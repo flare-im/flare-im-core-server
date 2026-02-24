@@ -272,7 +272,6 @@ impl OnlineStatusService {
                         seconds: dt.timestamp(),
                         nanos: dt.timestamp_subsec_nanos() as i32,
                     }),
-                    tenant: None,
                     device_id: status.device_id.unwrap_or_default(),
                     device_platform: status.device_platform.unwrap_or_default(),
                     gateway_id: status.gateway_id.unwrap_or_default(), // 返回 gateway_id 用于跨地区路由

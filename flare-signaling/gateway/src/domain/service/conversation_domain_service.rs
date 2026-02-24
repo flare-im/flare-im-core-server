@@ -61,13 +61,11 @@ impl ConversationDomainService {
         metadata.insert("gateway_id".to_string(), self.gateway_id.clone());
 
         // 从连接 metadata 中提取上下文（如果可用）
-        let request_context = connection_metadata
-            .map(|meta| build_request_context_from_metadata(meta, Some(user_id)))
-            .map(|ctx| ctx.into()); // 转换为 proto 类型
+        let request_context: Option<flare_proto::common::RequestContext> = connection_metadata
+            .map(|meta| build_request_context_from_metadata(meta, Some(user_id)).into()); // 转换为 proto 类型
         
-        let tenant_context = connection_metadata
-            .map(|meta| build_tenant_context_from_metadata(meta, "default"))
-            .map(|ctx| ctx.into()); // 转换为 proto 类型
+        let tenant_context: Option<flare_proto::common::TenantContext> = connection_metadata
+            .map(|meta| build_tenant_context_from_metadata(meta, "default").into()); // 转换为 proto 类型
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -75,8 +73,6 @@ impl ConversationDomainService {
             device_id: device_id.to_string(),
             server_id: server_id.clone(),
             metadata,
-            context: request_context,
-            tenant: tenant_context,
             device_platform: "unknown".to_string(),
             app_version: "unknown".to_string(),
             desired_conflict_strategy: 0,
@@ -149,8 +145,6 @@ impl ConversationDomainService {
         let logout_request = LogoutRequest {
             user_id: user_id.to_string(),
             conversation_id: conversation_id.unwrap_or("").to_string(),
-            context: None,
-            tenant: None,
         };
 
         if let Err(e) = self.signaling_gateway.logout(logout_request).await {
@@ -203,8 +197,6 @@ impl ConversationDomainService {
         let heartbeat_request = HeartbeatRequest {
             user_id: user_id.to_string(),
             conversation_id: conversation_id.to_string(),
-            context: None,
-            tenant: None,
             current_quality, // 使用从链接质量服务获取的质量信息
         };
 

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::BatchStoreMessage;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::kafka::{build_kafka_consumer, subscribe_and_wait_for_assignment};
 use prost::Message as _;
@@ -160,9 +160,9 @@ impl NormalMessageConsumer {
                 }
             };
 
-            match StoreMessageRequest::decode(payload) {
-                Ok(mut request) => {
-                    if let Some(ref mut msg) = request.message {
+            match flare_proto::storage::StoreMessage::decode(payload) {
+                Ok(mut store_msg) => {
+                    if let Some(ref mut msg) = store_msg.message {
                         msg.client_msg_id =
                             String::from_utf8_lossy(msg.client_msg_id.as_bytes()).to_string();
                         if let Some(ref mut content) = msg.content {
@@ -176,12 +176,48 @@ impl NormalMessageConsumer {
                             }
                         }
                     }
+                    let request = flare_proto::storage::StoreMessage {
+                        conversation_id: store_msg.conversation_id,
+                        message: store_msg.message,
+                        sync: store_msg.sync,
+                        tags: store_msg.tags,
+                        metadata: store_msg.metadata,
+                    };
                     requests.push(request);
                     valid_messages.push(message);
                 }
                 Err(err) => {
                     tracing::warn!(error = ?err, "Failed to decode StoreMessageRequest, trying PushMessageRequest fallback");
-                    if let Ok(mut push_req) = flare_proto::push::PushMessageRequest::decode(payload)
+                    // 尝试解析为 BatchStoreMessage
+                    if let Ok(batch_msg) = BatchStoreMessage::decode(payload) {
+                        // 将批量消息分解为单个消息进行处理
+                        for store_msg in batch_msg.messages {
+                            // 从 store_msg 或 batch_msg 的 metadata 中提取租户信息
+                            let _tenant_info = if let Some(tenant_id) = store_msg.metadata.get("tenant_id").or(batch_msg.metadata.get("tenant_id")) {
+                                Some(flare_proto::common::TenantContext {
+                                    tenant_id: tenant_id.clone(),
+                                    business_type: String::new(),
+                                    environment: String::new(),
+                                    organization_id: String::new(),
+                                    labels: std::collections::HashMap::new(),
+                                    attributes: std::collections::HashMap::new(),
+                                })
+                            } else {
+                                None
+                            };
+                            
+                            let store_request = flare_proto::storage::StoreMessage {
+                                conversation_id: store_msg.conversation_id,
+                                message: store_msg.message,
+                                sync: store_msg.sync,
+                                tags: store_msg.tags,
+                                metadata: store_msg.metadata,
+                            };
+                            requests.push(store_request);
+                        }
+                        // 只添加一次 message，因为我们已将一个批量消息分解为多个单独请求
+                        valid_messages.push(message);
+                    } else if let Ok(mut push_req) = flare_proto::push::PushMessageRequest::decode(payload)
                     {
                         if let Some(ref mut msg) = push_req.message {
                             msg.client_msg_id =
@@ -196,13 +232,12 @@ impl NormalMessageConsumer {
                                             .to_string();
                                 }
                             }
-                            let store = flare_proto::storage::StoreMessageRequest {
+                            let store = flare_proto::storage::StoreMessage {
                                 conversation_id: msg.conversation_id.clone(),
                                 message: Some(msg.clone()),
                                 sync: false,
-                                context: Default::default(),
-                                tenant: Default::default(),
                                 tags: std::collections::HashMap::new(),
+                                metadata: std::collections::HashMap::new(),
                             };
                             requests.push(store);
                             valid_messages.push(message);
@@ -221,14 +256,36 @@ impl NormalMessageConsumer {
             }
         }
 
-        let commands: Vec<_> = requests
-            .into_iter()
-            .map(|req| ProcessStoreMessageCommand { request: req })
-            .collect();
-
-        if let Err(e) = self.command_handler.handle_batch(commands).await {
-            error!(error = %e, "Failed to process batch");
-            return Ok(());
+        // 处理所有消息（普通消息和操作消息）
+        let mut normal_commands = Vec::new();
+        
+        for req in requests {
+            let store_msg = flare_proto::storage::StoreMessage {
+                conversation_id: req.conversation_id,
+                message: req.message,
+                sync: req.sync,
+                tags: req.tags,
+                metadata: req.metadata,
+            };
+            
+            // 检查是否为操作消息
+            if let Some(ref msg) = store_msg.message {
+                if crate::domain::service::MessageOperationDomainService::is_operation_message(msg) {
+                    // 如果是操作消息，直接跳过，因为它们应该由操作消费者处理
+                    continue;
+                }
+            }
+            
+            normal_commands.push(ProcessStoreMessageCommand {
+                command: store_msg,
+            });
+        }
+        
+        if !normal_commands.is_empty() {
+            // 只处理非操作消息
+            if let Err(e) = self.command_handler.handle_batch(normal_commands).await {
+                error!(error = %e, "Failed to process normal message batch");
+            }
         }
 
         let batch_duration = batch_start.elapsed();

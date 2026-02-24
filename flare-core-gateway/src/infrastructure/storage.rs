@@ -5,8 +5,7 @@ use async_trait::async_trait;
 // Note: Storage service client is not directly used here
 // Storage operations are handled through Message Orchestrator
 use flare_proto::storage::{
-    BatchStoreMessageRequest, BatchStoreMessageResponse, QueryMessagesRequest,
-    QueryMessagesResponse, StoreMessageRequest, StoreMessageResponse,
+    QueryMessagesRequest, QueryMessagesResponse,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
@@ -14,11 +13,6 @@ use tonic::transport::Channel;
 
 #[async_trait]
 pub trait StorageClient: Send + Sync {
-    async fn store_message(&self, request: StoreMessageRequest) -> Result<StoreMessageResponse>;
-    async fn batch_store_message(
-        &self,
-        request: BatchStoreMessageRequest,
-    ) -> Result<BatchStoreMessageResponse>;
     async fn query_messages(&self, request: QueryMessagesRequest) -> Result<QueryMessagesResponse>;
 }
 
@@ -36,26 +30,7 @@ impl GrpcStorageClient {
 
 #[async_trait]
 impl StorageClient for GrpcStorageClient {
-    async fn store_message(&self, _request: StoreMessageRequest) -> Result<StoreMessageResponse> {
-        // Note: Storage operations should go through Message Orchestrator
-        Err(ErrorBuilder::new(
-            ErrorCode::ServiceUnavailable,
-            "store_message should be called through Message Orchestrator",
-        )
-        .build_error())
-    }
 
-    async fn batch_store_message(
-        &self,
-        _request: BatchStoreMessageRequest,
-    ) -> Result<BatchStoreMessageResponse> {
-        // Note: Storage operations should go through Message Orchestrator
-        Err(ErrorBuilder::new(
-            ErrorCode::ServiceUnavailable,
-            "batch_store_message should be called through Message Orchestrator",
-        )
-        .build_error())
-    }
 
     async fn query_messages(
         &self,

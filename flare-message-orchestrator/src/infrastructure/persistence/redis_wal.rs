@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use prost::Message;
 use redis::AsyncCommands;
@@ -36,8 +36,41 @@ impl RedisWalRepository {
             .client
             .get_connection_manager()
             .await
-            .map_err(anyhow::Error::new)?;
+            .map_err(|e| crate::error::FlareError::system(e.to_string()))?;
         Ok(manager)
+    }
+
+    fn decode_wal_entry(
+        entry_json: &str,
+        message_id: &str,
+    ) -> Result<Option<flare_proto::common::Message>> {
+        // 反序列化 WalEntrySnapshot
+        let entry: WalEntrySnapshot = serde_json::from_str(entry_json)
+            .map_err(|e| crate::error::FlareError::system(format!("Failed to deserialize WAL entry: {}", e)))?;
+        
+        // 解码 base64 编码的 payload
+        let payload_bytes = BASE64.decode(&entry.encoded)
+            .map_err(|e| crate::error::FlareError::system(format!("Failed to decode base64 payload from WAL: {}", e)))?;
+        
+        // 反序列化为 StoreMessage
+        let request = flare_proto::storage::StoreMessage::decode(&payload_bytes[..])
+            .map_err(|e| crate::error::FlareError::system(format!("Failed to decode StoreMessage from WAL: {}", e)))?;
+        
+        // 提取 Message
+        if let Some(message) = request.message {
+            tracing::debug!(
+                message_id = %message_id,
+                sender_id = %message.sender_id,
+                "Successfully decoded message from WAL entry"
+            );
+            Ok(Some(message))
+        } else {
+            tracing::warn!(
+                message_id = %message_id,
+                "WAL entry found but message field is None"
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -75,12 +108,14 @@ impl WalRepository for RedisWalRepository {
 
             let payload = serde_json::to_string(&entry)?;
             conn.hset::<_, _, _, ()>(wal_key, &wal_message_id, payload)
-                .await?;
+                .await
+                .map_err(|e| crate::error::FlareError::system(format!("Redis hset error: {}", e)))?;
 
             if _self.config.wal_ttl_seconds > 0 {
                 let _: () = conn
                     .expire(wal_key, _self.config.wal_ttl_seconds as i64)
-                    .await?;
+                    .await
+                    .map_err(|e| crate::error::FlareError::system(format!("Redis expire error: {}", e)))?;
             }
 
             tracing::debug!(
@@ -119,51 +154,54 @@ impl WalRepository for RedisWalRepository {
                 "🔍 Querying WAL for message"
             );
 
-            let mut conn = _self.connection().await?;
+            let mut conn = _self.connection().await.map_err(|e| crate::error::FlareError::system(format!("Redis connection error: {}", e)))?;
 
-            // 从 Redis Hash 中查询
-            let entry_json: Option<String> = conn.hget(wal_key, &_message_id).await?;
+            // 首先尝试使用 message_id 直接查询（可能是服务端生成的 server_id）
+            let entry_json: Option<String> = match conn.hget(wal_key, &_message_id).await {
+                Ok(value) => value,
+                Err(e) => return Err(crate::error::FlareError::system(format!("Redis hget error: {}", e))),
+            };
             
             if let Some(json_str) = entry_json {
                 tracing::debug!(
                     message_id = %_message_id,
-                    "✅ Found WAL entry, decoding..."
+                    "Found WAL entry by server_id, decoding..."
                 );
-                // 反序列化 WalEntrySnapshot
-                let entry: WalEntrySnapshot = serde_json::from_str(&json_str)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize WAL entry: {}", e))?;
-                
-                // 解码 base64 编码的 payload
-                let payload_bytes = BASE64.decode(&entry.encoded)
-                    .map_err(|e| anyhow::anyhow!("Failed to decode base64 payload from WAL: {}", e))?;
-                
-                // 反序列化为 StoreMessageRequest
-                let request = flare_proto::storage::StoreMessageRequest::decode(&payload_bytes[..])
-                    .map_err(|e| anyhow::anyhow!("Failed to decode StoreMessageRequest from WAL: {}", e))?;
-                
-                // 提取 Message
-                if let Some(message) = request.message {
-                    tracing::info!(
-                        message_id = %_message_id,
-                        sender_id = %message.sender_id,
-                        "✅ Successfully retrieved message from WAL"
-                    );
-                    Ok(Some(message))
-                } else {
-                    tracing::warn!(
-                        message_id = %_message_id,
-                        "WAL entry found but message field is None"
-                    );
-                    Ok(None)
-                }
-            } else {
-                tracing::debug!(
-                    message_id = %_message_id,
-                    wal_key = %wal_key,
-                    "WAL entry not found in Redis"
-                );
-                Ok(None)
+                return Self::decode_wal_entry(&json_str, &_message_id);
             }
+
+            // 如果直接查询不到，遍历 WAL 中的所有条目，查找 extra.original_server_id 等于 message_id 的条目
+            // 注意：这可能会影响性能，但可以确保找到消息（即使使用的是客户端生成的 server_id）
+            tracing::debug!(
+                message_id = %_message_id,
+                "WAL entry not found by server_id, searching by original_server_id..."
+            );
+            
+            let all_entries: std::collections::HashMap<String, String> = conn.hgetall(wal_key).await
+                .map_err(|e| crate::error::FlareError::system(format!("Redis hgetall error: {}", e)))?;
+            
+            for (wal_server_id, entry_json) in all_entries {
+                if let Ok(Some(message)) = Self::decode_wal_entry(&entry_json, &wal_server_id) {
+                    // 检查 extra.original_server_id 是否等于查询的 message_id
+                    if let Some(original_server_id) = message.extra.get("original_server_id") {
+                        if original_server_id == &_message_id {
+                            tracing::info!(
+                                query_message_id = %_message_id,
+                                wal_server_id = %wal_server_id,
+                                "Found WAL entry by original_server_id"
+                            );
+                            return Ok(Some(message));
+                        }
+                    }
+                }
+            }
+
+            tracing::debug!(
+                message_id = %_message_id,
+                wal_key = %wal_key,
+                "WAL entry not found in Redis (searched by both server_id and original_server_id)"
+            );
+            Ok(None)
         })
     }
 }

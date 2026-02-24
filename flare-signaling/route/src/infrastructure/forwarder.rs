@@ -481,8 +481,6 @@ impl MessageForwarder {
             conversation_id,
             message: Some(message),
             sync: false,
-            context: Some(request_context),
-            tenant: Some(tenant_context),
         };
 
         // 发送请求到业务系统

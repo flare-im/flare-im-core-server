@@ -11,6 +11,7 @@ pub struct StorageWriterConfig {
     pub kafka_group: String,
     pub kafka_ack_topic: Option<String>,
     pub kafka_timeout_ms: u64,
+
     // 批量消费配置
     pub max_poll_records: usize,
     pub fetch_min_bytes: usize,

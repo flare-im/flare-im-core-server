@@ -51,7 +51,7 @@ impl MediaAttachmentVerifier for MediaAttachmentClient {
         let mut result = Vec::with_capacity(file_ids.len());
 
         // 从 Context 中提取 RequestContext 和 TenantContext（用于 protobuf 兼容性）
-        let request_context: flare_proto::common::RequestContext = ctx.request()
+        let _request_context: flare_proto::common::RequestContext = ctx.request()
             .cloned()
             .map(|req_ctx| req_ctx.into())
             .unwrap_or_else(|| {
@@ -71,7 +71,7 @@ impl MediaAttachmentVerifier for MediaAttachmentClient {
                 }
             });
 
-        let tenant: flare_proto::common::TenantContext = ctx.tenant()
+        let _tenant: flare_proto::common::TenantContext = ctx.tenant()
             .cloned()
             .map(|t| t.into())
             .or_else(|| {
@@ -88,8 +88,6 @@ impl MediaAttachmentVerifier for MediaAttachmentClient {
         for file_id in file_ids {
             let request = GetFileInfoRequest {
                 file_id: file_id.clone(),
-                context: Some(request_context.clone()),
-                tenant: Some(tenant.clone()),
             };
 
             match client.get_file_info(tonic::Request::new(request)).await {

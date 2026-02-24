@@ -146,8 +146,6 @@ impl AckPublisher for GrpcAckPublisher {
             Ok(mut client) => {
                 // 构造 PushAckRequest（使用 Push Proxy 的接口，与 Push Server 接口一致）
                 let request = tonic::Request::new(flare_proto::flare::push::v1::PushAckRequest {
-                    context: None,
-                    tenant: None,
                     target_user_ids: vec![event.user_id.clone()],
                     ack: Some(flare_proto::common::SendEnvelopeAck {
                         server_msg_id: "".to_string(),

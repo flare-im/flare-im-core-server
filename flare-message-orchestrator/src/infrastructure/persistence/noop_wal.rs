@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use anyhow::Result;
+use crate::error::{FlareError, Result};
 
 use crate::domain::model::MessageSubmission;
 use crate::domain::repository::WalRepository;

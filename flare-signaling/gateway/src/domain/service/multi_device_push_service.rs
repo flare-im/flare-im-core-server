@@ -252,8 +252,6 @@ impl MultiDevicePushService {
         let request = tonic::Request::new(GetDeviceRequest {
             user_id: user_id.to_string(),
             device_id: device_id.to_string(),
-            context: None,
-            tenant: None,
         });
 
         let response = client.clone().get_device(request).await?;

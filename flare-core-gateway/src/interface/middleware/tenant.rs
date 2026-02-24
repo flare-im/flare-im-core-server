@@ -3,7 +3,7 @@
 //! 提供租户上下文提取和验证功能。
 
 use anyhow::Result;
-use flare_proto::TenantContext;
+
 use tracing::debug;
 
 use crate::interface::middleware::auth::TokenClaims;

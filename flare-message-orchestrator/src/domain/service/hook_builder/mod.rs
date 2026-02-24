@@ -6,7 +6,8 @@ use flare_im_core::hooks::hook_context_data::{set_hook_context_data, HookContext
 use flare_server_core::context::{Context, ContextExt};
 use flare_proto::common::Message;
 use flare_proto::common::{RequestContext, TenantContext};
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
+use flare_proto::MessageContentExt;
 use serde_json::json;
 
 use crate::domain::model::MessageSubmission;
@@ -38,7 +39,7 @@ fn extract_client_message_id(message: &Message) -> Option<String> {
 /// 从Context构建hook_context（统一入口）
 pub fn build_hook_context_from_ctx(
     ctx: &Context,
-    request: &StoreMessageRequest,
+    request: &StoreMessage,
 ) -> Context {
     use flare_im_core::hooks::hook_context_data::{get_hook_context_data, set_hook_context_data};
     
@@ -46,13 +47,13 @@ pub fn build_hook_context_from_ctx(
     
     // 从request中提取request_id（如果Context中没有）
     if hook_ctx.request_id().is_empty() {
+        // 从 metadata 中查找 request_id
         if let Some(request_id) = request
-            .context
-            .as_ref()
-            .map(|c| c.request_id.clone())
+            .metadata
+            .get("request_id")
             .filter(|id| !id.is_empty())
         {
-            let mut new_ctx = Context::with_request_id(request_id);
+            let mut new_ctx = Context::with_request_id(request_id.clone());
             if let Some(tenant_id) = ctx.tenant_id() {
                 new_ctx = new_ctx.with_tenant_id(tenant_id.to_string());
             }
@@ -68,29 +69,16 @@ pub fn build_hook_context_from_ctx(
     hook_data.conversation_id = non_empty(request.conversation_id.clone());
     hook_data.tags = request.tags.clone();
 
-    if let Some(RequestContext {
-        request_id: _,
-        trace,
-        actor,
-        device: _,
-        channel: _,
-        user_agent,
-        attributes,
-    }) = request.context.as_ref()
-    {
-        if let Some(trace_ctx) = trace.as_ref() {
-            if !trace_ctx.trace_id.is_empty() {
-                hook_ctx = hook_ctx.with_trace_id(trace_ctx.trace_id.clone());
-            }
-            for (k, v) in &trace_ctx.tags {
-                hook_data.tags.insert(k.clone(), v.clone());
-            }
+    // 从 metadata 中获取 trace 和 actor 信息
+    if let Some(trace_id) = request.metadata.get("trace_id") {
+        if !trace_id.is_empty() {
+            hook_ctx = hook_ctx.with_trace_id(trace_id.clone());
         }
+    }
 
-        if let Some(actor_ctx) = actor.as_ref() {
-            if actor_ctx.r#type == flare_proto::common::ActorType::User as i32 {
-                hook_ctx = hook_ctx.with_user_id(actor_ctx.actor_id.clone());
-            }
+    if let Some(user_id) = request.metadata.get("user_id") {
+        if !user_id.is_empty() {
+            hook_ctx = hook_ctx.with_user_id(user_id.clone());
         }
     }
 
@@ -121,16 +109,22 @@ pub fn build_hook_context_from_ctx(
 
 /// 从request构建hook_context（向后兼容）
 pub fn build_hook_context(
-    request: &StoreMessageRequest,
+    request: &StoreMessage,
     default_tenant: Option<&String>,
 ) -> Context {
-    let tenant_id_str = tenant_id(&request.tenant, default_tenant);
+    // 从 metadata 获取租户ID
+    let tenant_id_str = request
+        .metadata
+        .get("tenant_id")
+        .cloned()
+        .or_else(|| default_tenant.cloned())
+        .unwrap_or_else(|| "0".to_string());
     
     // 创建 Context
     let request_id = request
-        .context
-        .as_ref()
-        .map(|c| c.request_id.clone())
+        .metadata
+        .get("request_id")
+        .cloned()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     
     let request_id_clone = request_id.clone();
@@ -149,62 +143,32 @@ pub fn build_hook_context(
     hook_data.conversation_id = non_empty(request.conversation_id.clone());
     hook_data.tags = request.tags.clone();
 
-    if let Some(RequestContext {
-        request_id: _,
-        trace,
-        actor,
-        device,
-        channel: _,
-        user_agent,
-        attributes,
-    }) = request.context.as_ref()
-    {
-        hook_data.request_metadata
-            .insert("request_id".into(), request_id_clone);
-
-        if let Some(trace_ctx) = trace.as_ref() {
-            hook_data.request_metadata
-                .insert("span_id".into(), trace_ctx.span_id.clone());
-            if !trace_ctx.trace_id.is_empty() {
-                ctx = ctx.with_trace_id(trace_ctx.trace_id.clone());
-            }
-            // 将 trace tags 添加到 hook_data.tags
-            for (k, v) in &trace_ctx.tags {
-                hook_data.tags.insert(k.clone(), v.clone());
-            }
-        }
-
-        if let Some(device_ctx) = device.as_ref() {
-            hook_data.request_metadata
-                .insert("client_ip".into(), device_ctx.ip_address.clone());
-        }
-
-        if !user_agent.is_empty() {
-            hook_data.request_metadata
-                .insert("user_agent".into(), user_agent.clone());
-        }
-
-        // 将 attributes 添加到 hook_data.tags
-        for (k, v) in attributes {
-            hook_data.tags.insert(k.clone(), v.clone());
-        }
-        
-        // 设置用户ID（从 actor 中提取）
-        if let Some(actor_ctx) = actor.as_ref() {
-            if actor_ctx.r#type == flare_proto::common::ActorType::User as i32 {
-                ctx = ctx.with_user_id(actor_ctx.actor_id.clone());
-            }
+    // 从 metadata 获取额外信息
+    if let Some(trace_id) = request.metadata.get("trace_id") {
+        if !trace_id.is_empty() {
+            ctx = ctx.with_trace_id(trace_id.clone());
         }
     }
 
-    if let Some(tenant) = request.tenant.as_ref() {
+    // 将 metadata 中的属性添加到 hook_data.tags
+    for (k, v) in &request.metadata {
+        if k != "tenant_id" && k != "request_id" && k != "trace_id" {
+            hook_data.tags.insert(k.clone(), v.clone());
+        }
+    }
+    
+    // 设置用户ID（从 metadata 中提取）
+    if let Some(user_id) = request.metadata.get("user_id") {
+        if user_id != "0" && !user_id.is_empty() {
+            ctx = ctx.with_user_id(user_id.clone());
+        }
+    }
+
+    // 从 metadata 获取租户相关信息
+    if let Some(tenant_id_val) = request.metadata.get("tenant_id") {
         hook_data.attributes
-            .entry("tenant_business_type".into())
-            .or_insert(tenant.business_type.clone());
-        hook_data.attributes
-            .entry("tenant_environment".into())
-            .or_insert(tenant.environment.clone());
-        hook_data.attributes.extend(tenant.attributes.clone());
+            .entry("tenant_id".into())
+            .or_insert(tenant_id_val.clone());
     }
 
     if let Some(message) = request.message.as_ref() {
@@ -232,7 +196,7 @@ pub fn build_hook_context(
         hook_data.attributes
             .entry("conversation_type".into())
             .or_insert(conversation_type_str.clone());
-
+        
         // 提取接收者信息（优先使用 receiver_id 和 channel_id）
         // 单聊：使用 receiver_id
         if message.conversation_type == flare_proto::common::ConversationType::Single as i32 {
@@ -270,23 +234,16 @@ pub fn build_hook_context(
     ctx
 }
 
-pub fn build_draft_from_request(request: &StoreMessageRequest) -> anyhow::Result<MessageDraft> {
+pub fn build_draft_from_request(request: &StoreMessage) -> anyhow::Result<MessageDraft> {
     let message = request
         .message
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("StoreMessageRequest.message must be set"))?;
 
-    // MessageDraft::new 需要 Vec<u8>，但 message.content 是 Option<MessageContent>
-    // 使用 prost 序列化 MessageContent，或使用空向量
-    use prost::Message as ProstMessage;
     let content_bytes = message
         .content
         .as_ref()
-        .map(|c| {
-            let mut buf = Vec::new();
-            c.encode(&mut buf).unwrap_or_default();
-            buf
-        })
+        .and_then(|c| c.encode_to_bytes().ok())
         .unwrap_or_default();
     let mut draft = MessageDraft::new(content_bytes);
     let message_type_label = detect_message_type(message);
@@ -382,37 +339,43 @@ pub fn build_draft_from_request(request: &StoreMessageRequest) -> anyhow::Result
         draft.extra("channel_id", json!(message.channel_id));
     }
 
-    // request.context 是 RequestContext，我们需要从中提取信息构建 JSON
-    if let Some(request_ctx) = request.context.as_ref() {
-        let mut request_context_json = json!({
-            "request_id": request_ctx.request_id,
-        });
+    // 从 metadata 中提取请求上下文信息构建 JSON
+    let request_id_value = request.metadata.get("request_id").cloned().unwrap_or_default();
+    let mut request_context_json = json!({
+        "request_id": request_id_value,
+    });
 
-        if let Some(trace_ctx) = request_ctx.trace.as_ref() {
-            if !trace_ctx.trace_id.is_empty() {
-                request_context_json["trace_id"] = json!(trace_ctx.trace_id);
-            }
-            if !trace_ctx.span_id.is_empty() {
-                request_context_json["span_id"] = json!(trace_ctx.span_id);
-            }
+    if let Some(trace_id) = request.metadata.get("trace_id") {
+        if !trace_id.is_empty() {
+            request_context_json["trace_id"] = json!(trace_id);
         }
-
-        // 将 attributes 添加到 JSON
-        if !request_ctx.attributes.is_empty() {
-            request_context_json["attributes"] = json!(request_ctx.attributes);
+    }
+    
+    // 将 metadata 中的其他属性添加到 JSON
+    let mut attrs = serde_json::Map::new();
+    for (k, v) in &request.metadata {
+        if k != "request_id" && k != "trace_id" && k != "tenant_id" && k != "user_id" {
+            attrs.insert(k.clone(), json!(v));
         }
-
-        draft.extra("request_context", request_context_json);
+    }
+    if !attrs.is_empty() {
+        request_context_json["attributes"] = json!(attrs);
     }
 
-    if let Some(tenant) = request.tenant.as_ref() {
+    draft.extra("request_context", request_context_json);
+
+    // 从 metadata 中提取租户上下文信息
+    if let Some(tenant_id) = request.metadata.get("tenant_id") {
         draft.extra(
             "tenant_context",
             json!({
-                "tenant_id": tenant.tenant_id,
-                "business_type": tenant.business_type,
-                "environment": tenant.environment,
-                "attributes": tenant.attributes,
+                "tenant_id": tenant_id,
+                "business_type": request.metadata.get("business_type").unwrap_or(&"".to_string()),
+                "environment": request.metadata.get("environment").unwrap_or(&"".to_string()),
+                "attributes": {
+                    "labels": {},
+                    "custom_attributes": request.metadata.clone(),
+                },
             }),
         );
     }
@@ -420,18 +383,21 @@ pub fn build_draft_from_request(request: &StoreMessageRequest) -> anyhow::Result
     Ok(draft)
 }
 
-pub fn apply_draft_to_request(request: &mut StoreMessageRequest, draft: &MessageDraft) {
+pub fn apply_draft_to_request(request: &mut StoreMessage, draft: &MessageDraft) {
     if let Some(conv) = draft.conversation_id.as_ref() {
         request.conversation_id = conv.clone();
     }
 
     request.tags = draft.headers.clone();
 
-    if let Some(message) = request.message.as_mut() {
-        if let Some(id) = draft.message_id.as_ref() {
-            message.server_id = id.clone();
+    // 将 draft 的信息添加到 request.metadata
+    if let Some(message_id) = &draft.message_id {
+        if let Some(message) = request.message.as_mut() {
+            message.server_id = message_id.clone();
         }
+    }
 
+    if let Some(message) = request.message.as_mut() {
         if let Some(conv) = draft.conversation_id.as_ref() {
             message.conversation_id = conv.clone();
         }
@@ -467,7 +433,7 @@ pub fn apply_draft_to_request(request: &mut StoreMessageRequest, draft: &Message
 
 pub fn build_message_record(
     submission: &MessageSubmission,
-    request: &StoreMessageRequest,
+    request: &StoreMessage,
 ) -> MessageRecord {
     let message = &submission.message;
     let mut metadata: HashMap<String, String> = message.extra.clone();

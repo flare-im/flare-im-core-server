@@ -1,5 +1,4 @@
 use anyhow::{Context as AnyhowContext, Result};
-use flare_proto::common::TenantContext;
 use flare_proto::storage::QueryMessagesRequest;
 use flare_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_server_core::client::set_context_metadata;
@@ -135,8 +134,6 @@ impl StorageReaderMessageProvider {
             end_time: 0,
             limit,
             cursor: cursor.unwrap_or_default().to_string(),
-            context: Some(request_context),
-            tenant: Some(tenant_context),
             pagination: None,
         }
     }
@@ -355,8 +352,6 @@ impl MessageProvider for StorageReaderMessageProvider {
             before_seq: before_seq.unwrap_or(0),
             limit,
             user_id: ctx.user_id().map(|s| s.to_string()).unwrap_or_default(),
-            context: Some(request_context),
-            tenant: Some(tenant_context),
         });
         
         // 利用 Context 传递能力，设置 metadata

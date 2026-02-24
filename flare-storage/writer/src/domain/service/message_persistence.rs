@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use flare_im_core::utils::{current_millis, extract_timeline_from_extra};
 use flare_proto::common::Message;
-use flare_proto::storage::StoreMessageRequest;
+// use flare_proto::storage::StoreMessageRequest; // 注释掉不存在的导入
 use serde_json;
 use tracing::{instrument, warn};
 
@@ -74,7 +74,7 @@ impl MessagePersistenceDomainService {
     ///
     /// 注意：消息从 Kafka 队列中读取出来时，说明已经成功发送并被接收，
     /// 因此应该将状态从 `Created` 更新为 `Sent`
-    pub fn prepare_message(&self, request: StoreMessageRequest) -> Result<PreparedMessage> {
+    pub fn prepare_message(&self, request: crate::application::commands::StoreMessageCommandInternal) -> Result<PreparedMessage> {
         let conversation_id = if request.conversation_id.is_empty() {
             request
                 .message

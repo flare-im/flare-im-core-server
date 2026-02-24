@@ -121,18 +121,9 @@ impl RouteServiceClient {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Route Service client not available"))?;
 
-        // 从 Context 中提取 TenantContext（用于 protobuf 兼容性）
-        let tenant: Option<flare_proto::TenantContext> = ctx.tenant().cloned().map(|tc| tc.into()).or_else(|| {
-            ctx.tenant_id().map(|tenant_id| flare_proto::TenantContext {
-                tenant_id: tenant_id.to_string(),
-                ..Default::default()
-            })
-        });
-
         let request = SelectPushTargetsRequest {
             user_id: user_id.to_string(),
             strategy: strategy as i32,
-            tenant,
         };
 
         let response = client

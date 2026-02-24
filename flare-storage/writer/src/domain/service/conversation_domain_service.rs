@@ -25,9 +25,23 @@ impl ConversationDomainService {
     /// 获取会话参与者列表
     ///
     /// 通过gRPC调用Conversation服务获取会话的所有参与者，用于更新未读数
-    pub async fn get_conversation_participants(&self, conversation_id: &str) -> Result<Vec<String>> {
+    pub async fn get_conversation_participants(&self, _conversation_id: &str) -> Result<Vec<String>> {
         // 注意：由于ServiceClient不能被克隆，我们需要使用Mutex来安全地访问它
-        // 这里我们暂时返回一个空的参与者列表，表示该功能尚未完全实现
-        Ok(vec![])
+        match &self.service_client {
+            Some(client_mutex) => {
+                let client_guard = client_mutex.lock().await;
+                // 这里需要实际调用Conversation服务的API来获取参与者列表
+                // 由于具体的API尚未定义，我们暂时返回一个示例实现
+                // 在实际部署中，这里会发起gRPC调用
+                drop(client_guard); // 显式释放锁
+                
+                // 临时实现：返回一个空列表，等待Conversation服务API集成
+                Ok(vec![])
+            }
+            None => {
+                // 如果没有配置服务客户端，返回空列表
+                Ok(vec![])
+            }
+        }
     }
 }

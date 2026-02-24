@@ -113,8 +113,6 @@ impl UserService {
             match self
                 .get_user_presence(GetUserPresenceRequest {
                     user_id: user_id.clone(),
-                    context: request.context.clone(),
-                    tenant: request.tenant.clone(),
                 })
                 .await
             {

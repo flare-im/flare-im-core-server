@@ -36,13 +36,21 @@ use flare_proto::message::{
     UnpinMessageRequest as MessageUnpinMessageRequest,
     UnpinMessageResponse as MessageUnpinMessageResponse,
 };
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
 use prost_types;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, instrument, warn};
 
-use crate::application::commands::StoreMessageCommand;
-use crate::application::handlers::{MessageCommandHandler, MessageQueryHandler};
+use crate::application::commands::{
+    AppAddReactionCommand, AppBatchMarkMessageReadCommand, AppDeleteMessageCommand,
+    AppEditMessageCommand, AppGetMarkedMessagesCommand, AppGetPinnedMessagesCommand,
+    AppGetThreadRepliesCommand, AppGetThreadsCommand, AppMarkAllConversationsReadCommand,
+    AppMarkConversationReadCommand, AppMarkMessageCommand, AppMarkMessagesReadUntilCommand,
+    AppPinMessageCommand, AppRecallMessageCommand, AppRemoveReactionCommand,
+    AppUnmarkMessageCommand, AppUnpinMessageCommand, LocalPagination,
+};
+use flare_proto::message_content_ext::MessageContentExt;
+use crate::application::handlers::{MessageCommandHandler, MessageQueryHandler, MessageOperationHandler};
 use crate::application::utils::OperationMessageBuilder;
 use crate::application::queries::QueryMessageQuery;
 use flare_proto::message::message_service_server::MessageService;
@@ -65,16 +73,19 @@ use chrono::Utc;
 pub struct MessageGrpcHandler {
     command_handler: Arc<MessageCommandHandler>,
     query_handler: Arc<MessageQueryHandler>,
+    operation_handler: Arc<MessageOperationHandler>,
 }
 
 impl MessageGrpcHandler {
     pub fn new(
         command_handler: Arc<MessageCommandHandler>,
         query_handler: Arc<MessageQueryHandler>,
+        operation_handler: Arc<MessageOperationHandler>,
     ) -> Self {
         Self {
             command_handler,
             query_handler,
+            operation_handler,
         }
     }
 }
@@ -100,8 +111,8 @@ impl MessageGrpcHandler {
                 message,
             conversation_id: req.conversation_id.clone(),
             sync: req.sync,
-            context: req.context.clone(),
-                tenant: req.tenant.clone(),
+            context: None, // 从上下文获取或构建
+            tenant: None,  // 从上下文获取或构建
         };
 
             // 调用应用层处理器处理发送消息逻辑
@@ -225,19 +236,25 @@ impl MessageGrpcHandler {
             .extra
             .insert("sender_type".to_string(), "system".to_string());
 
-        let store_request = StoreMessageRequest {
+        let mut metadata = std::collections::HashMap::new();
+        
+        // 从 Context 中获取租户ID并放入 metadata
+        if let Some(tenant_id) = ctx.tenant_id() {
+            metadata.insert("tenant_id".to_string(), tenant_id.to_string());
+        }
+        
+        let store_request = StoreMessage {
             conversation_id: req.conversation_id.clone(),
             message: Some(message),
             sync: false, // 系统消息默认异步
-            context: req.context,
-            tenant: req.tenant,
             tags,
+            metadata, // 使用包含租户ID的 metadata
         };
 
         // 调用 command_handler，跳过 PreSend Hook
         match self
             .command_handler
-            .handle_store_message_without_pre_hook(StoreMessageCommand {
+            .handle_store_message_without_pre_hook(crate::application::commands::StoreMessageCommand {
                 request: store_request,
             })
             .await
@@ -270,283 +287,168 @@ impl MessageGrpcHandler {
     #[instrument(skip(self, request))]
         async fn recall_message(
         &self,
-            request: Request<MessageRecallMessageRequest>,
-        ) -> Result<Response<MessageRecallMessageResponse>, Status> {
+        request: Request<MessageRecallMessageRequest>,
+    ) -> Result<Response<MessageRecallMessageResponse>, Status> {
+        let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-            // 从请求上下文提取操作者ID
-            let operator_id = req
-                .context
-                .as_ref()
-                .and_then(|c| c.actor.as_ref())
-                .map(|a| a.actor_id.clone())
-                .unwrap_or_default();
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppRecallMessageCommand {
+            message_id: req.message_id.clone(),
+            reason: if req.reason.is_empty() { None } else { Some(req.reason.clone()) },
+            time_limit_seconds: if req.recall_time_limit_seconds > 0 { Some(req.recall_time_limit_seconds) } else { None },
+            operator_id: ctx.actor().map(|a| a.actor_id.clone()).unwrap_or_default(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
-
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_recall_message(
-                &req,
-                &conversation_id,
-                &operator_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build recall message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 RecallMessageResponse
-            Ok(Response::new(MessageRecallMessageResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                recalled_at: send_inner.sent_at,
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理撤回消息逻辑
+        match self.operation_handler.handle_recall_message_app(&ctx, &app_command).await {
+            Ok((message_id, seq)) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageRecallMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    recalled_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to recall message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
     #[instrument(skip(self, request))]
         async fn edit_message(
         &self,
         request: Request<MessageEditMessageRequest>,
     ) -> Result<Response<MessageEditMessageResponse>, Status> {
+        let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-        // 从请求上下文提取操作者ID
-        let operator_id = req
-            .context
-            .as_ref()
-            .and_then(|c| c.actor.as_ref())
-            .map(|a| a.actor_id.clone())
-            .unwrap_or_default();
-
-        // 查询原消息获取 conversation_id
-        let original_message = self
-            .query_handler
-            .query_message(QueryMessageQuery {
-                message_id: req.message_id.clone(),
-                conversation_id: String::new(),
-            })
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    Status::not_found(format!("Message not found: {}", req.message_id))
-                } else {
-                    Status::internal(format!("Failed to query message: {}", e))
-                }
-            })?;
-
-        let conversation_id = original_message.conversation_id.clone();
-
-        // 构建操作消息
-        let operation_message = OperationMessageBuilder::build_edit_message(
-            &req,
-            &conversation_id,
-            &operator_id,
-        )
-        .map_err(|e| Status::internal(format!("Failed to build edit message: {}", e)))?;
-
-        // 构建 SendMessageRequest
-        let send_req = SendMessageRequest {
-            conversation_id: conversation_id.clone(),
-            message: Some(operation_message),
-            sync: false, // 操作消息默认异步
-            context: req.context.clone(),
-            tenant: req.tenant.clone(),
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppEditMessageCommand {
+            message_id: req.message_id.clone(),
+            new_content: req
+                .new_content
+                .as_ref()
+                .and_then(|content| content.encode_to_bytes().ok())
+                .unwrap_or_default(),
+            reason: if req.reason.is_empty() { None } else { Some(req.reason.clone()) },
+            show_edited_mark: req.show_edited_mark,
+            edit_version: req.edit_version,
+            operator_id: ctx.actor().map(|a| a.actor_id.clone()).unwrap_or_default(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
         };
 
-        // 调用 SendMessage（统一处理）
-        let send_resp = self.send_message(Request::new(send_req)).await?;
-        let send_inner = send_resp.into_inner();
-
-        // 转换为 EditMessageResponse
-        Ok(Response::new(MessageEditMessageResponse {
-            success: send_inner.success,
-            error_message: if send_inner.success {
-                String::new()
-            } else {
-                send_inner.status.as_ref()
-                    .map(|s| s.message.clone())
-                    .unwrap_or_default()
-            },
-            message_id: req.message_id,
-            edit_version: req.edit_version,
-            edited_at: send_inner.sent_at,
-            status: send_inner.status,
-        }))
+        // 调用应用层操作处理器处理编辑消息逻辑
+        match self.operation_handler.handle_edit_message_app(&ctx, &app_command).await {
+            Ok((message_id, seq)) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageEditMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    message_id: req.message_id,
+                    edit_version: req.edit_version,
+                    edited_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to edit message");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
 
     #[instrument(skip(self, request))]
         async fn delete_message(
         &self,
-            request: Request<MessageDeleteMessageRequest>,
-        ) -> Result<Response<MessageDeleteMessageResponse>, Status> {
+        request: Request<MessageDeleteMessageRequest>,
+    ) -> Result<Response<MessageDeleteMessageResponse>, Status> {
+        let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-        // 从请求上下文提取操作者ID
-        let operator_id = req
-            .context
-            .as_ref()
-            .and_then(|c| c.actor.as_ref())
-            .map(|a| a.actor_id.clone())
-            .unwrap_or_default();
-
-        // 构建操作消息（delete_message 请求中已有 conversation_id）
-        let operation_message = OperationMessageBuilder::build_delete_message(
-            &req,
-            &operator_id,
-        )
-        .map_err(|e| Status::internal(format!("Failed to build delete message: {}", e)))?;
-
-        // 构建 SendMessageRequest
-        let send_req = SendMessageRequest {
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppDeleteMessageCommand {
+            message_ids: req.message_ids.clone(),
             conversation_id: req.conversation_id.clone(),
-            message: Some(operation_message),
-            sync: false, // 操作消息默认异步
-            context: req.context.clone(),
-            tenant: req.tenant.clone(),
+            delete_type: if req.delete_type == 1 {
+                crate::application::commands::DeleteType::Hard
+            } else {
+                crate::application::commands::DeleteType::Soft
+            },
+            reason: if req.reason.is_empty() { None } else { Some(req.reason.clone()) },
+            notify_others: req.notify_others,
+            hard_delete: req.delete_type == 1,
+            operator_id: ctx.actor().map(|a| a.actor_id.clone()).unwrap_or_default(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
         };
 
-        // 调用 SendMessage（统一处理）
-        let send_resp = self.send_message(Request::new(send_req)).await?;
-        let send_inner = send_resp.into_inner();
-
-        // 转换为 DeleteMessageResponse
-        // 注意：批量删除时，实际删除数量需要从操作结果中获取
-        // 这里简化处理，返回成功表示至少删除了一条消息
-        Ok(Response::new(MessageDeleteMessageResponse {
-            success: send_inner.success,
-            deleted_count: if send_inner.success {
-                req.message_ids.len() as i32
-            } else {
-                0
-            },
-            status: send_inner.status,
-        }))
+        // 调用应用层操作处理器处理删除消息逻辑
+        match self.operation_handler.handle_delete_message_app(&ctx, &app_command).await {
+            Ok((success, deleted_count)) => {
+                Ok(Response::new(MessageDeleteMessageResponse {
+                    success,
+                    deleted_count,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to delete message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
     #[instrument(skip(self, request))]
         async fn mark_message_read(
         &self,
-            request: Request<MessageMarkMessageReadRequest>,
-        ) -> Result<Response<MessageMarkMessageReadResponse>, Status> {
+        request: Request<MessageMarkMessageReadRequest>,
+    ) -> Result<Response<MessageMarkMessageReadResponse>, Status> {
+        let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-        // 查询原消息获取 conversation_id
-        let original_message = self
-            .query_handler
-            .query_message(QueryMessageQuery {
-                message_id: req.message_id.clone(),
-                conversation_id: String::new(),
-            })
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    Status::not_found(format!("Message not found: {}", req.message_id))
-                } else {
-                    Status::internal(format!("Failed to query message: {}", e))
-                }
-            })?;
-
-        let conversation_id = original_message.conversation_id.clone();
-
-        // 构建已读操作消息（使用 MessageOperation）
-        let now = Utc::now();
-        let timestamp = prost_types::Timestamp {
-            seconds: now.timestamp(),
-            nanos: now.timestamp_subsec_nanos() as i32,
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppMarkMessageCommand {
+            message_id: req.message_id.clone(),
+            user_id: req.user_id.clone(),
+            mark_type: 0, // 已读操作固定为0
+            color: None,
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
         };
 
-        let operation = flare_proto::common::MessageOperation {
-            operation_type: flare_proto::common::OperationType::Read as i32,
-            target_message_id: req.message_id.clone(),
-            operator_id: req.user_id.clone(),
-            timestamp: Some(timestamp.clone()),
-            show_notice: false, // 已读操作不显示通知
-            notice_text: String::new(),
-            target_user_id: String::new(),
-            operation_data: Some(flare_proto::common::message_operation::OperationData::Read(
-                flare_proto::common::ReadOperationData {
-                    message_ids: vec![req.message_id.clone()],
-                    read_at: req.read_at.clone().or(Some(timestamp)),
-                    burn_after_read: req.burn_after_read,
-                },
-            )),
-            metadata: std::collections::HashMap::new(),
-        };
-
-        let mut operation_message = flare_proto::common::Message::default();
-        operation_message.server_id = format!("op_{}", uuid::Uuid::new_v4());
-        operation_message.conversation_id = conversation_id.clone();
-        operation_message.sender_id = req.user_id.clone();
-        operation_message.message_type = flare_proto::MessageType::Operation as i32;
-        operation_message.timestamp = Some(timestamp.clone());
-        operation_message.content = Some(flare_proto::common::MessageContent {
-            content: Some(flare_proto::common::message_content::Content::Operation(operation)),
-            extensions: vec![],
-        });
-        operation_message.extra.insert("message_type".to_string(), "operation".to_string());
-        operation_message.extra.insert("operation_type".to_string(), "read".to_string());
-
-        // 构建 SendMessageRequest
-        let send_req = SendMessageRequest {
-            conversation_id: conversation_id.clone(),
-            message: Some(operation_message),
-            sync: false, // 已读操作默认异步
-            context: req.context.clone(),
-            tenant: req.tenant.clone(),
-        };
-
-        // 调用 SendMessage（统一处理）
-        let send_resp = self.send_message(Request::new(send_req)).await?;
-        let send_inner = send_resp.into_inner();
-
-        // 转换为 MarkMessageReadResponse
-        Ok(Response::new(MessageMarkMessageReadResponse {
-            success: send_inner.success,
-            error_message: if send_inner.success {
-                String::new()
-            } else {
-                send_inner.status.as_ref()
-                    .map(|s| s.message.clone())
-                    .unwrap_or_default()
-            },
-            read_at: send_inner.sent_at,
-            burned_at: None, // 阅后即焚时间需要从操作结果中获取
-            status: send_inner.status,
-        }))
+        // 调用应用层操作处理器处理标记消息已读逻辑
+        match self.operation_handler.handle_mark_message_read_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageMarkMessageReadResponse {
+                    success: true,
+                    error_message: String::new(),
+                    read_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    burned_at: None,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to mark message as read");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
     #[instrument(skip(self, request))]
         async fn batch_mark_message_read(
@@ -556,60 +458,45 @@ impl MessageGrpcHandler {
         let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-            let operator_id = req.user_id.clone();
-            let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-
-        let read_at = req
-            .read_at
-            .map(|ts| {
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppBatchMarkMessageReadCommand {
+            conversation_id: req.conversation_id.clone(),
+            user_id: req.user_id.clone(),
+            message_ids: req.message_ids.clone(),
+            read_at: req.read_at.clone().map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .unwrap_or_else(|| chrono::Utc::now())
-            })
-            .unwrap_or_else(|| chrono::Utc::now());
+            }),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+        };
 
-            // 批量标记指定的消息为已读
-            let mut read_count = 0i32;
-            for message_id in &req.message_ids {
-                let read_cmd = crate::application::commands::ReadMessageCommand {
-                    base: crate::application::commands::MessageOperationCommand {
-                    message_id: message_id.clone(),
-                        operator_id: operator_id.clone(),
-                        timestamp: chrono::Utc::now(),
-                        tenant_id: tenant_id.clone(),
-                        conversation_id: req.conversation_id.clone(),
+        // 调用应用层操作处理器处理批量标记消息已读逻辑
+        match self.operation_handler.handle_batch_mark_message_read_app(&ctx, &app_command).await {
+            Ok(read_count) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageBatchMarkMessageReadResponse {
+                    success: read_count > 0,
+                    error_message: if read_count == 0 {
+                        "No messages marked as read".to_string()
+                    } else {
+                        String::new()
                     },
-                    message_ids: vec![message_id.clone()],
-                    read_at: Some(read_at),
-                    burn_after_read: false,
-                };
-
-                if self.command_handler.handle_read_message(read_cmd).await.is_ok() {
-                            read_count += 1;
+                    read_count,
+                    read_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to batch mark messages as read");
+                Err(Status::internal(err.to_string()))
             }
         }
-
-        Ok(Response::new(MessageBatchMarkMessageReadResponse {
-            success: read_count > 0,
-            error_message: if read_count == 0 {
-                "No messages marked as read".to_string()
-            } else {
-                String::new()
-            },
-            read_count,
-            read_at: Some(prost_types::Timestamp {
-                seconds: read_at.timestamp(),
-                nanos: read_at.timestamp_subsec_nanos() as i32,
-            }),
-            status: Some(ok_status()),
-        }))
     }
 
-        async fn mark_messages_read_until(
-            &self,
-            _request: Request<MessageMarkMessagesReadUntilRequest>,
-        ) -> Result<Response<MessageMarkMessagesReadUntilResponse>, Status> {
-            Err(Status::unimplemented("mark_messages_read_until not implemented"))
-        }
+    
 
     #[instrument(skip(self, request))]
         async fn mark_conversation_read(
@@ -619,71 +506,38 @@ impl MessageGrpcHandler {
         let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-            let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-
-            let read_at = req
-                .read_at
-                .map(|ts| {
-                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                        .unwrap_or_else(|| chrono::Utc::now())
-                })
-                .unwrap_or_else(|| chrono::Utc::now());
-
-            // 构建标记会话已读命令
-            let cmd = crate::application::commands::MarkConversationReadCommand {
-                conversation_id: req.conversation_id.clone(),
-                user_id: req.user_id.clone(),
-                read_at: Some(read_at),
-                tenant_id,
-            };
-
-            // 调用应用层处理器处理标记会话已读逻辑
-            // 注意：MarkConversationReadCommand 需要在 command_handler 中实现
-            // 这里先通过批量标记已读来实现
-        let batch_req = MessageBatchMarkMessageReadRequest {
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppMarkConversationReadCommand {
             conversation_id: req.conversation_id.clone(),
             user_id: req.user_id.clone(),
-            message_ids: vec![], // 空列表表示标记会话中所有未读消息
-            read_at: req.read_at.clone(),
-            burn_after_read: req.burn_after_read,
-            context: req.context.clone(),
-            tenant: req.tenant.clone(),
-        };
-
-        let batch_resp = self.batch_mark_message_read(Request::new(batch_req)).await?.into_inner();
-
-        // 获取会话的最后一条消息ID作为 last_read_message_id
-            let query = crate::application::queries::QueryMessagesQuery {
-            conversation_id: req.conversation_id.clone(),
-                limit: Some(1),
-                cursor: None,
-                start_time: None,
-                end_time: None,
-        };
-
-        let last_read_message_id = self
-                .query_handler
-                .query_messages(query)
-            .await
-            .ok()
-                .and_then(|messages| messages.first().map(|m| m.server_id.clone()))
-            .unwrap_or_default();
-
-        Ok(Response::new(MessageMarkConversationReadResponse {
-            success: batch_resp.success,
-            error_message: batch_resp.error_message,
-            read_count: batch_resp.read_count,
-            read_at: Some(prost_types::Timestamp {
-                seconds: read_at.timestamp(),
-                nanos: read_at.timestamp_subsec_nanos() as i32,
+            read_at: req.read_at.clone().map(|ts| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .unwrap_or_else(|| chrono::Utc::now())
             }),
-            last_read_message_id: if !last_read_message_id.is_empty() {
-                last_read_message_id
-            } else {
-                String::new()
-            },
-            status: batch_resp.status,
-        }))
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+        };
+
+        // 调用应用层操作处理器处理标记会话已读逻辑
+        match self.operation_handler.handle_mark_conversation_read_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageMarkConversationReadResponse {
+                    success: true,
+                    error_message: String::new(),
+                    read_count: 0, // 由于是标记整个会话已读，无法准确统计数量
+                    read_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    last_read_message_id: String::new(), // 标记会话已读时不需要特定消息ID
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to mark conversation as read");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
 
     #[instrument(skip(self, request))]
@@ -691,132 +545,285 @@ impl MessageGrpcHandler {
         &self,
         request: Request<MessageMarkAllConversationsReadRequest>,
     ) -> Result<Response<MessageMarkAllConversationsReadResponse>, Status> {
-        let _req = request.into_inner();
-
         // 这里需要查询用户的所有会话，然后对每个会话调用 mark_conversation_read
         // 简化实现：返回未实现错误，实际应该查询用户会话列表并批量处理
-        Err(Status::unimplemented("mark_all_conversations_read requires conversation service integration"))
+        
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppMarkAllConversationsReadCommand {
+            user_id: req.user_id.clone(),
+            read_at: req.read_at.clone().map(|ts| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .unwrap_or_else(|| chrono::Utc::now())
+            }),
+            conversation_types: req.conversation_types.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+        };
+
+        // 调用应用层操作处理器处理标记全部会话已读逻辑
+        match self.operation_handler.handle_mark_all_conversations_read_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageMarkAllConversationsReadResponse {
+                    success: true,
+                    error_message: String::new(),
+                    conversation_count: 0, // 暂时返回0，实际应该从操作结果中获取
+                    total_read_count: 0, // 暂时返回0，实际应该从操作结果中获取
+                    read_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    conversation_stats: vec![], // 暂时返回空列表
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to mark all conversations as read");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
+
+    #[instrument(skip(self, request))]
+    async fn mark_messages_read_until(
+        &self,
+        request: Request<MessageMarkMessagesReadUntilRequest>,
+    ) -> Result<Response<MessageMarkMessagesReadUntilResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppMarkMessagesReadUntilCommand {
+            conversation_id: req.conversation_id.clone(),
+            user_id: req.user_id.clone(),
+            until_message_id: req.until_message_id.clone(),
+            read_at: req.read_at.clone().map(|ts| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .unwrap_or_else(|| chrono::Utc::now())
+            }),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+        };
+
+        // 调用应用层操作处理器处理标记消息直到指定消息已读逻辑
+        match self.operation_handler.handle_mark_messages_read_until_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageMarkMessagesReadUntilResponse {
+                    success: true,
+                    error_message: String::new(),
+                    read_count: 0, // 暂时返回0，实际应该从操作结果中获取
+                    read_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to mark messages read until");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
+    #[instrument(skip(self, request))]
+    async fn get_pinned_messages(
+        &self,
+        request: Request<flare_proto::message::GetPinnedMessagesRequest>,
+    ) -> Result<Response<flare_proto::message::GetPinnedMessagesResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppGetPinnedMessagesCommand {
+            conversation_id: req.conversation_id.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            pagination: req.pagination.as_ref().map(|p| LocalPagination::from(p)),
+        };
+
+        // 调用应用层操作处理器处理获取置顶消息逻辑
+        match self.operation_handler.handle_get_pinned_messages_app(&ctx, &app_command).await {
+            Ok(messages) => {
+                Ok(Response::new(flare_proto::message::GetPinnedMessagesResponse {
+                    messages,
+                    pinned_infos: vec![], // 暂时返回空列表
+                    pagination: req.pagination,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to get pinned messages");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
+    #[instrument(skip(self, request))]
+    async fn get_marked_messages(
+        &self,
+        request: Request<flare_proto::message::GetMarkedMessagesRequest>,
+    ) -> Result<Response<flare_proto::message::GetMarkedMessagesResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppGetMarkedMessagesCommand {
+            user_id: req.user_id.clone(),
+            mark_type: if req.mark_type == 0 { None } else { Some(req.mark_type) },
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            pagination: req.pagination.as_ref().map(|p| LocalPagination::from(p)),
+        };
+
+        // 调用应用层操作处理器处理获取标记消息逻辑
+        match self.operation_handler.handle_get_marked_messages_app(&ctx, &app_command).await {
+            Ok(messages) => {
+                Ok(Response::new(flare_proto::message::GetMarkedMessagesResponse {
+                    messages,
+                    marked_infos: vec![], // 暂时返回空列表
+                    pagination: req.pagination,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to get marked messages");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
+    #[instrument(skip(self, request))]
+    async fn get_threads(
+        &self,
+        request: Request<flare_proto::message::GetThreadsRequest>,
+    ) -> Result<Response<flare_proto::message::GetThreadsResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppGetThreadsCommand {
+            conversation_id: req.conversation_id.clone(),
+            status: req.status as i32,
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            pagination: req.pagination.as_ref().map(|p| LocalPagination::from(p)),
+        };
+
+        // 调用应用层操作处理器处理获取话题逻辑
+        match self.operation_handler.handle_get_threads_app(&ctx, &app_command).await {
+            Ok(threads) => {
+                Ok(Response::new(flare_proto::message::GetThreadsResponse {
+                    threads,
+                    pagination: req.pagination,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to get threads");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
+    #[instrument(skip(self, request))]
+    async fn get_thread_replies(
+        &self,
+        request: Request<flare_proto::message::GetThreadRepliesRequest>,
+    ) -> Result<Response<flare_proto::message::GetThreadRepliesResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppGetThreadRepliesCommand {
+            thread_id: req.thread_id.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            pagination: req.pagination.as_ref().map(|p| LocalPagination::from(p)),
+        };
+
+        // 调用应用层操作处理器处理获取话题回复逻辑
+        match self.operation_handler.handle_get_thread_replies_app(&ctx, &app_command).await {
+            Ok(messages) => {
+                Ok(Response::new(flare_proto::message::GetThreadRepliesResponse {
+                    messages,
+                    thread_info: None, // 暂时返回None
+                    pagination: req.pagination,
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to get thread replies");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
 
     #[instrument(skip(self, request))]
         async fn add_reaction(
         &self,
-            request: Request<MessageAddReactionRequest>,
-        ) -> Result<Response<MessageAddReactionResponse>, Status> {
+        request: Request<MessageAddReactionRequest>,
+    ) -> Result<Response<MessageAddReactionResponse>, Status> {
+        let ctx = require_context(&request)?;
         let req = request.into_inner();
 
-        // 查询原消息获取 conversation_id
-        let original_message = self
-            .query_handler
-            .query_message(QueryMessageQuery {
-                message_id: req.message_id.clone(),
-                conversation_id: String::new(),
-            })
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    Status::not_found(format!("Message not found: {}", req.message_id))
-                } else {
-                    Status::internal(format!("Failed to query message: {}", e))
-                }
-            })?;
-
-        let conversation_id = original_message.conversation_id.clone();
-
-        // 构建操作消息
-        let operation_message = OperationMessageBuilder::build_add_reaction_message(
-            &req,
-            &conversation_id,
-        )
-        .map_err(|e| Status::internal(format!("Failed to build add reaction message: {}", e)))?;
-
-        // 构建 SendMessageRequest
-        let send_req = SendMessageRequest {
-            conversation_id: conversation_id.clone(),
-            message: Some(operation_message),
-            sync: false, // 操作消息默认异步
-            context: req.context.clone(),
-            tenant: req.tenant.clone(),
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppAddReactionCommand {
+            message_id: req.message_id.clone(),
+            user_id: req.user_id.clone(),
+            emoji: req.emoji.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
         };
 
-        // 调用 SendMessage（统一处理）
-        let send_resp = self.send_message(Request::new(send_req)).await?;
-        let send_inner = send_resp.into_inner();
-
-        // 转换为 AddReactionResponse
-        // 注意：new_count 需要从操作结果中获取，这里简化处理
-        Ok(Response::new(MessageAddReactionResponse {
-            success: send_inner.success,
-            error_message: if send_inner.success {
-                String::new()
-            } else {
-                send_inner.status.as_ref()
-                    .map(|s| s.message.clone())
-                    .unwrap_or_default()
-            },
-            new_count: 0, // 需要从操作结果中获取
-            status: send_inner.status,
-        }))
+        // 调用应用层操作处理器处理添加反应逻辑
+        match self.operation_handler.handle_add_reaction_app(&ctx, &app_command).await {
+            Ok(()) => {
+                Ok(Response::new(MessageAddReactionResponse {
+                    success: true,
+                    error_message: String::new(),
+                    new_count: 0, // 需要从操作结果中获取，暂时设为0
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to add reaction");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
 
     #[instrument(skip(self, request))]
         async fn remove_reaction(
         &self,
-            request: Request<MessageRemoveReactionRequest>,
-        ) -> Result<Response<MessageRemoveReactionResponse>, Status> {
-            let req = request.into_inner();
+        request: Request<MessageRemoveReactionRequest>,
+    ) -> Result<Response<MessageRemoveReactionResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppRemoveReactionCommand {
+            message_id: req.message_id.clone(),
+            user_id: req.user_id.clone(),
+            emoji: req.emoji.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_remove_reaction_message(
-                &req,
-                &conversation_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build remove reaction message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 RemoveReactionResponse
-            Ok(Response::new(MessageRemoveReactionResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                new_count: 0, // 需要从操作结果中获取
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理移除反应逻辑
+        match self.operation_handler.handle_remove_reaction_app(&ctx, &app_command).await {
+            Ok(()) => {
+                Ok(Response::new(MessageRemoveReactionResponse {
+                    success: true,
+                    error_message: String::new(),
+                    new_count: 0, // 需要从操作结果中获取，暂时设为0
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to remove reaction");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
 
     // reply_message 和 quote_message 已废弃：现在通过 SendMessage + Message.quote 字段实现
@@ -826,238 +833,146 @@ impl MessageGrpcHandler {
         &self,
         request: Request<MessagePinMessageRequest>,
     ) -> Result<Response<MessagePinMessageResponse>, Status> {
-            let req = request.into_inner();
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppPinMessageCommand {
+            message_id: req.message_id.clone(),
+            operator_id: req.operator_id.clone(),
+            reason: if req.reason.is_empty() { None } else { Some(req.reason.clone()) },
+            expire_at: req.expire_at.clone().map(|ts| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .unwrap_or_else(|| chrono::Utc::now())
+            }),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_pin_message(
-                &req,
-                &conversation_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build pin message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 PinMessageResponse
-            Ok(Response::new(MessagePinMessageResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                pinned_at: send_inner.sent_at,
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理置顶消息逻辑
+        match self.operation_handler.handle_pin_message_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessagePinMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    pinned_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to pin message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
-        #[instrument(skip(self, request))]
+    #[instrument(skip(self, request))]
     async fn unpin_message(
         &self,
         request: Request<MessageUnpinMessageRequest>,
     ) -> Result<Response<MessageUnpinMessageResponse>, Status> {
-            let req = request.into_inner();
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppUnpinMessageCommand {
+            message_id: req.message_id.clone(),
+            operator_id: req.operator_id.clone(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_unpin_message(
-                &req,
-                &conversation_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build unpin message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 UnpinMessageResponse
-            Ok(Response::new(MessageUnpinMessageResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理取消置顶消息逻辑
+        match self.operation_handler.handle_unpin_message_app(&ctx, &app_command).await {
+            Ok(()) => {
+                Ok(Response::new(MessageUnpinMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to unpin message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
-        #[instrument(skip(self, request))]
+    #[instrument(skip(self, request))]
     async fn mark_message(
         &self,
         request: Request<MessageMarkMessageRequest>,
     ) -> Result<Response<MessageMarkMessageResponse>, Status> {
-            let req = request.into_inner();
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppMarkMessageCommand {
+            message_id: req.message_id.clone(),
+            user_id: req.user_id.clone(),
+            mark_type: req.mark_type,
+            color: if req.color.is_empty() { None } else { Some(req.color.clone()) },
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_mark_message(
-                &req,
-                &conversation_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build mark message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 MarkMessageResponse
-            Ok(Response::new(MessageMarkMessageResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                marked_at: send_inner.sent_at,
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理标记消息逻辑
+        match self.operation_handler.handle_mark_message_app(&ctx, &app_command).await {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                Ok(Response::new(MessageMarkMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    marked_at: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to mark message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
-        #[instrument(skip(self, request))]
+    #[instrument(skip(self, request))]
     async fn unmark_message(
         &self,
         request: Request<MessageUnmarkMessageRequest>,
     ) -> Result<Response<MessageUnmarkMessageResponse>, Status> {
-            let req = request.into_inner();
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
 
-            // 查询原消息获取 conversation_id
-            let original_message = self
-                .query_handler
-                .query_message(QueryMessageQuery {
-                    message_id: req.message_id.clone(),
-                    conversation_id: String::new(),
-                })
-                .await
-                .map_err(|e| {
-                    if e.to_string().contains("not found") {
-                        Status::not_found(format!("Message not found: {}", req.message_id))
-                    } else {
-                        Status::internal(format!("Failed to query message: {}", e))
-                    }
-                })?;
+        // 将protobuf请求转换为应用层命令
+        let app_command = AppUnmarkMessageCommand {
+            message_id: req.message_id.clone(),
+            user_id: req.user_id.clone(),
+            mark_type: req.mark_type,
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            conversation_id: String::new(), // 会在后续填充
+        };
 
-            let conversation_id = original_message.conversation_id.clone();
-
-            // 构建操作消息
-            let operation_message = OperationMessageBuilder::build_unmark_message(
-                &req,
-                &conversation_id,
-            )
-            .map_err(|e| Status::internal(format!("Failed to build unmark message: {}", e)))?;
-
-            // 构建 SendMessageRequest
-            let send_req = SendMessageRequest {
-                conversation_id: conversation_id.clone(),
-                message: Some(operation_message),
-                sync: false, // 操作消息默认异步
-                context: req.context.clone(),
-                tenant: req.tenant.clone(),
-            };
-
-            // 调用 SendMessage（统一处理）
-            let send_resp = self.send_message(Request::new(send_req)).await?;
-            let send_inner = send_resp.into_inner();
-
-            // 转换为 UnmarkMessageResponse
-            Ok(Response::new(MessageUnmarkMessageResponse {
-                success: send_inner.success,
-                error_message: if send_inner.success {
-                    String::new()
-                } else {
-                    send_inner.status.as_ref()
-                        .map(|s| s.message.clone())
-                        .unwrap_or_default()
-                },
-                status: send_inner.status,
-            }))
+        // 调用应用层操作处理器处理取消标记消息逻辑
+        match self.operation_handler.handle_unmark_message_app(&ctx, &app_command).await {
+            Ok(()) => {
+                Ok(Response::new(MessageUnmarkMessageResponse {
+                    success: true,
+                    error_message: String::new(),
+                    status: Some(ok_status()),
+                }))
+            }
+            Err(err) => {
+                error!(error = %err, "Failed to unmark message");
+                Err(Status::internal(err.to_string()))
+            }
         }
+    }
 
         #[instrument(skip(self, request))]
     async fn query_messages(
@@ -1199,33 +1114,11 @@ impl MessageGrpcHandler {
             }))
     }
 
-    async fn get_pinned_messages(
-        &self,
-        _request: Request<flare_proto::message::GetPinnedMessagesRequest>,
-    ) -> Result<Response<flare_proto::message::GetPinnedMessagesResponse>, Status> {
-        Err(Status::unimplemented("get_pinned_messages not implemented"))
-    }
 
-    async fn get_marked_messages(
-        &self,
-        _request: Request<flare_proto::message::GetMarkedMessagesRequest>,
-    ) -> Result<Response<flare_proto::message::GetMarkedMessagesResponse>, Status> {
-        Err(Status::unimplemented("get_marked_messages not implemented"))
-    }
 
-    async fn get_threads(
-        &self,
-        _request: Request<flare_proto::message::GetThreadsRequest>,
-    ) -> Result<Response<flare_proto::message::GetThreadsResponse>, Status> {
-        Err(Status::unimplemented("get_threads not implemented"))
-    }
 
-    async fn get_thread_replies(
-        &self,
-        _request: Request<flare_proto::message::GetThreadRepliesRequest>,
-    ) -> Result<Response<flare_proto::message::GetThreadRepliesResponse>, Status> {
-        Err(Status::unimplemented("get_thread_replies not implemented"))
-    }
+
+
+
+
 }
-
-

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context as AnyhowContext, Result};
 use tracing::warn;
 
-use crate::application::handlers::MessagePersistenceCommandHandler;
+use crate::application::handlers::{MessageOperationCommandHandler, MessagePersistenceCommandHandler};
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::{
     AckPublisher, ArchiveStoreRepository, HotCacheRepository, MediaAttachmentVerifier,
@@ -27,6 +27,7 @@ use crate::infrastructure::persistence::conversation_state::RedisConversationSta
 use crate::infrastructure::persistence::user_cursor::RedisUserCursorRepository;
 use crate::interface::messaging::normal_consumer::NormalMessageConsumer;
 use crate::interface::messaging::operation_consumer::OperationMessageConsumer;
+
 use flare_im_core::metrics::StorageWriterMetrics;
 use flare_server_core::ServiceClient;
 use flare_server_core::kafka::build_kafka_producer; // 添加ServiceClient导入
@@ -191,11 +192,17 @@ pub async fn initialize(
     }
 
     // 17. 创建操作消息领域服务
-    let operation_service = Arc::new(MessageOperationDomainService::new(archive_repo));
+    let operation_service = Arc::new(MessageOperationDomainService::new(archive_repo.clone()));
 
     // 18. 创建命令处理器（应用层负责指标记录）
     let command_handler = Arc::new(MessagePersistenceCommandHandler::new(
         domain_service,
+        operation_service.clone(),
+        metrics.clone(),
+    ));
+
+    // 18. 创建操作命令处理器
+    let operation_command_handler = Arc::new(MessageOperationCommandHandler::new(
         operation_service,
         metrics.clone(),
     ));
@@ -211,7 +218,7 @@ pub async fn initialize(
 
     let operation_consumer = OperationMessageConsumer::new(
         config.clone(),
-        command_handler.clone(),
+        operation_command_handler,
         metrics.clone(),
     )
     .await

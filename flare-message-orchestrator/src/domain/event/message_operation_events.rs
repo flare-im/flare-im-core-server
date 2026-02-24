@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::model::MessageFsmState;
+use crate::domain::model::message_fsm::EditHistoryEntry;
 
 /// 消息操作事件基类
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,10 @@ pub struct MessageEditedEvent {
     pub new_state: MessageFsmState,
     /// 编辑原因（可选）
     pub reason: Option<String>,
+    /// 新的消息内容
+    pub new_content: Vec<u8>,
+    /// 完整的编辑历史
+    pub edit_history: Vec<EditHistoryEntry>,
 }
 
 /// 消息删除事件

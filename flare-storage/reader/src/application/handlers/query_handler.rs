@@ -12,7 +12,7 @@ use tracing::instrument;
 
 use crate::application::queries::{
     GetMessageQuery, ListMessageTagsQuery, QueryMessagesBySeqQuery, QueryMessagesQuery,
-    SearchMessagesQuery,
+    SearchMessagesQuery, QueryMessageOperationsQuery,
 };
 use crate::domain::repository::MessageStorage;
 use crate::domain::service::{MessageStorageDomainService, QueryMessagesResult};
@@ -236,5 +236,13 @@ impl MessageStorageQueryHandler {
             .and_then(|msg| extract_seq_from_message(msg));
 
         Ok((messages.messages, last_seq))
+    }
+
+    /// 查询消息操作历史
+    #[instrument(skip(self), fields(message_id = %query.message_id))]
+    pub async fn handle_query_message_operations(&self, query: QueryMessageOperationsQuery) -> Result<Vec<flare_proto::common::MessageOperation>> {
+        self.storage
+            .query_message_operations(&query.message_id)
+            .await
     }
 }

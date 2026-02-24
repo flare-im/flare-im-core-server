@@ -13,6 +13,7 @@ use flare_proto::common::{
     message_content::Content, message_operation::OperationData, DeleteType, MarkType,
     Message, MessageContent, MessageOperation, OperationType, ReactionAction,
 };
+use flare_proto::MessageContentExt;
 use flare_proto::message::{
     AddReactionRequest, DeleteMessageRequest, EditMessageRequest, MarkMessageRequest,
     PinMessageRequest, RecallMessageRequest, RemoveReactionRequest, UnmarkMessageRequest,
@@ -86,9 +87,8 @@ impl OperationMessageBuilder {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("new_content is required"))?;
 
-        // 将 MessageContent 序列化为 Vec<u8>
-        let mut new_content_buf = Vec::new();
-        new_content.encode(&mut new_content_buf).unwrap_or_default();
+        // 将 MessageContent 序列化为 Vec<u8>（使用统一的编码方法）
+        let new_content_buf = new_content.encode_to_bytes().unwrap_or_default();
 
         let operation = MessageOperation {
             operation_type: OperationType::Edit as i32,

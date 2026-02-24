@@ -279,8 +279,6 @@ fn build_context(
     }
 
     ProtoHookInvocationContext {
-        request_context: build_request_context(ctx, &hook_data),
-        tenant: Some(build_tenant_context(ctx, &hook_data)),
         conversation_id: hook_data.conversation_id.clone().unwrap_or_default(),
         conversation_type: hook_data.conversation_type.clone().unwrap_or_default(),
         corridor,

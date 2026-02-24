@@ -40,12 +40,8 @@ impl MessageTemporaryService {
     ) -> Result<()> {
         ctx.ensure_not_cancelled()?;
         
-        // 从 Context 中提取 RequestContext 和 TenantContext
-        let context: Option<RequestContext> = ctx.request().cloned().map(|rc| rc.into());
-        let tenant: Option<TenantContext> = ctx.tenant().cloned().map(|tc| tc.into());
-        
         // 构建推送请求
-        let push_request = self.build_push_request(message, context, tenant)?;
+        let push_request = self.build_push_request(message)?;
 
         // 只发布到推送队列，不持久化
         self.publisher
@@ -66,8 +62,6 @@ impl MessageTemporaryService {
     fn build_push_request(
         &self,
         message: &Message,
-        context: Option<RequestContext>,
-        tenant: Option<TenantContext>,
     ) -> Result<PushMessageRequest> {
         // 提取接收者ID列表
         let mut user_ids = Vec::new();
@@ -107,8 +101,6 @@ impl MessageTemporaryService {
             user_ids,
             message: Some(message_for_push),
             options: Some(push_options),
-            context,
-            tenant,
             template_id: String::new(),
             template_data: std::collections::HashMap::new(),
         })

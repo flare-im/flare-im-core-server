@@ -95,8 +95,6 @@ impl MediaService for MediaGrpcHandler {
             .handle_get_file_url(&ctx, flare_proto::media::GetFileUrlRequest {
                 file_id: metadata.file_id.clone(),
                 expires_in: 0, // 使用服务默认TTL
-                context: None,
-                tenant: None,
                 download: false,
                 response_headers: Default::default(),
             })
@@ -179,8 +177,6 @@ impl MediaService for MediaGrpcHandler {
             .handle_get_file_url(&ctx, flare_proto::media::GetFileUrlRequest {
                 file_id: metadata.file_id.clone(),
                 expires_in: 0, // 使用服务默认TTL
-                context: None,
-                tenant: None,
                 download: false,
                 response_headers: Default::default(),
             })

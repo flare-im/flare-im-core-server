@@ -27,54 +27,106 @@ impl MessageOperationDomainService {
     }
 
     /// 检查消息是否为操作消息
+    /// 
+    /// 操作消息使用 MessageType::Operation (302) 和 Content::Operation
     pub fn is_operation_message(message: &Message) -> bool {
-        message.message_type == flare_proto::MessageType::Notification as i32
-            && message
+        let message_type = message.message_type;
+        let expected_type = flare_proto::MessageType::Operation as i32;
+        
+        // 检查消息类型是否为 Operation (302)
+        if message_type != expected_type {
+            tracing::debug!(
+                message_id = %message.server_id,
+                message_type = message_type,
+                expected_type = expected_type,
+                "❌ 消息类型不匹配（期望 Operation=302，实际={})",
+                message_type
+            );
+            return false;
+        }
+        
+        // 检查内容是否为 Content::Operation
+        let has_operation_content = message
+            .content
+            .as_ref()
+            .and_then(|c| c.content.as_ref())
+            .map(|c| matches!(c, flare_proto::common::message_content::Content::Operation(_)))
+            .unwrap_or(false);
+        
+        if !has_operation_content {
+            let content_variant = message
                 .content
                 .as_ref()
                 .and_then(|c| c.content.as_ref())
-                .and_then(|c| match c {
-                    flare_proto::common::message_content::Content::Notification(notif) => {
-                        Some(notif.notification_type == "message_operation")
-                    }
-                    _ => None,
+                .map(|c| match c {
+                    flare_proto::common::message_content::Content::Operation(_) => "Operation",
+                    flare_proto::common::message_content::Content::Notification(_) => "Notification",
+                    flare_proto::common::message_content::Content::Text(_) => "Text",
+                    _ => "Other",
                 })
-                .unwrap_or(false)
+                .unwrap_or("None");
+            
+            tracing::debug!(
+                message_id = %message.server_id,
+                message_type = message_type,
+                content_variant = content_variant,
+                "❌ 消息类型是 Operation(302)，但内容不是 Content::Operation（实际内容类型: {})",
+                content_variant
+            );
+        } else {
+            tracing::debug!(
+                message_id = %message.server_id,
+                message_type = message_type,
+                "✅ 消息是操作消息（message_type=302 且 content=Operation）"
+            );
+        }
+        
+        has_operation_content
     }
 
     /// 从消息中提取 MessageOperation
+    /// 
+    /// 操作消息使用 Content::Operation，直接包含 MessageOperation
     pub fn extract_operation_from_message(message: &Message) -> Result<Option<MessageOperation>> {
         if !Self::is_operation_message(message) {
+            tracing::debug!(
+                message_id = %message.server_id,
+                "⚠️ extract_operation_from_message: is_operation_message 返回 false"
+            );
             return Ok(None);
         }
 
+        // 直接从 Content::Operation 中提取 MessageOperation
         if let Some(ref content) = message.content {
-            if let Some(flare_proto::common::message_content::Content::Notification(notif)) =
+            if let Some(flare_proto::common::message_content::Content::Operation(operation)) =
                 &content.content
             {
-                if notif.notification_type == "message_operation" {
-                    // 从 data 字段中反序列化 MessageOperation
-                    // 注意：根据协议设计，data 是 base64 编码的序列化 MessageOperation
-                    // 兼容两种键名：历史版本使用 "data"，SDK 当前使用 "operation_data"
-                    let data_str_opt = notif
-                        .data
-                        .get("operation_data")
-                        .or_else(|| notif.data.get("data"));
-                    if let Some(data_str) = data_str_opt {
-                        // 解码 base64
-                        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-                        let decoded = BASE64
-                            .decode(data_str)
-                            .map_err(|e| anyhow!("Failed to decode base64: {}", e))?;
-
-                        // 反序列化 MessageOperation
-                        let operation = ProstMessage::decode(&decoded[..])
-                            .map_err(|e| anyhow!("Failed to decode MessageOperation: {}", e))?;
-
-                        return Ok(Some(operation));
-                    }
-                }
+                tracing::debug!(
+                    message_id = %message.server_id,
+                    operation_type = operation.operation_type,
+                    "✅ 成功从 Content::Operation 中提取 MessageOperation"
+                );
+                // Content::Operation 直接包含 MessageOperation，无需反序列化
+                return Ok(Some(operation.clone()));
+            } else {
+                let content_variant = content.content.as_ref().map(|c| match c {
+                    flare_proto::common::message_content::Content::Operation(_) => "Operation",
+                    flare_proto::common::message_content::Content::Notification(_) => "Notification",
+                    _ => "Other",
+                }).unwrap_or("None");
+                
+                tracing::warn!(
+                    message_id = %message.server_id,
+                    content_variant = content_variant,
+                    "⚠️ extract_operation_from_message: 内容不是 Content::Operation（实际: {})",
+                    content_variant
+                );
             }
+        } else {
+            tracing::warn!(
+                message_id = %message.server_id,
+                "⚠️ extract_operation_from_message: message.content 为 None"
+            );
         }
 
         Ok(None)
@@ -166,6 +218,13 @@ impl MessageOperationDomainService {
         archive_repo: &Arc<dyn ArchiveStoreRepository + Send + Sync>,
     ) -> Result<()> {
         let message_id = &operation.target_message_id;
+        
+        tracing::info!(
+            target_message_id = %message_id,
+            operator_id = %operation.operator_id,
+            operation_type = operation.operation_type,
+            "📝 开始处理编辑操作，target_message_id 必须与数据库中的 server_id 匹配"
+        );
 
         // 从 operation_data 中提取编辑后的内容
         let edit_data = match &operation.operation_data {
@@ -175,8 +234,8 @@ impl MessageOperationDomainService {
 
         let new_content_bytes = &edit_data.new_content;
 
-        // 解码 new_content 从 &[u8] 到 MessageContent
-        let new_content = flare_proto::common::MessageContent::decode(new_content_bytes.as_slice())
+        // 解码 new_content 从 &[u8] 到 MessageContent（使用统一的解码方法）
+        let new_content = flare_proto::decode_message_content(new_content_bytes.as_slice())
             .context("Failed to decode new_content as MessageContent")?;
 
         // 1. 更新消息内容（内部会验证版本号并保存编辑历史）
@@ -202,7 +261,7 @@ impl MessageOperationDomainService {
         Ok(())
     }
 
-    /// 处理删除操作（硬删除）
+    /// 处理删除操作（硬删除和软删除）
     #[instrument(skip(self, archive_repo), fields(message_id = %operation.target_message_id))]
     async fn handle_delete_operation(
         &self,
@@ -210,19 +269,23 @@ impl MessageOperationDomainService {
         archive_repo: &Arc<dyn ArchiveStoreRepository + Send + Sync>,
     ) -> Result<()> {
         let message_id = &operation.target_message_id;
+        let user_id = &operation.operator_id;
 
         if let Some(OperationData::Delete(delete_data)) = &operation.operation_data {
             if delete_data.delete_type == flare_proto::common::DeleteType::Hard as i32 {
+                // 硬删除：更新消息状态为 DELETED_HARD
                 archive_repo
                     .update_message_fsm_state(message_id, "DELETED_HARD", None)
                     .await?;
 
                 archive_repo.append_operation(message_id, operation).await?;
             } else {
-                warn!(
-                    message_id = %message_id,
-                    "Soft delete operation should be handled by Reader, not Writer"
-                );
+                // 软删除：更新 message_visibility 表
+                archive_repo
+                    .update_message_visibility(message_id, user_id, "DELETED")
+                    .await?;
+
+                archive_repo.append_operation(message_id, operation).await?;
             }
         } else {
             return Err(anyhow!("Delete operation requires DeleteOperationData"));

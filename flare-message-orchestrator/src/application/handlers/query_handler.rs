@@ -34,6 +34,11 @@ impl MessageQueryHandler {
         }
     }
 
+    /// 获取存储客户端的引用
+    pub fn get_storage_client(&self) -> Option<&Arc<StorageReaderServiceClient<tonic::transport::Channel>>> {
+        self.storage_client.as_ref()
+    }
+
     /// 查询单条消息
     ///
     /// 实现策略：
@@ -55,41 +60,6 @@ impl MessageQueryHandler {
         // 构建查询请求
         let request = flare_proto::storage::GetMessageRequest {
             message_id: query.message_id.clone(),
-            context: Some(flare_proto::common::RequestContext {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                trace: None,
-                actor: Some(flare_proto::common::ActorContext {
-                    actor_id: "system".to_string(),
-                    r#type: flare_proto::common::ActorType::System as i32,
-                    roles: vec![],
-                    attributes: Default::default(),
-                }),
-                device: Some(flare_proto::common::DeviceContext {
-                    device_id: "server".to_string(),
-                    platform: "server".to_string(),
-                    model: "flare-message-orchestrator".to_string(),
-                    os_version: "unknown".to_string(),
-                    app_version: "1.0.0".to_string(),
-                    locale: "en-US".to_string(),
-                    timezone: "UTC".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
-                    attributes: Default::default(),
-                    priority: flare_proto::common::DevicePriority::Unspecified as i32,
-                    token_version: 0,
-                    connection_quality: None,
-                }),
-                channel: "api".to_string(),
-                user_agent: "flare-message-orchestrator".to_string(),
-                attributes: Default::default(),
-            }),
-            tenant: Some(flare_proto::common::TenantContext {
-                tenant_id: "default".to_string(),
-                business_type: "im".to_string(),
-                environment: "production".to_string(),
-                organization_id: String::new(),
-                labels: Default::default(),
-                attributes: Default::default(),
-            }),
         };
 
         // 调用存储服务
@@ -145,41 +115,6 @@ impl MessageQueryHandler {
             end_time: query.end_time.unwrap_or(chrono::Utc::now().timestamp()),
             limit: query.limit.unwrap_or(50).min(1000), // 限制最大查询数量
             cursor: query.cursor.clone().unwrap_or_default(),
-            context: Some(flare_proto::common::RequestContext {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                trace: None,
-                actor: Some(flare_proto::common::ActorContext {
-                    actor_id: "system".to_string(),
-                    r#type: flare_proto::common::ActorType::System as i32,
-                    roles: vec![],
-                    attributes: Default::default(),
-                }),
-                device: Some(flare_proto::common::DeviceContext {
-                    device_id: "server".to_string(),
-                    platform: "server".to_string(),
-                    model: "flare-message-orchestrator".to_string(),
-                    os_version: "unknown".to_string(),
-                    app_version: "1.0.0".to_string(),
-                    locale: "en-US".to_string(),
-                    timezone: "UTC".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
-                    attributes: Default::default(),
-                    priority: flare_proto::common::DevicePriority::Unspecified as i32,
-                    token_version: 0,
-                    connection_quality: None,
-                }),
-                channel: "api".to_string(),
-                user_agent: "flare-message-orchestrator".to_string(),
-                attributes: Default::default(),
-            }),
-            tenant: Some(flare_proto::common::TenantContext {
-                tenant_id: "default".to_string(),
-                business_type: "im".to_string(),
-                environment: "production".to_string(),
-                organization_id: String::new(),
-                labels: Default::default(),
-                attributes: Default::default(),
-            }),
             pagination: Some(flare_proto::common::Pagination {
                 cursor: query.cursor.clone().unwrap_or_default(),
                 limit: query.limit.unwrap_or(50) as i32,
@@ -237,41 +172,6 @@ impl MessageQueryHandler {
             end_time: query.end_time.unwrap_or(chrono::Utc::now().timestamp()),
             limit: query.limit.unwrap_or(50).min(1000), // 限制最大查询数量
             cursor: query.cursor.clone().unwrap_or_default(),
-            context: Some(flare_proto::common::RequestContext {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                trace: None,
-                actor: Some(flare_proto::common::ActorContext {
-                    actor_id: "system".to_string(),
-                    r#type: flare_proto::common::ActorType::System as i32,
-                    roles: vec![],
-                    attributes: Default::default(),
-                }),
-                device: Some(flare_proto::common::DeviceContext {
-                    device_id: "server".to_string(),
-                    platform: "server".to_string(),
-                    model: "flare-message-orchestrator".to_string(),
-                    os_version: "unknown".to_string(),
-                    app_version: "1.0.0".to_string(),
-                    locale: "en-US".to_string(),
-                    timezone: "UTC".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
-                    attributes: Default::default(),
-                    priority: flare_proto::common::DevicePriority::Unspecified as i32,
-                    token_version: 0,
-                    connection_quality: None,
-                }),
-                channel: "api".to_string(),
-                user_agent: "flare-message-orchestrator".to_string(),
-                attributes: Default::default(),
-            }),
-            tenant: Some(flare_proto::common::TenantContext {
-                tenant_id: "default".to_string(),
-                business_type: "im".to_string(),
-                environment: "production".to_string(),
-                organization_id: String::new(),
-                labels: Default::default(),
-                attributes: Default::default(),
-            }),
             pagination: Some(flare_proto::common::Pagination {
                 cursor: query.cursor.clone().unwrap_or_default(),
                 limit: query.limit.unwrap_or(50) as i32,
@@ -346,41 +246,6 @@ impl MessageQueryHandler {
 
         // 构建搜索请求
         let request = flare_proto::storage::SearchMessagesRequest {
-            context: Some(flare_proto::common::RequestContext {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                trace: None,
-                actor: Some(flare_proto::common::ActorContext {
-                    actor_id: "system".to_string(),
-                    r#type: flare_proto::common::ActorType::System as i32,
-                    roles: vec![],
-                    attributes: Default::default(),
-                }),
-                device: Some(flare_proto::common::DeviceContext {
-                    device_id: "server".to_string(),
-                    platform: "server".to_string(),
-                    model: "flare-message-orchestrator".to_string(),
-                    os_version: "unknown".to_string(),
-                    app_version: "1.0.0".to_string(),
-                    locale: "en-US".to_string(),
-                    timezone: "UTC".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
-                    attributes: Default::default(),
-                    priority: flare_proto::common::DevicePriority::Unspecified as i32,
-                    token_version: 0,
-                    connection_quality: None,
-                }),
-                channel: "api".to_string(),
-                user_agent: "flare-message-orchestrator".to_string(),
-                attributes: Default::default(),
-            }),
-            tenant: Some(flare_proto::common::TenantContext {
-                tenant_id: "default".to_string(),
-                business_type: "im".to_string(),
-                environment: "production".to_string(),
-                organization_id: String::new(),
-                labels: Default::default(),
-                attributes: Default::default(),
-            }),
             filters: all_filters,
             sort: vec![flare_proto::common::SortExpression {
                 field: "created_at".to_string(),

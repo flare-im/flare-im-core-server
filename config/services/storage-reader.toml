@@ -1,14 +1,14 @@
 # Storage Reader 服务配置
 #
 # 配置说明：
-# - MongoDB 配置通过 mongo 字段引用 base.toml 中的 mongodb.primary
+# - PostgreSQL 配置通过 postgres 字段引用 base.toml 中的 postgres.media
 # - Redis 配置通过 redis 字段引用 base.toml 中的 redis.conversation_store（可选）
 # - 所有基础设施配置都在 base.toml 中定义
 
 [services.storage_reader]
 
-# MongoDB 配置：引用 base.toml 中的 mongodb.primary
-mongo = "primary"
+# PostgreSQL 配置：引用 base.toml 中的 postgres.media
+postgres = "media"
 
 # Redis 配置（可选，用于缓存）
 # redis = "conversation_store"

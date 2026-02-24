@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::Message;
+use flare_proto::MessageContentExt;
 use prost::Message as _;
 use serde_json::to_value;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
@@ -113,7 +114,7 @@ impl PostgresMessageStore {
 
         // 解析 content 为 MessageContent
         let content = if let Some(content_bytes) = row.content {
-            flare_proto::common::MessageContent::decode(content_bytes.as_slice())
+            flare_proto::decode_message_content(content_bytes.as_slice())
                 .ok()
                 .map(|c| Some(c))
                 .unwrap_or(None)
@@ -153,15 +154,7 @@ impl PostgresMessageStore {
             nanos: row.timestamp.timestamp_subsec_nanos() as i32,
         });
 
-        // 解析 tenant_id
-        let _tenant = Some(flare_proto::common::TenantContext {
-            tenant_id: row.tenant_id.clone(),
-                business_type: String::new(),
-                environment: String::new(),
-                organization_id: String::new(),
-                labels: std::collections::HashMap::new(),
-                attributes: std::collections::HashMap::new(),
-            });
+
 
         // 解析 conversation_type
         let conversation_type = match row.conversation_type.as_deref() {
@@ -206,9 +199,9 @@ impl PostgresMessageStore {
                     )
                 })
                 .collect(),
+            tenant: row.tenant_id.clone(), // 从数据库行中获取租户ID
             offline_push_info: None,
             tags: vec![],
-            tenant: None,
             attributes: std::collections::HashMap::new(),
             status,
             is_recalled: row.status.as_deref() == Some("RECALLED"),
@@ -254,13 +247,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
 
         // 提取 tenant_id（从 message.tenant 或 extra 中提取）
         use serde_json::Value as JsonValue;
-        let tenant_id = message.tenant.as_ref()
-            .map(|t| t.tenant_id.clone())
-            .or_else(|| {
-                extra_value.get("tenant_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
+        let tenant_id = extra_value.get("tenant_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .unwrap_or_else(|| "default".to_string());
 
         // 提取 conversation_type（从 message 或 extra 中）
@@ -352,14 +341,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         fsm_state: &str,
         recall_reason: Option<&str>,
     ) -> Result<()> {
-        // 从消息中查询 tenant_id（用于接口一致性，但 UPDATE 时不需要作为条件）
-        let tenant_id = self
-            .get_message_by_id(message_id)
-            .await?
-            .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
-            })
-            .unwrap_or_else(|| "default".to_string());
+        let tenant_id = "default".to_string(); // 使用默认租户ID，因为Message结构体已移除tenant字段
         
         self.operation_store
             .update_message_fsm_state(&tenant_id, message_id, fsm_state, recall_reason)
@@ -379,7 +361,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -394,12 +376,12 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         user_id: &str,
         visibility_status: &str,
     ) -> Result<()> {
-        // 从消息中查询 tenant_id（INSERT 时需要）
+        // 从消息中查询 tenant_id（查询时需要，UPDATE 时不需要作为条件）
         let tenant_id = self
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -418,7 +400,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -439,7 +421,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -462,7 +444,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -485,7 +467,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -504,7 +486,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .get_message_by_id(message_id)
             .await?
             .and_then(|msg| {
-                msg.tenant.as_ref().map(|t| t.tenant_id.clone())
+                msg.extra.get("tenant_id").cloned()
             })
             .unwrap_or_else(|| "default".to_string());
         
@@ -549,11 +531,8 @@ impl ArchiveStoreRepository for PostgresMessageStore {
                 let content_size = m
                     .content
                     .as_ref()
-                    .map(|c| {
-                        let mut buf = Vec::new();
-                        c.encode(&mut buf).unwrap_or_default();
-                        buf.len()
-                    })
+                    .and_then(|c| c.encode_to_bytes().ok())
+                    .map(|buf| buf.len())
                     .unwrap_or(0);
                 let extra_size = serde_json::to_string(&m.extra).unwrap_or_default().len();
                 content_size + extra_size + 200 // 基础元数据约 200 字节

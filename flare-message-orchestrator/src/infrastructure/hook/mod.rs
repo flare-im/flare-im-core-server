@@ -7,6 +7,7 @@ use flare_server_core::context::Context;
 use flare_proto::common::{RequestContext, TenantContext};
 use flare_proto::common::Message;
 use flare_proto::storage::StoreMessageRequest;
+use flare_proto::MessageContentExt;
 use serde_json::json;
 
 use crate::domain::model::MessageSubmission;
@@ -49,15 +50,8 @@ pub fn build_draft_from_request(request: &StoreMessageRequest) -> anyhow::Result
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("StoreMessageRequest.message must be set"))?;
 
-    // MessageDraft::new 需要 Vec<u8>，但 message.content 是 Option<MessageContent>
-    // 使用 prost 序列化 MessageContent，或使用空向量
-    use prost::Message as ProstMessage;
     let content_bytes = message.content.as_ref()
-        .map(|c| {
-            let mut buf = Vec::new();
-            c.encode(&mut buf).unwrap_or_default();
-            buf
-        })
+        .and_then(|c| c.encode_to_bytes().ok())
         .unwrap_or_default();
     let mut draft = MessageDraft::new(content_bytes);
     let message_type_label = detect_message_type(message);

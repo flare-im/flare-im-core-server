@@ -48,28 +48,10 @@ impl HookExecutor {
     /// 构建 Hook 调用上下文
     fn build_hook_context(&self, ctx: &Context) -> HookInvocationContext {
         use flare_im_core::hooks::hook_context_data::get_hook_context_data;
-        use flare_proto::common::{RequestContext, TenantContext};
         
         let hook_data = get_hook_context_data(ctx).cloned().unwrap_or_default();
         
         HookInvocationContext {
-            request_context: Some(RequestContext {
-                request_id: ctx.request_id().to_string(),
-                trace: None,
-                actor: None,
-                device: None,
-                channel: String::new(),
-                user_agent: String::new(),
-                attributes: std::collections::HashMap::new(),
-            }),
-            tenant: ctx.tenant_id().map(|tid| TenantContext {
-                tenant_id: tid.to_string(),
-                business_type: String::new(),
-                environment: String::new(),
-                organization_id: String::new(),
-                labels: std::collections::HashMap::new(),
-                attributes: std::collections::HashMap::new(),
-            }),
             conversation_id: hook_data.conversation_id.clone().unwrap_or_default(),
             conversation_type: hook_data.conversation_type.clone().unwrap_or_default(),
             corridor: hook_data

@@ -25,7 +25,7 @@ pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_proto::media::F
         cdn_url: metadata.cdn_url.clone(),
         metadata: metadata.metadata.clone(),
         created_at: Some(to_proto_timestamp(metadata.uploaded_at)),
-        tenant: None,
+        tenant: "".to_string(),
         reference_count: metadata.reference_count,
         status: metadata.status.as_str().to_string(),
         sha256: metadata.sha256.clone().unwrap_or_default(),

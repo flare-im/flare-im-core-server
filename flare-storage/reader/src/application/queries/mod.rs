@@ -40,3 +40,9 @@ pub struct QueryMessagesBySeqQuery {
     pub limit: i32,
     pub user_id: Option<String>,
 }
+
+/// 查询消息操作历史
+#[derive(Debug, Clone)]
+pub struct QueryMessageOperationsQuery {
+    pub message_id: String,
+}

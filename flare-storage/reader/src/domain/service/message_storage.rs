@@ -64,8 +64,7 @@ pub struct QueryMessagesResult {
 pub struct MessageStorageDomainService {
     storage: Arc<dyn MessageStorage + Send + Sync>,
     visibility_storage: Option<Arc<dyn VisibilityStorage + Send + Sync>>,
-    message_state_repo:
-        Option<Arc<dyn crate::domain::repository::MessageStateRepository + Send + Sync>>,
+
     config: MessageStorageDomainConfig,
 }
 
@@ -73,15 +72,11 @@ impl MessageStorageDomainService {
     pub fn new(
         storage: Arc<dyn MessageStorage + Send + Sync>,
         visibility_storage: Option<Arc<dyn VisibilityStorage + Send + Sync>>,
-        message_state_repo: Option<
-            Arc<dyn crate::domain::repository::MessageStateRepository + Send + Sync>,
-        >,
         config: MessageStorageDomainConfig,
     ) -> Self {
         Self {
             storage,
             visibility_storage,
-            message_state_repo,
             config,
         }
     }
@@ -268,7 +263,7 @@ impl MessageStorageDomainService {
             .storage
             .query_messages(conversation_id, None, Some(start_dt), Some(end_dt), limit as i32)
             .await
-            .map_err(|err| anyhow!(err.to_string()))?;
+            ?;
 
         let mut results = Vec::new();
         for message in messages {
@@ -300,6 +295,28 @@ impl MessageStorageDomainService {
             .get_message(message_id)
             .await
             .map_err(|e| anyhow!("Failed to get message: {}", e))
+    }
+
+    /// 查询消息操作历史
+    #[instrument(skip(self), fields(message_id = %message_id))]
+    pub async fn query_message_operations(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<flare_proto::common::MessageOperation>> {
+        // 从存储层获取消息操作历史
+        // 由于 MessageOperation 现在通过单独的表或存储管理，需要实现相应的查询方法
+        // 临时实现：从消息本身获取操作相关信息
+        let message = self.get_message(message_id).await?;
+        let mut operations = Vec::new();
+        
+        // 从消息的扩展字段中提取操作历史
+        if let Some(ref msg) = message {
+            // 这里可以根据具体实现获取消息的操作历史
+            // 比如从扩展字段或单独的表中获取
+            // 临时返回空列表，等待具体的存储实现
+        }
+        
+        Ok(operations)
     }
 
     /// 搜索消息
@@ -490,29 +507,7 @@ impl MessageStorageDomainService {
             .await
             .map_err(|e| anyhow!("Failed to mark message as read: {}", e))?;
 
-        // 同时写入 message_state 表
-        if let Some(message_state_repo) = &self.message_state_repo {
-            if let Err(e) = message_state_repo.mark_as_read(ctx, message_id).await {
-                tracing::warn!(
-                    error = %e,
-                    message_id = %message_id,
-                    user_id = %user_id,
-                    "Failed to write to message_state table, but message read_by is updated"
-                );
-            }
 
-            // 如果是阅后即焚消息，同时标记为已焚毁
-            if burned_at.is_some() {
-                if let Err(e) = message_state_repo.mark_as_burned(ctx, message_id).await {
-                    tracing::warn!(
-                        error = %e,
-                        message_id = %message_id,
-                        user_id = %user_id,
-                        "Failed to mark message as burned in message_state table"
-                    );
-                }
-            }
-        }
 
         Ok((read_timestamp, burned_at))
     }
@@ -560,20 +555,7 @@ impl MessageStorageDomainService {
                 .map_err(|e| anyhow!("Failed to delete message for user: {}", e))?
         };
 
-        // 同时写入 message_state 表
-        if let Some(message_state_repo) = &self.message_state_repo {
-            if let Err(e) = message_state_repo
-                .mark_as_deleted(ctx, message_id)
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    message_id = %message_id,
-                    user_id = %user_id,
-                    "Failed to write to message_state table, but visibility is updated"
-                );
-            }
-        }
+
 
         Ok(result)
     }

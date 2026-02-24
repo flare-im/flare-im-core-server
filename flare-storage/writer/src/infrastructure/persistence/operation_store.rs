@@ -2,8 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::MessageContent;
+use flare_proto::MessageContentExt;
 use prost::Message as ProstMessage;
-use prost::Message;
 use serde_json::{json, Value};
 use sqlx::{Pool, Postgres, QueryBuilder, Row};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -34,9 +34,10 @@ impl OperationStore {
             query.push_bind(reason);
         }
 
-        // 使用唯一索引 idx_messages_server_id_unique (tenant_id, server_id) 保证唯一性
-        // UPDATE 时不需要 tenant_id 作为条件，因为 server_id 在租户内已唯一
+        // 支持通过 server_id 或 client_msg_id 更新
         query.push(" WHERE server_id = ");
+        query.push_bind(message_id);
+        query.push(" OR client_msg_id = ");
         query.push_bind(message_id);
 
         query.build().execute(&self.pool).await?;
@@ -55,40 +56,80 @@ impl OperationStore {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        // 查询时使用 tenant_id 进行数据隔离
+        // 查询时不使用 tenant_id 进行数据隔离，因为 tenant_id 不再强制要求
+        tracing::info!(
+            message_id = %message_id,
+            "🔍 查询消息以获取当前编辑版本，支持 server_id 或 client_msg_id"
+        );
+        
         let current_message_row = sqlx::query(
             r#"
-            SELECT content, current_edit_version
+            SELECT content, current_edit_version, extra, server_id
             FROM messages
-            WHERE tenant_id = $1 AND server_id = $2
+            WHERE (server_id = $1 OR client_msg_id = $1)
             "#,
         )
-        .bind(tenant_id)
         .bind(message_id)
         .fetch_optional(&mut *tx)
         .await?;
 
-        let current_edit_version = match current_message_row {
-            Some(row) => row.get::<i32, _>("current_edit_version"),
+        let (current_edit_version, mut extra, real_server_id) = match current_message_row {
+            Some(row) => {
+                let version = row.get::<i32, _>("current_edit_version");
+                let extra = row.get::<Value, _>("extra");
+                let server_id = row.get::<String, _>("server_id");
+                tracing::info!(
+                    message_id = %message_id,
+                    real_server_id = %server_id,
+                    current_edit_version = version,
+                    "✅ 找到消息，当前编辑版本: {}",
+                    version
+                );
+                (version, extra, server_id)
+            }
             None => {
                 tx.rollback().await?;
-                return Err(anyhow::anyhow!("Message not found: {}", message_id));
+                tracing::error!(
+                    tenant_id = %tenant_id,
+                    message_id = %message_id,
+                    "❌ 消息不存在，无法编辑。请确保 target_message_id 是服务端返回的 server_msg_id 或 client_msg_id"
+                );
+                return Err(anyhow::anyhow!("Message not found: {} (tenant_id: {}).", message_id, tenant_id));
             }
         };
 
-        if edit_version <= current_edit_version {
-            tx.rollback().await?;
-            return Err(anyhow::anyhow!(
-                "Edit version must be greater than current version. Current: {}, Provided: {}",
-                current_edit_version,
+        // **关键修复**：如果传入的 edit_version 无效（<= 0 或 <= current_edit_version），自动计算为 current_edit_version + 1
+        let final_edit_version = if edit_version <= 0 || edit_version <= current_edit_version {
+            current_edit_version + 1
+        } else {
                 edit_version
-            ));
+        };
+
+        // **关键修复**：如果是文本消息，同步更新 extra 字段中的 content_text
+        // 这样客户端在获取列表或搜索时能看到最新的文本内容
+        if let Some(flare_proto::common::message_content::Content::Text(text)) = &new_content.content {
+            if let Value::Object(ref mut map) = extra {
+                map.insert("content_text".to_string(), Value::String(text.text.clone()));
+                tracing::info!(
+                    message_id = %message_id,
+                    "📝 更新 extra.content_text 为新文本"
+                );
+            }
         }
 
-        let mut new_content_bytes = Vec::new();
-        new_content.encode(&mut new_content_bytes)?;
+        tracing::info!(
+            message_id = %message_id,
+            real_server_id = %real_server_id,
+            current_edit_version = current_edit_version,
+            provided_edit_version = edit_version,
+            final_edit_version = final_edit_version,
+            "📝 计算编辑版本号"
+        );
 
-        // UPDATE 时不需要 tenant_id 作为条件（唯一索引已保证）
+        // 使用统一的编码方法（高性能、一致性）
+        let new_content_bytes = new_content.encode_to_bytes()?;
+
+        // UPDATE 使用 real_server_id
         sqlx::query(
             r#"
             UPDATE messages
@@ -98,13 +139,15 @@ impl OperationStore {
                 fsm_state_changed_at = CURRENT_TIMESTAMP,
                 current_edit_version = $2,
                 last_edited_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE server_id = $3
+                updated_at = CURRENT_TIMESTAMP,
+                extra = $3
+            WHERE server_id = $4
             "#,
         )
         .bind(&new_content_bytes)
-        .bind(edit_version)
-        .bind(message_id)
+        .bind(final_edit_version)  // **关键修复**：使用计算后的版本号
+        .bind(&extra)
+        .bind(&real_server_id)
         .execute(&mut *tx)
         .await?;
 
@@ -116,8 +159,8 @@ impl OperationStore {
             "#,
         )
         .bind(tenant_id)
-        .bind(message_id)
-        .bind(edit_version)
+        .bind(&real_server_id) // 使用 real_server_id
+        .bind(final_edit_version)  // **关键修复**：使用计算后的版本号
         .bind(&new_content_bytes)
         .bind(editor_id)
         .bind(reason)

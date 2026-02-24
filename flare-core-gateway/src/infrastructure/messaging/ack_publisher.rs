@@ -169,8 +169,6 @@ impl AckPublisher for GrpcAckPublisher {
         };
 
         let request = flare_proto::access_gateway::PushAckRequest {
-            context: None, // 可以根据需要填充
-            tenant: None,  // 可以根据需要填充
             target_user_ids: vec![event.user_id.clone()],
             ack: Some(ack),
             metadata: std::collections::HashMap::new(), // 可以根据需要填充

@@ -236,8 +236,6 @@ impl MessageRouter {
         let mut route_request = RouteMessageRequest::default();
         route_request.svid = self.default_svid.clone();
         route_request.payload = payload;
-        route_request.context = Some(request_context);
-        route_request.tenant = Some(tenant_context);
         
         // 设置路由选项（proto 重新生成后确保字段存在）
         // 如果字段不存在，这行代码会编译失败，需要重新生成 proto 代码

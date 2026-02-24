@@ -54,7 +54,6 @@
 //! ```
 
 mod connection;
-mod custom_command;
 mod lifecycle;
 mod message_handler;
 mod push;

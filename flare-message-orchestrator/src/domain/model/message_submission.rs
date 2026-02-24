@@ -4,7 +4,7 @@ use flare_im_core::utils::{
     TimelineMetadata, current_millis, datetime_to_timestamp, embed_timeline_in_extra,
     timestamp_to_millis,
 };
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
 use uuid::Uuid;
 
 use crate::domain::model::message_kind::MessageProfile;
@@ -19,14 +19,14 @@ pub struct MessageDefaults {
 
 #[derive(Clone)]
 pub struct MessageSubmission {
-    pub kafka_payload: StoreMessageRequest,
+    pub kafka_payload: StoreMessage,
     pub message: flare_proto::common::Message,
     pub message_id: String,
     pub timeline: TimelineMetadata,
 }
 
 impl MessageSubmission {
-    pub fn prepare(mut request: StoreMessageRequest, defaults: &MessageDefaults) -> Result<Self> {
+    pub fn prepare(mut request: StoreMessage, defaults: &MessageDefaults) -> Result<Self> {
         if request.conversation_id.is_empty() {
             return Err(anyhow!("conversation_id is required"));
         }
@@ -132,10 +132,12 @@ impl MessageSubmission {
             .entry("shard_key".to_string())
             .or_insert(shard_key.clone());
 
-        let tenant_id = message
-            .extra
+        // 从 StoreMessage 的 metadata 中获取租户 ID，如果不存在则从 message.extra 获取，最后使用默认值
+        let tenant_id = request
+            .metadata
             .get("tenant_id")
             .cloned()
+            .or_else(|| message.extra.get("tenant_id").cloned())
             .or_else(|| defaults.default_tenant_id.clone());
         if let Some(ref tenant) = tenant_id {
             message
@@ -160,45 +162,17 @@ impl MessageSubmission {
         message.client_msg_id =
             String::from_utf8_lossy(message.client_msg_id.as_bytes()).to_string();
 
-        // 清理消息内容中的 text 字段，确保它是有效的 UTF-8
-        // 这可以避免 Protobuf 序列化/反序列化时的编码问题
-        if let Some(ref mut content) = message.content {
-            if let Some(flare_proto::common::message_content::Content::Text(ref mut text_content)) =
-                content.content
-            {
-                // 清理 text 字段：
-                // 1. 确保 UTF-8 编码
-                // 2. 移除控制字符（如 \x08 退格字符、\x00 空字符等）
-                // 3. 保留可打印字符和空白字符（空格、换行、制表符等）
-                let cleaned: String = text_content
-                    .text
-                    .chars()
-                    .filter(|c| {
-                        // 保留空白字符（空格、换行、制表符等）
-                        if c.is_whitespace() {
-                            true
-                        } else {
-                            // 过滤掉所有控制字符（包括 \x08 退格字符）
-                            !c.is_control()
-                        }
-                    })
-                    .collect();
-
-                // 去除首尾空白
-                text_content.text = cleaned.trim().to_string();
-            }
-        }
+        // 文本内容原封不动，不做任何处理
 
         // 使用 server_id 作为 message_id（服务端生成的消息ID）
         let message_id = message.server_id.clone();
 
-        let kafka_payload = StoreMessageRequest {
+        let kafka_payload = StoreMessage {
             conversation_id: request.conversation_id,
             message: Some(message.clone()),
             sync: request.sync,
-            context: request.context,
-            tenant: request.tenant,
             tags: request.tags,
+            metadata: request.metadata,
         };
 
         Ok(Self {

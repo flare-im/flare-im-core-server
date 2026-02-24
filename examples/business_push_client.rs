@@ -160,6 +160,7 @@ async fn main() -> Result<()> {
             seconds: now.timestamp(),
             nanos: 0,
         }),
+        quote: None,
         conversation_type: flare_proto::common::ConversationType::Group as i32, // 群聊类型
         message_type: MessageType::Text as i32,                       // 文本消息
         business_type: "chatroom".to_string(),
@@ -197,14 +198,7 @@ async fn main() -> Result<()> {
         edit_history: vec![],
         current_edit_version: 0,
         last_edited_at: None,
-        tenant: Some(flare_proto::common::TenantContext {
-            tenant_id: tenant_id.clone(),
-            business_type: "im".to_string(),
-            environment: "development".to_string(),
-            organization_id: String::new(),
-            labels: Default::default(),
-            attributes: Default::default(),
-        }),
+        tenant: tenant_id.clone(),
         audit: None,
         tags: vec![],
         offline_push_info: None,
@@ -217,28 +211,6 @@ async fn main() -> Result<()> {
 
     let push_request = PushMessageRequest {
         request_id: Uuid::new_v4().to_string(),
-        context: Some(flare_proto::common::RequestContext {
-            request_id: Uuid::new_v4().to_string(),
-            trace: None,
-            actor: Some(flare_proto::common::ActorContext {
-                actor_id: business_user_id.clone(),
-                r#type: 2, // ActorType::ActorTypeService = 2
-                roles: vec!["business_system".to_string()],
-                attributes: Default::default(),
-            }),
-            device: None,
-            channel: "grpc".to_string(),
-            user_agent: "business_push_client/1.0".to_string(),
-            attributes: Default::default(),
-        }),
-        tenant: Some(flare_proto::common::TenantContext {
-            tenant_id: tenant_id.clone(),
-            business_type: "im".to_string(),
-            environment: "development".to_string(),
-            organization_id: String::new(),
-            labels: Default::default(),
-            attributes: Default::default(),
-        }),
         target_user_ids: if is_broadcast {
             vec![] // 空列表表示广播给所有在线用户
         } else {

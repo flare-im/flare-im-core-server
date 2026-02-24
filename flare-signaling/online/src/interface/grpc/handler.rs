@@ -148,7 +148,6 @@ impl OnlineHandler {
                                     seconds: dt.timestamp(),
                                     nanos: dt.timestamp_subsec_nanos() as i32,
                                 }),
-                                tenant: None,
                                 device_id: event.status.device_id.unwrap_or_default(),
                                 device_platform: event.status.device_platform.unwrap_or_default(),
                                 gateway_id: event.status.gateway_id.unwrap_or_default(),

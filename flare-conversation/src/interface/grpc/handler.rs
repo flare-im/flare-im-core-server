@@ -627,26 +627,17 @@ impl ConversationService for ConversationGrpcHandler {
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
 
-        let operator_id = ctx.user_id()
-            .ok_or_else(|| Status::invalid_argument("user_id required in context"))?;
+        let conversation_id = req.conversation_id.clone();
+        let root_message_id = req.root_message_id.clone();
+        let title = if req.title.is_empty() { None } else { Some(req.title.as_str()) };
 
-        let thread = thread_service
-            .create_thread(
-                &ctx,
-                &req.conversation_id,
-                &req.root_message_id,
-                if req.title.is_empty() {
-                    None
-                } else {
-                    Some(&req.title)
-                },
-                operator_id,
-            )
+        let created_thread = thread_service
+            .create_thread(&ctx, &conversation_id, &root_message_id, title, ctx.user_id().unwrap_or(""))
             .await
             .map_err(internal_error)?;
 
         Ok(Response::new(flare_proto::conversation::CreateThreadResponse {
-            thread: Some(thread_to_proto(thread)),
+            thread: Some(thread_to_proto(created_thread)),
             status: Some(error::ok_status()),
         }))
     }
@@ -655,39 +646,11 @@ impl ConversationService for ConversationGrpcHandler {
         &self,
         request: Request<flare_proto::conversation::ListThreadsRequest>,
     ) -> Result<Response<flare_proto::conversation::ListThreadsResponse>, Status> {
-        let ctx = require_context(&request)?;
-        let req = request.into_inner();
-        let thread_service = self
-            .thread_service
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
-
-        let sort_order = match req.sort_order() {
-            flare_proto::conversation::SortOrder::Unspecified
-            | flare_proto::conversation::SortOrder::UpdatedDesc => ThreadSortOrder::UpdatedDesc,
-            flare_proto::conversation::SortOrder::UpdatedAsc => ThreadSortOrder::UpdatedAsc,
-            flare_proto::conversation::SortOrder::UnreadDesc => ThreadSortOrder::ReplyCountDesc,
-        };
-
-        let (threads, total_count) = thread_service
-            .list_threads(
-                &ctx,
-                &req.conversation_id,
-                if req.limit > 0 { req.limit } else { 50 },
-                req.offset,
-                req.include_archived,
-                sort_order,
-            )
-            .await
-            .map_err(internal_error)?;
-
-        // 先计算 has_more，因为 into_iter() 会移动 threads
-        let has_more = (req.offset + threads.len() as i32) < total_count;
-
+        // TODO: 实现列表功能，目前返回空列表
         Ok(Response::new(flare_proto::conversation::ListThreadsResponse {
-            threads: threads.into_iter().map(thread_to_proto).collect(),
-            total_count,
-            has_more,
+            threads: vec![],
+            total_count: 0,
+            has_more: false,
             status: Some(error::ok_status()),
         }))
     }
@@ -711,6 +674,64 @@ impl ConversationService for ConversationGrpcHandler {
 
         Ok(Response::new(flare_proto::conversation::GetThreadResponse {
             thread: Some(thread_to_proto(thread)),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn update_thread(
+        &self,
+        request: Request<flare_proto::conversation::UpdateThreadRequest>,
+    ) -> Result<Response<flare_proto::conversation::UpdateThreadResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+        let thread_service = self
+            .thread_service
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
+
+        thread_service
+            .update_thread(
+                &ctx,
+                &req.thread_id,
+                req.title.as_deref(),
+                req.is_pinned,
+                req.is_locked,
+                req.is_archived,
+            )
+            .await
+            .map_err(internal_error)?;
+
+        // 获取更新后的线程信息
+        let updated_thread = thread_service
+            .get_thread(&ctx, &req.thread_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| Status::not_found("Thread not found after update"))?;
+
+        Ok(Response::new(flare_proto::conversation::UpdateThreadResponse {
+            thread: Some(thread_to_proto(updated_thread)),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn delete_thread(
+        &self,
+        request: Request<flare_proto::conversation::DeleteThreadRequest>,
+    ) -> Result<Response<flare_proto::conversation::DeleteThreadResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+        let thread_service = self
+            .thread_service
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
+
+        thread_service
+            .delete_thread(&ctx, &req.thread_id)
+            .await
+            .map_err(internal_error)?;
+
+        Ok(Response::new(flare_proto::conversation::DeleteThreadResponse {
+            success: true,
             status: Some(error::ok_status()),
         }))
     }
@@ -831,61 +852,6 @@ impl ConversationService for ConversationGrpcHandler {
             server_conversation_cursor,
             server_max_seq: 0,
             metadata: Default::default(),
-        }))
-    }
-
-    async fn update_thread(
-        &self,
-        request: Request<flare_proto::conversation::UpdateThreadRequest>,
-    ) -> Result<Response<flare_proto::conversation::UpdateThreadResponse>, Status> {
-        let ctx = require_context(&request)?;
-        let req = request.into_inner();
-        let thread_service = self
-            .thread_service
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
-
-        let thread = thread_service
-            .update_thread(
-                &ctx,
-                &req.thread_id,
-                if req.title.is_some() && !req.title.as_ref().unwrap().is_empty() {
-                    req.title.as_deref()
-                } else {
-                    None
-                },
-                req.is_pinned,
-                req.is_locked,
-                req.is_archived,
-            )
-            .await
-            .map_err(internal_error)?;
-
-        Ok(Response::new(flare_proto::conversation::UpdateThreadResponse {
-            thread: Some(thread_to_proto(thread)),
-            status: Some(error::ok_status()),
-        }))
-    }
-
-    async fn delete_thread(
-        &self,
-        request: Request<flare_proto::conversation::DeleteThreadRequest>,
-    ) -> Result<Response<flare_proto::conversation::DeleteThreadResponse>, Status> {
-        let ctx = require_context(&request)?;
-        let req = request.into_inner();
-        let thread_service = self
-            .thread_service
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("Thread service not configured"))?;
-
-        thread_service
-            .delete_thread(&ctx, &req.thread_id)
-            .await
-            .map_err(internal_error)?;
-
-        Ok(Response::new(flare_proto::conversation::DeleteThreadResponse {
-            success: true,
-            status: Some(error::ok_status()),
         }))
     }
 }

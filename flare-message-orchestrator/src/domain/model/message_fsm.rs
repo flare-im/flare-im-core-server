@@ -104,6 +104,8 @@ pub struct Message {
     pub conversation_id: String,
     /// 发送者ID
     pub sender_id: String,
+    /// 接收者ID（单聊必需，群聊为空）
+    pub receiver_id: String,
     /// 消息内容（二进制）
     pub content: Vec<u8>,
     /// 消息时间戳
@@ -116,6 +118,8 @@ pub struct Message {
     pub edit_version: i32,
     /// 编辑历史
     pub edit_history: Vec<EditHistoryEntry>,
+    /// 扩展字段（元数据）
+    pub extra: std::collections::HashMap<String, String>,
     /// 更新时间
     pub updated_at: DateTime<Utc>,
 }
@@ -126,6 +130,7 @@ impl Message {
         server_id: String,
         conversation_id: String,
         sender_id: String,
+        receiver_id: String,
         content: Vec<u8>,
         timestamp: DateTime<Utc>,
     ) -> Self {
@@ -134,12 +139,14 @@ impl Message {
             server_id,
             conversation_id,
             sender_id,
+            receiver_id,
             content,
             timestamp,
             fsm_state: MessageFsmState::Init,
             fsm_state_changed_at: now,
             edit_version: 0,
             edit_history: Vec::new(),
+            extra: std::collections::HashMap::new(),
             updated_at: now,
         }
     }
@@ -235,6 +242,7 @@ mod tests {
             "msg-1".to_string(),
             "conv-1".to_string(),
             "user-1".to_string(),
+            "user-2".to_string(),
             b"Hello".to_vec(),
             Utc::now(),
         );
@@ -278,6 +286,7 @@ mod tests {
             "msg-1".to_string(),
             "conv-1".to_string(),
             "user-1".to_string(),
+            "user-2".to_string(),
             b"Hello".to_vec(),
             Utc::now(),
         );

@@ -1,17 +1,12 @@
-//! Wire 风格的依赖注入模块
-//!
-//! 类似 Go 的 Wire 框架，提供简单的依赖构建方法
-
 use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
 
-use crate::application::handlers::{MessageStorageCommandHandler, MessageStorageQueryHandler};
+use crate::application::handlers::{MessageStorageQueryHandler};
 use crate::config::StorageReaderConfig;
-use crate::domain::repository::{MessageStateRepository, MessageStorage, VisibilityStorage};
+use crate::domain::repository::{MessageStorage, VisibilityStorage};
 use crate::domain::service::{MessageStorageDomainConfig, MessageStorageDomainService};
-use crate::infrastructure::persistence::message_state_repo::PostgresMessageStateRepository;
-use crate::infrastructure::persistence::postgres_store::PostgresMessageStorage;
+use crate::infrastructure::persistence::optimized_postgres_store::OptimizedPostgresMessageStorageImpl;
 use crate::interface::grpc::handler::StorageReaderGrpcHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
@@ -37,80 +32,57 @@ pub async fn initialize(
             .with_context(|| "Failed to load storage reader service configuration")?,
     );
 
-    // 2. 创建消息存储实例（必须使用 PostgreSQL）
-    let storage: Arc<dyn MessageStorage + Send + Sync> = match PostgresMessageStorage::new(&config)
+    // 2. 创建基础存储组件
+    let postgres_base_storage = match crate::infrastructure::persistence::postgres_base::PostgresBaseStorage::new(config.as_ref())
         .await
-        .with_context(|| "Failed to create PostgreSQL storage")?
+        .with_context(|| "Failed to create PostgreSQL base storage")?
     {
-        Some(postgres_storage) => {
-            tracing::info!("Using PostgreSQL storage");
-            Arc::new(postgres_storage)
-        }
+        Some(storage) => storage,
         None => {
             return Err(anyhow::anyhow!(
                 "PostgreSQL URL not configured. Set POSTGRES_URL or STORAGE_POSTGRES_URL, or define postgres profile in config"
             ));
         }
     };
+    
+    // 3. 创建优化的消息存储实例（实现 MessageStorage trait）
+    let optimized_storage = Arc::new(
+        OptimizedPostgresMessageStorageImpl::new(postgres_base_storage.clone(), postgres_base_storage.cache.clone())
+    );
+    tracing::info!("Using PostgreSQL storage with optimizations");
 
-    // 3. 创建可见性存储（可选，暂时为 None）
-    let visibility_storage: Option<Arc<dyn VisibilityStorage + Send + Sync>> = None;
+    // 4. 创建可见性存储实例（实现 VisibilityStorage trait）
+    let visibility_storage_impl = Arc::new(
+        crate::infrastructure::persistence::visibility_storage_impl::PostgresVisibilityStorageImpl::new(postgres_base_storage)
+    );
 
-    // 4. 创建消息状态仓储（使用相同的 PostgreSQL 连接池）
-    let message_state_repo: Option<Arc<dyn MessageStateRepository + Send + Sync>> = {
-        if let Some(url) = &config.postgres_url {
-            // 创建新的连接池用于 message_state_repo
-            // 注意：这里可以优化为共享连接池，但为了简化，先创建新池
-            use sqlx::postgres::PgPoolOptions;
-            let pool = PgPoolOptions::new()
-                .max_connections(config.postgres_max_connections)
-                .min_connections(config.postgres_min_connections)
-                .acquire_timeout(std::time::Duration::from_secs(
-                    config.postgres_acquire_timeout_seconds,
-                ))
-                .idle_timeout(Some(std::time::Duration::from_secs(
-                    config.postgres_idle_timeout_seconds,
-                )))
-                .max_lifetime(Some(std::time::Duration::from_secs(
-                    config.postgres_max_lifetime_seconds,
-                )))
-                .test_before_acquire(true)
-                .connect(url)
-                .await
-                .with_context(|| "Failed to create pool for message_state_repo")?;
-            Some(Arc::new(PostgresMessageStateRepository::new(Arc::new(
-                pool,
-            ))))
-        } else {
-            None
-        }
-    };
+    // 5. 创建消息存储和可见性存储实例（分别实现不同的 trait）
+    let storage: Arc<dyn MessageStorage + Send + Sync> = optimized_storage;
+    let visibility_storage: Option<Arc<dyn VisibilityStorage + Send + Sync>> = Some(visibility_storage_impl);
 
-    // 5. 构建领域配置
+    // 6. 消息状态仓储不再需要（功能已合并到 message_read_records 和 message_visibility 表）
+    
+    // 7. 构建领域配置
     let domain_config = MessageStorageDomainConfig {
         max_page_size: config.max_page_size,
         default_range_seconds: config.default_range_seconds,
     };
 
-    // 6. 构建领域服务
+    // 8. 构建领域服务
     let domain_service = Arc::new(MessageStorageDomainService::new(
         storage.clone(),
         visibility_storage,
-        message_state_repo,
         domain_config,
     ));
 
-    // 6. 构建命令处理器
-    let command_handler = Arc::new(MessageStorageCommandHandler::new(domain_service.clone()));
-
-    // 7. 构建查询处理器（对于基于 seq 的查询，需要使用领域服务）
+    // 9. 构建查询处理器（对于基于 seq 的查询，需要使用领域服务）
     let query_handler = Arc::new(MessageStorageQueryHandler::with_domain_service(
         storage,
         domain_service.clone(),
     ));
 
-    // 8. 构建 gRPC 处理器
-    let grpc_handler = StorageReaderGrpcHandler::new(command_handler, query_handler).await?;
+    // 10. 构建 gRPC 处理器
+    let grpc_handler = StorageReaderGrpcHandler::new(query_handler).await?;
 
     Ok(ApplicationContext {
         handler: grpc_handler,

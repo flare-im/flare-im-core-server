@@ -25,23 +25,6 @@ pub fn context_to_proto(ctx: &Context) -> HookInvocationContext {
     let hook_data = get_hook_context_data(ctx).cloned().unwrap_or_default();
 
     HookInvocationContext {
-        request_context: Some(RequestContext {
-            request_id: ctx.request_id().to_string(),
-            trace: None,
-            actor: None,
-            device: None,
-            channel: String::new(),
-            user_agent: String::new(),
-            attributes: std::collections::HashMap::new(),
-        }),
-        tenant: ctx.tenant_id().map(|tid| TenantContext {
-            tenant_id: tid.to_string(),
-            business_type: String::new(),
-            environment: String::new(),
-            organization_id: String::new(),
-            labels: std::collections::HashMap::new(),
-            attributes: std::collections::HashMap::new(),
-        }),
         conversation_id: hook_data.conversation_id.clone().unwrap_or_default(),
         conversation_type: hook_data.conversation_type.clone().unwrap_or_default(),
         corridor: hook_data
@@ -135,11 +118,11 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         edit_history: vec![],
         current_edit_version: 0, // 未编辑
         last_edited_at: None,    // 未编辑
-        tenant: None,
         audit: None,
         tags: vec![],
         offline_push_info: None,
         extensions: vec![],
+        tenant: record.metadata.get("tenant_id").cloned().unwrap_or_default(), // 添加租户信息
     };
 
     HookMessageRecord {
@@ -237,27 +220,15 @@ pub fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
 
 /// 将 protobuf HookInvocationContext 转换为 flare_server_core::Context
 pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
-    let request_id = proto
-        .request_context
-        .as_ref()
-        .map(|r| r.request_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     let mut ctx = Context::with_request_id(request_id);
 
-    // 设置租户ID
-    if let Some(tenant) = &proto.tenant {
-        if !tenant.tenant_id.is_empty() {
-            ctx = ctx.with_tenant_id(tenant.tenant_id.clone());
-        }
-    }
+    // 设置租户ID（如果有的话）
+    // 注意：由于HookInvocationContext不再包含tenant字段，这里不设置租户ID
 
-    // 设置 trace_id（从 request_context 中提取）
-    if let Some(req_ctx) = &proto.request_context {
-        if !req_ctx.request_id.is_empty() {
-            ctx = ctx.with_trace_id(req_ctx.request_id.clone());
-        }
-    }
+    // 设置 trace_id（如果有的话）
+    // 注意：由于HookInvocationContext不再包含request_context字段，这里不从request_context中提取trace_id
 
     // 设置会话ID（从 conversation_id 中提取）
     if !proto.conversation_id.is_empty() {
@@ -284,7 +255,5 @@ pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
         occurred_at: None,
     };
 
-    ctx = set_hook_context_data(ctx, hook_data);
-
-    ctx
+    set_hook_context_data(ctx, hook_data)
 }

@@ -8,13 +8,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
 
-use crate::application::commands::{ProcessMessageOperationCommand, ProcessStoreMessageCommand};
+use crate::application::commands::ProcessStoreMessageCommand;
+use flare_proto::storage::{StoreMessage, BatchStoreMessage};
 use crate::domain::model::{PersistenceResult, PreparedMessage};
 use crate::domain::service::{MessageOperationDomainService, MessagePersistenceDomainService};
 
-/// 消息持久化命令处理器（编排层）
+/// 普通消息持久化命令处理器（编排层）
 ///
 /// 负责编排领域服务，并处理应用层关注点（如指标记录、追踪等）
+#[allow(dead_code)]
 pub struct MessagePersistenceCommandHandler {
     domain_service: Arc<MessagePersistenceDomainService>,
     operation_service: Arc<MessageOperationDomainService>,
@@ -34,58 +36,27 @@ impl MessagePersistenceCommandHandler {
         }
     }
 
-    /// 处理消息操作命令（撤回、编辑、删除等）
-    #[instrument(skip(self), fields(operation_type = %command.operation.operation_type))]
-    pub async fn handle_operation_message(
-        &self,
-        command: ProcessMessageOperationCommand,
-    ) -> Result<PersistenceResult> {
-        let start = Instant::now();
-
-        // 处理操作
-        self.operation_service
-            .process_operation(command.operation.clone(), &command.message)
-            .await?;
-
-        // 构建结果（操作消息不创建新消息，返回操作的目标消息ID）
-        let result = PersistenceResult {
-            conversation_id: command.message.conversation_id.clone(),
-            message_id: command.operation.target_message_id.clone(),
-            timeline: Default::default(),
-            deduplicated: false,
-        };
-
-        // 记录指标
-        let duration = start.elapsed();
-        self.metrics
-            .messages_persisted_duration_seconds
-            .observe(duration.as_secs_f64());
-        self.metrics
-            .messages_persisted_total
-            .with_label_values(&["operation"])
-            .inc();
-
-        tracing::info!(
-            message_id = %result.message_id,
-            operation_type = %command.operation.operation_type,
-            duration_ms = duration.as_millis(),
-            "Message operation processed successfully"
-        );
-
-        Ok(result)
-    }
-
-    /// 处理存储消息命令
+    /// 处理存储消息命令 - 只处理普通消息，如果是操作消息则返回 None
     #[instrument(skip(self), fields(tenant_id, message_id))]
-    pub async fn handle(&self, command: ProcessStoreMessageCommand) -> Result<PersistenceResult> {
+    pub async fn handle(&self, command: ProcessStoreMessageCommand) -> Result<Option<PersistenceResult>> {
         let start = Instant::now();
-        let request = command.request.clone();
+        let store_msg = command.command.clone();
+
+        let request = crate::application::commands::StoreMessageCommandInternal {
+            conversation_id: store_msg.conversation_id,
+            message: store_msg.message,
+            sync: store_msg.sync,
+            context: Default::default(),
+            tenant: Default::default(),
+            tags: store_msg.tags,
+            metadata: store_msg.metadata,
+        };
 
         // 在移动 request 之前，先保存需要的信息用于错误日志
         let message_id_for_error = request.message.as_ref().map(|m| m.server_id.clone());
 
         // 提取租户ID用于指标
-        let tenant_id = request
+        let _tenant_id = request
             .tenant
             .as_ref()
             .map(|t| t.tenant_id.as_str())
@@ -119,6 +90,13 @@ impl MessagePersistenceCommandHandler {
             }
         };
 
+        // **关键修改**：检查消息是否为操作消息（编辑、删除、撤回等）
+        use crate::domain::service::MessageOperationDomainService;
+        if MessageOperationDomainService::is_operation_message(&prepared.message) {
+            // 如果是操作消息，返回 None 表示需要由操作处理器处理
+            return Ok(None);
+        }
+
         // 保存必要信息用于后续操作（因为 prepared 会被移动到 persist_message）
         let message_id = prepared.message_id.clone();
         let conversation_id = prepared.conversation_id.clone();
@@ -127,11 +105,18 @@ impl MessagePersistenceCommandHandler {
         // 从 request 构建 Context（在移动 request 之前先保存 tenant 信息）
         use flare_server_core::context::Context;
         let tenant_id = request.tenant.as_ref().map(|t| t.tenant_id.clone());
-        let ctx = if let Some(ref tenant_id) = tenant_id {
+        let mut ctx = if let Some(ref tenant_id) = tenant_id {
             Context::root().with_tenant_id(tenant_id.clone())
         } else {
             Context::root()
         };
+        
+        // 从 metadata 中提取租户信息（如果 request.tenant 未设置）
+        if ctx.tenant_id().is_none() {
+            if let Some(tenant_id) = request.metadata.get("tenant_id") {
+                ctx = ctx.with_tenant_id(tenant_id.clone());
+            }
+        }
 
         // 验证并补全媒资附件
         if let Err(e) = self
@@ -224,7 +209,7 @@ impl MessagePersistenceCommandHandler {
             tracing::warn!(error = %e, message_id = %result.message_id, "Failed to publish ACK, but message is already persisted");
         }
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     /// 批量处理存储消息命令（优化性能）
@@ -239,16 +224,33 @@ impl MessagePersistenceCommandHandler {
         use flare_server_core::context::Context;
         let mut prepared_messages = Vec::with_capacity(commands.len());
         for command in &commands {
+            let request = crate::application::commands::StoreMessageCommandInternal {
+                conversation_id: command.command.conversation_id.clone(),
+                message: command.command.message.clone(),
+                sync: command.command.sync,
+                context: Default::default(),
+                tenant: Default::default(),
+                tags: command.command.tags.clone(),
+                metadata: command.command.metadata.clone(),
+            };
+            
             // 从 request 构建 Context
-            let ctx = if let Some(tenant) = &command.request.tenant {
+            let ctx = if let Some(tenant) = &request.tenant {
                 Context::root()
                     .with_tenant_id(tenant.tenant_id.clone())
             } else {
                 Context::root()
             };
 
-            match self.domain_service.prepare_message(command.request.clone()) {
+            match self.domain_service.prepare_message(request.clone()) {
                 Ok(mut prepared) => {
+                    // **关键修改**：检查消息是否为操作消息
+                    use crate::domain::service::MessageOperationDomainService;
+                    if MessageOperationDomainService::is_operation_message(&prepared.message) {
+                        // 对于批量处理，跳过操作消息
+                        continue;
+                    }
+
                     // 验证并补全媒资附件
                     if let Err(e) = self
                         .domain_service
@@ -293,8 +295,10 @@ impl MessagePersistenceCommandHandler {
         // 3. 批量持久化新消息
         if !new_messages.is_empty() {
             // 使用第一个命令的 Context（批量操作使用统一的 Context）
-            let ctx = if let Some(tenant) = &commands.first().and_then(|c| c.request.tenant.as_ref()) {
-                Context::root().with_tenant_id(tenant.tenant_id.clone())
+            let ctx = if let Some(msg) = &commands.first().and_then(|c| c.command.message.as_ref()) {
+                // 从消息的 extra 字段中获取租户信息
+                let tenant_id = msg.extra.get("tenant_id").cloned().unwrap_or("default".to_string());
+                Context::root().with_tenant_id(tenant_id)
             } else {
                 Context::root()
             };

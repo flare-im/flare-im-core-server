@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::{FlareError, Result};
 use flare_proto::conversation::conversation_service_client::ConversationServiceClient;
 use flare_proto::conversation::{CreateConversationRequest, ConversationParticipant};
 use flare_server_core::context::{Context, ContextExt};
@@ -57,8 +57,6 @@ impl ConversationRepository for GrpcConversationClient {
         attributes.insert("conversation_id".to_string(), conversation_id.clone());
 
         let request = CreateConversationRequest {
-            context: None, // 不再使用 context 字段，改用 metadata
-            tenant: None,  // 不再使用 tenant 字段，改用 metadata
             conversation_type: conversation_type.clone(),
             business_type: business_type.clone(),
             participants: participants
@@ -122,7 +120,7 @@ impl ConversationRepository for GrpcConversationClient {
                             conversation_id = %conversation_id,
                             "Failed to ensure conversation"
                         );
-                        Err(anyhow::anyhow!("Failed to ensure conversation: {}", e))
+                        Err(FlareError::system(format!("Failed to ensure conversation: {}", e)))
                     }
                 }
             }

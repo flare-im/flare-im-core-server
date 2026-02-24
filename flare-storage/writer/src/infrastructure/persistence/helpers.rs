@@ -59,27 +59,16 @@ pub fn infer_content_type(message: &Message) -> &'static str {
         })
 }
 
+/// 编码消息内容为字节数组
+///
+/// **已迁移到 flare-proto::encode_message_content**
+/// 使用统一的实现确保一致性和性能
 pub fn encode_message_content(message: &Message) -> Vec<u8> {
-    message
-        .content
-        .as_ref()
-        .map(|c| {
-            let mut buf = Vec::new();
-            c.encode(&mut buf).unwrap_or_default();
-            buf
-        })
-        .unwrap_or_default()
+    flare_proto::encode_message_content(message)
 }
 
 pub fn build_extra_value(message: &Message) -> Result<Map<String, Value>> {
     let mut extra_value = Map::new();
-
-    if let Some(ref tenant) = message.tenant {
-        extra_value.insert(
-            "tenant_id".to_string(),
-            Value::String(tenant.tenant_id.clone()),
-        );
-    }
 
     let source_str = match std::convert::TryFrom::try_from(message.source) {
         Ok(MessageSource::User) => "user",

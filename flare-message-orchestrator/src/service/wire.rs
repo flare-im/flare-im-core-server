@@ -19,6 +19,7 @@ use crate::infrastructure::messaging::kafka_publisher::KafkaMessagePublisher;
 use crate::infrastructure::persistence::noop_wal::NoopWalRepository;
 use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
 use crate::interface::grpc::handler::MessageGrpcHandler;
+use crate::domain::repository::message_event_publisher::KafkaEventPublisher;
 use flare_im_core::hooks::adapters::DefaultHookFactory;
 use flare_im_core::hooks::{HookConfigLoader, HookDispatcher, HookRegistry};
 use flare_im_core::metrics::MessageOrchestratorMetrics;
@@ -94,8 +95,9 @@ pub async fn initialize(
     ));
 
     // 12. 构建消息操作服务（总是创建，如果没有 reader_client 则使用 Noop MessageRepository）
-    use crate::domain::service::message_operation_service::{MessageOperationService, EventPublisher, MessageRepository};
+    use crate::domain::service::{MessageOperationService, EventPublisher, MessageRepository};
     use crate::domain::model::Message;
+    use crate::error::Result as FlareResult;
     
     let message_repo: Arc<dyn MessageRepository> = if let Some(ref reader_client) = reader_client {
         use crate::infrastructure::persistence::message_repository_adapter::StorageReaderMessageRepository;
@@ -105,34 +107,22 @@ pub async fn initialize(
         struct NoopMessageRepository;
         #[async_trait::async_trait]
         impl MessageRepository for NoopMessageRepository {
-            async fn find_by_id(&self, _message_id: &str) -> Result<Option<Message>> {
+            async fn find_by_id(&self, _message_id: &str) -> FlareResult<Option<Message>> {
                 Ok(None) // 总是返回 None，表示消息不存在
             }
-            async fn save(&self, _message: &Message) -> Result<()> {
+            async fn save(&self, _message: &Message) -> FlareResult<()> {
                 Ok(()) // Noop，不保存
             }
         }
         Arc::new(NoopMessageRepository)
     };
     
-    struct NoopEventPublisher;
-    #[async_trait::async_trait]
-    impl EventPublisher for NoopEventPublisher {
-        async fn publish_recalled(&self, _: &crate::domain::event::MessageRecalledEvent) -> Result<()> { Ok(()) }
-        async fn publish_edited(&self, _: &crate::domain::event::MessageEditedEvent) -> Result<()> { Ok(()) }
-        async fn publish_deleted(&self, _: &crate::domain::event::MessageDeletedEvent) -> Result<()> { Ok(()) }
-        async fn publish_read(&self, _: &crate::domain::event::MessageReadEvent) -> Result<()> { Ok(()) }
-        async fn publish_reaction_added(&self, _: &crate::domain::event::MessageReactionAddedEvent) -> Result<()> { Ok(()) }
-        async fn publish_reaction_removed(&self, _: &crate::domain::event::MessageReactionRemovedEvent) -> Result<()> { Ok(()) }
-        async fn publish_pinned(&self, _: &crate::domain::event::MessagePinnedEvent) -> Result<()> { Ok(()) }
-        async fn publish_unpinned(&self, _: &crate::domain::event::MessageUnpinnedEvent) -> Result<()> { Ok(()) }
-        async fn publish_favorited(&self, _: &crate::domain::event::MessageFavoritedEvent) -> Result<()> { Ok(()) }
-        async fn publish_unfavorited(&self, _: &crate::domain::event::MessageUnfavoritedEvent) -> Result<()> { Ok(()) }
-    }
+    // 创建 KafkaEventPublisher 来处理事件通知
+    let event_publisher = Arc::new(KafkaEventPublisher::new(publisher.clone()));
     
     let operation_service = Arc::new(MessageOperationService::new(
         message_repo,
-        Arc::new(NoopEventPublisher),
+        event_publisher,
         publisher.clone(),
         Some(wal_repository.clone()), // 注入 WAL Repository 用于 fallback 查询
     ));
@@ -148,10 +138,17 @@ pub async fn initialize(
         metrics,
     ));
 
-    // 15. 构建 gRPC 处理器（只依赖 command_handler 和 query_handler）
+    // 15. 构建操作处理器
+    let operation_handler = Arc::new(crate::application::handlers::MessageOperationHandler::new(
+        command_handler.clone(),
+        query_handler.clone(),
+    ));
+    
+    // 16. 构建 gRPC 处理器（依赖 command_handler、query_handler 和 operation_handler）
     let handler = MessageGrpcHandler::new(
         command_handler,
         query_handler,
+        operation_handler,
     );
 
     Ok(ApplicationContext {

@@ -154,18 +154,28 @@ impl MessageProfile {
     /// 规则：
     /// - MESSAGE_TYPE_TYPING (200) 或 MESSAGE_TYPE_SYSTEM_EVENT (201) => Temporary
     /// - MESSAGE_TYPE_OPERATION (302) => Operation
+    /// - MESSAGE_TYPE_NOTIFICATION (101) 且 notification_type = "message_operation" => Operation
     /// - MESSAGE_TYPE_NOTIFICATION (101) => Notification
     /// - 其他 => Normal
     fn determine_category(
         message_type: &MessageType,
         message_type_label: &str,
-        _extra: &std::collections::HashMap<String, String>,
+        extra: &std::collections::HashMap<String, String>,
     ) -> MessageCategory {
         use MessageType::*;
         match *message_type {
             Typing | SystemEvent => MessageCategory::Temporary,
             Operation => MessageCategory::Operation,
-            Notification => MessageCategory::Notification,
+            Notification => {
+                // **关键修复**：检查是否为操作消息（notification_type = "message_operation"）
+                // 操作消息应该被识别为 Operation 类别，而不是 Notification 类别
+                if let Some(notification_type) = extra.get("notification_type") {
+                    if notification_type == "message_operation" {
+                        return MessageCategory::Operation;
+                    }
+                }
+                MessageCategory::Notification
+            }
             _ => {
                 // 如果 message_type 未正确设置，根据 label 判断
                 match message_type_label {

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::kafka::{build_kafka_consumer, subscribe_and_wait_for_assignment};
 use prost::Message as _;
@@ -13,20 +13,21 @@ use rdkafka::Message;
 use tracing::{Span, debug, error, info, instrument, warn};
 
 use crate::application::commands::ProcessMessageOperationCommand;
+use crate::application::handlers::MessageOperationCommandHandler;
 use crate::application::handlers::MessagePersistenceCommandHandler;
 use crate::config::StorageWriterConfig;
 
 pub struct OperationMessageConsumer {
     config: Arc<StorageWriterConfig>,
     kafka_consumer: StreamConsumer,
-    command_handler: Arc<MessagePersistenceCommandHandler>,
+    operation_command_handler: Arc<MessageOperationCommandHandler>,
     metrics: Arc<StorageWriterMetrics>,
 }
 
 impl OperationMessageConsumer {
     pub async fn new(
         config: Arc<StorageWriterConfig>,
-        command_handler: Arc<MessagePersistenceCommandHandler>,
+        operation_command_handler: Arc<MessageOperationCommandHandler>,
         metrics: Arc<StorageWriterMetrics>,
     ) -> Result<Self> {
         let consumer = build_kafka_consumer(
@@ -69,7 +70,7 @@ impl OperationMessageConsumer {
         Ok(Self {
             config,
             kafka_consumer: consumer,
-            command_handler,
+            operation_command_handler,
             metrics,
         })
     }
@@ -154,28 +155,76 @@ impl OperationMessageConsumer {
                 }
             };
 
-            match StoreMessageRequest::decode(payload) {
-                Ok(request) => {
-                    if let Some(msg) = &request.message {
-                        if crate::domain::service::MessageOperationDomainService::is_operation_message(msg) {
+            match flare_proto::storage::StoreMessage::decode(payload) {
+                Ok(store_msg) => {
+                    if let Some(msg) = &store_msg.message {
+                        // **关键日志**：记录收到的消息信息
+                        tracing::debug!(
+                            message_id = %msg.server_id,
+                            message_type = msg.message_type,
+                            message_type_label = ?flare_proto::common::MessageType::try_from(msg.message_type).ok(),
+                            conversation_id = %msg.conversation_id,
+                            has_content = msg.content.is_some(),
+                            content_variant = msg.content.as_ref()
+                                .and_then(|c| c.content.as_ref())
+                                .map(|c| match c {
+                                    flare_proto::common::message_content::Content::Operation(_) => "Operation",
+                                    flare_proto::common::message_content::Content::Notification(_) => "Notification",
+                                    _ => "Other",
+                                })
+                                .unwrap_or("None"),
+                            "📥 OperationMessageConsumer 收到消息"
+                        );
+                                    
+                        let is_op = crate::domain::service::MessageOperationDomainService::is_operation_message(msg);
+                        tracing::info!(
+                            message_id = %msg.server_id,
+                            message_type = msg.message_type,
+                            is_operation_message = is_op,
+                            "🔍 检查是否为操作消息"
+                        );
+                                    
+                        if is_op {
                             if let Ok(Some(operation)) = crate::domain::service::MessageOperationDomainService::extract_operation_from_message(msg) {
-                                if let Err(e) = self.command_handler
-                                    .handle_operation_message(ProcessMessageOperationCommand {
+                                tracing::info!(
+                                    message_id = %msg.server_id,
+                                    operation_type = operation.operation_type,
+                                    target_message_id = %operation.target_message_id,
+                                    operator_id = %operation.operator_id,
+                                    "✅ 成功提取操作信息，开始处理"
+                                );
+                                            
+                                if let Err(e) = self.operation_command_handler
+                                    .handle(ProcessMessageOperationCommand {
                                         operation,
                                         message: msg.clone(),
                                     })
                                     .await
                                 {
-                                    error!(error = ?e, "Failed to process operation message");
+                                    error!(error = ?e, message_id = %msg.server_id, "Failed to process operation message");
                                     continue;
                                 }
                                 valid_messages.push(message);
+                            } else {
+                                warn!(
+                                    message_id = %msg.server_id,
+                                    "⚠️ is_operation_message 返回 true，但 extract_operation_from_message 返回 None"
+                                );
                             }
+                        } else {
+                            // 即使不是操作消息，也记录警告，但不处理
+                            warn!(
+                                message_id = %msg.server_id,
+                                message_type = msg.message_type,
+                                expected_type = 302,
+                                "⚠️ 消息不是操作消息类型（期望 message_type=302，实际={}）",
+                                msg.message_type
+                            );
                         }
                     }
                 }
                 Err(err) => {
-                    error!(error = ?err, "Failed to decode operation StoreMessageRequest");
+                    error!(error = ?err, "Failed to decode operation StoreMessage");
                     continue;
                 }
             }

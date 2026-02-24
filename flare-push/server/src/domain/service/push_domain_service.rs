@@ -447,8 +447,7 @@ impl PushDomainService {
                 target_user_ids,
                 message: first_message,
                 options: None,
-                context: None,
-                tenant: None,
+
                 metadata: {
                     let mut meta = HashMap::new();
                     meta.insert("message_ids".to_string(), all_message_ids_str.join(","));
@@ -854,7 +853,7 @@ impl PushDomainService {
                 headers: HashMap::new(),
                 metadata: HashMap::new(),
                 online: false, // 将在查询在线状态后更新
-                tenant_id: request.tenant.as_ref().map(|t| t.tenant_id.clone()),
+                tenant_id: None,
                 require_online: request
                     .options
                     .as_ref()
@@ -896,7 +895,7 @@ impl PushDomainService {
                 headers: HashMap::new(),
                 metadata: HashMap::new(),
                 online: false,
-                tenant_id: request.tenant.as_ref().map(|t| t.tenant_id.clone()),
+                tenant_id: None,
                 require_online: request
                     .options
                     .as_ref()

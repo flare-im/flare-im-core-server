@@ -132,10 +132,7 @@ impl HookService for HookServiceServer {
             .user_id()
             .map(|s| s.as_ref())
             .or_else(|| {
-                req.context
-                    .as_ref()
-                    .and_then(|ctx| ctx.actor.as_ref())
-                    .map(|a| a.actor_id.as_str())
+                None
             });
 
         let hook_id = self

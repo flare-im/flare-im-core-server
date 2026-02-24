@@ -8,7 +8,7 @@ use flare_server_core::context::Context;
 use flare_im_core::hooks::HookDispatcher;
 use flare_im_core::tracing::create_span;
 use flare_proto::push::{PushMessageRequest, PushOptions};
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
 use prost::Message;
 use tracing::{Span, instrument};
 
@@ -61,7 +61,7 @@ impl MessageDomainService {
     pub async fn orchestrate_message_storage(
         &self,
         ctx: &Context,
-        mut request: StoreMessageRequest,
+        mut request: StoreMessage,
         execute_pre_send: bool,
     ) -> Result<(String, u64)> {
         let _start = Instant::now();
@@ -201,10 +201,10 @@ impl MessageDomainService {
             // 确保 Context 有 tenant_id 和 request_id（从 request 或默认值获取）
             let mut ensure_ctx = ctx.clone();
             
-            // 如果 ctx 没有 tenant_id，从 request.tenant 或默认值获取
+            // 如果 ctx 没有 tenant_id，从 submission.message.extra 或默认值获取
             if ensure_ctx.tenant_id().is_none() {
-                if let Some(tenant) = &submission.message.tenant {
-                    ensure_ctx = ensure_ctx.with_tenant_id(tenant.tenant_id.clone());
+                if let Some(tenant_id_from_message) = submission.message.extra.get("tenant_id") {
+                    ensure_ctx = ensure_ctx.with_tenant_id(tenant_id_from_message.clone());
                 } else {
                     ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
                 }
@@ -221,8 +221,8 @@ impl MessageDomainService {
                 }
                 if let Some(tenant_id) = ctx.tenant_id() {
                     ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.to_string());
-                } else if let Some(tenant) = &submission.message.tenant {
-                    ensure_ctx = ensure_ctx.with_tenant_id(tenant.tenant_id.clone());
+                } else if let Some(tenant_id_from_message) = submission.message.extra.get("tenant_id") {
+                    ensure_ctx = ensure_ctx.with_tenant_id(tenant_id_from_message.clone());
                 } else {
                     ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
                 }
@@ -273,20 +273,55 @@ impl MessageDomainService {
         // 根据消息类型决定发布策略
         let _kafka_span = create_span("message-orchestrator", "kafka_produce");
 
-        match processing_type {
-            crate::domain::model::message_kind::MessageProcessingType::Normal => {
-                // 普通消息：并行发布到存储队列和推送队列
+        // **关键修复**：操作消息（Operation 类别）需要发布到操作队列，而不是存储队列
+        let category = profile.category();
+        tracing::info!(
+            message_id = %submission.message_id,
+            message_type = submission.message.message_type,
+            category = ?category,
+            "🔍 准备发布消息到 Kafka，检查消息类别"
+        );
+        
+        match category {
+            crate::domain::model::message_kind::MessageCategory::Operation => {
+                tracing::info!(
+                    message_id = %submission.message_id,
+                    "✅ 操作消息：发布到操作队列 (storage-message-operations)"
+                );
+                // 操作消息：发布到操作队列和推送队列
                 self.publisher
-                    .publish_both(submission.kafka_payload.clone(), push_request)
+                    .publish_operation(submission.kafka_payload.clone())
                     .await
-                    .context("Failed to publish message event")?;
-            }
-            crate::domain::model::message_kind::MessageProcessingType::Notification => {
-                // 通知消息：仅发布到推送队列
+                    .context("Failed to publish operation message")?;
                 self.publisher
                     .publish_push(push_request)
                     .await
                     .context("Failed to publish push task")?;
+            }
+            _ => {
+                tracing::info!(
+                    message_id = %submission.message_id,
+                    category = ?category,
+                    processing_type = ?processing_type,
+                    "⚠️ 非操作消息：根据 processing_type 决定发布策略"
+                );
+                // 其他消息：根据 processing_type 决定
+                match processing_type {
+                    crate::domain::model::message_kind::MessageProcessingType::Normal => {
+                        // 普通消息：并行发布到存储队列和推送队列
+                        self.publisher
+                            .publish_both(submission.kafka_payload.clone(), push_request)
+                            .await
+                            .context("Failed to publish message event")?;
+                    }
+                    crate::domain::model::message_kind::MessageProcessingType::Notification => {
+                        // 通知消息：仅发布到推送队列
+                        self.publisher
+                            .publish_push(push_request)
+                            .await
+                            .context("Failed to publish push task")?;
+                    }
+                }
             }
         }
 
@@ -423,8 +458,6 @@ impl MessageDomainService {
             user_ids,
             message: Some(message_for_push),
             options: Some(push_options),
-            context: submission.kafka_payload.context.clone(),
-            tenant: submission.kafka_payload.tenant.clone(),
             template_id: String::new(),
             template_data: std::collections::HashMap::new(),
         })

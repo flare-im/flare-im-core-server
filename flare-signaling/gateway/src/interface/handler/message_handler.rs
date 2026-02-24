@@ -5,11 +5,12 @@
 
 use async_trait::async_trait;
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
-use flare_core::common::protocol::{Frame, MessageCommand, NotificationCommand, Reliability, generate_message_id, frame_with_message_command};
+use flare_core::common::protocol::{Frame, MessageCommand, NotificationCommand, Reliability, frame_with_message_command};
 use flare_core::common::protocol::builder::{FrameBuilder, current_timestamp};
 use flare_core::common::protocol::flare::core::commands::command::Type as CommandType;
 use flare_core::server::events::handler::ServerEventHandler;
 use prost::Message;
+use std::collections::HashMap;
 use tracing::{debug, error, instrument, warn};
 
 use super::connection::LongConnectionHandler;
@@ -104,10 +105,15 @@ impl ServerEventHandler for LongConnectionHandler {
     /// 处理 DATA 消息命令（Gateway 暂不支持）
     async fn handle_data(
         &self,
-        _command: &MessageCommand,
-        _connection_id: &str,
+        command: &MessageCommand,
+        connection_id: &str,
     ) -> CoreResult<Option<Frame>> {
-        Ok(None)
+        if let Err(err) = self.refresh_session(connection_id).await {
+            warn!(?err, %connection_id, "failed to refresh session heartbeat");
+        }
+
+        let frame = self.handle_data_command(command, connection_id).await;
+        Ok(Some(frame))
     }
 
     /// 处理通知命令（Gateway 暂不支持）
@@ -146,20 +152,10 @@ impl ServerEventHandler for LongConnectionHandler {
     /// 处理自定义命令
     async fn handle_custom_command(
         &self,
-        command: &flare_core::common::protocol::CustomCommand,
-        connection_id: &str,
+        _command: &flare_core::common::protocol::CustomCommand,
+        _connection_id: &str,
     ) -> CoreResult<Option<Frame>> {
-        // 构建 Frame 用于处理
-        let frame = FrameBuilder::new()
-            .with_command(flare_core::common::protocol::flare::core::commands::Command {
-                r#type: Some(CommandType::Custom(command.clone())),
-            })
-            .with_message_id(generate_message_id())
-            .with_reliability(Reliability::AtLeastOnce)
-            .with_timestamp(current_timestamp())
-            .build();
-        
-        self.handle_frame_impl(&frame, connection_id).await
+        Ok(None)
     }
 
     /// 处理连接建立完成事件
@@ -182,6 +178,349 @@ impl ServerEventHandler for LongConnectionHandler {
 // ============================================================================
 
 impl LongConnectionHandler {
+    async fn require_connection_user_id(
+        &self,
+        connection_id: &str,
+    ) -> Option<String> {
+        if let Some(user_id) = self.user_id_for_connection(connection_id).await {
+            if !user_id.trim().is_empty() {
+                return Some(user_id);
+            }
+        }
+
+        if let Some(metadata) = self.get_connection_metadata(connection_id).await {
+            if let Some(user_id) =
+                crate::infrastructure::connection_context::extract_user_id_from_metadata(&metadata)
+            {
+                if !user_id.trim().is_empty() {
+                    return Some(user_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    async fn build_conversation_grpc_request<T>(
+        &self,
+        connection_id: &str,
+        user_id: &str,
+        msg: T,
+    ) -> tonic::Request<T> {
+        let connection_metadata = self.get_connection_metadata(connection_id).await;
+        let ctx = crate::infrastructure::connection_context::build_context_from_connection(
+            connection_metadata.as_ref(),
+            Some(user_id),
+            &self.default_tenant_id,
+        );
+
+        let mut req = tonic::Request::new(msg);
+        flare_server_core::client::metadata_codec::encode_context_to_metadata(req.metadata_mut(), &ctx);
+        req
+    }
+
+    async fn handle_data_command(
+        &self,
+        command: &MessageCommand,
+        connection_id: &str,
+    ) -> Frame {
+        use flare_core::common::protocol::flare::core::commands::message_command::Type as MsgType;
+        use flare_proto::common::{ClientPacket, ServerPacket, ErrorPacket};
+
+        let message_id = command.message_id.clone();
+
+        let client_packet = match ClientPacket::decode(command.payload.as_slice()) {
+            Ok(p) => p,
+            Err(e) => {
+                let server_packet = ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::Error(ErrorPacket {
+                        code: 400,
+                        message: format!("decode ClientPacket failed: {}", e),
+                        metadata: HashMap::new(),
+                    })),
+                };
+                return Self::build_data_frame(message_id, server_packet);
+            }
+        };
+
+        let server_packet = match self.handle_client_packet(client_packet, connection_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                let code = e
+                    .code()
+                    .map(|c| c.as_u32() as i32)
+                    .unwrap_or(6000);
+                ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::Error(
+                        ErrorPacket {
+                            code,
+                            message: e.to_string(),
+                            metadata: HashMap::new(),
+                        },
+                    )),
+                }
+            }
+        };
+
+        let mut payload = Vec::new();
+        if let Err(e) = server_packet.encode(&mut payload) {
+            let fallback_packet = ServerPacket {
+                payload: Some(flare_proto::common::server_packet::Payload::Error(ErrorPacket {
+                    code: 500,
+                    message: format!("encode ServerPacket failed: {}", e),
+                    metadata: HashMap::new(),
+                })),
+            };
+            return Self::build_data_frame(message_id, fallback_packet);
+        }
+
+        let msg_cmd = MessageCommand {
+            r#type: MsgType::Data as i32,
+            message_id: message_id.clone(),
+            payload,
+            metadata: HashMap::new(),
+            seq: 0,
+        };
+
+        FrameBuilder::new()
+            .with_command(flare_core::common::protocol::flare::core::commands::Command {
+                r#type: Some(CommandType::Message(msg_cmd)),
+            })
+            .with_message_id(message_id)
+            .with_reliability(Reliability::AtLeastOnce)
+            .with_timestamp(current_timestamp())
+            .build()
+    }
+
+    async fn handle_client_packet(
+        &self,
+        packet: flare_proto::common::ClientPacket,
+        connection_id: &str,
+    ) -> CoreResult<flare_proto::common::ServerPacket> {
+        use flare_proto::common::client_packet::Payload;
+        use flare_proto::common::ServerPacket;
+
+        let Some(payload) = packet.payload else {
+            return Err(CoreFlareError::system("ClientPacket.payload is None".to_string()));
+        };
+
+            match payload {
+            Payload::Send(envelope) => {
+                let mut messages = envelope.messages;
+                if messages.len() != 1 {
+                    return Err(CoreFlareError::system(format!(
+                        "SendMessageEnvelope.messages must contain exactly 1 message, got {}",
+                        messages.len()
+                    )));
+                }
+                let message = messages.remove(0);
+
+                let conversation_id = message.conversation_id.clone();
+
+                let mut buf = Vec::new();
+                message.encode(&mut buf).map_err(|e| {
+                    CoreFlareError::serialization_error(format!("encode Message: {}", e))
+                })?;
+
+                let msg_cmd = MessageCommand {
+                    r#type: flare_core::common::protocol::flare::core::commands::message_command::Type::Send as i32,
+                    message_id: message.client_msg_id.clone(),
+                    payload: buf,
+                    metadata: {
+                        let mut md = HashMap::new();
+                        md.insert("conversation_id".to_string(), conversation_id.as_bytes().to_vec());
+                        md
+                    },
+                    seq: 0,
+                };
+
+                let (server_msg_id, seq) = self.handle_message_send(&msg_cmd, connection_id).await?;
+
+                Ok(ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::SendAck(
+                        flare_proto::common::SendEnvelopeAck {
+                            server_msg_id,
+                            status: flare_proto::common::AckStatus::Success as i32,
+                            seq,
+                            error_code: 0,
+                            error_message: String::new(),
+                        },
+                    )),
+                })
+            }
+            Payload::SyncConversations(req) => {
+                let connection_user_id = self
+                    .require_connection_user_id(connection_id)
+                    .await
+                    .ok_or_else(|| CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::AuthenticationRequired,
+                        "not authenticated",
+                    ))?;
+
+                let mut req = req;
+                if !req.user_id.trim().is_empty() && req.user_id != connection_user_id {
+                    return Err(CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::PermissionDenied,
+                        "user_id mismatch",
+                    ));
+                }
+                req.user_id = connection_user_id;
+
+                let user_id_for_ctx = req.user_id.clone();
+                let mut client = self.ensure_conversation_client().await?;
+                let resp = client
+                    .sync_conversations(
+                        self.build_conversation_grpc_request(connection_id, &user_id_for_ctx, req)
+                            .await,
+                    )
+                    .await
+                    .map_err(|e| CoreFlareError::system(e.to_string()))?
+                    .into_inner();
+                Ok(ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::SyncConversationsResp(resp)),
+                })
+            }
+            Payload::SyncConversationsAll(req) => {
+                let connection_user_id = self
+                    .require_connection_user_id(connection_id)
+                    .await
+                    .ok_or_else(|| CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::AuthenticationRequired,
+                        "not authenticated",
+                    ))?;
+
+                let mut req = req;
+                if !req.user_id.trim().is_empty() && req.user_id != connection_user_id {
+                    return Err(CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::PermissionDenied,
+                        "user_id mismatch",
+                    ));
+                }
+                req.user_id = connection_user_id;
+
+                let user_id_for_ctx = req.user_id.clone();
+                let mut client = self.ensure_conversation_client().await?;
+                let resp = client
+                    .get_all_conversations(
+                        self.build_conversation_grpc_request(connection_id, &user_id_for_ctx, req)
+                            .await,
+                    )
+                    .await
+                    .map_err(|e| CoreFlareError::system(e.to_string()))?
+                    .into_inner();
+                Ok(ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::SyncConversationsAllResp(resp)),
+                })
+            }
+            Payload::SyncMessages(req) => {
+                let connection_user_id = self
+                    .require_connection_user_id(connection_id)
+                    .await
+                    .ok_or_else(|| CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::AuthenticationRequired,
+                        "not authenticated",
+                    ))?;
+
+                let mut req = req;
+                if !req.user_id.trim().is_empty() && req.user_id != connection_user_id {
+                    return Err(CoreFlareError::localized(
+                        flare_core::common::error::code::ErrorCode::PermissionDenied,
+                        "user_id mismatch",
+                    ));
+                }
+                req.user_id = connection_user_id;
+
+                let mut client = self.ensure_conversation_client().await?;
+
+                let conv_req = flare_proto::conversation::SyncMessagesRequest {
+                    user_id: req.user_id,
+                    conversation_id: req.conversation_id,
+                    since_ts: req.since_ts_ms,
+                    cursor: req.cursor,
+                    limit: req.limit,
+                    include_ack: req.include_ack,
+                };
+
+                let user_id_for_ctx = conv_req.user_id.clone();
+                let resp = client
+                    .sync_messages(
+                        self.build_conversation_grpc_request(connection_id, &user_id_for_ctx, conv_req)
+                            .await,
+                    )
+                    .await
+                    .map_err(|e| CoreFlareError::system(e.to_string()))?
+                    .into_inner();
+
+                let server_cursor_ts = resp.server_cursor_ts;
+                let envelope = flare_proto::common::MessageEnvelope {
+                    kind: flare_proto::common::EnvelopeKind::KindSync as i32,
+                    messages: resp.messages,
+                    has_more: !resp.next_cursor.is_empty(),
+                    max_seq: if server_cursor_ts > 0 {
+                        server_cursor_ts as u64
+                    } else {
+                        0
+                    },
+                    next_cursor: resp.next_cursor,
+                    window_id: String::new(),
+                };
+
+                let mut metadata = HashMap::new();
+                if server_cursor_ts > 0 {
+                    metadata.insert("server_cursor_ts_ms".to_string(), server_cursor_ts.to_string());
+                }
+
+                let common_resp = flare_proto::common::SyncMessagesResponse {
+                    envelope: Some(envelope),
+                    status: resp.status,
+                    metadata,
+                };
+
+                Ok(ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::SyncMessagesResp(common_resp)),
+                })
+            }
+            Payload::PushAck(_ack) => {
+                Ok(ServerPacket {
+                    payload: Some(flare_proto::common::server_packet::Payload::CustomPushData(
+                        flare_proto::common::CustomPushData {
+                            r#type: "ack".to_string(),
+                            payload: Vec::new(),
+                            metadata: HashMap::new(),
+                        },
+                    )),
+                })
+            }
+            Payload::GetConversationDetail(_req) => Err(CoreFlareError::system(
+                "GetConversationDetail is not supported by ConversationService".to_string(),
+            )),
+        }
+    }
+
+    fn build_data_frame(message_id: String, packet: flare_proto::common::ServerPacket) -> Frame {
+        use flare_core::common::protocol::flare::core::commands::message_command::Type as MsgType;
+
+        let mut payload = Vec::new();
+        let _ = packet.encode(&mut payload);
+
+        let msg_cmd = MessageCommand {
+            r#type: MsgType::Data as i32,
+            message_id: message_id.clone(),
+            payload,
+            metadata: HashMap::new(),
+            seq: 0,
+        };
+
+        FrameBuilder::new()
+            .with_command(flare_core::common::protocol::flare::core::commands::Command {
+                r#type: Some(CommandType::Message(msg_cmd)),
+            })
+            .with_message_id(message_id)
+            .with_reliability(Reliability::AtLeastOnce)
+            .with_timestamp(current_timestamp())
+            .build()
+    }
+
     /// 处理消息发送（协议适配层）
     ///
     /// 从连接信息获取 user_id，委托给应用层服务处理
@@ -247,7 +586,6 @@ impl LongConnectionHandler {
                         user_id: user_id.clone(),
                         conversation_id,
                         message_ts: ack_seq,
-                        tenant: None,
                         device_id: String::new(),
                     };
                     let _ = client.update_cursor(tonic::Request::new(req)).await;
@@ -319,4 +657,3 @@ impl LongConnectionHandler {
         Ok(client)
     }
 }
-

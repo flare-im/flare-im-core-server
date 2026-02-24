@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
+use crate::error::{FlareError, Result};
+use anyhow::Context;
 use std::sync::Arc;
 use flare_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_proto::storage::{GetMessageRequest, GetMessageResponse};
+use flare_proto::MessageContentExt;
 use tonic::Request;
 use crate::domain::model::{Message, MessageFsmState};
 use crate::domain::service::message_operation_service::MessageRepository;
@@ -23,12 +25,11 @@ impl MessageRepository for StorageReaderMessageRepository {
     async fn find_by_id(&self, message_id: &str) -> Result<Option<Message>> {
         let req = GetMessageRequest {
             message_id: message_id.to_string(),
-            context: None,
-            tenant: None,
         };
 
         let mut client = self.client.clone();
-        let resp = client.get_message(Request::new(req)).await?;
+        let resp = client.get_message(Request::new(req)).await
+            .map_err(|e| FlareError::system(format!("Failed to get message: {}", e)))?;
         let inner: GetMessageResponse = resp.into_inner();
 
         if let Some(proto_msg) = inner.message {
@@ -51,21 +52,16 @@ impl MessageRepository for StorageReaderMessageRepository {
                 })
                 .unwrap_or_else(Utc::now);
 
-            // 将 MessageContent 序列化为二进制
             let content_bytes = proto_msg.content
                 .as_ref()
-                .map(|c| {
-                    use prost::Message;
-                    let mut buf = Vec::new();
-                    c.encode(&mut buf).unwrap_or_default();
-                    buf
-                })
+                .and_then(|c| c.encode_to_bytes().ok())
                 .unwrap_or_default();
 
             let message = Message {
                 server_id: proto_msg.server_id.clone(),
                 conversation_id: proto_msg.conversation_id.clone(),
                 sender_id: proto_msg.sender_id.clone(),
+                receiver_id: proto_msg.receiver_id.clone(),
                 content: content_bytes,
                 timestamp,
                 fsm_state,
@@ -74,6 +70,7 @@ impl MessageRepository for StorageReaderMessageRepository {
                     .and_then(|v| v.parse::<i32>().ok())
                     .unwrap_or(0),
                 edit_history: vec![],
+                extra: proto_msg.extra,
                 updated_at: timestamp,
             };
 
@@ -84,7 +81,7 @@ impl MessageRepository for StorageReaderMessageRepository {
     }
 
     async fn save(&self, _message: &Message) -> Result<()> {
-        Err(anyhow::anyhow!("Save operation should be handled by Writer via Kafka"))
+        Err(FlareError::general_error("Save operation should be handled by Writer via Kafka".to_string()))
     }
 }
 

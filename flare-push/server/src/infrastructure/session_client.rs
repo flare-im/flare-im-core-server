@@ -150,8 +150,6 @@ impl ConversationServiceClient {
 
         // 使用 UpdateConversation 方法，只传 conversation_id，其他字段留空，来获取 Conversation 信息
         let request = UpdateConversationRequest {
-            context: Some(request_context),
-            tenant,
             conversation_id: conversation_id.to_string(),
             display_name: String::new(),                  // 留空，不更新
             attributes: std::collections::HashMap::new(), // 留空，不更新

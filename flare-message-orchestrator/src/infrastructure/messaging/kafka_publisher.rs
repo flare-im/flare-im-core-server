@@ -2,9 +2,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use crate::error::{FlareError, Result};
+use anyhow::{anyhow, Result as AnyhowResult};
 use flare_proto::push::PushMessageRequest as PushPushMessageRequest;
-use flare_proto::storage::StoreMessageRequest as StorageStoreMessageRequest;
+use flare_proto::storage::StoreMessage as StorageStoreMessageRequest;
 use futures::FutureExt;
 use futures::future::try_join_all;
 use prost::Message;
@@ -179,7 +180,9 @@ impl KafkaMessagePublisher {
             .collect();
 
         // 等待所有发送完成（并发执行）
-        try_join_all(futures).await?;
+        if let Err(e) = try_join_all(futures).await {
+            return Err(FlareError::system(&format!("Kafka batch send error: {}", e)));
+        }
 
         tracing::info!(
             topic = %self.config.kafka_storage_topic,
@@ -200,6 +203,26 @@ impl KafkaMessagePublisher {
         let mut valid_indices = Vec::new();
 
         for (idx, payload) in payloads.iter().enumerate() {
+            // **关键日志**：记录发布到 Kafka 的消息类型
+            if let Some(msg) = &payload.message {
+                tracing::info!(
+                    message_id = %msg.server_id,
+                    message_type = msg.message_type,
+                    message_type_label = ?flare_proto::common::MessageType::try_from(msg.message_type).ok(),
+                    conversation_id = %msg.conversation_id,
+                    has_content = msg.content.is_some(),
+                    content_variant = msg.content.as_ref()
+                        .and_then(|c| c.content.as_ref())
+                        .map(|c| match c {
+                            flare_proto::common::message_content::Content::Operation(_) => "Operation",
+                            flare_proto::common::message_content::Content::Notification(_) => "Notification",
+                            _ => "Other",
+                        })
+                        .unwrap_or("None"),
+                    "📤 发布操作消息到 Kafka (storage-message-operations)"
+                );
+            }
+            
             let encoded = payload.encode_to_vec();
 
             const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -241,7 +264,9 @@ impl KafkaMessagePublisher {
             })
             .collect();
 
-        try_join_all(futures).await?;
+        if let Err(e) = try_join_all(futures).await {
+            return Err(FlareError::system(&format!("Kafka batch send error: {}", e)));
+        }
 
         tracing::info!(
             topic = %self.config.kafka_operation_topic,
@@ -312,7 +337,9 @@ impl KafkaMessagePublisher {
             .collect();
 
         // 等待所有发送完成（并发执行）
-        try_join_all(futures).await?;
+        if let Err(e) = try_join_all(futures).await {
+            return Err(FlareError::system(&format!("Kafka batch send error: {}", e)));
+        }
 
         tracing::info!(
             topic = %self.config.kafka_push_topic,

@@ -290,14 +290,7 @@ async fn main() -> Result<()> {
                             edit_history: vec![],
                             current_edit_version: 0,
                             last_edited_at: None,
-                            tenant: Some(flare_proto::common::TenantContext {
-                                tenant_id: "default".to_string(),
-                                business_type: "im".to_string(),
-                                environment: "development".to_string(),
-                                organization_id: String::new(),
-                                labels: std::collections::HashMap::new(),
-                                attributes: std::collections::HashMap::new(),
-                            }),
+                            tenant: "default".to_string(),
                             audit: None,
                             tags: vec![],
                             offline_push_info: None,
@@ -614,6 +607,10 @@ fn parse_received_message(data: &[u8]) -> Option<MessageDisplayInfo> {
                 }
                 Some(flare_proto::common::server_packet::Payload::CustomPushData(_)) => {
                     // 自定义推送数据，暂不处理
+                    return None;
+                }
+                Some(flare_proto::common::server_packet::Payload::Error(_)) => {
+                    // 错误消息，暂不处理
                     return None;
                 }
                 None => {

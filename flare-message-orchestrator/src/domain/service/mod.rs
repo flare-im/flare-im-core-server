@@ -12,3 +12,4 @@ pub use message_domain_service::MessageDomainService;
 pub use message_read_service::MessageReadService;
 pub use message_temporary_service::MessageTemporaryService;
 pub use sequence_allocator::SequenceAllocator;
+pub use message_operation_service::{MessageOperationService, EventPublisher, MessageRepository};

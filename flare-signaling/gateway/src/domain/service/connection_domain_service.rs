@@ -75,36 +75,13 @@ impl ConnectionDomainService {
         metadata.insert("gateway_id".to_string(), self.config.gateway_id.clone());
 
         // 从连接 metadata 中提取上下文（如果可用）
-        #[cfg(feature = "proto")]
-        use flare_server_core::context::conversions::*;
+        let request_context: Option<flare_proto::common::RequestContext> = connection_metadata
+            .map(|meta| build_request_context_from_metadata(meta, Some(user_id)).into()); // 转换为 proto 类型
         
-        let request_context = connection_metadata
-            .map(|meta| {
-                let _ctx = build_request_context_from_metadata(meta, Some(user_id));
-                #[cfg(feature = "proto")]
-                {
-                    Some(flare_proto::common::RequestContext::from(ctx))
-                }
-                #[cfg(not(feature = "proto"))]
-                {
-                    None
-                }
-            })
-            .flatten();
+        let tenant_context: Option<flare_proto::common::TenantContext> = connection_metadata
+            .map(|meta| build_tenant_context_from_metadata(meta, "default").into()); // 转换为 proto 类型
         
-        let tenant_context = connection_metadata
-            .map(|meta| {
-                let _ctx = build_tenant_context_from_metadata(meta, "default");
-                #[cfg(feature = "proto")]
-                {
-                    Some(flare_proto::common::TenantContext::from(ctx))
-                }
-                #[cfg(not(feature = "proto"))]
-                {
-                    None
-                }
-            })
-            .flatten();
+        use flare_server_core::context::conversions::*; // 导入转换 trait
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -112,8 +89,6 @@ impl ConnectionDomainService {
             device_id: device_id.to_string(),
             server_id: server_id.clone(),
             metadata,
-            context: request_context,
-            tenant: tenant_context,
             device_platform: "unknown".to_string(),
             app_version: "unknown".to_string(),
             desired_conflict_strategy: 0,
@@ -189,8 +164,6 @@ impl ConnectionDomainService {
         let logout_request = LogoutRequest {
             user_id: user_id.to_string(),
             conversation_id: conversation_id.unwrap_or("").to_string(),
-            context: None,
-            tenant: None,
         };
 
         if let Err(e) = self.signaling_gateway.logout(logout_request).await {
@@ -234,8 +207,6 @@ impl ConnectionDomainService {
         let heartbeat_request = HeartbeatRequest {
             user_id: user_id.to_string(),
             conversation_id: conversation_id.to_string(),
-            context: None,
-            tenant: None,
             current_quality,
         };
 

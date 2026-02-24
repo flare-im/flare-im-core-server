@@ -1,12 +1,9 @@
-//! 话题领域服务 - 包含所有业务逻辑实现
-
-use std::sync::Arc;
-
-use anyhow::Result;
+use crate::domain::model::{Thread, ThreadSortOrder};
 use flare_server_core::context::Context;
+use std::sync::Arc;
+use anyhow::Result;
 use tracing::instrument;
 
-use crate::domain::model::{Thread, ThreadSortOrder};
 use crate::domain::repository::ThreadRepository;
 
 /// 话题领域服务 - 包含所有业务逻辑

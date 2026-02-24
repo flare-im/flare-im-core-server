@@ -104,7 +104,7 @@ pub fn build_request_context_from_metadata(
     
     let device_id = extract_device_id_from_metadata(metadata);
     
-    let mut req_ctx = RequestContext::default();
+    let mut req_ctx = RequestContext::new(uuid::Uuid::new_v4().to_string());
     
     if let Some(user_id) = user_id {
         req_ctx.actor = Some(flare_server_core::context::ActorContext {
@@ -134,4 +134,3 @@ pub fn build_request_context_from_metadata(
     
     req_ctx
 }
-

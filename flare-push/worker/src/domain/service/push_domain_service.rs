@@ -375,7 +375,7 @@ impl PushDomainService {
                 recall_reason: String::new(),
                 is_burn_after_read: false,
                 burn_after_seconds: 0,
-                tenant: None,
+                tenant: String::new(),
                 audit: None,
                 tags: Vec::new(),
                 visibility: HashMap::new(),
@@ -387,8 +387,7 @@ impl PushDomainService {
                 extensions: Vec::new(), // 添加缺失的 extensions 字段
             }),
             options: None,
-            context: None,
-            tenant: None,
+
             metadata: HashMap::new(),
             request_id: uuid::Uuid::new_v4().to_string(), // 添加缺失的 request_id 字段
         })

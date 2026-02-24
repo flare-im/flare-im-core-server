@@ -1,7 +1,7 @@
 //! 命令结构体定义（Command DTO）
 
 use flare_proto::message::{SendMessageRequest, BatchSendMessageRequest};
-use flare_proto::storage::StoreMessageRequest;
+use flare_proto::storage::StoreMessage;
 use flare_proto::common::{Message, RequestContext, TenantContext};
 
 /// 发送消息命令（包含消息类别判断和路由逻辑）
@@ -30,14 +30,14 @@ pub struct BatchSendMessageCommand {
 #[derive(Debug, Clone)]
 pub struct StoreMessageCommand {
     /// 原始请求
-    pub request: StoreMessageRequest,
+    pub request: StoreMessage,
 }
 
 /// 批量存储消息命令
 #[derive(Debug, Clone)]
 pub struct BatchStoreMessageCommand {
     /// 批量请求
-    pub requests: Vec<StoreMessageRequest>,
+    pub requests: Vec<StoreMessage>,
 }
 
 pub mod message_operation_commands;
@@ -46,3 +46,6 @@ pub use message_operation_commands::*;
 
 // Re-export HandleTemporaryMessageCommand
 pub use message_operation_commands::HandleTemporaryMessageCommand;
+
+// pub mod app_layer_operation_commands;
+// pub use app_layer_operation_commands::*;

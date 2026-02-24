@@ -61,8 +61,6 @@ impl OnlineServiceClient {
 
         let request = tonic::Request::new(ListUserDevicesRequest {
             user_id: user_id.to_string(),
-            context: Some(request_context),
-            tenant: Some(tenant),
         });
 
         let response = client.list_user_devices(request).await?;
