@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_proto::storage::StoreMessage;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::kafka::{build_kafka_consumer, subscribe_and_wait_for_assignment};
 use prost::Message as _;
@@ -14,7 +13,6 @@ use tracing::{Span, debug, error, info, instrument, warn};
 
 use crate::application::commands::ProcessMessageOperationCommand;
 use crate::application::handlers::MessageOperationCommandHandler;
-use crate::application::handlers::MessagePersistenceCommandHandler;
 use crate::config::StorageWriterConfig;
 
 pub struct OperationMessageConsumer {

@@ -1,17 +1,6 @@
 //! 领域模型定义
 
 use flare_im_core::utils::TimelineMetadata;
-use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize)]
-pub struct MediaAttachmentMetadata {
-    pub file_id: String,
-    pub file_name: String,
-    pub mime_type: String,
-    pub size: i64,
-    pub url: String,
-    pub cdn_url: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct PreparedMessage {

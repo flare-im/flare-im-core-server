@@ -309,9 +309,9 @@ impl MessageOperationHandler {
             .actor()
             .map(|a| a.actor_id.clone())
             .unwrap_or_default();
-
+    
         let delete_type = command.delete_type;
-
+    
         // 构建内部应用命令
         let delete_cmd = DeleteMessageCommand {
             base: crate::application::commands::MessageOperationCommand {
@@ -323,17 +323,57 @@ impl MessageOperationHandler {
             },
             delete_type,
             reason: command.reason.clone(),
-
+                
             message_ids: command.message_ids.clone(),
             notify_others: command.notify_others,
         };
-
+    
         // 通过命令处理器执行删除操作
         self.command_handler
             .handle_delete_message(delete_cmd)
             .await
             .map_err(|e| flare_im_core::error::FlareError::system(&format!("Internal error: {}", e)))?;
+    
+        Ok((true, command.message_ids.len() as i32))
+    }
 
+    /// 软删除消息 - 使用应用层命令
+    #[instrument(skip(self, ctx), fields(message_ids = ?command.message_ids))]
+    pub async fn handle_soft_delete_message_app(
+        &self,
+        ctx: &Context,
+        command: &AppDeleteMessageCommand,
+    ) -> Result<(bool, i32)> {
+        let operator_id = ctx
+            .actor()
+            .map(|a| a.actor_id.clone())
+            .unwrap_or_default();
+
+        // 确保删除类型为软删除
+        let delete_type = crate::application::commands::DeleteType::Soft;
+    
+        // 构建内部应用命令
+        let delete_cmd = DeleteMessageCommand {
+            base: crate::application::commands::MessageOperationCommand {
+                message_id: String::new(), // 批量删除不需要特定消息ID
+                operator_id: operator_id.clone(),
+                timestamp: chrono::Utc::now(),
+                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                conversation_id: command.conversation_id.clone(),
+            },
+            delete_type,
+            reason: command.reason.clone(),
+                
+            message_ids: command.message_ids.clone(),
+            notify_others: command.notify_others,
+        };
+    
+        // 通过命令处理器执行删除操作
+        self.command_handler
+            .handle_delete_message(delete_cmd)
+            .await
+            .map_err(|e| flare_im_core::error::FlareError::system(&format!("Internal error: {}", e)))?;
+    
         Ok((true, command.message_ids.len() as i32))
     }
 

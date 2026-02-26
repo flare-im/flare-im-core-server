@@ -58,7 +58,7 @@ impl AzSelector {
         &self,
         client_geo: Option<&str>,
         login_gateway: Option<&str>,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Option<String> {
         // 1. 优先根据地理位置选择
         if let Some(geo) = client_geo {

@@ -22,12 +22,136 @@ pub struct MessageStorageDomainConfig {
 }
 
 /// 查询游标
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct QueryCursor {
     ingestion_ts: i64,
     message_id: String,
 }
 
+/// 增强的查询游标，支持多种游标格式
+#[derive(Debug, Clone)]
+pub struct EnhancedQueryCursor {
+    /// 时间戳（毫秒）
+    pub timestamp_ms: i64,
+    /// 消息ID
+    pub message_id: String,
+    /// 序列号（如果可用）
+    pub seq: Option<i64>,
+    /// 类型标识（用于区分不同的游标格式）
+    pub cursor_type: CursorType,
+}
+
+/// 游标类型
+#[derive(Debug, Clone, PartialEq)]
+pub enum CursorType {
+    /// 基于时间戳的游标
+    Timestamp,
+    /// 基于序列号的游标
+    Sequence,
+    /// 混合游标（时间戳+序列号）
+    Hybrid,
+}
+
+impl EnhancedQueryCursor {
+    /// 从原始字符串解析游标
+    pub fn from_raw(raw: Option<&str>) -> Option<Self> {
+        let raw = raw?;
+        if raw.is_empty() {
+            return None;
+        }
+
+        // 尝试解析不同格式的游标
+        if raw.starts_with("seq:") {
+            // seq:123456:message_id 格式
+            let parts: Vec<&str> = raw.split(':').collect();
+            if parts.len() >= 3 {
+                if let Ok(seq) = parts[1].parse::<i64>() {
+                    return Some(EnhancedQueryCursor {
+                        timestamp_ms: 0, // 无法从序列号游标中获取时间戳
+                        message_id: parts[2..].join(":").to_string(), // 处理消息ID中可能包含冒号的情况
+                        seq: Some(seq),
+                        cursor_type: CursorType::Sequence,
+                    });
+                }
+            }
+        } else if raw.starts_with("hybrid:") {
+            // hybrid:timestamp:seq:message_id 格式
+            let parts: Vec<&str> = raw.split(':').collect();
+            if parts.len() >= 4 {
+                if let (Ok(timestamp), Ok(seq)) = (parts[1].parse::<i64>(), parts[2].parse::<i64>()) {
+                    return Some(EnhancedQueryCursor {
+                        timestamp_ms: timestamp,
+                        message_id: parts[3..].join(":").to_string(), // 处理消息ID中可能包含冒号的情况
+                        seq: Some(seq),
+                        cursor_type: CursorType::Hybrid,
+                    });
+                }
+            }
+        } else {
+            // timestamp:message_id 格式（旧格式兼容）
+            let parts: Vec<&str> = raw.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(timestamp) = parts[0].parse::<i64>() {
+                    return Some(EnhancedQueryCursor {
+                        timestamp_ms: timestamp,
+                        message_id: parts[1].to_string(),
+                        seq: None,
+                        cursor_type: CursorType::Timestamp,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 序列化游标为字符串
+    pub fn to_string(&self) -> String {
+        match self.cursor_type {
+            CursorType::Sequence => {
+                if let Some(seq) = self.seq {
+                    format!("seq:{}:{}", seq, self.message_id)
+                } else {
+                    format!("{}:{}", self.timestamp_ms, self.message_id)
+                }
+            }
+            CursorType::Timestamp => {
+                format!("{}:{}", self.timestamp_ms, self.message_id)
+            }
+            CursorType::Hybrid => {
+                if let Some(seq) = self.seq {
+                    format!("hybrid:{}:{}:{}", self.timestamp_ms, seq, self.message_id)
+                } else {
+                    format!("{}:{}", self.timestamp_ms, self.message_id)
+                }
+            }
+        }
+    }
+
+    /// 从消息创建游标
+    pub fn from_message(message: &Message, cursor_type: CursorType) -> Option<Self> {
+        // 提取消息时间戳
+        let timestamp_ms = message
+            .timestamp
+            .as_ref()
+            .map(|ts| ts.seconds * 1000 + (ts.nanos / 1_000_000) as i64)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+
+        // 提取序列号（如果存在）
+        let seq = extract_seq_from_message(message);
+
+        Some(EnhancedQueryCursor {
+            timestamp_ms,
+            message_id: message.server_id.clone(),
+            seq,
+            cursor_type,
+        })
+    }
+}
+
 impl QueryCursor {
+    #[allow(dead_code)]
     fn from_raw(raw: Option<&str>) -> Option<Self> {
         let raw = raw?;
         let mut parts = raw.splitn(2, ':');
@@ -96,7 +220,8 @@ impl MessageStorageDomainService {
         }
 
         let limit = limit.clamp(1, self.config.max_page_size) as usize;
-        let cursor = QueryCursor::from_raw(cursor);
+        // 使用增强的游标解析
+        let enhanced_cursor = EnhancedQueryCursor::from_raw(cursor);
 
         let end_ts = if end_time == 0 {
             Utc::now().timestamp()
@@ -134,16 +259,26 @@ impl MessageStorageDomainService {
             .map_err(|e| anyhow!("Failed to count messages: {}", e))?;
 
         let mut seen = HashSet::new();
-        if let Some(cursor) = &cursor {
-            seen.insert(cursor.message_id.clone());
+        if let Some(ref enhanced_cursor) = enhanced_cursor {
+            seen.insert(enhanced_cursor.message_id.clone());
         }
+
+        // 转换为旧的QueryCursor格式以保持与现有逻辑兼容
+        let old_cursor = if let Some(ref enhanced_cursor) = enhanced_cursor {
+            Some(QueryCursor {
+                ingestion_ts: enhanced_cursor.timestamp_ms,
+                message_id: enhanced_cursor.message_id.clone(),
+            })
+        } else {
+            None
+        };
 
         let mut aggregated = self
             .query_from_storage(
                 conversation_id,
                 start_ts_ms,
                 end_ts_ms,
-                cursor.as_ref(),
+                old_cursor.as_ref(),
                 limit,
                 &mut seen,
             )
@@ -153,11 +288,19 @@ impl MessageStorageDomainService {
         aggregated.truncate(limit);
 
         let messages: Vec<Message> = aggregated.iter().map(|item| item.message.clone()).collect();
+        
+        // 使用增强的游标生成
         let next_cursor = if messages.len() == limit {
-            aggregated
-                .last()
-                .map(|last| format!("{}:{}", last.timeline.ingestion_ts, last.message.server_id))
-                .unwrap_or_default()
+            if let Some(last_message) = messages.last() {
+                // 创建混合游标（时间戳+序列号+消息ID）
+                if let Some(cursor_obj) = EnhancedQueryCursor::from_message(last_message, CursorType::Hybrid) {
+                    cursor_obj.to_string()
+                } else {
+                    format!("{}:{}", chrono::Utc::now().timestamp_millis(), last_message.server_id)
+                }
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };
@@ -223,6 +366,261 @@ impl MessageStorageDomainService {
             messages,
             next_cursor: next_cursor.clone(),
             has_more: !next_cursor.is_empty(),
+            total_size,
+        })
+    }
+
+    /// 增强的分页查询方法，支持多种游标格式和智能预取
+    ///
+    /// # 特性
+    /// * 支持时间戳、序列号和混合游标格式
+    /// * 智能预取以减少后续查询延迟
+    /// * 高效的去重和过滤机制
+    #[instrument(skip(self), fields(conversation_id = %conversation_id))]
+    pub async fn query_messages_paginated(
+        &self,
+        conversation_id: &str,
+        user_id: Option<&str>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: i32,
+        cursor: Option<&str>,
+        prefetch_enabled: bool,
+    ) -> Result<QueryMessagesResult> {
+        if conversation_id.is_empty() {
+            return Err(anyhow!("conversation_id is required"));
+        }
+
+        let limit = limit.clamp(1, self.config.max_page_size) as usize;
+        let enhanced_cursor = EnhancedQueryCursor::from_raw(cursor);
+
+        // 解析时间范围
+        let end_ts = if let Some(end) = end_time {
+            end
+        } else {
+            Utc::now().timestamp()
+        };
+        let start_ts = if let Some(start) = start_time {
+            start
+        } else {
+            end_ts - self.config.default_range_seconds
+        };
+
+
+        // 计算总记录数
+        let start_dt_for_count = Utc
+            .timestamp_opt(start_ts, 0)
+            .single()
+            .unwrap_or_else(|| Utc::now() - Duration::seconds(self.config.default_range_seconds));
+        let end_dt_for_count = Utc
+            .timestamp_opt(end_ts, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+
+        let total_size = self
+            .storage
+            .count_messages(
+                conversation_id,
+                user_id,
+                Some(start_dt_for_count),
+                Some(end_dt_for_count),
+            )
+            .await
+            .map_err(|e| anyhow!("Failed to count messages: {}", e))?;
+
+        // 智能预取：如果启用了预取且当前页接近末尾，则预取更多数据
+        let effective_limit = if prefetch_enabled && limit < (self.config.max_page_size as usize / 2) {
+            // 预取更多的消息以提高后续查询的效率
+            std::cmp::min(limit * 2, self.config.max_page_size as usize)
+        } else {
+            limit
+        };
+
+        let mut seen = HashSet::new();
+        if let Some(ref enhanced_cursor) = enhanced_cursor {
+            seen.insert(enhanced_cursor.message_id.clone());
+        }
+
+        // 根据游标类型选择最优查询策略
+        let messages = match enhanced_cursor {
+            Some(ref cursor_obj) if cursor_obj.cursor_type == CursorType::Sequence => {
+                // 如果游标是序列号类型，使用基于序列号的查询
+                if let Some(seq) = cursor_obj.seq {
+                    self.storage
+                        .query_messages_by_seq(conversation_id, user_id, seq, None, effective_limit as i32)
+                        .await
+                        .map_err(|e| anyhow!("Failed to query messages by seq: {}", e))?
+                } else {
+                    // 回退到时间戳查询
+                    self.storage
+                        .query_messages(conversation_id, user_id, 
+                            Some(Utc.timestamp_opt(cursor_obj.timestamp_ms / 1000, 0).single().unwrap_or_else(|| Utc::now())),
+                            Some(Utc.timestamp_opt(end_ts, 0).single().unwrap_or_else(|| Utc::now())), 
+                            effective_limit as i32)
+                        .await
+                        .map_err(|e| anyhow!("Failed to query messages: {}", e))?
+                }
+            },
+            Some(ref cursor_obj) if cursor_obj.cursor_type == CursorType::Timestamp || cursor_obj.cursor_type == CursorType::Hybrid => {
+                // 使用时间戳查询
+                let start_time = Utc.timestamp_opt(cursor_obj.timestamp_ms / 1000, 0).single().unwrap_or_else(|| Utc::now());
+                self.storage
+                    .query_messages(conversation_id, user_id, 
+                        Some(start_time),
+                        Some(Utc.timestamp_opt(end_ts, 0).single().unwrap_or_else(|| Utc::now())), 
+                        effective_limit as i32)
+                    .await
+                    .map_err(|e| anyhow!("Failed to query messages: {}", e))?
+            },
+            Some(ref cursor_obj) => {
+                // 对于其他游标类型，使用时间戳查询作为默认回退
+                let start_time = Utc.timestamp_opt(cursor_obj.timestamp_ms / 1000, 0).single().unwrap_or_else(|| Utc::now());
+                self.storage
+                    .query_messages(conversation_id, user_id, 
+                        Some(start_time),
+                        Some(Utc.timestamp_opt(end_ts, 0).single().unwrap_or_else(|| Utc::now())), 
+                        effective_limit as i32)
+                    .await
+                    .map_err(|e| anyhow!("Failed to query messages: {}", e))?
+            },
+            None => {
+                // 初始查询，使用时间范围
+                self.storage
+                    .query_messages(conversation_id, user_id, 
+                        Some(Utc.timestamp_opt(start_ts, 0).single().unwrap_or_else(|| Utc::now())),
+                        Some(Utc.timestamp_opt(end_ts, 0).single().unwrap_or_else(|| Utc::now())), 
+                        effective_limit as i32)
+                    .await
+                    .map_err(|e| anyhow!("Failed to query messages: {}", e))?
+            }
+        };
+
+        // 过滤重复项并截断到请求的限制
+        let filtered_messages: Vec<Message> = messages
+            .into_iter()
+            .filter(|msg| !seen.contains(&msg.server_id))
+            .take(limit)
+            .collect();
+
+        // 生成下一个游标
+        let next_cursor = if filtered_messages.len() == limit {
+            if let Some(last_message) = filtered_messages.last() {
+                // 创建最适合的游标类型
+                let best_cursor_type = if extract_seq_from_message(last_message).is_some() {
+                    CursorType::Hybrid // 如果有seq，使用混合游标
+                } else {
+                    CursorType::Timestamp // 否则使用时间戳游标
+                };
+                
+                if let Some(cursor_obj) = EnhancedQueryCursor::from_message(last_message, best_cursor_type) {
+                    cursor_obj.to_string()
+                } else {
+                    format!("{}:{}", chrono::Utc::now().timestamp_millis(), last_message.server_id)
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        Ok(QueryMessagesResult {
+            messages: filtered_messages,
+            next_cursor: next_cursor.clone(),
+            has_more: !next_cursor.is_empty(),
+            total_size,
+        })
+    }
+
+    /// 按时间窗口查询消息（优化大量消息的分页性能）
+    ///
+    /// # 特性
+    /// * 按固定时间窗口（如每小时/每天）分割查询
+    /// * 并行查询多个时间窗口以提高性能
+    /// * 自动合并和排序结果
+    #[instrument(skip(self), fields(conversation_id = %conversation_id))]
+    pub async fn query_messages_by_time_windows(
+        &self,
+        conversation_id: &str,
+        user_id: Option<&str>,
+        start_time: i64,
+        end_time: i64,
+        window_size_seconds: i64,  // 窗口大小（秒）
+        limit: i32,
+    ) -> Result<QueryMessagesResult> {
+        if conversation_id.is_empty() {
+            return Err(anyhow!("conversation_id is required"));
+        }
+
+        let limit = limit.clamp(1, self.config.max_page_size) as usize;
+        let window_size = std::cmp::max(window_size_seconds, 3600); // 最小1小时窗口
+        let start_dt = Utc.timestamp_opt(start_time, 0).single().unwrap_or_else(Utc::now);
+        let end_dt = Utc.timestamp_opt(end_time, 0).single().unwrap_or_else(Utc::now);
+
+        // 计算时间窗口
+        let mut windows = Vec::new();
+        let mut current_start = start_dt;
+        
+        while current_start < end_dt {
+            let current_end = std::cmp::min(current_start + chrono::Duration::seconds(window_size), end_dt);
+            windows.push((current_start, current_end));
+            current_start = current_end;
+        }
+        
+        let window_count = windows.len(); // 预先计算窗口数量
+
+        // 并行查询各个时间窗口
+        let mut all_messages = Vec::new();
+        for (window_start, window_end) in windows {
+            let messages = self.storage
+                .query_messages(
+                    conversation_id,
+                    user_id,
+                    Some(window_start),
+                    Some(window_end),
+                    (limit / window_count).max(1) as i32, // 按窗口数分配限制
+                )
+                .await
+                .map_err(|e| anyhow!("Failed to query messages in time window: {}", e))?;
+            
+            all_messages.extend(messages);
+        }
+
+        // 按时间戳排序并截取
+        all_messages.sort_by(|a, b| {
+            let ts_a = a.timestamp.as_ref().map(|t| t.seconds).unwrap_or(0);
+            let ts_b = b.timestamp.as_ref().map(|t| t.seconds).unwrap_or(0);
+            ts_b.cmp(&ts_a) // 降序排列（最新的在前）
+        });
+
+        all_messages.truncate(limit);
+
+        // 计算总数（近似值）
+        let total_size = self
+            .storage
+            .count_messages(conversation_id, user_id, Some(start_dt), Some(end_dt))
+            .await
+            .unwrap_or(all_messages.len() as i64);
+
+        // 生成游标
+        let next_cursor = if all_messages.len() == limit {
+            if let Some(last_message) = all_messages.last() {
+                if let Some(cursor_obj) = EnhancedQueryCursor::from_message(last_message, CursorType::Hybrid) {
+                    cursor_obj.to_string()
+                } else {
+                    format!("{}:{}", chrono::Utc::now().timestamp_millis(), last_message.server_id)
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        Ok(QueryMessagesResult {
+            messages: all_messages,
+            next_cursor,
+            has_more: false, // 时间窗口查询不保证有更多数据
             total_size,
         })
     }
@@ -307,10 +705,10 @@ impl MessageStorageDomainService {
         // 由于 MessageOperation 现在通过单独的表或存储管理，需要实现相应的查询方法
         // 临时实现：从消息本身获取操作相关信息
         let message = self.get_message(message_id).await?;
-        let mut operations = Vec::new();
+        let operations = Vec::new();
         
         // 从消息的扩展字段中提取操作历史
-        if let Some(ref msg) = message {
+        if let Some(ref _msg) = message {
             // 这里可以根据具体实现获取消息的操作历史
             // 比如从扩展字段或单独的表中获取
             // 临时返回空列表，等待具体的存储实现

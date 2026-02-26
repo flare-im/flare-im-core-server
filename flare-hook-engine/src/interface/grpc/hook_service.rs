@@ -793,7 +793,7 @@ impl HookService for HookServiceServer {
             let records = execution_recorder.query(hook_name.as_deref(), limit).await;
 
             // 过滤条件
-            let mut filtered_records = records
+            let filtered_records = records
                 .into_iter()
                 .filter(|r| {
                     // 如果指定了message_id，需要匹配（但domain model中没有message_id，暂时跳过）

@@ -38,7 +38,7 @@ impl OnlineServiceClient {
         let mut client = self.client.clone();
 
         // 从 Context 中提取 RequestContext 和 TenantContext（用于 protobuf 兼容性）
-        let request_context: RequestContext = ctx.request().cloned().map(|rc| rc.into()).unwrap_or_else(|| RequestContext {
+        let _request_context: RequestContext = ctx.request().cloned().map(|rc| rc.into()).unwrap_or_else(|| RequestContext {
             request_id: ctx.request_id().to_string(),
             trace: None,
             actor: None,
@@ -48,7 +48,7 @@ impl OnlineServiceClient {
             attributes: std::collections::HashMap::new(),
         });
 
-        let tenant: TenantContext = ctx.tenant().cloned().map(|tc| tc.into()).or_else(|| {
+        let _tenant: TenantContext = ctx.tenant().cloned().map(|tc| tc.into()).or_else(|| {
             ctx.tenant_id().map(|tenant_id| TenantContext {
                 tenant_id: tenant_id.to_string(),
                 business_type: String::new(),

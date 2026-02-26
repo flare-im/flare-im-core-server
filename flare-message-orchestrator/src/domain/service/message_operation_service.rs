@@ -487,23 +487,31 @@ impl MessageOperationService {
 
     #[instrument(skip(self), fields(message_id = %cmd.base.message_id, operator_id = %cmd.base.operator_id))]
     pub async fn handle_delete(&self, cmd: DeleteMessageCommand) -> Result<()> {
-        // **关键修复**：删除操作（硬删除和软删除）都应该发布到操作队列
-                let store_request = MessageOperationBuilder::build_delete_request(&cmd)
-                    .map_err(|e| FlareError::system(format!("Failed to build delete request: {}", e)))?;
-                
-                self.kafka_publisher
-            .publish_operation(store_request)
-                    .await
-                    .map_err(|e| FlareError::system(format!("Failed to publish delete operation to Kafka: {}", e)))?;
+        // 1. 查询原消息以获取相关信息
+        let original_message = self
+            .message_repo
+            .find_by_id(&cmd.base.message_id)
+            .await?
+            .ok_or_else(|| MessageOperationErrorBuilder::message_not_found(&cmd.base.message_id))?;
 
-                let event = MessageDeletedEvent {
-                    base: MessageOperationEvent {
-                        message_id: cmd.base.message_id.clone(),
-                        conversation_id: cmd.base.conversation_id.clone(),
-                        operator_id: cmd.base.operator_id.clone(),
-                        timestamp: cmd.base.timestamp,
-                        tenant_id: cmd.base.tenant_id.clone(),
-                    },
+        // 2. 构建操作消息并发布到 Kafka
+        let store_request = MessageOperationBuilder::build_delete_request(&cmd)
+            .map_err(|e| FlareError::system(format!("Failed to build delete request: {}", e)))?;
+        
+        self.kafka_publisher
+            .publish_operation(store_request)
+            .await
+            .map_err(|e| FlareError::system(format!("Failed to publish delete operation to Kafka: {}", e)))?;
+
+        // 3. 发布领域事件
+        let event = MessageDeletedEvent {
+            base: MessageOperationEvent {
+                message_id: cmd.base.message_id.clone(),
+                conversation_id: cmd.base.conversation_id.clone(),
+                operator_id: cmd.base.operator_id.clone(),
+                timestamp: cmd.base.timestamp,
+                tenant_id: cmd.base.tenant_id.clone(),
+            },
             delete_type: match cmd.delete_type {
                 DeleteType::Hard => "HARD",
                 DeleteType::Soft => "SOFT",
@@ -511,11 +519,56 @@ impl MessageOperationService {
             .to_string(),
             new_state: match cmd.delete_type {
                 DeleteType::Hard => Some(MessageFsmState::DeletedHard),
-                DeleteType::Soft => None,
+                DeleteType::Soft => Some(MessageFsmState::DeletedSoft), // 软删除也应有状态
             },
-                    target_user_id: Some(String::new()),
-                };
-                self.event_publisher.publish_deleted(&event).await?;
+            target_user_id: Some(String::new()),
+        };
+        self.event_publisher.publish_deleted(&event).await?;
+
+        // 4. 发送推送通知
+        use flare_proto::common::{Message as ProtoMessage, MessageStatus};
+        use flare_proto::push::{PushMessageRequest, PushOptions};
+
+        let mut proto_msg = ProtoMessage::default();
+        proto_msg.server_id = original_message.server_id.clone();
+        proto_msg.conversation_id = original_message.conversation_id.clone();
+        proto_msg.sender_id = original_message.sender_id.clone();
+        proto_msg.receiver_id = original_message.receiver_id.clone();
+        
+        // 设置删除状态
+        match cmd.delete_type {
+            DeleteType::Hard => {
+                proto_msg.status = MessageStatus::DeletedHard as i32;
+            },
+            DeleteType::Soft => {
+                proto_msg.status = MessageStatus::DeletedSoft as i32; // 假设有DeletedSoft状态
+            },
+        }
+        
+        proto_msg.extra = original_message.extra.clone();
+        
+        // 确定接收者 ID
+        let mut user_ids = Vec::new();
+        if !original_message.receiver_id.is_empty() {
+            user_ids.push(original_message.receiver_id.clone());
+        }
+        // 注意：如果是群聊，user_ids 为空，Push Worker 会处理
+
+        let push_req = PushMessageRequest {
+            user_ids,
+            message: Some(proto_msg),
+            options: Some(PushOptions {
+                persist_if_offline: true, // 删除操作必须持久化通知
+                ..Default::default()
+            }),
+            template_id: String::new(),
+            template_data: Default::default(),
+        };
+
+        self.kafka_publisher
+            .publish_push(push_req)
+            .await
+            .map_err(|e| FlareError::system(format!("Failed to publish push notification: {}", e)))?;
 
         Ok(())
     }

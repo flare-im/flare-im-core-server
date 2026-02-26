@@ -1,6 +1,6 @@
 //! 命令结构体定义（Command DTO）
 
-use flare_proto::storage::{StoreMessage, BatchStoreMessage};
+use flare_proto::storage::StoreMessage;
 use flare_proto::common::Message;
 use std::collections::HashMap;
 

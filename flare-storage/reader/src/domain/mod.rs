@@ -5,5 +5,7 @@ pub mod repository;
 pub mod service;
 
 pub use model::*;
-pub use repository::*;
-pub use service::*;
+pub use repository::{MessageStorage, VisibilityStorage};
+pub use service::{
+    MessageStorageDomainConfig, MessageStorageDomainService, QueryMessagesResult,
+};

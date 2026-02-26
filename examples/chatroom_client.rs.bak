@@ -712,7 +712,6 @@ fn format_message_display(info: &MessageDisplayInfo, current_user_id: &str) -> S
 
 /// 消息显示信息
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct MessageDisplayInfo {
     id: String,
     sender_id: String,

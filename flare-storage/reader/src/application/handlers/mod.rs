@@ -1,7 +1,5 @@
-//! CQRS Handler（编排层）
+//! 查询侧 Handler（Reader 仅提供 Query，不提供 Command）
 
-pub mod command_handler;
 pub mod query_handler;
 
-pub use command_handler::MessageStorageCommandHandler;
 pub use query_handler::MessageStorageQueryHandler;

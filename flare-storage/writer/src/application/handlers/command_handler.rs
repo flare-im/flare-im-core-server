@@ -2,14 +2,11 @@
 
 use anyhow::Result;
 use flare_im_core::metrics::StorageWriterMetrics;
-#[cfg(feature = "tracing")]
-use flare_im_core::tracing::{create_span, set_message_id, set_tenant_id};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
 
 use crate::application::commands::ProcessStoreMessageCommand;
-use flare_proto::storage::{StoreMessage, BatchStoreMessage};
 use crate::domain::model::{PersistenceResult, PreparedMessage};
 use crate::domain::service::{MessageOperationDomainService, MessagePersistenceDomainService};
 
@@ -63,22 +60,9 @@ impl MessagePersistenceCommandHandler {
             .unwrap_or("unknown")
             .to_string();
 
-        // 设置追踪属性
-        #[cfg(feature = "tracing")]
-        {
-            let span = tracing::Span::current();
-            set_tenant_id(&span, &tenant_id);
-            if let Some(message) = &request.message {
-                if !message.server_id.is_empty() {
-                    set_message_id(&span, &message.server_id);
-                    span.record("message_id", &message.server_id);
-                }
-            }
-        }
-
         // 准备消息（克隆 request 以避免移动）
         let request_clone = request.clone();
-        let mut prepared = match self.domain_service.prepare_message(request_clone) {
+        let prepared = match self.domain_service.prepare_message(request_clone) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(
@@ -118,16 +102,6 @@ impl MessagePersistenceCommandHandler {
             }
         }
 
-        // 验证并补全媒资附件
-        if let Err(e) = self
-            .domain_service
-            .verify_and_enrich_media(&ctx, &mut prepared.message)
-            .await
-        {
-            tracing::error!(error = %e, message_id = %message_id, "Failed to verify and enrich media");
-            return Err(e);
-        }
-
         // 检查幂等性
         let is_new = match self.domain_service.check_idempotency(&prepared).await {
             Ok(new) => new,
@@ -146,9 +120,6 @@ impl MessagePersistenceCommandHandler {
 
         if is_new {
             // 数据库写入
-            #[cfg(feature = "tracing")]
-            let db_span = create_span("storage-writer", "db_write");
-
             let db_start = Instant::now();
             match self.domain_service.persist_message(&ctx, prepared).await {
                 Ok(_) => {
@@ -158,9 +129,6 @@ impl MessagePersistenceCommandHandler {
                     self.metrics
                         .db_write_duration_seconds
                         .observe(db_duration.as_secs_f64());
-
-                    #[cfg(feature = "tracing")]
-                    db_span.end();
 
                     // 记录总耗时和持久化计数（应用层关注点）
                     let total_duration = start.elapsed();
@@ -234,30 +202,12 @@ impl MessagePersistenceCommandHandler {
                 metadata: command.command.metadata.clone(),
             };
             
-            // 从 request 构建 Context
-            let ctx = if let Some(tenant) = &request.tenant {
-                Context::root()
-                    .with_tenant_id(tenant.tenant_id.clone())
-            } else {
-                Context::root()
-            };
-
             match self.domain_service.prepare_message(request.clone()) {
-                Ok(mut prepared) => {
+                Ok(prepared) => {
                     // **关键修改**：检查消息是否为操作消息
                     use crate::domain::service::MessageOperationDomainService;
                     if MessageOperationDomainService::is_operation_message(&prepared.message) {
-                        // 对于批量处理，跳过操作消息
                         continue;
-                    }
-
-                    // 验证并补全媒资附件
-                    if let Err(e) = self
-                        .domain_service
-                        .verify_and_enrich_media(&ctx, &mut prepared.message)
-                        .await
-                    {
-                        tracing::warn!(error = %e, message_id = %prepared.message_id, "Failed to verify media, continuing");
                     }
                     prepared_messages.push(prepared);
                 }

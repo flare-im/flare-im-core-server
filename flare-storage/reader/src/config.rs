@@ -14,8 +14,7 @@ pub struct StorageReaderConfig {
     pub postgres_acquire_timeout_seconds: u64,
     pub postgres_idle_timeout_seconds: u64,
     pub postgres_max_lifetime_seconds: u64,
-    // Redis 缓存配置
-    pub redis_cache_ttl_seconds: u64,
+    // Redis 缓存配置（仅消息与查询索引 TTL）
     pub redis_message_cache_ttl_seconds: u64,
     pub redis_session_cache_ttl_seconds: u64,
 }
@@ -87,11 +86,6 @@ impl StorageReaderConfig {
             .unwrap_or(1800); // 30 minutes
 
         // Redis 缓存配置
-        let redis_cache_ttl_seconds = env::var("STORAGE_REDIS_CACHE_TTL_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300); // 5 minutes
-
         let redis_message_cache_ttl_seconds = env::var("STORAGE_REDIS_MESSAGE_CACHE_TTL_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -112,7 +106,6 @@ impl StorageReaderConfig {
             postgres_acquire_timeout_seconds,
             postgres_idle_timeout_seconds,
             postgres_max_lifetime_seconds,
-            redis_cache_ttl_seconds,
             redis_message_cache_ttl_seconds,
             redis_session_cache_ttl_seconds,
         })
@@ -142,7 +135,6 @@ impl StorageReaderConfig {
             postgres_acquire_timeout_seconds: 30,
             postgres_idle_timeout_seconds: 600,
             postgres_max_lifetime_seconds: 1800,
-            redis_cache_ttl_seconds: 300,
             redis_message_cache_ttl_seconds: 3600,
             redis_session_cache_ttl_seconds: 1800,
         }

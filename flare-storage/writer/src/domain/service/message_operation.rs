@@ -10,7 +10,6 @@ use flare_proto::common::{
     Message, MessageOperation, OperationType,
     message_operation::OperationData,
 };
-use prost::Message as ProstMessage;
 use std::sync::Arc;
 use tracing::{instrument, warn};
 
@@ -163,6 +162,9 @@ impl MessageOperationDomainService {
             }
             Ok(OperationType::Mark) => {
                 self.handle_mark_operation(&operation, message, archive_repo).await
+            }
+            Ok(OperationType::Unmark) => {
+                self.handle_unmark_operation(&operation, message, archive_repo).await
             }
             _ => {
                 warn!(
@@ -424,6 +426,60 @@ impl MessageOperationDomainService {
 
         archive_repo.append_operation(message_id, operation).await?;
 
+        Ok(())
+    }
+
+    /// 处理取消标记操作
+    #[instrument(skip(self, archive_repo), fields(message_id = %operation.target_message_id))]
+    async fn handle_unmark_operation(
+        &self,
+        operation: &MessageOperation,
+        message: &Message,
+        archive_repo: &Arc<dyn ArchiveStoreRepository + Send + Sync>,
+    ) -> Result<()> {
+        let message_id = &operation.target_message_id;
+        let user_id = &operation.operator_id;
+        let conversation_id = &message.conversation_id;
+
+        if let Some(OperationData::Unmark(unmark_data)) = &operation.operation_data {
+            let opt_mark_type = match unmark_data.mark_type {
+                x if x == flare_proto::common::MarkType::Important as i32 => Some("IMPORTANT"),
+                x if x == flare_proto::common::MarkType::Todo as i32 => Some("TODO"),
+                x if x == flare_proto::common::MarkType::Done as i32 => Some("DONE"),
+                x if x == flare_proto::common::MarkType::Custom as i32 => Some("CUSTOM"),
+                _ => None, // 未指定类型：取消该用户对该消息的所有标记
+            };
+
+            if let Some(mark_type) = opt_mark_type {
+                archive_repo
+                    .mark_message(
+                        message_id,
+                        conversation_id,
+                        user_id,
+                        mark_type,
+                        None,
+                        false,
+                    )
+                    .await?;
+            } else {
+                for mt in ["IMPORTANT", "TODO", "DONE", "CUSTOM"] {
+                    let _ = archive_repo
+                        .mark_message(
+                            message_id,
+                            conversation_id,
+                            user_id,
+                            mt,
+                            None,
+                            false,
+                        )
+                        .await;
+                }
+            }
+        } else {
+            return Err(anyhow!("Unmark operation requires UnmarkOperationData"));
+        }
+
+        archive_repo.append_operation(message_id, operation).await?;
         Ok(())
     }
 }

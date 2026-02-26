@@ -2,7 +2,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::{ContentType, Message, MessageSource, MessageStatus, MessageType};
-use prost::Message as _;
 use serde_json::{to_value, Map, Value};
 
 pub fn infer_content_type(message: &Message) -> &'static str {
@@ -152,10 +151,12 @@ pub fn message_status_to_string(status: i32) -> String {
         .ok()
         .map(|s| match s {
             // Message FSM 状态映射到数据库 CHECK 约束值
-            // 数据库约束: CHECK (status IN ('INIT', 'SENT', 'EDITED', 'RECALLED', 'DELETED_HARD'))
+            // 数据库约束: CHECK (status IN ('INIT', 'SENT', 'EDITED', 'RECALLED', 'DELETED_HARD', 'DELETED_SOFT'))
             MessageStatus::Created => "INIT",      // Created 状态映射到 INIT（服务端构建中）
             MessageStatus::Sent => "SENT",        // Sent 状态映射到 SENT（已发送，正常态）
             MessageStatus::Recalled => "RECALLED", // Recalled 状态映射到 RECALLED（已撤回，终态）
+            MessageStatus::DeletedHard => "DELETED_HARD", // DeletedHard 状态映射到 DELETED_HARD（硬删除，终态）
+            MessageStatus::DeletedSoft => "DELETED_SOFT", // DeletedSoft 状态映射到 DELETED_SOFT（软删除，用户维度）
             // 其他状态映射（如果存在）
             MessageStatus::Delivered => "SENT",   // Delivered 视为已发送
             MessageStatus::Read => "SENT",         // Read 视为已发送（已读是 User-Message FSM，不影响 Message FSM）

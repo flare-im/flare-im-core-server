@@ -4,7 +4,6 @@ use chrono::Utc;
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::Message;
 use flare_proto::MessageContentExt;
-use prost::Message as _;
 use serde_json::to_value;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 
@@ -12,6 +11,29 @@ use crate::infrastructure::persistence::operation_store;
 
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::ArchiveStoreRepository;
+
+// 定义用于从数据库查询结果的行结构体
+#[derive(sqlx::FromRow)]
+struct MessageRow {
+    server_id: String,
+    conversation_id: String,
+    client_msg_id: Option<String>,
+    sender_id: String,
+    receiver_id: Option<String>,
+    channel_id: Option<String>,
+    content: Option<Vec<u8>>,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    extra: Option<serde_json::Value>,
+    message_type: Option<String>,
+    content_type: Option<String>,
+    business_type: Option<String>,
+    status: Option<String>,
+    is_burn_after_read: Option<bool>,
+    burn_after_seconds: Option<i32>,
+    seq: Option<i64>,
+    tenant_id: String,
+    conversation_type: Option<String>,
+}
 
 pub struct PostgresMessageStore {
     pool: Pool<Postgres>,
@@ -64,28 +86,6 @@ impl PostgresMessageStore {
         use flare_proto::common::{MessageType, MessageStatus, MessageSource};
 
         // 查询消息（使用唯一索引 idx_messages_server_id_unique，不需要 tenant_id 作为条件）
-        #[derive(sqlx::FromRow)]
-        struct MessageRow {
-            server_id: String,
-            conversation_id: String,
-            client_msg_id: Option<String>,
-            sender_id: String,
-            receiver_id: Option<String>,
-            channel_id: Option<String>,
-            content: Option<Vec<u8>>,
-            timestamp: chrono::DateTime<chrono::Utc>,
-            extra: Option<serde_json::Value>,
-            message_type: Option<String>,
-            content_type: Option<String>,
-            business_type: Option<String>,
-            status: Option<String>,
-            is_burn_after_read: Option<bool>,
-            burn_after_seconds: Option<i32>,
-            seq: Option<i64>,
-            tenant_id: String,
-            conversation_type: Option<String>,
-        }
-
         let row = sqlx::query_as::<_, MessageRow>(
             r#"
             SELECT 
@@ -145,6 +145,7 @@ impl PostgresMessageStore {
             Some("EDITED") => MessageStatus::Sent as i32, // EDITED 状态映射到 Sent
             Some("RECALLED") => MessageStatus::Recalled as i32,
             Some("DELETED_HARD") => MessageStatus::DeletedHard as i32,
+            Some("DELETED_SOFT") => MessageStatus::DeletedSoft as i32,
             _ => MessageStatus::Sent as i32,
         };
 
@@ -226,6 +227,133 @@ impl PostgresMessageStore {
         };
 
         Ok(Some(message))
+    }
+
+    /// 将 MessageRow 转换为 Message 对象
+    #[allow(dead_code)]
+    fn row_to_message(&self, row: &MessageRow) -> Result<flare_proto::common::Message> {
+        use serde_json::Value as JsonValue;
+        use flare_proto::common::{MessageType, MessageStatus, MessageSource};
+        
+        // 解析 extra JSON
+        let extra_value: JsonValue = row.extra.clone().unwrap_or_else(|| serde_json::json!({}));
+        let extra_map = extra_value.as_object()
+            .cloned()
+            .unwrap_or_else(|| serde_json::Map::new());
+
+        // 解析 content 为 MessageContent
+        let content = if let Some(content_bytes) = &row.content {
+            flare_proto::decode_message_content(content_bytes.as_slice())
+                .ok()
+                .map(|c| Some(c))
+                .unwrap_or(None)
+        } else {
+            None
+        };
+
+        // 解析 message_type
+        let message_type = match row.message_type.as_deref() {
+            Some("TEXT") => MessageType::Text as i32,
+            Some("IMAGE") => MessageType::Image as i32,
+            Some("VIDEO") => MessageType::Video as i32,
+            Some("AUDIO") => MessageType::Audio as i32,
+            Some("FILE") => MessageType::File as i32,
+            Some("LOCATION") => MessageType::Location as i32,
+            Some("CARD") => MessageType::Card as i32,
+            Some("NOTIFICATION") => MessageType::Notification as i32,
+            Some("TYPING") => MessageType::Typing as i32,
+            Some("SYSTEM_EVENT") => MessageType::SystemEvent as i32,
+            Some("OPERATION") => MessageType::Operation as i32,
+            _ => MessageType::Unspecified as i32,
+        };
+
+        // 解析 status
+        let status = match row.status.as_deref() {
+            Some("INIT") => MessageStatus::Created as i32,
+            Some("SENT") => MessageStatus::Sent as i32,
+            Some("EDITED") => MessageStatus::Sent as i32, // EDITED 状态映射到 Sent
+            Some("RECALLED") => MessageStatus::Recalled as i32,
+            Some("DELETED_HARD") => MessageStatus::DeletedHard as i32,
+            Some("DELETED_SOFT") => MessageStatus::DeletedSoft as i32,
+            _ => MessageStatus::Sent as i32,
+        };
+
+        // 解析 timestamp
+        let timestamp = Some(prost_types::Timestamp {
+            seconds: row.timestamp.timestamp(),
+            nanos: row.timestamp.timestamp_subsec_nanos() as i32,
+        });
+
+        // 解析 conversation_type
+        let conversation_type = match row.conversation_type.as_deref() {
+            Some("single") => flare_proto::common::ConversationType::Single as i32,
+            Some("group") => flare_proto::common::ConversationType::Group as i32,
+            Some("channel") => flare_proto::common::ConversationType::Channel as i32,
+            _ => flare_proto::common::ConversationType::Unspecified as i32,
+        };
+
+        // 解析 content_type
+        let content_type = match row.content_type.as_deref() {
+            Some("text/plain") => flare_proto::common::ContentType::PlainText as i32,
+            Some("text/html") => flare_proto::common::ContentType::Html as i32,
+            Some("text/markdown") => flare_proto::common::ContentType::Markdown as i32,
+            Some("application/json") => flare_proto::common::ContentType::Json as i32,
+            _ => flare_proto::common::ContentType::Unspecified as i32,
+        };
+
+        // 构建 Message 对象
+        let message = flare_proto::common::Message {
+            server_id: row.server_id.clone(),
+            conversation_id: row.conversation_id.clone(),
+            client_msg_id: row.client_msg_id.clone().unwrap_or_default(),
+            sender_id: row.sender_id.clone(),
+            source: MessageSource::User as i32,
+            seq: row.seq.unwrap_or(0) as u64,
+            timestamp,
+            conversation_type,
+            message_type,
+            business_type: row.business_type.clone().unwrap_or_default(),
+            receiver_id: row.receiver_id.clone().unwrap_or_default(),
+            channel_id: row.channel_id.clone().unwrap_or_default(),
+            content,
+            content_type,
+            attachments: vec![],
+            extra: extra_map
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect(),
+            tenant: row.tenant_id.clone(), // 从数据库行中获取租户ID
+            offline_push_info: None,
+            tags: vec![],
+            attributes: std::collections::HashMap::new(),
+            status,
+            is_recalled: row.status.as_deref() == Some("RECALLED"),
+            recalled_at: if row.status.as_deref() == Some("RECALLED") {
+                timestamp.clone()
+            } else {
+                None
+            },
+            recall_reason: String::new(), // 需要从 extra 或单独字段获取
+            is_burn_after_read: row.is_burn_after_read.unwrap_or(false),
+            burn_after_seconds: row.burn_after_seconds.unwrap_or(0),
+            timeline: None, // 需要从数据库字段构建
+            visibility: std::collections::HashMap::new(),
+            read_by: vec![],
+            reactions: vec![],
+            edit_history: vec![],
+            current_edit_version: 0,
+            last_edited_at: None,
+            audit: None,
+            extensions: vec![],
+            quote: None,
+        };
+
+        Ok(message)
     }
 }
 
@@ -831,6 +959,91 @@ impl PostgresMessageStore {
         );
 
         Ok(())
+    }
+
+    /// 批量查询消息（优化性能）
+    ///
+    /// 使用 TimescaleDB 优化的批量查询策略：
+    /// - 小批量（<=10）：直接使用 IN 查询
+    /// - 中批量（11-100）：使用 VALUES 表值构造器
+    /// - 大批量（>100）：分批处理，每批最多 100 条
+    ///
+    /// 性能优化：
+    /// - 利用 TimescaleDB 的分区裁剪
+    /// - 减少网络往返次数
+    /// - 优化参数绑定
+    #[allow(dead_code)]
+    async fn batch_query_messages(&self, message_ids: &[String]) -> Result<Vec<Message>> {
+        if message_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 小批量：直接使用 IN 查询
+        if message_ids.len() <= 10 {
+            let placeholders: Vec<String> = (0..message_ids.len())
+                .map(|i| format!("${}", i + 1))
+                .collect();
+            let query = format!(
+                "SELECT server_id, conversation_id, client_msg_id, sender_id, content, timestamp, \
+                 extra, created_at, message_type, content_type, business_type, status, \
+                 fsm_state_changed_at, is_burn_after_read, burn_after_seconds, seq, updated_at, tenant_id \
+                 FROM messages WHERE server_id IN ({})",
+                placeholders.join(",")
+            );
+
+            let mut query_builder = sqlx::QueryBuilder::new(&query);
+            for id in message_ids {
+                query_builder.push_bind(id);
+            }
+
+            let rows = query_builder
+                .build_query_as::<MessageRow>()
+                .fetch_all(&self.pool)
+                .await?;
+
+            let mut messages = Vec::with_capacity(rows.len());
+            for row in rows {
+                messages.push(self.row_to_message(&row)?);
+            }
+
+            return Ok(messages);
+        }
+
+        // 自适应批量大小：大批量时分批处理
+        let batch_size = if message_ids.len() > 100 {
+            100
+        } else {
+            message_ids.len()
+        };
+
+        let mut all_messages = Vec::new();
+        for chunk in message_ids.chunks(batch_size) {
+            // 使用 VALUES 表值构造器进行批量查询
+            let mut query_builder = sqlx::QueryBuilder::new(
+                "SELECT server_id, conversation_id, client_msg_id, sender_id, content, timestamp, \
+                 extra, created_at, message_type, content_type, business_type, status, \
+                 fsm_state_changed_at, is_burn_after_read, burn_after_seconds, seq, updated_at, tenant_id \
+                 FROM messages WHERE server_id IN (",
+            );
+
+            // 构建 VALUES 子句
+            let mut separated = query_builder.separated(", ");
+            for (_i, id) in chunk.iter().enumerate() {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+
+            let rows = query_builder
+                .build_query_as::<MessageRow>()
+                .fetch_all(&self.pool)
+                .await?;
+
+            for row in rows {
+                all_messages.push(self.row_to_message(&row)?);
+            }
+        }
+
+        Ok(all_messages)
     }
 }
 

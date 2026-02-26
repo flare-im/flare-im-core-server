@@ -1,12 +1,29 @@
 use anyhow::Result;
 use chrono::Utc;
 use flare_im_core::utils::timestamp_to_datetime;
-use flare_proto::common::MessageContent;
+use flare_proto::common::{MessageContent, OperationType};
 use flare_proto::MessageContentExt;
 use prost::Message as ProstMessage;
 use serde_json::{json, Value};
 use sqlx::{Pool, Postgres, QueryBuilder, Row};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+/// 将 OperationType 枚举转为 DB 存储的字符串（与 init.sql / reader 一致）
+fn operation_type_to_db_string(v: i32) -> &'static str {
+    match OperationType::try_from(v) {
+        Ok(OperationType::Recall) => "OPERATION_TYPE_RECALL",
+        Ok(OperationType::Edit) => "OPERATION_TYPE_EDIT",
+        Ok(OperationType::Delete) => "OPERATION_TYPE_DELETE",
+        Ok(OperationType::Read) => "OPERATION_TYPE_READ",
+        Ok(OperationType::ReactionAdd) => "OPERATION_TYPE_REACTION_ADD",
+        Ok(OperationType::ReactionRemove) => "OPERATION_TYPE_REACTION_REMOVE",
+        Ok(OperationType::Pin) => "OPERATION_TYPE_PIN",
+        Ok(OperationType::Unpin) => "OPERATION_TYPE_UNPIN",
+        Ok(OperationType::Mark) => "OPERATION_TYPE_MARK",
+        Ok(OperationType::Unmark) => "OPERATION_TYPE_UNMARK",
+        _ => "OPERATION_TYPE_UNSPECIFIED",
+    }
+}
 
 pub struct OperationStore {
     pool: Pool<Postgres>,
@@ -472,7 +489,7 @@ impl OperationStore {
         )
         .bind(tenant_id)
         .bind(message_id)
-        .bind(operation.operation_type as i32)
+        .bind(operation_type_to_db_string(operation.operation_type))
         .bind(&operation.operator_id)
         .bind(&operation.target_user_id)
         .bind(operation_data_json)

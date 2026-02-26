@@ -124,7 +124,7 @@ impl FlowController {
     }
 
     /// 检查是否为热点会话
-    fn is_hot_session(&self, conversation_id: &str, current_qps: u32) -> bool {
+    fn is_hot_session(&self, _conversation_id: &str, current_qps: u32) -> bool {
         current_qps > self.hot_session_threshold
     }
 
@@ -174,7 +174,7 @@ impl FlowController {
             0
         };
 
-        if let Some(conversation_id) = &ctx.conversation_id {
+        if let Some(_conversation_id) = &ctx.conversation_id {
             if session_qps > self.session_qps_limit {
                 return Err(anyhow::anyhow!(
                     "Session QPS limit exceeded: {} > {}",

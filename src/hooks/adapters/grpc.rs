@@ -287,6 +287,8 @@ fn build_context(
     }
 }
 
+// This function is currently unused but kept for potential future use
+#[allow(dead_code)]
 fn build_request_context(ctx: &Context, hook_data: &crate::hooks::hook_context_data::HookContextData) -> Option<ProtoRequestContext> {
     let mut has_context = false;
 
@@ -504,6 +506,8 @@ fn build_request_context(ctx: &Context, hook_data: &crate::hooks::hook_context_d
     })
 }
 
+// This function is currently unused but kept for potential future use
+#[allow(dead_code)]
 fn build_tenant_context(ctx: &Context, hook_data: &crate::hooks::hook_context_data::HookContextData) -> ProtoTenantContext {
     let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
     let business_type = hook_data

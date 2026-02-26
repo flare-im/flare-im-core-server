@@ -255,7 +255,7 @@ impl StorageReaderService for StorageReaderGrpcHandler {
         &self,
         request: Request<ExportMessagesRequest>,
     ) -> Result<Response<ExportMessagesResponse>, Status> {
-        let req = request.into_inner();
+        let _req = request.into_inner();
         // TODO: 实现导出消息功能
         Ok(Response::new(ExportMessagesResponse {
             export_task_id: format!("export_{}", uuid::Uuid::new_v4()),

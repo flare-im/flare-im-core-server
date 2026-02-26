@@ -304,7 +304,7 @@ impl MessageGrpcHandler {
 
         // 调用应用层操作处理器处理撤回消息逻辑
         match self.operation_handler.handle_recall_message_app(&ctx, &app_command).await {
-            Ok((message_id, seq)) => {
+            Ok((_message_id, _seq)) => {
                 let now = chrono::Utc::now();
                 Ok(Response::new(MessageRecallMessageResponse {
                     success: true,
@@ -349,7 +349,7 @@ impl MessageGrpcHandler {
 
         // 调用应用层操作处理器处理编辑消息逻辑
         match self.operation_handler.handle_edit_message_app(&ctx, &app_command).await {
-            Ok((message_id, seq)) => {
+            Ok((_message_id, _seq)) => {
                 let now = chrono::Utc::now();
                 Ok(Response::new(MessageEditMessageResponse {
                     success: true,

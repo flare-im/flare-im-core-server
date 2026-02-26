@@ -529,7 +529,7 @@ impl HookExtension for HookExtensionServer {
         let context = req
             .context
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        let mut draft = req
+        let draft = req
             .draft
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
 

@@ -25,6 +25,8 @@ pub enum MessageFsmState {
     Recalled,
     /// 已硬删除（终态）
     DeletedHard,
+    /// 已软删除（用户维度的删除，对当前用户不可见但仍存在于数据库中）
+    DeletedSoft,
 }
 
 impl MessageFsmState {
@@ -36,6 +38,7 @@ impl MessageFsmState {
             MessageFsmState::Edited => "EDITED",
             MessageFsmState::Recalled => "RECALLED",
             MessageFsmState::DeletedHard => "DELETED_HARD",
+            MessageFsmState::DeletedSoft => "DELETED_SOFT",
         }
     }
 
@@ -47,6 +50,7 @@ impl MessageFsmState {
             "EDITED" => Ok(MessageFsmState::Edited),
             "RECALLED" => Ok(MessageFsmState::Recalled),
             "DELETED_HARD" => Ok(MessageFsmState::DeletedHard),
+            "DELETED_SOFT" => Ok(MessageFsmState::DeletedSoft),
             _ => Err(format!("Invalid message FSM state: {}", s)),
         }
     }
@@ -69,6 +73,11 @@ impl MessageFsmState {
     /// 是否可以硬删除
     pub fn can_delete_hard(&self) -> bool {
         matches!(self, MessageFsmState::Sent | MessageFsmState::Edited)
+    }
+
+    /// 是否可以软删除
+    pub fn can_delete_soft(&self) -> bool {
+        matches!(self, MessageFsmState::Sent | MessageFsmState::Edited | MessageFsmState::Recalled)
     }
 }
 
@@ -230,6 +239,22 @@ impl Message {
 
         Ok(())
     }
+
+    /// 软删除消息（任何非硬删除/撤回状态 -> DELETED_SOFT）
+    pub fn delete_soft(&mut self) -> Result<(), String> {
+        if !self.fsm_state.can_delete_soft() {
+            return Err(format!(
+                "Cannot soft delete message: current state is {}",
+                self.fsm_state
+            ));
+        }
+
+        self.fsm_state = MessageFsmState::DeletedSoft;
+        self.fsm_state_changed_at = Utc::now();
+        self.updated_at = Utc::now();
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +306,31 @@ mod tests {
     }
 
     #[test]
+    fn test_message_fsm_soft_delete() {
+        let mut msg = Message::new(
+            "msg-1".to_string(),
+            "conv-1".to_string(),
+            "user-1".to_string(),
+            "user-2".to_string(),
+            b"Hello".to_vec(),
+            Utc::now(),
+        );
+
+        // INIT -> SENT
+        msg.mark_as_sent().unwrap();
+        assert_eq!(msg.fsm_state, MessageFsmState::Sent);
+
+        // SENT -> SOFT_DELETED
+        msg.delete_soft().unwrap();
+        assert_eq!(msg.fsm_state, MessageFsmState::DeletedSoft);
+
+        // SOFT_DELETED 不是终态，理论上可以恢复（但目前没有实现恢复功能）
+        // 但不能进行其他操作如编辑、撤回等
+        assert!(msg.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(msg.recall(None).is_err());
+    }
+
+    #[test]
     fn test_message_fsm_state_validation() {
         let mut msg = Message::new(
             "msg-1".to_string(),
@@ -301,9 +351,23 @@ mod tests {
         msg.recall(None).unwrap();
         assert_eq!(msg.fsm_state, MessageFsmState::Recalled);
 
-        // RECALLED 是终态，不能再操作
-        assert!(msg.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
-        assert!(msg.recall(None).is_err());
+        // RECALLED 状态下可以软删除
+        msg.delete_soft().unwrap();
+        assert_eq!(msg.fsm_state, MessageFsmState::DeletedSoft);
+
+        // RECALLED 是终态，不能再撤回或编辑，但可以软删除
+        let mut msg2 = Message::new(
+            "msg-2".to_string(),
+            "conv-1".to_string(),
+            "user-1".to_string(),
+            "user-2".to_string(),
+            b"Hello".to_vec(),
+            Utc::now(),
+        );
+        msg2.mark_as_sent().unwrap();
+        msg2.recall(None).unwrap();
+        assert!(msg2.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(msg2.recall(None).is_err());
     }
 }
 

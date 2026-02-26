@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use flare_proto::common::Message;
 
 use crate::domain::events::AckEvent;
-use crate::domain::model::MediaAttachmentMetadata;
 
 // Rust 2024: trait 中直接使用 async fn（原生支持，包括 trait 对象）
 #[async_trait]
@@ -41,20 +40,6 @@ pub trait HotCacheRepository: Send + Sync {
         // 默认实现：逐个存储（子类可以覆盖以优化）
         for message in messages {
             self.store_hot(message).await?;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-pub trait RealtimeStoreRepository: Send + Sync {
-    async fn store_realtime(&self, message: &Message) -> Result<()>;
-
-    /// 批量存储消息（优化性能）
-    async fn store_realtime_batch(&self, messages: &[Message]) -> Result<()> {
-        // 默认实现：逐个存储（子类可以覆盖以优化）
-        for message in messages {
-            self.store_realtime(message).await?;
         }
         Ok(())
     }
@@ -195,53 +180,8 @@ pub trait WalCleanupRepository: Send + Sync {
 }
 
 #[async_trait]
-pub trait ConversationStateRepository: Send + Sync {
-    async fn apply_message(&self, message: &Message) -> Result<()>;
-}
-
-#[async_trait]
-pub trait UserSyncCursorRepository: Send + Sync {
-    async fn advance_cursor(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, message_ts: i64) -> Result<()>;
-}
-
-#[async_trait]
 pub trait AckPublisher: Send + Sync {
     async fn publish(&self, event: AckEvent<'_>) -> Result<()>;
-}
-
-#[async_trait]
-pub trait MediaAttachmentVerifier: Send + Sync {
-    async fn fetch_metadata(&self, ctx: &flare_server_core::context::Context, file_ids: &[String]) -> Result<Vec<MediaAttachmentMetadata>>;
-}
-
-/// Session 仓储接口 - 用于检查并创建 session
-#[async_trait]
-pub trait ConversationRepository: Send + Sync {
-    /// 确保 conversation 存在，如果不存在则创建
-    async fn ensure_conversation(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        conversation_id: &str,
-        conversation_type: &str,
-        business_type: &str,
-        participants: Vec<String>,
-    ) -> Result<()>;
-}
-
-/// Session 更新仓储接口 - 用于更新会话和参与者信息（seq、未读数等）
-#[async_trait]
-pub trait ConversationUpdateRepository: Send + Sync {
-    /// 更新会话的最后消息信息
-    async fn update_last_message(&self, conversation_id: &str, message_id: &str, seq: i64)
-    -> Result<()>;
-
-    /// 批量更新参与者的未读数
-    async fn batch_update_unread_count(
-        &self,
-        conversation_id: &str,
-        last_message_seq: i64,
-        exclude_user_id: Option<&str>,
-    ) -> Result<()>;
 }
 
 // SeqGenerator 已移至编排服务（MessageOrchestrator）

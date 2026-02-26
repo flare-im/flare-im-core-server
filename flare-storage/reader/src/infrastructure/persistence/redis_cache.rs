@@ -14,6 +14,24 @@ use std::sync::Arc;
 use crate::config::StorageReaderConfig;
 use flare_proto::common::Message;
 
+/// Redis 缓存配置
+#[derive(Debug, Clone)]
+pub struct RedisCacheConfig {
+    /// 消息缓存 TTL（秒）
+    pub message_ttl_seconds: u64,
+    /// 会话缓存 TTL（秒）
+    pub session_ttl_seconds: u64,
+}
+
+impl Default for RedisCacheConfig {
+    fn default() -> Self {
+        Self {
+            message_ttl_seconds: 3600, // 1小时
+            session_ttl_seconds: 7200, // 2小时
+        }
+    }
+}
+
 /// Redis 消息缓存仓储
 pub struct RedisMessageCache {
     client: Arc<redis::Client>,
@@ -27,6 +45,15 @@ impl RedisMessageCache {
             client,
             message_ttl_seconds: config.redis_message_cache_ttl_seconds,
             session_ttl_seconds: config.redis_session_cache_ttl_seconds,
+        }
+    }
+
+    /// 使用 RedisCacheConfig 创建实例
+    pub fn new_with_config(client: Arc<redis::Client>, cache_config: &RedisCacheConfig) -> Self {
+        Self {
+            client,
+            message_ttl_seconds: cache_config.message_ttl_seconds,
+            session_ttl_seconds: cache_config.session_ttl_seconds,
         }
     }
 

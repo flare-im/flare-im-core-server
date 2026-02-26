@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use flare_proto::common::{ContentType, Message, MessageSource, MessageStatus, MessageType};
-use prost::Message as ProstMessage;
 use prost_types::Timestamp;
 use serde_json::{Value, from_value};
 

@@ -487,7 +487,7 @@ impl PushDomainService {
                             // PushStatusSuccess = 1, PushStatusPartial = 2
                             // 推送成功
                             success_count += 1;
-
+                    
                             // 从 metadata 中提取所有 message_id（必需字段，不再降级）
                             let message_ids_str: Vec<String> = push_request
                                 .metadata
@@ -502,13 +502,13 @@ impl PushDomainService {
                                 .split(',')
                                 .map(|s| s.to_string())
                                 .collect();
-
+                    
                             // 更新所有消息状态
                             for message_id in &message_ids_str {
                                 state_tracker
                                     .update_status(message_id, user_id, MessageStatus::Pushed, None)
                                     .await;
-
+                    
                                 // 注册待确认的ACK（从 task 构建 Context）
                                 let ctx = flare_server_core::context::Context::root()
                                     .with_user_id(user_id.clone());
@@ -523,7 +523,7 @@ impl PushDomainService {
                                     );
                                 }
                             }
-
+                    
                             // 更新指标
                             metrics
                                 .online_push_success_total
@@ -534,7 +534,7 @@ impl PushDomainService {
                             // PushStatusUserOffline = 3
                             // 用户离线，创建离线推送任务
                             fail_count += 1;
-
+                    
                             // 从 user_message_map 获取该用户的所有消息
                             if let Some(messages) = user_message_map.get(user_id) {
                                 for (message_id, _) in messages {
@@ -572,7 +572,7 @@ impl PushDomainService {
                         _ => {
                             // 推送失败
                             fail_count += 1;
-
+                    
                             // 更新该用户所有消息状态为失败
                             if let Some(messages) = user_message_map.get(user_id) {
                                 for (message_id, _) in messages {
@@ -584,7 +584,7 @@ impl PushDomainService {
                                             Some(result.error_message.clone()),
                                         )
                                         .await;
-
+                    
                                     // 检查消息类型，决定是否创建离线任务
                                     if let Some(tasks) = user_groups.get(user_id) {
                                         if let Some(task) =
