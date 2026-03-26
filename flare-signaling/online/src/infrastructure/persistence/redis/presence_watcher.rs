@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::config::OnlineConfig;
@@ -94,7 +93,6 @@ impl RedisPresenceWatcher {
     }
 }
 
-#[async_trait]
 impl PresenceWatcher for RedisPresenceWatcher {
     async fn watch_presence(
         &self,

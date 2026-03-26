@@ -11,7 +11,7 @@ use flare_im_core::{
     DeliveryEvent, DeliveryHook, MessageDraft, MessageRecord, PostSendHook,
     PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::{Context, Ctx};
 
 /// Local Plugin适配器
 pub struct LocalHookAdapter {
@@ -64,7 +64,9 @@ impl LocalHookAdapter {
             .get(target)
             .ok_or_else(|| anyhow::anyhow!("Local PreSend hook not found: {}", target))?;
 
-        Ok(hook.handle(ctx, draft).await)
+        // 将 &Context 包装为 &Ctx (&Arc<Context>)
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
+        Ok(hook.handle(&ctx_arc, draft).await)
     }
 
     /// 执行PostSend Hook
@@ -80,7 +82,8 @@ impl LocalHookAdapter {
             .get(target)
             .ok_or_else(|| anyhow::anyhow!("Local PostSend hook not found: {}", target))?;
 
-        let outcome = hook.handle(ctx, record, draft).await;
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
+        let outcome = hook.handle(&ctx_arc, record, draft).await;
         if outcome.is_completed() {
             Ok(())
         } else {
@@ -100,7 +103,8 @@ impl LocalHookAdapter {
             .get(target)
             .ok_or_else(|| anyhow::anyhow!("Local Delivery hook not found: {}", target))?;
 
-        let outcome = hook.handle(ctx, event).await;
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
+        let outcome = hook.handle(&ctx_arc, event).await;
         if outcome.is_completed() {
             Ok(())
         } else {
@@ -120,7 +124,8 @@ impl LocalHookAdapter {
             .get(target)
             .ok_or_else(|| anyhow::anyhow!("Local Recall hook not found: {}", target))?;
 
-        let outcome = hook.handle(ctx, event).await;
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
+        let outcome = hook.handle(&ctx_arc, event).await;
         if outcome.is_completed() {
             Ok(PreSendDecision::Continue)
         } else {

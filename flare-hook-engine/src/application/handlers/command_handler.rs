@@ -11,7 +11,7 @@ use crate::domain::service::HookOrchestrationService;
 use flare_im_core::{
     DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::{Context, Ctx};
 
 /// Hook命令处理器（编排层）
 pub struct HookCommandHandler {
@@ -32,8 +32,9 @@ impl HookCommandHandler {
         draft: &mut MessageDraft,
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<PreSendDecision> {
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
         self.orchestration_service
-            .execute_pre_send(ctx, draft, hooks)
+            .execute_pre_send(&ctx_arc, draft, hooks)
             .await
     }
 
@@ -45,8 +46,9 @@ impl HookCommandHandler {
         draft: &MessageDraft,
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<()> {
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
         self.orchestration_service
-            .execute_post_send(ctx, record, draft, hooks)
+            .execute_post_send(&ctx_arc, record, draft, hooks)
             .await
     }
 
@@ -57,8 +59,9 @@ impl HookCommandHandler {
         event: &DeliveryEvent,
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<()> {
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
         self.orchestration_service
-            .execute_delivery(ctx, event, hooks)
+            .execute_delivery(&ctx_arc, event, hooks)
             .await
     }
 
@@ -69,8 +72,9 @@ impl HookCommandHandler {
         event: &RecallEvent,
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<PreSendDecision> {
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
         self.orchestration_service
-            .execute_recall(ctx, event, hooks)
+            .execute_recall(&ctx_arc, event, hooks)
             .await
     }
 }

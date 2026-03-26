@@ -5,9 +5,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use chrono::{DateTime, Utc};
-use flare_im_core::utils::datetime_to_timestamp;
-use flare_proto::common::Message;
+use flare_im_core::utils::{datetime_to_timestamp, timestamp_to_datetime};
+use flare_im_core::message::Message;
+use prost::Message as ProstMessage;
+use prost_types;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 
@@ -23,14 +26,27 @@ pub struct PostgresBaseStorage {
 }
 
 impl PostgresBaseStorage {
+    /// 从已创建好的连接池和缓存构建存储实例（供 wire 使用，便于在 wire 中统一配置如 SQL 日志）
+    pub async fn from_pool_and_cache(
+        pool: Pool<Postgres>,
+        cache: Option<std::sync::Arc<RedisMessageCache>>,
+    ) -> Result<Self> {
+        let storage = Self { pool, cache };
+        storage
+            .verify_schema()
+            .await
+            .context("Failed to verify PostgreSQL schema")?;
+        Ok(storage)
+    }
+
     /// 创建新的 PostgreSQL 存储实例（带可选的 Redis 缓存）
+    /// 注意：生产环境建议在 wire 中创建 pool 并调用 from_pool_and_cache，以便统一配置 SQL 日志等
     pub async fn new(config: &StorageReaderConfig) -> Result<Option<Self>> {
         let url = match &config.postgres_url {
             Some(url) => url,
             None => return Ok(None),
         };
 
-        // 使用配置的连接池参数
         let pool = PgPoolOptions::new()
             .max_connections(config.postgres_max_connections)
             .min_connections(config.postgres_min_connections)
@@ -43,12 +59,11 @@ impl PostgresBaseStorage {
             .max_lifetime(Some(std::time::Duration::from_secs(
                 config.postgres_max_lifetime_seconds,
             )))
-            .test_before_acquire(true) // 连接池健康检查
+            .test_before_acquire(true)
             .connect(url)
             .await
             .context("Failed to connect to PostgreSQL")?;
 
-        // 初始化 Redis 缓存（可选）
         let cache = if let Some(redis_url) = &config.redis_url {
             let client =
                 redis::Client::open(redis_url.as_str()).context("Failed to create Redis client")?;
@@ -57,15 +72,9 @@ impl PostgresBaseStorage {
             None
         };
 
-        let storage = Self { pool, cache };
-
-        // 验证表结构（不创建，由 Writer 或 init.sql 创建）
-        storage
-            .verify_schema()
+        Self::from_pool_and_cache(pool, cache)
             .await
-            .context("Failed to verify PostgreSQL schema")?;
-
-        Ok(Some(storage))
+            .map(Some)
     }
 
     /// 验证表结构是否存在，并创建必要的索引（如果不存在）
@@ -206,190 +215,16 @@ impl PostgresBaseStorage {
         Ok(())
     }
 
-    /// 确保必要的索引存在（用于优化查询性能）
-    /// 注意：索引定义与 init.sql 保持一致
+    /// 确保必要索引存在（与 init_v2.sql 一致；init_v2 已建主键与唯一索引，此处仅补可选索引）
     pub async fn ensure_indexes(&self) -> Result<()> {
-        let indexes = vec![
-            // messages 表索引
-            (
-                "idx_messages_server_id_unique",
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_server_id_unique ON messages(server_id)",
-            ),
-            (
-                "idx_messages_conversation_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)",
-            ),
-            (
-                "idx_messages_sender_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id)",
-            ),
-            (
-                "idx_messages_conversation_timestamp",
-                "CREATE INDEX IF NOT EXISTS idx_messages_conversation_timestamp ON messages(conversation_id, timestamp DESC)",
-            ),
-            (
-                "idx_messages_client_msg_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id ON messages(client_msg_id) WHERE client_msg_id IS NOT NULL",
-            ),
-            (
-                "idx_messages_sender_client_msg_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_sender_client_msg_id ON messages(sender_id, client_msg_id) WHERE client_msg_id IS NOT NULL",
-            ),
-            (
-                "idx_messages_business_type",
-                "CREATE INDEX IF NOT EXISTS idx_messages_business_type ON messages(business_type) WHERE business_type IS NOT NULL",
-            ),
-            (
-                "idx_messages_message_type",
-                "CREATE INDEX IF NOT EXISTS idx_messages_message_type ON messages(message_type)",
-            ),
-            (
-                "idx_messages_fsm_state",
-                "CREATE INDEX IF NOT EXISTS idx_messages_fsm_state ON messages(status)",
-            ),
-            (
-                "idx_messages_fsm_state_changed_at",
-                "CREATE INDEX IF NOT EXISTS idx_messages_fsm_state_changed_at ON messages(fsm_state_changed_at) WHERE fsm_state_changed_at IS NOT NULL",
-            ),
-            (
-                "idx_messages_current_edit_version",
-                "CREATE INDEX IF NOT EXISTS idx_messages_current_edit_version ON messages(current_edit_version) WHERE current_edit_version > 0",
-            ),
-            (
-                "idx_messages_last_edited_at",
-                "CREATE INDEX IF NOT EXISTS idx_messages_last_edited_at ON messages(last_edited_at) WHERE last_edited_at IS NOT NULL",
-            ),
-            (
-                "idx_messages_conversation_seq",
-                "CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq ON messages(conversation_id, seq) WHERE seq IS NOT NULL",
-            ),
-            (
-                "idx_messages_seq",
-                "CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq) WHERE seq IS NOT NULL",
-            ),
-            (
-                "idx_messages_expire_at",
-                "CREATE INDEX IF NOT EXISTS idx_messages_expire_at ON messages(expire_at) WHERE expire_at IS NOT NULL",
-            ),
-            (
-                "idx_messages_source",
-                "CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source)",
-            ),
-            (
-                "idx_messages_tenant_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_tenant_id ON messages(tenant_id) WHERE tenant_id IS NOT NULL",
-            ),
-            // message_operation_history 表索引
-            (
-                "idx_message_operation_history_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_message_id ON message_operation_history(message_id)",
-            ),
-            (
-                "idx_message_operation_history_operation_type",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_operation_type ON message_operation_history(operation_type)",
-            ),
-            (
-                "idx_message_operation_history_operator_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_operator_id ON message_operation_history(operator_id)",
-            ),
-            (
-                "idx_message_operation_history_timestamp",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_timestamp ON message_operation_history(timestamp DESC)",
-            ),
-            // message_edit_history 表索引
-            (
-                "idx_message_edit_history_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_message_id ON message_edit_history(message_id)",
-            ),
-            (
-                "idx_message_edit_history_editor_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_editor_id ON message_edit_history(editor_id)",
-            ),
-            (
-                "idx_message_edit_history_edited_at",
-                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_edited_at ON message_edit_history(edited_at DESC)",
-            ),
-            // message_read_records 表索引
-            (
-                "idx_message_read_records_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_read_records_message_id ON message_read_records(message_id)",
-            ),
-            (
-                "idx_message_read_records_user_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_read_records_user_id ON message_read_records(user_id)",
-            ),
-            (
-                "idx_message_read_records_read_at",
-                "CREATE INDEX IF NOT EXISTS idx_message_read_records_read_at ON message_read_records(read_at DESC)",
-            ),
-            // message_visibility 表索引
-            (
-                "idx_message_visibility_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_visibility_message_id ON message_visibility(message_id)",
-            ),
-            (
-                "idx_message_visibility_user_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_visibility_user_id ON message_visibility(user_id)",
-            ),
-            (
-                "idx_message_visibility_status",
-                "CREATE INDEX IF NOT EXISTS idx_message_visibility_status ON message_visibility(visibility_status)",
-            ),
-            // message_reactions 表索引
-            (
-                "idx_message_reactions_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_reactions_message_id ON message_reactions(message_id)",
-            ),
-            (
-                "idx_message_reactions_emoji",
-                "CREATE INDEX IF NOT EXISTS idx_message_reactions_emoji ON message_reactions(emoji)",
-            ),
-            // pinned_messages 表索引
-            (
-                "idx_pinned_messages_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_message_id ON pinned_messages(message_id)",
-            ),
-            (
-                "idx_pinned_messages_conversation_id",
-                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_conversation_id ON pinned_messages(conversation_id)",
-            ),
-            (
-                "idx_pinned_messages_pinned_at",
-                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_pinned_at ON pinned_messages(pinned_at DESC)",
-            ),
-            // 多租户优化索引
-            (
-                "idx_messages_tenant_conversation_id",
-                "CREATE INDEX IF NOT EXISTS idx_messages_tenant_conversation_id ON messages(tenant_id, conversation_id)",
-            ),
-            (
-                "idx_messages_tenant_timestamp",
-                "CREATE INDEX IF NOT EXISTS idx_messages_tenant_timestamp ON messages(tenant_id, timestamp DESC)",
-            ),
-            (
-                "idx_message_operation_history_tenant_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message_id ON message_operation_history(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_edit_history_tenant_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message_id ON message_edit_history(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_read_records_tenant_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message_id ON message_read_records(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_visibility_tenant_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_message_id ON message_visibility(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_reactions_tenant_message_id",
-                "CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message_id ON message_reactions(tenant_id, message_id)",
-            ),
-            (
-                "idx_pinned_messages_tenant_conversation_id",
-                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation_id ON pinned_messages(tenant_id, conversation_id)",
-            ),
+        let indexes: &[(&str, &str)] = &[
+            ("idx_message_operation_history_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id)"),
+            ("idx_message_edit_history_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message ON message_edit_history(tenant_id, message_id)"),
+            ("idx_message_read_records_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message ON message_read_records(tenant_id, message_id)"),
+            ("idx_message_visibility_tenant_user", "CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id)"),
+            ("idx_message_reactions_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id)"),
+            ("idx_pinned_messages_tenant_conversation", "CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id)"),
+            ("idx_marked_messages_tenant_user", "CREATE INDEX IF NOT EXISTS idx_marked_messages_tenant_user ON marked_messages(tenant_id, user_id)"),
         ];
 
         for (name, sql) in indexes {
@@ -424,30 +259,26 @@ impl PostgresBaseStorage {
         Ok(())
     }
 
-    /// 从数据库行转换为 Message protobuf
+    /// 从 init_v2 messages 行转换为 common/message.proto Message
     pub fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<Message> {
         let server_id: String = row.get("server_id");
         let conversation_id: String = row.get("conversation_id");
         let client_msg_id: Option<String> = row.get("client_msg_id");
         let sender_id: String = row.get("sender_id");
-        let content: Option<Vec<u8>> = row.get("content");
+        let sender_name: Option<String> = row.get("sender_name");
+        let sender_avatar: Option<String> = row.get("sender_avatar");
+        let channel_id: Option<String> = row.get("channel_id");
+        let source: i32 = row.get("source");
+        let seq: i64 = row.get("seq");
         let timestamp: DateTime<Utc> = row.get("timestamp");
+        let conversation_type: i32 = row.get("conversation_type");
+        let message_type: i32 = row.get("message_type");
+        let content: Option<Vec<u8>> = row.get("content");
+        let status: i32 = row.get("status");
+        let offline_push_info: Option<Value> = row.get("offline_push_info");
         let extra: Option<Value> = row.get("extra");
-        let _created_at: Option<DateTime<Utc>> = row.get("created_at");
-        let message_type: Option<String> = row.get("message_type");
-        let content_type: Option<String> = row.get("content_type");
-        let business_type: String = row.get("business_type");
-        let status: String = row.get("status");
-        let fsm_state_changed_at: Option<DateTime<Utc>> = row.get("fsm_state_changed_at");
-        let is_burn_after_read: bool = row.get("is_burn_after_read");
-        let burn_after_seconds: i32 = row.get("burn_after_seconds");
-        let _seq: Option<i64> = row.get("seq");
-        let _updated_at: Option<DateTime<Utc>> = row.get("updated_at");
-        let _tenant_id: String = row.get("tenant_id");
+        let extensions: Option<Value> = row.get("extensions");
 
-        let content_proto = content.and_then(|bytes| flare_proto::decode_message_content(&bytes[..]).ok());
-
-        // 解析 extra JSONB
         let mut extra_map = HashMap::new();
         if let Some(extra_value) = extra {
             if let Ok(extra_obj) = from_value::<HashMap<String, Value>>(extra_value) {
@@ -457,63 +288,50 @@ impl PostgresBaseStorage {
             }
         }
 
-        // 使用 helpers 模块中的函数解析 extra 字段
-        let source = parse_message_source_from_extra(&extra_map);
-        let tags = parse_tags_from_extra(&extra_map);
-        let attributes = parse_attributes_from_extra(&extra_map);
+        let offline_push_proto = offline_push_info.as_ref().and_then(|v| {
+            let o = v.as_object()?;
+            Some(flare_proto::common::OfflinePushInfo {
+                title: o.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                body: o.get("body").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                sound: o.get("sound").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                badge: o.get("badge").and_then(|b| b.as_bool()).unwrap_or(false),
+                payload: o.get("payload").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                ..Default::default()
+            })
+        });
 
-        // Visibility, ReadBy, Operations now stored in separate tables
-        let visibility_map = HashMap::new();
-        let read_by_vec = Vec::new();
+        let extensions_map: std::collections::HashMap<String, Vec<u8>> = extensions
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| {
+                        let s = v.as_str()?;
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).ok()
+                            .map(|bytes| (k.clone(), bytes))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // 使用 helpers 模块中的函数转换枚举类型
-        let message_type_enum = string_to_message_type(message_type.as_deref());
-        let content_type_enum = string_to_content_type(content_type.as_deref());
-        // 与 init.sql Message FSM 一致：INIT, SENT, EDITED, RECALLED, DELETED_HARD（大小写不敏感）
-        let status_enum = match status.to_uppercase().as_str() {
-            "INIT" | "CREATED" => flare_proto::common::MessageStatus::Created as i32,
-            "SENT" => flare_proto::common::MessageStatus::Sent as i32,
-            "EDITED" => flare_proto::common::MessageStatus::Sent as i32, // 编辑后仍对客户端表现为可读
-            "DELIVERED" => flare_proto::common::MessageStatus::Delivered as i32,
-            "READ" => flare_proto::common::MessageStatus::Read as i32,
-            "FAILED" => flare_proto::common::MessageStatus::Failed as i32,
-            "RECALLED" => flare_proto::common::MessageStatus::Recalled as i32,
-            "DELETED_HARD" => flare_proto::common::MessageStatus::Failed as i32, // 硬删除对客户端不可见
-            _ => flare_proto::common::MessageStatus::Unspecified as i32,
-        };
-
-        let is_recalled = status_enum == flare_proto::common::MessageStatus::Recalled as i32;
-        let recalled_at = if is_recalled {
-            fsm_state_changed_at.map(|dt| datetime_to_timestamp(dt))
-        } else {
-            None
-        };
-
-        // 构建 Message
         Ok(Message {
             server_id,
             conversation_id,
             client_msg_id: client_msg_id.unwrap_or_default(),
             sender_id,
-            receiver_id: String::new(), // 从数据库读取：receiver_id 可能为空（旧数据）
-            channel_id: String::new(),  // 从数据库读取：channel_id 可能为空（旧数据）
-            content: content_proto,
-            timestamp: Some(datetime_to_timestamp(timestamp)),
-            extra: extra_map,
+            sender_name: sender_name.unwrap_or_default(),
+            sender_avatar: sender_avatar.unwrap_or_default(),
             source,
-            message_type: message_type_enum,
-            content_type: content_type_enum,
-            business_type,
-            status: status_enum,
-            is_recalled,
-            recalled_at,
-            is_burn_after_read,
-            burn_after_seconds,
-            visibility: visibility_map,
-            read_by: read_by_vec,
-            tags,
-            attributes,
-            ..Default::default()
+            seq: seq as u64,
+            timestamp: Some(datetime_to_timestamp(timestamp)),
+            conversation_type,
+            message_type,
+            channel_id: channel_id.unwrap_or_default(),
+            content: content.unwrap_or_default(),
+            status,
+            offline_push_info: offline_push_proto,
+            extra: extra_map,
+            extensions: extensions_map,
         })
     }
 }

@@ -1,6 +1,7 @@
 //! 服务发现模块
 //!
-//! 从配置文件中自动读取服务发现配置，构建服务注册和发现实例
+//! `flare_server_core::discovery` 提供类型与后端；[init] 提供基于 `FlareAppConfig` 的启动封装（仅在本 crate）。
+//! [grpc_connect] 提供通用 gRPC Channel / [`crate::gateway::GatewayRouter`] 构建，供 push-worker 等复用。
 //!
 //! ## 使用方式
 //!
@@ -17,6 +18,7 @@
 //! }
 //! ```
 
+pub mod grpc_connect;
 pub mod init;
 
 // 统一服务发现模块已移动到 flare-server-core
@@ -26,6 +28,10 @@ pub use flare_server_core::discovery::{
     HealthCheckConfig, InstanceMetadata, LoadBalanceStrategy, NamespaceConfig, ServiceClient,
     ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance, ServiceRegistry, TagFilter,
     VersionConfig,
+};
+
+pub use grpc_connect::{
+    build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,
 };
 
 // Re-exports

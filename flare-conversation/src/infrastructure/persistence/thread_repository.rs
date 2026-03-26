@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{PgPool, Row};
 use tracing::instrument;
 
 use crate::domain::model::{Thread, ThreadSortOrder};
 use crate::domain::repository::ThreadRepository;
-use async_trait::async_trait;
 
 /// PostgreSQL Thread Repository实现
 pub struct PostgresThreadRepository {

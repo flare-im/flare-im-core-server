@@ -14,7 +14,7 @@ use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord,
     PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::Ctx;
 
 #[derive(Clone)]
 pub struct WebhookHookFactory {
@@ -193,9 +193,9 @@ fn build_headers(
     builder
 }
 
-fn webhook_context(ctx: &Context) -> WebhookContextPayload {
+fn webhook_context(ctx: &Ctx) -> WebhookContextPayload {
     use crate::hooks::hook_context_data::get_hook_context_data;
-    
+
     let hook_data = get_hook_context_data(ctx).cloned().unwrap_or_default();
     let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
     let trace_id = {
@@ -206,7 +206,7 @@ fn webhook_context(ctx: &Context) -> WebhookContextPayload {
             Some(trace_id.to_string())
         }
     };
-    
+
     WebhookContextPayload {
         tenant_id,
         conversation_id: hook_data.conversation_id,
@@ -230,7 +230,7 @@ struct WebhookPreSendHook {
 
 #[async_trait]
 impl PreSendHook for WebhookPreSendHook {
-    async fn handle(&self, ctx: &Context, draft: &mut MessageDraft) -> PreSendDecision {
+    async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
         let request_body = PreSendWebhookRequest {
             context: webhook_context(ctx),
             draft: WebhookDraftPayload::from(&*draft),
@@ -245,25 +245,23 @@ impl PreSendHook for WebhookPreSendHook {
             Ok(resp) => match resp.json::<PreSendWebhookResponse>().await {
                 Ok(payload) => {
                     if payload.allow {
-                        if let Some(draft_payload) = payload.draft {
-                            if let Err(err) = draft_payload.apply_to(draft) {
-                                return PreSendDecision::Reject { error: err };
-                            }
+                        if let Some(draft_payload) = payload.draft
+                            && let Err(err) = draft_payload.apply_to(draft)
+                        {
+                            return PreSendDecision::Reject { error: err };
                         }
                         PreSendDecision::Continue
                     } else {
                         let err = payload
                             .status
-                            .and_then(|status| {
+                            .map(|status| {
                                 let code = status.code.unwrap_or_else(|| "BusinessRejected".into());
                                 let message = status
                                     .message
                                     .unwrap_or_else(|| "rejected by webhook".into());
-                                Some(
-                                    ErrorBuilder::new(ErrorCode::OperationFailed, &message)
-                                        .details(code)
-                                        .build_error(),
-                                )
+                                ErrorBuilder::new(ErrorCode::OperationFailed, &message)
+                                    .details(code)
+                                    .build_error()
                             })
                             .unwrap_or_else(|| {
                                 ErrorBuilder::new(
@@ -314,7 +312,7 @@ struct WebhookPostSendHook {
 impl PostSendHook for WebhookPostSendHook {
     async fn handle(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> HookOutcome {
@@ -365,7 +363,7 @@ struct WebhookDeliveryHook {
 
 #[async_trait]
 impl DeliveryHook for WebhookDeliveryHook {
-    async fn handle(&self, ctx: &Context, event: &DeliveryEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome {
         let request_body = DeliveryWebhookRequest {
             context: webhook_context(ctx),
             event: event.clone(),
@@ -411,7 +409,7 @@ struct WebhookRecallHook {
 
 #[async_trait]
 impl RecallHook for WebhookRecallHook {
-    async fn handle(&self, ctx: &Context, event: &RecallEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
         let request_body = RecallWebhookRequest {
             context: webhook_context(ctx),
             event: event.clone(),

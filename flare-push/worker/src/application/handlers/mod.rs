@@ -1,7 +1,5 @@
-//! CQRS Handler（编排层）
+//! 应用层编排：Online 设备解析 + 按网关分组直推 Access Gateway。
 
-pub mod command_handler;
-pub mod query_handler;
+mod online_gateway_delivery;
 
-pub use command_handler::PushCommandHandler;
-pub use query_handler::PushQueryHandler;
+pub use online_gateway_delivery::GatewayPushExecutor;

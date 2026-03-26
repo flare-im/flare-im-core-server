@@ -13,17 +13,15 @@ use tracing::instrument;
 
 use crate::application::queries::GetOnlineStatusQuery;
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::repository::ConversationRepository;
-
 /// 在线状态查询处理器（查询侧）
 ///
 /// 直接调用基础设施层的仓储实现，不经过领域服务
-pub struct OnlineQueryHandler {
-    repository: Arc<dyn ConversationRepository + Send + Sync>,
+pub struct OnlineQueryHandler<R: crate::domain::repository::ConversationRepository + Send + Sync> {
+    repository: Arc<R>,
 }
 
-impl OnlineQueryHandler {
-    pub fn new(repository: Arc<dyn ConversationRepository + Send + Sync>) -> Self {
+impl<R: crate::domain::repository::ConversationRepository + Send + Sync> OnlineQueryHandler<R> {
+    pub fn new(repository: Arc<R>) -> Self {
         Self { repository }
     }
 

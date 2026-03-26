@@ -254,14 +254,11 @@ impl RedisAckManager {
 
             let values: Vec<Option<String>> = pipe.query_async(&mut conn).await?;
 
-            for value in values {
-                if let Some(data) = value {
-                    match serde_json::from_str::<AckStatusInfo>(&data) {
-                        Ok(ack_info) => ack_infos.push(ack_info),
-                        Err(e) => {
-                            // 解析失败，记录错误但继续处理其他 keys
-                            tracing::warn!(error = %e, "Failed to deserialize ACK status from Redis");
-                        }
+            for data in values.into_iter().flatten() {
+                match serde_json::from_str::<AckStatusInfo>(&data) {
+                    Ok(ack_info) => ack_infos.push(ack_info),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to deserialize ACK status from Redis");
                     }
                 }
             }
@@ -283,14 +280,10 @@ impl RedisAckManager {
         let mut used_memory_peak = 0u64;
 
         for line in info.lines() {
-            if line.starts_with("used_memory:") {
-                if let Some(value) = line.split(':').nth(1) {
-                    used_memory = value.parse().unwrap_or(0);
-                }
-            } else if line.starts_with("used_memory_peak:") {
-                if let Some(value) = line.split(':').nth(1) {
-                    used_memory_peak = value.parse().unwrap_or(0);
-                }
+            if line.starts_with("used_memory:") && let Some(value) = line.split(':').nth(1) {
+                used_memory = value.parse().unwrap_or(0);
+            } else if line.starts_with("used_memory_peak:") && let Some(value) = line.split(':').nth(1) {
+                used_memory_peak = value.parse().unwrap_or(0);
             }
         }
 

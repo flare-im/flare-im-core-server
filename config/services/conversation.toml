@@ -3,13 +3,16 @@
 # 配置说明：
 # - Redis 配置通过 redis 字段引用 base.toml 中的 redis.conversation_store
 # - PostgreSQL 配置通过 postgres 字段引用 base.toml 中的 postgres.media（如果存在）
-# - Kafka 配置通过 kafka 字段引用 base.toml 中的 kafka.message（如果存在）
-# - 所有基础设施配置都在 base.toml 中定义，services 只引用名称
+# - 配置 kafka 后启用 ReadReceipt 消费者（未读数零成本），引用 base.toml 中 [kafka.message]
 
 [services.conversation]
 
-# Redis 配置：引用 base.toml 中的 redis.conversation_store
 redis = "conversation_store"
+
+# 事件总线：配置后消费 operation topic 中的 ReadReceipt，更新未读数（与 Storage Writer 同 topic、不同 group）
+kafka = "message"
+kafka_operation_topic = "flare.im.message.events"
+kafka_group = "conversation-read-receipt"
 
 # PostgreSQL 配置（可选，用于会话元数据存储）：引用 base.toml 中的 postgres.media
 # 如果未配置，将只使用 Redis（仅支持状态和光标操作）

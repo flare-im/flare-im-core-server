@@ -1,18 +1,33 @@
 //! 工具函数模块
 //!
-//! 提供时间戳转换、时间线提取、seq 操作、未读数计算等通用工具函数
+//! 提供错误类型与映射、时间戳转换、时间线提取、seq 操作、未读数计算、字符串/上下文等通用工具。
 
-pub mod context;
+pub mod error;
 pub mod helpers;
+
+/// 非空会话 ID 作为 resolve 的 fallback（trim 后非空返回 `Some`），供无 StorageReader 时解析使用。
+#[inline]
+pub fn optional_fallback_conversation(conversation_id: &str) -> Option<&str> {
+    let s = conversation_id.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
 
 pub use helpers::ServiceHelper;
 
-// 重新导出 context 工具函数
-pub use context::{
-    require_context, extract_context_opt,
-    require_tenant_id_from_context, require_user_id_from_context,
-    extract_session_id_from_context, require_request_id_from_context,
-    require_tenant_id, require_user_id, extract_session_id, require_request_id,
+// 重新导出 flare-server-core 的 context 工具函数
+pub use flare_server_core::utils::{
+    require_ctx_from_request as require_context,
+    extract_ctx_from_request_opt as extract_context_opt,
+    require_tenant_id_from_ctx as require_tenant_id_from_context,
+    require_user_id_from_ctx as require_user_id_from_context,
+    extract_session_id_from_ctx as extract_session_id_from_context,
+    require_request_id_from_ctx as require_request_id_from_context,
+    ctx_to_map as context_to_mq_metadata,
+    map_to_ctx as context_from_mq_metadata,
 };
 
 #[cfg(test)]
@@ -131,31 +146,26 @@ pub fn extract_timeline_from_extra(
     };
 
     TimelineMetadata {
-        emit_ts: map.get("emit_ts").and_then(parse_i64),
+        emit_ts: map.get("emit_ts").and_then(|v| parse_i64(v.as_str())),
         ingestion_ts: map
             .get("ingestion_ts")
-            .and_then(parse_i64)
+            .and_then(|v| parse_i64(v.as_str()))
             .unwrap_or(default_ingestion_ts),
-        persisted_ts: map.get("persisted_ts").and_then(parse_i64),
-        dispatched_ts: map.get("dispatched_ts").and_then(parse_i64),
-        acked_ts: map.get("acked_ts").and_then(parse_i64),
-        read_ts: map.get("read_ts").and_then(parse_i64),
-        deleted_ts: map.get("deleted_ts").and_then(parse_i64),
+        persisted_ts: map.get("persisted_ts").and_then(|v| parse_i64(v.as_str())),
+        dispatched_ts: map.get("dispatched_ts").and_then(|v| parse_i64(v.as_str())),
+        acked_ts: map.get("acked_ts").and_then(|v| parse_i64(v.as_str())),
+        read_ts: map.get("read_ts").and_then(|v| parse_i64(v.as_str())),
+        deleted_ts: map.get("deleted_ts").and_then(|v| parse_i64(v.as_str())),
     }
 }
 
-/// 将时间线元数据嵌入到消息的 extra 字段中
-///
-/// # 参数
-/// * `message` - 消息对象（可变引用）
-/// * `timeline` - 时间线元数据
-pub fn embed_timeline_in_extra(
-    message: &mut flare_proto::common::Message,
+/// 将时间线元数据嵌入到 `extra` Map 中（与具体消息类型解耦，domain 层可用）
+pub fn embed_timeline_in_extra_map(
+    extra: &mut HashMap<String, String>,
     timeline: &TimelineMetadata,
 ) {
     let mut timeline_map = HashMap::new();
 
-    // 使用 guard clause 减少嵌套
     if let Some(value) = timeline.emit_ts {
         timeline_map.insert("emit_ts".to_string(), value.to_string());
     }
@@ -186,7 +196,15 @@ pub fn embed_timeline_in_extra(
     }
 
     let json = serde_json::to_string(&timeline_map).unwrap_or_default();
-    message.extra.insert("timeline".to_string(), json);
+    extra.insert("timeline".to_string(), json);
+}
+
+/// 将时间线元数据嵌入到消息的 extra 字段中（proto Message）
+pub fn embed_timeline_in_extra(
+    message: &mut flare_proto::common::Message,
+    timeline: &TimelineMetadata,
+) {
+    embed_timeline_in_extra_map(&mut message.extra, timeline);
 }
 
 /// 解析 i64 字符串
@@ -196,7 +214,7 @@ pub fn embed_timeline_in_extra(
 ///
 /// # 返回
 /// * `Option<i64>` - 如果解析成功，返回 i64；否则返回 None
-fn parse_i64(value: &String) -> Option<i64> {
+fn parse_i64(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()
 }
 

@@ -26,6 +26,12 @@ pub struct ConversationBootstrapQuery {
     pub recent_limit: Option<i32>,
 }
 
+/// 单会话详情（读模型）
+#[derive(Debug, Clone)]
+pub struct GetConversationDetailQuery {
+    pub conversation_id: String,
+}
+
 /// 同步消息查询
 #[derive(Debug, Clone)]
 pub struct SyncMessagesQuery {

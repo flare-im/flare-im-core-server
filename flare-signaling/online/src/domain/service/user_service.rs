@@ -16,13 +16,13 @@ use tracing::{info, warn};
 use crate::domain::repository::ConversationRepository;
 use crate::util;
 
-/// 用户领域服务 - 包含所有业务逻辑
-pub struct UserService {
-    conversation_repository: Arc<dyn ConversationRepository + Send + Sync>,
+/// 用户领域服务 - 包含所有业务逻辑（泛型仓储，避免 `dyn` 异步 trait）
+pub struct UserService<R: ConversationRepository + Send + Sync> {
+    conversation_repository: Arc<R>,
 }
 
-impl UserService {
-    pub fn new(conversation_repository: Arc<dyn ConversationRepository + Send + Sync>) -> Self {
+impl<R: ConversationRepository + Send + Sync> UserService<R> {
+    pub fn new(conversation_repository: Arc<R>) -> Self {
         Self { conversation_repository }
     }
 
@@ -138,9 +138,16 @@ impl UserService {
         ctx: &flare_server_core::context::Context,
         request: ListUserDevicesRequest,
     ) -> Result<ListUserDevicesResponse> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        // Router / push-worker 等服务间调用会在 proto 中携带目标 user_id；上下文里的 user_id 常为调用方而非被查询用户。
+        let user_id = if !request.user_id.is_empty() {
+            request.user_id
+        } else {
+            ctx.user_id()
+                .ok_or_else(|| anyhow::anyhow!("user_id is required in ListUserDevicesRequest or context"))?
+                .to_string()
+        };
 
-        let user_id_vo = crate::domain::value_object::UserId::new(user_id.to_string())
+        let user_id_vo = crate::domain::value_object::UserId::new(user_id)
             .map_err(|e| anyhow::anyhow!(e))?;
         let sessions = self
             .conversation_repository

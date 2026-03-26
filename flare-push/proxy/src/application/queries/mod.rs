@@ -1,3 +1,5 @@
-//! 查询结构体定义（Query DTO）
+//! 查询侧：推送任务状态等。
 
-// Push Proxy 目前没有查询需求，保留此文件以备将来扩展
+mod push_task_status;
+
+pub use push_task_status::PushTaskStatusQuery;

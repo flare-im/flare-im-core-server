@@ -65,6 +65,7 @@ url = "redis://localhost:26379/4"
 namespace = "flare:message:wal"
 ttl_seconds = 86400
 
+# Kafka 事件总线：各服务通过 config/services/*.toml 引用 profile，Topic 见 flare_im_core::constants::topics
 [kafka.push]
 bootstrap_servers = "127.0.0.1:29092"
 client_id = "flare-im"
@@ -76,7 +77,7 @@ client_id = "flare-message-orchestrator"
 timeout_ms = 30000
 
 [postgres.media]
-url = "postgres://flare:flare123@localhost:25432/flare"
+url = "postgres://flare:flare123@localhost:25432/flare2"
 max_connections = 20
 
 [mongodb.primary]

@@ -43,7 +43,7 @@ graph TB
     subgraph "核心层"
         Route[flare-signaling/route<br/>路由中枢]
         Online[flare-signaling/online<br/>在线状态]
-        Orchestrator[flare-message-orchestrator<br/>消息编排]
+        Orchestrator[flare-orchestrator<br/>消息编排]
         HookEngine[flare-hook-engine<br/>Hook引擎]
     end
 
@@ -54,7 +54,6 @@ graph TB
     end
 
     subgraph "推送层"
-        PushProxy[flare-push/proxy<br/>推送入队]
         PushServer[flare-push/server<br/>推送调度]
         PushWorker[flare-push/worker<br/>推送执行]
     end
@@ -88,8 +87,6 @@ graph TB
     StorageWriter --> PostgreSQL
     StorageReader --> PostgreSQL
 
-    Orchestrator --> PushProxy
-    PushProxy --> Kafka
     Kafka --> PushServer
     PushServer --> PushWorker
 
@@ -113,12 +110,11 @@ graph TB
 | **flare-signaling/gateway** | 接入网关 | 无（WebSocket接入） | WebSocket/QUIC长连接、会话认证、消息转发 |
 | **flare-signaling/online** | 在线状态服务 | signaling.online.SignalingService | 用户登录登出、心跳维护、在线状态查询 |
 | **flare-signaling/route** | 路由决策服务 | signaling.router.RouterService | 推送策略、设备路由、智能调度 |
-| **flare-message-orchestrator** | 消息编排中心 | message.v1.MessageOrchestratorService | 消息预处理、事件发布、存储推送协调 |
 | **flare-hook-engine** | Hook引擎 | hooks.v1.HookExtensionService | Hook配置管理、执行调度、扩展支持 |
 | **flare-storage/writer** | 持久化消费者 | 无（Kafka消费者） | Kafka事件消费、数据库持久化、批量写入 |
 | **flare-storage/reader** | 存储查询服务 | storage.v1.StorageReaderService | 消息查询、撤回删除、历史回溯 |
 | **flare-conversation** | 会话同步服务 | conversation.v1.ConversationService | 会话元数据、用户光标、多端同步 |
-| **flare-push/proxy** | 推送代理 | push.v1.PushService | 推送请求接收、任务入队、前置校验 |
+| **flare-orchestrator** | 消息编排 | message.v1.MessageService | 消息编排、存储/推送入队（PushService 待实现） |
 | **flare-push/server** | 推送调度器 | push.v1.PushSchedulerService | 在线判断、任务生成、Worker分配 |
 | **flare-push/worker** | 推送执行器 | push.v1.PushWorkerService | 即时/离线推送、ACK上报、失败重试 |
 | **flare-media** | 媒资服务 | media.v1.MediaService | 文件上传、转码处理、元数据管理 |
@@ -170,7 +166,7 @@ flare-im-core/
 │   ├── online/                 # 在线状态服务
 │   ├── route/                  # 路由中枢
 │   └── common/                 # 公共模块
-├── flare-message-orchestrator/  # 消息编排中心
+├── flare-orchestrator/          # 消息编排中心（原 flare-message-orchestrator 已合并）
 ├── flare-hook-engine/          # Hook引擎
 ├── flare-storage/              # 存储子系统
 │   ├── writer/                # 持久化消费者
@@ -237,7 +233,7 @@ cargo run --bin flare-signaling-online
 cargo run --bin flare-signaling-route
 
 # 运行消息编排器
-cargo run --bin flare-message-orchestrator
+cargo run -p flare-orchestrator --bin flare-orchestrator
 ```
 
 ### 服务端口

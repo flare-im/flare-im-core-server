@@ -1,72 +1,64 @@
-//! 操作消息命令处理器 - 专门处理消息操作（撤回、编辑、删除等）
+//! 领域事件命令处理器：将 Event 应用到存储（撤回/编辑/删除/已读/反应/置顶/标记）
 
 use anyhow::Result;
 use flare_im_core::metrics::StorageWriterMetrics;
+use flare_server_core::context::Ctx;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
 
-use crate::application::commands::ProcessMessageOperationCommand;
+use crate::application::commands::ProcessEventCommand;
 use crate::domain::model::PersistenceResult;
-use crate::domain::service::MessageOperationDomainService;
+use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use crate::domain::service::event_handlers;
+use crate::domain::service::EventApplicationService;
+use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
+use crate::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
 
-/// 操作消息命令处理器
-///
-/// 专门处理消息操作命令（撤回、编辑、删除等）
+// 类型别名
+type ArchiveRepo = PostgresMessageStore;
+type EventStreamRepo = PostgresEventStreamStore;
+type EventApplicationServiceType = EventApplicationService<ArchiveRepo, EventStreamRepo>;
+
 pub struct MessageOperationCommandHandler {
-    operation_service: Arc<MessageOperationDomainService>,
+    event_service: Arc<EventApplicationServiceType>,
     metrics: Arc<StorageWriterMetrics>,
 }
 
 impl MessageOperationCommandHandler {
     pub fn new(
-        operation_service: Arc<MessageOperationDomainService>,
+        event_service: Arc<EventApplicationServiceType>,
         metrics: Arc<StorageWriterMetrics>,
     ) -> Self {
         Self {
-            operation_service,
+            event_service,
             metrics,
         }
     }
 
-    /// 处理消息操作命令（撤回、编辑、删除等）
-    #[instrument(skip(self), fields(operation_type = %command.operation.operation_type))]
-    pub async fn handle(
-        &self,
-        command: ProcessMessageOperationCommand,
-    ) -> Result<PersistenceResult> {
+    #[instrument(skip(self))]
+    pub async fn handle(&self, ctx: &Ctx, command: ProcessEventCommand) -> Result<PersistenceResult> {
         let start = Instant::now();
+        let event = command.event;
 
-        // 处理操作
-        self.operation_service
-            .process_operation(command.operation.clone(), &command.message)
-            .await?;
+        self.event_service.process_event(ctx, &event).await?;
 
-        // 构建结果（操作消息不创建新消息，返回操作的目标消息ID）
-        let result = PersistenceResult {
-            conversation_id: command.message.conversation_id.clone(),
-            message_id: command.operation.target_message_id.clone(),
-            timeline: Default::default(),
-            deduplicated: false,
-        };
+        let message_id = event_handlers::primary_message_id_for_metrics(&event);
 
-        // 记录指标
         let duration = start.elapsed();
         self.metrics
             .messages_persisted_duration_seconds
             .observe(duration.as_secs_f64());
         self.metrics
             .messages_persisted_total
-            .with_label_values(&["operation"])
+            .with_label_values(&["event"])
             .inc();
 
-        tracing::info!(
-            message_id = %result.message_id,
-            operation_type = %command.operation.operation_type,
-            duration_ms = duration.as_millis(),
-            "Message operation processed successfully"
-        );
-
-        Ok(result)
+        Ok(PersistenceResult {
+            conversation_id: event.conversation_id,
+            message_id,
+            timeline: Default::default(),
+            deduplicated: false,
+        })
     }
 }

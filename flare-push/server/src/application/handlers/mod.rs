@@ -1,7 +1,5 @@
-//! CQRS Handler（编排层）
+//! 应用层编排：消费 MQ 推送请求，查询在线并发布至 push-online / push-offline。
 
-pub mod command_handler;
-pub mod query_handler;
+mod push_router_handler;
 
-pub use command_handler::PushCommandHandler;
-pub use query_handler::PushQueryHandler;
+pub use push_router_handler::PushRouterHandler;

@@ -1,87 +1,48 @@
-//! 应用启动器 - 负责依赖注入和服务启动
-//!
-//! 注意：Push Server 是纯消费者，不提供 gRPC 服务
-//! ACK 通过 Push Proxy → Kafka → Push Server 的方式传递
-
 use anyhow::Result;
+use flare_server_core::kafka::KafkaMessageFetcher;
+use flare_server_core::mq::consumer::ConsumerRuntimeTask;
+use flare_server_core::runtime::ServiceRuntime;
 use tracing::info;
 
-use flare_server_core::runtime::ServiceRuntime;
+use crate::service::wire::{self, ApplicationContext};
+use flare_im_core::service_names::PUSH_SERVER;
 
-use super::wire;
-
-pub use wire::ApplicationContext;
-
-/// 应用启动器
 pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
-    /// 运行应用的主入口点
-    ///
-    /// 注意：Push Server 是纯消费者，不提供 gRPC 服务
-    /// ACK 通过 Push Proxy → Kafka → Push Server 的方式传递
     pub async fn run() -> Result<()> {
         use flare_im_core::load_config;
 
-        // 初始化 OpenTelemetry 追踪
-        #[cfg(feature = "tracing")]
-        {
-            let otlp_endpoint = std::env::var("OTLP_ENDPOINT").ok();
-            if let Err(e) =
-                flare_im_core::tracing::init_tracing("push-server", otlp_endpoint.as_deref())
-            {
-                tracing::error!(error = %e, "Failed to initialize OpenTelemetry tracing");
-            } else {
-                info!("✅ OpenTelemetry tracing initialized");
-            }
+        let app_config = load_config(Some("./config"));
+        let ctx = wire::initialize(app_config).await?;
+        Self::run_with_context(ctx).await
+    }
+
+    pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
+        info!("Starting Push Server (push-request -> push-online/push-offline) via ServiceRuntime...");
+
+        let topics = context.dispatcher.topics();
+        if topics.is_empty() {
+            anyhow::bail!("push-server: no Kafka topics registered on dispatcher");
         }
 
-        // 加载应用配置
-        let app_config = load_config(Some("./config"));
+        let fetcher = KafkaMessageFetcher::new_with_consumer_group(
+            context.config.as_ref(),
+            topics,
+            context.consumer_config.kafka_consumer_group_override.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("create kafka fetcher error: {}", e))?;
 
-        // 使用 Wire 风格的依赖注入构建应用上下文
-        let context = wire::initialize(app_config).await?;
+        let task = ConsumerRuntimeTask::from_parts(
+            context.consumer_config,
+            context.dispatcher.clone(),
+            fetcher,
+        );
 
-        info!("ApplicationBootstrap created successfully");
-
-        // 运行服务（纯消费者，只启动 Kafka 消费者）
-        Self::run_with_context(context).await
-    }
-
-    /// 运行服务（带应用上下文）
-    ///
-    /// 注意：Push Server 是纯消费者，不提供 gRPC 服务
-    /// 只启动 Kafka 消费者（推送消息消费者 + ACK 消费者）
-    pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        let consumer = context.consumer;
-        let ack_consumer = context.ack_consumer;
-
-        info!("Starting Push Server (Kafka consumers only, no gRPC service)...");
-
-        // 使用 ServiceRuntime 管理 Kafka 消费者（纯消费者模式，不需要地址）
-        let runtime = ServiceRuntime::new_consumer_only("push-server")
-            // 添加推送消息 Kafka 消费者任务
-            .add_consumer("kafka-consumer", async move {
-                info!("Starting Push Kafka consumer...");
-                consumer
-                    .run()
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("Push Kafka consumer error: {}", e).into()
-                    })
-            })
-            // 添加 ACK Kafka 消费者任务
-            .add_consumer("ack-kafka-consumer", async move {
-                info!("Starting ACK Kafka consumer...");
-                ack_consumer
-                    .run()
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("ACK Kafka consumer error: {}", e).into()
-                    })
-            });
-
-        // 运行服务（不带服务注册，因为这是纯消费者服务）
-        runtime.run().await
+        ServiceRuntime::new_consumer_only(PUSH_SERVER)
+            .add_mq_consumer_runtime("push-request-consumer", task)
+            .run()
+            .await
     }
 }
+

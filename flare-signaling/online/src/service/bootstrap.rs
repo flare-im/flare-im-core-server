@@ -6,6 +6,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use tracing::{error, info};
 
 use crate::service::wire::{self, ApplicationContext};
+use flare_im_core::service_names::SIGNALING_ONLINE;
 use flare_server_core::runtime::ServiceRuntime;
 
 /// 应用启动器
@@ -24,7 +25,7 @@ impl ApplicationBootstrap {
         let address: SocketAddr = ServiceHelper::parse_server_addr(
             app_config,
             &service_config.runtime,
-            "flare-signaling-online",
+            SIGNALING_ONLINE,
         )
         .with_context(|| "invalid signaling online server address")?;
         info!(address = %address, "Server address parsed successfully");
@@ -53,7 +54,7 @@ impl ApplicationBootstrap {
 
         // 使用 ServiceRuntime 管理服务生命周期
         let address_clone = address;
-        let runtime = ServiceRuntime::new("signaling-online", address)
+        let runtime = ServiceRuntime::new(SIGNALING_ONLINE, address)
             .add_spawn_with_shutdown("signaling-online-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
@@ -89,8 +90,6 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    // 注册服务（使用常量）
-                    use flare_im_core::service_names::SIGNALING_ONLINE;
                     match flare_im_core::discovery::register_service_only(
                         SIGNALING_ONLINE,
                         addr,

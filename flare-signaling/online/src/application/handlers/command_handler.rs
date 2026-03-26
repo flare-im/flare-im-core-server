@@ -3,26 +3,36 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::access_gateway::{PublishSignalResponse, SubscribeResponse, UnsubscribeResponse};
-use flare_proto::signaling::online::{HeartbeatResponse, LoginResponse, LogoutResponse};
+use flare_server_core::context::Context;
+use flare_proto::signaling::online::{HeartbeatResponse, LoginResponse, LogoutResponse, WatchPresenceRequest};
 use tracing::instrument;
 
 use crate::application::commands::{
-    HeartbeatCommand, LoginCommand, LogoutCommand, PublishSignalCommand, SubscribeCommand,
-    UnsubscribeCommand,
+    HeartbeatCommand, LoginCommand, LogoutCommand,
 };
-use crate::domain::service::{OnlineStatusDomainService, SubscriptionDomainService};
+use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
+use crate::domain::service::{OnlineStatusService, SubscriptionService};
 
 /// 在线状态命令处理器（编排层）
-pub struct OnlineCommandHandler {
-    online_domain_service: Arc<OnlineStatusDomainService>,
-    subscription_domain_service: Arc<SubscriptionDomainService>,
+pub struct OnlineCommandHandler<CR, SR, PP>
+where
+    CR: crate::domain::repository::ConversationRepository + Send + Sync,
+    SR: SubscriptionRepository + Send + Sync,
+    PP: PresencePublisher + Send + Sync,
+{
+    online_domain_service: Arc<OnlineStatusService<CR>>,
+    subscription_domain_service: Arc<SubscriptionService<SR, PP>>,
 }
 
-impl OnlineCommandHandler {
+impl<CR, SR, PP> OnlineCommandHandler<CR, SR, PP>
+where
+    CR: crate::domain::repository::ConversationRepository + Send + Sync,
+    SR: SubscriptionRepository + Send + Sync,
+    PP: PresencePublisher + Send + Sync,
+{
     pub fn new(
-        online_domain_service: Arc<OnlineStatusDomainService>,
-        subscription_domain_service: Arc<SubscriptionDomainService>,
+        online_domain_service: Arc<OnlineStatusService<CR>>,
+        subscription_domain_service: Arc<SubscriptionService<SR, PP>>,
     ) -> Self {
         Self {
             online_domain_service,
@@ -31,22 +41,23 @@ impl OnlineCommandHandler {
     }
 
     /// 处理登录命令
-    #[instrument(skip(self), fields(user_id = %command.request.user_id, device_id = %command.request.device_id))]
-    pub async fn handle_login(&self, command: LoginCommand) -> Result<LoginResponse> {
-        self.online_domain_service.login(command.request).await
+    #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, device_id = %command.request.device_id))]
+    pub async fn handle_login(&self, ctx: &Context, command: LoginCommand) -> Result<LoginResponse> {
+        self.online_domain_service.login(ctx, command.request).await
     }
 
     /// 处理登出命令
-    #[instrument(skip(self), fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id))]
-    pub async fn handle_logout(&self, command: LogoutCommand) -> Result<LogoutResponse> {
-        self.online_domain_service.logout(command.request).await
+    #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id))]
+    pub async fn handle_logout(&self, ctx: &Context, command: LogoutCommand) -> Result<LogoutResponse> {
+        self.online_domain_service.logout(ctx, command.request).await
     }
 
     /// 处理心跳命令
-    #[instrument(skip(self), fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id))]
-    pub async fn handle_heartbeat(&self, command: HeartbeatCommand) -> Result<HeartbeatResponse> {
+    #[instrument(skip(self, ctx), fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id))]
+    pub async fn handle_heartbeat(&self, ctx: &Context, command: HeartbeatCommand) -> Result<HeartbeatResponse> {
         self.online_domain_service
             .heartbeat(
+                ctx,
                 &command.request.conversation_id,
                 &command.request.user_id,
                 command.request.current_quality.as_ref(),
@@ -54,34 +65,25 @@ impl OnlineCommandHandler {
             .await
     }
 
-    /// 处理订阅命令
-    #[instrument(skip(self), fields(user_id = %command.request.user_id))]
-    pub async fn handle_subscribe(&self, command: SubscribeCommand) -> Result<SubscribeResponse> {
-        self.subscription_domain_service
-            .subscribe(command.request)
-            .await
-    }
-
-    /// 处理取消订阅命令
-    #[instrument(skip(self), fields(user_id = %command.request.user_id))]
-    pub async fn handle_unsubscribe(
+    /// 处理订阅用户状态命令
+    #[instrument(skip(self), fields(user_id = %user_id))]
+    pub async fn handle_subscribe_user_presence(
         &self,
-        ctx: &flare_server_core::context::Context,
-        command: UnsubscribeCommand,
-    ) -> Result<UnsubscribeResponse> {
+        user_id: String,
+    ) -> Result<Vec<flare_proto::signaling::online::UserPresenceEvent>> {
         self.subscription_domain_service
-            .unsubscribe(ctx, command.request)
+            .subscribe_user_presence(user_id)
             .await
     }
 
-    /// 处理发布信号命令
+    /// 处理订阅在线状态命令
     #[instrument(skip(self))]
-    pub async fn handle_publish_signal(
+    pub async fn handle_watch_presence(
         &self,
-        command: PublishSignalCommand,
-    ) -> Result<PublishSignalResponse> {
+        request: WatchPresenceRequest,
+    ) -> Result<Vec<flare_proto::signaling::online::PresenceEvent>> {
         self.subscription_domain_service
-            .publish_signal(command.request)
+            .watch_presence(request)
             .await
     }
 }

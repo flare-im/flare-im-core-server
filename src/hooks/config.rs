@@ -154,6 +154,12 @@ pub struct HookConfigLoader {
     candidate_paths: Vec<PathBuf>,
 }
 
+impl Default for HookConfigLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HookConfigLoader {
     pub fn new() -> Self {
         Self {
@@ -175,10 +181,8 @@ impl HookConfigLoader {
                 if let Ok(cfg) = self.load_from_directory(path) {
                     return Ok(cfg);
                 }
-            } else if path.is_file() {
-                if let Ok(cfg) = self.load_from_file(path) {
-                    return Ok(cfg);
-                }
+            } else if path.is_file() && let Ok(cfg) = self.load_from_file(path) {
+                return Ok(cfg);
             }
         }
         Ok(HookConfig::default())

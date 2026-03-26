@@ -12,7 +12,6 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::domain::model::MessageSyncResult;
 use crate::domain::repository::MessageProvider;
-use async_trait::async_trait;
 pub struct StorageReaderMessageProvider {
     service_name: String,
     service_client: Arc<Mutex<Option<ServiceClient>>>,
@@ -87,47 +86,13 @@ impl StorageReaderMessageProvider {
     }
 
     fn build_request(
-        ctx: &Context,
+        _ctx: &Context,
         conversation_id: &str,
         since_ts: i64,
         cursor: Option<&str>,
         limit: i32,
     ) -> QueryMessagesRequest {
-        // 从 Context 构建 protobuf RequestContext 和 TenantContext
-        let request_context: flare_proto::common::RequestContext = ctx.request()
-            .cloned()
-            .map(|req_ctx| req_ctx.into())
-            .unwrap_or_else(|| {
-                let request_id = if ctx.request_id().is_empty() {
-                    uuid::Uuid::new_v4().to_string()
-                } else {
-                    ctx.request_id().to_string()
-                };
-                flare_proto::common::RequestContext {
-                    request_id,
-                    trace: None,
-                    actor: None,
-                    device: None,
-                    channel: String::new(),
-                    user_agent: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }
-            });
-
-        let tenant_context: flare_proto::common::TenantContext = ctx.tenant()
-            .cloned()
-            .map(|t| t.into())
-            .or_else(|| {
-                ctx.tenant_id().map(|tenant_id| {
-                    let tenant: flare_server_core::context::TenantContext = 
-                        flare_server_core::context::TenantContext::new(tenant_id);
-                    tenant.into()
-                })
-            })
-            .unwrap_or_else(|| {
-                flare_proto::common::TenantContext::default()
-            });
-
+        // 请求体仅含查询参数；Context 通过 set_context_metadata 传递
         QueryMessagesRequest {
             conversation_id: conversation_id.to_string(),
             start_time: since_ts,
@@ -160,7 +125,6 @@ impl StorageReaderMessageProvider {
     }
 }
 
-#[async_trait]
 impl MessageProvider for StorageReaderMessageProvider {
     async fn sync_messages(
         &self,
@@ -310,41 +274,6 @@ impl MessageProvider for StorageReaderMessageProvider {
         limit: i32,
     ) -> Result<MessageSyncResult> {
         let mut client = self.client().await?;
-        
-        // 从 Context 构建 protobuf RequestContext 和 TenantContext
-        let request_context: flare_proto::common::RequestContext = ctx.request()
-            .cloned()
-            .map(|req_ctx| req_ctx.into())
-            .unwrap_or_else(|| {
-                let request_id = if ctx.request_id().is_empty() {
-                    uuid::Uuid::new_v4().to_string()
-                } else {
-                    ctx.request_id().to_string()
-                };
-                flare_proto::common::RequestContext {
-                    request_id,
-                    trace: None,
-                    actor: None,
-                    device: None,
-                    channel: String::new(),
-                    user_agent: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }
-            });
-
-        let tenant_context: flare_proto::common::TenantContext = ctx.tenant()
-            .cloned()
-            .map(|t| t.into())
-            .or_else(|| {
-                ctx.tenant_id().map(|tenant_id| {
-                    let tenant: flare_server_core::context::TenantContext = 
-                        flare_server_core::context::TenantContext::new(tenant_id);
-                    tenant.into()
-                })
-            })
-            .unwrap_or_else(|| {
-                flare_proto::common::TenantContext::default()
-            });
 
         let mut request = Request::new(flare_proto::storage::QueryMessagesBySeqRequest {
             conversation_id: conversation_id.to_string(),

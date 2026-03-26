@@ -7,7 +7,6 @@ use serde_json::json;
 
 use crate::config::OnlineConfig;
 use crate::domain::repository::SignalPublisher;
-use async_trait::async_trait;
 
 const SIGNAL_CHANNEL_PREFIX: &str = "signal";
 
@@ -35,7 +34,6 @@ impl RedisSignalPublisher {
     }
 }
 
-#[async_trait]
 impl SignalPublisher for RedisSignalPublisher {
     async fn publish_signal(
         &self,

@@ -1,3 +1,8 @@
+//! Access Gateway 配置
+//!
+//! 连接与稳定性相关项（max_connections、heartbeat、auth_timeout、send_timeout）对接 flare-core
+//! ServerConfig，便于扩容连接数与调优消息收发稳定性；可通过环境变量覆盖。
+
 use flare_im_core::config::{FlareAppConfig, RedisPoolConfig};
 
 #[derive(Debug, Clone)]
@@ -22,6 +27,20 @@ pub struct AccessGatewayConfig {
     pub compression_algorithm: Option<String>,
     pub enable_encryption: bool,
     pub encryption_key: Option<String>,
+
+    // 连接与稳定性（对接 flare-core ServerConfig，便于扩容与调优）
+    /// 最大连接数，默认 50_000，可通过 ACCESS_GATEWAY_MAX_CONNECTIONS 覆盖
+    pub max_connections: usize,
+    /// 连接空闲超时（秒），默认 300，flare-core 用于清理长时间无活动的连接
+    pub connection_timeout_secs: u64,
+    /// 心跳间隔（秒），默认 30
+    pub heartbeat_interval_secs: u64,
+    /// 心跳超时（秒），默认 90，超过未收到 PING/PONG 或业务消息则断开
+    pub heartbeat_timeout_secs: u64,
+    /// 认证超时（秒），默认 30，连接建立后须在此时间内完成认证
+    pub auth_timeout_secs: u64,
+    /// 下行发送超时（秒），默认 10，单帧发送超过此时长则放弃并记录
+    pub send_timeout_secs: u64,
 }
 
 impl AccessGatewayConfig {
@@ -38,32 +57,17 @@ impl AccessGatewayConfig {
         // 注意：服务名必须与注册中心中的服务类型一致（不带 flare- 前缀）
         let signaling_service = service
             .signaling_service
-            .or_else(|| {
-                service._signaling_endpoint.as_ref().and_then(|_| {
-                    // 如果使用旧配置，尝试从 endpoint 提取服务名（向后兼容）
-                    Some("signaling-online".to_string())
-                })
-            })
+            .clone()
             .unwrap_or_else(|| "signaling-online".to_string());
 
         let message_service = service
             .message_service
-            .or_else(|| {
-                service
-                    ._message_endpoint
-                    .as_ref()
-                    .and_then(|_| Some("message-orchestrator".to_string()))
-            })
+            .clone()
             .unwrap_or_else(|| "message-orchestrator".to_string());
 
         let push_service = service
             .push_service
-            .or_else(|| {
-                service
-                    ._push_endpoint
-                    .as_ref()
-                    .and_then(|_| Some("push-server".to_string()))
-            })
+            .clone()
             .unwrap_or_else(|| "push-server".to_string());
 
         // Route 服务配置（新增）
@@ -127,12 +131,37 @@ impl AccessGatewayConfig {
         let enable_encryption = std::env::var("GATEWAY_ENABLE_ENCRYPTION")
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
-            .or_else(|| service.enable_encryption)
+            .or(service.enable_encryption)
             .unwrap_or(false);
 
         let encryption_key = std::env::var("GATEWAY_ENCRYPTION_KEY")
             .ok()
             .or_else(|| service.encryption_key.clone());
+
+        let max_connections = std::env::var("ACCESS_GATEWAY_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(50_000);
+        let connection_timeout_secs = std::env::var("ACCESS_GATEWAY_CONNECTION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        let heartbeat_interval_secs = std::env::var("ACCESS_GATEWAY_HEARTBEAT_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let heartbeat_timeout_secs = std::env::var("ACCESS_GATEWAY_HEARTBEAT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(90);
+        let auth_timeout_secs = std::env::var("ACCESS_GATEWAY_AUTH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let send_timeout_secs = std::env::var("ACCESS_GATEWAY_SEND_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10);
 
         Self {
             signaling_service,
@@ -152,6 +181,12 @@ impl AccessGatewayConfig {
             compression_algorithm,
             enable_encryption,
             encryption_key,
+            max_connections,
+            connection_timeout_secs,
+            heartbeat_interval_secs,
+            heartbeat_timeout_secs,
+            auth_timeout_secs,
+            send_timeout_secs,
         }
     }
 }

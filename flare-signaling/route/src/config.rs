@@ -5,8 +5,6 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
     pub default_services: Vec<(String, String)>,
-    /// Online 服务的 gRPC 端点
-    pub online_service_endpoint: Option<String>,
     /// 默认租户ID
     pub default_tenant_id: Option<String>,
     /// 分片数（默认 64）
@@ -28,8 +26,8 @@ impl RouteConfig {
             (
                 "svid.im".to_string(),
                 env::var("BUSINESS_SERVICE_IM_ENDPOINT")
-                    .or_else(|_| env::var("MESSAGE_ORCHESTRATOR_SERVICE"))
-                    .unwrap_or("message-orchestrator".to_string()),
+                    .or_else(|_| env::var("ORCHESTRATOR_SERVICE"))
+                    .unwrap_or_else(|_| flare_im_core::service_names::ORCHESTRATOR.to_string()),
             ),
             (
                 "svid.customer".to_string(),
@@ -46,11 +44,10 @@ impl RouteConfig {
 
         Ok(Self {
             default_services: if default.is_empty() {
-                vec![("svid.im".to_string(), "message-orchestrator".to_string())]
+                vec![("svid.im".to_string(), flare_im_core::service_names::ORCHESTRATOR.to_string())]
             } else {
                 default
             },
-            online_service_endpoint: env::var("ONLINE_SERVICE_ENDPOINT").ok(),
             default_tenant_id: env::var("DEFAULT_TENANT_ID").ok(),
             shard_count: env::var("ROUTER_SHARD_COUNT")
                 .ok()

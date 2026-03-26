@@ -16,7 +16,7 @@ use flare_proto::hooks::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use flare_server_core::context::Context;
-use flare_im_core::utils::context::require_context;
+use flare_server_core::utils::require_ctx_from_request;
 
 use crate::domain::model::{
     HookConfigItem, HookSelectorConfig, HookTransportConfig,
@@ -30,8 +30,8 @@ use chrono::Utc;
 ///
 /// 优先从 Context 中提取，如果没有则返回 None
 fn extract_tenant_id<T>(request: &Request<T>) -> Option<String> {
-    if let Ok(ctx) = require_context(request) {
-        ctx.tenant_id().map(|s| s.to_string())
+    if let Ok(ctx) = require_ctx_from_request(request) {
+        ctx.tenant_id().map(|s: &str| s.to_string())
     } else {
         None
     }
@@ -75,7 +75,7 @@ impl HookService for HookServiceServer {
         &self,
         request: Request<CreateHookConfigRequest>,
     ) -> Result<Response<CreateHookConfigResponse>, Status> {
-        let ctx = require_context(&request).map_err(|_| Status::internal("Context not found"))?;
+        let ctx = require_ctx_from_request(&request).map_err(|_| Status::internal("Context not found"))?;
         let req = request.into_inner();
 
         // 提取租户ID（优先从 Context，其次从请求参数）
@@ -130,7 +130,7 @@ impl HookService for HookServiceServer {
         // 保存到数据库（优先从 Context 提取，其次从请求参数）
         let created_by = ctx
             .user_id()
-            .map(|s| s.as_ref())
+            .map(|s: &str| s.as_ref())
             .or_else(|| {
                 None
             });
@@ -174,6 +174,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -242,6 +244,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -413,6 +417,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -421,14 +427,14 @@ impl HookService for HookServiceServer {
         &self,
         request: Request<ListHookConfigsRequest>,
     ) -> Result<Response<ListHookConfigsResponse>, Status> {
-        let ctx = require_context(&request).ok();
+        let ctx = require_ctx_from_request(&request).ok();
         let req = request.into_inner();
 
         // 提取租户ID（优先从 Context，其次从请求参数）
         let tenant_id = if !req.tenant_id.is_empty() {
             Some(req.tenant_id.clone())
         } else if let Some(ref ctx) = ctx {
-            ctx.tenant_id().map(|s| s.to_string())
+            ctx.tenant_id().map(|s: &str| s.to_string())
         } else {
             None
         };
@@ -501,6 +507,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -572,6 +580,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -645,6 +655,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -751,6 +763,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -870,6 +884,8 @@ impl HookService for HookServiceServer {
                     zone: String::new(),
                     attributes: std::collections::HashMap::new(),
                 }),
+                localization_key: String::new(),
+                localization_params: std::collections::HashMap::new(),
             }),
         }))
     }

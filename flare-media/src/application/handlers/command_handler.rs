@@ -1,6 +1,7 @@
 //! 命令处理器（编排层）- 负责处理命令，调用领域服务
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
@@ -23,6 +24,8 @@ use tracing::instrument;
 /// 媒体命令处理器（编排层）
 pub struct MediaCommandHandler {
     domain_service: Arc<MediaService>,
+    /// 临时文件目录，用于媒体处理
+    temp_dir: PathBuf,
 }
 
 /// 处理后的媒体结果
@@ -34,7 +37,26 @@ pub struct ProcessedMediaResult {
 
 impl MediaCommandHandler {
     pub fn new(domain_service: Arc<MediaService>) -> Self {
-        Self { domain_service }
+        Self {
+            domain_service,
+            temp_dir: PathBuf::from("/tmp"), // 默认临时目录
+        }
+    }
+
+    /// 设置临时文件目录
+    pub fn with_temp_dir(mut self, temp_dir: PathBuf) -> Self {
+        self.temp_dir = temp_dir;
+        self
+    }
+
+    /// 获取临时文件输入路径（返回字符串用于文件操作）
+    fn temp_input_path(&self, file_id: &str) -> String {
+        self.temp_dir.join(format!("{}_input", file_id)).to_string_lossy().to_string()
+    }
+
+    /// 获取临时文件输出路径（返回字符串用于文件操作）
+    fn temp_output_path(&self, file_id: &str, suffix: &str) -> String {
+        self.temp_dir.join(format!("{}_{}", file_id, suffix)).to_string_lossy().to_string()
     }
 
     pub async fn handle_upload_file(
@@ -499,8 +521,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_resized", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "resized");
 
         // 下载原始文件到临时位置（简化实现）
         // 实际实现应该从对象存储下载文件
@@ -568,8 +590,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_cropped", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "cropped");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -632,8 +654,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_compressed", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "compressed");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -696,8 +718,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_watermarked", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "watermarked");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -760,8 +782,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_thumb", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "thumb");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -828,8 +850,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_transcoded", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "transcoded");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -888,8 +910,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_thumb", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "thumb");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -948,8 +970,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_audio", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "audio");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -1012,8 +1034,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_compressed", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "compressed");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();
@@ -1076,8 +1098,8 @@ impl MediaCommandHandler {
         };
 
         // 获取临时文件路径
-        let temp_input_path = format!("/tmp/{}_input", file.file_id);
-        let temp_output_path = format!("/tmp/{}_watermarked", file.file_id);
+        let temp_input_path = self.temp_input_path(&file.file_id);
+        let temp_output_path = self.temp_output_path(&file.file_id, "watermarked");
 
         // 下载原始文件到临时位置（简化实现）
         std::fs::write(&temp_input_path, "").ok();

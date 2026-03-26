@@ -17,9 +17,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as AnyhowContext, Result};
-use async_trait::async_trait;
+
 use flare_proto::access_gateway::{
-    PushMessageRequest, PushMessageResponse, PushStatus, access_gateway_client::AccessGatewayClient,
+    PushAckRequest, PushAckResponse, PushCustomRequest, PushEventRequest, PushMessageRequest,
+    PushNotificationRequest, PushNotificationResponse, PushResponse,
+    access_gateway_client::AccessGatewayClient,
 };
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
@@ -53,6 +55,9 @@ pub struct GatewayRouterConfig {
     pub local_gateway_id: Option<String>,
     /// Access Gateway 服务名（用于服务发现）
     pub access_gateway_service: String,
+    /// 无注册中心、且未注入 ServiceClient/ServiceDiscover 时，直连的 gRPC 基址（本地单实例开发）
+    /// 环境变量 `ACCESS_GATEWAY_GRPC_ENDPOINT` 可由各服务 wire 写入；亦见 [`crate::discovery::build_gateway_router_from_app_config`]。
+    pub static_fallback_endpoint: Option<String>,
 }
 
 impl Default for GatewayRouterConfig {
@@ -65,19 +70,44 @@ impl Default for GatewayRouterConfig {
             deployment_mode: "single_region".to_string(),
             local_gateway_id: None,
             access_gateway_service: ACCESS_GATEWAY.to_string(),
+            static_fallback_endpoint: None,
         }
     }
 }
 
 /// Gateway Router trait
-#[async_trait]
+
 pub trait GatewayRouterTrait: Send + Sync {
     /// 路由推送请求到Access Gateway
     async fn route_push_message(
         &self,
         gateway_id: &str,
         request: PushMessageRequest,
-    ) -> Result<PushMessageResponse>;
+    ) -> Result<PushResponse>;
+
+    async fn route_push_event(
+        &self,
+        gateway_id: &str,
+        request: PushEventRequest,
+    ) -> Result<PushResponse>;
+
+    async fn route_push_notification(
+        &self,
+        gateway_id: &str,
+        request: PushNotificationRequest,
+    ) -> Result<PushNotificationResponse>;
+
+    async fn route_push_ack(
+        &self,
+        gateway_id: &str,
+        request: PushAckRequest,
+    ) -> Result<PushAckResponse>;
+
+    async fn route_push_custom(
+        &self,
+        gateway_id: &str,
+        request: PushCustomRequest,
+    ) -> Result<PushResponse>;
 }
 
 /// 连接池条目（包含客户端和最后使用时间）
@@ -274,9 +304,33 @@ impl GatewayRouter {
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to get channel from service discovery: {}", e)
                 })?
+        } else if let Some(ref uri) = self.config.static_fallback_endpoint {
+            let endpoint = Endpoint::from_shared(uri.clone()).with_context(|| {
+                format!(
+                    "Invalid static_fallback_endpoint for Access Gateway: {}",
+                    uri
+                )
+            })?;
+            let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
+            tokio::time::timeout(timeout_duration, endpoint.connect())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timeout connecting to static Access Gateway {} (timeout: {}ms)",
+                        uri,
+                        timeout_duration.as_millis()
+                    )
+                })?
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to connect to static Access Gateway {}: {}",
+                        uri,
+                        e
+                    )
+                })?
         } else {
             return Err(anyhow::anyhow!(
-                "Neither ServiceDiscover nor ServiceClient is available. Please inject at least one via with_service_client() or with_service_client_and_discover()"
+                "Neither ServiceDiscover nor ServiceClient is available, and static_fallback_endpoint is unset. Inject discovery via with_service_client() / with_service_client_and_discover(), or set GatewayRouterConfig.static_fallback_endpoint (e.g. ACCESS_GATEWAY_GRPC_ENDPOINT in dev)."
             ));
         };
 
@@ -304,17 +358,17 @@ impl GatewayRouter {
     }
 }
 
-#[async_trait]
+
 impl GatewayRouterTrait for GatewayRouter {
     async fn route_push_message(
         &self,
         gateway_id: &str,
         request: PushMessageRequest,
-    ) -> Result<PushMessageResponse> {
+    ) -> Result<PushResponse> {
         info!(
             gateway_id = %gateway_id,
-            user_count = request.target_user_ids.len(),
-            user_ids = ?request.target_user_ids,
+            user_count = request.user_ids.len(),
+            user_ids = ?request.user_ids,
             "Routing push message to gateway"
         );
 
@@ -356,8 +410,8 @@ impl GatewayRouterTrait for GatewayRouter {
         // 调用Access Gateway推送接口（添加超时保护）
         debug!(
             gateway_id = %gateway_id,
-            user_count = request.target_user_ids.len(),
-            user_ids = ?request.target_user_ids,
+            user_count = request.user_ids.len(),
+            user_ids = ?request.user_ids,
             "Calling Access Gateway push_message"
         );
 
@@ -372,29 +426,29 @@ impl GatewayRouterTrait for GatewayRouter {
             Ok(Ok(resp)) => {
                 let response = resp.into_inner();
 
-                // 检查是否有 UserOffline 响应
+                // 按用户明细推断「全未触达在线设备且存在离线队列」视为需重查在线态
                 let mut offline_users = Vec::new();
-                for result in &response.results {
-                    if result.status == PushStatus::UserOffline as i32 {
-                        offline_users.push(result.user_id.clone());
+                for ur in &response.user_results {
+                    if let Some(pr) = ur.result.as_ref() {
+                        if pr.pushed_device_count == 0 && pr.offline_pending_count > 0 {
+                            offline_users.push(ur.user_id.clone());
+                        }
                     }
                 }
 
-                // 使用 guard clause 减少嵌套
                 if !offline_users.is_empty() {
                     warn!(
                         gateway_id = %gateway_id,
                         offline_user_count = offline_users.len(),
                         offline_users = ?offline_users,
-                        "Some users are offline, need to re-query online status"
+                        "Some users have no online delivery (offline pending), caller may re-query online"
                     );
-                    // 返回 UserOffline 错误，让调用方重新查询在线状态
                     return Err(GatewayRouterError::UsersOffline(offline_users).into());
                 }
 
                 info!(
                     gateway_id = %gateway_id,
-                    user_count = response.results.len(),
+                    user_count = response.user_results.len(),
                     "Successfully pushed message to Access Gateway"
                 );
                 response
@@ -421,5 +475,93 @@ impl GatewayRouterTrait for GatewayRouter {
         };
 
         Ok(response)
+    }
+
+    async fn route_push_event(
+        &self,
+        gateway_id: &str,
+        request: PushEventRequest,
+    ) -> Result<PushResponse> {
+        let mut client = self.get_or_create_client(gateway_id).await?;
+        let timeout_duration = Duration::from_secs(3);
+        match tokio::time::timeout(
+            timeout_duration,
+            client.push_event(tonic::Request::new(request)),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => Ok(resp.into_inner()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("push_event: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timeout access gateway push_event ({}s)",
+                timeout_duration.as_secs()
+            )),
+        }
+    }
+
+    async fn route_push_notification(
+        &self,
+        gateway_id: &str,
+        request: PushNotificationRequest,
+    ) -> Result<PushNotificationResponse> {
+        let mut client = self.get_or_create_client(gateway_id).await?;
+        let timeout_duration = Duration::from_secs(3);
+        match tokio::time::timeout(
+            timeout_duration,
+            client.push_notification(tonic::Request::new(request)),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => Ok(resp.into_inner()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("push_notification: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timeout access gateway push_notification ({}s)",
+                timeout_duration.as_secs()
+            )),
+        }
+    }
+
+    async fn route_push_ack(
+        &self,
+        gateway_id: &str,
+        request: PushAckRequest,
+    ) -> Result<PushAckResponse> {
+        let mut client = self.get_or_create_client(gateway_id).await?;
+        let timeout_duration = Duration::from_secs(3);
+        match tokio::time::timeout(
+            timeout_duration,
+            client.push_ack(tonic::Request::new(request)),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => Ok(resp.into_inner()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("push_ack: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timeout access gateway push_ack ({}s)",
+                timeout_duration.as_secs()
+            )),
+        }
+    }
+
+    async fn route_push_custom(
+        &self,
+        gateway_id: &str,
+        request: PushCustomRequest,
+    ) -> Result<PushResponse> {
+        let mut client = self.get_or_create_client(gateway_id).await?;
+        let timeout_duration = Duration::from_secs(3);
+        match tokio::time::timeout(
+            timeout_duration,
+            client.push_custom(tonic::Request::new(request)),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => Ok(resp.into_inner()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("push_custom: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timeout access gateway push_custom ({}s)",
+                timeout_duration.as_secs()
+            )),
+        }
     }
 }

@@ -1,9 +1,14 @@
+//! # Flare Push Server（以设计文档为准）
+//!
+//! 职责：
+//! - 分别消费 `push-message` / `push-event` / `push-notification` / `push-ack` / `push-custom` topic
+//! - 查询用户在线状态（flare-signaling/online）
+//! - 路由到 `push-online` / `push-offline`
+//! - 失败转入 `push-dlq`
+
 pub mod application;
 pub mod config;
 pub mod domain;
-pub mod error;
-// hooks 模块已从 flare-im-core 导入，不需要重新定义
-// pub mod hooks;
 pub mod infrastructure;
 pub mod interface;
 pub mod service;

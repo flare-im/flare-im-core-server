@@ -1,54 +1,19 @@
-//! 领域模型
+//! 领域模型（实体、值对象、配置）
 
-use chrono::{DateTime, Utc};
+mod connection_config;
+mod connection_info;
+mod connection;
+mod event_uplink_outcome;
+mod message;
+mod push_result;
+mod quality;
 
-/// 会话模型
-#[derive(Clone, Debug)]
-pub struct Session {
-    pub conversation_id: String,
-    pub user_id: String,
-    pub device_id: String,
-    pub route_server: Option<String>,
-    pub gateway_id: String,
-    pub connection_id: Option<String>,
-    pub last_heartbeat: DateTime<Utc>,
-}
-
-impl Session {
-    pub fn new(
-        conversation_id: String,
-        user_id: String,
-        device_id: String,
-        route_server: Option<String>,
-        gateway_id: String,
-    ) -> Self {
-        Self {
-            conversation_id,
-            user_id,
-            device_id,
-            route_server,
-            gateway_id,
-            connection_id: None,
-            last_heartbeat: Utc::now(),
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.last_heartbeat = Utc::now();
-    }
-
-    pub fn set_connection(&mut self, connection_id: Option<String>) {
-        self.connection_id = connection_id;
-    }
-}
-
-/// 连接信息模型
-#[derive(Clone, Debug)]
-pub struct ConnectionInfo {
-    pub connection_id: String,
-    pub protocol: String,
-    pub device_id: String,
-    pub platform: String,
-    pub connected_at: Option<DateTime<Utc>>,
-    pub last_active_at: Option<DateTime<Utc>>,
-}
+pub use connection_config::ConnectionDomainServiceConfig;
+pub use connection_info::ConnectionInfo;
+pub use connection::{Connection, ConnectionState, ConnectionQuality, DomainError};
+pub use event_uplink_outcome::EventUplinkOutcome;
+/// 连接上下文（ConnectionInfo 的别名，供 Port/Resolver 使用）
+pub use connection_info::ConnectionInfo as ConnectionContext;
+pub use message::MessageWrapper;
+pub use push_result::DomainPushResult;
+pub use quality::{ConnectionQualityMetrics, QualityLevel};

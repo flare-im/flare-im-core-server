@@ -34,6 +34,7 @@ struct MediaAssetRow {
     access_type: String,
 }
 
+#[async_trait::async_trait]
 impl TryFrom<MediaAssetRow> for MediaFileMetadata {
     type Error = anyhow::Error;
 
@@ -106,6 +107,7 @@ struct MediaReferenceRow {
     expires_at: Option<DateTime<Utc>>,
 }
 
+#[async_trait::async_trait]
 impl TryFrom<MediaReferenceRow> for MediaReference {
     type Error = anyhow::Error;
 

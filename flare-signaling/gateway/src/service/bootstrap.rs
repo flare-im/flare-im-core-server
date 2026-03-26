@@ -3,6 +3,7 @@
 use crate::service::service_manager::PortConfig;
 use crate::service::startup::start_services;
 use anyhow::Result;
+use flare_im_core::service_names::ACCESS_GATEWAY;
 use flare_im_core::FlareAppConfig;
 use tracing::{error, info};
 
@@ -40,7 +41,7 @@ impl ApplicationBootstrap {
         {
             let otlp_endpoint = std::env::var("OTLP_ENDPOINT").ok();
             if let Err(e) =
-                flare_im_core::tracing::init_tracing("access-gateway", otlp_endpoint.as_deref())
+                flare_im_core::tracing::init_tracing(ACCESS_GATEWAY, otlp_endpoint.as_deref())
             {
                 tracing::error!(error = %e, "Failed to initialize OpenTelemetry tracing");
             } else {
@@ -64,7 +65,7 @@ impl ApplicationBootstrap {
         // 获取运行时配置
         let service_cfg = app_config.access_gateway_service();
         let runtime_config =
-            app_config.compose_service_config(&service_cfg.runtime, "flare-access-gateway");
+            app_config.compose_service_config(&service_cfg.runtime, ACCESS_GATEWAY);
 
         // 端口配置：优先使用环境变量
         // 优先级：
@@ -95,7 +96,7 @@ impl ApplicationBootstrap {
 
         let service_cfg = config.access_gateway_service();
         let runtime_config =
-            config.compose_service_config(&service_cfg.runtime, "flare-access-gateway");
+            config.compose_service_config(&service_cfg.runtime, ACCESS_GATEWAY);
 
         // 计算端口分配（使用统一的环境变量解析逻辑）
         let port_config = PortConfig::from_env_or_config(runtime_config.server.port);

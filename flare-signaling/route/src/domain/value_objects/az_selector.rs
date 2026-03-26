@@ -5,11 +5,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 配置中心客户端trait，用于查询租户偏好机房
-#[async_trait::async_trait]
+/// 配置中心客户端 trait，用于查询租户偏好机房（Rust 2024 原生 async，禁止 `dyn`）
 pub trait ConfigClient: Send + Sync {
     /// 获取租户偏好机房
     async fn get_tenant_preferred_az(&self, tenant_id: &str) -> anyhow::Result<Option<String>>;
+}
+
+/// 无配置中心时的占位实现
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopConfigClient;
+
+impl ConfigClient for NoopConfigClient {
+    async fn get_tenant_preferred_az(&self, _tenant_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// 跨机房智能选择器（Multi-AZ Routing）
@@ -20,17 +29,17 @@ pub trait ConfigClient: Send + Sync {
 /// - 机房负载/延迟/存储健康度综合评分
 /// - 弱网环境优先近端机房
 #[derive(Clone)]
-pub struct AzSelector {
+pub struct AzSelector<C: ConfigClient + Send + Sync = NoopConfigClient> {
     /// 默认机房（兜底）
     default_az: String,
     /// 机房优先级配置（geo -> az 映射）
     /// 例如：{"CN-East": "shanghai", "CN-North": "beijing"}
     geo_az_map: HashMap<String, String>,
     /// 配置中心客户端（用于查询租户偏好机房）
-    config_client: Option<Arc<dyn ConfigClient + Send + Sync>>,
+    config_client: Option<Arc<C>>,
 }
 
-impl AzSelector {
+impl AzSelector<NoopConfigClient> {
     pub fn new() -> Self {
         Self {
             default_az: "default".to_string(),
@@ -38,11 +47,10 @@ impl AzSelector {
             config_client: None,
         }
     }
+}
 
-    pub fn with_config_client(
-        mut self,
-        config_client: Arc<dyn ConfigClient + Send + Sync>,
-    ) -> Self {
+impl<C: ConfigClient + Send + Sync> AzSelector<C> {
+    pub fn with_config_client(mut self, config_client: Arc<C>) -> Self {
         self.config_client = Some(config_client);
         self
     }

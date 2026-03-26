@@ -6,7 +6,6 @@
 //! - Hook管理代理 (hooks.proto)
 //! - 消息操作代理 (message.proto)
 //! - 用户在线状态代理 (online.proto)
-//! - 会话管理代理 (conversation.proto)
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -19,23 +18,18 @@ use flare_proto::media::*;
 use flare_proto::hooks::hook_service_server::HookService;
 use flare_proto::hooks::*;
 
-// 消息服务
-use flare_proto::message::message_service_server::MessageService;
+// 消息服务（仅发送侧）
+use flare_proto::message::message_send_service_server::MessageSendService;
 use flare_proto::message::*;
 
 // 在线状态服务（已合并为 OnlineService）
 use flare_proto::signaling::online::*;
 use flare_proto::signaling::online::online_service_server::OnlineService;
 
-// 会话服务
-use flare_proto::conversation::conversation_service_server::ConversationService;
-use flare_proto::conversation::*;
-
 use crate::infrastructure::hook::GrpcHookClient;
 use crate::infrastructure::media::GrpcMediaClient;
 use crate::infrastructure::message::GrpcMessageClient;
 use crate::infrastructure::online::GrpcOnlineClient;
-use crate::infrastructure::session::GrpcConversationClient;
 
 /// 简单网关处理器
 #[derive(Clone)]
@@ -48,8 +42,6 @@ pub struct SimpleGatewayHandler {
     message_client: Arc<GrpcMessageClient>,
     /// 在线状态服务客户端
     online_client: Arc<GrpcOnlineClient>,
-    /// 会话服务客户端
-    conversation_client: Arc<GrpcConversationClient>,
 }
 
 impl SimpleGatewayHandler {
@@ -59,14 +51,12 @@ impl SimpleGatewayHandler {
         hook_client: Arc<GrpcHookClient>,
         message_client: Arc<GrpcMessageClient>,
         online_client: Arc<GrpcOnlineClient>,
-        conversation_client: Arc<GrpcConversationClient>,
     ) -> Self {
         Self {
             media_client,
             hook_client,
             message_client,
             online_client,
-            conversation_client,
         }
     }
 }
@@ -190,7 +180,7 @@ impl MediaService for SimpleGatewayHandler {
     async fn set_object_acl(
         &self,
         request: Request<SetObjectAclRequest>,
-    ) -> Result<Response<SetObjectAclResponse>, Status> {
+    ) -> Result<Response<flare_proto::common::StatusOnlyResponse>, Status> {
         self.media_client.set_object_acl(request).await
     }
 
@@ -287,7 +277,7 @@ impl HookService for SimpleGatewayHandler {
 }
 
 #[tonic::async_trait]
-impl MessageService for SimpleGatewayHandler {
+impl MessageSendService for SimpleGatewayHandler {
     /// 发送单条消息
     async fn send_message(
         &self,
@@ -312,172 +302,26 @@ impl MessageService for SimpleGatewayHandler {
         self.message_client.send_system_message(request).await
     }
 
-    /// 查询会话消息
-    async fn query_messages(
+    /// 统一事件入口：ExecuteEventRequest → OperationResponse
+    async fn execute_event(
         &self,
-        request: Request<QueryMessagesRequest>,
-    ) -> Result<Response<QueryMessagesResponse>, Status> {
-        self.message_client.query_messages(request).await
+        request: Request<ExecuteEventRequest>,
+    ) -> Result<Response<flare_proto::common::OperationResponse>, Status> {
+        self.message_client.execute_event(request).await
     }
 
-    /// 搜索消息
-    async fn search_messages(
+    async fn send_ack(
         &self,
-        request: Request<SearchMessagesRequest>,
-    ) -> Result<Response<SearchMessagesResponse>, Status> {
-        self.message_client.search_messages(request).await
+        request: Request<SendAckRequest>,
+    ) -> Result<Response<SendAckResponse>, Status> {
+        self.message_client.send_ack(request).await
     }
 
-    /// 获取单条消息
-    async fn get_message(
+    async fn send_custom_data(
         &self,
-        request: Request<GetMessageRequest>,
-    ) -> Result<Response<GetMessageResponse>, Status> {
-        self.message_client.get_message(request).await
-    }
-
-    /// 撤回消息
-    async fn recall_message(
-        &self,
-        request: Request<RecallMessageRequest>,
-    ) -> Result<Response<RecallMessageResponse>, Status> {
-        self.message_client.recall_message(request).await
-    }
-
-    /// 删除消息
-    async fn delete_message(
-        &self,
-        request: Request<DeleteMessageRequest>,
-    ) -> Result<Response<DeleteMessageResponse>, Status> {
-        self.message_client.delete_message(request).await
-    }
-
-    /// 标记消息已读
-    async fn mark_message_read(
-        &self,
-        request: Request<MarkMessageReadRequest>,
-    ) -> Result<Response<MarkMessageReadResponse>, Status> {
-        self.message_client.mark_message_read(request).await
-    }
-
-    /// 编辑消息
-    async fn edit_message(
-        &self,
-        request: Request<EditMessageRequest>,
-    ) -> Result<Response<EditMessageResponse>, Status> {
-        self.message_client.edit_message(request).await
-    }
-
-    /// 添加表情反应
-    async fn add_reaction(
-        &self,
-        request: Request<AddReactionRequest>,
-    ) -> Result<Response<AddReactionResponse>, Status> {
-        self.message_client.add_reaction(request).await
-    }
-
-    /// 移除表情反应
-    async fn remove_reaction(
-        &self,
-        request: Request<RemoveReactionRequest>,
-    ) -> Result<Response<RemoveReactionResponse>, Status> {
-        self.message_client.remove_reaction(request).await
-    }
-
-    /// 置顶消息
-    async fn pin_message(
-        &self,
-        request: Request<PinMessageRequest>,
-    ) -> Result<Response<PinMessageResponse>, Status> {
-        self.message_client.pin_message(request).await
-    }
-
-    /// 取消置顶
-    async fn unpin_message(
-        &self,
-        request: Request<UnpinMessageRequest>,
-    ) -> Result<Response<UnpinMessageResponse>, Status> {
-        self.message_client.unpin_message(request).await
-    }
-
-    /// 标记消息
-    async fn mark_message(
-        &self,
-        request: Request<MarkMessageRequest>,
-    ) -> Result<Response<MarkMessageResponse>, Status> {
-        self.message_client.mark_message(request).await
-    }
-
-    /// 批量标记已读
-    async fn batch_mark_message_read(
-        &self,
-        request: Request<BatchMarkMessageReadRequest>,
-    ) -> Result<Response<BatchMarkMessageReadResponse>, Status> {
-        self.message_client.batch_mark_message_read(request).await
-    }
-
-    /// 范围标记已读
-    async fn mark_messages_read_until(
-        &self,
-        request: Request<MarkMessagesReadUntilRequest>,
-    ) -> Result<Response<MarkMessagesReadUntilResponse>, Status> {
-        self.message_client.mark_messages_read_until(request).await
-    }
-
-    /// 获取置顶消息列表
-    async fn get_pinned_messages(
-        &self,
-        request: Request<GetPinnedMessagesRequest>,
-    ) -> Result<Response<GetPinnedMessagesResponse>, Status> {
-        self.message_client.get_pinned_messages(request).await
-    }
-
-    /// 获取标记消息列表
-    async fn get_marked_messages(
-        &self,
-        request: Request<GetMarkedMessagesRequest>,
-    ) -> Result<Response<GetMarkedMessagesResponse>, Status> {
-        self.message_client.get_marked_messages(request).await
-    }
-
-    /// 获取话题列表
-    async fn get_threads(
-        &self,
-        request: Request<GetThreadsRequest>,
-    ) -> Result<Response<GetThreadsResponse>, Status> {
-        self.message_client.get_threads(request).await
-    }
-
-    /// 获取话题回复列表
-    async fn get_thread_replies(
-        &self,
-        request: Request<GetThreadRepliesRequest>,
-    ) -> Result<Response<GetThreadRepliesResponse>, Status> {
-        self.message_client.get_thread_replies(request).await
-    }
-
-    /// 标记会话已读
-    async fn mark_conversation_read(
-        &self,
-        request: Request<MarkConversationReadRequest>,
-    ) -> Result<Response<MarkConversationReadResponse>, Status> {
-        self.message_client.mark_conversation_read(request).await
-    }
-
-    /// 标记所有会话已读
-    async fn mark_all_conversations_read(
-        &self,
-        request: Request<MarkAllConversationsReadRequest>,
-    ) -> Result<Response<MarkAllConversationsReadResponse>, Status> {
-        self.message_client.mark_all_conversations_read(request).await
-    }
-
-    /// 取消标记消息
-    async fn unmark_message(
-        &self,
-        request: Request<UnmarkMessageRequest>,
-    ) -> Result<Response<UnmarkMessageResponse>, Status> {
-        self.message_client.unmark_message(request).await
+        request: Request<SendCustomDataRequest>,
+    ) -> Result<Response<SendCustomDataResponse>, Status> {
+        self.message_client.send_custom_data(request).await
     }
 }
 
@@ -505,7 +349,7 @@ impl OnlineService for SimpleGatewayHandler {
     type WatchPresenceStream = WatchPresenceStream;
     type SubscribeUserPresenceStream = SubscribeUserPresenceStream;
 
-    // ========== 会话管理 RPC ==========
+    // ========== 在线会话管理 RPC ==========
 
     /// 用户登录
     async fn login(
@@ -608,157 +452,3 @@ impl OnlineService for SimpleGatewayHandler {
     }
 }
 
-#[tonic::async_trait]
-impl ConversationService for SimpleGatewayHandler {
-    /// 会话引导
-    async fn conversation_bootstrap(
-        &self,
-        request: Request<ConversationBootstrapRequest>,
-    ) -> Result<Response<ConversationBootstrapResponse>, Status> {
-        self.conversation_client.conversation_bootstrap(request).await
-    }
-
-    /// 列出会话
-    async fn list_conversations(
-        &self,
-        request: Request<ListConversationsRequest>,
-    ) -> Result<Response<ListConversationsResponse>, Status> {
-        self.conversation_client.list_conversations(request).await
-    }
-
-    /// 同步消息
-    async fn sync_messages(
-        &self,
-        request: Request<SyncMessagesRequest>,
-    ) -> Result<Response<SyncMessagesResponse>, Status> {
-        self.conversation_client.sync_messages(request).await
-    }
-
-    /// 会话增量同步
-    async fn sync_conversations(
-        &self,
-        request: Request<flare_proto::common::SyncConversationsRequest>,
-    ) -> Result<Response<flare_proto::common::SyncConversationsResponse>, Status> {
-        self.conversation_client.sync_conversations(request).await
-    }
-
-    /// 会话全量恢复
-    async fn get_all_conversations(
-        &self,
-        request: Request<flare_proto::common::ConversationSyncAllRequest>,
-    ) -> Result<Response<flare_proto::common::ConversationSyncAllResponse>, Status> {
-        self.conversation_client.get_all_conversations(request).await
-    }
-
-    /// 更新游标
-    async fn update_cursor(
-        &self,
-        request: Request<UpdateCursorRequest>,
-    ) -> Result<Response<UpdateCursorResponse>, Status> {
-        self.conversation_client.update_cursor(request).await
-    }
-
-    /// 更新设备在线状态
-    async fn update_presence(
-        &self,
-        request: Request<UpdatePresenceRequest>,
-    ) -> Result<Response<UpdatePresenceResponse>, Status> {
-        self.conversation_client.update_presence(request).await
-    }
-
-    /// 强制会话同步
-    async fn force_conversation_sync(
-        &self,
-        request: Request<ForceConversationSyncRequest>,
-    ) -> Result<Response<ForceConversationSyncResponse>, Status> {
-        self.conversation_client.force_conversation_sync(request).await
-    }
-
-    /// 创建会话
-    async fn create_conversation(
-        &self,
-        request: Request<CreateConversationRequest>,
-    ) -> Result<Response<CreateConversationResponse>, Status> {
-        self.conversation_client.create_conversation(request).await
-    }
-
-    /// 更新会话
-    async fn update_conversation(
-        &self,
-        request: Request<UpdateConversationRequest>,
-    ) -> Result<Response<UpdateConversationResponse>, Status> {
-        self.conversation_client.update_conversation(request).await
-    }
-
-    /// 删除会话
-    async fn delete_conversation(
-        &self,
-        request: Request<DeleteConversationRequest>,
-    ) -> Result<Response<DeleteConversationResponse>, Status> {
-        self.conversation_client.delete_conversation(request).await
-    }
-
-    /// 管理参与者
-    async fn manage_participants(
-        &self,
-        request: Request<ManageParticipantsRequest>,
-    ) -> Result<Response<ManageParticipantsResponse>, Status> {
-        self.conversation_client.manage_participants(request).await
-    }
-
-    /// 批量确认
-    async fn batch_acknowledge(
-        &self,
-        request: Request<BatchAcknowledgeRequest>,
-    ) -> Result<Response<BatchAcknowledgeResponse>, Status> {
-        self.conversation_client.batch_acknowledge(request).await
-    }
-
-    /// 搜索会话
-    async fn search_conversations(
-        &self,
-        request: Request<SearchConversationsRequest>,
-    ) -> Result<Response<SearchConversationsResponse>, Status> {
-        self.conversation_client.search_conversations(request).await
-    }
-
-    /// 创建话题
-    async fn create_thread(
-        &self,
-        request: Request<CreateThreadRequest>,
-    ) -> Result<Response<CreateThreadResponse>, Status> {
-        self.conversation_client.create_thread(request).await
-    }
-
-    /// 获取话题列表
-    async fn list_threads(
-        &self,
-        request: Request<ListThreadsRequest>,
-    ) -> Result<Response<ListThreadsResponse>, Status> {
-        self.conversation_client.list_threads(request).await
-    }
-
-    /// 获取话题详情
-    async fn get_thread(
-        &self,
-        request: Request<GetThreadRequest>,
-    ) -> Result<Response<GetThreadResponse>, Status> {
-        self.conversation_client.get_thread(request).await
-    }
-
-    /// 更新话题
-    async fn update_thread(
-        &self,
-        request: Request<UpdateThreadRequest>,
-    ) -> Result<Response<UpdateThreadResponse>, Status> {
-        self.conversation_client.update_thread(request).await
-    }
-
-    /// 删除话题
-    async fn delete_thread(
-        &self,
-        request: Request<DeleteThreadRequest>,
-    ) -> Result<Response<DeleteThreadResponse>, Status> {
-        self.conversation_client.delete_thread(request).await
-    }
-}

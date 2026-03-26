@@ -1,5 +1,5 @@
-//! CQRS Handler（编排层）
+//! 应用层编排：Push gRPC → 入队 Kafka。
 
-pub mod command_handler;
+mod push_proxy_command_handler;
 
-pub use command_handler::PushCommandHandler;
+pub use push_proxy_command_handler::PushProxyCommandHandler;

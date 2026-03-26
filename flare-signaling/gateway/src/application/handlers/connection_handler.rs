@@ -1,127 +1,141 @@
-//! 连接管理处理器
+//! 连接管理处理器（Connection BC 应用层）
 //!
-//! 处理连接生命周期的业务流程编排
+//! 编排连接建立/断开，与 message_event_flow 中 Signaling Gateway 一致：on_connect → 注册会话；on_disconnect → 清理。
+//! **架构落地**（ARCHITECTURE_REFACTOR §5 State）：通过 `ConnectionStateNotifier` 上报连接状态，
+//! 驱动在线状态与路由表更新；默认 Noop，wire 中可替换为与 Online 打通的实现。
 
-use flare_server_core::error::Result; // 使用 flare_server_core 的 Result
 use std::sync::Arc;
-use tracing::{info, instrument, warn};
 
-use crate::domain::repository::ConnectionQuery;
-use crate::domain::service::ConversationDomainService;
+use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
+use flare_im_core::Ctx;
+use crate::domain::ports::IConnectionPort;
+use flare_server_core::error::Result;
+use tracing::{debug, instrument, warn};
 
-/// 连接管理处理器
-///
-/// 职责：
-/// - 编排连接建立流程
-/// - 编排连接断开流程
-/// - 协调会话管理和连接管理
+use crate::domain::service::ConnectionDomainService;
+
+/// 连接管理处理器：仅编排会话领域服务与指标，连接查询由 QueryHandler / PushDomainService 使用 ConnectionQuery 独立完成。
 pub struct ConnectionHandler {
-    session_domain_service: Arc<ConversationDomainService>,
-    connection_query: Arc<dyn ConnectionQuery>,
+    session_domain_service: Arc<ConnectionDomainService>,
     metrics: Arc<flare_im_core::metrics::AccessGatewayMetrics>,
+    /// State 模式：连接状态通知，默认 Noop，可注入实现与 Online 打通
+    state_notifier: Arc<dyn ConnectionStateNotifier>,
+    connection_port: Arc<dyn IConnectionPort>,
 }
 
 impl ConnectionHandler {
     pub fn new(
-        session_domain_service: Arc<ConversationDomainService>,
-        connection_query: Arc<dyn ConnectionQuery>,
+        session_domain_service: Arc<ConnectionDomainService>,
         metrics: Arc<flare_im_core::metrics::AccessGatewayMetrics>,
+        state_notifier: Arc<dyn ConnectionStateNotifier>,
+        connection_port: Arc<dyn IConnectionPort>,
     ) -> Self {
         Self {
             session_domain_service,
-            connection_query,
             metrics,
+            state_notifier,
+            connection_port,
         }
+    }
+
+    /// 为长连接请求构建请求级 `Ctx`（租户/用户/trace 等），供领域层与下游 RPC 透传。
+    pub async fn build_request_ctx(&self, connection_id: &str) -> Result<Ctx> {
+        self.connection_port.build_ctx(connection_id).await
     }
 
     /// 处理连接建立
     ///
     /// 流程：
-    /// 1. 记录指标
-    /// 2. 注册会话到 Signaling Online
-    /// 3. 记录日志
-    #[instrument(skip(self), fields(connection_id, user_id, device_id))]
-    pub async fn handle_connect(
-        &self,
-        connection_id: &str,
-        user_id: &str,
-        device_id: &str,
-        active_connections: usize,
-        connection_metadata: Option<&std::collections::HashMap<String, String>>,
-    ) -> Result<String> {
-        // 更新活跃连接数
-        self.metrics
-            .connections_active
-            .set(active_connections as i64);
+    /// 1. 获取连接信息(认证已在基础层完成)
+    /// 2. 注册会话到 Signaling Online(业务端会话管理)
+    /// 3. 通知连接状态(业务端通知)
+    /// 4. 记录指标和日志
+    #[instrument(skip(self))]
+    pub async fn handle_connect(&self, connection_id: &str) -> Result<String> {
+        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let user_id = connection_info.user_id.clone();
 
-        info!(
+        // 注册会话到 Signaling Online(业务端会话管理)
+        let conversation_id = self
+            .session_domain_service
+            .register_connection(
+                &user_id,
+                &connection_info.device_id,
+                Some(connection_id),
+                connection_info.metadata.as_ref(),
+            )
+            .await?;
+
+        // 通知连接状态(业务端通知)
+        self.state_notifier
+            .notify_connection_state(
+                connection_id,
+                Some(user_id.as_str()),
+                ConnectionState::Authenticated,
+            )
+            .await;
+
+        // 更新活跃连接数(从基础层获取)
+        let list = self.connection_port.list_user_connections(&user_id).await?;
+        let active_count = list.len() as i64;
+        self.metrics.connections_active.set(active_count);
+
+        debug!(
             user_id = %user_id,
-            device_id = %device_id,
             connection_id = %connection_id,
-            active_connections = active_connections,
-            "Connection established"
+            conversation_id = %conversation_id,
+            active_connections = active_count,
+            "Connection established (authentication done in base layer, storage done by flare-core)"
         );
 
-        // 注册会话到 Signaling Online（传递连接 metadata）
-        match self
-            .session_domain_service
-            .register_session(user_id, device_id, Some(connection_id), connection_metadata)
-            .await
-        {
-            Ok(conversation_id) => {
-                info!(
-                    user_id = %user_id,
-                    connection_id = %connection_id,
-                    conversation_id = %conversation_id,
-                    "Online status registered"
-                );
-                Ok(conversation_id)
-            }
-            Err(err) => {
-                warn!(
-                    ?err,
-                    user_id = %user_id,
-                    connection_id = %connection_id,
-                    "Failed to register online status"
-                );
-                Err(err)
-            }
-        }
+        Ok(conversation_id)
     }
 
     /// 处理连接断开
     ///
     /// 流程：
-    /// 1. 记录指标
-    /// 2. 检查用户是否还有其他连接
-    /// 3. 如果没有其他连接，注销会话
-    #[instrument(skip(self), fields(connection_id, user_id))]
-    pub async fn handle_disconnect(
-        &self,
-        connection_id: &str,
-        user_id: &str,
-        active_connections: usize,
-        has_other_connections: bool,
-    ) -> Result<()> {
-        // 记录连接断开指标
-        self.metrics.connection_disconnected_total.inc();
+    /// 1. 获取连接信息
+    /// 2. 通知连接状态
+    /// 3. 决定是否注销会话
+    /// 4. 记录指标和日志
+    #[instrument(skip(self))]
+    pub async fn handle_disconnect(&self, connection_id: &str) -> Result<()> {
+        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let user_id = connection_info.user_id.clone();
+
+        // 检查用户是否还有其他连接
+        let user_connections = self
+            .connection_port
+            .list_user_connections(&user_id)
+            .await?;
+        let has_other_connections = !user_connections.is_empty();
+
+        // 通知连接状态
+        self.state_notifier
+            .notify_connection_state(
+                connection_id,
+                Some(user_id.as_str()),
+                ConnectionState::Disconnected,
+            )
+            .await;
 
         // 更新活跃连接数
-        self.metrics
-            .connections_active
-            .set(active_connections as i64);
+        let active_count = user_connections.len() as i64;
+        self.metrics.connection_disconnected_total.inc();
+        self.metrics.connections_active.set(active_count);
 
-        info!(
+        debug!(
             connection_id = %connection_id,
-            active_connections = active_connections,
+            user_id = %user_id,
+            active_connections = active_count,
             "Connection disconnected"
         );
 
-        // 如果没有其他本地连接，注销会话
+        // 如果是最后一个连接,注销会话
         if !has_other_connections {
             if let Err(err) = self
                 .session_domain_service
-                .unregister_session(user_id, None)
+                .unregister_connection(&user_id, None)
                 .await
             {
                 warn!(
@@ -132,28 +146,69 @@ impl ConnectionHandler {
                 );
                 return Err(err);
             }
-        }
 
-        info!(
-            user_id = %user_id,
-            connection_id = %connection_id,
-            "User disconnected"
-        );
+            debug!(
+                user_id = %user_id,
+                connection_id = %connection_id,
+                "User disconnected"
+            );
+        }
 
         Ok(())
     }
 
     /// 刷新会话心跳
-    #[instrument(skip(self), fields(connection_id, user_id))]
-    pub async fn refresh_session(
-        &self,
-        connection_id: &str,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> Result<()> {
+    ///
+    /// 流程：
+    /// 1. 获取连接信息
+    /// 2. 刷新 Signaling Online 的心跳
+    /// 3. 记录日志
+    #[instrument(skip(self))]
+    pub async fn refresh_session(&self, connection_id: &str) -> Result<()> {
+        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let user_id = connection_info.user_id.clone();
+        let metadata = self.connection_port.get_connection_metadata(connection_id).await?;
+        let conversation_id = metadata
+            .get("conversation_id")
+            .cloned()
+            .ok_or_else(|| {
+                flare_server_core::error::ErrorBuilder::new(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    "conversation_id not in connection metadata",
+                )
+                .build_error()
+            })?;
+
+        // 刷新 Signaling Online 的心跳
         self.session_domain_service
-            .refresh_heartbeat(user_id, conversation_id, Some(connection_id))
+            .refresh_heartbeat(&user_id, &conversation_id, Some(connection_id))
             .await
+            .map_err(|e| {
+                flare_server_core::error::ErrorBuilder::new(
+                    flare_server_core::error::ErrorCode::InternalError,
+                    format!("Failed to refresh session: {e}"),
+                )
+                .build_error()
+            })?;
+
+        debug!(
+            user_id = %user_id,
+            connection_id = %connection_id,
+            conversation_id = %conversation_id,
+            "Session heartbeat refreshed"
+        );
+
+        Ok(())
     }
+
+    // pub async fn spawn_refresh_session(&self, connection_id: &str) {
+    //     let handler = self.clone();
+    //     let cid = connection_id.to_string();
+    //     tokio::spawn(async move {
+    //         if let Err(err) = handler.refresh_session(&cid).await {
+    //             tracing::warn!(?err, %cid, "spawn_refresh_session: failed to refresh session heartbeat");
+    //         }
+    //     });
+    // }
 }
 

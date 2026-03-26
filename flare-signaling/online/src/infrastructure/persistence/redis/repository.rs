@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as AnyhowContext, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use prost::Message;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use serde_json::json;
 
@@ -13,7 +14,7 @@ use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{
     ConnectionQuality, DeviceId, DevicePriority, ConnectionId, TokenVersion, UserId,
 };
-use async_trait::async_trait;
+use flare_server_core::context::Context as SrvContext;
 
 const CONNECTION_KEY_PREFIX: &str = "session";
 
@@ -42,7 +43,6 @@ impl RedisConversationRepository {
     }
 }
 
-#[async_trait]
 impl ConversationRepository for RedisConversationRepository {
     async fn save_connection(&self, session: &Connection) -> Result<()> {
         let mut conn = self.connection().await?;
@@ -265,45 +265,156 @@ impl ConversationRepository for RedisConversationRepository {
             .find(|s| s.device_id().as_str() == device_id.as_str()))
     }
 
-    async fn list_user_devices(
-        &self,
-        ctx: &flare_server_core::context::Context,
-    ) -> Result<Vec<crate::domain::model::DeviceInfo>> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        let sessions = self
-            .get_user_connections(&UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?)
-            .await?;
-        let devices: Vec<crate::domain::model::DeviceInfo> = sessions
-            .into_iter()
-            .map(|s| crate::domain::model::DeviceInfo {
-                device_id: s.device_id().as_str().to_string(),
-                platform: s.device_platform().to_string(),
-                model: None,
-                os_version: None,
-                last_active_time: s.last_heartbeat_at(),
-            })
-            .collect();
-        Ok(devices)
+    async fn list_user_connections(&self, ctx: &SrvContext) -> Result<Vec<Connection>> {
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id_vo = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        self.get_user_connections(&user_id_vo).await
+    }
+}
+
+/// Redis 订阅仓库实现
+pub struct RedisSubscriptionRepository {
+    client: Arc<redis::Client>,
+    config: Arc<OnlineConfig>,
+}
+
+impl RedisSubscriptionRepository {
+    pub fn new(client: Arc<redis::Client>, config: Arc<OnlineConfig>) -> Self {
+        Self { client, config }
     }
 
-    async fn get_device(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        device_id: &str,
-    ) -> Result<Option<crate::domain::model::DeviceInfo>> {
+    fn subscription_key(&self, user_id: &str, topic: &str) -> String {
+        format!("subscription:{}:{}", user_id, topic)
+    }
+
+    fn topic_subscribers_key(&self, topic: &str) -> String {
+        format!("topic_subscribers:{}", topic)
+    }
+
+    async fn connection(&self) -> Result<ConnectionManager> {
+        ConnectionManager::new(self.client.as_ref().clone())
+            .await
+            .context("failed to open redis connection")
+    }
+}
+
+impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepository {
+    async fn add_subscription(&self, user_id: String, topic: String) -> Result<()> {
+        let mut conn = self.connection().await?;
+        let key = self.subscription_key(&user_id, &topic);
+        let _: () = conn
+            .set(&key, "1")
+            .await
+            .context("failed to store subscription")?;
+        let _: bool = conn
+            .expire(&key, self.config.redis_ttl_seconds as i64)
+            .await
+            .context("failed to set subscription ttl")?;
+
+        // 添加到主题订阅者集合
+        let topic_key = self.topic_subscribers_key(&topic);
+        let _: () = conn
+            .sadd(&topic_key, &user_id)
+            .await
+            .context("failed to add user to topic subscribers")?;
+        let _: bool = conn
+            .expire(&topic_key, self.config.redis_ttl_seconds as i64)
+            .await
+            .context("failed to set topic subscribers ttl")?;
+
+        Ok(())
+    }
+
+    async fn remove_subscription(&self, ctx: &flare_server_core::context::Context, topics: &[String]) -> Result<()> {
         let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        let session = self
-            .get_connection_by_device(
-                &UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?,
-                &DeviceId::new(device_id.to_string()).map_err(|e| anyhow::anyhow!(e))?,
-            )
-            .await?;
-        Ok(session.map(|s| crate::domain::model::DeviceInfo {
-            device_id: s.device_id().as_str().to_string(),
-            platform: s.device_platform().to_string(),
-            model: None,
-            os_version: None,
-            last_active_time: s.last_heartbeat_at(),
-        }))
+        let mut conn = self.connection().await?;
+
+        for topic in topics {
+            let key = self.subscription_key(&user_id, topic);
+            let _: usize = conn.del(&key).await.context("failed to delete subscription")?;
+
+            // 从主题订阅者集合中移除
+            let topic_key = self.topic_subscribers_key(topic);
+            let _: () = conn
+                .srem(&topic_key, &user_id)
+                .await
+                .context("failed to remove user from topic subscribers")?;
+        }
+
+        Ok(())
+    }
+
+    async fn get_user_subscriptions(&self, ctx: &flare_server_core::context::Context) -> Result<Vec<(String, HashMap<String, String>)>> {
+        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let mut conn = self.connection().await?;
+
+        // 查找该用户的所有订阅键
+        let pattern = format!("subscription:{}:*", user_id);
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(&pattern)
+            .query_async(&mut conn)
+            .await
+            .context("failed to find user subscriptions")?;
+
+        let mut subscriptions = Vec::new();
+        for key in keys {
+            // 从键中提取主题名称
+            if let Some(topic) = key.strip_prefix(&format!("subscription:{}:", user_id)) {
+                subscriptions.push((topic.to_string(), HashMap::new()));
+            }
+        }
+
+        Ok(subscriptions)
+    }
+
+    async fn get_topic_subscribers(&self, topic: &str) -> Result<Vec<String>> {
+        let mut conn = self.connection().await?;
+        let key = self.topic_subscribers_key(topic);
+        let subscribers: Vec<String> = conn
+            .smembers(&key)
+            .await
+            .context("failed to get topic subscribers")?;
+        Ok(subscribers)
+    }
+}
+
+/// 在线状态发布者实现（基于 Redis Pub/Sub）
+pub struct RedisPresencePublisher {
+    client: Arc<redis::Client>,
+}
+
+impl RedisPresencePublisher {
+    pub fn new(client: Arc<redis::Client>) -> Self {
+        Self { client }
+    }
+
+    async fn connection(&self) -> Result<ConnectionManager> {
+        ConnectionManager::new(self.client.as_ref().clone())
+            .await
+            .context("failed to open redis connection")
+    }
+}
+
+impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
+    async fn publish_presence_event(&self, event: flare_proto::signaling::online::PresenceEvent) -> Result<()> {
+        let mut conn = self.connection().await?;
+        let payload = prost::Message::encode_to_vec(&event);
+        let _: () = conn
+            .publish("presence_events", payload)
+            .await
+            .context("failed to publish presence event")?;
+        Ok(())
+    }
+
+    async fn publish_user_presence_event(&self, event: flare_proto::signaling::online::UserPresenceEvent) -> Result<()> {
+        let mut conn = self.connection().await?;
+        let payload = prost::Message::encode_to_vec(&event);
+        let _: () = conn
+            .publish("user_presence_events", payload)
+            .await
+            .context("failed to publish user presence event")?;
+        Ok(())
     }
 }

@@ -1,3 +1,5 @@
+# Push Worker 服务配置（事件总线：消费推送流，与 Orchestrator push_topic 一致）
+
 [services.push_worker]
 kafka = "push"
 consumer_group = "push-worker"

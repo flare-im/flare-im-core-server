@@ -332,29 +332,6 @@ pub struct MediaServiceConfig {
     pub max_chunk_size_bytes: Option<i64>,
 }
 
-/// 推送代理服务配置
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct PushProxyServiceConfig {
-    /// 运行时配置
-    #[serde(flatten)]
-    pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置
-    #[serde(default)]
-    pub kafka: Option<String>,
-    /// 消息主题
-    #[serde(default)]
-    pub message_topic: Option<String>,
-    /// 通知主题
-    #[serde(default)]
-    pub notification_topic: Option<String>,
-    /// ACK 主题（从 Gateway 接收客户端 ACK，发布到 Kafka）
-    #[serde(default)]
-    pub ack_topic: Option<String>,
-    /// 超时时间（毫秒）
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-}
-
 /// 推送服务器服务配置
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct PushServerServiceConfig {
@@ -464,9 +441,15 @@ pub struct MessageOrchestratorServiceConfig {
     /// Kafka 配置
     #[serde(default)]
     pub kafka: Option<String>,
-    /// Kafka 主题
+    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_CREATED 对齐）
+    #[serde(default, alias = "kafka_topic")]
+    pub storage_topic: Option<String>,
+    /// 操作事件流 Topic（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
     #[serde(default)]
-    pub kafka_topic: Option<String>,
+    pub operation_topic: Option<String>,
+    /// 推送流 Topic（与 constants::topics::TOPIC_PUSH_TASKS 对齐）
+    #[serde(default)]
+    pub push_topic: Option<String>,
     /// WAL 存储
     #[serde(default)]
     pub wal_store: Option<String>,
@@ -547,9 +530,12 @@ pub struct StorageWriterServiceConfig {
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
-    /// Kafka 主题
+    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_CREATED 对齐）
     #[serde(default)]
     pub kafka_topic: Option<String>,
+    /// 操作事件流 Topic（Recall/Edit/Read 等，与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
+    #[serde(default)]
+    pub kafka_operation_topic: Option<String>,
     /// MongoDB 配置
     #[serde(default)]
     pub mongo: Option<String>,
@@ -596,6 +582,15 @@ pub struct ConversationServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
+    /// Kafka 配置（配置则启用 ReadReceipt 消费者，未读数零成本）
+    #[serde(default)]
+    pub kafka: Option<String>,
+    /// 操作事件流 Topic（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐，仅消费 ReadReceipt）
+    #[serde(default)]
+    pub kafka_operation_topic: Option<String>,
+    /// ReadReceipt 消费者 group（与 constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT 对齐）
+    #[serde(default)]
+    pub kafka_group: Option<String>,
     /// Redis 配置
     #[serde(default)]
     pub redis: Option<String>,
@@ -649,6 +644,9 @@ pub struct LoggingConfig {
     /// 是否显示行号
     #[serde(default = "default_true")]
     pub with_line_number: bool,
+    /// 是否使用 ANSI 颜色。默认 None 表示自动检测（输出到 TTY 时开启，重定向到文件时关闭，便于阅读日志文件）
+    #[serde(default)]
+    pub with_ansi: Option<bool>,
 }
 
 fn default_log_level() -> String {
@@ -743,11 +741,6 @@ impl FlareAppConfig {
         self.services.media.clone().unwrap_or_default()
     }
 
-    /// 获取推送代理服务配置
-    pub fn push_proxy_service(&self) -> PushProxyServiceConfig {
-        self.services.push_proxy.clone().unwrap_or_default()
-    }
-
     /// 获取推送服务器服务配置
     pub fn push_server_service(&self) -> PushServerServiceConfig {
         self.services.push_server.clone().unwrap_or_default()
@@ -758,12 +751,17 @@ impl FlareAppConfig {
         self.services.push_worker.clone().unwrap_or_default()
     }
 
-    /// 获取消息编排服务配置
-    pub fn message_orchestrator_service(&self) -> MessageOrchestratorServiceConfig {
+    /// 获取编排服务配置（消息编排 + 推送入队，原 message_orchestrator）
+    pub fn orchestrator_service(&self) -> MessageOrchestratorServiceConfig {
         self.services
             .message_orchestrator
             .clone()
             .unwrap_or_default()
+    }
+
+    /// @deprecated 使用 orchestrator_service
+    pub fn message_orchestrator_service(&self) -> MessageOrchestratorServiceConfig {
+        self.orchestrator_service()
     }
 
     /// 获取信令在线服务配置
@@ -889,14 +887,6 @@ impl FlareAppConfig {
             }
         }
 
-        // 验证推送服务配置
-        if let Some(cfg) = &self.services.push_proxy {
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka)
-                    .ok_or_else(|| anyhow!("Kafka config '{}' not found (push_proxy)", kafka))?;
-            }
-        }
-
         if let Some(cfg) = &self.services.push_server {
             if let Some(kafka) = &cfg.kafka {
                 self.kafka_profile(kafka)
@@ -908,11 +898,11 @@ impl FlareAppConfig {
             }
         }
 
-        if let Some(cfg) = &self.services.push_worker {
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka)
-                    .ok_or_else(|| anyhow!("Kafka config '{}' not found (push_worker)", kafka))?;
-            }
+        if let Some(cfg) = &self.services.push_worker
+            && let Some(kafka) = &cfg.kafka
+        {
+            self.kafka_profile(kafka)
+                .ok_or_else(|| anyhow!("Kafka config '{}' not found (push_worker)", kafka))?;
         }
 
         // 验证消息编排服务配置
@@ -928,13 +918,12 @@ impl FlareAppConfig {
             }
         }
 
-        // 验证信令在线服务配置
-        if let Some(cfg) = &self.services.signaling_online {
-            if let Some(redis) = &cfg.redis {
-                self.redis_profile(redis).ok_or_else(|| {
-                    anyhow!("Redis config '{}' not found (signaling_online)", redis)
-                })?;
-            }
+        if let Some(cfg) = &self.services.signaling_online
+            && let Some(redis) = &cfg.redis
+        {
+            self.redis_profile(redis).ok_or_else(|| {
+                anyhow!("Redis config '{}' not found (signaling_online)", redis)
+            })?;
         }
 
         // 验证存储读取服务配置
@@ -981,11 +970,15 @@ impl FlareAppConfig {
             }
         }
 
-        // 验证会话服务配置
         if let Some(cfg) = &self.services.conversation {
             if let Some(redis) = &cfg.redis {
                 self.redis_profile(redis)
                     .ok_or_else(|| anyhow!("Redis config '{}' not found (conversation)", redis))?;
+            }
+            if let Some(kafka) = &cfg.kafka {
+                self.kafka_profile(kafka).ok_or_else(|| {
+                    anyhow!("Kafka config '{}' not found (conversation)", kafka)
+                })?;
             }
         }
 
@@ -1010,10 +1003,19 @@ impl FlareAppConfig {
 /// let config = load_config(Some("config"));
 /// ```
 pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
-    // 确定配置文件候选路径
+    // 确定配置文件候选路径：优先使用传入路径，再尝试 config / flare-im-core/config（便于从 workspace 根目录运行）
     let candidates: Vec<PathBuf> = match path {
+        None | Some("config") => vec![
+            PathBuf::from("config"),
+            PathBuf::from("config.toml"),
+            PathBuf::from("flare-im-core/config"),
+        ],
+        Some("./config") => vec![
+            PathBuf::from("./config"),
+            PathBuf::from("config"),
+            PathBuf::from("flare-im-core/config"),
+        ],
         Some(p) => vec![PathBuf::from(p)],
-        None => vec![PathBuf::from("config"), PathBuf::from("config.toml")],
     };
 
     // 使用 OnceLock 确保配置只初始化一次
@@ -1056,10 +1058,8 @@ pub fn load_config_with_validation(
         config
             .validate_references()
             .with_context(|| "configuration validation failed")?;
-    } else {
-        if let Err(e) = config.validate_references() {
-            warn!("configuration reference validation failed: {}", e);
-        }
+    } else if let Err(e) = config.validate_references() {
+        warn!("configuration reference validation failed: {}", e);
     }
 
     Ok(config)
@@ -1074,11 +1074,11 @@ pub fn app_config() -> &'static FlareAppConfig {
 ///
 /// 按照候选路径列表依次尝试加载配置，如果都失败则使用默认配置
 fn load_with_fallback(candidates: &[PathBuf]) -> FlareAppConfig {
-    // 遍历候选路径列表，尝试加载配置
     for path in candidates {
         match load_config_from_source(path) {
             Ok(mut cfg) => {
                 cfg.ensure_defaults();
+                tracing::info!(config_path = %path.display(), "loaded config from path");
                 return cfg;
             }
             Err(err) => {
@@ -1087,7 +1087,6 @@ fn load_with_fallback(candidates: &[PathBuf]) -> FlareAppConfig {
         }
     }
 
-    // 如果所有候选路径都失败，则使用默认配置
     warn!("no configuration source succeeded, falling back to defaults");
     default_config()
 }
@@ -1272,9 +1271,6 @@ pub struct ServicesConfig {
     /// 媒体服务配置
     #[serde(default, rename = "media")]
     pub media: Option<MediaServiceConfig>,
-    /// 推送代理服务配置
-    #[serde(default, rename = "push_proxy")]
-    pub push_proxy: Option<PushProxyServiceConfig>,
     /// 推送服务器服务配置
     #[serde(default, rename = "push_server")]
     pub push_server: Option<PushServerServiceConfig>,

@@ -1,5 +1,6 @@
+pub mod ack_to_push_proxy;
 pub mod forwarder;
-pub mod online_client;
-pub mod persistence;
+pub mod grpc_connection_pool;
 
-pub use online_client::OnlineServiceClient;
+pub use ack_to_push_proxy::AckToPushProxyForwarder;
+pub use grpc_connection_pool::{GrpcConnectionPool, GrpcConnectionPoolConfig};

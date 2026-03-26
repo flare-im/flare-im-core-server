@@ -9,14 +9,13 @@ use anyhow::{Context, Result};
 use crate::config::GatewayConfig;
 // use crate::interface::grpc::handler::{SimpleGatewayHandler, LightweightGatewayHandler};
 use crate::infrastructure::{
-    GrpcHookClient, GrpcMediaClient, GrpcMessageClient, GrpcOnlineClient, GrpcConversationClient,
+    GrpcHookClient, GrpcMediaClient, GrpcMessageClient, GrpcOnlineClient,
 };
 use crate::interface::grpc::handler::{LightweightGatewayHandler, SimpleGatewayHandler};
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub simple_handler: SimpleGatewayHandler,
-    pub lightweight_handler: LightweightGatewayHandler,
 }
 
 /// 构建应用上下文
@@ -32,12 +31,12 @@ pub async fn initialize(
     app_config: &flare_im_core::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载配置
-    let gateway_config =
+    let _gateway_config =
         GatewayConfig::from_app_config(app_config).context("Failed to load gateway config")?;
 
     // 2. 创建服务发现（使用常量，支持环境变量覆盖）
     use flare_im_core::service_names::{
-        HOOK_ENGINE, MEDIA, MESSAGE_ORCHESTRATOR, CONVERSATION, SIGNALING_ONLINE, get_service_name,
+        ORCHESTRATOR, get_service_name,
     };
 
     // 2.1 Media 服务发现
@@ -76,8 +75,8 @@ pub async fn initialize(
         None
     };
 
-    // 2.3 Message 服务发现
-    let message_service = get_service_name("MESSAGE_ORCHESTRATOR");
+    // 2.3 Message 服务发现（Orchestrator）
+    let message_service = get_service_name(ORCHESTRATOR);
     let message_discover = flare_im_core::discovery::create_discover(&message_service)
         .await
         .map_err(|e| {
@@ -107,24 +106,6 @@ pub async fn initialize(
         })?;
 
     let online_service_client = if let Some(discover) = online_discover {
-        Some(flare_server_core::discovery::ServiceClient::new(discover))
-    } else {
-        None
-    };
-
-    // 2.5 Session 服务发现
-    let conversation_service = get_service_name("SESSION");
-    let session_discover = flare_im_core::discovery::create_discover(&conversation_service)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create session service discover for {}: {}",
-                conversation_service,
-                e
-            )
-        })?;
-
-    let conversation_service_client = if let Some(discover) = session_discover {
         Some(flare_server_core::discovery::ServiceClient::new(discover))
     } else {
         None
@@ -167,35 +148,23 @@ pub async fn initialize(
         Arc::new(GrpcOnlineClient::new(online_service.clone()))
     };
 
-    let conversation_client = if let Some(service_client) = conversation_service_client {
-        Arc::new(GrpcConversationClient::with_service_client(
-            service_client,
-            conversation_service.clone(),
-        ))
-    } else {
-        Arc::new(GrpcConversationClient::new(conversation_service.clone()))
-    };
-
     // 4. 构建简单网关处理器
     let simple_handler = SimpleGatewayHandler::new(
         media_client.clone(),
         hook_client.clone(),
         message_client.clone(),
         online_client.clone(),
-        conversation_client.clone(),
     );
 
     // 5. 构建轻量级网关处理器
-    let lightweight_handler = LightweightGatewayHandler::new(
+    let _lightweight_handler = LightweightGatewayHandler::new(
         media_client,
         hook_client,
         message_client,
         online_client,
-        conversation_client,
     );
 
     Ok(ApplicationContext {
         simple_handler,
-        lightweight_handler,
     })
 }

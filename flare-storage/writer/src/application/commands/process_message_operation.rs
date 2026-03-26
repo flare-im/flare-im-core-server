@@ -1,10 +1,9 @@
-//! 处理消息操作命令
+//! 处理领域事件命令（使用领域 Event，与 proto 解耦）
 
-use flare_proto::common::{Message, MessageOperation};
+use crate::domain::model::Event;
 
-/// 处理消息操作命令
+/// 处理领域事件命令（撤回、编辑、删除、已读、反应、置顶、标记等）
 #[derive(Debug, Clone)]
-pub struct ProcessMessageOperationCommand {
-    pub operation: MessageOperation,
-    pub message: Message,
+pub struct ProcessEventCommand {
+    pub event: Event,
 }

@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as AnyhowContext, Result};
-use flare_proto::common::TenantContext;
-use flare_proto::message::message_service_client::MessageServiceClient;
-use flare_proto::message::{SendMessageRequest, SendMessageResponse};
+use flare_proto::message::message_send_service_client::MessageSendServiceClient;
+use flare_proto::common::{CustomData, Event as ProtoEvent, Message, OperationResponse};
+use flare_proto::message::{ExecuteEventRequest, SendMessageRequest, SendMessageResponse};
 use prost::Message as ProstMessage;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -17,7 +17,7 @@ use tonic::transport::Channel;
 use flare_server_core::context::Context as ServerContext;
 use tracing::{debug, info};
 
-use crate::domain::repository::RouteRepository;
+use crate::domain::repository::{RouteRepository, DefaultRouteRepository};
 use flare_server_core::discovery::ServiceClient;
 
 /// SVID 常量定义
@@ -29,13 +29,13 @@ pub mod svid {
 /// 缓存的客户端条目
 struct CachedClient {
     /// 客户端
-    client: MessageServiceClient<Channel>,
+    client: MessageSendServiceClient<Channel>,
     /// 最后使用时间
     last_used: Instant,
 }
 
 impl CachedClient {
-    fn new(client: MessageServiceClient<Channel>) -> Self {
+    fn new(client: MessageSendServiceClient<Channel>) -> Self {
         Self {
             client,
             last_used: Instant::now(),
@@ -105,7 +105,7 @@ impl MessageForwarder {
         &self,
         svid: &str,
         endpoint: &str,
-    ) -> Result<MessageServiceClient<Channel>> {
+    ) -> Result<MessageSendServiceClient<Channel>> {
         let cache_key = Self::cache_key(svid, endpoint);
 
         // 快速路径：尝试从缓存读取（需要写锁以更新 last_used）
@@ -162,7 +162,7 @@ impl MessageForwarder {
         &self,
         endpoint: &str,
         svid: &str,
-    ) -> Result<MessageServiceClient<Channel>> {
+    ) -> Result<MessageSendServiceClient<Channel>> {
 
         // 特殊处理：如果 SVID 是 svid.im，直接使用 MESSAGE_ORCHESTRATOR 服务名
         if svid == svid::IM {
@@ -228,7 +228,7 @@ impl MessageForwarder {
                 )
             })?;
 
-            return Ok(MessageServiceClient::new(channel));
+            return Ok(MessageSendServiceClient::new(channel));
         }
 
         // 其他业务系统：判断 endpoint 是服务名还是 URL
@@ -327,7 +327,7 @@ impl MessageForwarder {
             })?
         };
 
-        Ok(MessageServiceClient::new(channel))
+        Ok(MessageSendServiceClient::new(channel))
     }
 
     /// 根据 endpoint 和 SVID 获取或创建业务系统客户端（带缓存）
@@ -340,7 +340,7 @@ impl MessageForwarder {
     /// # 参数
     /// * `endpoint` - 服务端点（服务名、URL 或 host:port）
     /// * `svid` - SVID（用于服务发现时的标签过滤）
-    async fn get_business_client(&self, endpoint: &str, svid: &str) -> Result<MessageServiceClient<Channel>> {
+    async fn get_business_client(&self, endpoint: &str, svid: &str) -> Result<MessageSendServiceClient<Channel>> {
         // 对于 svid.im，使用固定的 endpoint（MESSAGE_ORCHESTRATOR 服务名）
         let actual_endpoint = if svid == svid::IM {
             use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
@@ -360,8 +360,8 @@ impl MessageForwarder {
         &self,
         ctx: &ServerContext,
         svid: &str,
-        payload: Vec<u8>,
-        route_repository: Option<Arc<dyn RouteRepository + Send + Sync>>,
+        message: Message,
+        route_repository: Arc<DefaultRouteRepository>,
     ) -> Result<(String, Vec<u8>)> {
         // 提取或使用默认 SVID
         let resolved_svid = if svid.is_empty() {
@@ -375,13 +375,13 @@ impl MessageForwarder {
         let endpoint = if resolved_svid == svid::IM {
             use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
             get_service_name(MESSAGE_ORCHESTRATOR)
-        } else if let Some(repo) = route_repository {
+        } else {
             // 其他 SVID：从路由仓储解析端点
             use crate::domain::model::Svid;
             let svid_obj = Svid::new(resolved_svid.to_string())
                 .map_err(|e| anyhow::anyhow!("Invalid SVID: {}", e))?;
-            
-            match repo.find_by_svid(svid_obj.as_str()).await {
+
+            match route_repository.find_by_svid(svid_obj.as_str()).await {
                 Ok(Some(route)) => route.endpoint().as_str().to_string(),
                 Ok(None) => {
                     return Err(anyhow::anyhow!(
@@ -397,37 +397,21 @@ impl MessageForwarder {
                     ));
                 }
             }
-        } else {
-            return Err(anyhow::anyhow!(
-                "Route repository not available, cannot resolve endpoint for SVID {}",
-                resolved_svid
-            ));
         };
 
         // 获取或创建业务系统客户端（带缓存，使用 SVID 过滤）
         let mut client = self.get_business_client(&endpoint, &resolved_svid).await?;
-
-        // 解析 payload 为 Message 对象
-        use flare_proto::common::Message;
-        if payload.is_empty() {
-            return Err(anyhow::anyhow!("Empty payload for message forwarding"));
-        }
-
-        let message = Message::decode(&payload[..])
-            .map_err(|e| anyhow::anyhow!("Failed to decode payload as Message: {}", e))?;
 
         // 保存消息信息用于错误日志
         let message_id = message.server_id.clone();
         let message_type = message.message_type;
         let conversation_id_for_log = message.conversation_id.clone();
 
-        // 提取 conversation_id（优先从 message，否则从 context）
+        // 提取 conversation_id（以 message 为准；Context 通过 metadata 传递）
         let conversation_id = if !message.conversation_id.is_empty() {
             message.conversation_id.clone()
         } else {
-            ctx.request()
-                .and_then(|req| req.attributes.get("conversation_id").cloned())
-                .unwrap_or_default()
+            String::new()
         };
 
         // 记录消息信息（用于调试）
@@ -441,51 +425,27 @@ impl MessageForwarder {
             "Forwarding message to business service"
         );
 
-        // 从 Context 中提取 TenantContext（用于 protobuf 兼容性）
-        let _tenant_context: TenantContext = ctx.tenant().cloned().map(|tc| tc.into()).or_else(|| {
-            ctx.tenant_id().map(|tenant_id| TenantContext {
-                tenant_id: tenant_id.to_string(),
-                business_type: String::new(),
-                environment: String::new(),
-                organization_id: String::new(),
-                labels: std::collections::HashMap::new(),
-                attributes: std::collections::HashMap::new(),
-            })
-        }).unwrap_or_else(|| {
-            TenantContext {
-                tenant_id: self.default_tenant_id.clone(),
-                business_type: String::new(),
-                environment: String::new(),
-                organization_id: String::new(),
-                labels: std::collections::HashMap::new(),
-                attributes: std::collections::HashMap::new(),
-            }
-        });
-
-        // 从 Context 中提取 RequestContext（用于 protobuf 兼容性）
-        use flare_proto::common::RequestContext;
-        let _request_context: RequestContext = ctx.request().cloned().map(|rc| rc.into()).unwrap_or_else(|| {
-            RequestContext {
-                request_id: ctx.request_id().to_string(),
-                trace: None,
-                actor: None,
-                device: None,
-                channel: String::new(),
-                user_agent: String::new(),
-                attributes: std::collections::HashMap::new(),
-            }
-        });
-
         // 构造转发请求
         let request = SendMessageRequest {
             conversation_id,
             message: Some(message),
             sync: false,
+            svid: resolved_svid.to_string(),
         };
 
-        // 发送请求到业务系统
+        let forwarding_ctx = match ctx.tenant_id().filter(|t| !t.is_empty()) {
+            Some(_) => ctx.clone(),
+            None => ctx.with_tenant_id(self.default_tenant_id.clone()),
+        };
+
+        let mut grpc_request = tonic::Request::new(request);
+        flare_server_core::client::metadata_codec::encode_context_to_metadata(
+            grpc_request.metadata_mut(),
+            &forwarding_ctx,
+        );
+
         let response = match client
-            .send_message(tonic::Request::new(request))
+            .send_message(grpc_request)
             .await
         {
             Ok(resp) => resp,
@@ -526,4 +486,75 @@ impl MessageForwarder {
         Ok((endpoint, response_bytes))
     }
 
+    /// 转发 DATA 通道 `CustomData`（当前无统一编排 RPC 时返回空响应，供网关走「无回包」语义）。
+    pub async fn forward_custom_data(
+        &self,
+        _ctx: &ServerContext,
+        _svid: &str,
+        data: CustomData,
+        _route_repository: Arc<DefaultRouteRepository>,
+    ) -> Result<(String, Vec<u8>)> {
+        tracing::warn!(
+            r#type = %data.r#type,
+            "CustomData uplink accepted; downstream orchestrator RPC not wired — returning empty response_data"
+        );
+        Ok(("unwired-custom-data".to_string(), Vec::new()))
+    }
+
+    /// 转发事件到业务系统（ExecuteEvent）
+    ///
+    /// 返回 (端点, 响应数据) 元组
+    pub async fn forward_event(
+        &self,
+        ctx: &ServerContext,
+        svid: &str,
+        event: &ProtoEvent,
+        route_repository: Arc<DefaultRouteRepository>,
+    ) -> Result<(String, Vec<u8>)> {
+        let resolved_svid = if svid.is_empty() { svid::IM } else { svid };
+        let endpoint = if resolved_svid == svid::IM {
+            use flare_im_core::service_names::{get_service_name, MESSAGE_ORCHESTRATOR};
+            get_service_name(MESSAGE_ORCHESTRATOR)
+        } else {
+            use crate::domain::model::Svid;
+            let svid_obj = Svid::new(resolved_svid.to_string())
+                .map_err(|e| anyhow::anyhow!("Invalid SVID: {}", e))?;
+            match route_repository.find_by_svid(svid_obj.as_str()).await {
+                Ok(Some(route)) => route.endpoint().as_str().to_string(),
+                Ok(None) => return Err(anyhow::anyhow!("Business service not found for SVID {}", resolved_svid)),
+                Err(e) => return Err(anyhow::anyhow!("Failed to resolve route for SVID {}: {}", resolved_svid, e)),
+            }
+        };
+
+        let mut client = self.get_business_client(&endpoint, resolved_svid).await?;
+
+        let forwarding_ctx = match ctx.tenant_id().filter(|t| !t.is_empty()) {
+            Some(_) => ctx.clone(),
+            None => ctx.with_tenant_id(self.default_tenant_id.clone()),
+        };
+
+        let exec_req = ExecuteEventRequest {
+            svid: resolved_svid.to_string(),
+            event: Some(event.clone()),
+        };
+        let mut grpc_request = tonic::Request::new(exec_req);
+        flare_server_core::client::metadata_codec::encode_context_to_metadata(
+            grpc_request.metadata_mut(),
+            &forwarding_ctx,
+        );
+
+        let response = client
+            .execute_event(grpc_request)
+            .await
+            .map_err(|e| anyhow::anyhow!("ExecuteEvent failed (svid={}): {} ({:?})", resolved_svid, e.message(), e.code()))?;
+        let inner = response.into_inner();
+        let mut response_bytes = Vec::new();
+        OperationResponse::encode(&inner, &mut response_bytes)
+            .with_context(|| "Failed to encode OperationResponse")?;
+        info!(
+            "✅ Event forwarded to business service: SVID={}, Endpoint={}",
+            resolved_svid, endpoint
+        );
+        Ok((endpoint, response_bytes))
+    }
 }

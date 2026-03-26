@@ -16,3 +16,7 @@
 address = "0.0.0.0"
 port = 50062
 
+# 客户端送达 ACK 由 route 转发至 Push Proxy gRPC。
+# 无注册中心时默认回退 http://127.0.0.1:50090（与 push-proxy 默认监听一致）。
+# 生产环境请设置环境变量：PUSH_PROXY_GRPC_ENDPOINT=http://push-proxy:50090
+

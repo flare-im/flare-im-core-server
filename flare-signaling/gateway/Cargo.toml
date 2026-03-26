@@ -15,7 +15,6 @@ flare-core = { workspace = true }
 flare-server-core = { workspace = true, features = ["discovery"] }
 flare-proto = { workspace = true }
 flare-im-core = { path = "../..", features = ["discovery"] }
-flare-conversation = { path = "../../flare-conversation" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }

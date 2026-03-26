@@ -6,6 +6,6 @@ pub mod subscription_service;
 pub mod user_service;
 
 pub use device_manager_service::DeviceManagerService;
-pub use online_status_service::OnlineStatusService as OnlineStatusDomainService;
-pub use subscription_service::SubscriptionService as SubscriptionDomainService;
-pub use user_service::UserService as UserDomainService;
+pub use online_status_service::{DefaultOnlineStatusService, OnlineStatusService};
+pub use subscription_service::SubscriptionService;
+pub use user_service::UserService;

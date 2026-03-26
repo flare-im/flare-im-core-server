@@ -1,9 +1,7 @@
-//! # Hook引擎gRPC接口
-//!
-//! 提供Hook引擎的gRPC服务接口
+//! gRPC 接口层：HookExtension / HookService 的 tonic 实现，入参映射为应用层调用。
 
-pub mod hook_service;
-pub mod server;
+mod hook_extension;
+mod hook_service;
 
+pub use hook_extension::HookExtensionServer;
 pub use hook_service::HookServiceServer;
-pub use server::HookExtensionServer;

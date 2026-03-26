@@ -2,19 +2,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use flare_server_core::context::Context;
+use flare_server_core::context::Ctx;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum MatchRule {
+    #[default]
     Any,
     Exact { values: HashSet<String> },
-}
-
-impl Default for MatchRule {
-    fn default() -> Self {
-        MatchRule::Any
-    }
 }
 
 impl MatchRule {
@@ -51,7 +46,7 @@ pub struct HookSelector {
 }
 
 impl HookSelector {
-    pub fn matches(&self, ctx: &Context) -> bool {
+    pub fn matches(&self, ctx: &Ctx) -> bool {
         use crate::hooks::hook_context_data::get_hook_context_data;
         
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();

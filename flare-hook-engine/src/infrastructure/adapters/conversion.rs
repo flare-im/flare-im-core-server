@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flare_im_core::{
     DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
-use flare_proto::common::{RequestContext, TenantContext};
 use flare_proto::hooks::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
@@ -77,12 +76,11 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         conversation_id: record.conversation_id.clone(),
         client_msg_id: record.client_message_id.clone().unwrap_or_default(),
         sender_id: record.sender_id.clone(),
-        receiver_id: String::new(), // 从数据库读取：receiver_id 可能为空（旧数据）
-        channel_id: String::new(),  // 从数据库读取：channel_id 可能为空（旧数据）
+        sender_name: String::new(),
+        sender_avatar: String::new(),
         source: 1,
         seq: 0,
         timestamp: Some(ts.clone()),
-        quote: None, // 从数据库读取：quote 可能为空（旧数据）
         conversation_type: record
             .conversation_type
             .as_deref()
@@ -94,35 +92,12 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
             })
             .unwrap_or(0),
         message_type: 0,
-        business_type: String::new(),
-        content: None,
-        content_type: 1,
-        attachments: vec![],
-        extra: std::collections::HashMap::new(),
-        attributes: std::collections::HashMap::new(),
+        channel_id: String::new(),
+        content: Vec::new(),
         status: 1,
-        is_recalled: false,
-        recalled_at: None,
-        recall_reason: String::new(),
-        is_burn_after_read: false,
-        burn_after_seconds: 0,
-        timeline: Some(flare_proto::common::MessageTimeline {
-            created_at: None,
-            persisted_at: Some(ts),
-            delivered_at: None,
-            read_at: None,
-        }),
-        visibility: std::collections::HashMap::new(),
-        read_by: vec![],
-        reactions: vec![],
-        edit_history: vec![],
-        current_edit_version: 0, // 未编辑
-        last_edited_at: None,    // 未编辑
-        audit: None,
-        tags: vec![],
         offline_push_info: None,
-        extensions: vec![],
-        tenant: record.metadata.get("tenant_id").cloned().unwrap_or_default(), // 添加租户信息
+        extra: std::collections::HashMap::new(),
+        extensions: std::collections::HashMap::new(),
     };
 
     HookMessageRecord {

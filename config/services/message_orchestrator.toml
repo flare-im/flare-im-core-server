@@ -1,8 +1,12 @@
-# Message Orchestrator 服务配置
+# Message Orchestrator 服务配置（事件总线：消息流、操作事件流、推送流）
+# Kafka 使用 base.toml 中 [kafka.message]；Topic 与 flare_im_core::constants::topics 对齐
 
 [services.message_orchestrator]
 kafka = "message"
-kafka_topic = "storage-messages"
+# 消息流 / 操作事件流 / 推送流 Topic（不配则用 topics 默认值）
+storage_topic = "flare.im.message.created"
+operation_topic = "flare.im.message.events"
+push_topic = "flare.im.push.tasks"
 wal_store = "message_wal"
 wal_hash_key = "flare:message:wal"
 wal_ttl_seconds = 86400

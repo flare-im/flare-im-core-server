@@ -1,3 +1,5 @@
-pub mod handler;
+//! gRPC：`StorageReaderService` 协议适配。
 
-pub use handler::StorageReaderGrpcHandler;
+mod storage_reader_handler;
+
+pub use storage_reader_handler::StorageReaderGrpcHandler;

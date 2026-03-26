@@ -1,5 +1,7 @@
 use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
+use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
+use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
 use std::collections::HashMap;
 use std::env;
 
@@ -16,6 +18,18 @@ pub struct ConversationConfig {
     pub storage_reader_service: Option<String>,
     pub recent_message_limit: i32,
     pub default_policy: ConversationPolicy,
+    /// Kafka bootstrap（配置则启用 ReadReceipt 消费者，未读数零成本更新）
+    pub kafka_bootstrap: Option<String>,
+    /// 与 Storage Writer 相同的 operation topic（仅 use_events_topic_only=false 时用）
+    pub kafka_operation_topic: Option<String>,
+    /// 统一事件流 topic，优先于 kafka_operation_topic（与 Orchestrator 单事件流对齐）
+    pub kafka_events_topic: Option<String>,
+    /// Consumer group（与 storage-writer 不同，避免抢消息）
+    pub kafka_group: Option<String>,
+    /// 会话确保 Topic（Orchestrator 异步会话创建时发布；配置则启用 ConversationEnsure 消费者）
+    pub kafka_ensure_topic: Option<String>,
+    /// 会话确保消费者 group
+    pub kafka_ensure_group: Option<String>,
 }
 
 impl ConversationConfig {
@@ -129,6 +143,49 @@ impl ConversationConfig {
             metadata: policy_metadata,
         };
 
+        let kafka_bootstrap = env::var("CONVERSATION_KAFKA_BOOTSTRAP_SERVERS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                service_config
+                    .kafka
+                    .as_ref()
+                    .and_then(|name| app.kafka_profile(name))
+                    .map(|p| p.bootstrap_servers.clone())
+            });
+        let kafka_operation_topic = kafka_bootstrap.as_ref().map(|_| {
+            env::var("CONVERSATION_KAFKA_OPERATION_TOPIC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| service_config.kafka_operation_topic.clone())
+                .unwrap_or_else(|| TOPIC_MESSAGE_EVENTS.to_string())
+        });
+        let kafka_events_topic = kafka_bootstrap.as_ref().map(|_| {
+            env::var("CONVERSATION_KAFKA_EVENTS_TOPIC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| TOPIC_MESSAGE_EVENTS.to_string())
+        });
+        let kafka_group = kafka_bootstrap.as_ref().map(|_| {
+            env::var("CONVERSATION_KAFKA_GROUP")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| service_config.kafka_group.clone())
+                .unwrap_or_else(|| CONVERSATION_READ_RECEIPT_GROUP_DEFAULT.to_string())
+        });
+        let kafka_ensure_topic = kafka_bootstrap.as_ref().and_then(|_| {
+            env::var("CONVERSATION_KAFKA_ENSURE_TOPIC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| Some(TOPIC_CONVERSATION_ENSURE.to_string()))
+        });
+        let kafka_ensure_group = kafka_ensure_topic.as_ref().map(|_| {
+            env::var("CONVERSATION_KAFKA_ENSURE_GROUP")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "conversation-ensure".to_string())
+        });
+
         Ok(Self {
             redis_url,
             postgres_url,
@@ -139,6 +196,12 @@ impl ConversationConfig {
             storage_reader_service,
             recent_message_limit,
             default_policy,
+            kafka_bootstrap,
+            kafka_operation_topic,
+            kafka_events_topic,
+            kafka_group,
+            kafka_ensure_topic,
+            kafka_ensure_group,
         })
     }
 }

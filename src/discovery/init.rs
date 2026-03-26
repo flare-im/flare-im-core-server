@@ -1,6 +1,7 @@
-//! 服务注册发现初始化模块
+//! 服务注册发现初始化（**保留在 flare-im-core**）
 //!
-//! 从配置文件中自动读取服务发现配置，构建服务注册和发现实例
+//! 依赖 [crate::config::FlareAppConfig] 与全局 `app_config()`，与 IM 多服务 TOML 强绑定；不宜迁入 `flare-server-core`
+//!（避免 server-core 反向依赖应用配置形状）。底层注册/发现类型仍来自 `flare_server_core::discovery`。
 
 use std::net::SocketAddr;
 use uuid::Uuid;

@@ -51,15 +51,11 @@ pub fn boxed_error_to_core(error: Box<dyn std::error::Error>) -> FlareError {
     FlareError::system(error.to_string())
 }
 
-/// 将 server error code 映射到 core error code
-///
-/// 由于 `flare_server_core::error::ErrorCode` 和 `flare_core::common::error::code::ErrorCode`
-/// 的定义完全相同，可以直接通过数值转换
+/// 将 server error code 映射到 core error code。
+/// SAFETY: 仅当两处 ErrorCode 枚举定义（变体及 repr）完全一致时安全；若任一方修改需同步审查。
 fn map_server_code_to_core(
     server_code: flare_server_core::error::ErrorCode,
 ) -> flare_core::common::error::code::ErrorCode {
-    // 由于两个 ErrorCode 枚举的定义完全相同，可以直接通过数值转换
-    // 使用 unsafe 转换（安全，因为定义相同）
     unsafe { std::mem::transmute(server_code) }
 }
 
@@ -67,7 +63,7 @@ fn map_server_code_to_core(
 #[macro_export]
 macro_rules! to_core_result {
     ($expr:expr) => {
-        $expr.map_err(|e| crate::infrastructure::error::anyhow_error_to_core(e))
+        $expr.map_err(|e| $crate::infrastructure::error::anyhow_error_to_core(e))
     };
 }
 
@@ -75,6 +71,6 @@ macro_rules! to_core_result {
 #[macro_export]
 macro_rules! server_to_core_result {
     ($expr:expr) => {
-        $expr.map_err(|e| crate::infrastructure::error::server_error_to_core(e))
+        $expr.map_err(|e| $crate::infrastructure::error::server_error_to_core(e))
     };
 }

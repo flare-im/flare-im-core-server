@@ -2,7 +2,6 @@
 //! 提供统一的 ACK 能力，供各业务模块使用
 
 use crate::ack::redis_manager::AckStatusInfo;
-use async_trait::async_trait;
 
 // 重新导出类型，方便外部使用
 pub use crate::ack::redis_manager::{AckStatus, AckType, ImportanceLevel};
@@ -31,7 +30,6 @@ pub struct AckTimeoutEvent {
 /// ACK 管理器 Trait
 ///
 /// 提供统一的 ACK 状态管理能力，供各业务模块使用
-#[async_trait]
 pub trait AckManager: Send + Sync {
     /// 记录 ACK 事件
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>>;

@@ -7,27 +7,9 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
-use crate::infrastructure::connection_context::{
-    build_tenant_context_from_metadata, build_request_context_from_metadata,
-};
-
-use crate::domain::repository::SignalingGateway;
+use crate::domain::model::ConnectionDomainServiceConfig;
+use crate::domain::ports::IConnectionPort;
 use crate::domain::service::ConnectionQualityService;
-
-/// 连接管理领域服务配置
-#[derive(Debug, Clone)]
-pub struct ConnectionDomainServiceConfig {
-    /// 网关ID
-    pub gateway_id: String,
-}
-
-impl Default for ConnectionDomainServiceConfig {
-    fn default() -> Self {
-        Self {
-            gateway_id: "gateway-1".to_string(),
-        }
-    }
-}
 
 /// 连接管理领域服务
 ///
@@ -36,19 +18,19 @@ impl Default for ConnectionDomainServiceConfig {
 /// - 封装心跳管理逻辑
 /// - 提供连接生命周期管理
 pub struct ConnectionDomainService {
-    signaling_gateway: Arc<dyn SignalingGateway>,
+    connection_port: Arc<dyn IConnectionPort>,
     quality_service: Arc<ConnectionQualityService>,
     config: ConnectionDomainServiceConfig,
 }
 
 impl ConnectionDomainService {
     pub fn new(
-        signaling_gateway: Arc<dyn SignalingGateway>,
+        connection_port: Arc<dyn IConnectionPort>,
         quality_service: Arc<ConnectionQualityService>,
         config: ConnectionDomainServiceConfig,
     ) -> Self {
         Self {
-            signaling_gateway,
+            connection_port,
             quality_service,
             config,
         }
@@ -74,15 +56,6 @@ impl ConnectionDomainService {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("gateway_id".to_string(), self.config.gateway_id.clone());
 
-        // 从连接 metadata 中提取上下文（如果可用）
-        let request_context: Option<flare_proto::common::RequestContext> = connection_metadata
-            .map(|meta| build_request_context_from_metadata(meta, Some(user_id)).into()); // 转换为 proto 类型
-        
-        let tenant_context: Option<flare_proto::common::TenantContext> = connection_metadata
-            .map(|meta| build_tenant_context_from_metadata(meta, "default").into()); // 转换为 proto 类型
-        
-        use flare_server_core::context::conversions::*; // 导入转换 trait
-
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
             token: String::new(),
@@ -98,10 +71,10 @@ impl ConnectionDomainService {
             resume_conversation_id: String::new(),
         };
 
-        // 调用 Signaling Online 服务，添加超时保护
+        // 通过连接仓储调用登录，添加超时保护
         let login_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.signaling_gateway.login(login_request),
+            self.connection_port.login(login_request),
         )
         .await;
 
@@ -166,7 +139,7 @@ impl ConnectionDomainService {
             conversation_id: conversation_id.unwrap_or("").to_string(),
         };
 
-        if let Err(e) = self.signaling_gateway.logout(logout_request).await {
+        if let Err(e) = self.connection_port.logout(logout_request).await {
             warn!(
                 ?e,
                 user_id = %user_id,
@@ -188,21 +161,27 @@ impl ConnectionDomainService {
 
     /// 刷新连接心跳
     ///
-    /// 向 Signaling Online 服务发送心跳，保持连接活跃
+    /// 向 Signaling Online 服务发送心跳，保持连接活跃。
+    /// `connection_id` 可选，用于从质量服务获取该连接的 RTT/丢包率并上报。
     #[instrument(skip(self), fields(user_id))]
-    pub async fn refresh_heartbeat(&self, user_id: &str, conversation_id: &str) -> Result<()> {
-        // 从链接质量服务获取当前连接质量
-        let current_quality = self
-            .quality_service
-            .get_quality(conversation_id)
-            .await
-            .map(|metrics| flare_proto::common::ConnectionQuality {
-                rtt_ms: metrics.rtt_ms,
-                packet_loss_rate: metrics.packet_loss_rate,
-                last_measure_ts: 0, // TODO: 填充正确的时间戳
-                network_type: metrics.network_type,
-                signal_strength: 0, // TODO: 填充正确的信号强度
-            });
+    pub async fn refresh_heartbeat(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        connection_id: Option<&str>,
+    ) -> Result<()> {
+        // 从链接质量服务获取当前连接质量（按 connection_id 查）
+        let current_quality = match connection_id {
+            Some(cid) => self.quality_service.get_quality(cid).await,
+            None => None,
+        };
+        let current_quality = current_quality.map(|metrics| flare_proto::common::ConnectionQuality {
+            rtt_ms: metrics.rtt_ms,
+            packet_loss_rate: metrics.packet_loss_rate,
+            last_measure_ts: 0, // TODO: 填充正确的时间戳
+            network_type: metrics.network_type,
+            signal_strength: 0, // TODO: 填充正确的信号强度
+        });
 
         let heartbeat_request = HeartbeatRequest {
             user_id: user_id.to_string(),
@@ -213,7 +192,7 @@ impl ConnectionDomainService {
         // 添加超时保护
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            self.signaling_gateway.heartbeat(heartbeat_request),
+            self.connection_port.heartbeat(heartbeat_request),
         )
         .await
         {

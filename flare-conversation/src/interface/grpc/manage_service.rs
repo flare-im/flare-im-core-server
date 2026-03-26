@@ -1,0 +1,347 @@
+//! `ConversationManageService`：会话写命令与侧效应（游标、已读、在线等）
+
+use flare_proto::common::DeviceState as ProtoDeviceState;
+use flare_proto::common::StatusOnlyResponse;
+use flare_proto::conversation::conversation_manage_service_server::ConversationManageService;
+use flare_proto::conversation::{
+    BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse, DeleteConversationRequest,
+    ForceConversationSyncRequest, ManageParticipantsRequest, ManageParticipantsResponse,
+    MarkConversationAsReadRequest, SearchConversationsRequest, SearchConversationsResponse,
+    UpdateConversationRequest, UpdateConversationResponse, UpdateCursorRequest, UpdatePresenceRequest,
+};
+use flare_server_core::error;
+use flare_server_core::utils::require_ctx_from_request;
+use tonic::{Request, Response, Status};
+
+use crate::application::commands::{
+    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand, UpdateCursorCommand,
+    UpdatePresenceCommand,
+};
+use crate::application::queries::SearchConversationsQuery;
+use crate::domain::model::{
+    ConflictResolutionPolicy, ConversationLifecycleState, ConversationVisibility, DeviceState,
+};
+
+use super::shared::{
+    domain_to_proto_conversation, internal_error, participant_domain_to_proto, participant_proto_to_domain,
+    proto_summary,
+};
+use super::ConversationGrpcHandler;
+
+#[tonic::async_trait]
+impl ConversationManageService for ConversationGrpcHandler {
+    async fn create_conversation(
+        &self,
+        request: Request<CreateConversationRequest>,
+    ) -> Result<Response<CreateConversationResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let participants: Vec<_> = req.participants.into_iter().map(participant_proto_to_domain).collect();
+        let visibility = ConversationVisibility::from_proto(req.visibility);
+        let conv = self
+            .command_handler
+            .handle_create_conversation(
+                &ctx,
+                CreateConversationCommand {
+                    conversation_type: req.conversation_type,
+                    business_type: req.business_type,
+                    participants,
+                    attributes: req.attributes,
+                    visibility,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(CreateConversationResponse {
+            conversation: Some(domain_to_proto_conversation(conv)),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn update_conversation(
+        &self,
+        request: Request<UpdateConversationRequest>,
+    ) -> Result<Response<UpdateConversationResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let display_name = if req.display_name.is_empty() {
+            None
+        } else {
+            Some(req.display_name)
+        };
+        let attributes = if req.attributes.is_empty() {
+            None
+        } else {
+            Some(req.attributes)
+        };
+        let visibility = if req.visibility == 0 {
+            None
+        } else {
+            Some(ConversationVisibility::from_proto(req.visibility))
+        };
+        let lifecycle_state = if req.lifecycle_state == 0 {
+            None
+        } else {
+            Some(ConversationLifecycleState::from_proto(req.lifecycle_state))
+        };
+        let conv = self
+            .command_handler
+            .handle_update_conversation(
+                &ctx,
+                UpdateConversationCommand {
+                    conversation_id: req.conversation_id,
+                    display_name,
+                    attributes,
+                    visibility,
+                    lifecycle_state,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(UpdateConversationResponse {
+            conversation: Some(domain_to_proto_conversation(conv)),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn delete_conversation(
+        &self,
+        request: Request<DeleteConversationRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        self.command_handler
+            .handle_delete_conversation(
+                &ctx,
+                DeleteConversationCommand {
+                    conversation_id: req.conversation_id,
+                    hard_delete: req.hard_delete,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn manage_participants(
+        &self,
+        request: Request<ManageParticipantsRequest>,
+    ) -> Result<Response<ManageParticipantsResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let to_add: Vec<_> = req.to_add.into_iter().map(participant_proto_to_domain).collect();
+        let role_updates: Vec<(String, Vec<String>)> = req
+            .role_updates
+            .into_iter()
+            .map(|u| (u.user_id, u.roles))
+            .collect();
+        let participants = self
+            .command_handler
+            .handle_manage_participants(
+                &ctx,
+                ManageParticipantsCommand {
+                    conversation_id: req.conversation_id,
+                    to_add,
+                    to_remove: req.to_remove,
+                    role_updates,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(ManageParticipantsResponse {
+            participants: participants.into_iter().map(participant_domain_to_proto).collect(),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn batch_acknowledge(
+        &self,
+        request: Request<BatchAcknowledgeRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let cursors: Vec<(String, i64)> = req
+            .cursors
+            .into_iter()
+            .map(|c| (c.conversation_id, c.message_ts))
+            .collect();
+        self.command_handler
+            .handle_batch_acknowledge(&ctx, BatchAcknowledgeCommand { cursors })
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn search_conversations(
+        &self,
+        request: Request<SearchConversationsRequest>,
+    ) -> Result<Response<SearchConversationsResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let limit = req
+            .pagination
+            .as_ref()
+            .map(|p| p.limit.max(1) as usize)
+            .unwrap_or(20);
+        let offset = req
+            .pagination
+            .as_ref()
+            .and_then(|p| p.cursor.parse::<usize>().ok())
+            .unwrap_or(0);
+        let (summaries, total) = self
+            .query_handler
+            .handle_search_conversations(
+                &ctx,
+                SearchConversationsQuery {
+                    filters: vec![],
+                    sort: vec![],
+                    limit,
+                    offset,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        let conversations: Vec<_> = summaries.into_iter().map(proto_summary).collect();
+        Ok(Response::new(SearchConversationsResponse {
+            conversations,
+            pagination: Some(flare_proto::common::Pagination {
+                cursor: offset.saturating_add(limit).to_string(),
+                limit: limit as i32,
+                has_more: offset + limit < total,
+                previous_cursor: String::new(),
+                total_size: total as i64,
+            }),
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn update_cursor(
+        &self,
+        request: Request<UpdateCursorRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        self.command_handler
+            .handle_update_cursor(
+                &ctx,
+                UpdateCursorCommand {
+                    conversation_id: req.conversation_id.clone(),
+                    message_ts: req.message_ts,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn mark_conversation_as_read(
+        &self,
+        request: Request<MarkConversationAsReadRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        self.command_handler
+            .handle_mark_conversation_as_read(
+                &ctx,
+                MarkConversationAsReadCommand {
+                    conversation_id: req.conversation_id,
+                    read_seq: req.read_seq,
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn update_presence(
+        &self,
+        request: Request<UpdatePresenceRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let state = match ProtoDeviceState::try_from(req.state).ok() {
+            Some(ProtoDeviceState::Unspecified) | None => DeviceState::Unspecified,
+            Some(ProtoDeviceState::Online) => DeviceState::Online,
+            Some(ProtoDeviceState::Offline) => DeviceState::Offline,
+            Some(ProtoDeviceState::Conflict) => DeviceState::Conflict,
+        };
+
+        let resolution = ConflictResolutionPolicy::from_proto(req.resolution);
+        let resolution = if resolution == ConflictResolutionPolicy::Unspecified {
+            None
+        } else {
+            Some(resolution)
+        };
+
+        self.command_handler
+            .handle_update_presence(
+                &ctx,
+                UpdatePresenceCommand {
+                    device_id: req.device_id.clone(),
+                    device_platform: if req.device_platform.is_empty() {
+                        None
+                    } else {
+                        Some(req.device_platform)
+                    },
+                    state,
+                    conflict_resolution: resolution,
+                    notify_conflict: req.notify_conflict,
+                    conflict_reason: if req.conflict_reason.is_empty() {
+                        None
+                    } else {
+                        Some(req.conflict_reason)
+                    },
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+
+    async fn force_conversation_sync(
+        &self,
+        request: Request<ForceConversationSyncRequest>,
+    ) -> Result<Response<StatusOnlyResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let missing = self
+            .command_handler
+            .handle_force_conversation_sync(
+                &ctx,
+                ForceConversationSyncCommand {
+                    conversation_ids: req.conversation_ids.clone(),
+                    reason: if req.reason.is_empty() {
+                        None
+                    } else {
+                        Some(req.reason)
+                    },
+                },
+            )
+            .await
+            .map_err(internal_error)?;
+
+        if !missing.is_empty() {
+            return Err(Status::failed_precondition(format!(
+                "unknown conversations: {}",
+                missing.join(",")
+            )));
+        }
+
+        Ok(Response::new(StatusOnlyResponse {
+            status: Some(error::ok_status()),
+        }))
+    }
+}

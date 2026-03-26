@@ -1,13 +1,14 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use flare_im_core::service_names::STORAGE_READER;
 use tracing::{error, info};
 
 use flare_server_core::runtime::ServiceRuntime;
 
 mod wire;
 
-pub use wire::ApplicationContext;
+pub use wire::{ApplicationContext, MessageStorageType};
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -25,7 +26,7 @@ impl ApplicationBootstrap {
         let address: SocketAddr = ServiceHelper::parse_server_addr(
             app_config,
             &service_config.runtime,
-            "flare-storage-reader",
+            STORAGE_READER,
         )
         .context("invalid storage reader server address")?;
         info!(address = %address, "Server address parsed successfully");
@@ -40,7 +41,7 @@ impl ApplicationBootstrap {
     }
 
     /// 运行服务（带应用上下文）
-    async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
+    async fn run_with_context(context: ApplicationContext<MessageStorageType>, address: SocketAddr) -> Result<()> {
         use flare_proto::storage::storage_reader_service_server::StorageReaderServiceServer;
         use tonic::transport::Server;
 
@@ -54,7 +55,7 @@ impl ApplicationBootstrap {
 
         // 使用 ServiceRuntime 管理服务生命周期
         let address_clone = address;
-        let runtime = ServiceRuntime::new("storage-reader", address)
+        let runtime = ServiceRuntime::new(STORAGE_READER, address)
             .add_spawn_with_shutdown("storage-reader-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
@@ -90,8 +91,6 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    // 注册服务（使用常量）
-                    use flare_im_core::service_names::STORAGE_READER;
                     match flare_im_core::discovery::register_service_only(
                         STORAGE_READER,
                         addr,

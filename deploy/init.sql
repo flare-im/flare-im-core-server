@@ -306,6 +306,36 @@ SELECT create_hypertable('messages', 'timestamp',
 );
 
 -- ============================================================================
+-- 事件化消息流：会话事件表（Conversation Events）
+-- ============================================================================
+-- 设计：所有「影响会话历史」的操作作为事件写入同一有序流，保证多端/离线同步顺序一致。
+-- 事件类型：MESSAGE（用户消息）、RECALL、EDIT、DELETE_HARD、SYSTEM_NOTIFICATION。
+-- 不属于消息流的实时态（输入中、在线状态、typing）不写入本表。
+-- 参考：doc/EVENTIZED_MESSAGE_FLOW.md
+DROP TABLE IF EXISTS conversation_events CASCADE;
+CREATE TABLE conversation_events (
+    tenant_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    seq BIGINT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('MESSAGE', 'RECALL', 'EDIT', 'DELETE_HARD', 'SYSTEM_NOTIFICATION')),
+    message_id TEXT NOT NULL,
+    operator_id TEXT,
+    payload JSONB,
+    timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, conversation_id, seq)
+);
+
+COMMENT ON TABLE conversation_events IS '会话事件流（事件化模型）：MESSAGE/RECALL/EDIT/DELETE_HARD/SYSTEM_NOTIFICATION，同一会话 seq 单调递增';
+COMMENT ON COLUMN conversation_events.seq IS '会话内单调递增序号（与 SequenceAllocator 分配一致）';
+COMMENT ON COLUMN conversation_events.event_type IS 'MESSAGE=用户消息, RECALL=撤回, EDIT=编辑, DELETE_HARD=硬删除, SYSTEM_NOTIFICATION=系统通知';
+COMMENT ON COLUMN conversation_events.message_id IS 'MESSAGE 时为新消息 server_id；否则为目标消息 server_id';
+COMMENT ON COLUMN conversation_events.payload IS '操作类事件的 operation_data 等（JSON）';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_events_stream ON conversation_events(tenant_id, conversation_id, seq);
+CREATE INDEX IF NOT EXISTS idx_conversation_events_conversation_seq ON conversation_events(tenant_id, conversation_id, seq ASC);
+
+-- ============================================================================
 -- Message FSM 相关表
 -- ============================================================================
 

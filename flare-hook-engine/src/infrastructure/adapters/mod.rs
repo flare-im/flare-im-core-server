@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 
 use crate::domain::model::{HookTransportConfig, LoadBalanceStrategy};
 use crate::infrastructure::adapters::grpc::GrpcHookAdapter;
@@ -114,6 +115,8 @@ impl HookAdapterFactory {
 }
 
 /// Hook适配器接口
+///
+/// 使用 async-trait 宏以支持 trait 对象（dyn HookAdapter）
 #[async_trait::async_trait]
 pub trait HookAdapter: Send + Sync {
     /// 执行PreSend Hook

@@ -2,6 +2,7 @@
 //!
 //! 定义Hook引擎的核心领域服务
 
+use std::sync::Arc;
 use anyhow::Result;
 use futures_util::future::join_all;
 
@@ -10,7 +11,7 @@ use flare_im_core::{
     DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision,
     RecallEvent,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::{Context, Ctx};
 
 /// Hook分组结果
 #[derive(Debug, Default)]
@@ -63,10 +64,11 @@ impl HookOrchestrationService {
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<PreSendDecision> {
         let grouped = self.group_hooks(hooks);
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
 
         // 先执行validation组（串行，快速失败）
         for hook in &grouped.validation {
-            let decision = hook.execute(ctx, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -75,7 +77,7 @@ impl HookOrchestrationService {
 
         // 再执行critical组（串行，保证顺序）
         for hook in &grouped.critical {
-            let decision = hook.execute(ctx, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -84,7 +86,7 @@ impl HookOrchestrationService {
 
         // 最后执行business组（串行执行，因为draft是&mut不能并发）
         for hook in &grouped.business {
-            let decision = hook.execute(ctx, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await?;
             match decision {
                 PreSendDecision::Reject { .. } => {
                     // business组即使失败也不中断主流程，只记录日志
@@ -106,10 +108,11 @@ impl HookOrchestrationService {
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<()> {
         let grouped = self.group_hooks(hooks);
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
 
         // 串行执行validation和critical组
         for hook in grouped.validation.iter().chain(grouped.critical.iter()) {
-            if let Err(e) = hook.execute_post_send(ctx, record, draft).await {
+            if let Err(e) = hook.execute_post_send(&ctx_arc, record, draft).await {
                 if hook.require_success() {
                     return Err(e);
                 }
@@ -121,7 +124,7 @@ impl HookOrchestrationService {
         let business_futures: Vec<_> = grouped
             .business
             .iter()
-            .map(|hook| hook.execute_post_send(ctx, record, draft))
+            .map(|hook| hook.execute_post_send(&ctx_arc, record, draft))
             .collect();
 
         let results = join_all(business_futures).await;
@@ -146,10 +149,11 @@ impl HookOrchestrationService {
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<()> {
         let grouped = self.group_hooks(hooks);
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
 
         // 串行执行validation和critical组
         for hook in grouped.validation.iter().chain(grouped.critical.iter()) {
-            if let Err(e) = hook.execute_delivery(ctx, event).await {
+            if let Err(e) = hook.execute_delivery(&ctx_arc, event).await {
                 if hook.require_success() {
                     return Err(e);
                 }
@@ -161,7 +165,7 @@ impl HookOrchestrationService {
         let business_futures: Vec<_> = grouped
             .business
             .iter()
-            .map(|hook| hook.execute_delivery(ctx, event))
+            .map(|hook| hook.execute_delivery(&ctx_arc, event))
             .collect();
 
         let results = join_all(business_futures).await;
@@ -186,10 +190,11 @@ impl HookOrchestrationService {
         hooks: Vec<HookExecutionPlan>,
     ) -> Result<PreSendDecision> {
         let grouped = self.group_hooks(hooks);
+        let ctx_arc: Ctx = Arc::new(ctx.clone());
 
         // 先执行validation组（串行，快速失败）
         for hook in &grouped.validation {
-            let decision = hook.execute_recall(ctx, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -198,7 +203,7 @@ impl HookOrchestrationService {
 
         // 再执行critical组（串行，保证顺序）
         for hook in &grouped.critical {
-            let decision = hook.execute_recall(ctx, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -207,7 +212,7 @@ impl HookOrchestrationService {
 
         // 最后执行business组（串行执行）
         for hook in &grouped.business {
-            let decision = hook.execute_recall(ctx, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await?;
             match decision {
                 PreSendDecision::Reject { .. } => {
                     // business组即使失败也不中断主流程，只记录日志

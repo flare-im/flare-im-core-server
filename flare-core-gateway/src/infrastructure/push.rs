@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use async_trait::async_trait;
 use flare_proto::push::push_service_client::PushServiceClient;
 use flare_proto::push::{

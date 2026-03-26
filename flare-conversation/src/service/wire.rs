@@ -9,28 +9,28 @@ use anyhow::{Context, Result};
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
 use crate::domain::model::ConversationDomainConfig;
-use crate::domain::repository::MessageProvider;
-use crate::domain::service::ConversationDomainService;
-use crate::infrastructure::persistence::PostgresConversationRepository;
+use crate::domain::service::{ConversationDomainService, DefaultConversationDomainService};
 use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
-use crate::infrastructure::persistence::redis_repository::RedisConversationRepository;
+use crate::infrastructure::event_consumer::{
+    ConversationEnsureEventConsumer, ReadReceiptEventConsumer,
+};
 use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
-use crate::interface::grpc::handler::ConversationGrpcHandler;
+use crate::interface::grpc::ConversationGrpcHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub handler: ConversationGrpcHandler,
+    /// 配置了 Kafka 且初始化成功时存在，由 bootstrap 后台 `run`（`ctx` 在 MQ 侧重建）
+    pub read_receipt_consumer: Option<ReadReceiptEventConsumer>,
+    pub conversation_ensure_consumer: Option<ConversationEnsureEventConsumer>,
 }
 
 /// 构建应用上下文
 ///
 /// 类似 Go Wire 的 Initialize 函数，按照依赖顺序构建所有组件
 ///
-/// # 参数
-/// * `app_config` - 应用配置
-///
-/// # 返回
-/// * `ApplicationContext` - 构建好的应用上下文
+/// 注意：由于 Rust 2024 原生 async fn 不支持 dyn 兼容性，
+/// 我们使用泛型 + 具体类型的方式，在编译期确定实现
 pub async fn initialize(
     app_config: &flare_im_core::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
@@ -45,36 +45,29 @@ pub async fn initialize(
 
     // 3. 创建 PostgreSQL 连接池（可选）
     let postgres_pool = if let Some(ref postgres_url) = conversation_config.postgres_url {
-        Some(Arc::new(
+        Arc::new(
             sqlx::PgPool::connect(postgres_url)
                 .await
                 .context("Failed to connect to PostgreSQL")?,
-        ))
+        )
     } else {
-        None
+        return Err(anyhow::anyhow!("postgres config is required for conversation service"));
     };
 
-    // 4. 创建会话仓储
-    let conversation_repo: Arc<dyn crate::domain::repository::ConversationRepository> =
-        if let Some(ref pool) = postgres_pool {
-            let repo = PostgresConversationRepository::new(pool.clone(), conversation_config.clone());
-            Arc::new(repo)
-        } else {
-            Arc::new(RedisConversationRepository::new(
-                redis_client.clone(),
-                conversation_config.clone(),
-            ))
-        };
+    // 4. 创建会话仓储（硬切到 Postgres，会话元数据必须来自持久化读模型）
+    let conversation_repo = Arc::new(crate::infrastructure::persistence::PostgresConversationRepository::new(
+        postgres_pool,
+        conversation_config.clone(),
+    ));
 
     // 5. 创建在线状态仓储
-    let presence_repo = Arc::new(RedisPresenceRepository::new(
+    let presence_repo: Arc<RedisPresenceRepository> = Arc::new(RedisPresenceRepository::new(
         redis_client.clone(),
         conversation_config.clone(),
-    )) as Arc<dyn crate::domain::repository::PresenceRepository>;
+    ));
 
-    // 6. 创建消息提供者（可选，使用常量）
-    // 注意：服务名已统一在 service_names.rs 中定义，不再从配置读取
-    let message_provider: Option<Arc<dyn MessageProvider + Send + Sync>> = {
+    // 6. 创建消息提供者（可选）
+    let message_provider: Option<Arc<StorageReaderMessageProvider>> = {
         use flare_im_core::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
 
@@ -98,39 +91,62 @@ pub async fn initialize(
             StorageReaderMessageProvider::new(storage_reader_service)
         };
 
-        Some(Arc::new(provider) as Arc<dyn MessageProvider + Send + Sync>)
+        Some(Arc::new(provider))
     };
 
     // 7. 构建领域配置
     let domain_config = ConversationDomainConfig::new(conversation_config.recent_message_limit);
 
-    // 8. 转换 message_provider 类型
-    let message_provider_for_domain: Option<Arc<dyn MessageProvider>> = message_provider
-        .clone()
-        .map(|p| p as Arc<dyn MessageProvider>);
+    // 8. 构建领域服务（使用泛型参数以获得更好的性能）
+    let domain_service: Arc<DefaultConversationDomainService> = Arc::new(
+        ConversationDomainService::new(
+            conversation_repo.clone(),
+            presence_repo.clone(),
+            message_provider.clone(),
+            domain_config,
+        )
+    );
 
-    // 9. 构建领域服务
-    let domain_service = Arc::new(ConversationDomainService::new(
-        conversation_repo.clone(),
-        presence_repo,
-        message_provider_for_domain,
-        domain_config,
-    ));
-
-    // 10. 构建命令处理器
+    // 8. 构建命令处理器
     let command_handler = Arc::new(ConversationCommandHandler::new(domain_service.clone()));
 
-    // 11. 构建查询处理器
+    // 9. 构建查询处理器
     let query_handler = Arc::new(ConversationQueryHandler::new(
         conversation_repo,
         message_provider,
-        domain_service,
+        domain_service.clone(),
     ));
 
-    // 12. 构建 gRPC 处理器
-    let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler, None);
+    // 10. 构建 gRPC 处理器
+    let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler);
+
+    let read_receipt_consumer = if conversation_config.kafka_bootstrap.is_some() {
+        match ReadReceiptEventConsumer::new(conversation_config.as_ref(), domain_service.clone()).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "ReadReceipt Kafka consumer init failed, skipping");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let conversation_ensure_consumer = if conversation_config.kafka_bootstrap.is_some() {
+        match ConversationEnsureEventConsumer::new(conversation_config.as_ref(), domain_service.clone()).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "ConversationEnsure Kafka consumer init failed, skipping");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     Ok(ApplicationContext {
         handler: grpc_handler,
+        read_receipt_consumer,
+        conversation_ensure_consumer,
     })
 }

@@ -37,6 +37,7 @@
 //! **注意**：即使使用环境变量覆盖，服务名也必须遵循命名规范，且注册和发现必须使用相同的服务名。
 
 /// Flare IM 微服务服务名定义
+#[allow(clippy::module_inception)]
 pub mod service_names {
     /// Conversation 服务名
     ///
@@ -62,17 +63,17 @@ pub mod service_names {
     /// 注册路径: `flare/flare-push-server`
     pub const PUSH_SERVER: &str = "flare-push-server";
 
-    /// Push Proxy 服务名
-    ///
-    /// 用于推送代理、推送任务分发等功能
-    /// 注册路径: `flare/flare-push-proxy`
-    pub const PUSH_PROXY: &str = "flare-push-proxy";
-
     /// Push Worker 服务名
     ///
     /// 用于推送任务处理、离线推送等功能
     /// 注册路径: `flare/flare-push-worker`
     pub const PUSH_WORKER: &str = "flare-push-worker";
+
+    /// Push Proxy 服务名
+    ///
+    /// 暴露 PushService gRPC，将推送/ACK 请求写入 Kafka，由 Push Server 消费
+    /// 注册路径: `flare/flare-push-proxy`
+    pub const PUSH_PROXY: &str = "flare-push-proxy";
 
     /// Access Gateway 服务名
     ///
@@ -86,11 +87,13 @@ pub mod service_names {
     /// 注册路径: `flare/flare-core-gateway`
     pub const CORE_GATEWAY: &str = "flare-core-gateway";
 
-    /// Message Orchestrator 服务名
+    /// Orchestrator 服务名（消息编排，后续可扩展推送入队/ACK）
     ///
-    /// 用于消息编排、消息路由等功能
-    /// 注册路径: `flare/flare-message-orchestrator`
-    pub const MESSAGE_ORCHESTRATOR: &str = "flare-message-orchestrator";
+    /// 注册路径: `flare/flare-orchestrator`
+    pub const ORCHESTRATOR: &str = "flare-orchestrator";
+
+    /// Message Orchestrator 服务名（与 ORCHESTRATOR 同体，别名供路由等使用）
+    pub const MESSAGE_ORCHESTRATOR: &str = "flare-orchestrator";
 
     /// Storage Writer 服务名
     ///
@@ -103,6 +106,11 @@ pub mod service_names {
     /// 用于消息查询、历史消息等功能
     /// 注册路径: `flare/flare-storage-reader`
     pub const STORAGE_READER: &str = "flare-storage-reader";
+
+    /// Sync Orchestrator 服务名
+    ///
+    /// 用于统一会话/消息同步编排能力
+    pub const SYNC_ORCHESTRATOR: &str = "flare-sync-orchestrator";
 
     /// Media 服务名
     ///
@@ -127,13 +135,14 @@ pub fn validate_service_name(name: &str) -> bool {
             | service_names::SIGNALING_ONLINE
             | service_names::SIGNALING_ROUTE
             | service_names::PUSH_SERVER
-            | service_names::PUSH_PROXY
             | service_names::PUSH_WORKER
+            | service_names::PUSH_PROXY
             | service_names::ACCESS_GATEWAY
             | service_names::CORE_GATEWAY
-            | service_names::MESSAGE_ORCHESTRATOR
+            | service_names::ORCHESTRATOR
             | service_names::STORAGE_WRITER
             | service_names::STORAGE_READER
+            | service_names::SYNC_ORCHESTRATOR
             | service_names::MEDIA
             | service_names::HOOK_ENGINE
     )

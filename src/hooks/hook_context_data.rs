@@ -8,7 +8,7 @@ use std::time::SystemTime;
 /// Hook 特定的上下文数据
 ///
 /// 这些字段会被存储到 `flare_server_core::Context` 的自定义数据中
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HookContextData {
     pub conversation_id: Option<String>,
     pub conversation_type: Option<String>,
@@ -18,21 +18,6 @@ pub struct HookContextData {
     pub attributes: HashMap<String, String>,
     pub request_metadata: HashMap<String, String>,
     pub occurred_at: Option<SystemTime>,
-}
-
-impl Default for HookContextData {
-    fn default() -> Self {
-        Self {
-            conversation_id: None,
-            conversation_type: None,
-            message_type: None,
-            sender_id: None,
-            tags: HashMap::new(),
-            attributes: HashMap::new(),
-            request_metadata: HashMap::new(),
-            occurred_at: None,
-        }
-    }
 }
 
 impl HookContextData {

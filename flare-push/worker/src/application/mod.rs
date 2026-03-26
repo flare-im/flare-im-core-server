@@ -1,10 +1,5 @@
-//! 应用服务层（Command / Query）
+//! 应用层（CQRS）：编排见 `handlers`，网关推送领域规则见 `crate::domain`。
 
-pub mod commands;
-pub mod dto;
 pub mod handlers;
-pub mod queries;
-pub mod service;
 
-pub use handlers::{PushCommandHandler, PushQueryHandler};
-pub use service::PushApplication;
+pub use handlers::GatewayPushExecutor;

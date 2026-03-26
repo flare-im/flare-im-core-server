@@ -51,6 +51,13 @@ pub struct UpdateCursorCommand {
     pub message_ts: i64,
 }
 
+/// 标记会话已读命令（read_seq 为 0 时由服务端用 last_message_seq）
+#[derive(Debug, Clone)]
+pub struct MarkConversationAsReadCommand {
+    pub conversation_id: String,
+    pub read_seq: i64,
+}
+
 /// 更新设备状态命令
 #[derive(Debug, Clone)]
 pub struct UpdatePresenceCommand {

@@ -1,19 +1,13 @@
-# Storage Writer 服务配置
-#
-# 配置说明：
-# - Kafka 配置通过 kafka 字段引用 base.toml 中的 kafka.message
-# - PostgreSQL 配置通过 postgres 字段引用 base.toml 中的 postgres.media（可选）
-# - Redis 配置通过 wal_store 字段引用 base.toml 中的 redis.message_wal
-# - 所有基础设施配置都在 base.toml 中定义
+# Storage Writer 服务配置（事件总线：消费消息流 + 操作事件流）
+# Kafka 使用 base.toml 中 [kafka.message]；Topic 与 flare_im_core::constants::topics 对齐
 
 [services.storage_writer]
 
-# Kafka 配置：引用 base.toml 中的 kafka.message
 kafka = "message"
-# 开发阶段：使用新的 consumer group 名称，跳过旧消息
-# 生产环境应该使用固定的 consumer group 名称以确保消息不丢失
-consumer_group = "storage-writer-v2"
-kafka_topic = "storage-messages"
+consumer_group = "storage-writer"
+# 消息流 / 操作事件流 Topic（不配则用 topics 默认值）
+kafka_topic = "flare.im.message.created"
+kafka_operation_topic = "flare.im.message.events"
 
 # PostgreSQL 配置（可选，用于归档）
 postgres = "media"

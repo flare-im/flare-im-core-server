@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use async_trait::async_trait;
 // Note: Storage service client is not directly used here
 // Storage operations are handled through Message Orchestrator
@@ -8,8 +7,6 @@ use flare_proto::storage::{
     QueryMessagesRequest, QueryMessagesResponse,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
-use tokio::sync::Mutex;
-use tonic::transport::Channel;
 
 #[async_trait]
 pub trait StorageClient: Send + Sync {

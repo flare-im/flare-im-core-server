@@ -7,7 +7,6 @@ use serde_json::json;
 
 use crate::config::OnlineConfig;
 use crate::domain::repository::SubscriptionRepository;
-use async_trait::async_trait;
 
 const SUBSCRIPTION_KEY_PREFIX: &str = "subscription";
 const TOPIC_SUBSCRIBERS_KEY_PREFIX: &str = "topic:subscribers";
@@ -37,31 +36,21 @@ impl RedisSubscriptionRepository {
     }
 }
 
-#[async_trait]
-impl SubscriptionRepository for RedisSubscriptionRepository {
-    async fn add_subscription(
-        &self,
-        user_id: &str,
-        topic: &str,
-        params: &HashMap<String, String>,
-    ) -> Result<()> {
+impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepository {
+    async fn add_subscription(&self, user_id: String, topic: String) -> Result<()> {
         let mut conn = self.connection().await?;
-        let user_key = self.subscription_key(user_id);
-        let topic_key = self.topic_subscribers_key(topic);
+        let user_key = self.subscription_key(&user_id);
+        let topic_key = self.topic_subscribers_key(&topic);
 
         // 保存用户的订阅
-        let subscription_value = json!({
-            "topic": topic,
-            "params": params,
-        });
         let _: () = conn
-            .hset(&user_key, topic, subscription_value.to_string())
+            .hset(&user_key, &topic, "1")
             .await
             .context("failed to add subscription")?;
 
         // 添加到主题的订阅者列表
-        let _: i64 = conn
-            .sadd(&topic_key, user_id)
+        let _: () = conn
+            .sadd(&topic_key, &user_id)
             .await
             .context("failed to add topic subscriber")?;
 

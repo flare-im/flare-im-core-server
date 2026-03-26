@@ -20,7 +20,7 @@ impl ApplicationBootstrap {
         // 加载应用配置
         let app_config = load_config(Some("./config"));
         let gateway_config_service = app_config.core_gateway_service();
-        let runtime_config = app_config
+        let _runtime_config = app_config
             .compose_service_config(&gateway_config_service.runtime, "flare-core-gateway");
 
         info!("Parsing server address...");
@@ -48,14 +48,11 @@ impl ApplicationBootstrap {
     ) -> Result<()> {
         use flare_proto::hooks::hook_service_server::HookServiceServer;
         use flare_proto::media::media_service_server::MediaServiceServer;
-        use flare_proto::message::message_service_server::MessageServiceServer;
-        use flare_proto::conversation::conversation_service_server::ConversationServiceServer;
+        use flare_proto::message::message_send_service_server::MessageSendServiceServer;
         use flare_proto::signaling::online::online_service_server::OnlineServiceServer;
         use tonic::transport::Server;
 
         let simple_handler = context.simple_handler;
-        let lightweight_handler = context.lightweight_handler;
-
         info!(
             address = %address,
             port = %address.port(),
@@ -79,22 +76,17 @@ impl ApplicationBootstrap {
                 
                 let message_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(MessageServiceServer::new(simple_handler.clone()));
+                    .layer(MessageSendServiceServer::new(simple_handler.clone()));
                 
                 let online_service = ContextLayer::new()
                     .allow_missing()
                     .layer(OnlineServiceServer::new(simple_handler.clone()));
-                
-                let conversation_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(ConversationServiceServer::new(simple_handler.clone()));
                 
                 Server::builder()
                     .add_service(media_service)
                     .add_service(hook_service)
                     .add_service(message_service)
                     .add_service(online_service)
-                    .add_service(conversation_service)
                     .serve_with_shutdown(address_clone, async move {
                         info!(
                             address = %address_clone,

@@ -5,49 +5,74 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use flare_im_core::utils::{current_millis, extract_timeline_from_extra};
-use flare_proto::common::Message;
+use flare_im_core::utils::{current_millis, extract_timeline_from_extra, embed_timeline_in_extra_map};
 use tracing::{instrument, warn};
+use flare_server_core::context::Ctx;
+
+use flare_im_core::utils::datetime_to_timestamp;
 
 use crate::domain::events::{AckEvent, AckStatus};
-use crate::domain::model::{PersistenceResult, PreparedMessage};
+use crate::domain::model::{
+    Event, EventPayload, EventType, PersistenceResult, PreparedMessage,
+};
 use crate::domain::repository::{
-    AckPublisher, ArchiveStoreRepository, HotCacheRepository, MessageIdempotencyRepository,
-    WalCleanupRepository,
+    AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
+    MessageIdempotencyRepository, WalCleanupRepository,
 };
 
 /// 消息持久化领域服务
 ///
 /// 只做：幂等 → 热缓存(可选) → 归档(PostgreSQL) → WAL 清理(可选) → ACK 发布(可选)
-pub struct MessagePersistenceDomainService {
-    idempotency_repo: Option<Arc<dyn MessageIdempotencyRepository + Send + Sync>>,
-    hot_cache_repo: Option<Arc<dyn HotCacheRepository + Send + Sync>>,
-    archive_repo: Option<Arc<dyn ArchiveStoreRepository + Send + Sync>>,
-    wal_cleanup_repo: Option<Arc<dyn WalCleanupRepository + Send + Sync>>,
-    ack_publisher: Option<Arc<dyn AckPublisher + Send + Sync>>,
+///
+/// 使用泛型参数而非 trait objects，符合 Rust 2024 规范
+pub struct MessagePersistenceDomainService<I, H, A, E, W, P>
+where
+    I: MessageIdempotencyRepository + Send + Sync,
+    H: HotCacheRepository + Send + Sync,
+    A: ArchiveStoreRepository + Send + Sync,
+    E: EventStreamRepository + Send + Sync,
+    W: WalCleanupRepository + Send + Sync,
+    P: AckPublisher + Send + Sync,
+{
+    idempotency_repo: Option<Arc<I>>,
+    hot_cache_repo: Option<Arc<H>>,
+    archive_repo: Option<Arc<A>>,
+    event_stream_repo: Option<Arc<E>>,
+    wal_cleanup_repo: Option<Arc<W>>,
+    ack_publisher: Option<Arc<P>>,
 }
 
-impl MessagePersistenceDomainService {
+impl<I, H, A, E, W, P> MessagePersistenceDomainService<I, H, A, E, W, P>
+where
+    I: MessageIdempotencyRepository + Send + Sync,
+    H: HotCacheRepository + Send + Sync,
+    A: ArchiveStoreRepository + Send + Sync,
+    E: EventStreamRepository + Send + Sync,
+    W: WalCleanupRepository + Send + Sync,
+    P: AckPublisher + Send + Sync,
+{
     pub fn new(
-        idempotency_repo: Option<Arc<dyn MessageIdempotencyRepository + Send + Sync>>,
-        hot_cache_repo: Option<Arc<dyn HotCacheRepository + Send + Sync>>,
-        archive_repo: Option<Arc<dyn ArchiveStoreRepository + Send + Sync>>,
-        wal_cleanup_repo: Option<Arc<dyn WalCleanupRepository + Send + Sync>>,
-        ack_publisher: Option<Arc<dyn AckPublisher + Send + Sync>>,
+        idempotency_repo: Option<Arc<I>>,
+        hot_cache_repo: Option<Arc<H>>,
+        archive_repo: Option<Arc<A>>,
+        event_stream_repo: Option<Arc<E>>,
+        wal_cleanup_repo: Option<Arc<W>>,
+        ack_publisher: Option<Arc<P>>,
     ) -> Self {
         Self {
             idempotency_repo,
             hot_cache_repo,
             archive_repo,
+            event_stream_repo,
             wal_cleanup_repo,
             ack_publisher,
         }
     }
 
-    /// 准备消息（从 Kafka 请求中提取并补全字段）
+    /// 准备消息（从 MessageEnvelope / TopicEventEnvelope 解析后的命令）
     pub fn prepare_message(
         &self,
-        request: crate::application::commands::StoreMessageCommandInternal,
+        request: crate::application::commands::ProcessStoreMessageCommand,
     ) -> Result<PreparedMessage> {
         let conversation_id = if request.conversation_id.is_empty() {
             request
@@ -63,6 +88,11 @@ impl MessagePersistenceDomainService {
             .message
             .ok_or_else(|| anyhow!("missing message payload"))?;
 
+        if let Some(ref tenant) = request.tenant {
+            message.extra.insert("tenant_id".to_string(), tenant.tenant_id.clone());
+        } else if let Some(tenant_id) = request.metadata.get("x-tenant-id") {
+            message.extra.insert("tenant_id".to_string(), tenant_id.clone());
+        }
         if message.conversation_id.is_empty() {
             message.conversation_id = conversation_id.clone();
         }
@@ -70,14 +100,14 @@ impl MessagePersistenceDomainService {
             return Err(anyhow!("Message server_id cannot be empty"));
         }
 
-        use flare_proto::common::MessageStatus;
-        if message.status == MessageStatus::Created as i32 || message.status == 0 {
-            message.status = MessageStatus::Sent as i32;
+        // 与 proto MessageStatus 语义对齐：Created=1, Sent=2
+        if message.status == 1 || message.status == 0 {
+            message.status = 2;
         }
 
         let mut timeline = extract_timeline_from_extra(&message.extra, current_millis());
         timeline.persisted_ts = Some(current_millis());
-        flare_im_core::utils::embed_timeline_in_extra(&mut message, &timeline);
+        embed_timeline_in_extra_map(&mut message.extra, &timeline);
 
         Ok(PreparedMessage {
             conversation_id,
@@ -90,12 +120,13 @@ impl MessagePersistenceDomainService {
 
     /// 幂等性检查（client_msg_id 优先，否则 server_id）
     #[instrument(skip(self), fields(message_id = %prepared.message_id))]
-    pub async fn check_idempotency(&self, prepared: &PreparedMessage) -> Result<bool> {
+    pub async fn check_idempotency(&self, ctx: &Ctx, prepared: &PreparedMessage) -> Result<bool> {
         match &self.idempotency_repo {
             Some(repo) => {
                 if !prepared.message.client_msg_id.is_empty() {
                     match repo
                         .is_new_by_client_msg_id(
+                            ctx,
                             &prepared.message.client_msg_id,
                             Some(&prepared.message.sender_id),
                         )
@@ -104,29 +135,35 @@ impl MessagePersistenceDomainService {
                         Ok(v) => Ok(v),
                         Err(e) => {
                             warn!(error = ?e, "idempotency by client_msg_id failed, fallback to message_id");
-                            repo.is_new(&prepared.message_id).await
+                            repo.is_new(ctx, &prepared.message_id).await
                         }
                     }
                 } else {
-                    repo.is_new(&prepared.message_id).await
+                    repo.is_new(ctx, &prepared.message_id).await
                 }
             }
             None => Ok(true),
         }
     }
 
-    /// 持久化单条：热缓存(可选) + 归档
+    /// 持久化单条：热缓存(可选) + 归档 + 事件流(供 Sync)
     #[instrument(skip(self), fields(message_id = %prepared.message_id))]
     pub async fn persist_message(
         &self,
-        _ctx: &flare_server_core::context::Context,
+        ctx: &Ctx,
         prepared: PreparedMessage,
     ) -> Result<()> {
         if let Some(repo) = &self.hot_cache_repo {
-            repo.store_hot(&prepared.message).await?;
+            repo.store_hot(ctx, &prepared.message).await?;
         }
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive(&prepared.message).await?;
+            repo.store_archive(ctx, &prepared.message).await?;
+        }
+        if let Some(repo) = &self.event_stream_repo {
+            let event = build_event_message(&prepared.message);
+            if let Err(e) = repo.append_event_to_stream(ctx, &event).await {
+                warn!(error = ?e, message_id = %prepared.message_id, "append_event_to_stream failed");
+            }
         }
         Ok(())
     }
@@ -135,33 +172,42 @@ impl MessagePersistenceDomainService {
     #[instrument(skip(self), fields(batch_size = prepared.len()))]
     pub async fn persist_batch(
         &self,
-        _ctx: &flare_server_core::context::Context,
+        ctx: &Ctx,
         prepared: Vec<PreparedMessage>,
     ) -> Result<()> {
         if prepared.is_empty() {
             return Ok(());
         }
-        let messages: Vec<Message> = prepared.iter().map(|p| p.message.clone()).collect();
+        let messages: Vec<crate::domain::model::Message> =
+            prepared.iter().map(|p| p.message.clone()).collect();
         if let Some(repo) = &self.hot_cache_repo {
-            repo.store_hot_batch(&messages).await?;
+            repo.store_hot_batch(ctx, &messages).await?;
         }
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive_batch(&messages).await?;
+            repo.store_archive_batch(ctx, &messages).await?;
         }
-        Ok(())
-    }
-
-    #[instrument(skip(self), fields(message_id = %message_id))]
-    pub async fn cleanup_wal(&self, message_id: &str) -> Result<()> {
-        if let Some(repo) = &self.wal_cleanup_repo {
-            if let Err(e) = repo.remove(message_id).await {
-                warn!(error = ?e, message_id = %message_id, "WAL cleanup failed");
+        if let Some(repo) = &self.event_stream_repo {
+            for msg in &prepared {
+                let event = build_event_message(&msg.message);
+                if let Err(e) = repo.append_event_to_stream(ctx, &event).await {
+                    warn!(error = ?e, message_id = %msg.message_id, "append_event_to_stream failed");
+                }
             }
         }
         Ok(())
     }
 
-    pub async fn publish_ack(&self, result: &PersistenceResult) -> Result<()> {
+    #[instrument(skip(self), fields(message_id = %message_id))]
+    pub async fn cleanup_wal(&self, ctx: &Ctx, message_id: &str) -> Result<()> {
+        if let Some(repo) = &self.wal_cleanup_repo
+            && let Err(e) = repo.remove(ctx, message_id).await
+        {
+            warn!(error = ?e, message_id = %message_id, "WAL cleanup failed");
+        }
+        Ok(())
+    }
+
+    pub async fn publish_ack(&self, ctx: &Ctx, result: &PersistenceResult) -> Result<()> {
         if let Some(publisher) = &self.ack_publisher {
             let persisted_ts = result.timeline.persisted_ts.unwrap_or_else(current_millis);
             let event = AckEvent {
@@ -172,7 +218,7 @@ impl MessagePersistenceDomainService {
                 persisted_ts,
                 deduplicated: result.deduplicated,
             };
-            if let Err(e) = publisher.publish(event).await {
+            if let Err(e) = publisher.publish(ctx, event).await {
                 warn!(error = ?e, message_id = %result.message_id, "ACK publish failed");
             }
         }
@@ -182,10 +228,10 @@ impl MessagePersistenceDomainService {
     /// 单条一致性流程：幂等 → 持久化 → WAL 清理 → ACK
     pub async fn ensure_consistency(
         &self,
-        ctx: &flare_server_core::context::Context,
+        ctx: &Ctx,
         prepared: PreparedMessage,
     ) -> Result<PersistenceResult> {
-        let is_new = self.check_idempotency(&prepared).await?;
+        let is_new = self.check_idempotency(ctx, &prepared).await?;
         if !is_new {
             return Ok(PersistenceResult {
                 message_id: prepared.message_id.clone(),
@@ -200,7 +246,7 @@ impl MessagePersistenceDomainService {
         let timeline = prepared.timeline.clone();
 
         self.persist_message(ctx, prepared).await?;
-        self.cleanup_wal(&message_id).await?;
+        self.cleanup_wal(ctx, &message_id).await?;
 
         let result = PersistenceResult {
             message_id,
@@ -208,14 +254,14 @@ impl MessagePersistenceDomainService {
             timeline,
             deduplicated: false,
         };
-        self.publish_ack(&result).await?;
+        self.publish_ack(ctx, &result).await?;
         Ok(result)
     }
 
     /// 批量一致性流程
     pub async fn ensure_batch_consistency(
         &self,
-        ctx: &flare_server_core::context::Context,
+        ctx: &Ctx,
         prepared: Vec<PreparedMessage>,
     ) -> Result<Vec<PersistenceResult>> {
         if prepared.is_empty() {
@@ -226,7 +272,7 @@ impl MessagePersistenceDomainService {
         let mut results = Vec::new();
 
         for msg in prepared {
-            let is_new = self.check_idempotency(&msg).await?;
+            let is_new = self.check_idempotency(ctx, &msg).await?;
             if is_new {
                 new_messages.push(msg);
             } else {
@@ -245,7 +291,7 @@ impl MessagePersistenceDomainService {
 
         self.persist_batch(ctx, new_messages.clone()).await?;
         for msg in &new_messages {
-            self.cleanup_wal(&msg.message_id).await?;
+            self.cleanup_wal(ctx, &msg.message_id).await?;
         }
         for msg in new_messages {
             let result = PersistenceResult {
@@ -254,9 +300,31 @@ impl MessagePersistenceDomainService {
                 timeline: msg.timeline.clone(),
                 deduplicated: false,
             };
-            self.publish_ack(&result).await?;
+            self.publish_ack(ctx, &result).await?;
             results.push(result);
         }
         Ok(results)
+    }
+}
+
+/// 从已持久化消息构建 EVENT_MESSAGE，供事件流写入（Sync 按 last_seq 拉取）
+fn build_event_message(message: &crate::domain::model::Message) -> Event {
+    let tenant_id = message
+        .extra
+        .get("tenant_id")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
+    let now = chrono::Utc::now();
+    Event {
+        tenant_id: tenant_id.to_string(),
+        conversation_id: message.conversation_id.clone(),
+        seq: message.seq,
+        r#type: EventType::Message,
+        created_at: Some(datetime_to_timestamp(now)),
+        operator_id: String::new(),
+        event_seq: None,
+        request_id: None,
+        payload: Some(EventPayload::Message(message.clone())),
     }
 }

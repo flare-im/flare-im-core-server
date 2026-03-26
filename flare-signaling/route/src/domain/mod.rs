@@ -1,12 +1,12 @@
-pub mod device_route_repository;
-pub mod entities;
+//! 领域层模块
+//!
+//! 与 flare-storage 一致：model、repository（目录）、service、值对象等。
+
 pub mod model;
 pub mod repository;
 pub mod service;
 pub mod value_objects;
 
-pub use device_route_repository::DeviceRouteRepository;
-pub use entities::device_route::DeviceRoute;
 pub use model::*;
 pub use repository::*;
 pub use service::*;

@@ -8,20 +8,33 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_im_core::utils::timestamp_to_datetime;
-use flare_proto::common::{Message, MessageStatus, VisibilityStatus};
 use serde_json::Value;
 use sqlx::Row;
 use tokio::time::Instant;
+use tracing::instrument;
 
-use crate::domain::model::MessageUpdate;
+use crate::convert::{event_from_proto, message_from_proto, message_to_proto};
+use crate::domain::model::{ConversationMessageHead, Event, EventType, FilterExpression, Message, MessageUpdate, VisibilityStatus};
 use crate::domain::repository::message_storage::MessageStorage;
+use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
+use crate::infrastructure::persistence::helpers::*;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
+use flare_server_core::context::Ctx;
 
-use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
+// TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
+// use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
+#[derive(Debug, Clone)]
+pub struct PerformanceMetrics {}
+
+impl PerformanceMetrics {
+    pub fn record_cache_hit(&self, _cache_type: &str) {}
+    pub fn record_cache_miss(&self, _cache_type: &str) {}
+    pub fn record_query(&self, _query_type: &str, _duration_ms: u64) {}
+}
 
 /// 优化的 PostgreSQL 消息存储实现
+#[derive(Clone)]
 pub struct OptimizedPostgresMessageStorageImpl {
     pub base: PostgresBaseStorage,
     pub cache: Option<Arc<RedisMessageCache>>,
@@ -40,7 +53,9 @@ impl OptimizedPostgresMessageStorageImpl {
 
 #[async_trait]
 impl MessageStorage for OptimizedPostgresMessageStorageImpl {
-    async fn store_message(&self, _message: &Message, _conversation_id: &str) -> Result<()> {
+    #[instrument(skip(self, _message), fields(message_id = %_message.server_id))]
+    async fn store_message(&self, ctx: &Ctx, _message: &Message, _conversation_id: &str) -> Result<()> {
+        let _ = ctx; // 上下文用于日志追踪
         // 读侧存储通常不需要实现 store_message
         // 但为了兼容性，可以提供一个空实现或委托给 Writer
         tracing::warn!(
@@ -50,14 +65,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(conversation_id))]
     async fn query_messages(
         &self,
+        ctx: &Ctx,
         conversation_id: &str,
         user_id: Option<&str>,
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: i32,
     ) -> Result<Vec<Message>> {
+        let _ = ctx; // 上下文用于日志追踪
         let start = Instant::now();
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
@@ -74,89 +92,85 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     cached_count = cached_messages.len(),
                     "Cache hit: retrieved messages from Redis"
                 );
-                
+
+                // 转换 proto 类型的消息为领域模型类型
+                let domain_messages: Vec<Message> = cached_messages
+                    .into_iter()
+                    .map(|msg| message_from_proto(&msg))
+                    .collect();
+
+                tracing::debug!(
+                    conversation_id = %conversation_id,
+                    cached_count = domain_messages.len(),
+                    "Cache hit: retrieved messages from Redis"
+                );
+
                 // 记录缓存命中指标
                 if let Some(ref metrics) = self.metrics {
-                    metrics.record_cache_hit();
+                    metrics.record_cache_hit("redis");
                 }
-                
-                return Ok(cached_messages);
+
+                return Ok(domain_messages);
             }
         }
 
         // 记录缓存未命中
         if let Some(ref metrics) = self.metrics {
-            metrics.record_cache_miss();
+            metrics.record_cache_miss("redis");
         }
 
-        // 构建查询（带用户可见性过滤）
-        let mut query = if let Some(_uid) = user_id {
-            // 如果提供了 user_id，过滤已删除的消息（多租户支持）
-            sqlx::QueryBuilder::new(
+        // init_v2: messages 列为 INT + channel_id, offline_push_info, extensions；visibility_status 为 INT（1=HIDDEN, 2=DELETED）
+        let result = if let Some(uid) = user_id {
+            sqlx::query(
                 r#"
                 SELECT 
-                    m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.content, m.timestamp,
-                    m.extra, m.created_at, m.message_type, m.content_type, m.business_type,
-                    m.status, m.fsm_state_changed_at, m.is_burn_after_read, m.burn_after_seconds,
-                    m.seq, m.updated_at, m.tenant_id
+                    m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
+                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
+                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at
                 FROM messages m
-                WHERE m.conversation_id = $1
-                  AND m.timestamp >= $2
-                  AND m.timestamp <= $3
+                WHERE m.conversation_id = $1 AND m.timestamp >= $2 AND m.timestamp <= $3
                   AND NOT EXISTS (
-                      SELECT 1 FROM message_visibility mv 
-                      WHERE mv.tenant_id = m.tenant_id 
-                        AND mv.message_id = m.server_id 
-                        AND mv.user_id = $4 
-                        AND mv.visibility_status IN ('HIDDEN', 'DELETED')
+                      SELECT 1 FROM message_visibility mv
+                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id AND mv.user_id = $4
+                        AND mv.visibility_status IN (1, 2)
                   )
                 ORDER BY m.timestamp DESC, m.seq DESC NULLS LAST
                 LIMIT $5
                 "#,
             )
+            .bind(conversation_id)
+            .bind(start_ts)
+            .bind(end_ts)
+            .bind(uid)
+            .bind(limit)
+            .fetch_all(&self.base.pool)
+            .await
         } else {
-            // 无用户过滤的查询
-            sqlx::QueryBuilder::new(
+            sqlx::query(
                 r#"
                 SELECT 
-                    server_id, conversation_id, client_msg_id, sender_id, content, timestamp,
-                    extra, created_at, message_type, content_type, business_type,
-                    status, fsm_state_changed_at, is_burn_after_read, burn_after_seconds,
-                    seq, updated_at, tenant_id
+                    tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
                 FROM messages
-                WHERE conversation_id = $1
-                  AND timestamp >= $2
-                  AND timestamp <= $3
+                WHERE conversation_id = $1 AND timestamp >= $2 AND timestamp <= $3
                 ORDER BY timestamp DESC, seq DESC NULLS LAST
                 LIMIT $4
                 "#,
             )
-        };
-
-        // 根据是否有用户ID绑定参数
-        if user_id.is_some() {
-            query.push_bind(conversation_id);
-            query.push_bind(start_ts);
-            query.push_bind(end_ts);
-            query.push_bind(user_id.unwrap()); // 安全，因为我们已经检查过
-            query.push_bind(limit);
-        } else {
-            query.push_bind(conversation_id);
-            query.push_bind(start_ts);
-            query.push_bind(end_ts);
-            query.push_bind(limit);
-        }
-
-        let result = query
-            .build()
+            .bind(conversation_id)
+            .bind(start_ts)
+            .bind(end_ts)
+            .bind(limit)
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to query messages");
+        }
+        .context("Failed to query messages");
 
         // 记录查询性能指标
         let duration = start.elapsed();
         if let Some(ref metrics) = self.metrics {
-            metrics.record_query(duration, result.is_ok());
+            metrics.record_query("query_messages", duration.as_millis() as u64);
         }
 
         let rows = result?;
@@ -175,8 +189,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             let messages_clone = messages.clone();
             let conversation_id_clone = conversation_id.to_string();
             tokio::spawn(async move {
+                // 转换领域模型消息为 proto 类型
+                let proto_messages: Vec<flare_proto::Message> = messages_clone
+                    .iter()
+                    .map(|msg| message_to_proto(msg))
+                    .collect();
+
                 if let Err(e) = cache_clone
-                    .cache_session_messages(&conversation_id_clone, start_ts, end_ts, &messages_clone)
+                    .cache_session_messages(&conversation_id_clone, start_ts, end_ts, &proto_messages)
                     .await
                 {
                     tracing::warn!(
@@ -190,80 +210,66 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(messages)
     }
 
+    #[instrument(skip(self), fields(conversation_id))]
     async fn query_messages_by_seq(
         &self,
+        ctx: &Ctx,
         conversation_id: &str,
         user_id: Option<&str>,
         after_seq: i64,
         before_seq: Option<i64>,
         limit: i32,
     ) -> Result<Vec<Message>> {
+        let _ = ctx; // 上下文用于日志追踪
         let limit = limit.min(1000).max(1);
 
         // 构建查询：基于 seq 查询（性能更好），支持多租户
         // 优化：使用预编译查询和索引优化
-        let mut query = if let Some(_uid) = user_id {
-            // 带用户可见性过滤的查询
-            sqlx::QueryBuilder::new(
+        let rows = if let Some(uid) = user_id {
+            sqlx::query(
                 r#"
                 SELECT 
-                    m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.content, m.timestamp,
-                    m.extra, m.created_at, m.message_type, m.content_type, m.business_type,
-                    m.status, m.fsm_state_changed_at, m.is_burn_after_read, m.burn_after_seconds,
-                    m.seq, m.updated_at, m.tenant_id
+                    m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
+                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
+                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at
                 FROM messages m
-                WHERE m.conversation_id = $1
-                  AND m.seq > $2
-                  AND ($3::BIGINT IS NULL OR m.seq < $3)
+                WHERE m.conversation_id = $1 AND m.seq > $2 AND ($3::BIGINT IS NULL OR m.seq < $3)
                   AND NOT EXISTS (
-                      SELECT 1 FROM message_visibility mv 
-                      WHERE mv.tenant_id = m.tenant_id 
-                        AND mv.message_id = m.server_id 
-                        AND mv.user_id = $4 
-                        AND mv.visibility_status IN ('HIDDEN', 'DELETED')
+                      SELECT 1 FROM message_visibility mv
+                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id AND mv.user_id = $4
+                        AND mv.visibility_status IN (1, 2)
                   )
                 ORDER BY m.seq ASC
                 LIMIT $5
                 "#,
             )
+            .bind(conversation_id)
+            .bind(after_seq)
+            .bind(before_seq)
+            .bind(uid)
+            .bind(limit)
+            .fetch_all(&self.base.pool)
+            .await
         } else {
-            // 无用户过滤的查询
-            sqlx::QueryBuilder::new(
+            sqlx::query(
                 r#"
-                SELECT 
-                    server_id, conversation_id, client_msg_id, sender_id, content, timestamp,
-                    extra, created_at, message_type, content_type, business_type,
-                    status, fsm_state_changed_at, is_burn_after_read, burn_after_seconds,
-                    seq, updated_at, tenant_id
+                SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
                 FROM messages
-                WHERE conversation_id = $1
-                  AND seq > $2
-                  AND ($3::BIGINT IS NULL OR seq < $3)
+                WHERE conversation_id = $1 AND seq > $2 AND ($3::BIGINT IS NULL OR seq < $3)
                 ORDER BY seq ASC
                 LIMIT $4
                 "#,
             )
-        };
-
-        // 根据是否有用户ID绑定参数
-        if user_id.is_some() {
-            query.push_bind(conversation_id);
-            query.push_bind(after_seq);
-            query.push_bind(before_seq); // 可能为NULL，SQL会正确处理
-            query.push_bind(user_id.unwrap());
-            query.push_bind(limit);
-        } else {
-            query.push_bind(conversation_id);
-            query.push_bind(after_seq);
-            query.push_bind(before_seq); // 可能为NULL，SQL会正确处理
-            query.push_bind(limit);
-        }
-
-        let rows = query
-            .build()
+            .bind(conversation_id)
+            .bind(after_seq)
+            .bind(before_seq)
+            .bind(limit)
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to query messages by seq")?;
+        }
+        .context("Failed to query messages by seq")?;
 
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
@@ -273,16 +279,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(messages)
     }
 
-    async fn get_message(&self, message_id: &str) -> Result<Option<Message>> {
+    #[instrument(skip(self), fields(message_id))]
+    async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
+        let _ = ctx; // 上下文用于日志追踪
         // 1. Query Database
         // Support querying by server_id or client_msg_id
         let row = sqlx::query(
             r#"
             SELECT 
-                server_id, conversation_id, client_msg_id, sender_id, content, timestamp,
-                extra, created_at, message_type, content_type, business_type,
-                status, fsm_state_changed_at, is_burn_after_read, burn_after_seconds,
-                seq, updated_at, tenant_id
+                tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
             FROM messages
             WHERE server_id = $1 OR client_msg_id = $1
             LIMIT 1
@@ -302,7 +309,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     let cache_clone = std::sync::Arc::clone(cache);
                     let message_clone = message.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = cache_clone.cache_message(&message_clone).await {
+                        // 转换领域模型消息为 proto 类型
+                        let proto_msg = message_to_proto(&message_clone);
+
+                        if let Err(e) = cache_clone.cache_message(&proto_msg).await {
                             tracing::warn!(
                                 error = %e,
                                 "Failed to cache message to Redis (non-blocking)"
@@ -317,7 +327,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         }
     }
 
-    async fn get_message_timestamp(&self, message_id: &str) -> Result<Option<DateTime<Utc>>> {
+    #[instrument(skip(self), fields(message_id))]
+    async fn get_message_timestamp(&self, ctx: &Ctx, message_id: &str) -> Result<Option<DateTime<Utc>>> {
+        let _ = ctx; // 上下文用于日志追踪
         // 直接查询消息的时间戳，避免加载完整的消息内容
         let row = sqlx::query(
             r#"
@@ -341,7 +353,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         }
     }
 
-    async fn update_message(&self, message_id: &str, updates: MessageUpdate) -> Result<()> {
+    #[instrument(skip(self, updates), fields(message_id))]
+    async fn update_message(&self, ctx: &Ctx, message_id: &str, updates: MessageUpdate) -> Result<()> {
+        let _ = ctx; // 上下文用于日志追踪
         // 使用 QueryBuilder 构建动态 UPDATE 语句
         let mut query = sqlx::QueryBuilder::new("UPDATE messages SET ");
         let mut has_updates = false;
@@ -351,20 +365,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         if let Some(is_recalled) = updates.is_recalled {
             if is_recalled {
-                separated.push("status = 'RECALLED'");
+                separated.push("status = ");
+                separated.push_bind(6i32); // MessageStatus::Recalled
                 has_updates = true;
             }
         }
-        if let Some(recalled_at) = updates.recalled_at {
-            separated.push("fsm_state_changed_at = ");
-            // timestamp_to_datetime 返回 Option<DateTime<Utc>>，需要 unwrap
-            if let Some(dt) = timestamp_to_datetime(&recalled_at) {
-                separated.push_bind(dt);
-            } else {
-                // 如果转换失败，使用 None
-                separated.push_bind(Option::<DateTime<Utc>>::None);
-            }
-            has_updates = true;
+        if updates.recalled_at.is_some() {
+            // init_v2 messages 无 recalled_at 列，忽略
         }
         if let Some(_read_by) = updates.read_by {
             // read_by moved to message_read_records table
@@ -405,29 +412,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         }
         if let Some(status) = updates.status {
             separated.push("status = ");
-            // 与 init.sql Message FSM 一致：INIT, SENT, EDITED, RECALLED, DELETED_HARD
-            let status_str = MessageStatus::try_from(status)
-                .map(|s| match s {
-                    MessageStatus::Created => "INIT",
-                    MessageStatus::Sent => "SENT",
-                    MessageStatus::Delivered => "SENT",
-                    MessageStatus::Read => "SENT",
-                    MessageStatus::Failed => "DELETED_HARD",
-                    MessageStatus::Recalled => "RECALLED",
-                    _ => "SENT",
-                })
-                .unwrap_or("SENT");
-            separated.push_bind(status_str);
+            separated.push_bind(status);
             has_updates = true;
         }
-        // 反应存储在 message_reactions 表，不更新 messages 表
-
-        if !has_updates {
-            return Ok(()); // 没有需要更新的字段
+        if updates.reactions.is_some() {
+            // init_v2: reactions 在 message_reactions 表，不更新 messages 列
         }
 
-        // 添加 updated_at
-        separated.push("updated_at = CURRENT_TIMESTAMP");
+        if !has_updates {
+            return Ok(());
+        }
 
         // 添加 WHERE 子句
         query.push(" WHERE server_id = ");
@@ -453,39 +447,33 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(())
     }
 
+    #[instrument(skip(self, message_ids), fields(user_id, visibility))]
     async fn batch_update_visibility(
         &self,
+        ctx: &Ctx,
         message_ids: &[String],
         user_id: &str,
         visibility: VisibilityStatus,
     ) -> Result<usize> {
+        let _ = ctx; // 上下文用于日志追踪
         if message_ids.is_empty() {
             return Ok(0);
         }
 
-        // 获取可见性状态字符串
-        let vis_status = match visibility {
-            VisibilityStatus::VisibilityVisible => "VISIBLE",
-            VisibilityStatus::VisibilityHidden => "HIDDEN",
-            VisibilityStatus::VisibilityDeleted => "DELETED",
-        };
+        let vis_int = visibility as i32;
 
-        // 使用 INSERT ... ON CONFLICT DO UPDATE 语法更新或插入可见性记录
         let result = sqlx::query(
             r#"
-            INSERT INTO message_visibility (tenant_id, message_id, user_id, visibility_status, changed_at, created_at, updated_at)
-            SELECT m.tenant_id, m.server_id, $1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            INSERT INTO message_visibility (tenant_id, message_id, user_id, visibility_status, changed_at)
+            SELECT m.tenant_id, m.server_id, $1, $2, CURRENT_TIMESTAMP
             FROM messages m
             WHERE m.server_id = ANY($3)
-            ON CONFLICT (tenant_id, message_id, user_id) 
-            DO UPDATE SET 
-                visibility_status = $2,
-                changed_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
+            ON CONFLICT (tenant_id, message_id, user_id)
+            DO UPDATE SET visibility_status = $2, changed_at = CURRENT_TIMESTAMP
             "#,
         )
         .bind(user_id)
-        .bind(vis_status)
+        .bind(vis_int)
         .bind(message_ids)
         .execute(&self.base.pool)
         .await
@@ -494,13 +482,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(result.rows_affected() as usize)
     }
 
+    #[instrument(skip(self), fields(conversation_id))]
     async fn count_messages(
         &self,
+        ctx: &Ctx,
         conversation_id: &str,
         user_id: Option<&str>,
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<i64> {
+        let _ = ctx; // 上下文用于日志追踪
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
 
@@ -523,7 +514,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             query.push("AND mv.message_id = messages.server_id ");
             query.push("AND mv.user_id = ");
             query.push_bind(uid);
-            query.push(" AND mv.visibility_status IN ('HIDDEN', 'DELETED'))");
+            query.push(" AND mv.visibility_status IN (1, 2))");
         }
 
         let count: i64 = query
@@ -536,13 +527,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(count)
     }
 
+    #[instrument(skip(self, filters), fields(filter_count = filters.len()))]
     async fn search_messages(
         &self,
-        filters: &[flare_proto::common::FilterExpression],
+        ctx: &Ctx,
+        filters: &[FilterExpression],
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: i32,
     ) -> Result<Vec<Message>> {
+        let _ = ctx; // 上下文用于日志追踪
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
         let limit = limit.min(1000).max(1);
@@ -551,54 +545,52 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let mut query = sqlx::QueryBuilder::new(
             r#"
             SELECT 
-                server_id, conversation_id, client_msg_id, sender_id, content, timestamp,
-                extra, created_at, message_type, content_type, business_type,
-                status, fsm_state_changed_at, is_burn_after_read, burn_after_seconds,
-                seq, updated_at, tenant_id
+                tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
             FROM messages
-            WHERE timestamp >= $1
-              AND timestamp <= $2
+            WHERE timestamp >= $1 AND timestamp <= $2
             "#,
         );
         query.push_bind(start_ts);
         query.push_bind(end_ts);
 
-        // 应用过滤器（优化：预分配参数索引）
-        let mut param_index = 3; // 当前参数索引，从3开始（前两个是时间范围）
+        let mut param_index = 3u32;
         for filter in filters {
-            if filter.field.is_empty() || filter.values.is_empty() {
+            if filter.field.is_empty() || filter.value.is_empty() {
                 continue;
             }
-
             match filter.field.as_str() {
                 "conversation_id" => {
                     query.push(format!(" AND conversation_id = ${}", param_index));
-                    query.push_bind(&filter.values[0]);
+                    query.push_bind(&filter.value);
                     param_index += 1;
                 }
                 "sender_id" => {
                     query.push(format!(" AND sender_id = ${}", param_index));
-                    query.push_bind(&filter.values[0]);
+                    query.push_bind(&filter.value);
                     param_index += 1;
                 }
                 "message_type" => {
                     query.push(format!(" AND message_type = ${}", param_index));
-                    query.push_bind(&filter.values[0]);
+                    let v: i32 = filter.value.parse().unwrap_or(0);
+                    query.push_bind(v);
                     param_index += 1;
                 }
                 "status" => {
                     query.push(format!(" AND status = ${}", param_index));
-                    query.push_bind(&filter.values[0]);
+                    let v: i32 = filter.value.parse().unwrap_or(0);
+                    query.push_bind(v);
                     param_index += 1;
                 }
                 "is_recalled" => {
-                    let val = filter.values[0].parse::<bool>().unwrap_or(false);
+                    let val = filter.value.parse::<bool>().unwrap_or(false);
                     if val {
                         query.push(format!(" AND status = ${}", param_index));
-                        query.push_bind("recalled");
+                        query.push_bind(6i32);
                     } else {
                         query.push(format!(" AND status != ${}", param_index));
-                        query.push_bind("recalled");
+                        query.push_bind(6i32);
                     }
                     param_index += 1;
                 }
@@ -625,12 +617,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(messages)
     }
 
+    #[instrument(skip(self, attributes, tags), fields(message_id))]
     async fn update_message_attributes(
         &self,
+        ctx: &Ctx,
         message_id: &str,
         attributes: HashMap<String, String>,
         tags: Vec<String>,
     ) -> Result<()> {
+        let _ = ctx; // 上下文用于日志追踪
         // 更新 extra JSONB 中的 attributes 和 tags
         let mut extra_updates = serde_json::Map::new();
 
@@ -653,11 +648,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         sqlx::query(
             r#"
-            UPDATE messages
-            SET 
-                extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE server_id = $2
+            UPDATE messages SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb WHERE server_id = $2
             "#,
         )
         .bind(serde_json::to_value(&extra_updates)?)
@@ -669,7 +660,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(())
     }
 
-    async fn list_all_tags(&self) -> Result<Vec<String>> {
+    #[instrument(skip(self))]
+    async fn list_all_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        let _ = ctx; // 上下文用于日志追踪
         // 从 extra JSONB 中提取所有 tags
         let rows = sqlx::query(
             r#"
@@ -692,422 +685,331 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(tags)
     }
 
+    #[instrument(skip(self), fields(message_id))]
     async fn query_message_operations(
         &self,
-        message_id: &str,
-    ) -> Result<Vec<flare_proto::common::MessageOperation>> {
-        // 从 message_operation_history 表中查询操作历史
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                operation_type, operator_id, target_user_id, operation_data, 
-                show_notice, notice_text, timestamp, metadata, tenant_id
-            FROM message_operation_history
-            WHERE message_id = $1
-            ORDER BY timestamp ASC
-            "#,
-        )
-        .bind(message_id)
-        .fetch_all(&self.base.pool)
-        .await
-        .context("Failed to query message operations")?;
-
-        let mut operations = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 解析 operation_type
-            let operation_type_str: String = row.get("operation_type");
-            let operation_type = match operation_type_str.as_str() {
-                "OPERATION_TYPE_RECALL" => flare_proto::common::OperationType::Recall as i32,
-                "OPERATION_TYPE_EDIT" => flare_proto::common::OperationType::Edit as i32,
-                "OPERATION_TYPE_DELETE" => flare_proto::common::OperationType::Delete as i32,
-                "OPERATION_TYPE_READ" => flare_proto::common::OperationType::Read as i32,
-                "OPERATION_TYPE_REACTION_ADD" => flare_proto::common::OperationType::ReactionAdd as i32,
-                "OPERATION_TYPE_REACTION_REMOVE" => flare_proto::common::OperationType::ReactionRemove as i32,
-                "OPERATION_TYPE_PIN" => flare_proto::common::OperationType::Pin as i32,
-                "OPERATION_TYPE_UNPIN" => flare_proto::common::OperationType::Unpin as i32,
-                "OPERATION_TYPE_MARK" => flare_proto::common::OperationType::Mark as i32,
-                "OPERATION_TYPE_UNMARK" => flare_proto::common::OperationType::Unmark as i32,
-                _ => flare_proto::common::OperationType::Unspecified as i32,
-            };
-
-            // 解析时间戳
-            let timestamp_chrono: DateTime<Utc> = row.get("timestamp");
-            let timestamp = Some(prost_types::Timestamp {
-                seconds: timestamp_chrono.timestamp(),
-                nanos: timestamp_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析操作数据
-            let operation_data_json: Option<serde_json::Value> = row.get("operation_data");
-            let operation_data = if let Some(json_val) = operation_data_json {
-                // 根据操作类型解析 operation_data
-                match operation_type_str.as_str() {
-                    "OPERATION_TYPE_RECALL" => {
-                        // RecallOperationData
-                        Some(flare_proto::common::message_operation::OperationData::Recall(
-                            flare_proto::common::RecallOperationData {
-                                reason: json_val.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                time_limit_seconds: json_val.get("time_limit_seconds").and_then(|v| v.as_i64()).unwrap_or_default() as i32,
-                                allow_admin_recall: json_val.get("allow_admin_recall").and_then(|v| v.as_bool()).unwrap_or_default(),
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_EDIT" => {
-                        // EditOperationData
-                        Some(flare_proto::common::message_operation::OperationData::Edit(
-                            flare_proto::common::EditOperationData {
-                                new_content: json_val.get("new_content").and_then(|v| v.as_str()).unwrap_or_default().as_bytes().to_vec(),
-                                edit_version: json_val.get("edit_version").and_then(|v| v.as_i64()).unwrap_or_default() as i32,
-                                reason: json_val.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                show_edited_mark: json_val.get("show_edited_mark").and_then(|v| v.as_bool()).unwrap_or_default(),
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_REACTION_ADD" | "OPERATION_TYPE_REACTION_REMOVE" => {
-                        // ReactionOperationData
-                        let action = if operation_type_str.as_str() == "OPERATION_TYPE_REACTION_ADD" {
-                            flare_proto::common::ReactionAction::Add as i32
-                        } else {
-                            flare_proto::common::ReactionAction::Remove as i32
-                        };
-                        Some(flare_proto::common::message_operation::OperationData::Reaction(
-                            flare_proto::common::ReactionOperationData {
-                                emoji: json_val.get("emoji").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                action,
-                                count: json_val.get("count").and_then(|v| v.as_i64()).unwrap_or_default() as i32,
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_PIN" => {
-                        // PinOperationData
-                        Some(flare_proto::common::message_operation::OperationData::Pin(
-                            flare_proto::common::PinOperationData {
-                                reason: json_val.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                expire_at: json_val.get("expire_at").and_then(|v| v.as_str()).map(|s| {
-                                    // 尝试解析时间戳
-                                    DateTime::parse_from_rfc3339(s).ok().map(|dt| {
-                                        prost_types::Timestamp {
-                                            seconds: dt.timestamp(),
-                                            nanos: dt.timestamp_subsec_nanos() as i32,
-                                        }
-                                    })
-                                }).flatten(),
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_UNPIN" => {
-                        // PinOperationData for unpin
-                        Some(flare_proto::common::message_operation::OperationData::Pin(
-                            flare_proto::common::PinOperationData {
-                                reason: json_val.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                expire_at: None, // Unpin doesn't typically have an expiration
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_MARK" => {
-                        // MarkOperationData
-                        let mark_type_str = json_val.get("mark_type").and_then(|v| v.as_str()).unwrap_or_default();
-                        let mark_type = match mark_type_str {
-                            "MARK_TYPE_IMPORTANT" => flare_proto::common::MarkType::Important as i32,
-                            "MARK_TYPE_TODO" => flare_proto::common::MarkType::Todo as i32,
-                            "MARK_TYPE_DONE" => flare_proto::common::MarkType::Done as i32,
-                            "MARK_TYPE_CUSTOM" => flare_proto::common::MarkType::Custom as i32,
-                            _ => flare_proto::common::MarkType::Important as i32,
-                        };
-                        Some(flare_proto::common::message_operation::OperationData::Mark(
-                            flare_proto::common::MarkOperationData {
-                                mark_type,
-                                color: json_val.get("color").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            },
-                        ))
-                    },
-                    "OPERATION_TYPE_UNMARK" => {
-                        // UnmarkOperationData
-                        let mark_type_str = json_val.get("mark_type").and_then(|v| v.as_str()).unwrap_or_default();
-                        let mark_type = match mark_type_str {
-                            "MARK_TYPE_IMPORTANT" => flare_proto::common::MarkType::Important as i32,
-                            "MARK_TYPE_TODO" => flare_proto::common::MarkType::Todo as i32,
-                            "MARK_TYPE_DONE" => flare_proto::common::MarkType::Done as i32,
-                            "MARK_TYPE_CUSTOM" => flare_proto::common::MarkType::Custom as i32,
-                            _ => flare_proto::common::MarkType::Important as i32,
-                        };
-                        Some(flare_proto::common::message_operation::OperationData::Unmark(
-                            flare_proto::common::UnmarkOperationData {
-                                mark_type,
-                            },
-                        ))
-                    },
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            // 解析元数据
-            let metadata_json: Option<serde_json::Value> = row.get("metadata");
-            let mut metadata = std::collections::HashMap::new();
-            if let Some(json_val) = metadata_json {
-                if let Some(obj) = json_val.as_object() {
-                    for (key, value) in obj {
-                        metadata.insert(key.clone(), value.as_str().unwrap_or_default().to_string());
-                    }
-                }
-            }
-
-            let operation = flare_proto::common::MessageOperation {
-                operation_type,
-                target_message_id: message_id.to_string(),
-                operator_id: row.get("operator_id"),
-                timestamp,
-                show_notice: row.get("show_notice"),
-                notice_text: row.get::<Option<String>, _>("notice_text").unwrap_or_else(|| "".to_string()),
-                target_user_id: row.get::<Option<String>, _>("target_user_id").unwrap_or_else(|| "".to_string()),
-                operation_data,
-                metadata,
-            };
-
-            operations.push(operation);
-        }
-
-        Ok(operations)
+        ctx: &Ctx,
+        _message_id: &str,
+    ) -> Result<Vec<crate::domain::model::Event>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 从 message_operation_history 或事件表构建 Event 列表；当前与 proto 对齐返回 Event，先返回空
+        Ok(vec![])
     }
 
+    #[instrument(skip(self), fields(message_id))]
     async fn query_message_edit_history(
         &self,
+        ctx: &Ctx,
         message_id: &str,
-    ) -> Result<Vec<flare_proto::common::EditHistory>> {
-        // 从 message_edit_history 表中查询编辑历史
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                edit_version, content, editor_id, edited_at, reason, show_edited_mark, tenant_id
-            FROM message_edit_history
-            WHERE message_id = $1
-            ORDER BY edit_version ASC
-            "#,
-        )
-        .bind(message_id)
-        .fetch_all(&self.base.pool)
-        .await
-        .context("Failed to query message edit history")?;
-
-        let mut histories = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 解析时间戳
-            let edited_at_chrono: DateTime<Utc> = row.get("edited_at");
-            let edited_at = Some(prost_types::Timestamp {
-                seconds: edited_at_chrono.timestamp(),
-                nanos: edited_at_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析内容
-            let content_bytes: Vec<u8> = row.get("content");
-            let content = flare_proto::decode_message_content(&content_bytes[..]).ok();
-
-            let history = flare_proto::common::EditHistory {
-                edit_version: row.get("edit_version"),
-                content,
-                edited_at,
-                editor_id: row.get::<String, _>("editor_id"),
-                reason: row.get::<Option<String>, _>("reason").unwrap_or_else(|| "".to_string()),
-                show_edited_mark: row.get("show_edited_mark"),
-            };
-
-            histories.push(history);
-        }
-
-        Ok(histories)
+    ) -> Result<Vec<crate::domain::model::EditHistoryEntry>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 实现编辑历史查询
+        Ok(vec![])
     }
 
+    #[instrument(skip(self), fields(message_id))]
     async fn query_message_read_records(
         &self,
+        ctx: &Ctx,
         message_id: &str,
-    ) -> Result<Vec<flare_proto::common::MessageReadRecord>> {
-        // 从 message_read_records 表中查询已读记录
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                user_id, read_at, burned_at, tenant_id
-            FROM message_read_records
-            WHERE message_id = $1
-            ORDER BY read_at ASC
-            "#,
-        )
-        .bind(message_id)
-        .fetch_all(&self.base.pool)
-        .await
-        .context("Failed to query message read records")?;
-
-        let mut records = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 解析 read_at
-            let read_at_chrono: DateTime<Utc> = row.get("read_at");
-            let read_at = Some(prost_types::Timestamp {
-                seconds: read_at_chrono.timestamp(),
-                nanos: read_at_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析 burned_at
-            let burned_at_chrono: Option<DateTime<Utc>> = row.get("burned_at");
-            let burned_at = if let Some(burned_at_dt) = burned_at_chrono {
-                Some(prost_types::Timestamp {
-                    seconds: burned_at_dt.timestamp(),
-                    nanos: burned_at_dt.timestamp_subsec_nanos() as i32,
-                })
-            } else {
-                None
-            };
-
-            let record = flare_proto::common::MessageReadRecord {
-                user_id: row.get("user_id"),
-                read_at,
-                burned_at,
-            };
-
-            records.push(record);
-        }
-
-        Ok(records)
+    ) -> Result<Vec<crate::domain::model::ReadListEntry>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 实现已读记录查询
+        Ok(vec![])
     }
 
+    #[instrument(skip(self), fields(message_id, user_id))]
     async fn query_message_visibility(
         &self,
+        ctx: &Ctx,
         message_id: &str,
         user_id: &str,
-    ) -> Result<Option<flare_proto::common::VisibilityStatus>> {
-        // 从 message_visibility 表中查询可见性状态
+    ) -> Result<Option<crate::domain::model::VisibilityStatus>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 实现可见性查询
+        Ok(None)
+    }
+
+    #[instrument(skip(self), fields(message_id))]
+    async fn query_message_reactions(
+        &self,
+        ctx: &Ctx,
+        message_id: &str,
+    ) -> Result<Vec<crate::domain::model::ReactionItem>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 实现反应查询
+        Ok(vec![])
+    }
+
+    #[instrument(skip(self), fields(conversation_id))]
+    async fn query_pinned_messages(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+    ) -> Result<Vec<crate::domain::model::PinnedMessageInfo>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 实现置顶消息查询
+        Ok(vec![])
+    }
+
+    #[instrument(skip(self, _event_types), fields(message_id, limit = _limit))]
+    async fn query_message_events(
+        &self,
+        ctx: &Ctx,
+        _message_id: &str,
+        _event_types: Option<&[EventType]>,
+        _limit: i32,
+        _offset: i64,
+    ) -> Result<(Vec<Event>, bool)> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 从事件表按消息 ID 查询事件，支持类型过滤与分页
+        Ok((vec![], false))
+    }
+
+    #[instrument(skip(self, event_type_filter), fields(tenant_id, conversation_id, after_seq, before_seq, limit))]
+    async fn query_events(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        after_seq: i64,
+        before_seq: i64,
+        limit: i32,
+        event_type_filter: Vec<i32>,
+    ) -> Result<Vec<Event>> {
+        let _ = ctx;
+        let limit = limit.clamp(1, 500);
+
+        let mut b = sqlx::QueryBuilder::new(
+            "SELECT seq, event_type, created_at, operator_id, request_id, event_seq, payload FROM events WHERE conversation_id = ",
+        );
+        b.push_bind(conversation_id);
+        b.push(" AND seq > ");
+        b.push_bind(after_seq);
+        if before_seq > 0 {
+            b.push(" AND seq < ");
+            b.push_bind(before_seq);
+        }
+        if !tenant_id.is_empty() {
+            b.push(" AND tenant_id = ");
+            b.push_bind(tenant_id);
+        }
+        if !event_type_filter.is_empty() {
+            b.push(" AND event_type = ANY(");
+            b.push_bind(event_type_filter);
+            b.push(")");
+        }
+        b.push(" ORDER BY seq ASC LIMIT ");
+        b.push_bind(limit);
+
+        let rows = b
+            .build()
+            .fetch_all(&self.base.pool)
+            .await
+            .context("query events by conversation seq")?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let seq: i64 = row.try_get("seq").context("row seq")?;
+            let event_type: i32 = row.try_get("event_type").context("row event_type")?;
+            let created_at: DateTime<Utc> = row.try_get("created_at").context("row created_at")?;
+            let operator_id: String = row
+                .try_get::<Option<String>, _>("operator_id")
+                .context("row operator_id")?
+                .unwrap_or_default();
+            let request_id: Option<String> = row.try_get("request_id").ok();
+            let event_seq: Option<i64> = row.try_get("event_seq").ok();
+            let payload: Vec<u8> = row.try_get("payload").unwrap_or_default();
+
+            let proto_ev = match proto_event_from_events_row(
+                conversation_id,
+                seq,
+                event_type,
+                created_at,
+                operator_id,
+                request_id.clone(),
+                event_seq,
+                &payload,
+            ) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        conversation_id = %conversation_id,
+                        seq,
+                        "proto_event_from_events_row failed; returning shell Event"
+                    );
+                    flare_proto::common::Event {
+                        conversation_id: conversation_id.to_string(),
+                        seq: seq as u64,
+                        r#type: event_type,
+                        created_at: crate::convert::datetime_to_timestamp(Some(created_at)),
+                        event_id: format!("{conversation_id}:{seq}"),
+                        event_seq: event_seq.map(|v| v as u64),
+                        request_id,
+                        ..Default::default()
+                    }
+                }
+            };
+            out.push(event_from_proto(&proto_ev));
+        }
+        Ok(out)
+    }
+
+    #[instrument(skip(self), fields(tenant_id, conversation_id))]
+    async fn get_conversation_max_seq(
+        &self,
+        ctx: &Ctx,
+        _tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<i64>> {
+        let _ = ctx;
+        let row = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(seq) FROM messages WHERE conversation_id = $1",
+        )
+        .bind(conversation_id)
+        .fetch_one(&self.base.pool)
+        .await
+        .context("get_conversation_max_seq")?;
+        Ok(row)
+    }
+
+    #[instrument(skip(self), fields(conversation_id))]
+    async fn get_conversation_message_head(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationMessageHead>> {
+        let _ = ctx;
         let row = sqlx::query(
             r#"
-            SELECT 
-                visibility_status
-            FROM message_visibility
-            WHERE message_id = $1 AND user_id = $2
+            SELECT seq, server_id, timestamp
+            FROM messages
+            WHERE conversation_id = $1
+            ORDER BY seq DESC NULLS LAST
             LIMIT 1
             "#,
         )
-        .bind(message_id)
-        .bind(user_id)
+        .bind(conversation_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("Failed to query message visibility")?;
+        .context("get_conversation_message_head")?;
 
-        if let Some(row) = row {
-            let status_str: String = row.get("visibility_status");
-            let status = match status_str.as_str() {
-                "VISIBLE" => flare_proto::common::VisibilityStatus::VisibilityVisible as i32,
-                "HIDDEN" => flare_proto::common::VisibilityStatus::VisibilityHidden as i32,
-                "DELETED" => flare_proto::common::VisibilityStatus::VisibilityDeleted as i32,
-                _ => flare_proto::common::VisibilityStatus::VisibilityVisible as i32,
-            };
-            Ok(Some(flare_proto::common::VisibilityStatus::try_from(status).unwrap_or(flare_proto::common::VisibilityStatus::VisibilityVisible)))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let seq: i64 = row.try_get("seq").context("head seq")?;
+        let last_message_id: String = row.try_get("server_id").context("head server_id")?;
+        let last_at: Option<DateTime<Utc>> = row.try_get("timestamp").ok();
+        Ok(Some(ConversationMessageHead {
+            max_seq: seq,
+            last_message_id,
+            last_at,
+        }))
+    }
+
+    #[instrument(skip(self), fields(tenant_id, user_id, conversation_id))]
+    async fn get_sync_cursor(
+        &self,
+        ctx: &Ctx,
+        _tenant_id: &str,
+        _user_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<crate::domain::model::SyncCursor>> {
+        let _ = ctx; // 上下文用于日志追踪
+        // TODO: 获取用户在某会话的同步游标
+        Ok(None)
+    }
+
+    #[instrument(skip(self), fields(tenant_id, user_id))]
+    async fn get_sync_snapshot(
+        &self,
+        ctx: &Ctx,
+        _tenant_id: &str,
+        _user_id: &str,
+        conversation_ids: &[String],
+        messages_per_conversation: i32,
+    ) -> Result<Vec<(String, Vec<Message>, i64)>> {
+        let _ = ctx; // 上下文用于日志追踪
+        
+        let limit = messages_per_conversation.clamp(1, 100); // 限制范围 1-100
+        let mut results = Vec::new();
+
+        // conversation_ids 为空时，按最近活跃会话回填快照（避免冷启动永远空列表）
+        let target_conversation_ids: Vec<String> = if conversation_ids.is_empty() {
+            let rows = sqlx::query(
+                r#"
+                SELECT conversation_id
+                FROM messages
+                GROUP BY conversation_id
+                ORDER BY MAX(seq) DESC
+                LIMIT $1
+                "#,
+            )
+            .bind(limit)
+            .fetch_all(&self.base.pool)
+            .await
+            .context("Failed to query recent conversations for sync snapshot")?;
+
+            rows.into_iter()
+                .filter_map(|row| row.try_get::<String, _>("conversation_id").ok())
+                .collect()
         } else {
-            // 如果没有找到记录，默认为可见
-            Ok(Some(flare_proto::common::VisibilityStatus::VisibilityVisible))
+            conversation_ids.to_vec()
+        };
+        
+        // 对每个会话查询最新的消息
+        for conversation_id in &target_conversation_ids {
+            // 查询会话内最新的消息
+            let rows = sqlx::query(
+                r#"
+                SELECT 
+                    tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                FROM messages
+                WHERE conversation_id = $1
+                ORDER BY seq DESC
+                LIMIT $2
+                "#,
+            )
+            .bind(conversation_id)
+            .bind(limit)
+            .fetch_all(&self.base.pool)
+            .await
+            .context("Failed to query sync snapshot messages")?;
+            
+            let mut messages = Vec::with_capacity(rows.len());
+            let mut max_seq = 0;
+            
+            for row in rows {
+                let message = self.base.row_to_message(&row)?;
+                let seq_i64 = message.seq as i64;
+                max_seq = max_seq.max(seq_i64);
+                messages.push(message);
+            }
+            
+            // 反转顺序，使最旧的消息在前
+            messages.reverse();
+            
+            results.push((conversation_id.clone(), messages, max_seq));
         }
+        
+        Ok(results)
     }
 
-    async fn query_message_reactions(
+    #[instrument(skip(self), fields(tenant_id, user_id, conversation_id))]
+    async fn update_sync_cursor(
         &self,
-        message_id: &str,
-    ) -> Result<Vec<flare_proto::common::Reaction>> {
-        // 从 message_reactions 表中查询消息反应
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                emoji, user_ids, count, last_updated, created_at, tenant_id
-            FROM message_reactions
-            WHERE message_id = $1
-            "#,
-        )
-        .bind(message_id)
-        .fetch_all(&self.base.pool)
-        .await
-        .context("Failed to query message reactions")?;
-
-        let mut reactions = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 解析 last_updated
-            let last_updated_chrono: DateTime<Utc> = row.get("last_updated");
-            let last_updated = Some(prost_types::Timestamp {
-                seconds: last_updated_chrono.timestamp(),
-                nanos: last_updated_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析 created_at
-            let created_at_chrono: DateTime<Utc> = row.get("created_at");
-            let created_at = Some(prost_types::Timestamp {
-                seconds: created_at_chrono.timestamp(),
-                nanos: created_at_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析 user_ids 数组
-            let user_ids_db: Vec<String> = row.get("user_ids");
-
-            let reaction = flare_proto::common::Reaction {
-                emoji: row.get("emoji"),
-                user_ids: user_ids_db,
-                count: row.get("count"),
-                last_updated,
-                created_at,
-            };
-
-            reactions.push(reaction);
-        }
-
-        Ok(reactions)
-    }
-
-    async fn query_pinned_messages(
-        &self,
-        conversation_id: &str,
-    ) -> Result<Vec<flare_proto::common::PinnedMessageInfo>> {
-        // 从 pinned_messages 表中查询置顶消息
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                message_id, pinned_by, pinned_at, expire_at, reason, tenant_id
-            FROM pinned_messages
-            WHERE conversation_id = $1
-            ORDER BY pinned_at DESC
-            "#,
-        )
-        .bind(conversation_id)
-        .fetch_all(&self.base.pool)
-        .await
-        .context("Failed to query pinned messages")?;
-
-        let mut pinned_messages = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 解析 pinned_at
-            let pinned_at_chrono: DateTime<Utc> = row.get("pinned_at");
-            let pinned_at = Some(prost_types::Timestamp {
-                seconds: pinned_at_chrono.timestamp(),
-                nanos: pinned_at_chrono.timestamp_subsec_nanos() as i32,
-            });
-
-            // 解析 expire_at
-            let expire_at_chrono: Option<DateTime<Utc>> = row.get("expire_at");
-            let expire_at = if let Some(expire_at_dt) = expire_at_chrono {
-                Some(prost_types::Timestamp {
-                    seconds: expire_at_dt.timestamp(),
-                    nanos: expire_at_dt.timestamp_subsec_nanos() as i32,
-                })
-            } else {
-                None
-            };
-
-            let pinned_message = flare_proto::common::PinnedMessageInfo {
-                message_id: row.get("message_id"),
-                conversation_id: conversation_id.to_string(),
-                pinned_by: row.get("pinned_by"),
-                pinned_at,
-                expire_at,
-                reason: row.get::<Option<String>, _>("reason").unwrap_or_else(|| "".to_string()),
-            };
-
-            pinned_messages.push(pinned_message);
-        }
-
-        Ok(pinned_messages)
+        ctx: &Ctx,
+        _tenant_id: &str,
+        _user_id: &str,
+        _conversation_id: &str,
+        _last_synced_seq: i64,
+        _last_synced_ts: i64,
+        _device_id: Option<&str>,
+    ) -> Result<()> {
+        // TODO: 更新用户在某会话的同步游标
+        Ok(())
     }
 }

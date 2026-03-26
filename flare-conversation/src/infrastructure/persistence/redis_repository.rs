@@ -10,7 +10,6 @@ use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant, ConversationSort, ConversationSummary,
 };
 use crate::domain::repository::ConversationRepository;
-use async_trait::async_trait;
 
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
@@ -39,7 +38,6 @@ impl RedisConversationRepository {
     }
 }
 
-#[async_trait]
 impl ConversationRepository for RedisConversationRepository {
     async fn load_bootstrap(
         &self,
@@ -190,6 +188,16 @@ impl ConversationRepository for RedisConversationRepository {
     async fn mark_as_read(&self, _ctx: &flare_server_core::context::Context, _conversation_id: &str, _seq: i64) -> Result<()> {
         Err(anyhow::anyhow!(
             "RedisConversationRepository does not support mark_as_read. Use PostgresConversationRepository instead."
+        ))
+    }
+
+    async fn get_last_message_seq(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+    ) -> Result<Option<i64>> {
+        Err(anyhow::anyhow!(
+            "RedisConversationRepository does not support get_last_message_seq. Use PostgresConversationRepository instead."
         ))
     }
 

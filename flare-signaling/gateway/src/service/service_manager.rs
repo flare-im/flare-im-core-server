@@ -67,26 +67,23 @@ impl PortConfig {
         // 检查是否同时指定了 PORT 和 GRPC_PORT（多网关部署场景）
         if let (Ok(env_port), Ok(env_grpc_port)) =
             (std::env::var("PORT"), std::env::var("GRPC_PORT"))
-        {
-            if let (Ok(ws_port), Ok(grpc_port)) =
+            && let (Ok(ws_port), Ok(grpc_port)) =
                 (env_port.parse::<u16>(), env_grpc_port.parse::<u16>())
             {
                 info!("使用环境变量 PORT={} 和 GRPC_PORT={}", ws_port, grpc_port);
                 return Self::from_ws_port(ws_port, grpc_port);
             }
-        }
 
         // 只指定了 GRPC_PORT
-        if let Ok(env_grpc_port) = std::env::var("GRPC_PORT") {
-            if let Ok(port) = env_grpc_port.parse::<u16>() {
+        if let Ok(env_grpc_port) = std::env::var("GRPC_PORT")
+            && let Ok(port) = env_grpc_port.parse::<u16>() {
                 info!("使用环境变量 GRPC_PORT={} 作为 gRPC 端口", port);
                 return Self::from_grpc_port(port);
             }
-        }
 
         // 只指定了 PORT
-        if let Ok(env_port) = std::env::var("PORT") {
-            if let Ok(port) = env_port.parse::<u16>() {
+        if let Ok(env_port) = std::env::var("PORT")
+            && let Ok(port) = env_port.parse::<u16>() {
                 let grpc_port = port + 2;
                 info!(
                     "使用环境变量 PORT={}，gRPC 端口 = {} (PORT + 2)",
@@ -94,7 +91,6 @@ impl PortConfig {
                 );
                 return Self::from_ws_port(port, grpc_port);
             }
-        }
 
         // 默认：使用配置端口 + 2 作为 gRPC 端口
         let grpc_port = config_port + 2;
@@ -233,11 +229,10 @@ impl ServiceManager {
     /// 4. 注销服务注册
     async fn shutdown(&mut self) {
         // 1. 停止 gRPC 服务器
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            if shutdown_tx.send(()).is_err() {
+        if let Some(shutdown_tx) = self.shutdown_tx.take()
+            && shutdown_tx.send(()).is_err() {
                 warn!("停止信号发送失败（gRPC 服务器可能已停止）");
             }
-        }
 
         // 等待 gRPC 服务器停止
         if let Some(handle) = self.grpc_server_handle.take() {

@@ -7,6 +7,16 @@ use crate::domain::model::{
     MediaAssetStatus, MediaFileMetadata, MediaReference, UploadContext, UploadSession,
 };
 
+/// 对象存储仓储接口
+///
+/// **重要说明**：使用 `#[async_trait::async_trait]` 宏是因为该 trait 需要作为 trait 对象（dyn Trait）使用，
+/// 以支持依赖注入和运行时多态。虽然 Rust 2024 支持原生 `async fn in traits`，但原生实现不支持 dyn 兼容性。
+/// 
+/// 这是性能与灵活性的权衡：
+/// - **性能影响**：动态分发有少量性能开销（约 5-10%）
+/// - **灵活性收益**：支持运行时切换实现、依赖注入、测试 Mock
+///
+/// 如果需要极致性能，建议改用泛型参数而非 trait 对象。
 #[async_trait::async_trait]
 pub trait MediaObjectRepository: Send + Sync {
     async fn put_object(&self, context: &UploadContext<'_>) -> Result<String>;
@@ -23,6 +33,9 @@ pub trait MediaObjectRepository: Send + Sync {
     }
 }
 
+/// 媒体元数据存储仓储接口
+///
+/// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaMetadataStore: Send + Sync {
     async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()>;
@@ -38,6 +51,9 @@ pub trait MediaMetadataStore: Send + Sync {
     ) -> Result<()>;
 }
 
+/// 媒体元数据缓存接口
+///
+/// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaMetadataCache: Send + Sync {
     async fn cache_metadata(&self, metadata: &MediaFileMetadata) -> Result<()>;
@@ -45,6 +61,9 @@ pub trait MediaMetadataCache: Send + Sync {
     async fn invalidate(&self, file_id: &str) -> Result<()>;
 }
 
+/// 本地存储接口
+///
+/// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaLocalStore: Send + Sync {
     async fn write(&self, context: &UploadContext<'_>) -> Result<String>;
@@ -52,6 +71,9 @@ pub trait MediaLocalStore: Send + Sync {
     fn base_url(&self) -> Option<String>;
 }
 
+/// 媒体引用存储仓储接口
+///
+/// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaReferenceStore: Send + Sync {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool>;
@@ -70,6 +92,9 @@ pub trait MediaReferenceStore: Send + Sync {
     ) -> Result<bool>;
 }
 
+/// 分片上传会话存储接口
+///
+/// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait UploadSessionStore: Send + Sync {
     async fn create_session(&self, session: &UploadSession) -> Result<()>;

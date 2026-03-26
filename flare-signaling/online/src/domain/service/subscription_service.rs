@@ -3,192 +3,84 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::access_gateway::{
-    PublishSignalRequest, PublishSignalResponse, SubscribeRequest, SubscribeResponse, Subscription,
-    UnsubscribeRequest, UnsubscribeResponse,
-};
-use tracing::{info, warn};
+use flare_proto::signaling::online::{PresenceEvent, UserPresenceEvent, WatchPresenceRequest};
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
+use tracing::info;
 
-use crate::domain::repository::{SignalPublisher, SubscriptionRepository};
-use crate::util;
+use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
 
-/// 订阅领域服务 - 包含所有业务逻辑
-pub struct SubscriptionService {
-    subscription_repo: Arc<dyn SubscriptionRepository + Send + Sync>,
-    signal_publisher: Arc<dyn SignalPublisher + Send + Sync>,
+/// 订阅领域服务 - 包含所有业务逻辑（泛型依赖，避免 `dyn` 异步 trait）
+pub struct SubscriptionService<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sync> {
+    subscription_repo: Arc<SR>,
+    presence_publisher: Arc<PP>,
 }
 
-impl SubscriptionService {
-    pub fn new(
-        subscription_repo: Arc<dyn SubscriptionRepository + Send + Sync>,
-        signal_publisher: Arc<dyn SignalPublisher + Send + Sync>,
-    ) -> Self {
+impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sync>
+    SubscriptionService<SR, PP>
+{
+    pub fn new(subscription_repo: Arc<SR>, presence_publisher: Arc<PP>) -> Self {
         Self {
             subscription_repo,
-            signal_publisher,
+            presence_publisher,
         }
     }
 
-    /// 订阅频道/主题
-    pub async fn subscribe(&self, request: SubscribeRequest) -> Result<SubscribeResponse> {
-        let user_id = &request.user_id;
-        let subscriptions = &request.subscriptions;
-
-        if subscriptions.is_empty() {
-            return Ok(SubscribeResponse {
-                granted: vec![],
-                status: util::rpc_status_error(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    "subscriptions list is empty",
-                ),
-            });
+    /// 订阅用户在线状态变化
+    pub async fn subscribe_user_presence(&self, user_id: String) -> Result<Vec<UserPresenceEvent>> {
+        // 检查用户是否存在
+        if user_id.is_empty() {
+            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id cannot be empty")
+                .build_error()
+                .into());
         }
 
-        let mut granted = Vec::new();
-        for subscription in subscriptions {
-            let topic = &subscription.topic;
+        // 记录订阅
+        self.subscription_repo
+            .add_subscription(user_id.clone(), "presence".to_string())
+            .await?;
 
-            if topic.is_empty() {
-                warn!(user_id = %user_id, "empty topic in subscription request");
-                continue;
-            }
+        info!(user_id = %user_id, "Subscribed to user presence events");
 
-            // 添加订阅
-            if let Err(err) = self
-                .subscription_repo
-                .add_subscription(user_id, topic, &subscription.params)
-                .await
-            {
-                warn!(user_id = %user_id, topic = %topic, error = %err, "failed to add subscription");
-                continue;
-            }
-
-            granted.push(Subscription {
-                topic: topic.clone(),
-                params: subscription.params.clone(),
-            });
-
-            info!(user_id = %user_id, topic = %topic, "subscription added");
-        }
-
-        Ok(SubscribeResponse {
-            granted,
-            status: util::rpc_status_ok(),
-        })
+        // 返回当前状态（如果有）
+        Ok(Vec::new())
     }
 
-    pub async fn unsubscribe(&self, ctx: &flare_server_core::context::Context, request: UnsubscribeRequest) -> Result<UnsubscribeResponse> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        let topics = &request.topics;
+    /// 订阅在线状态流
+    pub async fn watch_presence(&self, request: WatchPresenceRequest) -> Result<Vec<PresenceEvent>> {
+        let user_ids = &request.user_ids;
 
-        if topics.is_empty() {
-            return Ok(UnsubscribeResponse {
-                status: util::rpc_status_error(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    "topics list is empty",
-                ),
-            });
+        if user_ids.is_empty() {
+            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "user_ids cannot be empty")
+                .build_error()
+                .into());
         }
 
-        if let Err(err) = self
-            .subscription_repo
-            .remove_subscription(ctx, topics)
-            .await
-        {
-            warn!(user_id = %user_id, error = %err, "failed to remove subscriptions");
-            return Ok(UnsubscribeResponse {
-                status: util::rpc_status_error(
-                    flare_server_core::error::ErrorCode::InternalError,
-                    &format!("failed to unsubscribe: {}", err),
-                ),
-            });
+        // 为每个用户添加订阅
+        for user_id in user_ids {
+            self.subscription_repo
+                .add_subscription(user_id.clone(), "presence".to_string())
+                .await?;
         }
 
-        info!(user_id = %user_id, topics = ?topics, "subscriptions removed");
+        info!(user_ids = ?user_ids, "Subscribed to presence events");
 
-        Ok(UnsubscribeResponse {
-            status: util::rpc_status_ok(),
-        })
+        // 返回当前状态（如果有）
+        Ok(Vec::new())
     }
 
-    /// 发布信令消息
-    pub async fn publish_signal(
-        &self,
-        request: PublishSignalRequest,
-    ) -> Result<PublishSignalResponse> {
-        let envelope = request.envelope.as_ref().ok_or_else(|| {
-            flare_server_core::error::ErrorBuilder::new(
-                flare_server_core::error::ErrorCode::InvalidParameter,
-                "envelope is required",
-            )
-            .build_error()
-        })?;
+    /// 发布在线状态事件
+    pub async fn publish_presence_event(&self, event: PresenceEvent) -> Result<()> {
+        self.presence_publisher
+            .publish_presence_event(event)
+            .await?;
+        Ok(())
+    }
 
-        let topic = &envelope.topic;
-        if topic.is_empty() {
-            return Ok(PublishSignalResponse {
-                status: util::rpc_status_error(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    "topic is required",
-                ),
-            });
-        }
-
-        // 获取主题的所有订阅者
-        let subscribers = match self.subscription_repo.get_topic_subscribers(topic).await {
-            Ok(subs) => subs,
-            Err(err) => {
-                warn!(topic = %topic, error = %err, "failed to get topic subscribers");
-                return Ok(PublishSignalResponse {
-                    status: util::rpc_status_error(
-                        flare_server_core::error::ErrorCode::InternalError,
-                        &format!("failed to get subscribers: {}", err),
-                    ),
-                });
-            }
-        };
-
-        // 如果有指定的目标用户，只发布给这些用户
-        let targets = if envelope.targets.is_empty() {
-            subscribers
-        } else {
-            // 过滤出同时订阅了主题且在被指定目标列表中的用户
-            envelope
-                .targets
-                .iter()
-                .filter(|target| subscribers.contains(target))
-                .cloned()
-                .collect()
-        };
-
-        if targets.is_empty() {
-            info!(topic = %topic, "no subscribers for topic");
-        } else {
-            // 发布信号
-            if let Err(err) = self
-                .signal_publisher
-                .publish_signal(topic, &envelope.payload, &envelope.metadata)
-                .await
-            {
-                warn!(topic = %topic, error = %err, "failed to publish signal");
-                return Ok(PublishSignalResponse {
-                    status: util::rpc_status_error(
-                        flare_server_core::error::ErrorCode::InternalError,
-                        &format!("failed to publish signal: {}", err),
-                    ),
-                });
-            }
-
-            info!(
-                topic = %topic,
-                subscribers = targets.len(),
-                from = %envelope.from,
-                "signal published"
-            );
-        }
-
-        Ok(PublishSignalResponse {
-            status: util::rpc_status_ok(),
-        })
+    /// 发布用户状态事件
+    pub async fn publish_user_presence_event(&self, event: UserPresenceEvent) -> Result<()> {
+        self.presence_publisher
+            .publish_user_presence_event(event)
+            .await?;
+        Ok(())
     }
 }

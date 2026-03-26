@@ -10,7 +10,7 @@ pub mod traits;
 use crate::ack::metrics::AckMetrics;
 use crate::ack::redis_manager::RedisAckManager;
 use crate::ack::service::AckService;
-use async_trait::async_trait;
+
 use std::sync::Arc;
 
 /// ACK处理模块（精简版）
@@ -100,7 +100,7 @@ impl AckModule {
     }
 }
 
-#[async_trait]
+
 impl AckManager for AckModule {
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>> {
         // 调用 AckService 的 trait 实现

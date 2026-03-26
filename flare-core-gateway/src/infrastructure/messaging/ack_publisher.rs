@@ -1,6 +1,6 @@
 //! ACK上报发布器
 //!
-//! 使用 transport.proto 定义的 SendEnvelopeAck 作为核心 ACK 结构
+//! 使用 common/ack.proto 的 Ack + SendAck 作为核心 ACK 结构
 //! Gateway 作为接入层，通过轻量的 gRPC 上报，不直接依赖 Kafka
 
 use async_trait::async_trait;
@@ -156,23 +156,32 @@ impl GrpcAckPublisher {
 #[async_trait]
 impl AckPublisher for GrpcAckPublisher {
     async fn publish_ack(&self, event: &AckAuditEvent) -> Result<()> {
-        // 构造 PushAckRequest
-        let ack = flare_proto::common::SendEnvelopeAck {
+        use flare_proto::common::ack::Payload as AckPayload;
+        use flare_proto::common::{Ack, AckType, SendAck};
+
+        let send_ack = SendAck {
+            client_msg_id: String::new(),
             server_msg_id: event.ack.server_msg_id.clone(),
-            status: match event.ack.status {
-                AckStatusValue::Success => flare_proto::common::AckStatus::Success as i32,
-                AckStatusValue::Failed => flare_proto::common::AckStatus::Failed as i32,
-            },
             seq: event.ack.seq.unwrap_or(0),
+            conversation_id: String::new(),
+            success: matches!(event.ack.status, AckStatusValue::Success),
             error_code: event.ack.error_code.unwrap_or(0),
             error_message: event.ack.error_message.clone().unwrap_or_default(),
+            server_time: None,
+            ack_id: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let ack = Ack {
+            r#type: AckType::Send as i32,
+            ack_id: None,
+            at: None,
+            payload: Some(AckPayload::Send(send_ack)),
         };
 
         let request = flare_proto::access_gateway::PushAckRequest {
-            target_user_ids: vec![event.user_id.clone()],
+            user_ids: vec![event.user_id.clone()],
             ack: Some(ack),
-            metadata: std::collections::HashMap::new(), // 可以根据需要填充
-            request_id: format!("ack-{}", uuid::Uuid::new_v4()), // 生成唯一的请求ID
+            options: None,
         };
 
         // 发送 gRPC 请求到 AccessGateway Service

@@ -5,7 +5,6 @@ members = [
     "flare-core-gateway",
     
     # 通信核心层 - 信令系统
-    "flare-signaling/common",
     "flare-signaling/gateway",
     "flare-signaling/online",
     "flare-signaling/route",
@@ -19,9 +18,9 @@ members = [
     "flare-storage/writer",
     "flare-storage/reader",
     "flare-conversation",
+    "flare-sync-orchestrator",
 
-    # 消息编排服务
-    "flare-message-orchestrator",
+    "flare-orchestrator",
     
     # Hook引擎
     "flare-hook-engine",
@@ -79,6 +78,7 @@ jsonwebtoken = { version = "10.2", default-features = false, features = ["rust_c
 bytes = "1"
 async-trait = "0.1"
 thiserror = "2.0"
+log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -154,8 +154,10 @@ toml = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 once_cell = { workspace = true }
-flare-proto = { workspace = true }
 tonic = { workspace = true }
+prost = { workspace = true }
+rdkafka = { workspace = true }
+flare-proto = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

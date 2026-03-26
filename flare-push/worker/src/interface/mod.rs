@@ -1,3 +1,1 @@
-pub mod consumers;
-
-pub use consumers::PushWorkerConsumer;
+pub mod messaging;

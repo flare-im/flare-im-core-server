@@ -1,13 +1,5 @@
-pub mod auth;
-pub mod connection_context;
-pub mod connection_query;
-pub mod conversation_client;
-pub mod error;
-pub mod messaging;
+//! 基础设施层：连接上下文、端口适配器（认证见 `application::handlers::AuthHandler`）
 
-pub use messaging::ack_publisher::{
-    AckAuditEvent, AckData, AckPublisher, AckStatusValue, GrpcAckPublisher, NoopAckPublisher,
-};
-pub use messaging::ack_sender::AckSender;
-pub use conversation_client::ConversationServiceClient;
-pub mod signaling;
+pub mod connection_context;
+pub mod error;
+pub mod ports;

@@ -19,7 +19,7 @@ pub struct GetMessageQuery {
 /// 搜索消息
 #[derive(Debug, Clone)]
 pub struct SearchMessagesQuery {
-    pub filters: Vec<flare_proto::common::FilterExpression>,
+    pub filters: Vec<crate::domain::model::FilterExpression>,
     pub start_time: i64, // 改为 i64，与 QueryMessagesQuery 保持一致
     pub end_time: i64,
     pub limit: i32,

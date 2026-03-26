@@ -9,24 +9,29 @@ use anyhow::{Context as AnyhowContext, Result};
 use uuid::Uuid;
 
 use crate::application::handlers::{
-    ConnectionQueryService, PushMessageService,
+    AuthHandler, ConnectionHandler, ConnectionQueryHandler, PushHandler, SendHandler,
 };
-use crate::application::handlers::{ConnectionHandler, MessageHandler};
 use crate::config::AccessGatewayConfig;
-use crate::domain::repository::{ConnectionQuery, SignalingGateway};
-use crate::domain::service::{GatewayService, PushDomainService, ConversationDomainService, MessageDomainService};
-use crate::infrastructure::auth::TokenAuthenticator;
-use crate::infrastructure::connection_query::ManagerConnectionQuery;
-use crate::infrastructure::signaling::grpc::GrpcSignalingGateway;
-use crate::infrastructure::{AckPublisher, GrpcAckPublisher};
-use crate::interface::handler::LongConnectionHandler;
+use crate::domain::model::ConnectionDomainServiceConfig;
+use crate::domain::ports::{ConnectionQuery, IConnectionPort};
+use crate::domain::service::{
+    ConnectionDomainService, ConnectionQualityService, PushDomainService, SendAckDomainService,
+    SendDataDomainService, SendEventDomainService, SendMessageDomainService, SyncService,
+};
+use crate::infrastructure::ports::{
+    ConnectionContextResolver, ConnectionRepository, ManagerConnectionQuery, PushRepository,
+    RouterAckReportPort, RouterDataCommandPort, RouterEventCommandPort, RouterMessageCommandPort,
+    SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
+};
+use tokio::sync::Mutex;
+use crate::interface::link::LongConnectionHandler;
 use crate::interface::grpc::handler::AccessGatewayHandler;
 use crate::service::service_manager::PortConfig;
 
 // 注意：最新的 Flare 模式不再需要在 FlareServerBuilder 中配置中间件
 // 中间件是客户端特性，服务端通过 ServerEventHandler 处理消息
 use flare_core::server::builder::flare::{FlareServer, FlareServerBuilder};
-use flare_core::server::connection::ConnectionManager;
+use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use flare_core::server::handle::{DefaultServerHandle, ServerHandle};
 use flare_im_core::metrics::AccessGatewayMetrics;
 use flare_server_core::Config;
@@ -67,7 +72,7 @@ pub async fn initialize(
     runtime_config: &Config,
     port_config: PortConfig,
 ) -> Result<ApplicationContext> {
-    use tracing::{debug, error, info};
+    use tracing::{debug, info};
 
     // 1. 加载配置
     let access_config = Arc::new(AccessGatewayConfig::from_app_config(app_config));
@@ -91,206 +96,63 @@ pub async fn initialize(
     // 4. 构建连接管理器
     let connection_manager = Arc::new(ConnectionManager::new());
 
-    // 5. 创建 Signaling 服务发现（使用常量，支持环境变量覆盖）
-    use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
-    let signaling_service = get_service_name(SIGNALING_ONLINE);
-    let signaling_discover = flare_im_core::discovery::create_discover(&signaling_service)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create signaling service discover for {}: {}",
-                signaling_service,
-                e
-            )
-        })?;
 
-    let signaling_service_client =
-        signaling_discover.map(flare_server_core::discovery::ServiceClient::new);
-
-    // 6. 构建 Signaling Gateway
-    let signaling_gateway: Arc<dyn SignalingGateway> =
-        if let Some(service_client) = signaling_service_client {
-            Arc::new(GrpcSignalingGateway::with_service_client(
-                signaling_service.clone(),
-                service_client,
-            ))
-        } else {
-            // 降级：使用服务名称（如果没有配置服务发现）
-            Arc::new(GrpcSignalingGateway::new(signaling_service.clone()))
-        };
-
-    // 7. 构建连接查询服务
-    let connection_query = build_connection_query(connection_manager.clone()).await;
-
-    // 8. 构建ACK发布器（使用 gRPC，通过 Push Proxy 路由，支持跨区域部署）
-    let ack_publisher: Option<Arc<dyn AckPublisher>> = if access_config.use_ack_report {
-        // 使用 Push Proxy 接收 ACK 上报（跨区域部署时，Push Proxy 在本地区域，延迟更低）
-        // ACK 通过 Push Proxy → Kafka → Push Server，保持架构一致性
-        use flare_im_core::service_names::{PUSH_PROXY, get_service_name};
-        let push_proxy_service_name = get_service_name(PUSH_PROXY);
-
-        // 创建服务发现工厂
-        let discovery_factory = Arc::new(flare_server_core::discovery::DiscoveryFactory {});
-        let publisher = GrpcAckPublisher::new(discovery_factory, push_proxy_service_name.clone());
-        info!(service = %push_proxy_service_name, "ACK Publisher initialized (gRPC via Push Proxy)");
-        Some(publisher)
-    } else {
-        debug!("ACK Publisher disabled by configuration");
-        None
-    };
-
-    // 9. 创建 Route 服务发现（用于消息路由，使用常量）
-    use flare_im_core::service_names::SIGNALING_ROUTE;
-    let route_service = get_service_name(SIGNALING_ROUTE);
-    let route_service_discover = flare_im_core::discovery::create_discover(&route_service)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create Route service discover for {}: {}",
-                route_service,
-                e
-            )
-        })?;
-
-    // 10. 构建消息路由服务（通过 Route 服务路由消息）
-    let message_router: Option<
-        Arc<crate::infrastructure::messaging::message_router::MessageRouter>,
-    > = {
-        let service_name = route_service.clone();
-        let default_tenant_id = access_config.default_tenant_id.clone(); // 使用配置中的默认租户ID
-        let default_svid = access_config.default_svid.clone();
-
-        let router = if let Some(discover) = route_service_discover {
-            let service_client = flare_server_core::discovery::ServiceClient::new(discover);
-            Arc::new(
-                crate::infrastructure::messaging::message_router::MessageRouter::with_service_client(
-                    service_client,
-                    default_tenant_id,
-                    default_svid,
-                )
-                .with_connection_manager(Arc::new(tokio::sync::Mutex::new(Some(connection_manager.clone() as Arc<dyn flare_core::server::connection::ConnectionManagerTrait>))))
-            )
-        } else {
-            // 降级：使用服务名称（如果没有配置服务发现）
-            Arc::new(
-                crate::infrastructure::messaging::message_router::MessageRouter::new(
-                    service_name.clone(),
-                    default_tenant_id,
-                    default_svid,
-                ),
-            )
-        };
-
-        // 同步初始化连接（使用超时避免阻塞）
-        info!(route_service = %service_name, "Initializing Message Router (via Route Service)");
-        match tokio::time::timeout(Duration::from_secs(10), router.initialize()).await {
-            Ok(Ok(_)) => {
-                info!(route_service = %service_name, "Message Router initialized successfully");
-            }
-            Ok(Err(e)) => {
-                error!(
-                    error = %e,
-                    route_service = %service_name,
-                    "Failed to initialize Message Router, will retry on first message"
-                );
-            }
-            Err(_) => {
-                error!(
-                    route_service = %service_name,
-                    "Message Router initialization timeout (10s), will retry on first message"
-                );
-            }
-        }
-
-        Some(router)
-    };
-
-    let message_router_arc = message_router
-        .ok_or_else(|| anyhow::anyhow!("Message Router not configured"))?;
-    
-    // 11. 构建连接处理器（提前构建，用于后续服务）
-    let connection_handler = Arc::new(LongConnectionHandler::new_with_placeholders(
-        signaling_gateway.clone(),
-        gateway_id.clone(),
+    // 6. 连接读模型（CQRS 查询侧，本地 ConnectionManager）
+    let connection_query: Arc<dyn ConnectionQuery> = Arc::new(ManagerConnectionQuery::new(
+        connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
         access_config.default_tenant_id.clone(),
-        ack_publisher.clone(),
-        Some(message_router_arc.clone()),
-        metrics.clone(),
     ));
 
-    // 12. 构建领域服务
-    let gateway_service_config = crate::domain::service::GatewayServiceConfig {
-        gateway_id: gateway_id.clone(),
-        online_service_endpoint: Some("http://127.0.0.1:50061".to_string()),
-    };
-
-    let gateway_service = Arc::new(
-        GatewayService::new(
-            signaling_gateway.clone(),
-            connection_query.clone(),
-            connection_handler.clone(),
-            gateway_service_config,
-        )
-        .await,
-    );
-
-    // 13. 构建会话领域服务
-    let session_domain_service = Arc::new(ConversationDomainService::new(
-        signaling_gateway.clone(),
-        Arc::new(
-            crate::domain::service::connection_quality_service::ConnectionQualityService::new(),
-        ),
-        gateway_id.clone(),
+    // 7. IConnectionPort：在线 RPC + 本地连接信息（供 ConnectionHandler / gRPC）
+    let connection_port: Arc<dyn IConnectionPort> = Arc::new(ConnectionRepository::new(
+        connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
+        access_config.default_tenant_id.clone(),
     ));
 
-    // 15. 构建领域服务
-    let message_domain_service = Arc::new(MessageDomainService::new());
+    // 8–9. 连接领域服务 + 应用层连接处理器（State 模式：默认 NoopConnectionStateNotifier）
+    let quality_service = Arc::new(ConnectionQualityService::new());
+    let session_domain_service = Arc::new(ConnectionDomainService::new(
+        connection_port.clone(),
+        quality_service,
+        ConnectionDomainServiceConfig {
+            gateway_id: gateway_id.clone(),
+        },
+    ));
 
-    // 16. 构建应用层处理器（只负责编排，业务逻辑在领域层）
     let connection_handler_app = Arc::new(ConnectionHandler::new(
         session_domain_service.clone(),
-        connection_query.clone(),
         metrics.clone(),
+        Arc::new(flare_im_core::abstractions::state::NoopConnectionStateNotifier),
+        connection_port.clone(),
     ));
 
-    let message_handler_app = Arc::new(MessageHandler::new(
-        message_domain_service,
-        message_router_arc.clone(),
-        ack_publisher.clone(),
-        gateway_id.clone(),
-    ));
+    // 10. 与 Flare `ServerHandle` 共享槽位：`setup_server_components` 注入后 `PushRepository` 即可下行
+    let push_handle_slot: Arc<Mutex<Option<Arc<dyn ServerHandle>>>> = Arc::new(Mutex::new(None));
+    let push_port: Arc<dyn crate::domain::ports::IPushPort> =
+        Arc::new(PushRepository::new(push_handle_slot.clone()));
 
-    // 16. 更新连接处理器中的应用处理器引用
-    let connection_handler = Arc::new(LongConnectionHandler::new(
-        signaling_gateway.clone(),
-        gateway_id.clone(),
-        access_config.default_tenant_id.clone(),
-        ack_publisher.clone(),
-        Some(message_router_arc.clone()),
-        metrics.clone(),
+    // 11. Signaling Router / Conversation Sync gRPC 池（上行 Route* 与 DATA 同步）
+    let route_grpc_pool = Arc::new(SignalingRouteGrpcPool::new());
+    let storage_sync_pool = Arc::new(StorageSyncGrpcPool::new());
+
+    // 12. 长连接处理器：ConnectionHandler + 上行 SendHandler（`IContextResolver` → `ConnectionContextResolver`）
+    let connection_handler = build_long_connection_handler(
         connection_handler_app.clone(),
-        message_handler_app.clone(),
-    ));
+        connection_port.clone(),
+        route_grpc_pool,
+        storage_sync_pool,
+    );
 
-    // 17. 构建推送领域服务
+    // 13. 推送领域服务：读 `ConnectionQuery` + 写 `IPushPort`（ServerHandle 就绪后生效）
     let push_domain_service = Arc::new(PushDomainService::new(
-        connection_handler.clone(),
+        push_port,
         connection_query.clone(),
     ));
 
-    // 18. 构建推送服务（应用层）
-    let push_service = Arc::new(PushMessageService::new(
-        push_domain_service.clone(),
-        ack_publisher.clone(),
-        gateway_id.clone(),
-        metrics.clone(),
-    ));
-    let connection_query_service = Arc::new(ConnectionQueryService::new(connection_query.clone()));
-
-    // 19. 构建认证器
+    // 14. 构建认证器
     let authenticator = build_authenticator(&access_config).await;
 
-    // 20. 构建长连接服务器
+    // 15. 构建长连接服务器
     debug!(ws_port = %port_config.ws_port, quic_port = %port_config.quic_port, "Building long connection server");
     let long_connection_server = build_long_connection_server(
         runtime_config,
@@ -300,25 +162,24 @@ pub async fn initialize(
         authenticator,
         connection_handler.clone(),
         access_config.clone(),
+        push_handle_slot,
     )
     .await
     .with_context(|| "Failed to build long connection server")?;
 
     info!("Long connection server built successfully");
 
-    // 21. 构建 gRPC 处理器
+    // 16. 构建 gRPC 处理器
     // 注意：SignalingService 由 flare-signaling/online 服务实现，Gateway 不再提供
     debug!("Building gRPC handlers");
 
     let access_gateway_grpc_handler = Arc::new(AccessGatewayHandler::new(
-        push_service.clone(),
-        connection_query_service.clone(),
-        gateway_service.subscription_service.clone(),
-        connection_handler.clone(),
+        Arc::new(PushHandler::new(push_domain_service.clone())),
+        Arc::new(ConnectionQueryHandler::new(connection_port.clone())),
     ));
     debug!("gRPC handlers built successfully");
 
-    // 22. gRPC 地址
+    // 17. gRPC 地址
     let grpc_addr = format!(
         "{}:{}",
         runtime_config.server.address, port_config.grpc_port
@@ -339,11 +200,42 @@ pub async fn initialize(
     })
 }
 
-/// 构建连接查询
-async fn build_connection_query(
-    connection_manager: Arc<ConnectionManager>,
-) -> Arc<dyn ConnectionQuery> {
-    Arc::new(ManagerConnectionQuery::new(connection_manager))
+/// 装配长连接上行：`SendHandler` + Router / Conversation Sync 适配端口
+fn build_long_connection_handler(
+    connection_handler_app: Arc<ConnectionHandler>,
+    connection_port: Arc<dyn IConnectionPort>,
+    route_pool: Arc<SignalingRouteGrpcPool>,
+    storage_sync_pool: Arc<StorageSyncGrpcPool>,
+) -> Arc<LongConnectionHandler> {
+    let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> =
+        Arc::new(RouterMessageCommandPort::new(route_pool.clone()));
+    let event_port: Arc<dyn crate::domain::ports::IEventCommandPort> =
+        Arc::new(RouterEventCommandPort::new(route_pool.clone()));
+    let storage_sync = Arc::new(StorageSyncPort::new(storage_sync_pool));
+    let sync_port: Arc<dyn crate::domain::ports::ISyncPort> = storage_sync;
+
+    let sync_service = Arc::new(SyncService::new(sync_port));
+    let send_event_service = Arc::new(SendEventDomainService::new(event_port));
+
+    let data_port: Arc<dyn crate::domain::ports::IDataCommandPort> =
+        Arc::new(RouterDataCommandPort::new(route_pool.clone()));
+    let ack_port: Arc<dyn crate::domain::ports::IAckReportPort> =
+        Arc::new(RouterAckReportPort::new(route_pool));
+    let context_resolver: Arc<dyn crate::domain::ports::IContextResolver> =
+        Arc::new(ConnectionContextResolver::new(connection_port));
+
+    let send_handler = Arc::new(SendHandler::new(
+        Arc::new(SendMessageDomainService::new(message_port)),
+        send_event_service,
+        Arc::new(SendDataDomainService::new(data_port, sync_service)),
+        Arc::new(SendAckDomainService::new(ack_port)),
+        context_resolver,
+    ));
+
+    Arc::new(LongConnectionHandler::new(
+        connection_handler_app,
+        send_handler,
+    ))
 }
 
 /// 构建认证器
@@ -372,7 +264,7 @@ async fn build_authenticator(
         }
     }
 
-    Arc::new(TokenAuthenticator::new(Arc::new(token_service)))
+    Arc::new(AuthHandler::new(Arc::new(token_service)))
 }
 
 /// 使用 Flare 模式构建服务器
@@ -381,6 +273,7 @@ async fn build_authenticator(
 /// - 只需实现 `ServerEventHandler` trait
 /// - 自动消息路由和 ACK 处理
 /// - 支持设备管理、认证、多协议等完整功能
+/// - 连接数、心跳、认证超时等由 access_config 提供，便于扩容与稳定性调优
 fn build_flare_server(
     ws_addr: String,
     quic_addr: Option<String>,
@@ -390,31 +283,27 @@ fn build_flare_server(
     authenticator: Arc<dyn flare_core::server::auth::Authenticator + Send + Sync>,
     compression_algorithm: flare_core::common::compression::CompressionAlgorithm,
     encryption_enabled: bool,
+    access_config: &AccessGatewayConfig,
 ) -> Result<FlareServer> {
     use flare_core::common::config_types::{HeartbeatConfig, TransportProtocol};
     use flare_core::common::protocol::SerializationFormat;
-    
-    // LongConnectionHandler 实现了 ServerEventHandler，Flare 模式会自动路由消息
-    let event_handler: Arc<dyn flare_core::server::events::handler::ServerEventHandler> = 
+
+    let event_handler: Arc<dyn flare_core::server::events::handler::ServerEventHandler> =
         connection_handler.clone();
-    
+
     let mut builder = FlareServerBuilder::new(ws_addr.clone(), event_handler)
-        // 连接和设备管理
         .with_connection_manager(connection_manager)
         .with_device_manager(device_manager)
-        // 认证配置
         .enable_auth()
         .with_authenticator(authenticator)
-        .with_auth_timeout(Duration::from_secs(30))
-        // 连接配置
-        .with_max_connections(10000)
-        .with_connection_timeout(Duration::from_secs(60))
+        .with_auth_timeout(Duration::from_secs(access_config.auth_timeout_secs))
+        .with_max_connections(access_config.max_connections)
+        .with_connection_timeout(Duration::from_secs(access_config.connection_timeout_secs))
         .with_heartbeat(HeartbeatConfig {
-            interval: Duration::from_secs(30),
-            timeout: Duration::from_secs(90),
+            interval: Duration::from_secs(access_config.heartbeat_interval_secs),
+            timeout: Duration::from_secs(access_config.heartbeat_timeout_secs),
             enabled: true,
         })
-        // 协商配置（使用配置的压缩算法）
         .with_default_format(SerializationFormat::Protobuf)
         .with_default_compression(compression_algorithm);
     
@@ -449,6 +338,7 @@ async fn build_long_connection_server(
     authenticator: Arc<dyn flare_core::server::auth::Authenticator + Send + Sync>,
     connection_handler: Arc<LongConnectionHandler>,
     access_config: Arc<AccessGatewayConfig>,
+    push_handle_slot: Arc<Mutex<Option<Arc<dyn ServerHandle>>>>,
 ) -> Result<Arc<tokio::sync::Mutex<Option<FlareServer>>>> {
     use tracing::{error, info, warn};
 
@@ -487,7 +377,6 @@ async fn build_long_connection_server(
         "Configuration parsed, building FlareServer"
     );
 
-    // 尝试构建服务器（优先使用 QUIC + WebSocket）
     let server = match build_flare_server(
         ws_addr.clone(),
         Some(quic_addr.clone()),
@@ -497,23 +386,25 @@ async fn build_long_connection_server(
         authenticator.clone(),
         compression_algorithm.clone(),
         encryption_config.enabled,
+        access_config.as_ref(),
     ) {
         Ok(server) => server,
         Err(e) => {
             let error_msg = e.to_string();
-            // QUIC 端口被占用，降级为仅 WebSocket
-            if error_msg.contains("Address already in use") 
-                || error_msg.contains("创建 QUIC 端点失败") {
+            if error_msg.contains("Address already in use")
+                || error_msg.contains("创建 QUIC 端点失败")
+            {
                 warn!(quic_addr = %quic_addr, "QUIC port unavailable, falling back to WebSocket-only mode");
                 build_flare_server(
                     ws_addr.clone(),
-                    None, // 仅 WebSocket
+                    None,
                     connection_handler.clone(),
                     connection_manager.clone(),
                     device_manager.clone(),
                     authenticator.clone(),
                     compression_algorithm,
                     encryption_config.enabled,
+                    access_config.as_ref(),
                 )?
             } else {
                 error!(error = %e, "Failed to build FlareServer");
@@ -522,8 +413,13 @@ async fn build_long_connection_server(
         }
     };
 
-    // 设置 server handle 和 connection manager（用于消息发送和连接管理）
-    setup_server_components(&connection_handler, &connection_manager).await;
+    // 设置 server handle、连接管理器，并注入 `PushRepository` 共用的 `ServerHandle` 槽位
+    setup_server_components(
+        &connection_handler,
+        &connection_manager,
+        Some(&push_handle_slot),
+    )
+    .await;
     
     // 启动服务器
     server.start().await.map_err(|e| {
@@ -602,13 +498,14 @@ async fn setup_encryption_config(
             warn!(error = %e, "Failed to create encryption, encryption disabled");
             EncryptionConfig { enabled: false }
         }
-        }
+    }
 }
 
 /// 设置服务器组件（ServerHandle 和 ConnectionManager）
 async fn setup_server_components(
     connection_handler: &Arc<LongConnectionHandler>,
     connection_manager: &Arc<ConnectionManager>,
+    push_handle_slot: Option<&Arc<Mutex<Option<Arc<dyn ServerHandle>>>>>,
 ) {
     use tracing::info;
 
@@ -617,8 +514,12 @@ async fn setup_server_components(
     let server_handle: Arc<dyn ServerHandle> =
         Arc::new(DefaultServerHandle::new(manager_trait.clone()));
 
+    if let Some(slot) = push_handle_slot {
+        *slot.lock().await = Some(server_handle.clone());
+    }
+
     connection_handler.set_server_handle(server_handle).await;
     connection_handler.set_connection_manager(manager_trait).await;
-    
-    info!("✅ Server handle and connection manager configured");
+
+    info!("✅ Server handle, connection manager, and push handle slot configured");
 }

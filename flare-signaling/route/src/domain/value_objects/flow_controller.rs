@@ -10,7 +10,6 @@ use redis::{AsyncCommands, aio::ConnectionManager};
 use crate::domain::service::RouteContext;
 
 /// 监控客户端trait，用于查询系统反压信号
-#[async_trait::async_trait]
 pub trait MonitoringClient: Send + Sync {
     /// 获取Kafka Lag值
     async fn get_kafka_lag(&self) -> anyhow::Result<u64>;
@@ -18,6 +17,22 @@ pub trait MonitoringClient: Send + Sync {
     /// 获取Storage写入延迟（P99）
     async fn get_storage_latency(&self) -> anyhow::Result<f64>;
 }
+
+/// Noop 监控客户端实现（用于不需要监控的场景）
+pub struct NoopMonitoringClient;
+
+impl MonitoringClient for NoopMonitoringClient {
+    async fn get_kafka_lag(&self) -> anyhow::Result<u64> {
+        Ok(0)
+    }
+
+    async fn get_storage_latency(&self) -> anyhow::Result<f64> {
+        Ok(0.0)
+    }
+}
+
+/// 默认的流控器类型（使用 NoopMonitoringClient）
+pub type DefaultFlowController = FlowController<NoopMonitoringClient>;
 
 /// 热点会话信息
 #[derive(Debug, Clone)]
@@ -34,8 +49,9 @@ struct HotSessionInfo {
 /// - 群聊fanout限制
 /// - 系统反压检测（Kafka Lag、Storage延迟）
 /// - 热点会话降级
-#[derive(Clone)]
-pub struct FlowController {
+///
+/// 使用泛型参数以支持 Rust 2024 原生 async fn in traits
+pub struct FlowController<MC> {
     /// 会话级QPS限制（默认50 QPS）
     session_qps_limit: u32,
     /// 热点会话阈值（超过此值触发降级）
@@ -45,12 +61,12 @@ pub struct FlowController {
     /// Redis客户端（用于QPS计数）
     redis_client: Option<Arc<redis::Client>>,
     /// 监控客户端（用于反压信号）
-    monitoring_client: Option<Arc<dyn MonitoringClient + Send + Sync>>,
+    monitoring_client: Option<Arc<MC>>,
     /// 热点会话缓存
     hot_sessions: Arc<RwLock<HashMap<String, HotSessionInfo>>>,
 }
 
-impl FlowController {
+impl<MC: MonitoringClient> FlowController<MC> {
     pub fn new() -> Self {
         Self {
             session_qps_limit: 50,
@@ -69,7 +85,7 @@ impl FlowController {
 
     pub fn with_monitoring_client(
         mut self,
-        monitoring_client: Arc<dyn MonitoringClient + Send + Sync>,
+        monitoring_client: Arc<MC>,
     ) -> Self {
         self.monitoring_client = Some(monitoring_client);
         self.backpressure_enabled = true;
@@ -158,7 +174,8 @@ impl FlowController {
     /// 4. 热点会话降级
     pub async fn check(&self, ctx: &RouteContext) -> Result<()> {
         // 1. 检查会话QPS（Redis INCR + EXPIRE）
-        let session_qps = if let Some(conversation_id) = &ctx.conversation_id {
+        let conversation_id_str = ctx.conversation_id.as_ref().map(|c| c.as_str());
+        let session_qps = if let Some(conversation_id) = conversation_id_str {
             let qps = self.get_session_qps(conversation_id).await?;
             // 检查是否为热点会话
             if self.is_hot_session(conversation_id, qps) {
@@ -174,7 +191,7 @@ impl FlowController {
             0
         };
 
-        if let Some(_conversation_id) = &ctx.conversation_id {
+        if ctx.conversation_id.is_some() {
             if session_qps > self.session_qps_limit {
                 return Err(anyhow::anyhow!(
                     "Session QPS limit exceeded: {} > {}",

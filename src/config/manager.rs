@@ -35,11 +35,10 @@ impl ConfigManager {
         config: &FlareAppConfig,
         profile_name: &str,
     ) -> Option<ObjectStoreConfig> {
-        // 首先检查环境变量中是否指定了对象存储配置
-        if let Ok(env_profile) = env::var("FLARE_OBJECT_STORE_PROFILE") {
-            if let Some(store_config) = config.object_store_profile(&env_profile) {
-                return Some(store_config.clone());
-            }
+        if let Ok(env_profile) = env::var("FLARE_OBJECT_STORE_PROFILE")
+            && let Some(store_config) = config.object_store_profile(&env_profile)
+        {
+            return Some(store_config.clone());
         }
 
         // 如果环境变量未设置或无效，则使用配置文件中指定的配置
@@ -102,8 +101,10 @@ impl ConfigManager {
                 for (key, value) in tables {
                     // 只有当配置包含 profile_type 时才处理
                     if let Some(profile_type) = value.get("profile_type").and_then(|v| v.as_str()) {
-                        let mut config = ObjectStoreConfig::default();
-                        config.profile_type = profile_type.to_string();
+                        let mut config = ObjectStoreConfig {
+                            profile_type: profile_type.to_string(),
+                            ..Default::default()
+                        };
 
                         // 逐个字段处理配置值
                         if let Some(endpoint) = value.get("endpoint").and_then(|v| v.as_str()) {

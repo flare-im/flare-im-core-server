@@ -1,6 +1,7 @@
 //! 服务模块 - 包含服务启动、注册和管理相关功能
 
 use anyhow::Result;
+use flare_im_core::service_names::STORAGE_WRITER;
 use tracing::info;
 
 use flare_server_core::runtime::ServiceRuntime;
@@ -18,7 +19,7 @@ impl ApplicationBootstrap {
         use flare_im_core::load_config;
 
         // 加载应用配置
-        let app_config = load_config(Some("./config"));
+        let app_config = load_config(Some("config"));
 
         // 使用 Wire 风格的依赖注入构建应用上下文
         let context = self::wire::initialize(app_config).await?;
@@ -32,35 +33,33 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     ///
     /// 使用 ServiceRuntime 管理消费者生命周期，支持优雅停机
-    /// 支持添加多个消费者任务
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        info!("Starting Storage Writer (Kafka consumer)");
+        use flare_server_core::kafka::KafkaMessageFetcher;
+        use flare_server_core::mq::consumer::ConsumerRuntimeTask;
 
-        // 使用 ServiceRuntime 管理两个独立的消费者
-        let normal_consumer = context.normal_consumer;
-        let operation_consumer = context.operation_consumer;
-        
-        let runtime = ServiceRuntime::new_consumer_only("storage-writer")
-            .add_consumer(
-                "normal-message-consumer",
-                async move {
-                    normal_consumer
-                        .consume_messages()
-                        .await
-                        .map_err(|e| format!("Normal message consumer error: {}", e).into())
-                },
-            )
-            .add_consumer(
-                "operation-message-consumer",
-                async move {
-                    operation_consumer
-                        .consume_messages()
-                        .await
-                        .map_err(|e| format!("Operation message consumer error: {}", e).into())
-                },
-            );
+        info!("Starting Storage Writer (Kafka consumer via ServiceRuntime)");
 
-        // 运行服务（不带服务注册，因为这是消费者服务）
-        runtime.run().await
+        let topics = context.dispatcher.topics();
+        if topics.is_empty() {
+            anyhow::bail!("storage-writer: no Kafka topics registered on dispatcher");
+        }
+
+        let fetcher = KafkaMessageFetcher::new_with_consumer_group(
+            context.config.as_ref(),
+            topics,
+            context.consumer_config.kafka_consumer_group_override.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("create kafka fetcher: {}", e))?;
+
+        let task = ConsumerRuntimeTask::from_parts(
+            context.consumer_config,
+            context.dispatcher.clone(),
+            fetcher,
+        );
+
+        ServiceRuntime::new_consumer_only(STORAGE_WRITER)
+            .add_mq_consumer_runtime("storage-kafka-consumer", task)
+            .run()
+            .await
     }
 }

@@ -14,7 +14,6 @@ path = "cmd/main.rs"
 flare-server-core = { workspace = true }
 flare-proto = { workspace = true }
 flare-im-core = { path = "../.." }
-flare-signaling-common = { path = "../common" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -33,3 +32,4 @@ chrono = { workspace = true }
 prometheus = { workspace = true }
 redis = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = "6"

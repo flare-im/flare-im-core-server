@@ -531,3 +531,14 @@ cargo run --example business_push_client
 **最后更新**：2025-11-17  
 **维护者**：Flare IM Core Team
 
+## 测试脚本
+```
+# 默认（非调试）
+./scripts/start_server.sh single
+
+# 调试模式，所有服务打 trace 日志（含 SQL）
+./scripts/start_server.sh single debug
+
+# 自定义 RUST_LOG 再开调试（例如只看 sqlx）
+RUST_LOG=info,sqlx=trace ./scripts/start_server.sh single debug
+```

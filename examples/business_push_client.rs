@@ -147,62 +147,32 @@ async fn main() -> Result<()> {
     // 注意：business_push_client 和 chatroom_client 都使用相同的 conversation_id
     let conversation_id = "chatroom".to_string();
 
+    extra.insert("business_type".to_string(), "chatroom".to_string());
+    extra.insert("source".to_string(), "system".to_string());
+    extra.insert("conversation_type".to_string(), "group".to_string());
+    extra.insert("tenant_id".to_string(), tenant_id.clone());
+
     let message = Message {
         server_id: format!("msg-{}", Uuid::new_v4()),
         conversation_id: conversation_id.clone(),
-        client_msg_id: String::new(), // 客户端消息ID（可选）
+        client_msg_id: String::new(),
         sender_id: business_user_id.clone(),
-        receiver_id: String::new(),           // 群聊场景：receiver_id 为空
-        channel_id: conversation_id.clone(),       // 群聊场景：使用 channel_id（等同于 conversation_id）
-        source: MessageSource::System as i32, // 业务系统消息
+        receiver_id: String::new(),
         seq: 0,
         timestamp: Some(prost_types::Timestamp {
             seconds: now.timestamp(),
             nanos: 0,
         }),
-        quote: None,
-        conversation_type: flare_proto::common::ConversationType::Group as i32, // 群聊类型
-        message_type: MessageType::Text as i32,                       // 文本消息
-        business_type: "chatroom".to_string(),
-        content: Some(MessageContent {
-            content: Some(flare_proto::common::message_content::Content::Text(
-                TextContent {
-                    text: message_content.clone(),
-                    mentions: vec![], // @提及列表
-                },
-            )),
-            extensions: vec![],
-        }),
-        content_type: ContentType::PlainText as i32, // 纯文本消息
-        attachments: vec![],
+        message_type: MessageType::Text as i32,
+        content: vec![],
+        content_type: ContentType::PlainText as i32,
         extra,
-        attributes: Default::default(),
-        status: MessageStatus::Created as i32, // 消息状态
-        is_recalled: false,
-        recalled_at: None,
-        recall_reason: String::new(),
-        is_burn_after_read: false,
-        burn_after_seconds: 0,
-        timeline: Some(flare_proto::common::MessageTimeline {
-            created_at: Some(prost_types::Timestamp {
-                seconds: now.timestamp(),
-                nanos: 0,
-            }),
-            persisted_at: None,
-            delivered_at: None,
-            read_at: None,
-        }),
-        visibility: Default::default(),
-        read_by: vec![],
-        reactions: vec![],
-        edit_history: vec![],
-        current_edit_version: 0,
-        last_edited_at: None,
-        tenant: tenant_id.clone(),
-        audit: None,
-        tags: vec![],
-        offline_push_info: None,
-        extensions: vec![],
+        quote: None,
+        tags: std::collections::HashMap::new(),
+        offline_push: None,
+        priority: 0,
+        thread_root_id: None,
+        ..Default::default()
     };
 
     // 构建 PushMessageRequest（直接使用 StorageMessage）

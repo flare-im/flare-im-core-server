@@ -5,7 +5,6 @@
 use anyhow::Result;
 use flare_proto::hooks::hook_service_client::HookServiceClient;
 use flare_proto::hooks::*;
-use std::sync::Arc;
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 

@@ -6,22 +6,28 @@ use tracing::{debug, info};
 
 use crate::application::commands::{
     BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
-    ManageParticipantsCommand, UpdateCursorCommand, UpdatePresenceCommand, UpdateConversationCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateCursorCommand, UpdatePresenceCommand,
+    UpdateConversationCommand,
 };
 use crate::application::queries::{
-    ListConversationsQuery, SearchConversationsQuery, ConversationBootstrapQuery, SyncMessagesQuery,
+    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery, SearchConversationsQuery,
+    SyncMessagesQuery,
 };
-use crate::domain::service::conversation_domain_service::{
-    ConversationBootstrapOutput, ConversationDomainService,
-};
+use crate::domain::service::conversation_domain_service::ConversationBootstrapOutput;
+use crate::domain::service::DefaultConversationDomainService;
+use crate::infrastructure::persistence::PostgresConversationRepository;
+use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
 
 /// 会话命令处理器
+///
+/// 使用 DefaultConversationDomainService 类型别名
+/// 该类型使用具体的 Redis 实现，提供零开销的静态分发
 pub struct ConversationCommandHandler {
-    domain_service: Arc<ConversationDomainService>,
+    domain_service: Arc<DefaultConversationDomainService>,
 }
 
 impl ConversationCommandHandler {
-    pub fn new(domain_service: Arc<ConversationDomainService>) -> Self {
+    pub fn new(domain_service: Arc<DefaultConversationDomainService>) -> Self {
         Self { domain_service }
     }
 
@@ -174,6 +180,28 @@ impl ConversationCommandHandler {
         Ok(())
     }
 
+    /// 标记会话已读（编排 → 领域 `mark_as_read`）
+    pub async fn handle_mark_conversation_as_read(
+        &self,
+        ctx: &Context,
+        command: MarkConversationAsReadCommand,
+    ) -> Result<()> {
+        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
+
+        debug!(
+            user_id = %user_id,
+            conversation_id = %command.conversation_id,
+            read_seq = command.read_seq,
+            "Handling mark conversation as read"
+        );
+
+        self.domain_service
+            .mark_as_read(ctx, &command.conversation_id, command.read_seq)
+            .await?;
+
+        Ok(())
+    }
+
     /// 处理更新设备状态命令
     pub async fn handle_update_presence(
         &self,
@@ -235,16 +263,14 @@ impl ConversationCommandHandler {
 
 /// 会话查询处理器
 pub struct ConversationQueryHandler {
-    domain_service: Arc<ConversationDomainService>,
+    domain_service: Arc<DefaultConversationDomainService>,
 }
 
 impl ConversationQueryHandler {
     pub fn new(
-        _conversation_repo: Arc<dyn crate::domain::repository::ConversationRepository>,
-        _message_provider: Option<
-            Arc<dyn crate::domain::repository::MessageProvider + Send + Sync>,
-        >,
-        domain_service: Arc<ConversationDomainService>,
+        _conversation_repo: Arc<PostgresConversationRepository>,
+        _message_provider: Option<Arc<StorageReaderMessageProvider>>,
+        domain_service: Arc<DefaultConversationDomainService>,
     ) -> Self {
         Self { domain_service }
     }
@@ -274,6 +300,33 @@ impl ConversationQueryHandler {
             .await?;
 
         Ok(result)
+    }
+
+    /// 单会话详情：必须已认证，且当前用户须为参与者（非成员与不存在统一返回 NOT_FOUND 语义错误码由 gRPC 层映射）。
+    pub async fn handle_get_conversation_detail(
+        &self,
+        ctx: &Context,
+        query: GetConversationDetailQuery,
+    ) -> Result<crate::domain::model::Conversation> {
+        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
+        if query.conversation_id.trim().is_empty() {
+            anyhow::bail!("GET_CONV_DETAIL_BAD_REQUEST");
+        }
+
+        let Some(conv) = self
+            .domain_service
+            .get_conversation(ctx, query.conversation_id.trim())
+            .await?
+        else {
+            anyhow::bail!("GET_CONV_DETAIL_NOT_FOUND");
+        };
+
+        let member = conv.participants.iter().any(|p| p.user_id == user_id);
+        if !member {
+            anyhow::bail!("GET_CONV_DETAIL_NOT_FOUND");
+        }
+
+        Ok(conv)
     }
 
     /// 处理搜索会话查询

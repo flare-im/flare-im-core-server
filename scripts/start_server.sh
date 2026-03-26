@@ -1,10 +1,11 @@
 #!/bin/bash
 # 启动 Flare IM Core 所有服务模块
-# 
+#
 # 使用方法:
-#   ./scripts/start_server.sh [single|multi]
+#   ./scripts/start_server.sh [single|multi] [debug]
 #   - single: 启动单网关模式（默认，仅启动一个 access-gateway 实例）
 #   - multi:  启动多网关模式（启动多个 access-gateway 实例）
+#   - debug:  第二参数，开启调试模式（RUST_LOG=trace，各服务日志与 sqlx SQL 等全部输出到对应 log 文件）
 
 set -e
 
@@ -30,13 +31,24 @@ echo ""
 
 # 解析参数
 GATEWAY_MODE="${1:-single}"  # 默认单网关模式
+DEBUG_MODE=""                 # 第二参数为 debug 时开启调试日志
+
+# 默认使用 trace 级别日志（可被外部环境变量覆盖）
+export RUST_LOG="${RUST_LOG:-trace}"
 
 if [ "$GATEWAY_MODE" != "single" ] && [ "$GATEWAY_MODE" != "multi" ]; then
     echo -e "${RED}错误: 无效的参数 '$GATEWAY_MODE'${NC}"
-    echo "使用方法: $0 [single|multi]"
+    echo "使用方法: $0 [single|multi] [debug]"
     echo "  - single: 启动单网关模式（默认）"
     echo "  - multi:  启动多网关模式"
+    echo "  - debug:  第二参数，开启调试模式（RUST_LOG=trace，含 sqlx SQL 等全部日志）"
     exit 1
+fi
+
+if [ "${2:-}" = "debug" ]; then
+    DEBUG_MODE=1
+    echo -e "${GREEN}🔧 调试模式已开启: RUST_LOG=$RUST_LOG${NC}"
+    echo ""
 fi
 
 # 创建日志目录
@@ -47,6 +59,7 @@ echo -e "${BLUE}  Flare IM Core 完整服务启动脚本${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}📁 日志目录: $LOGS_DIR${NC}"
 echo -e "${YELLOW}🚪 网关模式: $GATEWAY_MODE${NC}"
+[ -n "$DEBUG_MODE" ] && echo -e "${GREEN}🔧 调试模式: RUST_LOG=$RUST_LOG${NC}"
 echo ""
 
 # 检查基础设施服务
@@ -74,6 +87,26 @@ echo -e "${YELLOW}💡 提示: 如需启动基础设施服务，请运行:${NC}"
 echo "   ${BLUE}cd deploy && docker-compose up -d${NC}"
 echo ""
 
+# 预创建 Kafka Topic（避免 UnknownTopicOrPartition，确保消息能落库）
+# 与 abstractions/topics 与 config 中 topic 名一致；仅当 Kafka 在 Docker 中运行时执行
+echo -e "${YELLOW}📬 确保 Kafka 事件总线 Topic 存在...${NC}"
+if docker ps -q -f name=flare-kafka 2>/dev/null | grep -q .; then
+    create_kafka_topic() {
+        local topic=$1
+        if docker exec flare-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$topic" --partitions 4 --replication-factor 1 2>/dev/null; then
+            echo -e "${GREEN}   ✓ Topic $topic 已就绪${NC}"
+        else
+            echo -e "${YELLOW}   ⚠ 创建 topic $topic 失败（可忽略若已存在）${NC}"
+        fi
+    }
+    create_kafka_topic "flare.im.message.created"
+    create_kafka_topic "flare.im.message.events"
+    create_kafka_topic "flare.im.push.tasks"
+else
+    echo -e "${YELLOW}   ⚠ Kafka 未在 Docker 中运行，请确保已创建 topic: flare.im.message.created, flare.im.message.events, flare.im.push.tasks${NC}"
+fi
+echo ""
+
 # 检查并停止旧进程
 echo -e "${YELLOW}🔍 检查并停止旧进程...${NC}"
 
@@ -87,7 +120,7 @@ CORE_SERVICES=(
     "message-orchestrator"
     "storage-writer"
     "storage-reader"
-    "push-proxy"
+    "sync-orchestrator"
     "push-server"
     "push-worker"
     "media"
@@ -208,10 +241,11 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 # 3. 会话服务：conversation（会话管理服务）
 # 4. 消息编排：message-orchestrator（消息编排服务）
 # 5. 存储服务：storage-writer（消息持久化）、storage-reader（消息查询）
-# 6. 推送服务：push-proxy（推送代理）、push-server（推送服务）、push-worker（推送工作器）
-# 7. 媒资服务：media（媒资服务）
-# 8. 核心网关：core-gateway（业务系统统一入口）
-# 9. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
+# 6. 同步编排：sync-orchestrator（统一 SyncService 入口）
+# 7. 推送服务：push-server（推送服务）、push-worker（推送工作器）
+# 8. 媒资服务：media（媒资服务）
+# 9. 核心网关：core-gateway（业务系统统一入口）
+# 10. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
 
 # 启动服务（后台运行）
 for service in "${CORE_SERVICES[@]}"; do
@@ -260,8 +294,8 @@ for service in "${CORE_SERVICES[@]}"; do
             ENV_VARS=""
             ;;
         "message-orchestrator")
-            PACKAGE="flare-message-orchestrator"
-            BIN_NAME="flare-message-orchestrator"
+            PACKAGE="flare-orchestrator"
+            BIN_NAME="flare-orchestrator"
             ENV_VARS=""
             ;;
         "storage-writer")
@@ -274,9 +308,11 @@ for service in "${CORE_SERVICES[@]}"; do
             BIN_NAME="flare-storage-reader"
             ENV_VARS=""
             ;;
-        "push-proxy")
-            PACKAGE="flare-push-proxy"
-            BIN_NAME="flare-push-proxy"
+        "sync-orchestrator")
+            PACKAGE="flare-sync-orchestrator"
+            BIN_NAME="flare-sync-orchestrator"
+            export SYNC_ORCHESTRATOR_HOST="${SYNC_ORCHESTRATOR_HOST:-0.0.0.0}"
+            export SYNC_ORCHESTRATOR_PORT="${SYNC_ORCHESTRATOR_PORT:-60084}"
             ENV_VARS=""
             ;;
         "push-server")
@@ -309,6 +345,7 @@ for service in "${CORE_SERVICES[@]}"; do
     pid_file="$LOGS_DIR/flare-$service.pid"
     
     # 启动服务（使用编译好的二进制，避免并发编译问题）
+    # 调试模式下已 export RUST_LOG，子进程会继承，输出完整日志
     "$PROJECT_ROOT/target/debug/$BIN_NAME" > "$LOGS_DIR/flare-$service.log" 2>&1 &
     
     # 清理环境变量
@@ -316,6 +353,8 @@ for service in "${CORE_SERVICES[@]}"; do
         unset SIGNALING_ONLINE_SERVICE_HOST SIGNALING_ONLINE_SERVICE_PORT ONLINE_SERVICE_ENDPOINT
     elif [ "$service" = "signaling-route" ]; then
         unset SIGNALING_ROUTE_SERVICE_HOST SIGNALING_ROUTE_SERVICE_PORT ROUTE_SERVICE_ENDPOINT
+    elif [ "$service" = "sync-orchestrator" ]; then
+        unset SYNC_ORCHESTRATOR_HOST SYNC_ORCHESTRATOR_PORT
     fi
     service_pid=$!
     echo $service_pid > "$pid_file"

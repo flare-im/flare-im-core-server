@@ -1,46 +1,59 @@
-//! 消息路由处理器
+//! 消息路由处理器（CQRS 写侧 - 命令）
 //!
-//! 负责消息路由的业务流程编排
+//! 负责「发送消息」的路由编排：流控 → 转发至 Orchestrator SendMessage。
+//! 与 `EventRoutingHandler` / `AckRoutingHandler` / `DataRoutingHandler` 分离。
 
 use std::sync::Arc;
 use std::time::Instant;
+
+use flare_proto::common::Message;
 use flare_proto::signaling::router::RouteOptions;
 use flare_server_core::context::{Context, ContextExt};
 use flare_server_core::error::ErrorCode;
 use tracing::instrument;
 
+use crate::application::dto::{build_route_metadata, MessageRouteResult};
+use crate::domain::service::RouteContext;
+use crate::domain::value_objects::DefaultFlowController;
 use crate::infrastructure::forwarder::MessageForwarder;
-use crate::application::dto::{MessageRouteResult, build_route_metadata};
 
-/// 消息路由处理器
-///
-/// 职责：
-/// - 编排消息路由流程
-/// - 调用领域服务进行路由决策
-/// - 调用基础设施层进行消息转发
+fn build_route_ctx_for_flow(ctx: &Context, svid: &str, message: &Message) -> Option<RouteContext> {
+    let conversation_id = if message.conversation_id.is_empty() {
+        None
+    } else {
+        Some(message.conversation_id.clone())
+    };
+    Some(RouteContext {
+        svid: svid.to_string(),
+        conversation_id,
+        user_id: if message.sender_id.is_empty() {
+            None
+        } else {
+            Some(message.sender_id.clone())
+        },
+        tenant_id: ctx.tenant_id().map(|s| s.to_string()),
+        client_geo: None,
+        login_gateway: None,
+    })
+}
+
 pub struct MessageRoutingHandler {
     message_forwarder: Arc<MessageForwarder>,
+    flow_controller: Option<Arc<DefaultFlowController>>,
 }
 
 impl MessageRoutingHandler {
     pub fn new(
         message_forwarder: Arc<MessageForwarder>,
+        flow_controller: Option<Arc<DefaultFlowController>>,
     ) -> Self {
         Self {
             message_forwarder,
+            flow_controller,
         }
     }
 
-    /// 路由消息到业务系统
-    ///
-    /// # 流程
-    /// 1. 提取路由选项和追踪上下文
-    /// 2. 调用消息转发服务转发消息
-    /// 3. 构建路由元数据
-    ///
-    /// # 返回
-    /// 消息路由结果（包含响应数据、端点地址和路由元数据）
-    #[instrument(skip(self, ctx), fields(
+    #[instrument(skip(self, ctx, message), fields(
         request_id = %ctx.request_id(),
         trace_id = %ctx.trace_id(),
         svid = %svid,
@@ -49,7 +62,7 @@ impl MessageRoutingHandler {
         &self,
         ctx: &Context,
         svid: &str,
-        payload: Vec<u8>,
+        message: Message,
         route_options: RouteOptions,
     ) -> MessageRouteResult {
         ctx.ensure_not_cancelled().map_err(|e| {
@@ -59,44 +72,52 @@ impl MessageRoutingHandler {
             )
             .details(e.to_string())
             .build_error()
-        }).ok(); // 忽略取消错误，继续处理
+        }).ok();
         let start_time = Instant::now();
         let decision_start = Instant::now();
-        
-        // 提取追踪上下文
-        let trace_context: Option<flare_proto::common::TraceContext> = if route_options.enable_tracing {
-            ctx.request()
-                .and_then(|req| req.trace.clone().map(|tc| tc.into()))
-                .or_else(|| {
-                    if !ctx.trace_id().is_empty() {
-                        Some(flare_proto::common::TraceContext {
-                            trace_id: ctx.trace_id().to_string(),
-                            span_id: String::new(),
-                            parent_span_id: String::new(),
-                            sampled: "yes".to_string(),
-                            tags: std::collections::HashMap::new(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-        } else {
-            None
-        };
-        
-        // 记录路由决策耗时
         let decision_duration = decision_start.elapsed();
-        
-        // 调用消息转发服务转发消息
+
+        if let Some(ref fc) = self.flow_controller {
+            if let Some(route_ctx) = build_route_ctx_for_flow(ctx, svid, &message) {
+                if let Err(e) = fc.check(&route_ctx).await {
+                    let total_duration = start_time.elapsed();
+                    tracing::warn!(
+                        error = %e,
+                        svid = %svid,
+                        conversation_id = ?route_ctx.conversation_id,
+                        "Flow control rejected"
+                    );
+                    return MessageRouteResult {
+                        response_data: vec![],
+                        routed_endpoint: String::new(),
+                        metadata: build_route_metadata(
+                            total_duration.as_millis() as i64,
+                            0,
+                            decision_duration.as_millis() as i64,
+                            svid,
+                            route_options.load_balance_strategy,
+                        ),
+                        error_code: Some(ErrorCode::ResourceExhausted as u32),
+                        error_message: Some(e.to_string()),
+                    };
+                }
+            }
+        }
+
         let business_start = Instant::now();
-        match self.message_forwarder
-            .forward_message(ctx, svid, payload, None)
+        match self
+            .message_forwarder
+            .forward_message(
+                ctx,
+                svid,
+                message,
+                Arc::new(crate::domain::repository::NoopRouteRepository),
+            )
             .await
         {
             Ok((endpoint, response_data)) => {
                 let business_duration = business_start.elapsed();
                 let total_duration = start_time.elapsed();
-                
                 tracing::info!(
                     svid = %svid,
                     routed_endpoint = %endpoint,
@@ -106,7 +127,6 @@ impl MessageRoutingHandler {
                     total_duration_ms = total_duration.as_millis(),
                     "Message routed successfully"
                 );
-                
                 MessageRouteResult {
                     response_data,
                     routed_endpoint: endpoint,
@@ -116,7 +136,6 @@ impl MessageRoutingHandler {
                         decision_duration.as_millis() as i64,
                         svid,
                         route_options.load_balance_strategy,
-                        trace_context,
                     ),
                     error_code: None,
                     error_message: None,
@@ -124,7 +143,6 @@ impl MessageRoutingHandler {
             }
             Err(e) => {
                 let total_duration = start_time.elapsed();
-                
                 tracing::error!(
                     error = %e,
                     svid = %svid,
@@ -132,7 +150,6 @@ impl MessageRoutingHandler {
                     total_duration_ms = total_duration.as_millis(),
                     "Failed to forward message to business system"
                 );
-                
                 MessageRouteResult {
                     response_data: vec![],
                     routed_endpoint: String::new(),
@@ -142,7 +159,6 @@ impl MessageRoutingHandler {
                         decision_duration.as_millis() as i64,
                         svid,
                         route_options.load_balance_strategy,
-                        trace_context,
                     ),
                     error_code: Some(ErrorCode::InternalError as u32),
                     error_message: Some(format!("Failed to forward message: {}", e)),
@@ -151,4 +167,3 @@ impl MessageRoutingHandler {
         }
     }
 }
-

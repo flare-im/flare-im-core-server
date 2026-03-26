@@ -1,11 +1,6 @@
-//! 领域层（业务核心逻辑）
+//! 领域层：网关推送目标与路由合并（无 I/O）。
 
 pub mod model;
-pub mod repository;
-pub mod service;
+pub mod push_routing;
 
-pub use model::{DispatchNotification, PushDispatchTask, RequestMetadata};
-pub use repository::{
-    AckPublisher, DlqPublisher, OfflinePushSender, OnlinePushSender, PushAckEvent,
-};
-pub use service::PushDomainService;
+pub use model::GatewayPushTarget;

@@ -9,16 +9,11 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::error::{ErrorBuilder, ErrorCode, Result, from_rpc_status};
 use flare_proto::common::Message as ProtoStorageMessage;
-use flare_proto::common::{
-    ActorContext as ProtoActorContext, ActorType as ProtoActorType,
-    DeviceContext as ProtoDeviceContext, TraceContext as ProtoTraceContext,
-};
 use flare_proto::{
     HookExtensionClient, ProtoDeliveryHookRequest, ProtoDeliveryHookResponse,
     ProtoHookDeliveryEvent, ProtoHookInvocationContext, ProtoHookMessageDraft,
     ProtoHookMessageRecord, ProtoPostSendHookRequest, ProtoPreSendHookRequest,
-    ProtoRecallHookRequest, ProtoRecallHookResponse, RequestContext as ProtoRequestContext,
-    TenantContext as ProtoTenantContext,
+    ProtoRecallHookRequest, ProtoRecallHookResponse,
 };
 
 use super::super::config::HookDefinition;
@@ -26,7 +21,7 @@ use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord,
     PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::Ctx;
 
 #[derive(Clone)]
 pub struct GrpcHookFactory;
@@ -109,9 +104,10 @@ struct GrpcPreSendHook {
     static_metadata: HashMap<String, String>,
 }
 
+
 #[async_trait]
 impl PreSendHook for GrpcPreSendHook {
-    async fn handle(&self, ctx: &Context, draft: &mut MessageDraft) -> PreSendDecision {
+    async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
         let mut client = HookExtensionClient::new(self.channel.clone());
         let mut request = ProtoPreSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
@@ -147,11 +143,12 @@ struct GrpcPostSendHook {
     static_metadata: HashMap<String, String>,
 }
 
+
 #[async_trait]
 impl PostSendHook for GrpcPostSendHook {
     async fn handle(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> HookOutcome {
@@ -187,9 +184,10 @@ struct GrpcDeliveryHook {
     static_metadata: HashMap<String, String>,
 }
 
+
 #[async_trait]
 impl DeliveryHook for GrpcDeliveryHook {
-    async fn handle(&self, ctx: &Context, event: &DeliveryEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome {
         let mut client = HookExtensionClient::new(self.channel.clone());
         let mut request = ProtoDeliveryHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
@@ -221,9 +219,10 @@ struct GrpcRecallHook {
     static_metadata: HashMap<String, String>,
 }
 
+
 #[async_trait]
 impl RecallHook for GrpcRecallHook {
-    async fn handle(&self, ctx: &Context, event: &RecallEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
         let mut client = HookExtensionClient::new(self.channel.clone());
         let mut request = ProtoRecallHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
@@ -250,7 +249,7 @@ impl RecallHook for GrpcRecallHook {
 }
 
 fn build_context(
-    ctx: &Context,
+    ctx: &Ctx,
     static_metadata: &HashMap<String, String>,
 ) -> ProtoHookInvocationContext {
     // 从 Context 中提取 Hook 特定的数据
@@ -284,255 +283,6 @@ fn build_context(
         corridor,
         tags: hook_data.tags.clone(),
         attributes,
-    }
-}
-
-// This function is currently unused but kept for potential future use
-#[allow(dead_code)]
-fn build_request_context(ctx: &Context, hook_data: &crate::hooks::hook_context_data::HookContextData) -> Option<ProtoRequestContext> {
-    let mut has_context = false;
-
-    let request_id = hook_data
-        .request_metadata
-        .get("request_id")
-        .cloned()
-        .or_else(|| {
-            let trace_id = ctx.trace_id();
-            if trace_id.is_empty() {
-                None
-            } else {
-                Some(trace_id.to_string())
-            }
-        });
-
-    let trace = {
-        let trace_id = ctx.trace_id();
-        if trace_id.is_empty() {
-            None
-        } else {
-            Some(trace_id.to_string())
-        }
-    }.map(|trace_id| {
-        has_context = true;
-        ProtoTraceContext {
-            trace_id: trace_id.clone(),
-            span_id: hook_data
-                .request_metadata
-                .get("span_id")
-                .cloned()
-                .unwrap_or_default(),
-            parent_span_id: hook_data
-                .request_metadata
-                .get("parent_span_id")
-                .cloned()
-                .unwrap_or_default(),
-            sampled: hook_data
-                .request_metadata
-                .get("trace_sampled")
-                .cloned()
-                .unwrap_or_default(),
-            tags: hook_data
-                .request_metadata
-                .iter()
-                .filter_map(|(k, v)| {
-                    if let Some(rest) = k.strip_prefix("trace.tag.") {
-                        Some((rest.to_string(), v.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        }
-    });
-
-    let actor_id = hook_data
-        .sender_id
-        .clone()
-        .or_else(|| hook_data.request_metadata.get("actor_id").cloned())
-        .or_else(|| ctx.user_id().map(|s| s.to_string()));
-
-    let actor = actor_id.map(|id| {
-        has_context = true;
-        let roles = hook_data
-            .attributes
-            .get("actor_roles")
-            .map(|raw| {
-                raw.split(',')
-                    .filter_map(|r| {
-                        let trimmed = r.trim();
-                        (!trimmed.is_empty()).then(|| trimmed.to_string())
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let actor_type = hook_data
-            .attributes
-            .get("actor_type")
-            .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                "service" => Some(ProtoActorType::Service),
-                "tenant_admin" | "tenant-admin" => Some(ProtoActorType::TenantAdmin),
-                "system" => Some(ProtoActorType::System),
-                "guest" => Some(ProtoActorType::Guest),
-                "user" => Some(ProtoActorType::User),
-                "unspecified" => Some(ProtoActorType::Unspecified),
-                _ => None,
-            })
-            .unwrap_or(ProtoActorType::User);
-
-        ProtoActorContext {
-            actor_id: id,
-            r#type: actor_type as i32,
-            roles,
-            attributes: hook_data
-                .attributes
-                .iter()
-                .filter_map(|(k, v)| {
-                    if let Some(rest) = k.strip_prefix("actor.attr.") {
-                        Some((rest.to_string(), v.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        }
-    });
-
-    let device = {
-        let device_id = hook_data
-            .request_metadata
-            .get("device_id")
-            .cloned()
-            .or_else(|| hook_data.attributes.get("device_id").cloned());
-        if device_id.is_some() {
-            has_context = true;
-        }
-        device_id.map(|id| ProtoDeviceContext {
-            device_id: id,
-            platform: hook_data
-                .request_metadata
-                .get("device_platform")
-                .cloned()
-                .or_else(|| hook_data.attributes.get("device_platform").cloned())
-                .unwrap_or_default(),
-            model: hook_data
-                .request_metadata
-                .get("device_model")
-                .cloned()
-                .unwrap_or_default(),
-            os_version: hook_data
-                .request_metadata
-                .get("os_version")
-                .cloned()
-                .unwrap_or_else(|| {
-                    hook_data.attributes
-                        .get("os_version")
-                        .cloned()
-                        .unwrap_or_default()
-                }),
-            app_version: hook_data
-                .request_metadata
-                .get("app_version")
-                .cloned()
-                .unwrap_or_else(|| {
-                    hook_data.attributes
-                        .get("app_version")
-                        .cloned()
-                        .unwrap_or_default()
-                }),
-            locale: hook_data
-                .request_metadata
-                .get("locale")
-                .cloned()
-                .unwrap_or_default(),
-            timezone: hook_data
-                .request_metadata
-                .get("timezone")
-                .cloned()
-                .unwrap_or_default(),
-            ip_address: hook_data
-                .request_metadata
-                .get("ip_address")
-                .cloned()
-                .unwrap_or_default(),
-            attributes: hook_data
-                .request_metadata
-                .iter()
-                .filter_map(|(k, v)| {
-                    if let Some(rest) = k.strip_prefix("device.attr.") {
-                        Some((rest.to_string(), v.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            priority: 0,              // 【新增】默认为 Unspecified
-            token_version: 0,         // 【新增】默认为 0
-            connection_quality: None, // 【新增】默认为 None
-        })
-    };
-
-    if !has_context && request_id.is_none() {
-        return None;
-    }
-
-    Some(ProtoRequestContext {
-        request_id: request_id.unwrap_or_default(),
-        trace,
-        actor,
-        device,
-        channel: hook_data
-            .attributes
-            .get("channel")
-            .cloned()
-            .or_else(|| hook_data.request_metadata.get("channel").cloned())
-            .unwrap_or_else(|| "grpc".to_string()),
-        user_agent: hook_data
-            .request_metadata
-            .get("user_agent")
-            .cloned()
-            .unwrap_or_default(),
-        attributes: hook_data
-            .request_metadata
-            .iter()
-            .filter_map(|(k, v)| {
-                if let Some(rest) = k.strip_prefix("request.attr.") {
-                    Some((rest.to_string(), v.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect(),
-    })
-}
-
-// This function is currently unused but kept for potential future use
-#[allow(dead_code)]
-fn build_tenant_context(ctx: &Context, hook_data: &crate::hooks::hook_context_data::HookContextData) -> ProtoTenantContext {
-    let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-    let business_type = hook_data
-        .attributes
-        .get("tenant_business_type")
-        .cloned()
-        .unwrap_or_default();
-    let environment = hook_data
-        .attributes
-        .get("tenant_environment")
-        .cloned()
-        .unwrap_or_default();
-    let organization_id = hook_data
-        .attributes
-        .get("tenant_organization_id")
-        .cloned()
-        .unwrap_or_default();
-
-    ProtoTenantContext {
-        tenant_id,
-        business_type,
-        environment,
-        organization_id,
-        labels: HashMap::new(),
-        attributes: HashMap::new(),
     }
 }
 

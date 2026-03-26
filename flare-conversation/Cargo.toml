@@ -15,8 +15,10 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 flare-proto = { workspace = true }
-flare-server-core = { workspace = true }
+flare-server-core = { workspace = true, features = ["kafka"] }
 flare-im-core = { path = ".." }
+prost = "0.14"
+rdkafka = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +33,7 @@ prost-types = { workspace = true }
 flare-core = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
+log = { workspace = true }
 sqlx = { workspace = true }
 ulid = { workspace = true }
 

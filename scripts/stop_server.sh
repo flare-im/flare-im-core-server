@@ -50,7 +50,7 @@ CORE_SERVICES=(
     "message-orchestrator"
     "storage-writer"
     "storage-reader"
-    "push-proxy"
+    "sync-orchestrator"
     "push-server"
     "push-worker"
     "media"

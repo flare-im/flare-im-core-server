@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::error::{ErrorBuilder, ErrorCode, FlareError, Result};
-use flare_server_core::context::Context;
+use flare_server_core::context::Ctx;
 
 /// Hook 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -20,9 +20,10 @@ pub enum HookKind {
 }
 
 /// Hook 执行策略
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookErrorPolicy {
     /// 失败时终止主流程（快速失败）
+    #[default]
     FailFast,
     /// 失败时重试（超过最大重试次数后记录告警）
     Retry,
@@ -30,20 +31,15 @@ pub enum HookErrorPolicy {
     Ignore,
 }
 
-impl Default for HookErrorPolicy {
-    fn default() -> Self {
-        HookErrorPolicy::FailFast
-    }
-}
-
 /// Hook分组
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookGroup {
     /// 校验类Hook组（串行执行，快速失败）
     Validation,
     /// 关键业务处理Hook组（串行执行，保证顺序）
     Critical,
     /// 非关键业务处理Hook组（并发执行，容错）
+    #[default]
     Business,
 }
 
@@ -55,12 +51,6 @@ impl HookGroup {
         } else {
             HookGroup::Business
         }
-    }
-}
-
-impl Default for HookGroup {
-    fn default() -> Self {
-        HookGroup::Business
     }
 }
 
@@ -199,38 +189,49 @@ impl HookOutcome {
 }
 
 /// Pre-Send Hook Trait
+///
+/// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态，
+/// 允许在运行时动态注册和执行不同的 Hook 实现。
 #[async_trait]
 pub trait PreSendHook: Send + Sync {
-    async fn handle(&self, ctx: &Context, draft: &mut MessageDraft) -> PreSendDecision;
+    async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision;
 }
 
 /// Post-Send Hook Trait
+///
+/// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态。
 #[async_trait]
 pub trait PostSendHook: Send + Sync {
     async fn handle(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> HookOutcome;
 }
 
 /// Delivery Hook Trait
+///
+/// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态。
 #[async_trait]
 pub trait DeliveryHook: Send + Sync {
-    async fn handle(&self, ctx: &Context, event: &DeliveryEvent) -> HookOutcome;
+    async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome;
 }
 
 /// Recall Hook Trait
+///
+/// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态。
 #[async_trait]
 pub trait RecallHook: Send + Sync {
-    async fn handle(&self, ctx: &Context, event: &RecallEvent) -> HookOutcome;
+    async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome;
 }
 
 /// GetConversationParticipants Hook Trait
 ///
 /// 业务系统可以通过实现此 Hook 来提供会话参与者列表
 /// 如果 Hook 未实现或返回错误，系统将降级到数据库查询
+///
+/// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态。
 #[async_trait]
 pub trait GetConversationParticipantsHook: Send + Sync {
     /// 获取会话的所有参与者
@@ -245,7 +246,7 @@ pub trait GetConversationParticipantsHook: Send + Sync {
     /// * `Err(e)` - Hook执行失败，降级到数据库查询
     async fn get_participants(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         conversation_id: &str,
     ) -> anyhow::Result<Option<Vec<String>>>;
 }
@@ -255,7 +256,7 @@ impl<T> PreSendHook for Arc<T>
 where
     T: PreSendHook + ?Sized,
 {
-    async fn handle(&self, ctx: &Context, draft: &mut MessageDraft) -> PreSendDecision {
+    async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
         (**self).handle(ctx, draft).await
     }
 }
@@ -267,7 +268,7 @@ where
 {
     async fn handle(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> HookOutcome {
@@ -280,7 +281,7 @@ impl<T> DeliveryHook for Arc<T>
 where
     T: DeliveryHook + ?Sized,
 {
-    async fn handle(&self, ctx: &Context, event: &DeliveryEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome {
         (**self).handle(ctx, event).await
     }
 }
@@ -290,7 +291,7 @@ impl<T> RecallHook for Arc<T>
 where
     T: RecallHook + ?Sized,
 {
-    async fn handle(&self, ctx: &Context, event: &RecallEvent) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
         (**self).handle(ctx, event).await
     }
 }

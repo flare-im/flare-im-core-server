@@ -9,6 +9,12 @@
 //! - **监控统计**：收集Hook执行指标，提供监控和告警能力
 //! - **扩展机制**：支持gRPC、WebHook、Local Plugin三种扩展方式
 //!
+//! ## 调用方与事件
+//!
+//! 本服务**不消费 Kafka**。调用关系：
+//! - **Orchestrator**：发消息链路使用进程内 `flare_im_core::hooks::HookDispatcher`（PreSend/PostSend），不调用本 gRPC。
+//! - **Push**：推送/投递扩展可经 gRPC 调用本服务（HookExtensionServer），用于 WebHook/插件等扩展。
+//!
 //! ## 架构设计
 //!
 //! Hook引擎采用DDD + CQRS架构：

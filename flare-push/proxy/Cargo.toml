@@ -11,19 +11,20 @@ name = "flare-push-proxy"
 path = "cmd/main.rs"
 
 [dependencies]
-uuid = { workspace = true }
 flare-server-core = { workspace = true, features = ["kafka"] }
 flare-proto = { workspace = true }
-flare-im-core = { path = "../.." }
+flare-im-core = { path = "../..", features = ["tracing"] }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
-thiserror = { workspace = true }
-rdkafka = { workspace = true }
+prost = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-prost = { workspace = true }
+rdkafka = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+redis = { workspace = true }

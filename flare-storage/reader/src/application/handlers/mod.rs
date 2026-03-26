@@ -2,4 +2,4 @@
 
 pub mod query_handler;
 
-pub use query_handler::MessageStorageQueryHandler;
+pub use query_handler::{MessageStorageQueryHandler, QueryMessagesResult};

@@ -4,7 +4,7 @@ use futures_util::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 
 use flare_proto::media::media_service_client::MediaServiceClient;
 use flare_proto::media::*;
@@ -226,7 +226,7 @@ impl GrpcMediaClient {
     pub async fn set_object_acl(
         &self,
         request: Request<SetObjectAclRequest>,
-    ) -> Result<Response<SetObjectAclResponse>, Status> {
+    ) -> Result<Response<flare_proto::common::StatusOnlyResponse>, Status> {
         let mut client = self.get_client().await?;
         client.set_object_acl(request).await
     }

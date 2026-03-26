@@ -20,8 +20,10 @@ pub struct PresenceUpdate {
     pub conflict_reason: Option<String>,
 }
 
-/// Conversation 仓储接口（需要作为 trait 对象使用，保留 async-trait）
-#[async_trait]
+/// Conversation 仓储接口
+///
+/// 使用 Rust 2024 原生 async fn in traits（无需 async-trait 宏）
+/// 注意：由于需要作为 trait 对象（dyn Trait）使用，需要使用泛型包装器模式
 pub trait ConversationRepository: Send + Sync {
     async fn load_bootstrap(
         &self,
@@ -55,17 +57,25 @@ pub trait ConversationRepository: Send + Sync {
 
     async fn mark_as_read(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, seq: i64) -> Result<()>;
 
+    /// 获取会话当前 last_message_seq（用于「标记已读」未传 seq 时解析为已读位置）
+    async fn get_last_message_seq(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<Option<i64>>;
+
     async fn get_unread_count(&self, ctx: &flare_server_core::context::Context, conversation_id: &str) -> Result<i32>;
 }
 
-/// Presence 仓储接口（需要作为 trait 对象使用，保留 async-trait）
-#[async_trait]
+/// Presence 仓储接口
+/// 使用 Rust 2024 原生 async fn in traits
 pub trait PresenceRepository: Send + Sync {
     async fn list_devices(&self, user_id: &str) -> Result<Vec<DevicePresence>>;
     async fn update_presence(&self, update: PresenceUpdate) -> Result<()>;
 }
 
-#[async_trait]
+/// Message Provider 仓储接口
+/// 使用 Rust 2024 原生 async fn in traits
 pub trait MessageProvider: Send + Sync {
     async fn sync_messages(
         &self,
@@ -114,6 +124,7 @@ pub trait MessageProvider: Send + Sync {
 }
 
 /// Thread 仓储接口（话题管理）
+/// 注意：使用 async_trait 宏是因为该 trait 需要作为 trait 对象使用。
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
     /// 创建话题

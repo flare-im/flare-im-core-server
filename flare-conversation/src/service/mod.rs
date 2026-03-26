@@ -37,11 +37,30 @@ impl ApplicationBootstrap {
     }
 
     /// 运行服务（带应用上下文）
-    async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
-        use flare_proto::conversation::conversation_service_server::ConversationServiceServer;
+    async fn run_with_context(mut context: ApplicationContext, address: SocketAddr) -> Result<()> {
+        use flare_proto::conversation::conversation_manage_service_server::ConversationManageServiceServer;
+        use flare_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
         use tonic::transport::Server;
 
         let handler = context.handler.clone();
+
+        // 若已配置 ReadReceipt Kafka 消费者，则后台启动
+        if let Some(consumer) = context.read_receipt_consumer.take() {
+            tokio::spawn(async move {
+                if let Err(e) = consumer.run().await {
+                    tracing::error!(error = %e, "ReadReceipt consumer loop exited");
+                }
+            });
+        }
+
+        // 若已配置 ConversationEnsure Kafka 消费者（Orchestrator 异步会话创建），则后台启动
+        if let Some(consumer) = context.conversation_ensure_consumer.take() {
+            tokio::spawn(async move {
+                if let Err(e) = consumer.run().await {
+                    tracing::error!(error = %e, "ConversationEnsure consumer loop exited");
+                }
+            });
+        }
 
         info!(
             address = %address,
@@ -56,12 +75,16 @@ impl ApplicationBootstrap {
                 // 使用 ContextLayer 直接包裹 Service
                 use flare_server_core::middleware::ContextLayer;
                 
-                let conversation_service = ContextLayer::new()
+                let read_svc = ContextLayer::new()
                     .allow_missing()
-                    .layer(ConversationServiceServer::new(handler));
-                
+                    .layer(ConversationReadServiceServer::new(handler.clone()));
+                let manage_svc = ContextLayer::new()
+                    .allow_missing()
+                    .layer(ConversationManageServiceServer::new(handler));
+
                 Server::builder()
-                    .add_service(conversation_service)
+                    .add_service(read_svc)
+                    .add_service(manage_svc)
                     .serve_with_shutdown(address_clone, async move {
                         info!(
                             address = %address_clone,

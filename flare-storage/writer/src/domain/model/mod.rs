@@ -1,4 +1,15 @@
-//! 领域模型定义
+//! 领域模型定义（与 proto 解耦，不在 application/domain/infrastructure 使用 proto 类型）
+
+mod context;
+mod event;
+mod message;
+
+pub use context::{RequestContext, TenantContext};
+pub use event::{
+    CustomPayload, DeletePayload, EditPayload, Event, EventPayload, EventType, MarkPayload,
+    PinPayload, ReactionPayload, ReadPayload, RecallPayload, UnmarkPayload, UnpinPayload,
+};
+pub use message::{Attachment, Message};
 
 use flare_im_core::utils::TimelineMetadata;
 
@@ -6,7 +17,7 @@ use flare_im_core::utils::TimelineMetadata;
 pub struct PreparedMessage {
     pub conversation_id: String,
     pub message_id: String,
-    pub message: flare_proto::common::Message,
+    pub message: Message,
     pub timeline: TimelineMetadata,
     pub sync: bool,
 }

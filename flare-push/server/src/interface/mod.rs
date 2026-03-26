@@ -1,1 +1,1 @@
-pub mod consumers;
+pub mod messaging;

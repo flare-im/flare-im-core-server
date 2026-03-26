@@ -26,6 +26,7 @@ redis = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+prost = { workspace = true }
 prost-types = { workspace = true }
 anyhow = { workspace = true }
 tokio-stream = { workspace = true }

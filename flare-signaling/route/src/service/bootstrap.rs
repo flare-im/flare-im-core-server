@@ -6,6 +6,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use tracing::{error, info};
 
 use crate::service::wire::{self, ApplicationContext};
+use flare_im_core::service_names::SIGNALING_ROUTE;
 use flare_server_core::runtime::ServiceRuntime;
 
 /// 应用启动器
@@ -16,7 +17,6 @@ impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
         use flare_im_core::{ServiceHelper, load_config};
 
-        // 加载应用配置
         let app_config = load_config(Some("./config"));
         let service_config = app_config.signaling_route_service();
 
@@ -24,54 +24,49 @@ impl ApplicationBootstrap {
         let address: SocketAddr = ServiceHelper::parse_server_addr(
             app_config,
             &service_config.runtime,
-            "flare-signaling-route",
+            SIGNALING_ROUTE,
         )
         .with_context(|| "invalid signaling route server address")?;
         info!(address = %address, "Server address parsed successfully");
 
-        // 使用 Wire 风格的依赖注入构建应用上下文
         let context = wire::initialize(app_config).await?;
 
         info!("ApplicationBootstrap created successfully");
 
-        // 运行服务
         Self::run_with_context(context, address).await
     }
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
-        use flare_proto::signaling::router::router_service_server::RouterServiceServer;
+        use flare_proto::signaling::router::router_upstream_service_server::RouterUpstreamServiceServer;
         use tonic::transport::Server;
 
-        let handler = context.handler.clone();
+        let upstream_handler = context.upstream_handler;
 
         info!(
             address = %address,
             port = %address.port(),
-            "Starting Router gRPC service..."
+            "Starting Router gRPC service (upstream only; downstream push lives in flare-push-worker)"
         );
 
-        // 使用 ServiceRuntime 管理服务生命周期
         let address_clone = address;
-        let runtime = ServiceRuntime::new("router", address)
+        let runtime = ServiceRuntime::new(SIGNALING_ROUTE, address)
             .add_spawn_with_shutdown("router-grpc", move |shutdown_rx| async move {
-                // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
-                
-                let router_service = ContextLayer::new()
+
+                let upstream_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(RouterServiceServer::new(handler));
-                
+                    .layer(RouterUpstreamServiceServer::new(upstream_handler));
+
                 Server::builder()
-                    .add_service(router_service)
+                    .add_service(upstream_service)
                     .serve_with_shutdown(address_clone, async move {
                         info!(
                             address = %address_clone,
                             port = %address_clone.port(),
-                            "✅ Router gRPC service is listening"
+                            "✅ Router gRPC upstream is listening"
                         );
 
-                        // 同时监听 Ctrl+C 和关闭通道
                         tokio::select! {
                             _ = tokio::signal::ctrl_c() => {
                                 tracing::info!("shutdown signal received (Ctrl+C)");
@@ -85,12 +80,9 @@ impl ApplicationBootstrap {
                     .map_err(|e| format!("gRPC server error: {}", e).into())
             });
 
-        // 运行服务（带服务注册）
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    // 注册服务（使用常量）
-                    use flare_im_core::service_names::SIGNALING_ROUTE;
                     match flare_im_core::discovery::register_service_only(
                         SIGNALING_ROUTE,
                         addr,

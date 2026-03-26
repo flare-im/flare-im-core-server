@@ -14,13 +14,13 @@ use crate::domain::model::{ConnectionQualityRecord, ConnectionRecord};
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{ConnectionId, UserId};
 
-/// 设备管理领域服务
-pub struct DeviceManagerService {
-    repository: Arc<dyn ConversationRepository + Send + Sync>,
+/// 设备管理领域服务（泛型仓储，避免 `dyn` 异步 trait）
+pub struct DeviceManagerService<R: ConversationRepository + Send + Sync> {
+    repository: Arc<R>,
 }
 
-impl DeviceManagerService {
-    pub fn new(repository: Arc<dyn ConversationRepository + Send + Sync>) -> Self {
+impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
+    pub fn new(repository: Arc<R>) -> Self {
         Self { repository }
     }
 

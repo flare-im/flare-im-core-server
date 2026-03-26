@@ -1,7 +1,13 @@
 pub mod model;
-pub mod repository;
+pub mod ports;
 pub mod service;
 
-pub use model::{ConnectionInfo, Session};
-pub use repository::{ConnectionQuery, SignalingGateway};
-pub use service::{GatewayService, PushDomainService, ConversationDomainService};
+pub use model::{
+    ConnectionContext, ConnectionDomainServiceConfig, ConnectionInfo, ConnectionQualityMetrics,
+    DomainPushResult, EventUplinkOutcome, QualityLevel,
+};
+pub use service::{
+    ConnectionDomainService, ConnectionQualityService, PushDomainService, SendAckDomainService,
+    SendDataDomainService, SendEventDomainService, SendMessageDomainService,
+    SyncService,
+};

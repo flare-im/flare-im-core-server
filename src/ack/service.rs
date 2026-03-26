@@ -5,7 +5,7 @@ use crate::ack::config::AckServiceConfig;
 use crate::ack::metrics::AckMetrics;
 use crate::ack::redis_manager::{AckStatusInfo, ImportanceLevel, RedisAckManager};
 use crate::ack::traits::{AckEvent, AckManager};
-use async_trait::async_trait;
+
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -93,11 +93,10 @@ impl AckService {
                     queue.drain(..count).collect::<Vec<_>>()
                 };
 
-                // 只有当有待处理的ACK时才执行批量存储
-                if !acks_to_process.is_empty() {
-                    if let Err(e) = redis_manager.batch_store_ack_status(&acks_to_process).await {
-                        tracing::error!(error = %e, "Failed to batch store ACKs");
-                    }
+                if !acks_to_process.is_empty()
+                    && let Err(e) = redis_manager.batch_store_ack_status(&acks_to_process).await
+                {
+                    tracing::error!(error = %e, "Failed to batch store ACKs");
                 }
             }
         });
@@ -127,11 +126,10 @@ impl AckService {
                     queue.drain(..count).collect::<Vec<_>>()
                 };
 
-                // 只有当有待处理的高优先级ACK时才执行批量存储
-                if !acks_to_process.is_empty() {
-                    if let Err(e) = redis_manager.batch_store_ack_status(&acks_to_process).await {
-                        tracing::error!(error = %e, "Failed to batch store high priority ACKs");
-                    }
+                if !acks_to_process.is_empty()
+                    && let Err(e) = redis_manager.batch_store_ack_status(&acks_to_process).await
+                {
+                    tracing::error!(error = %e, "Failed to batch store high priority ACKs");
                 }
             }
         });
@@ -358,7 +356,7 @@ impl AckService {
     }
 }
 
-#[async_trait]
+
 impl AckManager for AckService {
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>> {
         let ack_info = AckStatusInfo {

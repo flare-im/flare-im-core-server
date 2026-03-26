@@ -1,7 +1,5 @@
-pub mod commands;
-pub mod handlers;
-pub mod queries;
-pub mod service;
+//! 应用层（CQRS）：编排见 `handlers`，领域规则见 `crate::domain`。
 
-pub use handlers::{PushCommandHandler, PushQueryHandler};
-pub use service::PushApplication;
+pub mod handlers;
+
+pub use handlers::PushRouterHandler;

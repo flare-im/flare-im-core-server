@@ -1,4 +1,14 @@
-//! 命令结构体定义（Command DTO）
+//! 命令类型（写侧 CQRS）
 //!
-//! 此模块用于定义命令 DTOs，当前命令定义在 handlers 中。
-//! 如果将来需要单独定义命令结构，可以在此模块中定义。
+//! - **Push**：AccessGateway 下行推送（PushMessage / BatchPushMessage）
+//! - **上行四条线**：客户端 → 网关，MESSAGE / EVENT / ACK / DATA
+
+mod push_command;
+
+mod send_command;
+
+pub use push_command::{
+    PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
+    PushNotificationCommand,
+};
+pub use send_command::{SendMessageCommand,SendEventCommand,SendDataCommand,SendAckCommand};

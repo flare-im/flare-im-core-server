@@ -1,0 +1,279 @@
+//! IM Kafka Topic 名、事件类型常量，以及 proto 信封 ↔ [flare_server_core::EventEnvelope] 的转换。
+//!
+//! 线上主链路载荷为 **protobuf**（`TopicEventEnvelope` 等）。JSON 整包 [flare_server_core::TopicEventBus] 见 `flare_server_core::event_bus`。
+
+use std::collections::HashMap;
+
+use flare_proto::common::EventType;
+use flare_server_core::context::Ctx;
+use flare_server_core::error::Result as ServerResult;
+use flare_server_core::TopicEventBus;
+use prost::Message as _;
+use prost_types::Timestamp;
+
+// Topic / 消费者组名请使用 [crate::constants::topics]、[crate::constants::groups]；
+// 本模块仅保留 event_type 字符串、信封转换与发布端口 trait。
+
+// --- event_type 字符串（TopicEventEnvelope.event_type） ------------------------
+
+pub const EVENT_TYPE_CONVERSATION_ENSURE: &str = "conversation.ensure";
+pub const EVENT_TYPE_MESSAGE_CREATED: &str = "message.created";
+pub const EVENT_TYPE_OPERATION_RECALLED: &str = "operation.recalled";
+pub const EVENT_TYPE_OPERATION_EDITED: &str = "operation.edited";
+pub const EVENT_TYPE_OPERATION_DELETED: &str = "operation.deleted";
+pub const EVENT_TYPE_OPERATION_READ_RECEIPT: &str = "operation.read_receipt";
+pub const EVENT_TYPE_OPERATION_REACTION: &str = "operation.reaction";
+pub const EVENT_TYPE_OPERATION_PIN: &str = "operation.pin";
+pub const EVENT_TYPE_OPERATION_UNPIN: &str = "operation.unpin";
+pub const EVENT_TYPE_OPERATION_MARK: &str = "operation.mark";
+pub const EVENT_TYPE_OPERATION_UNMARK: &str = "operation.unmark";
+
+pub const CONVERSATION_UPDATE_TYPE_UNREAD: &str = "unread";
+pub const CONVERSATION_UPDATE_TYPE_SUMMARY: &str = "summary";
+pub const CONVERSATION_UPDATE_TYPE_REMOVE: &str = "remove";
+
+// --- 发布端口（proto 字节） ----------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum EventBusPublishError {
+    #[error("publish failed: {0}")]
+    Publish(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("serialization failed: {0}")]
+    Serialization(String),
+}
+
+pub trait ImTopicEventPublisher: Send + Sync {
+    async fn publish_topic_event(
+        &self,
+        ctx: &Ctx,
+        topic: &str,
+        envelope: &flare_proto::common::TopicEventEnvelope,
+    ) -> Result<(), EventBusPublishError>;
+}
+
+pub async fn publish_proto_as_server_event_envelope<B>(
+    bus: &B,
+    ctx: &Ctx,
+    topic: &str,
+    envelope: &flare_proto::common::TopicEventEnvelope,
+) -> ServerResult<()>
+where
+    B: TopicEventBus + ?Sized,
+{
+    let ev = to_event_envelope(envelope);
+    bus.publish(ctx, topic, &ev).await
+}
+
+pub fn encode_topic_event_envelope(
+    envelope: &flare_proto::common::TopicEventEnvelope,
+) -> Result<Vec<u8>, EventBusPublishError> {
+    let mut buf = Vec::with_capacity(envelope.encoded_len());
+    envelope
+        .encode(&mut buf)
+        .map_err(|e| EventBusPublishError::Serialization(e.to_string()))?;
+    Ok(buf)
+}
+
+// --- proto ↔ server-core EventEnvelope ----------------------------------------
+
+const EVENT_ENVELOPE_SOURCE_IM_CORE: &str = "flare-im-core";
+
+fn timestamp_ms_from_proto(ts: Option<&Timestamp>) -> Option<u64> {
+    let t = ts?;
+    let secs = t.seconds.max(0) as u64;
+    let nanos = t.nanos.max(0) as u32 as u64;
+    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+}
+
+pub fn to_event_envelope(
+    envelope: &flare_proto::common::TopicEventEnvelope,
+) -> flare_server_core::EventEnvelope {
+    let payload = envelope.encode_to_vec();
+    let mut core = flare_server_core::EventEnvelope::new(
+        envelope.event_type.as_str(),
+        envelope.conversation_id.as_str(),
+        envelope.seq,
+        payload,
+    );
+    if let Some(ev) = envelope.event.as_ref() {
+        if !ev.event_id.is_empty() {
+            core.event_id = ev.event_id.clone();
+        }
+        core.timestamp_ms = timestamp_ms_from_proto(ev.created_at.as_ref());
+    }
+    if !envelope.request_id.is_empty() {
+        core = core.with_source(format!(
+            "{};request_id={}",
+            EVENT_ENVELOPE_SOURCE_IM_CORE, envelope.request_id
+        ));
+    } else {
+        core = core.with_source(EVENT_ENVELOPE_SOURCE_IM_CORE);
+    }
+    core
+}
+
+pub fn event_type_str_from_proto_event(event: &flare_proto::common::Event) -> Option<&'static str> {
+    match EventType::try_from(event.r#type).ok()? {
+        EventType::EventMessageRecall => Some(EVENT_TYPE_OPERATION_RECALLED),
+        EventType::EventMessageEdit => Some(EVENT_TYPE_OPERATION_EDITED),
+        EventType::EventMessageDelete => Some(EVENT_TYPE_OPERATION_DELETED),
+        EventType::EventReadReceipt => Some(EVENT_TYPE_OPERATION_READ_RECEIPT),
+        EventType::EventReaction => Some(EVENT_TYPE_OPERATION_REACTION),
+        EventType::EventPin => Some(EVENT_TYPE_OPERATION_PIN),
+        EventType::EventUnpin => Some(EVENT_TYPE_OPERATION_UNPIN),
+        EventType::EventMark => Some(EVENT_TYPE_OPERATION_MARK),
+        EventType::EventUnmark => Some(EVENT_TYPE_OPERATION_UNMARK),
+        _ => None,
+    }
+}
+
+pub fn message_envelope_from_message(
+    msg: &flare_proto::common::Message,
+    event_type: impl Into<String>,
+    created_at_ms: i64,
+    tenant_id: impl AsRef<str>,
+) -> flare_proto::common::MessageEnvelope {
+    use crate::abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAGS};
+    let sync = msg.extra.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
+    let tags = msg
+        .extra
+        .get(EXTRA_KEY_TAGS)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let mut metadata = HashMap::new();
+    for (k, v) in &msg.extra {
+        if k.as_str() != EXTRA_KEY_SYNC && k.as_str() != EXTRA_KEY_TAGS {
+            metadata.insert(k.clone(), v.clone());
+        }
+    }
+    flare_proto::common::MessageEnvelope {
+        conversation_id: msg.conversation_id.clone(),
+        message: Some(msg.clone()),
+        sync,
+        tags,
+        metadata,
+        event_type: event_type.into(),
+        created_at_ms,
+        tenant_id: tenant_id.as_ref().to_string(),
+    }
+}
+
+pub fn topic_event_envelope_from_event(
+    conversation_id: impl Into<String>,
+    event: Option<flare_proto::common::Event>,
+    tenant_id: impl Into<String>,
+    event_type: impl Into<String>,
+    seq: u64,
+    request_id: impl Into<String>,
+) -> flare_proto::common::TopicEventEnvelope {
+    flare_proto::common::TopicEventEnvelope {
+        conversation_id: conversation_id.into(),
+        event,
+        tenant_id: tenant_id.into(),
+        event_type: event_type.into(),
+        seq,
+        request_id: request_id.into(),
+    }
+}
+
+pub fn conversation_update_envelope(
+    user_id: impl Into<String>,
+    conversation_id: impl Into<String>,
+    tenant_id: impl Into<String>,
+    update_type: impl Into<String>,
+    max_seq: u64,
+    last_read_seq: u64,
+    summary_snapshot: Vec<u8>,
+    metadata: HashMap<String, String>,
+    updated_at_ms: i64,
+) -> flare_proto::common::ConversationUpdateEnvelope {
+    flare_proto::common::ConversationUpdateEnvelope {
+        user_id: user_id.into(),
+        conversation_id: conversation_id.into(),
+        tenant_id: tenant_id.into(),
+        update_type: update_type.into(),
+        max_seq,
+        last_read_seq,
+        summary_snapshot,
+        metadata,
+        updated_at_ms,
+    }
+}
+
+pub fn message_to_topic_event_envelope(
+    msg: &flare_proto::common::Message,
+    tenant_id: impl AsRef<str>,
+    seq: u64,
+) -> flare_proto::common::TopicEventEnvelope {
+    use flare_proto::common::{Event, EventType};
+    let payload = Some(flare_proto::common::event::Payload::Message(msg.clone()));
+    let event = Event {
+        conversation_id: msg.conversation_id.clone(),
+        seq,
+        r#type: EventType::EventMessage as i32,
+        created_at: None,
+        event_id: String::new(),
+        event_seq: None,
+        request_id: None,
+        payload,
+    };
+    let request_id = msg.extra.get("x-request-id").map(|s| s.as_str()).unwrap_or("");
+    topic_event_envelope_from_event(
+        &msg.conversation_id,
+        Some(event),
+        tenant_id.as_ref().to_string(),
+        EVENT_TYPE_MESSAGE_CREATED,
+        seq,
+        request_id,
+    )
+}
+
+pub fn push_message_request_to_task_envelopes(
+    req: &flare_proto::push::PushMessageRequest,
+    tenant_id: impl AsRef<str>,
+    priority: i32,
+    expire_at_ms: i64,
+) -> Vec<flare_proto::common::PushTaskEnvelope> {
+    // 强制统一下行载荷：PushTaskEnvelope.push_payload 只允许承载 AccessGateway PushMessageRequest（用于 Route→Gateway 转发）
+    // 禁止在 MQ 中携带 flare.push.v1.PushMessageRequest（避免多套结构并存）。
+    let message = req.message.clone().unwrap_or_default();
+    let ag_req = flare_proto::access_gateway::PushMessageRequest {
+        user_ids: req.user_ids.clone(),
+        messages: vec![message],
+        options: None,
+    };
+    let push_payload = ag_req.encode_to_vec();
+    let conversation_id = req
+        .message
+        .as_ref()
+        .map(|m| m.conversation_id.clone())
+        .unwrap_or_default();
+    let message_id = req
+        .message
+        .as_ref()
+        .map(|m| m.server_id.clone())
+        .unwrap_or_default();
+    let mut metadata = req
+        .options
+        .as_ref()
+        .map(|o| o.metadata.clone())
+        .unwrap_or_default();
+    for (k, v) in &req.metadata {
+        metadata.insert(k.clone(), v.clone());
+    }
+
+    req.user_ids
+        .iter()
+        .map(|user_id| flare_proto::common::PushTaskEnvelope {
+            user_id: user_id.clone(),
+            message_id: message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            tenant_id: tenant_id.as_ref().to_string(),
+            priority,
+            expire_at_ms,
+            push_payload: push_payload.clone(),
+            metadata: metadata.clone(),
+            payload_kind: flare_proto::common::PushTaskPayloadKind::Message as i32,
+        })
+        .collect()
+}

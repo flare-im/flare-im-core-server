@@ -54,7 +54,7 @@ SERVICES=(
     "message-orchestrator:50081"
     "storage-writer:"  # 无端口（Kafka 消费者）
     "storage-reader:60083"
-    "push-proxy:60071"
+    "sync-orchestrator:60084"
     "push-server:"  # 无端口（Kafka 消费者）
     "push-worker:"  # 无端口（Kafka 消费者）
     "media:60081"

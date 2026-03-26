@@ -12,7 +12,7 @@ use flare_im_core::{
     DeliveryEvent, HookErrorPolicy, HookGroup, HookMetadata, MessageDraft,
     MessageRecord, PreSendDecision, PreSendHook, RecallEvent,
 };
-use flare_server_core::context::Context;
+use flare_server_core::context::{Context, Ctx};
 
 /// Hook执行模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,7 +383,7 @@ impl HookExecutionPlan {
     /// 执行PreSend Hook
     pub async fn execute(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         draft: &mut MessageDraft,
     ) -> anyhow::Result<PreSendDecision> {
         // 优先使用适配器（gRPC/WebHook）
@@ -403,7 +403,7 @@ impl HookExecutionPlan {
     /// 执行PostSend Hook
     pub async fn execute_post_send(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> anyhow::Result<()> {
@@ -419,7 +419,7 @@ impl HookExecutionPlan {
     /// 执行Delivery Hook
     pub async fn execute_delivery(
         &self,
-        ctx: &Context,
+        ctx: &Ctx,
         event: &DeliveryEvent,
     ) -> anyhow::Result<()> {
         // 优先使用适配器（gRPC/WebHook）

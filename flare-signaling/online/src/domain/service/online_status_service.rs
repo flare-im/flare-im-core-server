@@ -4,15 +4,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use flare_im_core::ConnectionEvent;
 use flare_proto::signaling::online::{
     DeviceConflictStrategy, GetOnlineStatusResponse, HeartbeatResponse, LoginRequest,
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
+use flare_server_core::context::Context;
 use prost_types::Timestamp;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::domain::aggregate::{Connection, ConnectionCreateParams};
+use crate::domain::connection_event_publisher::{
+    ConnectionEventPublisher, NoopConnectionEventPublisher,
+};
 use crate::domain::model::OnlineStatusRecord;
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{
@@ -27,23 +32,41 @@ struct InMemoryConnection {
 
 /// 在线状态领域服务 - 包含所有业务逻辑
 ///
-/// 注意：领域服务不依赖基础设施层的配置，配置由应用层传入必要参数
-pub struct OnlineStatusService {
-    repository: Arc<dyn ConversationRepository + Send + Sync>,
+/// 使用泛型参数以支持 Rust 2024 原生 async fn in traits（禁止 `dyn` 异步 trait）
+pub struct OnlineStatusService<CR, P = NoopConnectionEventPublisher> {
+    repository: Arc<CR>,
     sessions: Arc<RwLock<HashMap<String, InMemoryConnection>>>,
     gateway_id: String,
+    connection_event_publisher: Option<Arc<P>>,
 }
 
-impl OnlineStatusService {
-    pub fn new(repository: Arc<dyn ConversationRepository + Send + Sync>, gateway_id: String) -> Self {
+impl<CR, P> OnlineStatusService<CR, P>
+where
+    CR: ConversationRepository + Send + Sync,
+    P: ConnectionEventPublisher + Send + Sync,
+{
+    pub fn new(repository: Arc<CR>, gateway_id: String) -> Self {
         Self {
             repository,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             gateway_id,
+            connection_event_publisher: None,
         }
     }
 
-    pub async fn login(&self, request: LoginRequest) -> Result<LoginResponse> {
+    pub fn with_connection_event_publisher(mut self, publisher: Option<Arc<P>>) -> Self {
+        self.connection_event_publisher = publisher;
+        self
+    }
+
+    pub async fn login(&self, ctx: &Context, request: LoginRequest) -> Result<LoginResponse> {
+        tracing::debug!(
+            trace_id = %ctx.trace_id(),
+            user_id = %request.user_id,
+            device_id = %request.device_id,
+            "Handling login request"
+        );
+
         let user_id = &request.user_id;
         let device_id = &request.device_id;
         let device_platform = request.device_platform.as_str();
@@ -154,6 +177,20 @@ impl OnlineStatusService {
 
         self.repository.save_connection(&session).await?;
 
+        if let (Some(publisher), Some(_connection_id)) = (
+            &self.connection_event_publisher,
+            request.metadata.get("connection_id"),
+        ) {
+            let event = ConnectionEvent {
+                user_id: user_id.clone(),
+                device_id: Some(device_id.clone()),
+                state: "registered".to_string(),
+            };
+            if let Err(e) = publisher.publish(&event).await {
+                warn!(error = %e, "Failed to publish ConnectionRegistered event");
+            }
+        }
+
         info!(
             user_id = %user_id,
             conversation_id = %conversation_id,
@@ -172,7 +209,14 @@ impl OnlineStatusService {
         })
     }
 
-    pub async fn logout(&self, request: LogoutRequest) -> Result<LogoutResponse> {
+    pub async fn logout(&self, ctx: &Context, request: LogoutRequest) -> Result<LogoutResponse> {
+        tracing::debug!(
+            trace_id = %ctx.trace_id(),
+            user_id = %request.user_id,
+            conversation_id = %request.conversation_id,
+            "Handling logout request"
+        );
+
         let user_id = &request.user_id;
         let conversation_id = &request.conversation_id;
 
@@ -203,10 +247,18 @@ impl OnlineStatusService {
 
     pub async fn heartbeat(
         &self,
+        ctx: &Context,
         conversation_id: &str,
         user_id: &str,
         connection_quality: Option<&flare_proto::common::ConnectionQuality>,
     ) -> Result<HeartbeatResponse> {
+        tracing::debug!(
+            trace_id = %ctx.trace_id(),
+            user_id = %user_id,
+            conversation_id = %conversation_id,
+            "Handling heartbeat request"
+        );
+
         // 检查会话是否存在
         {
             let map = self.sessions.read().await;
@@ -245,7 +297,13 @@ impl OnlineStatusService {
         })
     }
 
-    pub async fn get_online_status(&self, user_ids: &[String]) -> Result<GetOnlineStatusResponse> {
+    pub async fn get_online_status(&self, ctx: &Context, user_ids: &[String]) -> Result<GetOnlineStatusResponse> {
+        tracing::debug!(
+            trace_id = %ctx.trace_id(),
+            user_count = %user_ids.len(),
+            "Handling get online status request"
+        );
+
         let statuses = self.repository.fetch_statuses(user_ids).await?;
 
         let mut result = HashMap::new();
@@ -285,3 +343,22 @@ impl OnlineStatusService {
         })
     }
 }
+
+/// Noop ConversationRepository 实现
+pub struct NoopConversationRepository;
+
+impl ConversationRepository for NoopConversationRepository {
+    async fn save_connection(&self, _connection: &Connection) -> Result<()> { Ok(()) }
+    async fn remove_connection(&self, _conversation_id: &ConnectionId, _user_id: &UserId) -> Result<()> { Ok(()) }
+    async fn touch_connection(&self, _user_id: &UserId) -> Result<()> { Ok(()) }
+    async fn fetch_statuses(&self, _user_ids: &[String]) -> Result<HashMap<String, OnlineStatusRecord>> { Ok(HashMap::new()) }
+    async fn get_user_connections(&self, _user_id: &UserId) -> Result<Vec<Connection>> { Ok(vec![]) }
+    async fn remove_user_connections(&self, _user_id: &UserId, _device_ids: Option<&[DeviceId]>) -> Result<()> { Ok(()) }
+    async fn get_connection_by_device(&self, _user_id: &UserId, _device_id: &DeviceId) -> Result<Option<Connection>> { Ok(None) }
+    async fn list_user_connections(&self, _ctx: &Context) -> Result<Vec<Connection>> { Ok(vec![]) }
+}
+
+/// 默认的在线状态服务类型
+pub type DefaultOnlineStatusService =
+    OnlineStatusService<NoopConversationRepository, NoopConnectionEventPublisher>;
+

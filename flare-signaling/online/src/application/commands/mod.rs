@@ -1,13 +1,15 @@
 //! 命令结构体定义（Command DTO）
 
-use flare_proto::access_gateway::{PublishSignalRequest, SubscribeRequest, UnsubscribeRequest};
-use flare_proto::signaling::online::{HeartbeatRequest, LoginRequest, LogoutRequest};
+use flare_server_core::context::Context;
+use flare_proto::signaling::online::{HeartbeatRequest, LoginRequest, LogoutRequest, SubscribeUserPresenceRequest, WatchPresenceRequest};
 
 /// 登录命令
 #[derive(Debug, Clone)]
 pub struct LoginCommand {
     /// 原始请求
     pub request: LoginRequest,
+    /// 上下文
+    pub ctx: Context,
 }
 
 /// 登出命令
@@ -15,6 +17,8 @@ pub struct LoginCommand {
 pub struct LogoutCommand {
     /// 原始请求
     pub request: LogoutRequest,
+    /// 上下文
+    pub ctx: Context,
 }
 
 /// 心跳命令
@@ -22,25 +26,20 @@ pub struct LogoutCommand {
 pub struct HeartbeatCommand {
     /// 原始请求
     pub request: HeartbeatRequest,
+    /// 上下文
+    pub ctx: Context,
 }
 
-/// 订阅命令
+/// 订阅用户状态命令
 #[derive(Debug, Clone)]
-pub struct SubscribeCommand {
+pub struct SubscribeUserPresenceCommand {
     /// 原始请求
-    pub request: SubscribeRequest,
+    pub request: SubscribeUserPresenceRequest,
 }
 
-/// 取消订阅命令
+/// 订阅在线状态命令
 #[derive(Debug, Clone)]
-pub struct UnsubscribeCommand {
+pub struct WatchPresenceCommand {
     /// 原始请求
-    pub request: UnsubscribeRequest,
-}
-
-/// 发布信号命令
-#[derive(Debug, Clone)]
-pub struct PublishSignalCommand {
-    /// 原始请求
-    pub request: PublishSignalRequest,
+    pub request: WatchPresenceRequest,
 }

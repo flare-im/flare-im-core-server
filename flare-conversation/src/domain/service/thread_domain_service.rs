@@ -7,12 +7,15 @@ use tracing::instrument;
 use crate::domain::repository::ThreadRepository;
 
 /// 话题领域服务 - 包含所有业务逻辑
-pub struct ThreadDomainService {
-    thread_repo: Arc<dyn ThreadRepository>,
+///
+/// 使用泛型参数以获得更好的性能（静态分发）
+/// 符合 Rust 2024 原生 async fn in traits 规范
+pub struct ThreadDomainService<TR> {
+    thread_repo: Arc<TR>,
 }
 
-impl ThreadDomainService {
-    pub fn new(thread_repo: Arc<dyn ThreadRepository>) -> Self {
+impl<TR: ThreadRepository> ThreadDomainService<TR> {
+    pub fn new(thread_repo: Arc<TR>) -> Self {
         Self { thread_repo }
     }
 

@@ -7,7 +7,6 @@ use redis::{AsyncCommands, aio::ConnectionManager};
 use crate::config::ConversationConfig;
 use crate::domain::model::{DevicePresence, DeviceState};
 use crate::domain::repository::{PresenceRepository, PresenceUpdate};
-use async_trait::async_trait;
 
 pub struct RedisPresenceRepository {
     client: Arc<redis::Client>,
@@ -32,7 +31,6 @@ impl RedisPresenceRepository {
     }
 }
 
-#[async_trait]
 impl PresenceRepository for RedisPresenceRepository {
     async fn list_devices(&self, user_id: &str) -> Result<Vec<DevicePresence>> {
         let mut conn = self.connection().await?;

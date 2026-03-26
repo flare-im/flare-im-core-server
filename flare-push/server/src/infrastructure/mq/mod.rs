@@ -1,1 +1,2 @@
-pub mod kafka_task_publisher;
+pub mod publisher;
+
