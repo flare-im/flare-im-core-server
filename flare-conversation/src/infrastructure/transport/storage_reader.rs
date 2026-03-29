@@ -135,7 +135,13 @@ impl MessageProvider for StorageReaderMessageProvider {
         limit: i32,
     ) -> Result<MessageSyncResult> {
         let mut client = self.client().await?;
-        let mut request = Request::new(Self::build_request(ctx, conversation_id, since_ts, cursor, limit));
+        let mut request = Request::new(Self::build_request(
+            ctx,
+            conversation_id,
+            since_ts,
+            cursor,
+            limit,
+        ));
         // 利用 Context 传递能力，设置 metadata
         set_context_metadata(&mut request, ctx);
         let response = client
@@ -219,7 +225,13 @@ impl MessageProvider for StorageReaderMessageProvider {
 
                 let mut client = StorageReaderServiceClient::new(channel);
                 // 使用任务级别的 Context
-                let mut request = Request::new(Self::build_request(&task_ctx, &conversation_id, since_ts, None, limit));
+                let mut request = Request::new(Self::build_request(
+                    &task_ctx,
+                    &conversation_id,
+                    since_ts,
+                    None,
+                    limit,
+                ));
                 set_context_metadata(&mut request, &task_ctx);
                 let response = client
                     .query_messages(request)
@@ -282,7 +294,7 @@ impl MessageProvider for StorageReaderMessageProvider {
             limit,
             user_id: ctx.user_id().map(|s| s.to_string()).unwrap_or_default(),
         });
-        
+
         // 利用 Context 传递能力，设置 metadata
         set_context_metadata(&mut request, ctx);
 

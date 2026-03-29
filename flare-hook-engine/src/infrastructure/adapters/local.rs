@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use flare_im_core::{
-    DeliveryEvent, DeliveryHook, MessageDraft, MessageRecord, PostSendHook,
-    PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    DeliveryEvent, DeliveryHook, MessageDraft, MessageRecord, PostSendHook, PreSendDecision,
+    PreSendHook, RecallEvent, RecallHook,
 };
 use flare_server_core::context::{Context, Ctx};
 
@@ -92,12 +92,7 @@ impl LocalHookAdapter {
     }
 
     /// 执行Delivery Hook
-    pub async fn delivery(
-        &self,
-        target: &str,
-        ctx: &Context,
-        event: &DeliveryEvent,
-    ) -> Result<()> {
+    pub async fn delivery(&self, target: &str, ctx: &Context, event: &DeliveryEvent) -> Result<()> {
         let hook = self
             .delivery_hooks
             .get(target)

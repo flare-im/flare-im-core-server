@@ -5,14 +5,14 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use flare_im_core::message::{message_to_proto, Message};
+use flare_im_core::message::{Message, message_to_proto};
 use flare_im_core::utils::extract_seq_from_message;
 use std::sync::Arc;
 use tracing::instrument;
 
 use crate::application::queries::{
-    GetMessageQuery, ListMessageTagsQuery, QueryMessageOperationsQuery, QueryMessagesBySeqQuery, QueryMessagesQuery,
-    SearchMessagesQuery,
+    GetMessageQuery, ListMessageTagsQuery, QueryMessageOperationsQuery, QueryMessagesBySeqQuery,
+    QueryMessagesQuery, SearchMessagesQuery,
 };
 use crate::convert::{datetime_to_timestamp, event_to_proto_or_default};
 use crate::domain::model::Event;
@@ -42,9 +42,7 @@ where
     M: MessageStorage + Send + Sync,
 {
     pub fn new(storage: Arc<M>) -> Self {
-        Self {
-            storage,
-        }
+        Self { storage }
     }
 
     /// 暴露 storage 供 gRPC handler 直接调用仓储（如 query_message_events 等）
@@ -54,7 +52,11 @@ where
 
     /// 查询消息列表
     #[instrument(skip(self, ctx), fields(conversation_id = %query.conversation_id))]
-    pub async fn handle_query_messages(&self, ctx: &flare_server_core::context::Ctx, query: QueryMessagesQuery) -> Result<Vec<Message>> {
+    pub async fn handle_query_messages(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        query: QueryMessagesQuery,
+    ) -> Result<Vec<Message>> {
         let start_time = if query.start_time == 0 {
             None
         } else {
@@ -87,7 +89,7 @@ where
         query: QueryMessagesQuery,
     ) -> Result<QueryMessagesResult> {
         let _ = ctx; // 上下文用于日志追踪
-        
+
         let start_time = if query.start_time == 0 {
             None
         } else {
@@ -201,7 +203,7 @@ where
         query: QueryMessagesBySeqQuery,
     ) -> Result<(Vec<Message>, Option<i64>)> {
         let _ = ctx; // 上下文用于日志追踪
-        
+
         // 直接使用存储层查询
         let messages = self
             .storage
@@ -368,7 +370,15 @@ where
     ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         self.storage
-            .update_sync_cursor(ctx, "", user_id, conversation_id, last_synced_seq, last_synced_ts, None)
+            .update_sync_cursor(
+                ctx,
+                "",
+                user_id,
+                conversation_id,
+                last_synced_seq,
+                last_synced_ts,
+                None,
+            )
             .await
     }
 }

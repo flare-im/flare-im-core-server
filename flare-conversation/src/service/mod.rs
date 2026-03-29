@@ -22,9 +22,12 @@ impl ApplicationBootstrap {
         let service_config = app_config.conversation_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr =
-            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, "flare-conversation")
-                .context("invalid conversation server address")?;
+        let address: SocketAddr = ServiceHelper::parse_server_addr(
+            app_config,
+            &service_config.runtime,
+            "flare-conversation",
+        )
+        .context("invalid conversation server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -74,7 +77,7 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("conversation-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 直接包裹 Service
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let read_svc = ContextLayer::new()
                     .allow_missing()
                     .layer(ConversationReadServiceServer::new(handler.clone()));
@@ -112,7 +115,8 @@ impl ApplicationBootstrap {
                 Box::pin(async move {
                     // 注册服务（使用常量）
                     use flare_im_core::service_names::CONVERSATION;
-                    match flare_im_core::discovery::register_service_only(CONVERSATION, addr, None).await
+                    match flare_im_core::discovery::register_service_only(CONVERSATION, addr, None)
+                        .await
                     {
                         Ok(Some(registry)) => {
                             info!("✅ Service registered: {}", CONVERSATION);

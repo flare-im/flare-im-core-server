@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT;
-use flare_im_core::constants::topics::TOPIC_MESSAGE_CREATED;
+use flare_im_core::constants::topics::TOPIC_MESSAGE_CREATED as TOPIC_MESSAGE_STORAGE;
 use flare_im_core::event::types::types as im_event_types;
 use flare_proto::common::Message;
 use flare_server_core::context::Ctx;
@@ -17,11 +17,16 @@ use tracing::warn;
 use crate::application::handlers::MessagePersistenceCommandHandler;
 
 // 类型别名，简化泛型参数
-type IdempotencyRepo = crate::infrastructure::persistence::repository::redis_idempotency::RedisIdempotencyRepository;
-type HotCacheRepo = crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
-type ArchiveRepo = crate::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
-type EventStreamRepo = crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
-type WalCleanupRepo = crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
+type IdempotencyRepo =
+    crate::infrastructure::persistence::repository::redis_idempotency::RedisIdempotencyRepository;
+type HotCacheRepo =
+    crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
+type ArchiveRepo =
+    crate::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
+type EventStreamRepo =
+    crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
+type WalCleanupRepo =
+    crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
 type AckPub = crate::infrastructure::messaging::ack_publisher::MqAckPublisher;
 
 type MessagePersistenceHandler = MessagePersistenceCommandHandler<
@@ -67,8 +72,9 @@ impl EventHandler for MessageEventHandler {
         }
 
         // 从 payload 解析 Message
-        let message = Message::decode(&*envelope.payload)
-            .map_err(|e| FlareError::deserialization_error(format!("Failed to decode Message: {}", e)))?;
+        let message = Message::decode(&*envelope.payload).map_err(|e| {
+            FlareError::deserialization_error(format!("Failed to decode Message: {}", e))
+        })?;
 
         // 转换为命令
         let cmd = crate::convert::message_command_from_proto(message);
@@ -111,7 +117,7 @@ impl MessageEventConsumerFactory {
     /// # 返回
     /// - `&'static str`: 主题名称
     pub fn topic() -> &'static str {
-        TOPIC_MESSAGE_CREATED
+        TOPIC_MESSAGE_STORAGE
     }
 
     /// 获取消费者组名称

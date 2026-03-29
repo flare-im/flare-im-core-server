@@ -12,7 +12,7 @@ use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{
-    ConnectionQuality, DeviceId, DevicePriority, ConnectionId, TokenVersion, UserId,
+    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
 use flare_server_core::context::Context as SrvContext;
 
@@ -68,7 +68,11 @@ impl ConversationRepository for RedisConversationRepository {
         Ok(())
     }
 
-    async fn remove_connection(&self, conversation_id: &ConnectionId, user_id: &UserId) -> Result<()> {
+    async fn remove_connection(
+        &self,
+        conversation_id: &ConnectionId,
+        user_id: &UserId,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
         let _: usize = conn.del(&key).await.context("failed to delete session")?;
@@ -327,13 +331,22 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         Ok(())
     }
 
-    async fn remove_subscription(&self, ctx: &flare_server_core::context::Context, topics: &[String]) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+    async fn remove_subscription(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        topics: &[String],
+    ) -> Result<()> {
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
 
         for topic in topics {
             let key = self.subscription_key(&user_id, topic);
-            let _: usize = conn.del(&key).await.context("failed to delete subscription")?;
+            let _: usize = conn
+                .del(&key)
+                .await
+                .context("failed to delete subscription")?;
 
             // 从主题订阅者集合中移除
             let topic_key = self.topic_subscribers_key(topic);
@@ -346,8 +359,13 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         Ok(())
     }
 
-    async fn get_user_subscriptions(&self, ctx: &flare_server_core::context::Context) -> Result<Vec<(String, HashMap<String, String>)>> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+    async fn get_user_subscriptions(
+        &self,
+        ctx: &flare_server_core::context::Context,
+    ) -> Result<Vec<(String, HashMap<String, String>)>> {
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
 
         // 查找该用户的所有订阅键
@@ -398,7 +416,10 @@ impl RedisPresencePublisher {
 }
 
 impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
-    async fn publish_presence_event(&self, event: flare_proto::signaling::online::PresenceEvent) -> Result<()> {
+    async fn publish_presence_event(
+        &self,
+        event: flare_proto::signaling::online::PresenceEvent,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
         let payload = prost::Message::encode_to_vec(&event);
         let _: () = conn
@@ -408,7 +429,10 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
         Ok(())
     }
 
-    async fn publish_user_presence_event(&self, event: flare_proto::signaling::online::UserPresenceEvent) -> Result<()> {
+    async fn publish_user_presence_event(
+        &self,
+        event: flare_proto::signaling::online::UserPresenceEvent,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
         let payload = prost::Message::encode_to_vec(&event);
         let _: () = conn

@@ -1,6 +1,6 @@
 //! Storage + Sync gRPC 客户端池
 
-use flare_im_core::service_names::{get_service_name, STORAGE_READER, SYNC_ORCHESTRATOR};
+use flare_im_core::service_names::{STORAGE_READER, SYNC_ORCHESTRATOR, get_service_name};
 use flare_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_proto::sync::sync_service_client::SyncServiceClient;
 use flare_server_core::discovery::ServiceClient;
@@ -67,12 +67,15 @@ impl StorageSyncGrpcPool {
         let discover = flare_im_core::discovery::create_discover(&self.sync_service_name)
             .await
             .map_err(|e| {
-                ErrorBuilder::new(ErrorCode::ServiceUnavailable, "sync orchestrator unavailable")
-                    .details(format!(
-                        "Failed to create service discover for {}: {}",
-                        self.sync_service_name, e
-                    ))
-                    .build_error()
+                ErrorBuilder::new(
+                    ErrorCode::ServiceUnavailable,
+                    "sync orchestrator unavailable",
+                )
+                .details(format!(
+                    "Failed to create service discover for {}: {}",
+                    self.sync_service_name, e
+                ))
+                .build_error()
             })?;
 
         if let Some(discover) = discover {
@@ -80,14 +83,17 @@ impl StorageSyncGrpcPool {
             return Ok(());
         }
 
-        Err(
-            ErrorBuilder::new(ErrorCode::ServiceUnavailable, "sync orchestrator unavailable")
-                .details("Service discovery not configured for sync orchestrator")
-                .build_error(),
+        Err(ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "sync orchestrator unavailable",
         )
+        .details("Service discovery not configured for sync orchestrator")
+        .build_error())
     }
 
-    pub async fn ensure_storage_reader_client(&self) -> Result<StorageReaderServiceClient<Channel>> {
+    pub async fn ensure_storage_reader_client(
+        &self,
+    ) -> Result<StorageReaderServiceClient<Channel>> {
         let mut guard = self.storage_reader_grpc.lock().await;
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
@@ -96,8 +102,11 @@ impl StorageSyncGrpcPool {
         self.ensure_storage_service_client().await?;
         let mut sc_guard = self.storage_service_client.lock().await;
         let service_client = sc_guard.as_mut().ok_or_else(|| {
-            ErrorBuilder::new(ErrorCode::InternalError, "storage reader service client not initialized")
-                .build_error()
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "storage reader service client not initialized",
+            )
+            .build_error()
         })?;
         let channel = service_client.get_channel().await.map_err(|e| {
             ErrorBuilder::new(ErrorCode::ServiceUnavailable, "storage reader unavailable")
@@ -119,13 +128,19 @@ impl StorageSyncGrpcPool {
         self.ensure_sync_service_client().await?;
         let mut sc_guard = self.sync_service_client.lock().await;
         let service_client = sc_guard.as_mut().ok_or_else(|| {
-            ErrorBuilder::new(ErrorCode::InternalError, "sync orchestrator service client not initialized")
-                .build_error()
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "sync orchestrator service client not initialized",
+            )
+            .build_error()
         })?;
         let channel = service_client.get_channel().await.map_err(|e| {
-            ErrorBuilder::new(ErrorCode::ServiceUnavailable, "sync orchestrator unavailable")
-                .details(format!("Failed to get channel: {}", e))
-                .build_error()
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "sync orchestrator unavailable",
+            )
+            .details(format!("Failed to get channel: {}", e))
+            .build_error()
         })?;
 
         let client = SyncServiceClient::new(channel);

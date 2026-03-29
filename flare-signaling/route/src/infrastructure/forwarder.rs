@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as AnyhowContext, Result};
-use flare_proto::message::message_send_service_client::MessageSendServiceClient;
 use flare_proto::common::{CustomData, Event as ProtoEvent, Message, OperationResponse};
+use flare_proto::message::message_send_service_client::MessageSendServiceClient;
 use flare_proto::message::{ExecuteEventRequest, SendMessageRequest, SendMessageResponse};
 use prost::Message as ProstMessage;
 use tokio::sync::RwLock;
@@ -17,7 +17,7 @@ use tonic::transport::Channel;
 use flare_server_core::context::Context as ServerContext;
 use tracing::{debug, info};
 
-use crate::domain::repository::{RouteRepository, DefaultRouteRepository};
+use crate::domain::repository::{DefaultRouteRepository, RouteRepository};
 use flare_server_core::discovery::ServiceClient;
 
 /// SVID 常量定义
@@ -71,7 +71,7 @@ impl MessageForwarder {
         Self {
             business_clients: Arc::new(RwLock::new(HashMap::new())),
             default_tenant_id,
-            max_cache_size: 100, // 最多缓存 100 个客户端
+            max_cache_size: 100,                         // 最多缓存 100 个客户端
             max_idle_duration: Duration::from_secs(300), // 5 分钟空闲后清理
         }
     }
@@ -85,11 +85,9 @@ impl MessageForwarder {
     async fn cleanup_expired_clients(&self) {
         let mut clients = self.business_clients.write().await;
         let initial_size = clients.len();
-        
-        clients.retain(|_key, cached_client| {
-            !cached_client.should_cleanup(self.max_idle_duration)
-        });
-        
+
+        clients.retain(|_key, cached_client| !cached_client.should_cleanup(self.max_idle_duration));
+
         let removed = initial_size - clients.len();
         if removed > 0 {
             debug!(
@@ -127,26 +125,26 @@ impl MessageForwarder {
 
         // 检查缓存大小，必要时清理
         let mut clients = self.business_clients.write().await;
-        
+
         // 如果缓存已满，清理过期客户端
         if clients.len() >= self.max_cache_size {
             drop(clients); // 释放写锁，允许其他操作
             self.cleanup_expired_clients().await;
             let mut clients = self.business_clients.write().await;
-            
+
             // 如果清理后还是满的，移除最旧的客户端
             if clients.len() >= self.max_cache_size {
                 let oldest_key = clients
                     .iter()
                     .min_by_key(|(_, cached)| cached.last_used)
                     .map(|(key, _)| key.clone());
-                
+
                 if let Some(key) = oldest_key {
                     clients.remove(&key);
                     debug!(removed_key = %key, "Removed oldest client from cache");
                 }
             }
-            
+
             // 插入新客户端
             clients.insert(cache_key, CachedClient::new(new_client.clone()));
             Ok(new_client)
@@ -163,26 +161,25 @@ impl MessageForwarder {
         endpoint: &str,
         svid: &str,
     ) -> Result<MessageSendServiceClient<Channel>> {
-
         // 特殊处理：如果 SVID 是 svid.im，直接使用 MESSAGE_ORCHESTRATOR 服务名
         if svid == svid::IM {
-            use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
             use flare_im_core::config::app_config;
             use flare_im_core::discovery::create_discover_from_registry_config_with_filters;
-            
+            use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
+
             let message_orchestrator_service = get_service_name(MESSAGE_ORCHESTRATOR);
             let app_config = app_config();
-            
+
             // 使用 svid.im 作为过滤条件
             let mut tag_filters = std::collections::HashMap::new();
             tag_filters.insert("svid".to_string(), svid::IM.to_string());
-            
+
             debug!(
                 service = %message_orchestrator_service,
                 svid = svid::IM,
                 "Creating service discover for svid.im with MESSAGE_ORCHESTRATOR"
             );
-            
+
             let discover = if let Some(registry_config) = &app_config.core.registry {
                 create_discover_from_registry_config_with_filters(
                     registry_config,
@@ -251,9 +248,9 @@ impl MessageForwarder {
             // 服务名（通过服务发现，支持 SVID 过滤）
             use flare_im_core::config::app_config;
             use flare_im_core::discovery::create_discover_from_registry_config_with_filters;
-            
+
             let app_config = app_config();
-            
+
             // 根据 SVID 过滤服务实例（如果提供了 SVID）
             let tag_filters = if !svid.is_empty() {
                 let mut filters = std::collections::HashMap::new();
@@ -262,7 +259,7 @@ impl MessageForwarder {
             } else {
                 None
             };
-            
+
             let discover = if let Some(registry_config) = &app_config.core.registry {
                 if tag_filters.is_some() {
                     info!(
@@ -289,9 +286,13 @@ impl MessageForwarder {
                     let discover_result = flare_im_core::discovery::create_discover(endpoint)
                         .await
                         .map_err(|e| {
-                            anyhow::anyhow!("Failed to create service discover for {}: {}", endpoint, e)
+                            anyhow::anyhow!(
+                                "Failed to create service discover for {}: {}",
+                                endpoint,
+                                e
+                            )
                         })?;
-                    
+
                     discover_result.ok_or_else(|| {
                         anyhow::anyhow!("Service discovery not configured for {}", endpoint)
                     })?
@@ -340,7 +341,11 @@ impl MessageForwarder {
     /// # 参数
     /// * `endpoint` - 服务端点（服务名、URL 或 host:port）
     /// * `svid` - SVID（用于服务发现时的标签过滤）
-    async fn get_business_client(&self, endpoint: &str, svid: &str) -> Result<MessageSendServiceClient<Channel>> {
+    async fn get_business_client(
+        &self,
+        endpoint: &str,
+        svid: &str,
+    ) -> Result<MessageSendServiceClient<Channel>> {
         // 对于 svid.im，使用固定的 endpoint（MESSAGE_ORCHESTRATOR 服务名）
         let actual_endpoint = if svid == svid::IM {
             use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
@@ -350,9 +355,10 @@ impl MessageForwarder {
         };
 
         // 从缓存获取或创建客户端
-        self.get_or_create_cached_client(svid, &actual_endpoint).await
+        self.get_or_create_cached_client(svid, &actual_endpoint)
+            .await
     }
-    
+
     /// 转发消息到业务系统
     ///
     /// 返回 (端点, 响应数据) 元组
@@ -364,11 +370,7 @@ impl MessageForwarder {
         route_repository: Arc<DefaultRouteRepository>,
     ) -> Result<(String, Vec<u8>)> {
         // 提取或使用默认 SVID
-        let resolved_svid = if svid.is_empty() {
-            svid::IM
-        } else {
-            svid
-        };
+        let resolved_svid = if svid.is_empty() { svid::IM } else { svid };
         debug!(svid = %resolved_svid, "Forwarding message to business system");
 
         // 对于 svid.im，直接使用服务发现，不需要 RouteRepository
@@ -444,10 +446,7 @@ impl MessageForwarder {
             &forwarding_ctx,
         );
 
-        let response = match client
-            .send_message(grpc_request)
-            .await
-        {
+        let response = match client.send_message(grpc_request).await {
             Ok(resp) => resp,
             Err(e) => {
                 use tracing::error;
@@ -513,7 +512,7 @@ impl MessageForwarder {
     ) -> Result<(String, Vec<u8>)> {
         let resolved_svid = if svid.is_empty() { svid::IM } else { svid };
         let endpoint = if resolved_svid == svid::IM {
-            use flare_im_core::service_names::{get_service_name, MESSAGE_ORCHESTRATOR};
+            use flare_im_core::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
             get_service_name(MESSAGE_ORCHESTRATOR)
         } else {
             use crate::domain::model::Svid;
@@ -521,8 +520,19 @@ impl MessageForwarder {
                 .map_err(|e| anyhow::anyhow!("Invalid SVID: {}", e))?;
             match route_repository.find_by_svid(svid_obj.as_str()).await {
                 Ok(Some(route)) => route.endpoint().as_str().to_string(),
-                Ok(None) => return Err(anyhow::anyhow!("Business service not found for SVID {}", resolved_svid)),
-                Err(e) => return Err(anyhow::anyhow!("Failed to resolve route for SVID {}: {}", resolved_svid, e)),
+                Ok(None) => {
+                    return Err(anyhow::anyhow!(
+                        "Business service not found for SVID {}",
+                        resolved_svid
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to resolve route for SVID {}: {}",
+                        resolved_svid,
+                        e
+                    ));
+                }
             }
         };
 
@@ -543,10 +553,14 @@ impl MessageForwarder {
             &forwarding_ctx,
         );
 
-        let response = client
-            .execute_event(grpc_request)
-            .await
-            .map_err(|e| anyhow::anyhow!("ExecuteEvent failed (svid={}): {} ({:?})", resolved_svid, e.message(), e.code()))?;
+        let response = client.execute_event(grpc_request).await.map_err(|e| {
+            anyhow::anyhow!(
+                "ExecuteEvent failed (svid={}): {} ({:?})",
+                resolved_svid,
+                e.message(),
+                e.code()
+            )
+        })?;
         let inner = response.into_inner();
         let mut response_bytes = Vec::new();
         OperationResponse::encode(&inner, &mut response_bytes)

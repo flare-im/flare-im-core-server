@@ -17,7 +17,11 @@ pub struct PushMessageCommand {
 }
 
 impl PushMessageCommand {
-    pub fn new(user_ids: Vec<String>, messages: Vec<Message>, options: Option<PushOptions>) -> Self {
+    pub fn new(
+        user_ids: Vec<String>,
+        messages: Vec<Message>,
+        options: Option<PushOptions>,
+    ) -> Self {
         Self {
             user_ids,
             messages,

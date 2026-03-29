@@ -44,28 +44,33 @@ impl EventHandler for OnlinePushTaskHandler {
                 let user_id = env.user_id.clone();
 
                 let route_result = match kind {
-                    PushTaskPayloadKind::Message => match access_gateway::PushMessageRequest::decode(
-                        env.push_payload.as_slice(),
-                    ) {
-                        Ok(push) => {
-                            self.gateway_push
-                                .push_message(ctx, &user_id, strategy, push)
-                                .await
+                    PushTaskPayloadKind::Message => {
+                        match access_gateway::PushMessageRequest::decode(
+                            env.push_payload.as_slice(),
+                        ) {
+                            Ok(push) => {
+                                self.gateway_push
+                                    .push_message(ctx, &user_id, strategy, push)
+                                    .await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("decode PushMessageRequest: {}", e)),
                         }
-                        Err(e) => Err(anyhow::anyhow!("decode PushMessageRequest: {}", e)),
-                    },
-                    PushTaskPayloadKind::Event => match access_gateway::PushEventRequest::decode(
-                        env.push_payload.as_slice(),
-                    ) {
-                        Ok(push) => {
-                            self.gateway_push
-                                .push_event(ctx, &user_id, strategy, push)
-                                .await
+                    }
+                    PushTaskPayloadKind::Event => {
+                        match access_gateway::PushEventRequest::decode(env.push_payload.as_slice())
+                        {
+                            Ok(push) => {
+                                self.gateway_push
+                                    .push_event(ctx, &user_id, strategy, push)
+                                    .await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("decode PushEventRequest: {}", e)),
                         }
-                        Err(e) => Err(anyhow::anyhow!("decode PushEventRequest: {}", e)),
-                    },
+                    }
                     PushTaskPayloadKind::Notification => {
-                        match access_gateway::PushNotificationRequest::decode(env.push_payload.as_slice()) {
+                        match access_gateway::PushNotificationRequest::decode(
+                            env.push_payload.as_slice(),
+                        ) {
                             Ok(push) => {
                                 self.gateway_push
                                     .push_notification(ctx, &user_id, strategy, push)
@@ -74,26 +79,27 @@ impl EventHandler for OnlinePushTaskHandler {
                             Err(e) => Err(anyhow::anyhow!("decode PushNotificationRequest: {}", e)),
                         }
                     }
-                    PushTaskPayloadKind::Ack => match access_gateway::PushAckRequest::decode(
-                        env.push_payload.as_slice(),
-                    ) {
-                        Ok(push) => {
-                            self.gateway_push
-                                .push_ack(ctx, &user_id, strategy, push)
-                                .await
+                    PushTaskPayloadKind::Ack => {
+                        match access_gateway::PushAckRequest::decode(env.push_payload.as_slice()) {
+                            Ok(push) => {
+                                self.gateway_push
+                                    .push_ack(ctx, &user_id, strategy, push)
+                                    .await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("decode PushAckRequest: {}", e)),
                         }
-                        Err(e) => Err(anyhow::anyhow!("decode PushAckRequest: {}", e)),
-                    },
-                    PushTaskPayloadKind::Custom => match access_gateway::PushCustomRequest::decode(
-                        env.push_payload.as_slice(),
-                    ) {
-                        Ok(push) => {
-                            self.gateway_push
-                                .push_custom(ctx, &user_id, strategy, push)
-                                .await
+                    }
+                    PushTaskPayloadKind::Custom => {
+                        match access_gateway::PushCustomRequest::decode(env.push_payload.as_slice())
+                        {
+                            Ok(push) => {
+                                self.gateway_push
+                                    .push_custom(ctx, &user_id, strategy, push)
+                                    .await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("decode PushCustomRequest: {}", e)),
                         }
-                        Err(e) => Err(anyhow::anyhow!("decode PushCustomRequest: {}", e)),
-                    },
+                    }
                     PushTaskPayloadKind::Unspecified => Err(anyhow::anyhow!(
                         "PushTaskEnvelope.payload_kind unspecified; reject task"
                     )),

@@ -1,14 +1,10 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 // Note: Storage service client is not directly used here
 // Storage operations are handled through Message Orchestrator
-use flare_proto::storage::{
-    QueryMessagesRequest, QueryMessagesResponse,
-};
+use flare_proto::storage::{QueryMessagesRequest, QueryMessagesResponse};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
-#[async_trait]
 pub trait StorageClient: Send + Sync {
     async fn query_messages(&self, request: QueryMessagesRequest) -> Result<QueryMessagesResponse>;
 }
@@ -25,10 +21,7 @@ impl GrpcStorageClient {
     }
 }
 
-#[async_trait]
 impl StorageClient for GrpcStorageClient {
-
-
     async fn query_messages(
         &self,
         _request: QueryMessagesRequest,

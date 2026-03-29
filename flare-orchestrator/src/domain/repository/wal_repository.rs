@@ -1,6 +1,6 @@
+use crate::error::Result;
 use std::future::Future;
 use std::pin::Pin;
-use crate::error::Result;
 
 use crate::domain::model::MessageSubmission;
 

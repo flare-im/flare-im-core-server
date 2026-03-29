@@ -7,10 +7,9 @@
 use std::sync::Arc;
 
 use flare_im_core::{
-    DeleteType as CoreDeleteType, MarkType as CoreMarkType,
-    MessageCommand, MessageCommandHandler as CoreMessageCommandHandler,
-    OperationResult, ReactionAction as CoreReactionAction,
-    SendAckResult, SendMessageCommand,
+    DeleteType as CoreDeleteType, MarkType as CoreMarkType, MessageCommand,
+    MessageCommandHandler as CoreMessageCommandHandler, OperationResult,
+    ReactionAction as CoreReactionAction, SendAckResult, SendMessageCommand,
 };
 use flare_proto::common::Message;
 use flare_server_core::context::{Context, Ctx};
@@ -36,7 +35,7 @@ impl CoreMessageCommandHandlerAdapter {
 impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
     async fn handle_send_message(
         &self,
-        ctx: &Ctx,
+        _ctx: &Ctx,
         cmd: &SendMessageCommand,
     ) -> anyhow::Result<SendAckResult> {
         let ctx = std::sync::Arc::new(Context::root());
@@ -87,16 +86,18 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
 
     async fn handle_message_operation(
         &self,
-        ctx: &Ctx,
+        _ctx: &Ctx,
         cmd: &MessageCommand,
     ) -> anyhow::Result<Option<OperationResult>> {
         let ctx = std::sync::Arc::new(Context::root());
-        let base = |conversation_id: &str, server_msg_id: &str, operator_id: &str| MessageOperationCommand {
-            message_id: server_msg_id.to_string(),
-            operator_id: operator_id.to_string(),
-            timestamp: chrono::Utc::now(),
-            tenant_id: "0".to_string(),
-            conversation_id: conversation_id.to_string(),
+        let base = |conversation_id: &str, server_msg_id: &str, operator_id: &str| {
+            MessageOperationCommand {
+                message_id: server_msg_id.to_string(),
+                operator_id: operator_id.to_string(),
+                timestamp: chrono::Utc::now(),
+                tenant_id: "0".to_string(),
+                conversation_id: conversation_id.to_string(),
+            }
         };
         let request_id = match cmd {
             MessageCommand::Recall { request_id, .. }
@@ -120,7 +121,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                 request_id: _,
             } => {
                 let recall_cmd = RecallMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), operator_id.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        operator_id.as_str(),
+                    ),
                     reason: reason.clone(),
                     time_limit_seconds: None,
                     allow_admin_override: false,
@@ -135,7 +140,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                 request_id: _,
             } => {
                 let edit_cmd = EditMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), operator_id.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        operator_id.as_str(),
+                    ),
                     new_content: new_content.clone(),
                     reason: None,
                     allow_admin_override: false,
@@ -154,7 +163,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                     CoreDeleteType::Hard => (DeleteType::Hard, DeleteScope::ConversationGlobal),
                 };
                 let delete_cmd = DeleteMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), operator_id.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        operator_id.as_str(),
+                    ),
                     delete_type: delete_type_impl,
                     delete_scope: scope,
                     reason: None,
@@ -202,17 +215,31 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                 let reaction_cmd = match action {
                     CoreReactionAction::Add => {
                         let add_cmd = AddReactionCommand {
-                            base: base(conversation_id.as_str(), server_msg_id.as_str(), user_id.as_str()),
+                            base: base(
+                                conversation_id.as_str(),
+                                server_msg_id.as_str(),
+                                user_id.as_str(),
+                            ),
                             emoji: emoji.clone(),
                         };
-                        self.inner.handle_add_reaction(&ctx, add_cmd).await.map(|_| ())
+                        self.inner
+                            .handle_add_reaction(&ctx, add_cmd)
+                            .await
+                            .map(|_| ())
                     }
                     CoreReactionAction::Remove => {
                         let remove_cmd = RemoveReactionCommand {
-                            base: base(conversation_id.as_str(), server_msg_id.as_str(), user_id.as_str()),
+                            base: base(
+                                conversation_id.as_str(),
+                                server_msg_id.as_str(),
+                                user_id.as_str(),
+                            ),
                             emoji: emoji.clone(),
                         };
-                        self.inner.handle_remove_reaction(&ctx, remove_cmd).await.map(|_| ())
+                        self.inner
+                            .handle_remove_reaction(&ctx, remove_cmd)
+                            .await
+                            .map(|_| ())
                     }
                 };
                 reaction_cmd
@@ -224,7 +251,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                 request_id: _,
             } => {
                 let pin_cmd = PinMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), pinned_by.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        pinned_by.as_str(),
+                    ),
                     reason: None,
                     expire_at: None,
                 };
@@ -254,7 +285,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                     CoreMarkType::Custom => 3,
                 };
                 let mark_cmd = MarkMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), user_id.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        user_id.as_str(),
+                    ),
                     mark_type: mark_type_i32,
                 };
                 self.inner.handle_mark_message(&ctx, mark_cmd).await
@@ -273,7 +308,11 @@ impl CoreMessageCommandHandler for CoreMessageCommandHandlerAdapter {
                     CoreMarkType::Custom => 3,
                 };
                 let unmark_cmd = UnmarkMessageCommand {
-                    base: base(conversation_id.as_str(), server_msg_id.as_str(), user_id.as_str()),
+                    base: base(
+                        conversation_id.as_str(),
+                        server_msg_id.as_str(),
+                        user_id.as_str(),
+                    ),
                     mark_type: Some(mark_type_i32),
                     user_id: user_id.as_str().to_string(),
                 };

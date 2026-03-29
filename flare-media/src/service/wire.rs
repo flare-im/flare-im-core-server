@@ -15,10 +15,10 @@ use crate::domain::repository::{
 };
 use crate::domain::service::MediaService;
 use crate::infrastructure::cache::redis_metadata::RedisMetadataCache;
+use crate::infrastructure::conversation::redis_session::RedisUploadSessionStore;
 use crate::infrastructure::local::filesystem::FilesystemMediaStore;
 use crate::infrastructure::object_store::adapter::build_object_store;
 use crate::infrastructure::persistence::postgres_metadata::PostgresMetadataStore;
-use crate::infrastructure::conversation::redis_session::RedisUploadSessionStore;
 use crate::interface::grpc::MediaGrpcHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
@@ -59,9 +59,7 @@ pub async fn initialize(
 }
 
 /// 构建媒体服务
-async fn build_media_service(
-    config: &MediaConfig,
-) -> Result<Arc<MediaService>> {
+async fn build_media_service(config: &MediaConfig) -> Result<Arc<MediaService>> {
     let object_repo: Option<ObjectRepositoryRef> =
         build_object_store(config.object_store.as_ref()).await?;
 

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use flare_proto::common::{Ack, DataPacket, Event};
 use flare_proto::Message;
+use flare_proto::common::{Ack, DataPacket, Event};
+use std::collections::HashMap;
 
 ///! 上行命令
 
@@ -14,12 +14,12 @@ pub struct SendMessageCommand {
 }
 
 impl SendMessageCommand {
-    pub fn new(connection_id: String, msg: Message,seq: u64)->Self{
-        Self{
+    pub fn new(connection_id: String, msg: Message, seq: u64) -> Self {
+        Self {
             connection_id,
             msg,
             seq,
-            metadata: HashMap::new()
+            metadata: HashMap::new(),
         }
     }
 }

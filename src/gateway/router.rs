@@ -245,11 +245,12 @@ impl GatewayRouter {
                 Some(instance) => {
                     // 根据实例地址直接创建 channel
                     let uri = instance.to_grpc_uri();
-                    let endpoint = Endpoint::from_shared(uri)
-                        .with_context(|| format!(
+                    let endpoint = Endpoint::from_shared(uri).with_context(|| {
+                        format!(
                             "Invalid URI for gateway {}: {}",
                             gateway_id, instance.address
-                        ))?;
+                        )
+                    })?;
 
                     let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
                     tokio::time::timeout(timeout_duration, endpoint.connect())
@@ -322,11 +323,7 @@ impl GatewayRouter {
                     )
                 })?
                 .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to connect to static Access Gateway {}: {}",
-                        uri,
-                        e
-                    )
+                    anyhow::anyhow!("Failed to connect to static Access Gateway {}: {}", uri, e)
                 })?
         } else {
             return Err(anyhow::anyhow!(
@@ -357,7 +354,6 @@ impl GatewayRouter {
         Ok(client)
     }
 }
-
 
 impl GatewayRouterTrait for GatewayRouter {
     async fn route_push_message(

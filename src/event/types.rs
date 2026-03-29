@@ -7,19 +7,19 @@
 pub mod types {
     /// 消息事件
     pub const MESSAGE: &str = "message";
-    
+
     /// 事件
     pub const EVENT: &str = "event";
-    
+
     /// ACK
     pub const ACK: &str = "ack";
-    
+
     /// 通知
     pub const NOTIFICATION: &str = "notification";
-    
+
     /// 自定义数据
     pub const CUSTOM: &str = "custom";
-    
+
     /// 系统消息
     pub const SYSTEM: &str = "system";
 }
@@ -55,6 +55,3 @@ pub fn is_custom_event(event_type: &str) -> bool {
 pub fn is_system_event(event_type: &str) -> bool {
     event_type == types::SYSTEM
 }
-
-
-

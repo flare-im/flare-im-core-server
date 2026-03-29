@@ -23,7 +23,9 @@ pub struct UserService<R: ConversationRepository + Send + Sync> {
 
 impl<R: ConversationRepository + Send + Sync> UserService<R> {
     pub fn new(conversation_repository: Arc<R>) -> Self {
-        Self { conversation_repository }
+        Self {
+            conversation_repository,
+        }
     }
 
     /// 查询用户在线状态
@@ -143,12 +145,14 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             request.user_id
         } else {
             ctx.user_id()
-                .ok_or_else(|| anyhow::anyhow!("user_id is required in ListUserDevicesRequest or context"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("user_id is required in ListUserDevicesRequest or context")
+                })?
                 .to_string()
         };
 
-        let user_id_vo = crate::domain::value_object::UserId::new(user_id)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let user_id_vo =
+            crate::domain::value_object::UserId::new(user_id).map_err(|e| anyhow::anyhow!(e))?;
         let sessions = self
             .conversation_repository
             .get_user_connections(&user_id_vo)
@@ -218,8 +222,14 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         }
     }
 
-    pub async fn get_device(&self, ctx: &flare_server_core::context::Context, request: GetDeviceRequest) -> Result<GetDeviceResponse> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+    pub async fn get_device(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        request: GetDeviceRequest,
+    ) -> Result<GetDeviceResponse> {
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let device_id = &request.device_id;
 
         let user_id_vo = crate::domain::value_object::UserId::new(user_id.to_string())

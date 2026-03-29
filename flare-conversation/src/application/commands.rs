@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::domain::model::{
-    ConflictResolutionPolicy, DeviceState, ConversationLifecycleState, ConversationParticipant,
-    ConversationVisibility,
+    ConflictResolutionPolicy, ConversationLifecycleState, ConversationParticipant,
+    ConversationVisibility, DeviceState,
 };
 
 /// 批量确认命令
@@ -19,6 +19,8 @@ pub struct CreateConversationCommand {
     pub participants: Vec<ConversationParticipant>,
     pub attributes: HashMap<String, String>,
     pub visibility: ConversationVisibility,
+    /// 落库：单聊由领域强制清空；非单聊写入 conversations.channel_id
+    pub channel_id: String,
 }
 
 /// 删除会话命令

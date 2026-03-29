@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::event::DomainEvent;
 use super::super::value_object::{
-    ConnectionQuality, DeviceId, DevicePriority, ConnectionId, TokenVersion, UserId,
+    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
 
 /// Connection 聚合根

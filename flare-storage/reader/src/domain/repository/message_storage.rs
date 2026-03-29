@@ -13,8 +13,8 @@
 //! 典型实现：PostgreSQL（+ 可选 Redis 缓存）见 `infrastructure::persistence::optimized_postgres_store`。
 
 use crate::domain::model::{
-    ConversationMessageHead, EditHistoryEntry, Event, EventType, FilterExpression, Message, MessageUpdate,
-    PinnedMessageInfo, ReactionItem, ReadListEntry, SyncCursor, VisibilityStatus,
+    ConversationMessageHead, EditHistoryEntry, Event, EventType, FilterExpression, Message,
+    MessageUpdate, PinnedMessageInfo, ReactionItem, ReadListEntry, SyncCursor, VisibilityStatus,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,7 +27,12 @@ use std::collections::HashMap;
 #[async_trait]
 pub trait MessageStorage: Send + Sync {
     /// CQRS 读侧不落库：写入由 Storage Writer 消费事件完成；此处固定 no-op，仅保留以兼容 trait 对象。
-    async fn store_message(&self, ctx: &Ctx, _message: &Message, _conversation_id: &str) -> Result<()> {
+    async fn store_message(
+        &self,
+        ctx: &Ctx,
+        _message: &Message,
+        _conversation_id: &str,
+    ) -> Result<()> {
         let _ = ctx;
         Ok(())
     }
@@ -65,9 +70,18 @@ pub trait MessageStorage: Send + Sync {
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>>;
 
     /// 获取消息时间戳（用于清除会话等）
-    async fn get_message_timestamp(&self, ctx: &Ctx, message_id: &str) -> Result<Option<DateTime<Utc>>>;
+    async fn get_message_timestamp(
+        &self,
+        ctx: &Ctx,
+        message_id: &str,
+    ) -> Result<Option<DateTime<Utc>>>;
 
-    async fn update_message(&self, ctx: &Ctx, message_id: &str, updates: MessageUpdate) -> Result<()>;
+    async fn update_message(
+        &self,
+        ctx: &Ctx,
+        message_id: &str,
+        updates: MessageUpdate,
+    ) -> Result<()>;
 
     async fn batch_update_visibility(
         &self,
@@ -189,7 +203,7 @@ pub trait MessageStorage: Send + Sync {
         user_id: &str,
         conversation_ids: &[String],
         messages_per_conversation: i32,
-    ) -> Result<Vec<(String, Vec<Message>, i64)>>;  // (conversation_id, messages, last_seq)
+    ) -> Result<Vec<(String, Vec<Message>, i64)>>; // (conversation_id, messages, last_seq)
 
     /// 同步用：更新用户在某会话的同步游标
     async fn update_sync_cursor(

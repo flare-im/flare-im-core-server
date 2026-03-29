@@ -9,7 +9,9 @@ use flare_server_core::context::Ctx;
 pub enum MatchRule {
     #[default]
     Any,
-    Exact { values: HashSet<String> },
+    Exact {
+        values: HashSet<String>,
+    },
 }
 
 impl MatchRule {
@@ -48,16 +50,16 @@ pub struct HookSelector {
 impl HookSelector {
     pub fn matches(&self, ctx: &Ctx) -> bool {
         use crate::hooks::hook_context_data::get_hook_context_data;
-        
+
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
         let hook_data = get_hook_context_data(ctx);
-        
+
         self.tenants.matches(Some(tenant_id.as_str()))
-            && self.conversation_types.matches(
-                hook_data.and_then(|d| d.conversation_type.as_deref())
-            )
-            && self.message_types.matches(
-                hook_data.and_then(|d| d.message_type.as_deref())
-            )
+            && self
+                .conversation_types
+                .matches(hook_data.and_then(|d| d.conversation_type.as_deref()))
+            && self
+                .message_types
+                .matches(hook_data.and_then(|d| d.message_type.as_deref()))
     }
 }

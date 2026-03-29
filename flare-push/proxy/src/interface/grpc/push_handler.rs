@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
+use flare_proto::RpcStatusExt;
 use flare_proto::common::RpcStatus;
 use flare_proto::push::push_service_server::PushService;
 use flare_proto::push::{
     PushCustomRequest, PushCustomResponse, PushMessageRequest, PushMessageResponse,
-    PushNotificationRequest, PushNotificationResponse,
-    QueryPushStatusRequest, QueryPushStatusResponse,
+    PushNotificationRequest, PushNotificationResponse, QueryPushStatusRequest,
+    QueryPushStatusResponse,
 };
-use flare_proto::RpcStatusExt;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 use tracing::instrument;

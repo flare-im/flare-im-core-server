@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use flare_proto::signaling::online::{
+    HeartbeatResponse, LoginResponse, LogoutResponse, WatchPresenceRequest,
+};
 use flare_server_core::context::Context;
-use flare_proto::signaling::online::{HeartbeatResponse, LoginResponse, LogoutResponse, WatchPresenceRequest};
 use tracing::instrument;
 
-use crate::application::commands::{
-    HeartbeatCommand, LoginCommand, LogoutCommand,
-};
+use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
 use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
 use crate::domain::service::{OnlineStatusService, SubscriptionService};
 
@@ -42,19 +42,33 @@ where
 
     /// 处理登录命令
     #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, device_id = %command.request.device_id))]
-    pub async fn handle_login(&self, ctx: &Context, command: LoginCommand) -> Result<LoginResponse> {
+    pub async fn handle_login(
+        &self,
+        ctx: &Context,
+        command: LoginCommand,
+    ) -> Result<LoginResponse> {
         self.online_domain_service.login(ctx, command.request).await
     }
 
     /// 处理登出命令
     #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id))]
-    pub async fn handle_logout(&self, ctx: &Context, command: LogoutCommand) -> Result<LogoutResponse> {
-        self.online_domain_service.logout(ctx, command.request).await
+    pub async fn handle_logout(
+        &self,
+        ctx: &Context,
+        command: LogoutCommand,
+    ) -> Result<LogoutResponse> {
+        self.online_domain_service
+            .logout(ctx, command.request)
+            .await
     }
 
     /// 处理心跳命令
     #[instrument(skip(self, ctx), fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id))]
-    pub async fn handle_heartbeat(&self, ctx: &Context, command: HeartbeatCommand) -> Result<HeartbeatResponse> {
+    pub async fn handle_heartbeat(
+        &self,
+        ctx: &Context,
+        command: HeartbeatCommand,
+    ) -> Result<HeartbeatResponse> {
         self.online_domain_service
             .heartbeat(
                 ctx,

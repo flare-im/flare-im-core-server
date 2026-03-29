@@ -7,8 +7,8 @@ use crate::domain::model::{
     ReactionPayload, ReadPayload, RecallPayload, RequestContext, TenantContext, UnmarkPayload,
     UnpinPayload,
 };
-use flare_proto::common::message_content::Content;
 use flare_proto::common;
+use flare_proto::common::message_content::Content;
 
 /// 统一从 flare-im-core 重导出，供本 crate 其他处使用
 pub use flare_im_core::message::{message_from_proto, message_to_proto};
@@ -16,7 +16,10 @@ pub use flare_im_core::message::{message_from_proto, message_to_proto};
 /// 从 proto Event 转为领域 Event（common::Event 无 tenant_id/operator_id，由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
     let r#type = event_type_from_i32(p.r#type);
-    let payload = p.payload.as_ref().and_then(|pl| event_payload_from_proto(pl));
+    let payload = p
+        .payload
+        .as_ref()
+        .and_then(|pl| event_payload_from_proto(pl));
     Event {
         tenant_id: String::new(),
         conversation_id: p.conversation_id.clone(),
@@ -62,9 +65,7 @@ fn event_type_from_i32(v: i32) -> EventType {
     }
 }
 
-fn event_payload_from_proto(
-    p: &flare_proto::common::event::Payload,
-) -> Option<EventPayload> {
+fn event_payload_from_proto(p: &flare_proto::common::event::Payload) -> Option<EventPayload> {
     use flare_proto::common::event::Payload as P;
     Some(match p {
         P::Recall(r) => EventPayload::Recall(RecallPayload {
@@ -239,7 +240,7 @@ pub enum TopicEventDispatch {
 pub fn dispatch_topic_event_envelope(
     env: &flare_proto::common::TopicEventEnvelope,
 ) -> TopicEventDispatch {
-    use flare_im_core::abstractions::topics::EVENT_TYPE_MESSAGE_CREATED;
+    use flare_im_core::event::EVENT_TYPE_MESSAGE_CREATED;
     let event = match &env.event {
         Some(ev) => ev,
         None => return TopicEventDispatch::Unsupported,
@@ -247,7 +248,8 @@ pub fn dispatch_topic_event_envelope(
     if env.event_type == EVENT_TYPE_MESSAGE_CREATED {
         if let Some(flare_proto::common::event::Payload::Message(mut m)) = event.payload.clone() {
             if !env.tenant_id.is_empty() {
-                m.extra.insert("x-tenant-id".to_string(), env.tenant_id.clone());
+                m.extra
+                    .insert("x-tenant-id".to_string(), env.tenant_id.clone());
             }
             return TopicEventDispatch::MessageCreated(message_command_from_proto(m));
         }
@@ -272,7 +274,8 @@ pub fn command_from_message_envelope(
         msg.conversation_id = envelope.conversation_id.clone();
     }
     if !envelope.tenant_id.is_empty() {
-        msg.extra.insert("x-tenant-id".to_string(), envelope.tenant_id.clone());
+        msg.extra
+            .insert("x-tenant-id".to_string(), envelope.tenant_id.clone());
     }
     msg.extra.insert(
         flare_im_core::abstractions::storage_payload::EXTRA_KEY_SYNC.to_string(),
@@ -295,7 +298,8 @@ pub fn message_command_from_proto(
     msg: flare_proto::common::Message,
 ) -> crate::application::commands::ProcessStoreMessageCommand {
     use crate::application::commands::ProcessStoreMessageCommand;
-    let payload = flare_im_core::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
+    let payload =
+        flare_im_core::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
     let message = payload.message.as_ref().map(message_from_proto);
     let tenant = payload
         .metadata

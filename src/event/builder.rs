@@ -88,12 +88,7 @@ impl EventEnvelopeBuilder {
     /// # 返回
     /// - `EventEnvelope`: 事件信封实例
     pub fn build(self) -> EventEnvelope {
-        let mut e = EventEnvelope::new(
-            self.event_type,
-            self.partition_key,
-            self.seq,
-            self.payload,
-        );
+        let mut e = EventEnvelope::new(self.event_type, self.partition_key, self.seq, self.payload);
         if let Some(ts) = self.timestamp_ms {
             e = e.with_timestamp_ms(ts);
         }
@@ -155,8 +150,7 @@ where
 {
     let payload = message.encode_to_vec();
 
-    Ok(EventEnvelope::new(event_type, partition_key, seq, payload)
-        .with_timestamp_ms(timestamp_ms))
+    Ok(EventEnvelope::new(event_type, partition_key, seq, payload).with_timestamp_ms(timestamp_ms))
 }
 
 /// 从 Protobuf 消息构建 EventEnvelope（带来源）
@@ -182,8 +176,7 @@ where
 {
     let payload = message.encode_to_vec();
 
-    Ok(EventEnvelope::new(event_type, partition_key, seq, payload)
-        .with_source(source))
+    Ok(EventEnvelope::new(event_type, partition_key, seq, payload).with_source(source))
 }
 
 /// 从 Protobuf 消息构建 EventEnvelope（完整版）
@@ -241,7 +234,6 @@ where
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| anyhow::anyhow!("system clock error: {}", e))?
         .as_millis() as u64;
-    
-    Ok(EventEnvelope::new(event_type, partition_key, seq, payload)
-        .with_timestamp_ms(timestamp_ms))
+
+    Ok(EventEnvelope::new(event_type, partition_key, seq, payload).with_timestamp_ms(timestamp_ms))
 }

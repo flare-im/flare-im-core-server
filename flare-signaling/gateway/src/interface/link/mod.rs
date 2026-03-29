@@ -17,4 +17,3 @@ mod connection;
 mod message;
 
 pub use connection::LongConnectionHandler;
-

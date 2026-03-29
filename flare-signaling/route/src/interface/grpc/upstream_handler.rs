@@ -6,10 +6,8 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use flare_proto::signaling::router::{
-    RouteMessageRequest, RouteMessageResponse,
-    RouteEventRequest, RouteEventResponse,
-    RouteAckRequest, RouteAckResponse,
-    RouteDataRequest, RouteDataResponse,
+    RouteAckRequest, RouteAckResponse, RouteDataRequest, RouteDataResponse, RouteEventRequest,
+    RouteEventResponse, RouteMessageRequest, RouteMessageResponse,
     router_upstream_service_server::RouterUpstreamService,
 };
 use flare_server_core::utils::require_ctx_from_request;
@@ -56,9 +54,9 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         // 2. 解析请求
         let req = request.into_inner();
         let svid = req.svid;
-        let message = req.message.ok_or_else(|| {
-            Status::invalid_argument("Message is required")
-        })?;
+        let message = req
+            .message
+            .ok_or_else(|| Status::invalid_argument("Message is required"))?;
         let options = req.options.unwrap_or_default();
 
         let result = self
@@ -71,13 +69,13 @@ impl RouterUpstreamService for RouterUpstreamHandler {
             response_data: result.response_data,
             routed_endpoint: result.routed_endpoint,
             metadata: Some(result.metadata),
-            status: result.error_code.map(|code| {
-                flare_proto::common::RpcStatus {
+            status: result
+                .error_code
+                .map(|code| flare_proto::common::RpcStatus {
                     code: code as i32,
                     message: result.error_message.unwrap_or_default(),
                     ..Default::default()
-                }
-            }),
+                }),
         };
 
         Ok(Response::new(response))
@@ -94,9 +92,9 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         // 2. 解析请求
         let req = request.into_inner();
         let svid = req.svid;
-        let event = req.event.ok_or_else(|| {
-            Status::invalid_argument("Event is required")
-        })?;
+        let event = req
+            .event
+            .ok_or_else(|| Status::invalid_argument("Event is required"))?;
         let options = req.options.unwrap_or_default();
 
         let result = self
@@ -109,13 +107,13 @@ impl RouterUpstreamService for RouterUpstreamHandler {
             response_data: result.response_data,
             routed_endpoint: result.routed_endpoint,
             metadata: Some(result.metadata),
-            status: result.error_code.map(|code| {
-                flare_proto::common::RpcStatus {
+            status: result
+                .error_code
+                .map(|code| flare_proto::common::RpcStatus {
                     code: code as i32,
                     message: result.error_message.unwrap_or_default(),
                     ..Default::default()
-                }
-            }),
+                }),
         };
 
         Ok(Response::new(response))
@@ -132,27 +130,24 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         // 2. 解析请求
         let req = request.into_inner();
         let svid = req.svid;
-        let ack = req.ack.ok_or_else(|| {
-            Status::invalid_argument("Ack is required")
-        })?;
+        let ack = req
+            .ack
+            .ok_or_else(|| Status::invalid_argument("Ack is required"))?;
         let options = req.options.unwrap_or_default();
 
-        let result = self
-            .ack_handler
-            .route_ack(&ctx, &svid, ack, options)
-            .await;
+        let result = self.ack_handler.route_ack(&ctx, &svid, ack, options).await;
 
         // 4. 构建响应
         let response = RouteAckResponse {
             routed_endpoint: result.routed_endpoint,
             metadata: Some(result.metadata),
-            status: result.error_code.map(|code| {
-                flare_proto::common::RpcStatus {
+            status: result
+                .error_code
+                .map(|code| flare_proto::common::RpcStatus {
                     code: code as i32,
                     message: result.error_message.unwrap_or_default(),
                     ..Default::default()
-                }
-            }),
+                }),
         };
 
         Ok(Response::new(response))
@@ -169,9 +164,9 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         // 2. 解析请求
         let req = request.into_inner();
         let svid = req.svid;
-        let data = req.data.ok_or_else(|| {
-            Status::invalid_argument("Data is required")
-        })?;
+        let data = req
+            .data
+            .ok_or_else(|| Status::invalid_argument("Data is required"))?;
         let options = req.options.unwrap_or_default();
 
         let result = self
@@ -184,13 +179,13 @@ impl RouterUpstreamService for RouterUpstreamHandler {
             response_data: result.response_data,
             routed_endpoint: result.routed_endpoint,
             metadata: Some(result.metadata),
-            status: result.error_code.map(|code| {
-                flare_proto::common::RpcStatus {
+            status: result
+                .error_code
+                .map(|code| flare_proto::common::RpcStatus {
                     code: code as i32,
                     message: result.error_message.unwrap_or_default(),
                     ..Default::default()
-                }
-            }),
+                }),
         };
 
         Ok(Response::new(response))

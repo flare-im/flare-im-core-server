@@ -6,11 +6,11 @@
 //! - 不分配 seq
 //! - 离线消息直接丢弃
 
-use std::sync::Arc;
 use anyhow::{Context, Result};
-use flare_proto::push::{PushMessageRequest, PushOptions};
 use flare_proto::common::Message;
-use flare_server_core::context::{Ctx, ContextExt};
+use flare_proto::push::{PushMessageRequest, PushOptions};
+use flare_server_core::context::{ContextExt, Ctx};
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::domain::repository::{MessageEventPublisher, OrchestratorPublisher};
@@ -33,13 +33,9 @@ impl MessageTemporaryService {
         message_type = message.message_type,
         conversation_id = %message.conversation_id
     ))]
-    pub async fn handle_temporary_message(
-        &self,
-        ctx: &Ctx,
-        message: &Message,
-    ) -> Result<()> {
+    pub async fn handle_temporary_message(&self, ctx: &Ctx, message: &Message) -> Result<()> {
         ctx.ensure_not_cancelled()?;
-        
+
         // 构建推送请求
         let push_request = self.build_push_request(message)?;
 
@@ -59,10 +55,7 @@ impl MessageTemporaryService {
     }
 
     /// 构建推送请求
-    fn build_push_request(
-        &self,
-        message: &Message,
-    ) -> Result<PushMessageRequest> {
+    fn build_push_request(&self, message: &Message) -> Result<PushMessageRequest> {
         // 提取接收者ID列表
         let mut user_ids = Vec::new();
 
@@ -77,10 +70,14 @@ impl MessageTemporaryService {
                     }
                 }
                 flare_proto::common::ConversationType::Group
-                | flare_proto::common::ConversationType::Channel => {
-                    // 群聊、频道：user_ids 留空，由推送服务根据 channel_id/conversation_id 查询成员
+                | flare_proto::common::ConversationType::Channel
+                | flare_proto::common::ConversationType::Ai
+                | flare_proto::common::ConversationType::Customer
+                | flare_proto::common::ConversationType::System
+                | flare_proto::common::ConversationType::Temp => {
+                    // 非单聊：user_ids 留空，由推送服务按 conversation_id 解析成员
                 }
-                _ => {}
+                flare_proto::common::ConversationType::Unspecified => {}
             }
         }
 
@@ -105,4 +102,3 @@ impl MessageTemporaryService {
         })
     }
 }
-

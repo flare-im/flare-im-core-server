@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use flare_core::common::error::{FlareError, Result};
 use flare_core::common::ErrorCode;
+use flare_core::common::error::{FlareError, Result};
 use flare_im_core::Ctx;
 use flare_proto::common::data_packet::Payload as DataPayload;
 use flare_proto::common::{CustomData, DataKind, DataPacket};

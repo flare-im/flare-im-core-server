@@ -63,10 +63,8 @@ use chrono::{DateTime, Local, Utc};
 use flare_core::common::conversation::generate_single_chat_conversation_id;
 use flare_proto::access_gateway::PushMessageRequest;
 use flare_proto::common::{
-    ack::Payload as AckPayload,
-    event::Payload as EventPayload,
-    Ack, AckType, ConversationAck, EventEnvelope, Message as ProtoMessage, MessageContent, MessagePush,
-    SendAck,
+    Ack, AckType, ConversationAck, EventEnvelope, Message as ProtoMessage, MessageContent,
+    MessagePush, SendAck, ack::Payload as AckPayload, event::Payload as EventPayload,
 };
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -732,7 +730,8 @@ impl MessageListener for ChatListener {
                         false
                     };
 
-                    let should_display = ((is_from_recipient || is_to_me) || is_system_message
+                    let should_display = ((is_from_recipient || is_to_me)
+                        || is_system_message
                         || is_single_chat_peer)
                         && !is_from_self
                         && !is_duplicate;
@@ -865,7 +864,10 @@ impl ChatListener {
         let mut metadata = std::collections::HashMap::new();
         // 添加conversation_id等元数据
         if let Some(conversation_id) = self.get_conversation_id_for_sender(sender_id) {
-            metadata.insert("conversation_id".to_string(), conversation_id.as_bytes().to_vec());
+            metadata.insert(
+                "conversation_id".to_string(),
+                conversation_id.as_bytes().to_vec(),
+            );
         }
 
         // 创建ACK命令
@@ -897,9 +899,12 @@ impl ChatListener {
     }
 
     /// 获取会话ID（用于ACK metadata）
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn get_conversation_id_for_sender(&self, sender_id: &str) -> Option<String> {
         // 使用工具类生成单聊会话ID（格式：1-{hash}，自动排序）
-        Some(generate_single_chat_conversation_id(&self.user_id, sender_id))
+        Some(generate_single_chat_conversation_id(
+            &self.user_id,
+            sender_id,
+        ))
     }
 }

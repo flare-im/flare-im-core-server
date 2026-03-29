@@ -29,11 +29,7 @@ impl HookDispatcher {
     }
 
     /// 执行 PreSend Hook
-    pub async fn pre_send(
-        &self,
-        ctx: &Ctx,
-        draft: &mut MessageDraft,
-    ) -> Result<PreSendDecision> {
+    pub async fn pre_send(&self, ctx: &Ctx, draft: &mut MessageDraft) -> Result<PreSendDecision> {
         // 计划要执行的 PreSend Hooks
         let plans = self.registry.plan_pre_send(ctx).await;
 

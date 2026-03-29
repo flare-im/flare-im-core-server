@@ -20,17 +20,9 @@ impl SyncService {
     }
 
     /// 处理同步：仅连接态补全 → 下游原样返回（含 `RpcStatus` 业务错误）。
-    pub async fn execute(
-        &self,
-        tx: &Ctx,
-        _connection_id: &str,
-        mut sync: Sync,
-    ) -> Result<SyncRes> {
+    pub async fn execute(&self, tx: &Ctx, _connection_id: &str, mut sync: Sync) -> Result<SyncRes> {
         if sync.device_id.is_empty() {
-            sync.device_id = tx
-                .device_id()
-                .map(str::to_string)
-                .unwrap_or_default();
+            sync.device_id = tx.device_id().map(str::to_string).unwrap_or_default();
         }
 
         match self.port.forward_sync(tx, sync).await {

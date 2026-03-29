@@ -19,7 +19,12 @@ impl ConnectionQueryHandler {
 }
 
 impl ConnectionQueryHandler {
-    pub async fn query_user_connections(&self, query: UserConnectionsQuery) -> Result<Vec<ConnectionInfo>> {
-        self.connection_port.list_user_connections(&query.user_id).await
+    pub async fn query_user_connections(
+        &self,
+        query: UserConnectionsQuery,
+    ) -> Result<Vec<ConnectionInfo>> {
+        self.connection_port
+            .list_user_connections(&query.user_id)
+            .await
     }
 }

@@ -3,7 +3,6 @@
 //! 使用 common/ack.proto 的 Ack + SendAck 作为核心 ACK 结构
 //! Gateway 作为接入层，通过轻量的 gRPC 上报，不直接依赖 Kafka
 
-use async_trait::async_trait;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -49,7 +48,6 @@ impl AckAuditEvent {
 }
 
 /// ACK 发布器 trait
-#[async_trait]
 pub trait AckPublisher: Send + Sync {
     async fn publish_ack(&self, event: &AckAuditEvent) -> Result<()>;
 }
@@ -153,7 +151,6 @@ impl GrpcAckPublisher {
     }
 }
 
-#[async_trait]
 impl AckPublisher for GrpcAckPublisher {
     async fn publish_ack(&self, event: &AckAuditEvent) -> Result<()> {
         use flare_proto::common::ack::Payload as AckPayload;
@@ -238,7 +235,6 @@ impl NoopAckPublisher {
     }
 }
 
-#[async_trait]
 impl AckPublisher for NoopAckPublisher {
     async fn publish_ack(&self, _event: &AckAuditEvent) -> Result<()> {
         // 不做任何操作，用于测试或禁用 ACK 上报

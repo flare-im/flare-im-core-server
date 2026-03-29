@@ -93,7 +93,7 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("hook-engine-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹每个 Service
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let hook_extension_service = ContextLayer::new()
                     .allow_missing()
                     .layer(
@@ -101,7 +101,7 @@ impl ApplicationBootstrap {
                             hook_extension_service
                         )
                     );
-                
+
                 let server = match hook_service {
                     Some(hook_service) => {
                         info!("HookService registered");
@@ -112,7 +112,7 @@ impl ApplicationBootstrap {
                                     hook_service
                                 )
                             );
-                        
+
                         Server::builder()
                             .add_service(hook_extension_service)
                             .add_service(hook_service_wrapped)

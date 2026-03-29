@@ -116,7 +116,6 @@ pub async fn initialize(config: HookEngineConfig) -> Result<ApplicationContext> 
             .context("Failed to create database config repository")?,
         );
 
-
         let repository_clone = repository.clone();
         loaders.push(Arc::new(ConfigLoaderItem::Database(
             DatabaseConfigLoader::new(repository_clone, config.tenant_id.clone()),

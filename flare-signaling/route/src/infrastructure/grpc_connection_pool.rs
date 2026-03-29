@@ -71,7 +71,12 @@ impl GrpcConnectionPool {
             .http2_keep_alive_interval(Duration::from_secs(self.config.keep_alive_interval))
             .connect()
             .await
-            .with_context(|| format!("Failed to connect to service {} at {}", service_name, address))?;
+            .with_context(|| {
+                format!(
+                    "Failed to connect to service {} at {}",
+                    service_name, address
+                )
+            })?;
 
         let mut connections = self.connections.write().await;
         connections.insert(service_name.to_string(), endpoint);

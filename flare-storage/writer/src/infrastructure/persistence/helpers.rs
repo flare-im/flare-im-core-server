@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::Message;
 use prost::Message as _;
-use serde_json::{to_value, Map, Value};
+use serde_json::{Map, Value, to_value};
 
 /// 编码消息内容为字节数组（proto Message.content）
 pub fn encode_message_content(message: &Message) -> Vec<u8> {
@@ -31,4 +31,3 @@ pub fn get_message_timestamp(message: &Message) -> DateTime<Utc> {
         .and_then(timestamp_to_datetime)
         .unwrap_or_else(Utc::now)
 }
-

@@ -11,7 +11,7 @@ use crate::domain::model::{
 ///
 /// **重要说明**：使用 `#[async_trait::async_trait]` 宏是因为该 trait 需要作为 trait 对象（dyn Trait）使用，
 /// 以支持依赖注入和运行时多态。虽然 Rust 2024 支持原生 `async fn in traits`，但原生实现不支持 dyn 兼容性。
-/// 
+///
 /// 这是性能与灵活性的权衡：
 /// - **性能影响**：动态分发有少量性能开销（约 5-10%）
 /// - **灵活性收益**：支持运行时切换实现、依赖注入、测试 Mock
@@ -39,7 +39,11 @@ pub trait MediaObjectRepository: Send + Sync {
 #[async_trait::async_trait]
 pub trait MediaMetadataStore: Send + Sync {
     async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()>;
-    async fn load_metadata(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Option<MediaFileMetadata>>;
+    async fn load_metadata(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Option<MediaFileMetadata>>;
     async fn load_by_hash(&self, sha256: &str) -> Result<Option<MediaFileMetadata>>;
     async fn delete_metadata(&self, file_id: &str) -> Result<()>;
     async fn list_orphaned_assets(&self, before: DateTime<Utc>) -> Result<Vec<MediaFileMetadata>>;
@@ -78,10 +82,26 @@ pub trait MediaLocalStore: Send + Sync {
 pub trait MediaReferenceStore: Send + Sync {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool>;
     async fn delete_reference(&self, reference_id: &str) -> Result<bool>;
-    async fn delete_any_reference(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Option<String>>;
-    async fn delete_all_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<u64>;
-    async fn list_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Vec<MediaReference>>;
-    async fn count_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<u64>;
+    async fn delete_any_reference(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Option<String>>;
+    async fn delete_all_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<u64>;
+    async fn list_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Vec<MediaReference>>;
+    async fn count_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<u64>;
     async fn reference_exists(
         &self,
         ctx: &flare_server_core::context::Context,

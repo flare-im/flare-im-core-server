@@ -175,13 +175,14 @@ impl ConnectionDomainService {
             Some(cid) => self.quality_service.get_quality(cid).await,
             None => None,
         };
-        let current_quality = current_quality.map(|metrics| flare_proto::common::ConnectionQuality {
-            rtt_ms: metrics.rtt_ms,
-            packet_loss_rate: metrics.packet_loss_rate,
-            last_measure_ts: 0, // TODO: 填充正确的时间戳
-            network_type: metrics.network_type,
-            signal_strength: 0, // TODO: 填充正确的信号强度
-        });
+        let current_quality =
+            current_quality.map(|metrics| flare_proto::common::ConnectionQuality {
+                rtt_ms: metrics.rtt_ms,
+                packet_loss_rate: metrics.packet_loss_rate,
+                last_measure_ts: 0, // TODO: 填充正确的时间戳
+                network_type: metrics.network_type,
+                signal_strength: 0, // TODO: 填充正确的信号强度
+            });
 
         let heartbeat_request = HeartbeatRequest {
             user_id: user_id.to_string(),

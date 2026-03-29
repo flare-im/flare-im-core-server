@@ -1,11 +1,11 @@
 use anyhow::Result;
+use base64::Engine;
 use chrono::Utc;
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::{Event, EventType};
 use prost::Message as ProstMessage;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, Row};
-use base64::Engine;
 
 /// init_v2: messages.status 为 INT（MessageStatus 枚举值）
 fn fsm_state_to_status_int(fsm_state: &str) -> i32 {
@@ -111,13 +111,14 @@ impl OperationStore {
         .await?;
 
         let (mut extra, real_server_id) = match row {
-            Some(r) => (
-                r.get::<Value, _>("extra"),
-                r.get::<String, _>("server_id"),
-            ),
+            Some(r) => (r.get::<Value, _>("extra"), r.get::<String, _>("server_id")),
             None => {
                 tx.rollback().await?;
-                return Err(anyhow::anyhow!("Message not found: {} (tenant_id: {}).", message_id, tenant_id));
+                return Err(anyhow::anyhow!(
+                    "Message not found: {} (tenant_id: {}).",
+                    message_id,
+                    tenant_id
+                ));
             }
         };
 
@@ -131,7 +132,10 @@ impl OperationStore {
         .bind(&real_server_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let final_edit_version = next_version_row.unwrap_or(1).max(if edit_version > 0 { edit_version } else { 1 });
+        let final_edit_version =
+            next_version_row
+                .unwrap_or(1)
+                .max(if edit_version > 0 { edit_version } else { 1 });
 
         if let Some(text) = content_text_for_extra {
             if let Value::Object(ref mut map) = extra {

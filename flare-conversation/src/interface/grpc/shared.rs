@@ -10,12 +10,18 @@ use flare_proto::conversation::{
 use prost_types::Timestamp;
 
 use crate::domain::model::{
-    Conversation, ConversationParticipant, ConversationPolicy, ConversationSummary, ConversationVisibility,
-    DevicePresence,
+    millis_to_datetime, Conversation, ConversationParticipant, ConversationPolicy,
+    ConversationSummary, DevicePresence,
 };
 
 pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
     let last_message_time = summary.last_message_time.and_then(timestamp_from_datetime);
+    // Sync 编排器用 `updated_at` 做会话列表排序与增量游标过滤，必须与「会话/成员变更时间」一致。
+    // 仅填 last_message_time 会导致无最近消息预览时为空 → ts=0，增量同步在客户端游标非零时会误过滤掉整行。
+    let list_change_time = summary
+        .last_message_time
+        .or_else(|| summary.server_cursor_ts.and_then(millis_to_datetime));
+    let updated_at_for_sync = list_change_time.and_then(timestamp_from_datetime);
 
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
@@ -31,16 +37,16 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
             time: last_message_time,
         }),
         unread_count: summary.unread_count as u32,
-        max_seq: 0,
+        max_seq: summary.last_message_seq.unwrap_or(0).max(0) as u64,
         last_read_seq: 0,
         is_muted: false,
         is_pinned: false,
         mute_until: None,
-        updated_at: last_message_time,
+        updated_at: updated_at_for_sync.or(last_message_time),
         created_at: None,
         labels: Vec::new(),
         member_count: 0,
-        channel_id: summary.metadata.get("channel_id").cloned().unwrap_or_default(),
+        channel_id: summary.channel_id,
         ext: summary.metadata,
     }
 }
@@ -110,7 +116,10 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
     let avatar_url = attrs.get("avatar_url").cloned().unwrap_or_default();
     let description = attrs.get("description").cloned().unwrap_or_default();
     let announcement = attrs.get("announcement").cloned().unwrap_or_default();
-    let announcement_updated_by = attrs.get("announcement_updated_by").cloned().unwrap_or_default();
+    let announcement_updated_by = attrs
+        .get("announcement_updated_by")
+        .cloned()
+        .unwrap_or_default();
     let announcement_updated_at = attrs
         .get("announcement_updated_at")
         .and_then(|s| s.parse::<i64>().ok())
@@ -118,6 +127,7 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
         .and_then(timestamp_from_datetime);
 
     let member_count = conversation.participants.len() as i32;
+    let channel_id = conversation.channel_id.clone();
 
     ProtoConversationDetail {
         conversation_id: conversation.conversation_id,
@@ -150,6 +160,7 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
         updated_at: timestamp_from_datetime(conversation.updated_at),
         member_count,
         attributes: conversation.attributes,
+        channel_id,
         ext: std::collections::HashMap::new(),
     }
 }
@@ -169,6 +180,7 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
         conversation_id: conversation.conversation_id,
         conversation_type: conversation.conversation_type,
         business_type: conversation.business_type,
+        channel_id: conversation.channel_id,
         attributes: conversation.attributes,
         participants: conversation
             .participants
@@ -185,12 +197,8 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
             .collect(),
         visibility: conversation.visibility.as_proto(),
         lifecycle_state: conversation.lifecycle_state.as_proto(),
-        created_at: Some(
-            timestamp_from_datetime(conversation.created_at).unwrap_or_default(),
-        ),
-        updated_at: Some(
-            timestamp_from_datetime(conversation.updated_at).unwrap_or_default(),
-        ),
+        created_at: Some(timestamp_from_datetime(conversation.created_at).unwrap_or_default()),
+        updated_at: Some(timestamp_from_datetime(conversation.updated_at).unwrap_or_default()),
         policy: conversation.policy.map(proto_common_policy),
     }
 }

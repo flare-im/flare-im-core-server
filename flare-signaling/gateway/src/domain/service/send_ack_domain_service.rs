@@ -46,7 +46,9 @@ impl SendAckDomainService {
                 self.ack_port
                     .report_conversation_ack(tx, conv_ack.clone())
                     .await
-                    .map_err(|e| FlareError::system(format!("report conversation ack failed: {e}")))?;
+                    .map_err(|e| {
+                        FlareError::system(format!("report conversation ack failed: {e}"))
+                    })?;
             }
             AckPayload::Batch(batch) => {
                 self.ack_port

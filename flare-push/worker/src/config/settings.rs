@@ -142,4 +142,3 @@ impl KafkaProducerConfig for PushWorkerConfig {
         300_000
     }
 }
-

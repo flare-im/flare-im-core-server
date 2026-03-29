@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
-use flare_im_core::Ctx;
 use crate::domain::ports::IConnectionPort;
+use flare_im_core::Ctx;
+use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
 use flare_server_core::error::Result;
 use tracing::{debug, instrument, warn};
 
@@ -52,7 +52,10 @@ impl ConnectionHandler {
     /// 4. 记录指标和日志
     #[instrument(skip(self))]
     pub async fn handle_connect(&self, connection_id: &str) -> Result<String> {
-        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let connection_info = self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await?;
         let user_id = connection_info.user_id.clone();
 
         // 注册会话到 Signaling Online(业务端会话管理)
@@ -100,14 +103,14 @@ impl ConnectionHandler {
     /// 4. 记录指标和日志
     #[instrument(skip(self))]
     pub async fn handle_disconnect(&self, connection_id: &str) -> Result<()> {
-        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let connection_info = self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await?;
         let user_id = connection_info.user_id.clone();
 
         // 检查用户是否还有其他连接
-        let user_connections = self
-            .connection_port
-            .list_user_connections(&user_id)
-            .await?;
+        let user_connections = self.connection_port.list_user_connections(&user_id).await?;
         let has_other_connections = !user_connections.is_empty();
 
         // 通知连接状态
@@ -165,19 +168,22 @@ impl ConnectionHandler {
     /// 3. 记录日志
     #[instrument(skip(self))]
     pub async fn refresh_session(&self, connection_id: &str) -> Result<()> {
-        let connection_info = self.connection_port.get_connection_info(connection_id).await?;
+        let connection_info = self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await?;
         let user_id = connection_info.user_id.clone();
-        let metadata = self.connection_port.get_connection_metadata(connection_id).await?;
-        let conversation_id = metadata
-            .get("conversation_id")
-            .cloned()
-            .ok_or_else(|| {
-                flare_server_core::error::ErrorBuilder::new(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    "conversation_id not in connection metadata",
-                )
-                .build_error()
-            })?;
+        let metadata = self
+            .connection_port
+            .get_connection_metadata(connection_id)
+            .await?;
+        let conversation_id = metadata.get("conversation_id").cloned().ok_or_else(|| {
+            flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "conversation_id not in connection metadata",
+            )
+            .build_error()
+        })?;
 
         // 刷新 Signaling Online 的心跳
         self.session_domain_service
@@ -211,4 +217,3 @@ impl ConnectionHandler {
     //     });
     // }
 }
-

@@ -5,12 +5,13 @@
 
 use std::sync::Arc;
 
+use crate::application::UserConnectionsQuery;
 use crate::application::commands::{
     PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
     PushNotificationCommand,
 };
-use crate::application::UserConnectionsQuery;
 use crate::application::handlers::{ConnectionQueryHandler, PushHandler};
+use flare_im_core::require_context;
 use flare_proto::access_gateway::access_gateway_server::AccessGateway;
 use flare_proto::access_gateway::{
     ConnectionInfo as ProtoConnectionInfo, GetUserConnectionsRequest, GetUserConnectionsResponse,
@@ -18,7 +19,6 @@ use flare_proto::access_gateway::{
     PushNotificationRequest, PushNotificationResponse, PushResponse,
 };
 use flare_proto::common::{ErrorCode, RpcStatus};
-use flare_im_core::require_context;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -96,9 +96,9 @@ impl AccessGateway for AccessGatewayHandler {
         let ctx = require_context(&request)?;
         let req = request.into_inner();
         debug!("PushNotification request: {} users", req.user_ids.len());
-        let notification = req.notification.ok_or_else(|| {
-            Status::invalid_argument("missing notification")
-        })?;
+        let notification = req
+            .notification
+            .ok_or_else(|| Status::invalid_argument("missing notification"))?;
         let response = self
             .push_handler
             .handle_push_notification(
@@ -125,10 +125,7 @@ impl AccessGateway for AccessGatewayHandler {
             .ok_or_else(|| Status::invalid_argument("missing ack"))?;
         let response = self
             .push_handler
-            .handle_push_ack(
-                &ctx,
-                PushAckCommand::new(req.user_ids, ack, req.options),
-            )
+            .handle_push_ack(&ctx, PushAckCommand::new(req.user_ids, ack, req.options))
             .await
             .map_err(|e| {
                 tracing::error!(?e, "Failed to push ack");

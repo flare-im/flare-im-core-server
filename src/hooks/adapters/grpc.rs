@@ -18,8 +18,8 @@ use flare_proto::{
 
 use super::super::config::HookDefinition;
 use super::super::types::{
-    DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord,
-    PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
+    PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
 use flare_server_core::context::Ctx;
 
@@ -104,7 +104,6 @@ struct GrpcPreSendHook {
     static_metadata: HashMap<String, String>,
 }
 
-
 #[async_trait]
 impl PreSendHook for GrpcPreSendHook {
     async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
@@ -143,15 +142,9 @@ struct GrpcPostSendHook {
     static_metadata: HashMap<String, String>,
 }
 
-
 #[async_trait]
 impl PostSendHook for GrpcPostSendHook {
-    async fn handle(
-        &self,
-        ctx: &Ctx,
-        record: &MessageRecord,
-        draft: &MessageDraft,
-    ) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome {
         let mut client = HookExtensionClient::new(self.channel.clone());
         let mut request = ProtoPostSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
@@ -183,7 +176,6 @@ struct GrpcDeliveryHook {
     channel: Channel,
     static_metadata: HashMap<String, String>,
 }
-
 
 #[async_trait]
 impl DeliveryHook for GrpcDeliveryHook {
@@ -218,7 +210,6 @@ struct GrpcRecallHook {
     channel: Channel,
     static_metadata: HashMap<String, String>,
 }
-
 
 #[async_trait]
 impl RecallHook for GrpcRecallHook {
@@ -256,7 +247,7 @@ fn build_context(
     // 注意：这里需要访问 HookContextData，但它在 flare-hook-engine 中
     // 为了简化，我们使用 Context 的基本字段
     use crate::hooks::hook_context_data::get_hook_context_data;
-    
+
     let hook_data = get_hook_context_data(ctx).cloned().unwrap_or_default();
     let corridor = hook_data
         .attributes
@@ -326,9 +317,23 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
             "single" | "conversation_type_single" | "1" => {
                 flare_proto::common::ConversationType::Single as i32
             }
-            "group" | "conversation_type_group" | "2" => flare_proto::common::ConversationType::Group as i32,
+            "group" | "conversation_type_group" | "2" => {
+                flare_proto::common::ConversationType::Group as i32
+            }
             "channel" | "conversation_type_channel" | "3" => {
                 flare_proto::common::ConversationType::Channel as i32
+            }
+            "ai" | "conversation_type_ai" | "4" => {
+                flare_proto::common::ConversationType::Ai as i32
+            }
+            "customer" | "conversation_type_customer" | "5" => {
+                flare_proto::common::ConversationType::Customer as i32
+            }
+            "system" | "conversation_type_system" | "6" => {
+                flare_proto::common::ConversationType::System as i32
+            }
+            "temp" | "conversation_type_temp" | "7" => {
+                flare_proto::common::ConversationType::Temp as i32
             }
             _ => flare_proto::common::ConversationType::Unspecified as i32,
         })

@@ -2,10 +2,10 @@
 //!
 //! 负责会话QPS、群聊fanout、系统反压检查
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use redis::{AsyncCommands, aio::ConnectionManager};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::domain::service::RouteContext;
 
@@ -83,10 +83,7 @@ impl<MC: MonitoringClient> FlowController<MC> {
         self
     }
 
-    pub fn with_monitoring_client(
-        mut self,
-        monitoring_client: Arc<MC>,
-    ) -> Self {
+    pub fn with_monitoring_client(mut self, monitoring_client: Arc<MC>) -> Self {
         self.monitoring_client = Some(monitoring_client);
         self.backpressure_enabled = true;
         self
@@ -232,4 +229,3 @@ impl<MC: MonitoringClient> FlowController<MC> {
         Ok(())
     }
 }
-

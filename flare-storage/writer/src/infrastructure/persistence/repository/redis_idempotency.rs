@@ -40,7 +40,12 @@ impl MessageIdempotencyRepository for RedisIdempotencyRepository {
     }
 
     #[instrument(skip(self), fields(client_msg_id, sender_id))]
-    async fn is_new_by_client_msg_id(&self, ctx: &Ctx, client_msg_id: &str, sender_id: Option<&str>) -> Result<bool> {
+    async fn is_new_by_client_msg_id(
+        &self,
+        ctx: &Ctx,
+        client_msg_id: &str,
+        sender_id: Option<&str>,
+    ) -> Result<bool> {
         let _ = ctx; // 上下文用于日志追踪
         if client_msg_id.is_empty() {
             return Ok(true);

@@ -1,10 +1,10 @@
 //! 标记事件应用
 
-use anyhow::{anyhow, Result};
 use crate::domain::model::{Event, MarkPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use anyhow::{Result, anyhow};
 
-use super::{append_event_and_stream, EventContext};
+use super::{EventContext, append_event_and_stream};
 
 // 与 proto MarkType 对齐
 const MARK_IMPORTANT: i32 = 1;

@@ -1,19 +1,25 @@
-//! Push Proxy 配置：gRPC 监听地址与 Kafka Topic（以设计文档为准）
+//! Push Proxy 配置:gRPC 监听地址与 Kafka Topic(以设计文档为准)
 
 use flare_im_core::config::FlareAppConfig;
-use flare_im_core::constants::topics::TOPIC_PUSH_MESSAGES;
+use flare_im_core::constants::topics::{
+    TOPIC_PUSH_MESSAGES, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+};
 use flare_server_core::mq::kafka::KafkaProducerConfig;
 use std::env;
 
 #[derive(Clone, Debug)]
 pub struct PushProxyConfig {
-    /// Kafka bootstrap（与 Push Server 一致）
+    /// Kafka bootstrap(与 Push Server 一致)
     pub kafka_bootstrap: String,
-    /// 推送消息入站 Topic（默认 `TOPIC_PUSH_MESSAGES` / `push-messages`）
+    /// 推送消息入站 Topic(默认 `TOPIC_PUSH_MESSAGES` / `push-messages`)
     pub push_request_topic: String,
-    /// Kafka 发送超时（毫秒）
+    /// 在线推送 Topic
+    pub push_online_topic: String,
+    /// 离线推送 Topic
+    pub push_offline_topic: String,
+    /// Kafka 发送超时(毫秒)
     pub kafka_timeout_ms: u64,
-    /// Redis URL（任务粗粒度状态，供 QueryPushStatus）
+    /// Redis URL(任务粗粒度状态,供 QueryPushStatus)
     pub redis_url: String,
     /// Redis key 前缀
     pub redis_key_prefix: String,
@@ -34,6 +40,14 @@ impl PushProxyConfig {
             .ok()
             .unwrap_or_else(|| TOPIC_PUSH_MESSAGES.to_string());
 
+        let push_online_topic = env::var("PUSH_PROXY_PUSH_ONLINE_TOPIC")
+            .ok()
+            .unwrap_or_else(|| TOPIC_PUSH_ONLINE.to_string());
+
+        let push_offline_topic = env::var("PUSH_PROXY_PUSH_OFFLINE_TOPIC")
+            .ok()
+            .unwrap_or_else(|| TOPIC_PUSH_OFFLINE.to_string());
+
         let kafka_timeout_ms = env::var("PUSH_PROXY_KAFKA_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -50,6 +64,8 @@ impl PushProxyConfig {
         Self {
             kafka_bootstrap,
             push_request_topic,
+            push_online_topic,
+            push_offline_topic,
             kafka_timeout_ms,
             redis_url,
             redis_key_prefix,

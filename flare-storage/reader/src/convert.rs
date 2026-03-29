@@ -81,7 +81,9 @@ fn event_type_from_i32(v: i32) -> EventType {
 // ---------- Storage DTOs -> Proto（gRPC 响应） ----------
 
 /// 领域编辑历史条目 -> proto MessageEditHistoryEntry
-pub fn edit_history_entry_to_proto(e: &EditHistoryEntry) -> flare_proto::storage::MessageEditHistoryEntry {
+pub fn edit_history_entry_to_proto(
+    e: &EditHistoryEntry,
+) -> flare_proto::storage::MessageEditHistoryEntry {
     let content = MessageContent::decode(e.content_bytes.as_slice()).ok();
     flare_proto::storage::MessageEditHistoryEntry {
         edit_version: e.edit_version,
@@ -157,7 +159,9 @@ pub fn reaction_item_from_proto(p: &flare_proto::common::Reaction) -> ReactionIt
 }
 
 /// 领域 ReadListEntry -> proto MessageReadRecord（供 repository 写 DB 使用）
-pub fn read_list_entry_to_common_proto(e: &ReadListEntry) -> flare_proto::common::MessageReadRecord {
+pub fn read_list_entry_to_common_proto(
+    e: &ReadListEntry,
+) -> flare_proto::common::MessageReadRecord {
     flare_proto::common::MessageReadRecord {
         user_id: e.user_id.clone(),
         read_at: datetime_to_timestamp(e.read_at),
@@ -177,19 +181,31 @@ pub fn reaction_item_to_common_proto(r: &ReactionItem) -> flare_proto::common::R
 }
 
 /// Proto FilterExpression -> 领域 FilterExpression
-pub fn filter_expression_from_proto(p: &flare_proto::common::FilterExpression) -> crate::domain::model::FilterExpression {
+pub fn filter_expression_from_proto(
+    p: &flare_proto::common::FilterExpression,
+) -> crate::domain::model::FilterExpression {
     crate::domain::model::FilterExpression {
         field: p.field.clone(),
-        operator: format!("{:?}", flare_proto::common::FilterOperator::try_from(p.op).unwrap_or(flare_proto::common::FilterOperator::Eq)),
+        operator: format!(
+            "{:?}",
+            flare_proto::common::FilterOperator::try_from(p.op)
+                .unwrap_or(flare_proto::common::FilterOperator::Eq)
+        ),
         value: p.values.join(","),
     }
 }
 
 /// 领域 FilterExpression -> Proto FilterExpression
-pub fn filter_expression_to_proto(d: &crate::domain::model::FilterExpression) -> flare_proto::common::FilterExpression {
+pub fn filter_expression_to_proto(
+    d: &crate::domain::model::FilterExpression,
+) -> flare_proto::common::FilterExpression {
     flare_proto::common::FilterExpression {
         field: d.field.clone(),
         op: flare_proto::common::FilterOperator::Eq as i32, // 默认使用 Eq，实际应根据 operator 字符串解析
-        values: if d.value.is_empty() { vec![] } else { vec![d.value.clone()] },
+        values: if d.value.is_empty() {
+            vec![]
+        } else {
+            vec![d.value.clone()]
+        },
     }
 }

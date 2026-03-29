@@ -3,11 +3,40 @@
 use flare_server_core::context::Ctx;
 
 use crate::domain::model::Message;
-use crate::domain::service::message_operation_service::MessageRepository;
+use crate::domain::service::message_operation_service::{
+    ConversationServerIdsPage, MessageRepository,
+};
 use crate::error::Result;
 
 use super::message_repository_adapter::StorageReaderMessageRepository;
-use super::noop_message_repository::NoopMessageRepository;
+
+/// 无 Storage Reader 时的消息仓储占位（操作类在 WAL 未命中时视为无消息）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopMessageRepository;
+
+impl MessageRepository for NoopMessageRepository {
+    async fn find_by_id(&self, _ctx: &Ctx, _message_id: &str) -> Result<Option<Message>> {
+        Ok(None)
+    }
+
+    async fn save(&self, _ctx: &Ctx, _message: &Message) -> Result<()> {
+        Ok(())
+    }
+
+    async fn page_server_ids_in_conversation(
+        &self,
+        _ctx: &Ctx,
+        _conversation_id: &str,
+        _limit: i32,
+        _cursor: Option<&str>,
+    ) -> Result<ConversationServerIdsPage> {
+        Ok(ConversationServerIdsPage {
+            server_ids: Vec::new(),
+            next_cursor: String::new(),
+            has_more: false,
+        })
+    }
+}
 
 /// 消息仓储变体：有 Reader 走 gRPC，否则 Noop。
 pub enum MessageRepositoryKind {
@@ -27,6 +56,25 @@ impl MessageRepository for MessageRepositoryKind {
         match self {
             Self::Storage(r) => r.save(ctx, message).await,
             Self::Noop(r) => r.save(ctx, message).await,
+        }
+    }
+
+    async fn page_server_ids_in_conversation(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        limit: i32,
+        cursor: Option<&str>,
+    ) -> Result<ConversationServerIdsPage> {
+        match self {
+            Self::Storage(r) => {
+                r.page_server_ids_in_conversation(ctx, conversation_id, limit, cursor)
+                    .await
+            }
+            Self::Noop(r) => {
+                r.page_server_ids_in_conversation(ctx, conversation_id, limit, cursor)
+                    .await
+            }
         }
     }
 }

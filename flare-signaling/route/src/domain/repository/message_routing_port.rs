@@ -42,7 +42,7 @@ pub trait MessageRoutingPort: Send + Sync {
 }
 
 /// Ctx 定义（简化版，实际应从 flare-core 导入）
-/// 
+///
 /// 承载 TraceID、UserID、TenantID 等上下文信息
 #[derive(Debug, Clone)]
 pub struct Ctx {

@@ -1,7 +1,7 @@
 use crate::domain::model::{Thread, ThreadSortOrder};
+use anyhow::Result;
 use flare_server_core::context::Context;
 use std::sync::Arc;
-use anyhow::Result;
 use tracing::instrument;
 
 use crate::domain::repository::ThreadRepository;
@@ -31,11 +31,11 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
     ) -> Result<Thread> {
         let thread_id = self
             .thread_repo
-            .create_thread(conversation_id, root_message_id, title, creator_id)
+            .create_thread(ctx, conversation_id, root_message_id, title, creator_id)
             .await?;
 
         self.thread_repo
-            .get_thread(&thread_id)
+            .get_thread(ctx, &thread_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Thread not found after creation"))
     }
@@ -52,14 +52,21 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
         sort_order: ThreadSortOrder,
     ) -> Result<(Vec<Thread>, i32)> {
         self.thread_repo
-            .list_threads(conversation_id, limit, offset, include_archived, sort_order)
+            .list_threads(
+                ctx,
+                conversation_id,
+                limit,
+                offset,
+                include_archived,
+                sort_order,
+            )
             .await
     }
 
     /// 获取话题详情
     #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
     pub async fn get_thread(&self, ctx: &Context, thread_id: &str) -> Result<Option<Thread>> {
-        self.thread_repo.get_thread(thread_id).await
+        self.thread_repo.get_thread(ctx, thread_id).await
     }
 
     /// 更新话题
@@ -74,11 +81,11 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
         is_archived: Option<bool>,
     ) -> Result<Thread> {
         self.thread_repo
-            .update_thread(thread_id, title, is_pinned, is_locked, is_archived)
+            .update_thread(ctx, thread_id, title, is_pinned, is_locked, is_archived)
             .await?;
 
         self.thread_repo
-            .get_thread(thread_id)
+            .get_thread(ctx, thread_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Thread not found after update"))
     }
@@ -86,7 +93,7 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
     /// 删除话题
     #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
     pub async fn delete_thread(&self, ctx: &Context, thread_id: &str) -> Result<()> {
-        self.thread_repo.delete_thread(thread_id).await
+        self.thread_repo.delete_thread(ctx, thread_id).await
     }
 
     /// 增加话题回复计数
@@ -99,13 +106,20 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
         reply_user_id: &str,
     ) -> Result<()> {
         self.thread_repo
-            .increment_reply_count(thread_id, reply_message_id, reply_user_id)
+            .increment_reply_count(ctx, thread_id, reply_message_id, reply_user_id)
             .await
     }
 
     /// 添加话题参与者
     #[instrument(skip(self, ctx), fields(thread_id = %thread_id, user_id = %user_id))]
-    pub async fn add_participant(&self, ctx: &Context, thread_id: &str, user_id: &str) -> Result<()> {
-        self.thread_repo.add_participant(thread_id, user_id).await
+    pub async fn add_participant(
+        &self,
+        ctx: &Context,
+        thread_id: &str,
+        user_id: &str,
+    ) -> Result<()> {
+        self.thread_repo
+            .add_participant(ctx, thread_id, user_id)
+            .await
     }
 }

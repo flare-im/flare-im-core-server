@@ -12,7 +12,7 @@ use flare_server_core::context::{Context, ContextExt};
 use flare_server_core::error::ErrorCode;
 use tracing::instrument;
 
-use crate::application::dto::{build_route_metadata, MessageRouteResult};
+use crate::application::dto::{MessageRouteResult, build_route_metadata};
 use crate::domain::service::RouteContext;
 use crate::domain::value_objects::DefaultFlowController;
 use crate::infrastructure::forwarder::MessageForwarder;
@@ -65,14 +65,16 @@ impl MessageRoutingHandler {
         message: Message,
         route_options: RouteOptions,
     ) -> MessageRouteResult {
-        ctx.ensure_not_cancelled().map_err(|e| {
-            flare_server_core::error::ErrorBuilder::new(
-                ErrorCode::InternalError,
-                "Request cancelled",
-            )
-            .details(e.to_string())
-            .build_error()
-        }).ok();
+        ctx.ensure_not_cancelled()
+            .map_err(|e| {
+                flare_server_core::error::ErrorBuilder::new(
+                    ErrorCode::InternalError,
+                    "Request cancelled",
+                )
+                .details(e.to_string())
+                .build_error()
+            })
+            .ok();
         let start_time = Instant::now();
         let decision_start = Instant::now();
         let decision_duration = decision_start.elapsed();

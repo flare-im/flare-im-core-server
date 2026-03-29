@@ -132,7 +132,9 @@ impl Endpoint {
     /// - 格式：http://host:port 或 host:port
     pub fn new(value: String) -> Result<Self, RouteError> {
         if value.is_empty() {
-            return Err(RouteError::InvalidEndpoint("Endpoint cannot be empty".to_string()));
+            return Err(RouteError::InvalidEndpoint(
+                "Endpoint cannot be empty".to_string(),
+            ));
         }
         // 基本格式验证
         if !value.contains(':') {
@@ -243,4 +245,3 @@ fn normalize_svid(svid: &str) -> String {
         }
     }
 }
-

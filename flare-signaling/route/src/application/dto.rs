@@ -2,8 +2,8 @@
 //!
 //! 用于封装应用层到接口层的数据传输
 
-use std::collections::HashMap;
 use flare_proto::signaling::router::RouteMetadata;
+use std::collections::HashMap;
 
 /// 消息路由结果
 #[derive(Debug, Clone)]
@@ -41,7 +41,10 @@ pub fn build_route_metadata(
         decision_details: {
             let mut details = HashMap::new();
             details.insert("svid".to_string(), svid.to_string());
-            details.insert("load_balance_strategy".to_string(), format!("{}", load_balance_strategy));
+            details.insert(
+                "load_balance_strategy".to_string(),
+                format!("{}", load_balance_strategy),
+            );
             details
         },
     }

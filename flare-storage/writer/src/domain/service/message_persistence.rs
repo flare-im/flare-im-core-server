@@ -5,16 +5,16 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use flare_im_core::utils::{current_millis, extract_timeline_from_extra, embed_timeline_in_extra_map};
-use tracing::{instrument, warn};
+use flare_im_core::utils::{
+    current_millis, embed_timeline_in_extra_map, extract_timeline_from_extra,
+};
 use flare_server_core::context::Ctx;
+use tracing::{instrument, warn};
 
 use flare_im_core::utils::datetime_to_timestamp;
 
 use crate::domain::events::{AckEvent, AckStatus};
-use crate::domain::model::{
-    Event, EventPayload, EventType, PersistenceResult, PreparedMessage,
-};
+use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, PreparedMessage};
 use crate::domain::repository::{
     AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
     MessageIdempotencyRepository, WalCleanupRepository,
@@ -89,9 +89,13 @@ where
             .ok_or_else(|| anyhow!("missing message payload"))?;
 
         if let Some(ref tenant) = request.tenant {
-            message.extra.insert("tenant_id".to_string(), tenant.tenant_id.clone());
+            message
+                .extra
+                .insert("tenant_id".to_string(), tenant.tenant_id.clone());
         } else if let Some(tenant_id) = request.metadata.get("x-tenant-id") {
-            message.extra.insert("tenant_id".to_string(), tenant_id.clone());
+            message
+                .extra
+                .insert("tenant_id".to_string(), tenant_id.clone());
         }
         if message.conversation_id.is_empty() {
             message.conversation_id = conversation_id.clone();
@@ -148,11 +152,7 @@ where
 
     /// 持久化单条：热缓存(可选) + 归档 + 事件流(供 Sync)
     #[instrument(skip(self), fields(message_id = %prepared.message_id))]
-    pub async fn persist_message(
-        &self,
-        ctx: &Ctx,
-        prepared: PreparedMessage,
-    ) -> Result<()> {
+    pub async fn persist_message(&self, ctx: &Ctx, prepared: PreparedMessage) -> Result<()> {
         if let Some(repo) = &self.hot_cache_repo {
             repo.store_hot(ctx, &prepared.message).await?;
         }
@@ -170,11 +170,7 @@ where
 
     /// 批量持久化
     #[instrument(skip(self), fields(batch_size = prepared.len()))]
-    pub async fn persist_batch(
-        &self,
-        ctx: &Ctx,
-        prepared: Vec<PreparedMessage>,
-    ) -> Result<()> {
+    pub async fn persist_batch(&self, ctx: &Ctx, prepared: Vec<PreparedMessage>) -> Result<()> {
         if prepared.is_empty() {
             return Ok(());
         }

@@ -5,8 +5,8 @@ use serde_json::to_value;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use tracing::instrument;
 
-use crate::convert;
 use super::operation_store;
+use crate::convert;
 
 use crate::config::StorageWriterConfig;
 use crate::domain::model::{Event, Message};
@@ -121,11 +121,27 @@ impl PostgresMessageStore {
             use flare_proto::common::OfflinePushInfo;
             let o = v.as_object()?;
             Some(OfflinePushInfo {
-                title: o.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                body: o.get("body").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                sound: o.get("sound").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                title: o
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                body: o
+                    .get("body")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                sound: o
+                    .get("sound")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 badge: o.get("badge").and_then(|b| b.as_bool()).unwrap_or(false),
-                payload: o.get("payload").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                payload: o
+                    .get("payload")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 ..Default::default()
             })
         });
@@ -138,7 +154,8 @@ impl PostgresMessageStore {
                 o.iter()
                     .filter_map(|(k, v)| {
                         let s = v.as_str()?;
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).ok()
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                            .ok()
                             .map(|bytes| (k.clone(), bytes))
                     })
                     .collect()
@@ -175,7 +192,9 @@ impl PostgresMessageStore {
     }
 }
 
-fn offline_push_info_to_json(opt: Option<&flare_proto::common::OfflinePushInfo>) -> serde_json::Value {
+fn offline_push_info_to_json(
+    opt: Option<&flare_proto::common::OfflinePushInfo>,
+) -> serde_json::Value {
     let o = match opt {
         Some(o) => o,
         None => return serde_json::json!({}),
@@ -193,7 +212,12 @@ fn extensions_to_json(map: &std::collections::HashMap<String, Vec<u8>>) -> serde
     use serde_json::Value as J;
     let o: serde_json::Map<String, J> = map
         .iter()
-        .map(|(k, v)| (k.clone(), J::String(base64::engine::general_purpose::STANDARD.encode(v))))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                J::String(base64::engine::general_purpose::STANDARD.encode(v)),
+            )
+        })
         .collect();
     J::Object(o)
 }
@@ -208,8 +232,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         let created_at_dt = get_message_timestamp(&proto_msg);
         let content_bytes = proto_msg.content.clone();
         let extra_value = build_extra_value(&proto_msg)?;
-        let seq = i64::try_from(proto_msg.seq)
-            .map_err(|_| anyhow::anyhow!("invalid seq overflow for message {}", proto_msg.server_id))?;
+        let seq = i64::try_from(proto_msg.seq).map_err(|_| {
+            anyhow::anyhow!("invalid seq overflow for message {}", proto_msg.server_id)
+        })?;
         if seq <= 0 {
             return Err(anyhow::anyhow!(
                 "invalid seq={}, message must be assigned in orchestrator: {}",
@@ -218,11 +243,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             ));
         }
 
-        let tenant_id = message
-            .extra
-            .get("tenant_id")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("tenant_id is required for message {}", proto_msg.server_id))?;
+        let tenant_id = message.extra.get("tenant_id").cloned().ok_or_else(|| {
+            anyhow::anyhow!("tenant_id is required for message {}", proto_msg.server_id)
+        })?;
 
         sqlx::query(
             r#"
@@ -346,7 +369,10 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .await
     }
 
-    #[instrument(skip(self), fields(tenant_id, message_id, conversation_id, user_id, pin))]
+    #[instrument(
+        skip(self),
+        fields(tenant_id, message_id, conversation_id, user_id, pin)
+    )]
     async fn pin_message(
         &self,
         ctx: &Ctx,
@@ -360,11 +386,22 @@ impl ArchiveStoreRepository for PostgresMessageStore {
     ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         self.operation_store
-            .pin_message(tenant_id, message_id, conversation_id, user_id, pin, expire_at, reason)
+            .pin_message(
+                tenant_id,
+                message_id,
+                conversation_id,
+                user_id,
+                pin,
+                expire_at,
+                reason,
+            )
             .await
     }
 
-    #[instrument(skip(self), fields(tenant_id, message_id, conversation_id, user_id, mark_type))]
+    #[instrument(
+        skip(self),
+        fields(tenant_id, message_id, conversation_id, user_id, mark_type)
+    )]
     async fn mark_message(
         &self,
         ctx: &Ctx,
@@ -378,7 +415,15 @@ impl ArchiveStoreRepository for PostgresMessageStore {
     ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         self.operation_store
-            .mark_message(tenant_id, message_id, conversation_id, user_id, mark_type, color, add)
+            .mark_message(
+                tenant_id,
+                message_id,
+                conversation_id,
+                user_id,
+                mark_type,
+                color,
+                add,
+            )
             .await
     }
 
@@ -396,7 +441,12 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             return Err(anyhow::anyhow!("tenant_id is required"));
         }
         self.operation_store
-            .append_event(tenant_id, message_id, &proto_event, event.operator_id.as_str())
+            .append_event(
+                tenant_id,
+                message_id,
+                &proto_event,
+                event.operator_id.as_str(),
+            )
             .await
     }
 
@@ -513,17 +563,35 @@ impl PostgresMessageStore {
                     .get("tenant_id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
-                    .ok_or_else(|| anyhow::anyhow!("tenant_id is required for message {}", proto_msg.server_id))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("tenant_id is required for message {}", proto_msg.server_id)
+                    })?;
 
                 Ok((
                     tenant_id,
                     proto_msg.server_id.clone(),
                     proto_msg.conversation_id.clone(),
-                    if proto_msg.client_msg_id.is_empty() { None } else { Some(proto_msg.client_msg_id.clone()) },
+                    if proto_msg.client_msg_id.is_empty() {
+                        None
+                    } else {
+                        Some(proto_msg.client_msg_id.clone())
+                    },
                     proto_msg.sender_id.clone(),
-                    if proto_msg.sender_name.is_empty() { None } else { Some(proto_msg.sender_name.clone()) },
-                    if proto_msg.sender_avatar.is_empty() { None } else { Some(proto_msg.sender_avatar.clone()) },
-                    if proto_msg.channel_id.is_empty() { None } else { Some(proto_msg.channel_id.clone()) },
+                    if proto_msg.sender_name.is_empty() {
+                        None
+                    } else {
+                        Some(proto_msg.sender_name.clone())
+                    },
+                    if proto_msg.sender_avatar.is_empty() {
+                        None
+                    } else {
+                        Some(proto_msg.sender_avatar.clone())
+                    },
+                    if proto_msg.channel_id.is_empty() {
+                        None
+                    } else {
+                        Some(proto_msg.channel_id.clone())
+                    },
                     proto_msg.source,
                     seq,
                     created_at_dt,
@@ -560,7 +628,9 @@ impl PostgresMessageStore {
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to begin transaction after retries")));
+                    return Err(last_error.unwrap_or_else(|| {
+                        anyhow::anyhow!("Failed to begin transaction after retries")
+                    }));
                 }
             };
 
@@ -575,21 +645,21 @@ impl PostgresMessageStore {
             );
 
             query_builder.push_values(&prepared_data, |mut b, row| {
-                b.push_bind(&row.0);  // tenant_id
-                b.push_bind(&row.1);  // server_id
-                b.push_bind(&row.2);  // conversation_id
-                b.push_bind(&row.3);  // client_msg_id
-                b.push_bind(&row.4);  // sender_id
-                b.push_bind(&row.5);  // sender_name
-                b.push_bind(&row.6);  // sender_avatar
-                b.push_bind(&row.7);  // channel_id
-                b.push_bind(row.8);   // source
-                b.push_bind(row.9);   // seq
-                b.push_bind(row.10);  // timestamp
-                b.push_bind(row.11);  // conversation_type
-                b.push_bind(row.12);  // message_type
+                b.push_bind(&row.0); // tenant_id
+                b.push_bind(&row.1); // server_id
+                b.push_bind(&row.2); // conversation_id
+                b.push_bind(&row.3); // client_msg_id
+                b.push_bind(&row.4); // sender_id
+                b.push_bind(&row.5); // sender_name
+                b.push_bind(&row.6); // sender_avatar
+                b.push_bind(&row.7); // channel_id
+                b.push_bind(row.8); // source
+                b.push_bind(row.9); // seq
+                b.push_bind(row.10); // timestamp
+                b.push_bind(row.11); // conversation_type
+                b.push_bind(row.12); // message_type
                 b.push_bind(&row.13); // content
-                b.push_bind(row.14);  // status
+                b.push_bind(row.14); // status
                 b.push_bind(&row.15); // offline_push_info
                 b.push_bind(&row.16); // extra
                 b.push_bind(&row.17); // extensions

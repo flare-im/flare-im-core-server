@@ -13,8 +13,10 @@ use crate::application::queries::{
     ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
 };
 
-use super::shared::{domain_to_conversation_detail, internal_error, proto_device, proto_policy, proto_summary};
 use super::ConversationGrpcHandler;
+use super::shared::{
+    domain_to_conversation_detail, internal_error, proto_device, proto_policy, proto_summary,
+};
 
 #[tonic::async_trait]
 impl ConversationReadService for ConversationGrpcHandler {

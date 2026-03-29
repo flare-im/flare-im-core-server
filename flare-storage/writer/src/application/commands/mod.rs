@@ -16,7 +16,5 @@ pub struct ProcessStoreMessageCommand {
     pub metadata: HashMap<String, String>,
 }
 
-
-
 pub mod process_message_operation;
 pub use process_message_operation::ProcessEventCommand;

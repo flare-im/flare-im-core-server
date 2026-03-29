@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use flare_proto::push::push_service_client::PushServiceClient;
 use flare_proto::push::{
     PushMessageRequest, PushMessageResponse, PushNotificationRequest, PushNotificationResponse,
@@ -10,7 +9,6 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-#[async_trait]
 pub trait PushClient: Send + Sync {
     async fn push_message(&self, request: PushMessageRequest) -> Result<PushMessageResponse>;
     async fn push_notification(
@@ -92,7 +90,6 @@ impl GrpcPushClient {
     }
 }
 
-#[async_trait]
 impl PushClient for GrpcPushClient {
     async fn push_message(&self, request: PushMessageRequest) -> Result<PushMessageResponse> {
         let mut client = self.ensure_client().await?;

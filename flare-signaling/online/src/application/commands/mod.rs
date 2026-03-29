@@ -1,7 +1,10 @@
 //! 命令结构体定义（Command DTO）
 
+use flare_proto::signaling::online::{
+    HeartbeatRequest, LoginRequest, LogoutRequest, SubscribeUserPresenceRequest,
+    WatchPresenceRequest,
+};
 use flare_server_core::context::Context;
-use flare_proto::signaling::online::{HeartbeatRequest, LoginRequest, LogoutRequest, SubscribeUserPresenceRequest, WatchPresenceRequest};
 
 /// 登录命令
 #[derive(Debug, Clone)]

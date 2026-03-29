@@ -4,5 +4,6 @@
 
 pub mod flow_controller;
 
-pub use flow_controller::{FlowController, MonitoringClient, NoopMonitoringClient, DefaultFlowController};
-
+pub use flow_controller::{
+    DefaultFlowController, FlowController, MonitoringClient, NoopMonitoringClient,
+};

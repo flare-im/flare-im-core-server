@@ -1,8 +1,5 @@
-// 简单网关处理器
+//! gRPC 网关：透明代理到 Media / Hook / Message(Orchestrator) / Online。
+
 pub mod simple_gateway;
 
-// 轻量级网关处理器
-pub mod lightweight_gateway;
-
-pub use lightweight_gateway::LightweightGatewayHandler;
 pub use simple_gateway::SimpleGatewayHandler;

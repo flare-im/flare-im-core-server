@@ -1,9 +1,9 @@
 //! 消息存储辅助：extra 解析等（init_v2 使用 INT 类型，不再使用字符串 message_type/status/content_type）。
 
-use std::collections::HashMap;
 use flare_proto::common::MessageSource;
 use prost_types::Timestamp;
 use serde_json::{Value, from_value};
+use std::collections::HashMap;
 
 /// 从 extra 解析出的租户信息（与 metadata 解耦，仅读模型使用）
 #[derive(Debug, Clone, Default)]
@@ -96,45 +96,39 @@ pub fn parse_read_by_from_jsonb(
 ) -> Vec<flare_proto::common::MessageReadRecord> {
     read_by
         .and_then(|v| {
-            from_value::<Vec<serde_json::Value>>(v)
-                .ok()
-                .map(|records| {
-                    let mut result = Vec::new();
-                    for record in records {
-                        if let (Some(user_id), read_at_opt, burned_at_opt) = (
-                            record.get("user_id").and_then(|v| v.as_str()),
-                            record.get("read_at"),
-                            record.get("burned_at"),
-                        ) {
-                            let read_at = read_at_opt
-                                .and_then(|v| v.as_object())
-                                .and_then(|obj| {
-                                    let seconds = obj.get("seconds")?.as_i64()?;
-                                    let nanos = obj.get("nanos")?.as_i64()?;
-                                    Some(Timestamp {
-                                        seconds,
-                                        nanos: nanos as i32,
-                                    })
-                                });
-                            let burned_at = burned_at_opt
-                                .and_then(|v| v.as_object())
-                                .and_then(|obj| {
-                                    let seconds = obj.get("seconds")?.as_i64()?;
-                                    let nanos = obj.get("nanos")?.as_i64()?;
-                                    Some(Timestamp {
-                                        seconds,
-                                        nanos: nanos as i32,
-                                    })
-                                });
-                            result.push(flare_proto::common::MessageReadRecord {
-                                user_id: user_id.to_string(),
-                                read_at,
-                                burned_at,
-                            });
-                        }
+            from_value::<Vec<serde_json::Value>>(v).ok().map(|records| {
+                let mut result = Vec::new();
+                for record in records {
+                    if let (Some(user_id), read_at_opt, burned_at_opt) = (
+                        record.get("user_id").and_then(|v| v.as_str()),
+                        record.get("read_at"),
+                        record.get("burned_at"),
+                    ) {
+                        let read_at = read_at_opt.and_then(|v| v.as_object()).and_then(|obj| {
+                            let seconds = obj.get("seconds")?.as_i64()?;
+                            let nanos = obj.get("nanos")?.as_i64()?;
+                            Some(Timestamp {
+                                seconds,
+                                nanos: nanos as i32,
+                            })
+                        });
+                        let burned_at = burned_at_opt.and_then(|v| v.as_object()).and_then(|obj| {
+                            let seconds = obj.get("seconds")?.as_i64()?;
+                            let nanos = obj.get("nanos")?.as_i64()?;
+                            Some(Timestamp {
+                                seconds,
+                                nanos: nanos as i32,
+                            })
+                        });
+                        result.push(flare_proto::common::MessageReadRecord {
+                            user_id: user_id.to_string(),
+                            read_at,
+                            burned_at,
+                        });
                     }
-                    result
-                })
+                }
+                result
+            })
         })
         .unwrap_or_default()
 }

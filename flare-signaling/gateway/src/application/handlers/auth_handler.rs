@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
 use flare_core::server::{AuthResult, Authenticator};
 use flare_server_core::TokenService;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 use crate::constants::{
@@ -83,7 +83,10 @@ impl Authenticator for AuthHandler {
                 }
 
                 debug!( connection_id = %connection_id,user_id = %user_id,tenant_id = %tenant_id,"✅ Token 验证成功，租户ID已设置");
-                Ok(AuthResult::success_with_metadata(Some(user_id),user_metadata))
+                Ok(AuthResult::success_with_metadata(
+                    Some(user_id),
+                    user_metadata,
+                ))
             }
             None => {
                 warn!(
@@ -91,7 +94,9 @@ impl Authenticator for AuthHandler {
                     token_preview = %self.token_preview(token),
                     "❌ Token 验证失败"
                 );
-                Ok(AuthResult::failure(AUTH_FAILURE_MSG_TOKEN_INVALID.to_string()))
+                Ok(AuthResult::failure(
+                    AUTH_FAILURE_MSG_TOKEN_INVALID.to_string(),
+                ))
             }
         }
     }

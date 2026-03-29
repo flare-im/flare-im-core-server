@@ -100,7 +100,6 @@ impl AckModule {
     }
 }
 
-
 impl AckManager for AckModule {
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>> {
         // 调用 AckService 的 trait 实现

@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use flare_im_core::{
-    DeliveryEvent, HookErrorPolicy, HookGroup, HookMetadata, MessageDraft,
-    MessageRecord, PreSendDecision, PreSendHook, RecallEvent,
+    DeliveryEvent, HookErrorPolicy, HookGroup, HookMetadata, MessageDraft, MessageRecord,
+    PreSendDecision, PreSendHook, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
 
@@ -417,11 +417,7 @@ impl HookExecutionPlan {
     }
 
     /// 执行Delivery Hook
-    pub async fn execute_delivery(
-        &self,
-        ctx: &Ctx,
-        event: &DeliveryEvent,
-    ) -> anyhow::Result<()> {
+    pub async fn execute_delivery(&self, ctx: &Ctx, event: &DeliveryEvent) -> anyhow::Result<()> {
         // 优先使用适配器（gRPC/WebHook）
         if let Some(ref adapter) = self.adapter {
             return adapter.delivery(ctx, event).await;

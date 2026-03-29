@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_proto::signaling::online::GetOnlineStatusRequest;
+use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_server_core::context::Ctx;
 use tonic::transport::Channel;
 
@@ -40,4 +40,3 @@ impl OnlineStatusService {
         &self.config.default_tenant_id
     }
 }
-

@@ -52,7 +52,7 @@ impl ApplicationBootstrap {
         use flare_proto::signaling::online::online_service_server::OnlineServiceServer;
         use tonic::transport::Server;
 
-        let simple_handler = context.simple_handler;
+        let grpc_handler = context.grpc_handler;
         info!(
             address = %address,
             port = %address.port(),
@@ -65,23 +65,24 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("core-gateway-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 分别包裹每个 Service
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let media_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(MediaServiceServer::new(simple_handler.clone()));
-                
+                    .layer(MediaServiceServer::new(grpc_handler.clone()));
+
                 let hook_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(HookServiceServer::new(simple_handler.clone()));
-                
+                    .layer(HookServiceServer::new(grpc_handler.clone()));
+
+                // 仅暴露上行发送；消息读模型由 Storage Reader（storage.proto）提供，不再经 message.proto 的查询服务。
                 let message_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(MessageSendServiceServer::new(simple_handler.clone()));
-                
+                    .layer(MessageSendServiceServer::new(grpc_handler.clone()));
+
                 let online_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(OnlineServiceServer::new(simple_handler.clone()));
-                
+                    .layer(OnlineServiceServer::new(grpc_handler));
+
                 Server::builder()
                     .add_service(media_service)
                     .add_service(hook_service)

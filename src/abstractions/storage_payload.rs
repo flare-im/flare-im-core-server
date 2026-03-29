@@ -43,7 +43,8 @@ impl StorageMessagePayload {
         if msg.conversation_id.is_empty() {
             msg.conversation_id = self.conversation_id.clone();
         }
-        msg.extra.insert(EXTRA_KEY_SYNC.to_string(), self.sync.to_string());
+        msg.extra
+            .insert(EXTRA_KEY_SYNC.to_string(), self.sync.to_string());
         if !self.tags.is_empty() {
             if let Ok(json) = serde_json::to_string(&self.tags) {
                 msg.extra.insert(EXTRA_KEY_TAGS.to_string(), json);

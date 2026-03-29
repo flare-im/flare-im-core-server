@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use flare_proto::common::StatusOnlyResponse;
 use flare_proto::media::media_service_server::MediaService;
 use flare_proto::media::upload_file_request;
-use flare_proto::common::StatusOnlyResponse;
 use flare_proto::media::{
     AbortMultipartUploadRequest, AbortMultipartUploadResponse, CleanupOrphanedAssetsRequest,
     CleanupOrphanedAssetsResponse, CompleteMultipartUploadRequest, CreateReferenceRequest,
@@ -12,9 +12,8 @@ use flare_proto::media::{
     GetFileUrlRequest, GetFileUrlResponse, InitiateMultipartUploadRequest,
     InitiateMultipartUploadResponse, ListObjectsRequest, ListObjectsResponse,
     ListReferencesRequest, ListReferencesResponse, ProcessImageRequest, ProcessImageResponse,
-    ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest,
-    UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
-    UploadMultipartChunkResponse,
+    ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest, UploadFileRequest,
+    UploadFileResponse, UploadMultipartChunkRequest, UploadMultipartChunkResponse,
 };
 use flare_server_core::error::ok_status;
 use flare_server_core::utils::require_ctx_from_request;
@@ -54,7 +53,7 @@ impl MediaService for MediaGrpcHandler {
     ) -> Result<Response<UploadFileResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-        
+
         let mut stream = request.into_inner();
         let first = stream
             .next()
@@ -69,7 +68,9 @@ impl MediaService for MediaGrpcHandler {
 
         // 将 tenant_id 添加到 metadata 中（如果未设置）
         if !tenant_id.is_empty() && !upload_metadata.metadata.contains_key("tenant_id") {
-            upload_metadata.metadata.insert("tenant_id".to_string(), tenant_id);
+            upload_metadata
+                .metadata
+                .insert("tenant_id".to_string(), tenant_id);
         }
 
         while let Some(chunk) = stream.next().await {
@@ -93,12 +94,15 @@ impl MediaService for MediaGrpcHandler {
         // 上传完成后，返回预签名URL
         let presigned = self
             .query_handler
-            .handle_get_file_url(&ctx, flare_proto::media::GetFileUrlRequest {
-                file_id: metadata.file_id.clone(),
-                expires_in: 0, // 使用服务默认TTL
-                download: false,
-                response_headers: Default::default(),
-            })
+            .handle_get_file_url(
+                &ctx,
+                flare_proto::media::GetFileUrlRequest {
+                    file_id: metadata.file_id.clone(),
+                    expires_in: 0, // 使用服务默认TTL
+                    download: false,
+                    response_headers: Default::default(),
+                },
+            )
             .await
             .map_err(status_internal)?;
         Ok(Response::new(UploadFileResponse {
@@ -175,12 +179,15 @@ impl MediaService for MediaGrpcHandler {
         // 完成分片上传后也返回预签名URL
         let presigned = self
             .query_handler
-            .handle_get_file_url(&ctx, flare_proto::media::GetFileUrlRequest {
-                file_id: metadata.file_id.clone(),
-                expires_in: 0, // 使用服务默认TTL
-                download: false,
-                response_headers: Default::default(),
-            })
+            .handle_get_file_url(
+                &ctx,
+                flare_proto::media::GetFileUrlRequest {
+                    file_id: metadata.file_id.clone(),
+                    expires_in: 0, // 使用服务默认TTL
+                    download: false,
+                    response_headers: Default::default(),
+                },
+            )
             .await
             .map_err(status_internal)?;
         Ok(Response::new(UploadFileResponse {
@@ -221,7 +228,7 @@ impl MediaService for MediaGrpcHandler {
         let ctx = require_ctx_from_request(&request)?;
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
         let req = request.into_inner();
-        
+
         // 将 tenant_id 添加到 metadata 中（如果未设置）
         let mut metadata = req.metadata;
         if !metadata.contains_key("tenant_id") {

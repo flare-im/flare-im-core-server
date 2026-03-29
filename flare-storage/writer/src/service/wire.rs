@@ -5,7 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context as AnyhowContext, Result};
 use tracing::warn;
 
-use crate::application::handlers::{MessageOperationCommandHandler, MessagePersistenceCommandHandler};
+use crate::application::handlers::{
+    MessageOperationCommandHandler, MessagePersistenceCommandHandler,
+};
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::{
     AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
@@ -71,67 +73,60 @@ pub async fn initialize(
     let ack_publisher = build_ack_publisher(&config)?;
     let redis_client = build_redis_client(&config);
 
-    let idempotency_repo = redis_client.as_ref().map(|client| {
-        Arc::new(RedisIdempotencyRepository::new(client.clone(), &config))
-    });
+    let idempotency_repo = redis_client
+        .as_ref()
+        .map(|client| Arc::new(RedisIdempotencyRepository::new(client.clone(), &config)));
 
-    let hot_cache_repo = redis_client.as_ref().map(|client| {
-        Arc::new(RedisHotCacheRepository::new(client.clone(), &config))
-    });
+    let hot_cache_repo = redis_client
+        .as_ref()
+        .map(|client| Arc::new(RedisHotCacheRepository::new(client.clone(), &config)));
 
     let wal_cleanup_repo = match (&redis_client, &config.wal_hash_key) {
-        (Some(client), Some(key)) => Some(
-            Arc::new(RedisWalCleanupRepository::new(client.clone(), key.clone()))
-        ),
+        (Some(client), Some(key)) => Some(Arc::new(RedisWalCleanupRepository::new(
+            client.clone(),
+            key.clone(),
+        ))),
         _ => None,
     };
 
-    let archive_repo =
-        match PostgresMessageStore::new(&config).await {
-            Ok(Some(store)) => Some(Arc::new(store)),
-            Ok(None) => None,
-            Err(err) => {
-                warn!(error = ?err, "PostgreSQL init failed, archive storage disabled");
-                None
-            }
-        };
+    let archive_repo = match PostgresMessageStore::new(&config).await {
+        Ok(Some(store)) => Some(Arc::new(store)),
+        Ok(None) => None,
+        Err(err) => {
+            warn!(error = ?err, "PostgreSQL init failed, archive storage disabled");
+            None
+        }
+    };
 
-    let event_stream_repo =
-        match PostgresEventStreamStore::from_config(&config).await {
-            Ok(Some(store)) => Some(Arc::new(store)),
-            Ok(None) => None,
-            Err(err) => {
-                warn!(error = ?err, "Event stream store init failed, sync event stream disabled");
-                None
-            }
-        };
+    let event_stream_repo = match PostgresEventStreamStore::from_config(&config).await {
+        Ok(Some(store)) => Some(Arc::new(store)),
+        Ok(None) => None,
+        Err(err) => {
+            warn!(error = ?err, "Event stream store init failed, sync event stream disabled");
+            None
+        }
+    };
 
     let metrics = Arc::new(StorageWriterMetrics::new());
 
     // 使用具体类型创建 domain_service
-    let domain_service: Arc<MessagePersistenceService> = Arc::new(
-        MessagePersistenceDomainService::new(
+    let domain_service: Arc<MessagePersistenceService> =
+        Arc::new(MessagePersistenceDomainService::new(
             idempotency_repo,
             hot_cache_repo,
             archive_repo.clone(),
             event_stream_repo.clone(),
             wal_cleanup_repo,
             ack_publisher,
-        )
-    );
+        ));
 
-    let event_service: Arc<EventApplicationServiceType> = Arc::new(
-        EventApplicationService::new(
-            archive_repo.clone(),
-            event_stream_repo,
-        )
-    );
+    let event_service: Arc<EventApplicationServiceType> = Arc::new(EventApplicationService::new(
+        archive_repo.clone(),
+        event_stream_repo,
+    ));
 
     let command_handler: Arc<MessagePersistenceHandler> = Arc::new(
-        MessagePersistenceCommandHandler::new(
-            domain_service,
-            metrics.clone(),
-        )
+        MessagePersistenceCommandHandler::new(domain_service, metrics.clone()),
     );
 
     let operation_command_handler = Arc::new(MessageOperationCommandHandler::new(
@@ -169,12 +164,10 @@ pub async fn initialize(
     })
 }
 
-fn build_ack_publisher(
-    config: &Arc<StorageWriterConfig>,
-) -> Result<Option<Arc<AckPub>>> {
+fn build_ack_publisher(config: &Arc<StorageWriterConfig>) -> Result<Option<Arc<AckPub>>> {
     if let Some(topic) = &config.kafka_ack_topic {
         let producer = build_kafka_producer(config.as_ref())
-        .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer for ACK: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer for ACK: {}", e))?;
         let producer = Arc::new(producer);
         let publisher = Arc::new(MqAckPublisher::new(producer, config.clone(), topic.clone()));
         Ok(Some(publisher))
@@ -184,13 +177,14 @@ fn build_ack_publisher(
 }
 
 fn build_redis_client(config: &Arc<StorageWriterConfig>) -> Option<Arc<redis::Client>> {
-    config.redis_url.as_ref().and_then(|url| {
-        match redis::Client::open(url.as_str()) {
+    config
+        .redis_url
+        .as_ref()
+        .and_then(|url| match redis::Client::open(url.as_str()) {
             Ok(client) => Some(Arc::new(client)),
             Err(err) => {
                 warn!(error = ?err, "Redis init failed; Redis-backed features disabled");
                 None
             }
-        }
-    })
+        })
 }

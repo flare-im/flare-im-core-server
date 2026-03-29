@@ -8,4 +8,3 @@ pub mod decorator;
 pub mod messaging;
 pub mod state;
 pub mod storage_payload;
-pub mod topics;

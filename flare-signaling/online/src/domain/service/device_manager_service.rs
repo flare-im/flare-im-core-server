@@ -223,9 +223,15 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     }
 
     /// 强制踢出指定设备
-    pub async fn kick_device(&self, user_id: &str, conversation_id: &str, reason: &str) -> Result<()> {
+    pub async fn kick_device(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        reason: &str,
+    ) -> Result<()> {
         let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
-        let sid = ConnectionId::from_string(conversation_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let sid = ConnectionId::from_string(conversation_id.to_string())
+            .map_err(|e| anyhow::anyhow!(e))?;
         warn!(
             user_id = %user_id,
             conversation_id = %conversation_id,

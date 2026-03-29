@@ -8,7 +8,10 @@ pub struct UserConnectionsQuery {
 
 impl UserConnectionsQuery {
     pub fn new(user_id: String, platforms: Vec<String>, limit: i32) -> Self {
-        Self { user_id, platforms, limit }
+        Self {
+            user_id,
+            platforms,
+            limit,
+        }
     }
 }
-

@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
 use flare_im_core::event::types::types;
+use flare_proto::common::PushTaskEnvelope;
+use flare_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
 use flare_server_core::context::Ctx;
 use flare_server_core::event_bus::EventEnvelope;
 use flare_server_core::event_bus::EventPublisher;
@@ -87,4 +88,26 @@ impl PushProxyMqPublisher {
         Ok(())
     }
 
+    /// 发布 PushTaskEnvelope 到在线/离线推送 topic
+    #[instrument(skip(self, ctx, task))]
+    pub async fn publish_push_task(
+        &self,
+        ctx: &Ctx,
+        task: &PushTaskEnvelope,
+        is_online: bool,
+    ) -> Result<()> {
+        let topic = if is_online {
+            &self.config.push_online_topic
+        } else {
+            &self.config.push_offline_topic
+        };
+
+        let envelope = EventEnvelope::new(types::SYSTEM, &task.user_id, 0, task.encode_to_vec())
+            .with_source("flare-push-proxy");
+
+        self.event_publisher
+            .publish(ctx, topic, &envelope)
+            .await
+            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))
+    }
 }

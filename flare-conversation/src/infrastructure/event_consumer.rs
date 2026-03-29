@@ -1,33 +1,34 @@
 //! Kafka 事件消费者
 //!
-//! - ReadReceipt：优先消费 TOPIC_MESSAGE_EVENTS（与 Orchestrator 单事件流对齐），仅处理 operation.read_receipt，驱动未读数更新
-//! - ConversationEnsure：消费 TOPIC_CONVERSATION_ENSURE，Orchestrator 异步会话创建时幂等创建会话
+//! - ReadReceipt：消费 TOPIC_MESSAGE_EVENTS（与 Orchestrator `publish_domain_event` 对齐）
+//! - ConversationEnsure：消费 TOPIC_CONVERSATION_ENSURE（与 Orchestrator `publish_conversation_ensure` 对齐）
 //!
-//! 与 event_bus/topic_envelope 对齐：消息体为 TopicEventEnvelope（proto），内嵌 event 与 tenant_id。
+//! 消息体与 [flare_server_core::event_bus::MqEventBus] 一致：**JSON 序列化的 EventEnvelope**（`partition_key` 为会话等业务分区键）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use flare_proto::common::Event;
 use flare_proto::common::event::Payload;
-use flare_proto::common::TopicEventEnvelope;
 use flare_server_core::context::Context;
+use flare_server_core::event_bus::EventEnvelope;
 use flare_server_core::kafka::{build_kafka_consumer, subscribe_and_wait_for_assignment};
 use prost::Message as _;
+use rdkafka::Message as RdkafkaMessage;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::BorrowedMessage;
-use rdkafka::Message as RdkafkaMessage;
 use tracing::{debug, error, info, warn};
 
-use flare_im_core::abstractions::topics::{
-    EVENT_TYPE_CONVERSATION_ENSURE, EVENT_TYPE_OPERATION_READ_RECEIPT,
-};
 use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_im_core::event::{
+    EVENT_TYPE_OPERATION_CONVERSATION_ENSURE, EVENT_TYPE_OPERATION_READ_RECEIPT,
+};
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{ConversationParticipant, ConversationVisibility};
-use crate::domain::service::{ConversationDomainService, DefaultConversationDomainService};
+use crate::domain::service::DefaultConversationDomainService;
 
 /// Kafka 消费者配置（实现 KafkaConsumerConfig）
 struct ReadReceiptConsumerConfig {
@@ -127,11 +128,8 @@ impl ReadReceiptEventConsumer {
         info!(topic = %self.topic, "ReadReceipt consumer loop started");
 
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.consumer.recv(),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(5), self.consumer.recv())
+                .await
             {
                 Ok(Ok(message)) => {
                     if let Err(e) = self.process_message(&message).await {
@@ -151,17 +149,17 @@ impl ReadReceiptEventConsumer {
     }
 
     async fn process_message(&self, message: &BorrowedMessage<'_>) -> Result<()> {
-        let payload = RdkafkaMessage::payload(message).ok_or_else(|| anyhow::anyhow!("empty payload"))?;
-        let envelope = TopicEventEnvelope::decode(payload)?;
+        let raw =
+            RdkafkaMessage::payload(message).ok_or_else(|| anyhow::anyhow!("empty payload"))?;
+        let envelope: EventEnvelope = serde_json::from_slice(raw)
+            .map_err(|e| anyhow::anyhow!("parse EventEnvelope JSON: {}", e))?;
         if envelope.event_type != EVENT_TYPE_OPERATION_READ_RECEIPT {
             return Ok(());
         }
-        let event = match envelope.event {
-            Some(e) => e,
-            None => return Ok(()),
-        };
+        let event = Event::decode(&*envelope.payload)
+            .map_err(|e| anyhow::anyhow!("decode Event proto from envelope.payload: {}", e))?;
 
-        let Some(Payload::Read(read)) = &event.payload else {
+        let Some(Payload::Read(read)) = event.payload.as_ref() else {
             return Ok(());
         };
 
@@ -171,11 +169,7 @@ impl ReadReceiptEventConsumer {
             return Ok(());
         }
 
-        let tenant_id = if envelope.tenant_id.is_empty() {
-            "0"
-        } else {
-            envelope.tenant_id.as_str()
-        };
+        let tenant_id = "0";
         let user_id = read.user_id.as_str();
         if user_id.is_empty() {
             debug!("ReadReceipt with empty user_id, skip");
@@ -211,6 +205,9 @@ struct ConversationEnsurePayload {
     conversation_type: String,
     business_type: String,
     participants: Vec<String>,
+    /// 非单聊时与消息 channel_id 一致；单聊应为空（由读路径组装对端）
+    #[serde(default)]
+    channel_id: String,
 }
 
 struct ConversationEnsureConsumerConfig {
@@ -219,7 +216,9 @@ struct ConversationEnsureConsumerConfig {
     topic: String,
 }
 
-impl flare_server_core::mq::kafka::config::KafkaConsumerConfig for ConversationEnsureConsumerConfig {
+impl flare_server_core::mq::kafka::config::KafkaConsumerConfig
+    for ConversationEnsureConsumerConfig
+{
     fn kafka_bootstrap(&self) -> &str {
         &self.bootstrap
     }
@@ -264,10 +263,9 @@ impl ConversationEnsureEventConsumer {
         config: &ConversationConfig,
         domain_service: Arc<DefaultConversationDomainService>,
     ) -> Result<Self> {
-        let bootstrap = config
-            .kafka_bootstrap
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("kafka_bootstrap required for ConversationEnsure consumer"))?;
+        let bootstrap = config.kafka_bootstrap.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("kafka_bootstrap required for ConversationEnsure consumer")
+        })?;
         let topic = config
             .kafka_ensure_topic
             .as_deref()
@@ -308,11 +306,8 @@ impl ConversationEnsureEventConsumer {
         info!(topic = %self.topic, "ConversationEnsure consumer loop started");
 
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.consumer.recv(),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(5), self.consumer.recv())
+                .await
             {
                 Ok(Ok(message)) => {
                     if let Err(e) = self.process_message(&message).await {
@@ -332,37 +327,25 @@ impl ConversationEnsureEventConsumer {
     }
 
     async fn process_message(&self, message: &BorrowedMessage<'_>) -> Result<()> {
-        let payload = RdkafkaMessage::payload(message)
-            .ok_or_else(|| anyhow::anyhow!("empty payload"))?;
-        let envelope = TopicEventEnvelope::decode(payload)?;
+        let raw =
+            RdkafkaMessage::payload(message).ok_or_else(|| anyhow::anyhow!("empty payload"))?;
+        let envelope: EventEnvelope = serde_json::from_slice(raw)
+            .map_err(|e| anyhow::anyhow!("parse EventEnvelope JSON: {}", e))?;
 
-        if envelope.event_type != EVENT_TYPE_CONVERSATION_ENSURE {
+        if envelope.event_type != EVENT_TYPE_OPERATION_CONVERSATION_ENSURE {
             return Ok(());
         }
 
-        let event = match &envelope.event {
-            Some(e) => e,
-            None => return Ok(()),
-        };
+        let ensure_payload: ConversationEnsurePayload = serde_json::from_slice(&envelope.payload)
+            .map_err(|e| anyhow::anyhow!("parse ensure payload: {}", e))?;
 
-        let Some(Payload::Custom(custom)) = &event.payload else {
-            return Ok(());
-        };
-
-        let ensure_payload: ConversationEnsurePayload =
-            serde_json::from_slice(&custom.payload).map_err(|e| anyhow::anyhow!("parse ensure payload: {}", e))?;
-
-        let conversation_id = envelope.conversation_id.as_str();
+        let conversation_id = envelope.partition_key.as_str();
         if conversation_id.is_empty() {
-            debug!("ConversationEnsure with empty conversation_id, skip");
+            debug!("ConversationEnsure with empty partition_key, skip");
             return Ok(());
         }
 
-        let tenant_id = if envelope.tenant_id.is_empty() {
-            "0"
-        } else {
-            envelope.tenant_id.as_str()
-        };
+        let tenant_id = "0";
 
         let participants: Vec<ConversationParticipant> = ensure_payload
             .participants
@@ -389,6 +372,7 @@ impl ConversationEnsureEventConsumer {
                 participants,
                 attributes,
                 ConversationVisibility::Private,
+                ensure_payload.channel_id,
             )
             .await?;
 

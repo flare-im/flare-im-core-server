@@ -66,7 +66,10 @@ impl RedisMessageCache {
     pub async fn cache_message(&self, message: &Message) -> Result<()> {
         let mut conn = self.get_connection().await?;
 
-        let message_key = format!("cache:msg:{}:{}", message.conversation_id, message.server_id);
+        let message_key = format!(
+            "cache:msg:{}:{}",
+            message.conversation_id, message.server_id
+        );
 
         // 编码消息为 protobuf bytes，然后 base64 编码
         let mut buf = Vec::new();
@@ -102,7 +105,10 @@ impl RedisMessageCache {
         };
 
         for message in messages {
-            let message_key = format!("cache:msg:{}:{}", message.conversation_id, message.server_id);
+            let message_key = format!(
+                "cache:msg:{}:{}",
+                message.conversation_id, message.server_id
+            );
 
             let mut buf = Vec::new();
             message.encode(&mut buf)?;
@@ -126,7 +132,11 @@ impl RedisMessageCache {
     }
 
     /// 从缓存获取消息
-    pub async fn get_message(&self, conversation_id: &str, message_id: &str) -> Result<Option<Message>> {
+    pub async fn get_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Message>> {
         let mut conn = self.get_connection().await?;
 
         let message_key = format!("cache:msg:{}:{}", conversation_id, message_id);
@@ -214,7 +224,10 @@ impl RedisMessageCache {
         for message in messages {
             if let Some(ts) = &message.timestamp {
                 let score = ts.seconds as f64 + (ts.nanos as f64 / 1_000_000_000.0);
-                pipe.cmd("ZADD").arg(&index_key).arg(score).arg(&message.server_id);
+                pipe.cmd("ZADD")
+                    .arg(&index_key)
+                    .arg(score)
+                    .arg(&message.server_id);
             }
         }
 
@@ -253,7 +266,9 @@ impl RedisMessageCache {
         }
 
         // 批量获取消息
-        let cached_messages = self.get_messages_batch(conversation_id, &message_ids).await?;
+        let cached_messages = self
+            .get_messages_batch(conversation_id, &message_ids)
+            .await?;
 
         // 按 message_ids 顺序返回
         let mut messages = Vec::new();
@@ -310,4 +325,3 @@ impl RedisMessageCache {
         Ok(())
     }
 }
-

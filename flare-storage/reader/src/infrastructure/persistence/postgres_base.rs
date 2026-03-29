@@ -7,16 +7,16 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use flare_im_core::utils::{datetime_to_timestamp, timestamp_to_datetime};
 use flare_im_core::message::Message;
+use flare_im_core::utils::{datetime_to_timestamp, timestamp_to_datetime};
 use prost::Message as ProstMessage;
 use prost_types;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 
 use crate::config::StorageReaderConfig;
-use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use crate::infrastructure::persistence::helpers::*;
+use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 
 #[derive(Clone)]
 /// PostgreSQL 消息存储基础结构
@@ -67,14 +67,15 @@ impl PostgresBaseStorage {
         let cache = if let Some(redis_url) = &config.redis_url {
             let client =
                 redis::Client::open(redis_url.as_str()).context("Failed to create Redis client")?;
-            Some(std::sync::Arc::new(RedisMessageCache::new(std::sync::Arc::new(client), config)))
+            Some(std::sync::Arc::new(RedisMessageCache::new(
+                std::sync::Arc::new(client),
+                config,
+            )))
         } else {
             None
         };
 
-        Self::from_pool_and_cache(pool, cache)
-            .await
-            .map(Some)
+        Self::from_pool_and_cache(pool, cache).await.map(Some)
     }
 
     /// 验证表结构是否存在，并创建必要的索引（如果不存在）
@@ -114,7 +115,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if message_operation_history table exists")?;
 
         if !exists {
-            tracing::warn!("message_operation_history table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "message_operation_history table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 检查 message_edit_history 表是否存在
@@ -132,7 +135,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if message_edit_history table exists")?;
 
         if !exists {
-            tracing::warn!("message_edit_history table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "message_edit_history table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 检查 message_read_records 表是否存在
@@ -150,7 +155,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if message_read_records table exists")?;
 
         if !exists {
-            tracing::warn!("message_read_records table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "message_read_records table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 检查 message_visibility 表是否存在
@@ -168,7 +175,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if message_visibility table exists")?;
 
         if !exists {
-            tracing::warn!("message_visibility table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "message_visibility table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 检查 message_reactions 表是否存在
@@ -186,7 +195,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if message_reactions table exists")?;
 
         if !exists {
-            tracing::warn!("message_reactions table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "message_reactions table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 检查 pinned_messages 表是否存在
@@ -204,7 +215,9 @@ impl PostgresBaseStorage {
         .context("Failed to check if pinned_messages table exists")?;
 
         if !exists {
-            tracing::warn!("pinned_messages table does not exist. Please run init.sql to initialize the schema.");
+            tracing::warn!(
+                "pinned_messages table does not exist. Please run init.sql to initialize the schema."
+            );
         }
 
         // 创建必要的索引（如果不存在）以优化查询性能
@@ -218,13 +231,34 @@ impl PostgresBaseStorage {
     /// 确保必要索引存在（与 init_v2.sql 一致；init_v2 已建主键与唯一索引，此处仅补可选索引）
     pub async fn ensure_indexes(&self) -> Result<()> {
         let indexes: &[(&str, &str)] = &[
-            ("idx_message_operation_history_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id)"),
-            ("idx_message_edit_history_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message ON message_edit_history(tenant_id, message_id)"),
-            ("idx_message_read_records_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message ON message_read_records(tenant_id, message_id)"),
-            ("idx_message_visibility_tenant_user", "CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id)"),
-            ("idx_message_reactions_tenant_message", "CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id)"),
-            ("idx_pinned_messages_tenant_conversation", "CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id)"),
-            ("idx_marked_messages_tenant_user", "CREATE INDEX IF NOT EXISTS idx_marked_messages_tenant_user ON marked_messages(tenant_id, user_id)"),
+            (
+                "idx_message_operation_history_tenant_message",
+                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id)",
+            ),
+            (
+                "idx_message_edit_history_tenant_message",
+                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message ON message_edit_history(tenant_id, message_id)",
+            ),
+            (
+                "idx_message_read_records_tenant_message",
+                "CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message ON message_read_records(tenant_id, message_id)",
+            ),
+            (
+                "idx_message_visibility_tenant_user",
+                "CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id)",
+            ),
+            (
+                "idx_message_reactions_tenant_message",
+                "CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id)",
+            ),
+            (
+                "idx_pinned_messages_tenant_conversation",
+                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id)",
+            ),
+            (
+                "idx_marked_messages_tenant_user",
+                "CREATE INDEX IF NOT EXISTS idx_marked_messages_tenant_user ON marked_messages(tenant_id, user_id)",
+            ),
         ];
 
         for (name, sql) in indexes {
@@ -291,11 +325,27 @@ impl PostgresBaseStorage {
         let offline_push_proto = offline_push_info.as_ref().and_then(|v| {
             let o = v.as_object()?;
             Some(flare_proto::common::OfflinePushInfo {
-                title: o.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                body: o.get("body").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                sound: o.get("sound").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                title: o
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                body: o
+                    .get("body")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                sound: o
+                    .get("sound")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 badge: o.get("badge").and_then(|b| b.as_bool()).unwrap_or(false),
-                payload: o.get("payload").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                payload: o
+                    .get("payload")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 ..Default::default()
             })
         });
@@ -307,7 +357,8 @@ impl PostgresBaseStorage {
                 o.iter()
                     .filter_map(|(k, v)| {
                         let s = v.as_str()?;
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).ok()
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                            .ok()
                             .map(|bytes| (k.clone(), bytes))
                     })
                     .collect()

@@ -10,10 +10,10 @@ use crate::application::handlers::{ConversationCommandHandler, ConversationQuery
 use crate::config::ConversationConfig;
 use crate::domain::model::ConversationDomainConfig;
 use crate::domain::service::{ConversationDomainService, DefaultConversationDomainService};
-use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
 use crate::infrastructure::event_consumer::{
     ConversationEnsureEventConsumer, ReadReceiptEventConsumer,
 };
+use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
 use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
 use crate::interface::grpc::ConversationGrpcHandler;
 
@@ -51,14 +51,18 @@ pub async fn initialize(
                 .context("Failed to connect to PostgreSQL")?,
         )
     } else {
-        return Err(anyhow::anyhow!("postgres config is required for conversation service"));
+        return Err(anyhow::anyhow!(
+            "postgres config is required for conversation service"
+        ));
     };
 
     // 4. 创建会话仓储（硬切到 Postgres，会话元数据必须来自持久化读模型）
-    let conversation_repo = Arc::new(crate::infrastructure::persistence::PostgresConversationRepository::new(
-        postgres_pool,
-        conversation_config.clone(),
-    ));
+    let conversation_repo = Arc::new(
+        crate::infrastructure::persistence::PostgresConversationRepository::new(
+            postgres_pool,
+            conversation_config.clone(),
+        ),
+    );
 
     // 5. 创建在线状态仓储
     let presence_repo: Arc<RedisPresenceRepository> = Arc::new(RedisPresenceRepository::new(
@@ -98,14 +102,13 @@ pub async fn initialize(
     let domain_config = ConversationDomainConfig::new(conversation_config.recent_message_limit);
 
     // 8. 构建领域服务（使用泛型参数以获得更好的性能）
-    let domain_service: Arc<DefaultConversationDomainService> = Arc::new(
-        ConversationDomainService::new(
+    let domain_service: Arc<DefaultConversationDomainService> =
+        Arc::new(ConversationDomainService::new(
             conversation_repo.clone(),
             presence_repo.clone(),
             message_provider.clone(),
             domain_config,
-        )
-    );
+        ));
 
     // 8. 构建命令处理器
     let command_handler = Arc::new(ConversationCommandHandler::new(domain_service.clone()));
@@ -121,7 +124,9 @@ pub async fn initialize(
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler);
 
     let read_receipt_consumer = if conversation_config.kafka_bootstrap.is_some() {
-        match ReadReceiptEventConsumer::new(conversation_config.as_ref(), domain_service.clone()).await {
+        match ReadReceiptEventConsumer::new(conversation_config.as_ref(), domain_service.clone())
+            .await
+        {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::warn!(error = %e, "ReadReceipt Kafka consumer init failed, skipping");
@@ -133,7 +138,12 @@ pub async fn initialize(
     };
 
     let conversation_ensure_consumer = if conversation_config.kafka_bootstrap.is_some() {
-        match ConversationEnsureEventConsumer::new(conversation_config.as_ref(), domain_service.clone()).await {
+        match ConversationEnsureEventConsumer::new(
+            conversation_config.as_ref(),
+            domain_service.clone(),
+        )
+        .await
+        {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::warn!(error = %e, "ConversationEnsure Kafka consumer init failed, skipping");

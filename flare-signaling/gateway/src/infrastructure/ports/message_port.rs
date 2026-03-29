@@ -47,22 +47,24 @@ impl IMessageCommandPort for RouterMessageCommandPort {
         };
 
         let request = request_with_context(req, tx);
-        let resp = client.route_message(request).await
+        let resp = client
+            .route_message(request)
+            .await
             .map_err(|status| {
-                ErrorBuilder::new(ServerErrorCode::ServiceUnavailable, "RouteMessage RPC failed")
-                    .details(status.to_string())
-                    .build_error()
+                ErrorBuilder::new(
+                    ServerErrorCode::ServiceUnavailable,
+                    "RouteMessage RPC failed",
+                )
+                .details(status.to_string())
+                .build_error()
             })?
             .into_inner();
 
         if let Some(st) = resp.status.as_ref()
-            && st.code != ErrorCode::Ok as i32 {
-                return Ok(send_ack_from_failure(
-                    &message,
-                    st.code,
-                    st.message.clone(),
-                ));
-            }
+            && st.code != ErrorCode::Ok as i32
+        {
+            return Ok(send_ack_from_failure(&message, st.code, st.message.clone()));
+        }
 
         if resp.response_data.is_empty() {
             return Ok(send_ack_from_failure(
@@ -72,11 +74,12 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             ));
         }
 
-        let send_resp = SendMessageResponse::decode(resp.response_data.as_slice()).map_err(|e| {
-            ErrorBuilder::new(ServerErrorCode::InternalError, "decode SendMessageResponse")
-                .details(e.to_string())
-                .build_error()
-        })?;
+        let send_resp =
+            SendMessageResponse::decode(resp.response_data.as_slice()).map_err(|e| {
+                ErrorBuilder::new(ServerErrorCode::InternalError, "decode SendMessageResponse")
+                    .details(e.to_string())
+                    .build_error()
+            })?;
 
         let status = send_resp
             .status
@@ -91,11 +94,7 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             });
 
         if status.code != ErrorCode::Ok as i32 || !send_resp.success {
-            return Ok(send_ack_from_failure(
-                &message,
-                status.code,
-                status.message,
-            ));
+            return Ok(send_ack_from_failure(&message, status.code, status.message));
         }
 
         Ok(SendAck {
@@ -106,13 +105,15 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             success: true,
             error_code: ErrorCode::Ok as i32,
             error_message: String::new(),
-            server_time: send_resp.sent_at.or_else(|| Some(Timestamp {
-                seconds: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0),
-                nanos: 0,
-            })),
+            server_time: send_resp.sent_at.or_else(|| {
+                Some(Timestamp {
+                    seconds: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    nanos: 0,
+                })
+            }),
             ack_id: None,
             metadata: Default::default(),
         })

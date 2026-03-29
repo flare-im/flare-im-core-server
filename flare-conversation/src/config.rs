@@ -51,16 +51,14 @@ impl ConversationConfig {
             })
             .unwrap_or_else(|| "redis://127.0.0.1:6379/0".to_string());
 
-        let postgres_url = env::var("CONVERSATION_POSTGRES_URL")
-            .ok()
-            .or_else(|| {
-                if let Some(postgres_name) = &service_config.postgres {
-                    app.postgres_profile(postgres_name)
-                        .map(|profile| profile.url.clone())
-                } else {
-                    None
-                }
-            });
+        let postgres_url = env::var("CONVERSATION_POSTGRES_URL").ok().or_else(|| {
+            if let Some(postgres_name) = &service_config.postgres {
+                app.postgres_profile(postgres_name)
+                    .map(|profile| profile.url.clone())
+            } else {
+                None
+            }
+        });
 
         let conversation_state_prefix = env::var("CONVERSATION_STATE_PREFIX")
             .ok()

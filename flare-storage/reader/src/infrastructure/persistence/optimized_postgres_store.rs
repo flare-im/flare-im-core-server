@@ -14,7 +14,10 @@ use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::convert::{event_from_proto, message_from_proto, message_to_proto};
-use crate::domain::model::{ConversationMessageHead, Event, EventType, FilterExpression, Message, MessageUpdate, VisibilityStatus};
+use crate::domain::model::{
+    ConversationMessageHead, Event, EventType, FilterExpression, Message, MessageUpdate,
+    VisibilityStatus,
+};
 use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
 use crate::infrastructure::persistence::helpers::*;
@@ -43,18 +46,27 @@ pub struct OptimizedPostgresMessageStorageImpl {
 
 impl OptimizedPostgresMessageStorageImpl {
     pub fn new(
-        base: PostgresBaseStorage, 
-        cache: Option<Arc<RedisMessageCache>>, 
-        metrics: Option<Arc<PerformanceMetrics>>
+        base: PostgresBaseStorage,
+        cache: Option<Arc<RedisMessageCache>>,
+        metrics: Option<Arc<PerformanceMetrics>>,
     ) -> Self {
-        Self { base, cache, metrics }
+        Self {
+            base,
+            cache,
+            metrics,
+        }
     }
 }
 
 #[async_trait]
 impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     #[instrument(skip(self, _message), fields(message_id = %_message.server_id))]
-    async fn store_message(&self, ctx: &Ctx, _message: &Message, _conversation_id: &str) -> Result<()> {
+    async fn store_message(
+        &self,
+        ctx: &Ctx,
+        _message: &Message,
+        _conversation_id: &str,
+    ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         // 读侧存储通常不需要实现 store_message
         // 但为了兼容性，可以提供一个空实现或委托给 Writer
@@ -196,7 +208,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     .collect();
 
                 if let Err(e) = cache_clone
-                    .cache_session_messages(&conversation_id_clone, start_ts, end_ts, &proto_messages)
+                    .cache_session_messages(
+                        &conversation_id_clone,
+                        start_ts,
+                        end_ts,
+                        &proto_messages,
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -328,7 +345,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     }
 
     #[instrument(skip(self), fields(message_id))]
-    async fn get_message_timestamp(&self, ctx: &Ctx, message_id: &str) -> Result<Option<DateTime<Utc>>> {
+    async fn get_message_timestamp(
+        &self,
+        ctx: &Ctx,
+        message_id: &str,
+    ) -> Result<Option<DateTime<Utc>>> {
         let _ = ctx; // 上下文用于日志追踪
         // 直接查询消息的时间戳，避免加载完整的消息内容
         let row = sqlx::query(
@@ -354,7 +375,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     }
 
     #[instrument(skip(self, updates), fields(message_id))]
-    async fn update_message(&self, ctx: &Ctx, message_id: &str, updates: MessageUpdate) -> Result<()> {
+    async fn update_message(
+        &self,
+        ctx: &Ctx,
+        message_id: &str,
+        updates: MessageUpdate,
+    ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         // 使用 QueryBuilder 构建动态 UPDATE 语句
         let mut query = sqlx::QueryBuilder::new("UPDATE messages SET ");
@@ -496,9 +522,8 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let end_ts = end_time.unwrap_or(Utc::now());
 
         // 修复：使用独立的查询构建器，避免参数绑定冲突
-        let query_builder = sqlx::QueryBuilder::new(
-            "SELECT COUNT(*) FROM messages WHERE conversation_id = "
-        );
+        let query_builder =
+            sqlx::QueryBuilder::new("SELECT COUNT(*) FROM messages WHERE conversation_id = ");
         let mut query = query_builder;
         query.push_bind(conversation_id);
         query.push(" AND timestamp >= ");
@@ -766,7 +791,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok((vec![], false))
     }
 
-    #[instrument(skip(self, event_type_filter), fields(tenant_id, conversation_id, after_seq, before_seq, limit))]
+    #[instrument(
+        skip(self, event_type_filter),
+        fields(tenant_id, conversation_id, after_seq, before_seq, limit)
+    )]
     async fn query_events(
         &self,
         ctx: &Ctx,
@@ -931,7 +959,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         messages_per_conversation: i32,
     ) -> Result<Vec<(String, Vec<Message>, i64)>> {
         let _ = ctx; // 上下文用于日志追踪
-        
+
         let limit = messages_per_conversation.clamp(1, 100); // 限制范围 1-100
         let mut results = Vec::new();
 
@@ -957,7 +985,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         } else {
             conversation_ids.to_vec()
         };
-        
+
         // 对每个会话查询最新的消息
         for conversation_id in &target_conversation_ids {
             // 查询会话内最新的消息
@@ -978,23 +1006,23 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .fetch_all(&self.base.pool)
             .await
             .context("Failed to query sync snapshot messages")?;
-            
+
             let mut messages = Vec::with_capacity(rows.len());
             let mut max_seq = 0;
-            
+
             for row in rows {
                 let message = self.base.row_to_message(&row)?;
                 let seq_i64 = message.seq as i64;
                 max_seq = max_seq.max(seq_i64);
                 messages.push(message);
             }
-            
+
             // 反转顺序，使最旧的消息在前
             messages.reverse();
-            
+
             results.push((conversation_id.clone(), messages, max_seq));
         }
-        
+
         Ok(results)
     }
 

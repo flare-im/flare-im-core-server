@@ -40,10 +40,9 @@ impl MessageProfile {
             .cloned()
             .or_else(|| {
                 if !message.content.is_empty() {
-                    let content = flare_proto::common::MessageContent::decode(
-                        message.content.as_slice(),
-                    )
-                    .ok()?;
+                    let content =
+                        flare_proto::common::MessageContent::decode(message.content.as_slice())
+                            .ok()?;
                     match content.content.as_ref() {
                         Some(flare_proto::common::message_content::Content::Text(_)) => {
                             Some("text".to_string())
@@ -148,7 +147,12 @@ impl MessageProfile {
         let category = Self::determine_category(&message_type, &message_type_label, &message.extra);
 
         // 判断消息处理类型（Normal vs Notification）
-        let processing_type = Self::determine_processing_type(&category, &message_type_label, &message.content, &message.extra);
+        let processing_type = Self::determine_processing_type(
+            &category,
+            &message_type_label,
+            &message.content,
+            &message.extra,
+        );
 
         MessageProfile {
             message_type,
@@ -176,7 +180,10 @@ impl MessageProfile {
         if matches!(message_type_label, "typing" | "system_event") {
             return MessageCategory::Temporary;
         }
-        if message_type_label == "operation" || message_type_label == "recall" || message_type_label == "read" {
+        if message_type_label == "operation"
+            || message_type_label == "recall"
+            || message_type_label == "read"
+        {
             return MessageCategory::Operation;
         }
         match *message_type {
@@ -190,12 +197,10 @@ impl MessageProfile {
                 }
                 MessageCategory::Notification
             }
-            _ => {
-                match message_type_label {
-                    "notification" => MessageCategory::Notification,
-                    _ => MessageCategory::Normal,
-                }
-            }
+            _ => match message_type_label {
+                "notification" => MessageCategory::Notification,
+                _ => MessageCategory::Normal,
+            },
         }
     }
 
@@ -217,7 +222,10 @@ impl MessageProfile {
             MessageCategory::Notification => {
                 if !content.is_empty() {
                     if let Ok(msg_content) = flare_proto::common::MessageContent::decode(content) {
-                        if let Some(flare_proto::common::message_content::Content::Notification(notif)) = &msg_content.content {
+                        if let Some(flare_proto::common::message_content::Content::Notification(
+                            notif,
+                        )) = &msg_content.content
+                        {
                             if notif.persistent {
                                 return MessageProcessingType::Normal;
                             }
@@ -226,12 +234,12 @@ impl MessageProfile {
                 }
                 // 如果 content 中没有，检查 extra 中的 persistent 标志（兼容性处理）
                 if let Some(flag) = extra.get("persistent") {
-            if flag == "true" || flag == "1" {
+                    if flag == "true" || flag == "1" {
                         return MessageProcessingType::Normal;
-            }
-        }
+                    }
+                }
                 MessageProcessingType::Notification
-        }
+            }
             MessageCategory::Operation => MessageProcessingType::Normal,
             MessageCategory::Normal => MessageProcessingType::Normal,
         }

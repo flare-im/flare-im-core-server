@@ -40,7 +40,10 @@ impl HotCacheRepository for RedisHotCacheRepository {
         let message = crate::convert::message_to_proto(message);
         let mut conn = self.get_connection().await?;
 
-        let message_key = format!("cache:msg:{}:{}", message.conversation_id, message.server_id);
+        let message_key = format!(
+            "cache:msg:{}:{}",
+            message.conversation_id, message.server_id
+        );
         let index_key = format!("cache:session:{}:index", message.conversation_id);
 
         // 将 Message 编码为 protobuf bytes，然后 base64 编码存储
@@ -76,13 +79,19 @@ impl HotCacheRepository for RedisHotCacheRepository {
     /// 使用 Redis Pipeline 批量执行命令，减少网络往返次数，
     /// 性能比逐个执行提升 10-50 倍（取决于批量大小）
     #[instrument(skip(self, messages), fields(batch_size = messages.len()))]
-    async fn store_hot_batch(&self, ctx: &Ctx, messages: &[crate::domain::model::Message]) -> Result<()> {
+    async fn store_hot_batch(
+        &self,
+        ctx: &Ctx,
+        messages: &[crate::domain::model::Message],
+    ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         if messages.is_empty() {
             return Ok(());
         }
-        let messages: Vec<flare_proto::common::Message> =
-            messages.iter().map(crate::convert::message_to_proto).collect();
+        let messages: Vec<flare_proto::common::Message> = messages
+            .iter()
+            .map(crate::convert::message_to_proto)
+            .collect();
         let messages: &[flare_proto::common::Message] = &messages;
 
         let mut conn = self.get_connection().await?;
@@ -104,7 +113,10 @@ impl HotCacheRepository for RedisHotCacheRepository {
 
         // 准备所有命令
         for message in messages {
-            let message_key = format!("cache:msg:{}:{}", message.conversation_id, message.server_id);
+            let message_key = format!(
+                "cache:msg:{}:{}",
+                message.conversation_id, message.server_id
+            );
 
             // 编码消息
             let mut buf = Vec::new();

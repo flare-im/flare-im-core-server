@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
-use flare_im_core::service_names::{get_service_name, SIGNALING_ONLINE};
+use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
 use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
@@ -21,10 +21,9 @@ use tonic::transport::Channel;
 
 use flare_im_core::Ctx;
 
+use crate::constants::METADATA_KEY_TENANT_ID;
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;
 use crate::domain::ports::IConnectionPort;
-use crate::constants::METADATA_KEY_TENANT_ID;
-
 
 pub struct ConnectionRepository {
     connection_manager: Arc<dyn ConnectionManagerTrait>,
@@ -189,18 +188,17 @@ impl IConnectionPort for ConnectionRepository {
     }
 
     async fn list_user_connections(&self, user_id: &str) -> Result<Vec<DomainConnectionInfo>> {
-        let connection_ids = self
-            .connection_manager
-            .get_user_connections(user_id)
-            .await;
+        let connection_ids = self.connection_manager.get_user_connections(user_id).await;
         let mut list = Vec::with_capacity(connection_ids.len());
         for connection_id in connection_ids {
-            if let Some((_, core_info)) = self
-                .connection_manager
-                .get_connection(&connection_id)
-                .await
+            if let Some((_, core_info)) =
+                self.connection_manager.get_connection(&connection_id).await
             {
-                list.push(core_info_to_domain(connection_id, &core_info, &self.default_tenant_id));
+                list.push(core_info_to_domain(
+                    connection_id,
+                    &core_info,
+                    &self.default_tenant_id,
+                ));
             }
         }
         Ok(list)
@@ -212,12 +210,9 @@ impl IConnectionPort for ConnectionRepository {
             .get_connection(connection_id)
             .await
             .ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    "connection not found",
-                )
-                .details(format!("connection_id={}", connection_id))
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "connection not found")
+                    .details(format!("connection_id={}", connection_id))
+                    .build_error()
             })?;
         Ok(core_info_to_domain(
             connection_id.to_string(),
@@ -235,12 +230,9 @@ impl IConnectionPort for ConnectionRepository {
             .get_connection(connection_id)
             .await
             .ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    "connection not found",
-                )
-                .details(format!("connection_id={}", connection_id))
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "connection not found")
+                    .details(format!("connection_id={}", connection_id))
+                    .build_error()
             })?;
         Ok(core_info.metadata)
     }
@@ -254,17 +246,13 @@ impl IConnectionPort for ConnectionRepository {
     }
 }
 
-
 /// 将 flare_core trait 侧 `ConnectionInfo`（[`TraitConnectionInfo`]）转为领域 [`DomainConnectionInfo`]
 pub(crate) fn core_info_to_domain(
     connection_id: String,
     core_info: &TraitConnectionInfo,
     default_tenant_id: &str,
 ) -> DomainConnectionInfo {
-    let user_id = core_info
-        .user_id
-        .clone()
-        .unwrap_or_else(String::new);
+    let user_id = core_info.user_id.clone().unwrap_or_else(String::new);
     let device_id = core_info
         .device_info
         .as_ref()
@@ -274,8 +262,11 @@ pub(crate) fn core_info_to_domain(
         .device_info
         .as_ref()
         .map(|d| format!("{:?}", d.platform));
-    let tenant_id = core_info.metadata.get(METADATA_KEY_TENANT_ID).cloned()
-        .unwrap_or_else(||default_tenant_id.to_string());
+    let tenant_id = core_info
+        .metadata
+        .get(METADATA_KEY_TENANT_ID)
+        .cloned()
+        .unwrap_or_else(|| default_tenant_id.to_string());
     let mut info = DomainConnectionInfo::new(connection_id, user_id, tenant_id, device_id);
     if let Some(p) = platform {
         info = info.with_platform(p);

@@ -6,15 +6,15 @@
 //! - **门面**：MessageHandler（委托四条上行 CommandHandler）
 //! - **推送**：PushMessageCommandHandler / BatchPushMessageCommandHandler（上层 gRPC 直接使用）
 
-pub mod connection_handler;
 mod auth_handler;
-mod send_handler;
-mod push_handler;
+pub mod connection_handler;
 mod connection_query_handler;
+mod push_handler;
+mod send_handler;
 
-pub use send_handler::SendHandler;
-pub use push_handler::PushHandler;
 pub use auth_handler::AuthHandler;
+pub use push_handler::PushHandler;
+pub use send_handler::SendHandler;
 
 pub use connection_handler::ConnectionHandler;
 pub use connection_query_handler::ConnectionQueryHandler;

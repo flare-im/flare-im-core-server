@@ -9,25 +9,19 @@ pub mod helpers;
 #[inline]
 pub fn optional_fallback_conversation(conversation_id: &str) -> Option<&str> {
     let s = conversation_id.trim();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 pub use helpers::ServiceHelper;
 
 // 重新导出 flare-server-core 的 context 工具函数
 pub use flare_server_core::utils::{
-    require_ctx_from_request as require_context,
-    extract_ctx_from_request_opt as extract_context_opt,
+    ctx_to_map as context_to_mq_metadata, extract_ctx_from_request_opt as extract_context_opt,
+    extract_session_id_from_ctx as extract_session_id_from_context,
+    map_to_ctx as context_from_mq_metadata, require_ctx_from_request as require_context,
+    require_request_id_from_ctx as require_request_id_from_context,
     require_tenant_id_from_ctx as require_tenant_id_from_context,
     require_user_id_from_ctx as require_user_id_from_context,
-    extract_session_id_from_ctx as extract_session_id_from_context,
-    require_request_id_from_ctx as require_request_id_from_context,
-    ctx_to_map as context_to_mq_metadata,
-    map_to_ctx as context_from_mq_metadata,
 };
 
 #[cfg(test)]

@@ -39,7 +39,9 @@ impl MessageSubmission {
         };
         request.server_id = Uuid::new_v4().to_string();
         if let Some(old_server_id) = client_provided_server_id {
-            request.extra.insert("original_server_id".to_string(), old_server_id);
+            request
+                .extra
+                .insert("original_server_id".to_string(), old_server_id);
         }
         if request.client_msg_id.is_empty() {
             request.client_msg_id = request.server_id.clone();
@@ -56,8 +58,15 @@ impl MessageSubmission {
                 _ => 1,
             };
         }
-        if request.extra.get("business_type").map_or(true, |v| v.is_empty()) {
-            request.extra.insert("business_type".to_string(), defaults.default_business_type.clone());
+        if request
+            .extra
+            .get("business_type")
+            .map_or(true, |v| v.is_empty())
+        {
+            request.extra.insert(
+                "business_type".to_string(),
+                defaults.default_business_type.clone(),
+            );
         }
         if request.conversation_type == 0 {
             request.conversation_type = match defaults.default_conversation_type.as_str() {
@@ -87,7 +96,10 @@ impl MessageSubmission {
             .get("shard_key")
             .cloned()
             .unwrap_or_else(|| request.conversation_id.clone());
-        request.extra.entry("shard_key".to_string()).or_insert(shard_key.clone());
+        request
+            .extra
+            .entry("shard_key".to_string())
+            .or_insert(shard_key.clone());
         let tenant_id = request
             .extra
             .get("x-tenant-id")
@@ -95,7 +107,10 @@ impl MessageSubmission {
             .cloned()
             .or_else(|| defaults.default_tenant_id.clone())
             .unwrap_or_else(|| "default".to_string());
-        request.extra.entry("tenant_id".to_string()).or_insert(tenant_id);
+        request
+            .extra
+            .entry("tenant_id".to_string())
+            .or_insert(tenant_id);
         let timeline = TimelineMetadata {
             emit_ts,
             ingestion_ts,

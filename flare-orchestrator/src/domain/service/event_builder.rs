@@ -3,11 +3,11 @@
 use chrono::Utc;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{
-    Event, EventType, MessageDeleteEvent as ProtoMessageDeleteEvent,
+    Event, EventType, MarkEvent as ProtoMarkEvent, MessageDeleteEvent as ProtoMessageDeleteEvent,
     MessageEditEvent as ProtoMessageEditEvent, MessageRecallEvent as ProtoMessageRecallEvent,
     PinEvent as ProtoPinEvent, ReactionEvent as ProtoReactionEvent,
-    ReadReceiptEvent as ProtoReadReceiptEvent, UnpinEvent as ProtoUnpinEvent,
-    MarkEvent as ProtoMarkEvent, UnmarkEvent as ProtoUnmarkEvent,
+    ReadReceiptEvent as ProtoReadReceiptEvent, UnmarkEvent as ProtoUnmarkEvent,
+    UnpinEvent as ProtoUnpinEvent,
 };
 use prost_types::Timestamp;
 

@@ -67,7 +67,13 @@ pub trait ArchiveStoreRepository: Send + Sync {
     }
 
     /// 记录消息已读
-    async fn record_message_read(&self, ctx: &Ctx, tenant_id: &str, message_id: &str, user_id: &str) -> Result<()> {
+    async fn record_message_read(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        user_id: &str,
+    ) -> Result<()> {
         let _ = (ctx, tenant_id, message_id, user_id);
         Ok(())
     }

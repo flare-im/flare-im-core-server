@@ -3,8 +3,8 @@
 //! **不要删除**：`MessageCommandHandler` / `SyncQueryHandler` 与 `ConnectionEvent` 等被多个 workspace crate 直接依赖；
 //! 若迁入 `flare-server-core` 会把 IM 语义绑进通用库，反而污染分层。Orchestrator 内部另有应用层 `SendMessageCommand`，勿混淆。
 
-use std::collections::HashMap;
 use flare_server_core::context::Ctx;
+use std::collections::HashMap;
 
 pub type ConversationId = String;
 pub type UserId = String;

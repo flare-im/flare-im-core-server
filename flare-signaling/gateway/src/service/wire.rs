@@ -23,10 +23,10 @@ use crate::infrastructure::ports::{
     RouterAckReportPort, RouterDataCommandPort, RouterEventCommandPort, RouterMessageCommandPort,
     SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
 };
-use tokio::sync::Mutex;
-use crate::interface::link::LongConnectionHandler;
 use crate::interface::grpc::handler::AccessGatewayHandler;
+use crate::interface::link::LongConnectionHandler;
 use crate::service::service_manager::PortConfig;
+use tokio::sync::Mutex;
 
 // 注意：最新的 Flare 模式不再需要在 FlareServerBuilder 中配置中间件
 // 中间件是客户端特性，服务端通过 ServerEventHandler 处理消息
@@ -96,7 +96,6 @@ pub async fn initialize(
     // 4. 构建连接管理器
     let connection_manager = Arc::new(ConnectionManager::new());
 
-
     // 6. 连接读模型（CQRS 查询侧，本地 ConnectionManager）
     let connection_query: Arc<dyn ConnectionQuery> = Arc::new(ManagerConnectionQuery::new(
         connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
@@ -144,10 +143,7 @@ pub async fn initialize(
     );
 
     // 13. 推送领域服务：读 `ConnectionQuery` + 写 `IPushPort`（ServerHandle 就绪后生效）
-    let push_domain_service = Arc::new(PushDomainService::new(
-        push_port,
-        connection_query.clone(),
-    ));
+    let push_domain_service = Arc::new(PushDomainService::new(push_port, connection_query.clone()));
 
     // 14. 构建认证器
     let authenticator = build_authenticator(&access_config).await;
@@ -306,14 +302,14 @@ fn build_flare_server(
         })
         .with_default_format(SerializationFormat::Protobuf)
         .with_default_compression(compression_algorithm);
-    
+
     // 可选：启用加密
     if encryption_enabled {
         builder = builder.with_default_encryption(
-            flare_core::common::encryption::EncryptionAlgorithm::Aes256Gcm
+            flare_core::common::encryption::EncryptionAlgorithm::Aes256Gcm,
         );
     }
-    
+
     // 协议配置
     if let Some(quic) = quic_addr {
         builder = builder
@@ -325,8 +321,10 @@ fn build_flare_server(
             .with_protocols(vec![TransportProtocol::WebSocket])
             .with_protocol_address(TransportProtocol::WebSocket, ws_addr);
     }
-    
-    builder.build().map_err(|e| anyhow::anyhow!("Failed to build FlareServer: {}", e))
+
+    builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build FlareServer: {}", e))
 }
 
 /// 构建长连接服务器
@@ -360,17 +358,17 @@ async fn build_long_connection_server(
         enable_encryption = %access_config.enable_encryption,
         "Reading compression and encryption configuration"
     );
-    
-    let compression_algorithm = parse_compression_algorithm(
-        access_config.compression_algorithm.as_deref()
-    );
-    
+
+    let compression_algorithm =
+        parse_compression_algorithm(access_config.compression_algorithm.as_deref());
+
     // 先注册加密器（如果启用），必须在构建服务器之前注册
     let encryption_config = setup_encryption_config(
         access_config.enable_encryption,
         access_config.encryption_key.as_deref(),
-    ).await;
-    
+    )
+    .await;
+
     info!(
         compression = ?compression_algorithm,
         encryption_enabled = %encryption_config.enabled,
@@ -420,7 +418,7 @@ async fn build_long_connection_server(
         Some(&push_handle_slot),
     )
     .await;
-    
+
     // 启动服务器
     server.start().await.map_err(|e| {
         error!(error = %e, "Failed to start FlareServer");
@@ -438,7 +436,9 @@ struct EncryptionConfig {
 }
 
 /// 解析压缩算法
-fn parse_compression_algorithm(algorithm: Option<&str>) -> flare_core::common::compression::CompressionAlgorithm {
+fn parse_compression_algorithm(
+    algorithm: Option<&str>,
+) -> flare_core::common::compression::CompressionAlgorithm {
     use flare_core::common::compression::CompressionAlgorithm;
 
     let result = match algorithm {
@@ -450,7 +450,7 @@ fn parse_compression_algorithm(algorithm: Option<&str>) -> flare_core::common::c
             CompressionAlgorithm::None
         }
     };
-    
+
     tracing::debug!(algorithm = ?algorithm, parsed = ?result, "Parsed compression algorithm");
     result
 }
@@ -474,10 +474,14 @@ async fn setup_encryption_config(
             Some(key.as_bytes().to_vec())
         } else if key.len() == 64 {
             // hex 编码的 64 字符字符串（32字节）
-            (0..32).try_fold(Vec::new(), |mut acc, i| {
-                u8::from_str_radix(&key[i * 2..i * 2 + 2], 16)
-                    .map(|b| { acc.push(b); acc })
-            }).ok()
+            (0..32)
+                .try_fold(Vec::new(), |mut acc, i| {
+                    u8::from_str_radix(&key[i * 2..i * 2 + 2], 16).map(|b| {
+                        acc.push(b);
+                        acc
+                    })
+                })
+                .ok()
         } else {
             None
         }
@@ -519,7 +523,9 @@ async fn setup_server_components(
     }
 
     connection_handler.set_server_handle(server_handle).await;
-    connection_handler.set_connection_manager(manager_trait).await;
+    connection_handler
+        .set_connection_manager(manager_trait)
+        .await;
 
     info!("✅ Server handle, connection manager, and push handle slot configured");
 }

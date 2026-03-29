@@ -356,7 +356,6 @@ impl AckService {
     }
 }
 
-
 impl AckManager for AckService {
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>> {
         let ack_info = AckStatusInfo {

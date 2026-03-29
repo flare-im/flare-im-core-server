@@ -8,9 +8,7 @@ use anyhow::Result;
 
 use crate::domain::model::HookExecutionPlan;
 use crate::domain::service::HookOrchestrationService;
-use flare_im_core::{
-    DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
-};
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::{Context, Ctx};
 
 /// Hook命令处理器（编排层）

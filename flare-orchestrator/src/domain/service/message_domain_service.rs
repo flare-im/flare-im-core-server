@@ -12,15 +12,17 @@ use std::time::Instant;
 use anyhow::{Context as AnyhowContext, Result};
 use flare_im_core::abstractions::builders::PushMessageRequestBuilder;
 use flare_im_core::abstractions::decorator::{MessageDecorator, NoopMessageDecorator};
+use flare_im_core::abstractions::messaging::MessageEventPublisher;
 use flare_im_core::abstractions::storage_payload::StorageMessagePayload;
 use flare_im_core::hooks::HookDispatcher;
 use flare_im_core::tracing::create_span;
-use flare_server_core::context::{Context, Ctx};
-use flare_proto::push::{PushMessageRequest, PushOptions};
 use flare_proto::common::Message;
+use flare_proto::push::{PushMessageRequest, PushOptions};
+use flare_server_core::context::{Context, Ctx};
 use prost::Message as ProstMessage;
 use tracing::{Span, instrument};
 
+use crate::config::SessionCreationMode;
 use crate::domain::model::MessageProfile;
 use crate::domain::model::{MessageDefaults, MessageSubmission};
 use crate::domain::repository::{
@@ -28,13 +30,18 @@ use crate::domain::repository::{
     WalRepositoryItem,
 };
 use crate::domain::service::hook_builder::{
-    build_hook_context_from_ctx,
-    apply_draft_to_request, build_draft_from_request, build_hook_context, build_message_record,
-    draft_from_submission, merge_context,
+    apply_draft_to_request, build_draft_from_request, build_hook_context,
+    build_hook_context_from_ctx, build_message_record, draft_from_submission, merge_context,
 };
-use crate::config::SessionCreationMode;
-use crate::domain::service::message_publish_strategy::{MessagePublishStrategyRegistry, PublishContext};
 use crate::domain::service::sequence_allocator::SequenceAllocator;
+
+/// 写入会话表 `channel_id`：单聊须空；群/频道等取消息 `channel_id`（与 Conversation 域一致）
+fn persisted_conversation_channel_id(conversation_type: &str, message_channel_id: &str) -> String {
+    match conversation_type {
+        "single" => String::new(),
+        _ => message_channel_id.to_string(),
+    }
+}
 
 /// 消息领域服务 - 包含所有业务逻辑
 pub struct MessageDomainService {
@@ -45,8 +52,6 @@ pub struct MessageDomainService {
     sequence_allocator: Arc<SequenceAllocator>,
     defaults: MessageDefaults,
     hooks: Arc<HookDispatcher>,
-    /// 按消息类别可插拔的发布策略（Strategy 模式）
-    publish_strategy_registry: MessagePublishStrategyRegistry,
     /// Decorator 模式：消息增强（已读标记、@提及等），默认 Noop
     message_decorator: Arc<dyn MessageDecorator>,
     /// 会话生成模式：Sync 同步 gRPC / Async 发布 conversation.ensure 事件
@@ -71,7 +76,6 @@ impl MessageDomainService {
             sequence_allocator,
             defaults,
             hooks,
-            publish_strategy_registry: MessagePublishStrategyRegistry::new(),
             message_decorator: message_decorator.unwrap_or_else(|| Arc::new(NoopMessageDecorator)),
             session_creation_mode,
         }
@@ -97,8 +101,8 @@ impl MessageDomainService {
 
         // 从Context构建hook_context（确保tenant_id从Context获取）
         let original_context = build_hook_context_from_ctx(ctx, &request);
-        let mut draft =
-            build_draft_from_request(&request).with_context(|| "Failed to build draft from request")?;
+        let mut draft = build_draft_from_request(&request)
+            .with_context(|| "Failed to build draft from request")?;
 
         // 执行 PreSend Hook（如果启用）
         if execute_pre_send {
@@ -147,15 +151,6 @@ impl MessageDomainService {
         // 注意：MessageProfile::ensure 会修改 message，所以需要 clone
         let mut message_for_profile = submission.message.clone();
         let profile = MessageProfile::ensure(&mut message_for_profile);
-        let processing_type = profile.processing_type(); // 保留变量名，因为在后面会使用
-
-        let _message_type = match processing_type {
-            // 添加下划线前缀表示故意未使用
-            crate::domain::model::message_kind::MessageProcessingType::Normal => "normal",
-            crate::domain::model::message_kind::MessageProcessingType::Notification => {
-                "notification"
-            }
-        };
 
         // 仅普通消息需要写入WAL
         if profile.needs_wal() {
@@ -171,22 +166,28 @@ impl MessageDomainService {
 
         // 会话生成：如会话不存在则创建（Sync 同步 gRPC / Async 发布 conversation.ensure 事件）
         let mut participants = vec![submission.message.sender_id.clone()];
-        if submission.message.conversation_type == flare_proto::common::ConversationType::Single as i32
+        if submission.message.conversation_type
+            == flare_proto::common::ConversationType::Single as i32
             && !submission.message.channel_id.is_empty()
         {
             participants.push(submission.message.channel_id.clone());
         }
         let conversation_id = submission.message.conversation_id.clone();
-        let conversation_type =
-            match flare_proto::common::ConversationType::try_from(submission.message.conversation_type) {
-                Ok(st) => match st {
-                    flare_proto::common::ConversationType::Single => "single".to_string(),
-                    flare_proto::common::ConversationType::Group => "group".to_string(),
-                    flare_proto::common::ConversationType::Channel => "channel".to_string(),
-                    _ => "unknown".to_string(),
-                },
-                Err(_) => "unknown".to_string(),
-            };
+        let conversation_type = match flare_proto::common::ConversationType::try_from(
+            submission.message.conversation_type,
+        ) {
+            Ok(st) => match st {
+                flare_proto::common::ConversationType::Unspecified => "unspecified".to_string(),
+                flare_proto::common::ConversationType::Single => "single".to_string(),
+                flare_proto::common::ConversationType::Group => "group".to_string(),
+                flare_proto::common::ConversationType::Channel => "channel".to_string(),
+                flare_proto::common::ConversationType::Ai => "ai".to_string(),
+                flare_proto::common::ConversationType::Customer => "customer".to_string(),
+                flare_proto::common::ConversationType::System => "system".to_string(),
+                flare_proto::common::ConversationType::Temp => "temp".to_string(),
+            },
+            Err(_) => "unknown".to_string(),
+        };
         let business_type = submission
             .message
             .extra
@@ -194,16 +195,17 @@ impl MessageDomainService {
             .cloned()
             .unwrap_or_default();
 
+        let stored_channel_id = persisted_conversation_channel_id(
+            conversation_type.as_str(),
+            submission.message.channel_id.as_str(),
+        );
+
         match self.session_creation_mode {
             SessionCreationMode::Sync => {
                 if let Some(conversation_repo) = &self.conversation_repository {
                     let mut ensure_ctx = (**ctx).clone();
                     if ensure_ctx.tenant_id().is_none() {
-                        if let Some(tenant_id_from_message) = submission.message.extra.get("x-tenant-id").or_else(|| submission.message.extra.get("tenant_id")) {
-                            ensure_ctx = ensure_ctx.with_tenant_id(tenant_id_from_message.clone());
-                        } else {
-                            ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
-                        }
+                        ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
                     }
                     if ensure_ctx.request_id().is_empty() {
                         use uuid::Uuid;
@@ -215,8 +217,6 @@ impl MessageDomainService {
                         }
                         if let Some(t) = ctx.tenant_id() {
                             ensure_ctx = ensure_ctx.with_tenant_id(t.to_string());
-                        } else if let Some(t) = submission.message.extra.get("x-tenant-id").or_else(|| submission.message.extra.get("tenant_id")) {
-                            ensure_ctx = ensure_ctx.with_tenant_id(t.clone());
                         } else {
                             ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
                         }
@@ -229,6 +229,7 @@ impl MessageDomainService {
                             &conversation_type,
                             &business_type,
                             participants.clone(),
+                            stored_channel_id.clone(),
                         ),
                     )
                     .await;
@@ -253,10 +254,7 @@ impl MessageDomainService {
                 }
             }
             SessionCreationMode::Async => {
-                let tenant_id_str = ctx
-                    .tenant_id()
-                    .or_else(|| submission.message.extra.get("x-tenant-id").or_else(|| submission.message.extra.get("tenant_id")).map(|s| s.as_str()))
-                    .unwrap_or("0");
+                let tenant_id_str = ctx.tenant_id().unwrap_or("0");
                 if let Err(e) = self
                     .publisher
                     .publish_conversation_ensure(
@@ -265,6 +263,7 @@ impl MessageDomainService {
                         &conversation_type,
                         &business_type,
                         participants,
+                        stored_channel_id,
                     )
                     .await
                 {
@@ -292,26 +291,12 @@ impl MessageDomainService {
         // 构建推送任务
         let push_request = self.build_push_request(&submission, &profile)?;
 
-        // Strategy 模式（ARCHITECTURE_REFACTOR §2）：按 MessageProfile 的 category/processing_type 取策略并执行
+        // 最终一致性语义：存储与推送并行分发，降低端到端延迟。
+        // 若任一分发失败则本次返回错误，由上层重试/补偿。
         let _kafka_span = create_span("message-orchestrator", "kafka_produce");
-        let category = profile.category();
-        tracing::info!(
-            message_id = %submission.message_id,
-            message_type = submission.message.message_type,
-            category = ?category,
-            "准备按策略发布到事件总线"
-        );
-        let strategy = self
-            .publish_strategy_registry
-            .get(category, profile.processing_type());
         let storage_payload = StorageMessagePayload::from(&submission.kafka_payload);
-        strategy
-            .publish(PublishContext {
-                request_ctx: ctx,
-                publisher: self.publisher.as_ref(),
-                storage_payload,
-                push_request,
-            })
+        self.publisher
+            .publish_both(ctx, storage_payload, push_request)
             .await
             .context("Failed to publish message")?;
 
@@ -371,14 +356,18 @@ impl MessageDomainService {
                     }
                 }
                 flare_proto::common::ConversationType::Group
-                | flare_proto::common::ConversationType::Channel => {
-                    // 群聊、频道：使用 conversation_id 查询成员，user_ids 留空由推送服务查询
+                | flare_proto::common::ConversationType::Channel
+                | flare_proto::common::ConversationType::Ai
+                | flare_proto::common::ConversationType::Customer
+                | flare_proto::common::ConversationType::System
+                | flare_proto::common::ConversationType::Temp => {
+                    // 群/频道/AI/客服/系统/临时：成员由推送侧按 conversation_id 解析，user_ids 留空
                     tracing::debug!(
-                        "Group/channel message. Push worker will query members. conversation_id={}",
+                        "Non-direct message. Push worker will resolve members. conversation_id={}",
                         submission.message.conversation_id
                     );
                 }
-                _ => {}
+                flare_proto::common::ConversationType::Unspecified => {}
             }
         }
 
@@ -387,7 +376,9 @@ impl MessageDomainService {
         let mut message_for_push = submission.message.clone();
 
         // 验证单聊时 channel_id（对方 user_id）在克隆后仍然存在
-        if message_for_push.conversation_type == flare_proto::common::ConversationType::Single as i32 {
+        if message_for_push.conversation_type
+            == flare_proto::common::ConversationType::Single as i32
+        {
             if message_for_push.channel_id.is_empty() {
                 tracing::error!(
                     message_id = %message_for_push.server_id,

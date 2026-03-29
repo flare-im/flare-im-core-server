@@ -22,10 +22,9 @@ impl ApplicationBootstrap {
         #[cfg(feature = "tracing")]
         {
             let otlp_endpoint = std::env::var("OTLP_ENDPOINT").ok();
-            if let Err(e) = flare_im_core::tracing::init_tracing(
-                ORCHESTRATOR,
-                otlp_endpoint.as_deref(),
-            ) {
+            if let Err(e) =
+                flare_im_core::tracing::init_tracing(ORCHESTRATOR, otlp_endpoint.as_deref())
+            {
                 tracing::error!(error = %e, "Failed to initialize OpenTelemetry tracing");
             } else {
                 info!("✅ OpenTelemetry tracing initialized");
@@ -37,12 +36,9 @@ impl ApplicationBootstrap {
         let service_config = app_config.orchestrator_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr = ServiceHelper::parse_server_addr(
-            app_config,
-            &service_config.runtime,
-            ORCHESTRATOR,
-        )
-        .context("invalid orchestrator server address")?;
+        let address: SocketAddr =
+            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, ORCHESTRATOR)
+                .context("invalid orchestrator server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -59,12 +55,25 @@ impl ApplicationBootstrap {
         context: wire::ApplicationContext,
         address: SocketAddr,
     ) -> Result<()> {
-        use flare_proto::message::message_send_service_server::MessageSendServiceServer;
         use flare_proto::message::message_action_service_server::MessageActionServiceServer;
-        use flare_proto::message::message_query_service_server::MessageQueryServiceServer;
+        use flare_proto::message::message_send_service_server::MessageSendServiceServer;
+        use flare_server_core::kafka::KafkaMessageFetcher;
+        use flare_server_core::mq::consumer::ConsumerRuntimeTask;
         use tonic::transport::Server;
 
-        let handler = context.handler.clone();
+        let send_grpc = context.message_send_grpc.clone();
+        let action_grpc = context.message_action_grpc.clone();
+        let topics = context.dispatcher.topics();
+        if topics.is_empty() {
+            anyhow::bail!("orchestrator: no Kafka topics registered on dispatcher");
+        }
+        let fetcher = KafkaMessageFetcher::new(context.config.as_ref(), topics)
+            .map_err(|e| anyhow::anyhow!("create kafka fetcher: {}", e))?;
+        let consumer_task = ConsumerRuntimeTask::from_parts(
+            context.consumer_config.clone(),
+            context.dispatcher.clone(),
+            fetcher,
+        );
 
         info!(
             address = %address,
@@ -77,21 +86,17 @@ impl ApplicationBootstrap {
         let runtime = ServiceRuntime::new(ORCHESTRATOR, address)
             .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let send_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(MessageSendServiceServer::new(handler.clone()));
+                    .layer(MessageSendServiceServer::new(send_grpc));
                 let action_service = ContextLayer::new()
                     .allow_missing()
-                    .layer(MessageActionServiceServer::new(handler.clone()));
-                let query_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(MessageQueryServiceServer::new(handler));
-                
+                    .layer(MessageActionServiceServer::new(action_grpc));
+
                 Server::builder()
                     .add_service(send_service)
                     .add_service(action_service)
-                    .add_service(query_service)
                     .serve_with_shutdown(address_clone, async move {
                         info!(
                             address = %address_clone,
@@ -111,22 +116,23 @@ impl ApplicationBootstrap {
                     })
                     .await
                     .map_err(|e| format!("gRPC server error: {}", e).into())
-            });
+            })
+            .add_mq_consumer_runtime("orchestrator-main-queue-consumer", consumer_task);
 
         // 准备服务注册的元数据（server_id 和 svid）
         // 从环境变量或配置获取（MessageOrchestratorConfig 已经处理了配置）
         let config = context.config.clone();
         let mut metadata = std::collections::HashMap::new();
-        
+
         // 从配置获取 server_id
         if let Some(server_id) = &config.server_id {
             metadata.insert("server_id".to_string(), server_id.clone());
         }
-        
+
         // 从配置获取 svid（默认为 svid.im）
         let svid = config.svid.as_deref().unwrap_or("svid.im");
         metadata.insert("svid".to_string(), svid.to_string());
-        
+
         let metadata_clone = Some(metadata);
 
         // 运行服务（带服务注册）

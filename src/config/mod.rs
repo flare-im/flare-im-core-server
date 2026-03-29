@@ -441,13 +441,13 @@ pub struct MessageOrchestratorServiceConfig {
     /// Kafka 配置
     #[serde(default)]
     pub kafka: Option<String>,
-    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_CREATED 对齐）
+    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
     #[serde(default, alias = "kafka_topic")]
     pub storage_topic: Option<String>,
     /// 操作事件流 Topic（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
     #[serde(default)]
     pub operation_topic: Option<String>,
-    /// 推送流 Topic（与 constants::topics::TOPIC_PUSH_TASKS 对齐）
+    /// 推送流 Topic（与 constants::topics::TOPIC_PUSH_MESSAGES 对齐）
     #[serde(default)]
     pub push_topic: Option<String>,
     /// WAL 存储
@@ -530,7 +530,7 @@ pub struct StorageWriterServiceConfig {
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
-    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_CREATED 对齐）
+    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
     #[serde(default)]
     pub kafka_topic: Option<String>,
     /// 操作事件流 Topic（Recall/Edit/Read 等，与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
@@ -788,7 +788,6 @@ impl FlareAppConfig {
     pub fn conversation_service(&self) -> ConversationServiceConfig {
         self.services.conversation.clone().unwrap_or_default()
     }
-    
 
     /// 组合服务配置
     pub fn compose_service_config(
@@ -921,9 +920,8 @@ impl FlareAppConfig {
         if let Some(cfg) = &self.services.signaling_online
             && let Some(redis) = &cfg.redis
         {
-            self.redis_profile(redis).ok_or_else(|| {
-                anyhow!("Redis config '{}' not found (signaling_online)", redis)
-            })?;
+            self.redis_profile(redis)
+                .ok_or_else(|| anyhow!("Redis config '{}' not found (signaling_online)", redis))?;
         }
 
         // 验证存储读取服务配置
@@ -976,9 +974,8 @@ impl FlareAppConfig {
                     .ok_or_else(|| anyhow!("Redis config '{}' not found (conversation)", redis))?;
             }
             if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka).ok_or_else(|| {
-                    anyhow!("Kafka config '{}' not found (conversation)", kafka)
-                })?;
+                self.kafka_profile(kafka)
+                    .ok_or_else(|| anyhow!("Kafka config '{}' not found (conversation)", kafka))?;
             }
         }
 
@@ -1124,8 +1121,10 @@ fn load_config_from_file(path: &Path) -> Result<FlareAppConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("unable to read config file: {}", Path::new(path).display()))?;
     // 解析 TOML 格式的配置内容
-    let mut cfg: FlareAppConfig = toml::from_str(&content)
-        .context(format!("invalid config format: {}", Path::new(path).display()))?;
+    let mut cfg: FlareAppConfig = toml::from_str(&content).context(format!(
+        "invalid config format: {}",
+        Path::new(path).display()
+    ))?;
     // 确保配置有默认值
     cfg.ensure_defaults();
     Ok(cfg)
@@ -1154,9 +1153,10 @@ fn load_config_from_directory(path: &Path) -> Result<FlareAppConfig> {
     merge_directory(&mut merged, &path.join("services"))?;
     merge_directory(&mut merged, &path.join("overrides"))?;
 
-    let cfg: FlareAppConfig = merged
-        .try_into()
-        .context(format!("invalid configuration after merging {}", path.display()))?;
+    let cfg: FlareAppConfig = merged.try_into().context(format!(
+        "invalid configuration after merging {}",
+        path.display()
+    ))?;
 
     Ok(cfg)
 }
@@ -1194,8 +1194,10 @@ fn merge_directory(root: &mut Value, dir: &Path) -> Result<()> {
 fn load_toml_value(path: &Path) -> Result<Value> {
     let content = fs::read_to_string(path)
         .context(format!("unable to read config fragment {}", path.display()))?;
-    let value: Value = toml::from_str(&content)
-        .context(format!("invalid TOML content in fragment {}", path.display()))?;
+    let value: Value = toml::from_str(&content).context(format!(
+        "invalid TOML content in fragment {}",
+        path.display()
+    ))?;
     Ok(value)
 }
 

@@ -44,12 +44,10 @@ impl StartupInfo {
             region,
             port_config,
             address,
-            grpc_services: vec![
-                GrpcServiceInfo {
-                    name: "AccessGateway".to_string(),
-                    description: "业务系统推送消息".to_string(),
-                },
-            ],
+            grpc_services: vec![GrpcServiceInfo {
+                name: "AccessGateway".to_string(),
+                description: "业务系统推送消息".to_string(),
+            }],
         }
     }
 
@@ -193,9 +191,9 @@ pub async fn start_services(
 
             // 添加上下文中间件（自动提取和注入 TenantContext 和 RequestContext）
             use flare_server_core::middleware::ContextLayer;
-            
+
             // 使用 ContextLayer 包裹 Service
-            
+
             let access_gateway_service = ContextLayer::new()
                 .allow_missing()
                 .layer(
@@ -203,7 +201,7 @@ pub async fn start_services(
                         (*access_gateway_handler).clone(),
                     ),
                 );
-            
+
             let server_result = Server::builder()
                 .add_service(access_gateway_service)
                 .serve_with_shutdown(grpc_addr, async move {

@@ -5,24 +5,24 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use flare_core::common::conversation::{
-    ConversationType, generate_single_chat_conversation_id, generate_group_conversation_id,
-    generate_ai_conversation_id, generate_customer_conversation_id, generate_system_conversation_id,
+    generate_ai_conversation_id, generate_customer_conversation_id, generate_group_conversation_id,
+    generate_single_chat_conversation_id, generate_system_conversation_id,
     generate_temp_conversation_id, validate_conversation_id,
 };
-use flare_proto::common::message_content::Content;
 use flare_proto::common::Message;
+use flare_proto::common::message_content::Content;
 use flare_proto::message_content_ext::decode_message_content;
 use flare_server_core::context::Context;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::domain::model::{
-    ConflictResolutionPolicy, DevicePresence, DeviceState, MessageSyncResult, Conversation,
-    ConversationDomainConfig, ConversationFilter, ConversationLifecycleState, ConversationParticipant, ConversationPolicy,
-    ConversationSort, ConversationSummary, ConversationVisibility,
+    ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
+    ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
+    ConversationSummary, ConversationVisibility, DevicePresence, DeviceState, MessageSyncResult,
 };
 use crate::domain::repository::{
-    MessageProvider, PresenceRepository, PresenceUpdate, ConversationRepository,
+    ConversationRepository, MessageProvider, PresenceRepository, PresenceUpdate,
 };
 
 /// 会话领域服务 - 包含所有业务逻辑
@@ -115,87 +115,99 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         // 仅在需要 recent 数据时补充最后一条消息，避免 bootstrap 首屏同步超时。
         if include_recent {
             if let Some(provider) = &self.message_provider {
-            // 为每个会话获取最后一条消息（如果有）
-            for summary in &mut summaries {
-                if summary.last_message_id.is_none() {
-                    // 尝试获取最后一条消息信息
-                    if let Ok(sync_result) = provider
-                        .sync_messages(ctx, &summary.conversation_id, 0, None, 1)
-                        .await
-                    {
-                        if let Some(last_msg) = sync_result.messages.first() {
-                            summary.last_message_id = Some(last_msg.server_id.clone());
+                // 为每个会话获取最后一条消息（如果有）
+                for summary in &mut summaries {
+                    if summary.last_message_id.is_none() {
+                        // 尝试获取最后一条消息信息
+                        if let Ok(sync_result) = provider
+                            .sync_messages(ctx, &summary.conversation_id, 0, None, 1)
+                            .await
+                        {
+                            if let Some(last_msg) = sync_result.messages.first() {
+                                summary.last_message_id = Some(last_msg.server_id.clone());
 
-                            // 转换 Timestamp 为 DateTime<Utc>
-                            summary.last_message_time =
-                                last_msg.timestamp.as_ref().and_then(|ts| {
-                                    chrono::TimeZone::timestamp_opt(
-                                        &chrono::Utc,
-                                        ts.seconds,
-                                        ts.nanos as u32,
-                                    )
-                                    .single()
-                                });
+                                // 转换 Timestamp 为 DateTime<Utc>
+                                summary.last_message_time =
+                                    last_msg.timestamp.as_ref().and_then(|ts| {
+                                        chrono::TimeZone::timestamp_opt(
+                                            &chrono::Utc,
+                                            ts.seconds,
+                                            ts.nanos as u32,
+                                        )
+                                        .single()
+                                    });
 
-                            summary.last_sender_id = Some(last_msg.sender_id.clone());
-                            summary.last_message_type = Some(last_msg.message_type() as i32);
+                                summary.last_sender_id = Some(last_msg.sender_id.clone());
+                                summary.last_message_type = Some(last_msg.message_type() as i32);
 
-                            // Message.content 为按 message_content.proto 序列化的 bytes
-                            summary.last_content_type = if last_msg.content.is_empty() {
-                                None
-                            } else {
-                                decode_message_content(&last_msg.content).ok().and_then(|mc| {
-                                    mc.content.map(|c| match c {
-                                        Content::Text(_) => "text".to_string(),
-                                        Content::Image(_) => "image".to_string(),
-                                        Content::Video(_) => "video".to_string(),
-                                        Content::Audio(_) => "audio".to_string(),
-                                        Content::File(_) => "file".to_string(),
-                                        Content::Location(_) => "location".to_string(),
-                                        Content::Card(_) => "card".to_string(),
-                                        Content::Sticker(_) => "sticker".to_string(),
-                                        Content::Emoji(_) => "emoji".to_string(),
-                                        Content::Gif(_) => "gif".to_string(),
-                                        Content::Quote(_) => "quote".to_string(),
-                                        Content::LinkCard(_) => "link_card".to_string(),
-                                        Content::Forward(_) => "forward".to_string(),
-                                        Content::Thread(_) => "thread".to_string(),
-                                        Content::MiniProgram(_) => "mini_program".to_string(),
-                                        Content::RichText(_) => "rich_text".to_string(),
-                                        Content::Markdown(_) => "markdown".to_string(),
-                                        Content::ImageGroup(_) => "image_group".to_string(),
-                                        Content::System(_) => "system".to_string(),
-                                        Content::Notification(_) => "notification".to_string(),
-                                        Content::Vote(_) => "vote".to_string(),
-                                        Content::Task(_) => "task".to_string(),
-                                        Content::Schedule(_) => "schedule".to_string(),
-                                        Content::Announcement(_) => "announcement".to_string(),
-                                        Content::Custom(_) => "custom".to_string(),
-                                        Content::Placeholder(_) => "placeholder".to_string(),
-                                    })
-                                })
-                            };
+                                // Message.content 为按 message_content.proto 序列化的 bytes
+                                summary.last_content_type = if last_msg.content.is_empty() {
+                                    None
+                                } else {
+                                    decode_message_content(&last_msg.content)
+                                        .ok()
+                                        .and_then(|mc| {
+                                            mc.content.map(|c| match c {
+                                                Content::Text(_) => "text".to_string(),
+                                                Content::Image(_) => "image".to_string(),
+                                                Content::Video(_) => "video".to_string(),
+                                                Content::Audio(_) => "audio".to_string(),
+                                                Content::File(_) => "file".to_string(),
+                                                Content::Location(_) => "location".to_string(),
+                                                Content::Card(_) => "card".to_string(),
+                                                Content::Sticker(_) => "sticker".to_string(),
+                                                Content::Emoji(_) => "emoji".to_string(),
+                                                Content::Gif(_) => "gif".to_string(),
+                                                Content::Quote(_) => "quote".to_string(),
+                                                Content::LinkCard(_) => "link_card".to_string(),
+                                                Content::Forward(_) => "forward".to_string(),
+                                                Content::Thread(_) => "thread".to_string(),
+                                                Content::MiniProgram(_) => {
+                                                    "mini_program".to_string()
+                                                }
+                                                Content::RichText(_) => "rich_text".to_string(),
+                                                Content::Markdown(_) => "markdown".to_string(),
+                                                Content::ImageGroup(_) => "image_group".to_string(),
+                                                Content::System(_) => "system".to_string(),
+                                                Content::Notification(_) => {
+                                                    "notification".to_string()
+                                                }
+                                                Content::Vote(_) => "vote".to_string(),
+                                                Content::Task(_) => "task".to_string(),
+                                                Content::Schedule(_) => "schedule".to_string(),
+                                                Content::Announcement(_) => {
+                                                    "announcement".to_string()
+                                                }
+                                                Content::Custom(_) => "custom".to_string(),
+                                                Content::Placeholder(_) => {
+                                                    "placeholder".to_string()
+                                                }
+                                            })
+                                        })
+                                };
 
-                            // 更新server_cursor_ts为最后消息的时间戳
-                            if let Some(ts) = last_msg.timestamp.as_ref() {
-                                summary.server_cursor_ts =
-                                    Some(ts.seconds * 1_000 + (ts.nanos as i64 / 1_000_000));
+                                // 更新server_cursor_ts为最后消息的时间戳
+                                if let Some(ts) = last_msg.timestamp.as_ref() {
+                                    summary.server_cursor_ts =
+                                        Some(ts.seconds * 1_000 + (ts.nanos as i64 / 1_000_000));
+                                }
                             }
                         }
-                    }
 
-                    // 未读数已在 load_bootstrap 中从数据库读取（基于 seq）
-                    // 这里不再需要重新计算
+                        // 未读数已在 load_bootstrap 中从数据库读取（基于 seq）
+                        // 这里不再需要重新计算
+                    }
                 }
-            }
             }
         }
 
         let mut recent_messages = Vec::new();
         if include_recent {
             if let Some(provider) = &self.message_provider {
-                let conversation_ids: Vec<String> =
-                    summaries.iter().map(|s| s.conversation_id.clone()).collect();
+                let conversation_ids: Vec<String> = summaries
+                    .iter()
+                    .map(|s| s.conversation_id.clone())
+                    .collect();
                 if !conversation_ids.is_empty() {
                     recent_messages = provider
                         .recent_messages(
@@ -210,10 +222,12 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             }
         }
 
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let devices = self
             .presence_repo
-            .list_devices(user_id)
+            .list_devices(ctx, user_id)
             .await
             .unwrap_or_default();
 
@@ -304,7 +318,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         notify_conflict: bool,
         conflict_reason: Option<String>,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let update = PresenceUpdate {
             user_id: user_id.to_string(),
             device_id: device_id.to_string(),
@@ -314,7 +330,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             notify_conflict,
             conflict_reason,
         };
-        self.presence_repo.update_presence(update).await
+        self.presence_repo.update_presence(ctx, update).await
     }
 
     /// 强制会话同步（业务逻辑）
@@ -345,7 +361,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .cloned()
             .collect();
 
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         if missing.is_empty() {
             info!(
                 user_id = %user_id,
@@ -379,8 +397,13 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         participants: Vec<ConversationParticipant>,
         mut attributes: HashMap<String, String>,
         visibility: ConversationVisibility,
+        stored_channel_id: String,
     ) -> Result<Conversation> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let normalized_channel_id = match conversation_type.as_str() {
+            "single" => String::new(),
+            _ => stored_channel_id,
+        };
         // 尝试从 attributes 中提取指定的 conversation_id
         if let Some(requested_conversation_id) = attributes.remove("conversation_id") {
             // 验证会话ID格式（如果格式不正确，记录警告但继续处理，保持向后兼容）
@@ -393,8 +416,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             }
 
             // 检查会话是否已存在
-            if let Ok(Some(existing_session)) =
-                self.conversation_repo.get_conversation(ctx, &requested_conversation_id).await
+            if let Ok(Some(existing_session)) = self
+                .conversation_repo
+                .get_conversation(ctx, &requested_conversation_id)
+                .await
             {
                 // 会话已存在，更新参与者（确保所有参与者都在会话中）
                 debug!(
@@ -422,7 +447,13 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                         "Adding new participants to existing session"
                     );
                     self.conversation_repo
-                        .manage_participants(ctx, &requested_conversation_id, &participants_to_add, &[], &[])
+                        .manage_participants(
+                            ctx,
+                            &requested_conversation_id,
+                            &participants_to_add,
+                            &[],
+                            &[],
+                        )
                         .await?;
                 }
 
@@ -439,6 +470,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     conversation_id: requested_conversation_id.clone(),
                     conversation_type,
                     business_type,
+                    channel_id: normalized_channel_id,
                     display_name: None,
                     attributes,
                     participants,
@@ -449,7 +481,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     updated_at: chrono::Utc::now(),
                 };
 
-                self.conversation_repo.create_conversation(ctx, &session).await?;
+                self.conversation_repo
+                    .create_conversation(ctx, &session)
+                    .await?;
                 info!(conversation_id = %requested_conversation_id, "Conversation created with provided conversation_id");
                 Ok(session)
             }
@@ -478,11 +512,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 }
                 "assistant" | "ai" => {
                     // AI 助手：从参与者中提取用户ID，ai_scope 从 attributes 或默认值
-                    let user_id = participants.first()
+                    let user_id = participants
+                        .first()
                         .map(|p| p.user_id.as_str())
-                        .unwrap_or_else(|| {
-                            ctx.user_id().unwrap_or("unknown")
-                        });
+                        .unwrap_or_else(|| ctx.user_id().unwrap_or("unknown"));
                     let ai_scope = attributes
                         .get("ai_scope")
                         .map(|s| s.as_str())
@@ -527,6 +560,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 conversation_id: conversation_id.clone(),
                 conversation_type,
                 business_type,
+                channel_id: normalized_channel_id,
                 display_name: None,
                 attributes,
                 participants,
@@ -537,7 +571,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 updated_at: chrono::Utc::now(),
             };
 
-            self.conversation_repo.create_conversation(ctx, &session).await?;
+            self.conversation_repo
+                .create_conversation(ctx, &session)
+                .await?;
             info!(
                 conversation_id = %conversation_id,
                 "Conversation created with generated conversation_id"
@@ -547,8 +583,14 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
     }
 
     /// 获取会话（业务逻辑）
-    pub async fn get_conversation(&self, ctx: &Context, conversation_id: &str) -> Result<Option<Conversation>> {
-        self.conversation_repo.get_conversation(ctx, conversation_id).await
+    pub async fn get_conversation(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+    ) -> Result<Option<Conversation>> {
+        self.conversation_repo
+            .get_conversation(ctx, conversation_id)
+            .await
     }
 
     /// 更新会话（业务逻辑）
@@ -581,7 +623,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         }
         conversation.updated_at = chrono::Utc::now();
 
-        self.conversation_repo.update_conversation(ctx, &conversation).await?;
+        self.conversation_repo
+            .update_conversation(ctx, &conversation)
+            .await?;
         info!(conversation_id = %conversation_id, "Conversation updated");
         Ok(conversation)
     }
@@ -629,7 +673,9 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         ctx: &Context,
         cursors: Vec<(String, i64)>,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         self.conversation_repo
             .batch_acknowledge(ctx, &cursors)
             .await?;

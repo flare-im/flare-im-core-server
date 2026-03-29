@@ -280,9 +280,13 @@ impl RedisAckManager {
         let mut used_memory_peak = 0u64;
 
         for line in info.lines() {
-            if line.starts_with("used_memory:") && let Some(value) = line.split(':').nth(1) {
+            if line.starts_with("used_memory:")
+                && let Some(value) = line.split(':').nth(1)
+            {
                 used_memory = value.parse().unwrap_or(0);
-            } else if line.starts_with("used_memory_peak:") && let Some(value) = line.split(':').nth(1) {
+            } else if line.starts_with("used_memory_peak:")
+                && let Some(value) = line.split(':').nth(1)
+            {
                 used_memory_peak = value.parse().unwrap_or(0);
             }
         }

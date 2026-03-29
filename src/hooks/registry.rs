@@ -7,8 +7,8 @@ use crate::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
 use super::selector::HookSelector;
 use super::types::{
-    DeliveryEvent, DeliveryHook, HookKind, HookMetadata, HookOutcome, MessageDraft,
-    MessageRecord, PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    DeliveryEvent, DeliveryHook, HookKind, HookMetadata, HookOutcome, MessageDraft, MessageRecord,
+    PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
 use flare_server_core::context::Ctx;
 
@@ -76,7 +76,9 @@ impl PreSendPlan {
 }
 
 fn annotate(err: FlareError, metadata: &HookMetadata) -> FlareError {
-    if let Some(localized) = err.as_localized() && localized.details.is_none() {
+    if let Some(localized) = err.as_localized()
+        && localized.details.is_none()
+    {
         tracing::debug!(
             hook = %metadata.name,
             "hook error returned without details"
@@ -174,11 +176,7 @@ impl HookRegistry {
             .collect()
     }
 
-    pub async fn execute_pre_send(
-        &self,
-        ctx: &Ctx,
-        draft: &mut MessageDraft,
-    ) -> Result<()> {
+    pub async fn execute_pre_send(&self, ctx: &Ctx, draft: &mut MessageDraft) -> Result<()> {
         for plan in self.plan_pre_send(ctx).await {
             match plan.execute(ctx, draft).await {
                 PreSendDecision::Continue => continue,

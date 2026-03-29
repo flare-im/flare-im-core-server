@@ -12,7 +12,8 @@ use tracing::info;
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{
-    Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant, ConversationSort, ConversationSummary,
+    Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
+    ConversationSort, ConversationSummary,
 };
 use crate::domain::repository::ConversationRepository;
 use flare_im_core::utils::calculate_unread_count;
@@ -43,6 +44,65 @@ impl PostgresConversationRepository {
         Self { pool, config }
     }
 
+    /// 单聊库中 `channel_id` 为空：按当前用户从 participants 解析对端，仅写入内存摘要（不下发进 DB 列）。
+    async fn fill_single_chat_channel_ids(
+        pool: &PgPool,
+        tenant_id: &str,
+        current_user_id: &str,
+        summaries: &mut [ConversationSummary],
+    ) -> Result<()> {
+        let need_peer: Vec<String> = summaries
+            .iter()
+            .filter(|s| {
+                if !s.channel_id.is_empty() {
+                    return false;
+                }
+                match s.conversation_type.as_deref() {
+                    Some("single") => true,
+                    Some(_) => false,
+                    None => s.conversation_id.starts_with("1A"),
+                }
+            })
+            .map(|s| s.conversation_id.clone())
+            .collect();
+
+        if need_peer.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT cp.conversation_id::text AS conversation_id, cp.user_id::text AS user_id
+            FROM conversation_participants cp
+            WHERE cp.tenant_id = $1
+              AND cp.conversation_id = ANY($2)
+              AND cp.user_id <> $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&need_peer)
+        .bind(current_user_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("fill single chat channel_id: {}", e))?;
+
+        let mut peer_by_cid: HashMap<String, String> = HashMap::new();
+        for row in rows {
+            let cid: String = row.get("conversation_id");
+            let uid: String = row.get("user_id");
+            peer_by_cid.entry(cid).or_insert(uid);
+        }
+
+        for s in summaries.iter_mut() {
+            if s.channel_id.is_empty() {
+                if let Some(peer) = peer_by_cid.get(&s.conversation_id) {
+                    s.channel_id.clone_from(peer);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ConversationRepository for PostgresConversationRepository {
@@ -52,7 +112,9 @@ impl ConversationRepository for PostgresConversationRepository {
         client_cursor: &HashMap<String, i64>,
     ) -> Result<ConversationBootstrapResult> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         // 1. 从user_sync_cursor表加载用户的光标映射
         let cursor_rows = sqlx::query(
             r#"
@@ -92,8 +154,9 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.attributes,
                 s.visibility,
                 s.lifecycle_state,
-                s.updated_at,
+                GREATEST(s.updated_at, sp.joined_at, sp.updated_at) AS effective_updated_at,
                 s.last_message_seq,
+                COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(sp.last_read_seq, 0) as last_read_seq,
                 COALESCE(sp.unread_count, 0) as unread_count
             FROM conversations s
@@ -102,7 +165,8 @@ impl ConversationRepository for PostgresConversationRepository {
               AND sp.tenant_id = $1
               AND sp.user_id = $2
               AND s.lifecycle_state != 'deleted'
-            ORDER BY s.updated_at DESC
+              AND NOT COALESCE(sp.is_deleted, false)
+            ORDER BY effective_updated_at DESC
             "#,
         )
         .bind(tenant_id)
@@ -119,10 +183,11 @@ impl ConversationRepository for PostgresConversationRepository {
             let business_type: Option<String> = row.get("business_type");
             let display_name: Option<String> = row.get("display_name");
             let attributes: Option<serde_json::Value> = row.get("attributes");
-            let updated_at: DateTime<Utc> = row.get("updated_at");
+            let effective_updated_at: DateTime<Utc> = row.get("effective_updated_at");
 
             // 从数据库读取未读数相关字段
             let last_message_seq: Option<i64> = row.get("last_message_seq");
+            let channel_id: String = row.get("channel_id");
             let last_read_seq: i64 = row.get("last_read_seq");
             let unread_count: i32 = row.get("unread_count");
 
@@ -131,11 +196,11 @@ impl ConversationRepository for PostgresConversationRepository {
                 .unwrap_or_default();
 
             // 注释：最后一条消息信息将在ApplicationService层通过MessageProvider补充
-            // 当前实现使用updated_at作为server_cursor_ts的fallback
+            // server_cursor_ts：用户级游标优先，否则用会话与成员时间较大值（晚加入者也能被增量同步命中）
             let server_cursor_ts = server_cursor
                 .get(&conversation_id)
                 .copied()
-                .or_else(|| Some(updated_at.timestamp_millis()));
+                .or_else(|| Some(effective_updated_at.timestamp_millis()));
 
             // 计算未读数：基于 last_message_seq - last_read_seq（init_v2 列名）
             // 如果数据库中的 unread_count 已更新，直接使用；否则计算
@@ -159,10 +224,14 @@ impl ConversationRepository for PostgresConversationRepository {
                 metadata: attributes,
                 server_cursor_ts,
                 display_name,
+                last_message_seq,
+                channel_id,
             };
 
             summaries.push(summary);
         }
+
+        Self::fill_single_chat_channel_ids(&self.pool, tenant_id, user_id, &mut summaries).await?;
 
         // 按server_cursor_ts降序排序
         summaries.sort_by(|a, b| {
@@ -179,9 +248,16 @@ impl ConversationRepository for PostgresConversationRepository {
         })
     }
 
-    async fn update_cursor(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, ts: i64) -> Result<()> {
+    async fn update_cursor(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        ts: i64,
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         sqlx::query(
             r#"
             INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_ts, updated_at)
@@ -201,7 +277,11 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(())
     }
 
-    async fn create_conversation(&self, ctx: &flare_server_core::context::Context, session: &Conversation) -> Result<()> {
+    async fn create_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        session: &Conversation,
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let mut tx = self.pool.begin().await?;
 
@@ -210,9 +290,9 @@ impl ConversationRepository for PostgresConversationRepository {
             r#"
             INSERT INTO conversations (
                 tenant_id, conversation_id, conversation_type, business_type, display_name,
-                attributes, visibility, lifecycle_state, created_at, updated_at
+                attributes, visibility, lifecycle_state, channel_id, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT (tenant_id, conversation_id) DO NOTHING
             "#,
         )
@@ -224,6 +304,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(serde_json::to_value(&session.attributes)?)
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
+        .bind(&session.channel_id)
         .execute(&mut *tx)
         .await
         .context("Failed to create conversation")?;
@@ -265,12 +346,16 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(())
     }
 
-    async fn get_conversation(&self, ctx: &flare_server_core::context::Context, conversation_id: &str) -> Result<Option<Conversation>> {
+    async fn get_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<Option<Conversation>> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let row = sqlx::query(
             r#"
             SELECT conversation_id, conversation_type, business_type, display_name,
-                   attributes, visibility, lifecycle_state,
+                   attributes, visibility, lifecycle_state, channel_id,
                    created_at, updated_at
             FROM conversations
             WHERE tenant_id = $1 AND conversation_id = $2
@@ -289,6 +374,7 @@ impl ConversationRepository for PostgresConversationRepository {
         let conversation_id: String = row.get("conversation_id");
         let conversation_type: String = row.get("conversation_type");
         let business_type: String = row.get("business_type");
+        let channel_id: String = row.get("channel_id");
         let display_name: Option<String> = row.get("display_name");
         let attributes: Option<serde_json::Value> = row.get("attributes");
         let visibility_int: i32 = row.get("visibility");
@@ -349,6 +435,7 @@ impl ConversationRepository for PostgresConversationRepository {
             conversation_id,
             conversation_type,
             business_type,
+            channel_id,
             display_name,
             attributes,
             participants,
@@ -360,7 +447,11 @@ impl ConversationRepository for PostgresConversationRepository {
         }))
     }
 
-    async fn update_conversation(&self, ctx: &flare_server_core::context::Context, session: &Conversation) -> Result<()> {
+    async fn update_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        session: &Conversation,
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         sqlx::query(
             r#"
@@ -369,14 +460,16 @@ impl ConversationRepository for PostgresConversationRepository {
                 attributes = $2,
                 visibility = $3,
                 lifecycle_state = $4,
+                channel_id = $5,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE tenant_id = $5 AND conversation_id = $6
+            WHERE tenant_id = $6 AND conversation_id = $7
             "#,
         )
         .bind(&session.display_name)
         .bind(serde_json::to_value(&session.attributes)?)
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
+        .bind(&session.channel_id)
         .bind(tenant_id)
         .bind(&session.conversation_id)
         .execute(&*self.pool)
@@ -387,7 +480,12 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(())
     }
 
-    async fn delete_conversation(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, hard_delete: bool) -> Result<()> {
+    async fn delete_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        hard_delete: bool,
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         if hard_delete {
             // 物理删除（级联删除参与者）
@@ -525,9 +623,15 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(participants)
     }
 
-    async fn batch_acknowledge(&self, ctx: &flare_server_core::context::Context, cursors: &[(String, i64)]) -> Result<()> {
+    async fn batch_acknowledge(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        cursors: &[(String, i64)],
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let mut tx = self.pool.begin().await?;
 
         for (conversation_id, ts) in cursors {
@@ -573,7 +677,8 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.attributes,
                 s.visibility,
                 s.lifecycle_state,
-                s.updated_at
+                s.updated_at,
+                COALESCE(s.channel_id, '') as channel_id
             FROM conversations s
             "#,
         );
@@ -703,7 +808,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .context("Failed to search conversations")?;
 
         // 转换为ConversationSummary
-        let summaries: Vec<ConversationSummary> = rows
+        let mut summaries: Vec<ConversationSummary> = rows
             .into_iter()
             .map(|row| {
                 let conversation_id: String = row.get("conversation_id");
@@ -712,6 +817,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 let display_name: Option<String> = row.get("display_name");
                 let attributes: Option<serde_json::Value> = row.get("attributes");
                 let updated_at: DateTime<Utc> = row.get("updated_at");
+                let channel_id: String = row.get("channel_id");
 
                 let attributes: HashMap<String, String> = attributes
                     .and_then(|v| serde_json::from_value(v).ok())
@@ -731,16 +837,25 @@ impl ConversationRepository for PostgresConversationRepository {
                     metadata: attributes,
                     server_cursor_ts,
                     display_name,
+                    last_message_seq: None,
+                    channel_id,
                 }
             })
             .collect();
+
+        if let Some(uid) = user_id {
+            Self::fill_single_chat_channel_ids(&self.pool, tenant_id, uid, &mut summaries).await?;
+        }
 
         // 查询总数（用于分页）
         // 注意：总数查询可能较慢，生产环境建议：
         // 1. 使用Redis缓存查询结果（TTL 5-10分钟）
         // 2. 使用近似值（如通过采样估算）
         // 3. 对于大用户，考虑使用分页而不显示总数
-        let count_query = query.replace("SELECT DISTINCT", "SELECT COUNT(DISTINCT s.conversation_id)");
+        let count_query = query.replace(
+            "SELECT DISTINCT",
+            "SELECT COUNT(DISTINCT s.conversation_id)",
+        );
         let count_query = count_query.split("LIMIT").next().unwrap_or(&count_query);
         let mut count_builder = sqlx::query_scalar::<_, i64>(count_query);
 
@@ -772,9 +887,16 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok((summaries, total))
     }
 
-    async fn mark_as_read(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, seq: i64) -> Result<()> {
+    async fn mark_as_read(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        seq: i64,
+    ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         // 更新 conversation_participants 的 last_read_seq 和 unread_count（init_v2 列名）
         sqlx::query(
             r#"
@@ -823,9 +945,15 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(row.and_then(|r| r.get("last_message_seq")))
     }
 
-    async fn get_unread_count(&self, ctx: &flare_server_core::context::Context, conversation_id: &str) -> Result<i32> {
+    async fn get_unread_count(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<i32> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         // 从 conversation_participants 表读取未读数
         let row = sqlx::query(
             r#"

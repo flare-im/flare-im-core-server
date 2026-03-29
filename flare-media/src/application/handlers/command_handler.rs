@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
-use flare_server_core::context::Context;
 use flare_proto::media::{
     AbortMultipartUploadRequest, CompleteMultipartUploadRequest, DeleteFileRequest,
     InitiateMultipartUploadRequest, ProcessImageRequest, ProcessVideoRequest, UploadFileMetadata,
     UploadMultipartChunkRequest,
 };
+use flare_server_core::context::Context;
 use tracing::info;
 
 use crate::domain::model::{
@@ -51,12 +51,18 @@ impl MediaCommandHandler {
 
     /// 获取临时文件输入路径（返回字符串用于文件操作）
     fn temp_input_path(&self, file_id: &str) -> String {
-        self.temp_dir.join(format!("{}_input", file_id)).to_string_lossy().to_string()
+        self.temp_dir
+            .join(format!("{}_input", file_id))
+            .to_string_lossy()
+            .to_string()
     }
 
     /// 获取临时文件输出路径（返回字符串用于文件操作）
     fn temp_output_path(&self, file_id: &str, suffix: &str) -> String {
-        self.temp_dir.join(format!("{}_{}", file_id, suffix)).to_string_lossy().to_string()
+        self.temp_dir
+            .join(format!("{}_{}", file_id, suffix))
+            .to_string_lossy()
+            .to_string()
     }
 
     pub async fn handle_upload_file(
@@ -90,7 +96,11 @@ impl MediaCommandHandler {
             .context("store media file")
     }
 
-    pub async fn handle_delete_file(&self, ctx: &Context, request: DeleteFileRequest) -> Result<()> {
+    pub async fn handle_delete_file(
+        &self,
+        ctx: &Context,
+        request: DeleteFileRequest,
+    ) -> Result<()> {
         self.domain_service
             .delete_media_file(ctx, &request.file_id)
             .await

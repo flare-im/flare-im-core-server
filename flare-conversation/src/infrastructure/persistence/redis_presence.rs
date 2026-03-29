@@ -32,7 +32,11 @@ impl RedisPresenceRepository {
 }
 
 impl PresenceRepository for RedisPresenceRepository {
-    async fn list_devices(&self, user_id: &str) -> Result<Vec<DevicePresence>> {
+    async fn list_devices(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+    ) -> Result<Vec<DevicePresence>> {
         let mut conn = self.connection().await?;
         let mut devices = Vec::new();
         let keys: Vec<String> = conn.keys(self.device_pattern(user_id)).await?;
@@ -59,7 +63,11 @@ impl PresenceRepository for RedisPresenceRepository {
         Ok(devices)
     }
 
-    async fn update_presence(&self, update: PresenceUpdate) -> Result<()> {
+    async fn update_presence(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        update: PresenceUpdate,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.device_key(&update.user_id, &update.device_id);
         let now = Utc::now().timestamp_millis();

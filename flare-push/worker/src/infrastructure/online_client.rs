@@ -32,7 +32,11 @@ impl OnlineServiceClient {
         trace_id = %ctx.trace_id(),
         user_id = %user_id,
     ))]
-    pub async fn list_user_devices(&self, ctx: &Context, user_id: &str) -> Result<ListUserDevicesResponse> {
+    pub async fn list_user_devices(
+        &self,
+        ctx: &Context,
+        user_id: &str,
+    ) -> Result<ListUserDevicesResponse> {
         ctx.ensure_not_cancelled()
             .map_err(|e| anyhow::anyhow!("Request cancelled: {}", e))?;
         let request = tonic::Request::new(ListUserDevicesRequest {

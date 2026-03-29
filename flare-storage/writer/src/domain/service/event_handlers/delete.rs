@@ -1,10 +1,10 @@
 //! 删除事件应用（硬删 / 软删可见性）
 
-use anyhow::Result;
 use crate::domain::model::{DeletePayload, Event};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use anyhow::Result;
 
-use super::{append_event_and_stream, EventContext};
+use super::{EventContext, append_event_and_stream};
 
 // 与 proto DeleteType 对齐：SOFT=1, HARD=2
 const DELETE_TYPE_HARD: i32 = 2;

@@ -8,11 +8,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
 use flare_im_core::Ctx;
+use flare_proto::RpcStatus;
 use flare_proto::access_gateway::{
     PushAckResponse, PushNotificationResponse, PushResponse, PushResult, UserPushResult,
 };
 use flare_proto::common::ErrorCode;
-use flare_proto::RpcStatus;
 use prost_types::Timestamp;
 use tracing::instrument;
 
@@ -30,7 +30,11 @@ fn ok_status() -> RpcStatus {
     }
 }
 
-fn push_result_at_now(pushed_device_count: i32, offline_pending_count: i32, window_id: String) -> PushResult {
+fn push_result_at_now(
+    pushed_device_count: i32,
+    offline_pending_count: i32,
+    window_id: String,
+) -> PushResult {
     PushResult {
         pushed_device_count,
         offline_pending_count,
@@ -113,7 +117,11 @@ impl PushHandler {
 
     /// PushEvent：编排领域层
     #[instrument(skip(self))]
-    pub async fn handle_push_event(&self, ctx: &Ctx, req: PushEventCommand) -> Result<PushResponse> {
+    pub async fn handle_push_event(
+        &self,
+        ctx: &Ctx,
+        req: PushEventCommand,
+    ) -> Result<PushResponse> {
         let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
         Ok(PushResponse {
@@ -154,7 +162,11 @@ impl PushHandler {
 
     /// PushCustom：编排领域层
     #[instrument(skip(self))]
-    pub async fn handle_push_custom(&self, ctx: &Ctx, req: PushCustomDataCommand) -> Result<PushResponse> {
+    pub async fn handle_push_custom(
+        &self,
+        ctx: &Ctx,
+        req: PushCustomDataCommand,
+    ) -> Result<PushResponse> {
         let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
         Ok(PushResponse {

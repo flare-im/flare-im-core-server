@@ -6,15 +6,14 @@ use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
 
+use crate::application::handlers::{
+    AckRoutingHandler, DataRoutingHandler, EventRoutingHandler, MessageRoutingHandler,
+};
 use crate::config::RouteConfig;
 use crate::domain::value_objects::DefaultFlowController;
 use crate::infrastructure::{
-    AckToPushProxyForwarder, forwarder::MessageForwarder,
-    GrpcConnectionPool, GrpcConnectionPoolConfig,
-};
-use crate::application::handlers::{
-    AckRoutingHandler, DataRoutingHandler, EventRoutingHandler,
-    MessageRoutingHandler,
+    AckToPushProxyForwarder, GrpcConnectionPool, GrpcConnectionPoolConfig,
+    forwarder::MessageForwarder,
 };
 use crate::interface::grpc::RouterUpstreamHandler;
 
@@ -36,9 +35,7 @@ pub async fn initialize(
         .default_tenant_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let message_forwarder = Arc::new(
-        MessageForwarder::new(default_tenant_id)
-    );
+    let message_forwarder = Arc::new(MessageForwarder::new(default_tenant_id));
 
     let _connection_pool = Arc::new(GrpcConnectionPool::new(GrpcConnectionPoolConfig::default()));
 
@@ -62,7 +59,5 @@ pub async fn initialize(
         data_routing_handler,
     );
 
-    Ok(ApplicationContext {
-        upstream_handler,
-    })
+    Ok(ApplicationContext { upstream_handler })
 }

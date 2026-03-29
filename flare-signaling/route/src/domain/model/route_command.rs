@@ -2,8 +2,8 @@
 //!
 //! RouteCommand 是上行路由的聚合根，负责维护路由命令的业务不变式
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// 路由命令聚合根
 ///
@@ -31,7 +31,12 @@ impl RouteCommand {
     /// # 业务规则
     /// - command_id 不能为空
     /// - svid 不能为空
-    pub fn new(command_id: String, svid: String, route_type: RouteType, options: RouteOptions) -> Self {
+    pub fn new(
+        command_id: String,
+        svid: String,
+        route_type: RouteType,
+        options: RouteOptions,
+    ) -> Self {
         Self {
             command_id,
             svid,
@@ -143,7 +148,10 @@ impl RouteOptions {
     }
 
     /// 设置负载均衡策略
-    pub fn with_load_balance_strategy(mut self, load_balance_strategy: LoadBalanceStrategy) -> Self {
+    pub fn with_load_balance_strategy(
+        mut self,
+        load_balance_strategy: LoadBalanceStrategy,
+    ) -> Self {
         self.load_balance_strategy = load_balance_strategy;
         self
     }
@@ -241,7 +249,10 @@ mod tests {
         assert_eq!(options.timeout_seconds(), 5);
         assert!(options.enable_tracing());
         assert_eq!(options.retry_strategy(), &RetryStrategy::None);
-        assert_eq!(options.load_balance_strategy(), &LoadBalanceStrategy::RoundRobin);
+        assert_eq!(
+            options.load_balance_strategy(),
+            &LoadBalanceStrategy::RoundRobin
+        );
         assert_eq!(options.priority(), 0);
     }
 
@@ -257,7 +268,10 @@ mod tests {
         assert_eq!(options.timeout_seconds(), 10);
         assert!(!options.enable_tracing());
         assert_eq!(options.retry_strategy(), &RetryStrategy::Once);
-        assert_eq!(options.load_balance_strategy(), &LoadBalanceStrategy::LeastConnections);
+        assert_eq!(
+            options.load_balance_strategy(),
+            &LoadBalanceStrategy::LeastConnections
+        );
         assert_eq!(options.priority(), 5);
     }
 }

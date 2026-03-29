@@ -1,21 +1,20 @@
-//! IM Kafka Topic 名、事件类型常量，以及 proto 信封 ↔ [flare_server_core::EventEnvelope] 的转换。
+//! IM topic envelope 事件常量与转换工具。
 //!
-//! 线上主链路载荷为 **protobuf**（`TopicEventEnvelope` 等）。JSON 整包 [flare_server_core::TopicEventBus] 见 `flare_server_core::event_bus`。
+//! Topic 名请使用 `crate::constants::topics`。
 
 use std::collections::HashMap;
 
 use flare_proto::common::EventType;
+use flare_server_core::TopicEventBus;
 use flare_server_core::context::Ctx;
 use flare_server_core::error::Result as ServerResult;
-use flare_server_core::TopicEventBus;
 use prost::Message as _;
 use prost_types::Timestamp;
 
-// Topic / 消费者组名请使用 [crate::constants::topics]、[crate::constants::groups]；
-// 本模块仅保留 event_type 字符串、信封转换与发布端口 trait。
-
 // --- event_type 字符串（TopicEventEnvelope.event_type） ------------------------
 
+/// Orchestrator 异步会话创建（Kafka `TOPIC_CONVERSATION_ENSURE`，载荷为 JSON，见 `MqMessagePublisher::publish_conversation_ensure`）
+pub const EVENT_TYPE_OPERATION_CONVERSATION_ENSURE: &str = "operation.conversation_ensure";
 pub const EVENT_TYPE_CONVERSATION_ENSURE: &str = "conversation.ensure";
 pub const EVENT_TYPE_MESSAGE_CREATED: &str = "message.created";
 pub const EVENT_TYPE_OPERATION_RECALLED: &str = "operation.recalled";
@@ -31,8 +30,6 @@ pub const EVENT_TYPE_OPERATION_UNMARK: &str = "operation.unmark";
 pub const CONVERSATION_UPDATE_TYPE_UNREAD: &str = "unread";
 pub const CONVERSATION_UPDATE_TYPE_SUMMARY: &str = "summary";
 pub const CONVERSATION_UPDATE_TYPE_REMOVE: &str = "remove";
-
-// --- 发布端口（proto 字节） ----------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum EventBusPublishError {
@@ -73,8 +70,6 @@ pub fn encode_topic_event_envelope(
         .map_err(|e| EventBusPublishError::Serialization(e.to_string()))?;
     Ok(buf)
 }
-
-// --- proto ↔ server-core EventEnvelope ----------------------------------------
 
 const EVENT_ENVELOPE_SOURCE_IM_CORE: &str = "flare-im-core";
 
@@ -217,7 +212,11 @@ pub fn message_to_topic_event_envelope(
         request_id: None,
         payload,
     };
-    let request_id = msg.extra.get("x-request-id").map(|s| s.as_str()).unwrap_or("");
+    let request_id = msg
+        .extra
+        .get("x-request-id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     topic_event_envelope_from_event(
         &msg.conversation_id,
         Some(event),
@@ -226,54 +225,4 @@ pub fn message_to_topic_event_envelope(
         seq,
         request_id,
     )
-}
-
-pub fn push_message_request_to_task_envelopes(
-    req: &flare_proto::push::PushMessageRequest,
-    tenant_id: impl AsRef<str>,
-    priority: i32,
-    expire_at_ms: i64,
-) -> Vec<flare_proto::common::PushTaskEnvelope> {
-    // 强制统一下行载荷：PushTaskEnvelope.push_payload 只允许承载 AccessGateway PushMessageRequest（用于 Route→Gateway 转发）
-    // 禁止在 MQ 中携带 flare.push.v1.PushMessageRequest（避免多套结构并存）。
-    let message = req.message.clone().unwrap_or_default();
-    let ag_req = flare_proto::access_gateway::PushMessageRequest {
-        user_ids: req.user_ids.clone(),
-        messages: vec![message],
-        options: None,
-    };
-    let push_payload = ag_req.encode_to_vec();
-    let conversation_id = req
-        .message
-        .as_ref()
-        .map(|m| m.conversation_id.clone())
-        .unwrap_or_default();
-    let message_id = req
-        .message
-        .as_ref()
-        .map(|m| m.server_id.clone())
-        .unwrap_or_default();
-    let mut metadata = req
-        .options
-        .as_ref()
-        .map(|o| o.metadata.clone())
-        .unwrap_or_default();
-    for (k, v) in &req.metadata {
-        metadata.insert(k.clone(), v.clone());
-    }
-
-    req.user_ids
-        .iter()
-        .map(|user_id| flare_proto::common::PushTaskEnvelope {
-            user_id: user_id.clone(),
-            message_id: message_id.clone(),
-            conversation_id: conversation_id.clone(),
-            tenant_id: tenant_id.as_ref().to_string(),
-            priority,
-            expire_at_ms,
-            push_payload: push_payload.clone(),
-            metadata: metadata.clone(),
-            payload_kind: flare_proto::common::PushTaskPayloadKind::Message as i32,
-        })
-        .collect()
 }

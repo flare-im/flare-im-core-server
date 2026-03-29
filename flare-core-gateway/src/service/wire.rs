@@ -7,15 +7,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::config::GatewayConfig;
-// use crate::interface::grpc::handler::{SimpleGatewayHandler, LightweightGatewayHandler};
-use crate::infrastructure::{
-    GrpcHookClient, GrpcMediaClient, GrpcMessageClient, GrpcOnlineClient,
-};
-use crate::interface::grpc::handler::{LightweightGatewayHandler, SimpleGatewayHandler};
+use crate::infrastructure::{GrpcHookClient, GrpcMediaClient, GrpcMessageClient, GrpcOnlineClient};
+use crate::interface::grpc::handler::SimpleGatewayHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
-    pub simple_handler: SimpleGatewayHandler,
+    /// gRPC 透明代理（Media / Hook / Message / Online）
+    pub grpc_handler: SimpleGatewayHandler,
 }
 
 /// 构建应用上下文
@@ -35,9 +33,7 @@ pub async fn initialize(
         GatewayConfig::from_app_config(app_config).context("Failed to load gateway config")?;
 
     // 2. 创建服务发现（使用常量，支持环境变量覆盖）
-    use flare_im_core::service_names::{
-        ORCHESTRATOR, get_service_name,
-    };
+    use flare_im_core::service_names::{ORCHESTRATOR, get_service_name};
 
     // 2.1 Media 服务发现
     let media_service = get_service_name("MEDIA");
@@ -148,23 +144,12 @@ pub async fn initialize(
         Arc::new(GrpcOnlineClient::new(online_service.clone()))
     };
 
-    // 4. 构建简单网关处理器
-    let simple_handler = SimpleGatewayHandler::new(
-        media_client.clone(),
-        hook_client.clone(),
-        message_client.clone(),
-        online_client.clone(),
-    );
-
-    // 5. 构建轻量级网关处理器
-    let _lightweight_handler = LightweightGatewayHandler::new(
+    let grpc_handler = SimpleGatewayHandler::new(
         media_client,
         hook_client,
         message_client,
         online_client,
     );
 
-    Ok(ApplicationContext {
-        simple_handler,
-    })
+    Ok(ApplicationContext { grpc_handler })
 }

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use flare_proto::common::Message;
 
 use crate::domain::model::{
-    ConflictResolutionPolicy, DevicePresence, DeviceState, MessageSyncResult, Conversation,
-    ConversationBootstrapResult, ConversationParticipant, ConversationSummary,
+    ConflictResolutionPolicy, Conversation, ConversationBootstrapResult, ConversationParticipant,
+    ConversationSummary, DevicePresence, DeviceState, MessageSyncResult,
 };
 
 #[derive(Clone, Debug)]
@@ -31,12 +30,34 @@ pub trait ConversationRepository: Send + Sync {
         client_cursor: &HashMap<String, i64>,
     ) -> Result<ConversationBootstrapResult>;
 
-    async fn update_cursor(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, ts: i64) -> Result<()>;
+    async fn update_cursor(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        ts: i64,
+    ) -> Result<()>;
 
-    async fn create_conversation(&self, ctx: &flare_server_core::context::Context, conversation: &Conversation) -> Result<()>;
-    async fn get_conversation(&self, ctx: &flare_server_core::context::Context, conversation_id: &str) -> Result<Option<Conversation>>;
-    async fn update_conversation(&self, ctx: &flare_server_core::context::Context, conversation: &Conversation) -> Result<()>;
-    async fn delete_conversation(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, hard_delete: bool) -> Result<()>;
+    async fn create_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation: &Conversation,
+    ) -> Result<()>;
+    async fn get_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<Option<Conversation>>;
+    async fn update_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation: &Conversation,
+    ) -> Result<()>;
+    async fn delete_conversation(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        hard_delete: bool,
+    ) -> Result<()>;
     async fn manage_participants(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -45,7 +66,11 @@ pub trait ConversationRepository: Send + Sync {
         to_remove: &[String],
         role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>>;
-    async fn batch_acknowledge(&self, ctx: &flare_server_core::context::Context, cursors: &[(String, i64)]) -> Result<()>;
+    async fn batch_acknowledge(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        cursors: &[(String, i64)],
+    ) -> Result<()>;
     async fn search_conversations(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -55,7 +80,12 @@ pub trait ConversationRepository: Send + Sync {
         offset: usize,
     ) -> Result<(Vec<ConversationSummary>, usize)>;
 
-    async fn mark_as_read(&self, ctx: &flare_server_core::context::Context, conversation_id: &str, seq: i64) -> Result<()>;
+    async fn mark_as_read(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        seq: i64,
+    ) -> Result<()>;
 
     /// 获取会话当前 last_message_seq（用于「标记已读」未传 seq 时解析为已读位置）
     async fn get_last_message_seq(
@@ -64,14 +94,26 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &str,
     ) -> Result<Option<i64>>;
 
-    async fn get_unread_count(&self, ctx: &flare_server_core::context::Context, conversation_id: &str) -> Result<i32>;
+    async fn get_unread_count(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<i32>;
 }
 
 /// Presence 仓储接口
 /// 使用 Rust 2024 原生 async fn in traits
 pub trait PresenceRepository: Send + Sync {
-    async fn list_devices(&self, user_id: &str) -> Result<Vec<DevicePresence>>;
-    async fn update_presence(&self, update: PresenceUpdate) -> Result<()>;
+    async fn list_devices(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+    ) -> Result<Vec<DevicePresence>>;
+    async fn update_presence(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        update: PresenceUpdate,
+    ) -> Result<()>;
 }
 
 /// Message Provider 仓储接口
@@ -124,12 +166,12 @@ pub trait MessageProvider: Send + Sync {
 }
 
 /// Thread 仓储接口（话题管理）
-/// 注意：使用 async_trait 宏是因为该 trait 需要作为 trait 对象使用。
-#[async_trait]
+/// 使用 Rust 2024 原生 async fn in traits
 pub trait ThreadRepository: Send + Sync {
     /// 创建话题
     async fn create_thread(
         &self,
+        ctx: &flare_server_core::context::Context,
         conversation_id: &str,
         root_message_id: &str,
         title: Option<&str>,
@@ -139,6 +181,7 @@ pub trait ThreadRepository: Send + Sync {
     /// 获取话题列表
     async fn list_threads(
         &self,
+        ctx: &flare_server_core::context::Context,
         conversation_id: &str,
         limit: i32,
         offset: i32,
@@ -147,11 +190,16 @@ pub trait ThreadRepository: Send + Sync {
     ) -> Result<(Vec<crate::domain::model::Thread>, i32)>;
 
     /// 获取话题详情
-    async fn get_thread(&self, thread_id: &str) -> Result<Option<crate::domain::model::Thread>>;
+    async fn get_thread(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        thread_id: &str,
+    ) -> Result<Option<crate::domain::model::Thread>>;
 
     /// 更新话题
     async fn update_thread(
         &self,
+        ctx: &flare_server_core::context::Context,
         thread_id: &str,
         title: Option<&str>,
         is_pinned: Option<bool>,
@@ -160,19 +208,33 @@ pub trait ThreadRepository: Send + Sync {
     ) -> Result<()>;
 
     /// 删除话题
-    async fn delete_thread(&self, thread_id: &str) -> Result<()>;
+    async fn delete_thread(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        thread_id: &str,
+    ) -> Result<()>;
 
     /// 增加话题回复计数
     async fn increment_reply_count(
         &self,
+        ctx: &flare_server_core::context::Context,
         thread_id: &str,
         reply_message_id: &str,
         reply_user_id: &str,
     ) -> Result<()>;
 
     /// 添加话题参与者
-    async fn add_participant(&self, thread_id: &str, user_id: &str) -> Result<()>;
+    async fn add_participant(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        thread_id: &str,
+        user_id: &str,
+    ) -> Result<()>;
 
     /// 获取话题参与者列表
-    async fn get_participants(&self, thread_id: &str) -> Result<Vec<String>>;
+    async fn get_participants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        thread_id: &str,
+    ) -> Result<Vec<String>>;
 }

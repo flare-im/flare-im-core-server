@@ -13,11 +13,11 @@
 
 pub mod application;
 pub mod config;
+pub mod constants;
 pub mod domain;
 pub mod infrastructure;
 pub mod interface;
 pub mod service;
-pub mod constants;
 mod utils;
 
 pub use config::AccessGatewayConfig;

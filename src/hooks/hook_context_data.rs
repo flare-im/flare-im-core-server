@@ -67,7 +67,9 @@ impl HookContextData {
 }
 
 /// 从 `flare_server_core::Context` 中提取 Hook 上下文数据
-pub fn get_hook_context_data(ctx: &flare_server_core::context::Context) -> Option<&HookContextData> {
+pub fn get_hook_context_data(
+    ctx: &flare_server_core::context::Context,
+) -> Option<&HookContextData> {
     ctx.get_data::<HookContextData>()
 }
 
@@ -78,4 +80,3 @@ pub fn set_hook_context_data(
 ) -> flare_server_core::context::Context {
     ctx.insert_data(data)
 }
-

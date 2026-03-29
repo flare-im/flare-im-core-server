@@ -4,30 +4,31 @@ use flare_proto::common::DeviceState as ProtoDeviceState;
 use flare_proto::common::StatusOnlyResponse;
 use flare_proto::conversation::conversation_manage_service_server::ConversationManageService;
 use flare_proto::conversation::{
-    BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse, DeleteConversationRequest,
-    ForceConversationSyncRequest, ManageParticipantsRequest, ManageParticipantsResponse,
-    MarkConversationAsReadRequest, SearchConversationsRequest, SearchConversationsResponse,
-    UpdateConversationRequest, UpdateConversationResponse, UpdateCursorRequest, UpdatePresenceRequest,
+    BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse,
+    DeleteConversationRequest, ForceConversationSyncRequest, ManageParticipantsRequest,
+    ManageParticipantsResponse, MarkConversationAsReadRequest, SearchConversationsRequest,
+    SearchConversationsResponse, UpdateConversationRequest, UpdateConversationResponse,
+    UpdateCursorRequest, UpdatePresenceRequest,
 };
 use flare_server_core::error;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
 use crate::application::commands::{
-    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
-    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand, UpdateCursorCommand,
-    UpdatePresenceCommand,
+    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
+    ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
+    UpdateConversationCommand, UpdateCursorCommand, UpdatePresenceCommand,
 };
 use crate::application::queries::SearchConversationsQuery;
 use crate::domain::model::{
     ConflictResolutionPolicy, ConversationLifecycleState, ConversationVisibility, DeviceState,
 };
 
-use super::shared::{
-    domain_to_proto_conversation, internal_error, participant_domain_to_proto, participant_proto_to_domain,
-    proto_summary,
-};
 use super::ConversationGrpcHandler;
+use super::shared::{
+    domain_to_proto_conversation, internal_error, participant_domain_to_proto,
+    participant_proto_to_domain, proto_summary,
+};
 
 #[tonic::async_trait]
 impl ConversationManageService for ConversationGrpcHandler {
@@ -37,7 +38,11 @@ impl ConversationManageService for ConversationGrpcHandler {
     ) -> Result<Response<CreateConversationResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-        let participants: Vec<_> = req.participants.into_iter().map(participant_proto_to_domain).collect();
+        let participants: Vec<_> = req
+            .participants
+            .into_iter()
+            .map(participant_proto_to_domain)
+            .collect();
         let visibility = ConversationVisibility::from_proto(req.visibility);
         let conv = self
             .command_handler
@@ -49,6 +54,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                     participants,
                     attributes: req.attributes,
                     visibility,
+                    channel_id: req.channel_id,
                 },
             )
             .await
@@ -132,7 +138,11 @@ impl ConversationManageService for ConversationGrpcHandler {
     ) -> Result<Response<ManageParticipantsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-        let to_add: Vec<_> = req.to_add.into_iter().map(participant_proto_to_domain).collect();
+        let to_add: Vec<_> = req
+            .to_add
+            .into_iter()
+            .map(participant_proto_to_domain)
+            .collect();
         let role_updates: Vec<(String, Vec<String>)> = req
             .role_updates
             .into_iter()
@@ -152,7 +162,10 @@ impl ConversationManageService for ConversationGrpcHandler {
             .await
             .map_err(internal_error)?;
         Ok(Response::new(ManageParticipantsResponse {
-            participants: participants.into_iter().map(participant_domain_to_proto).collect(),
+            participants: participants
+                .into_iter()
+                .map(participant_domain_to_proto)
+                .collect(),
             status: Some(error::ok_status()),
         }))
     }

@@ -9,12 +9,12 @@ pub trait DomainEvent: Send + Sync {
     fn occurred_at(&self) -> DateTime<Utc>;
 }
 
-pub mod priority_changed_event;
-pub mod quality_changed_event;
 pub mod connection_created_event;
 pub mod connection_kicked_event;
+pub mod priority_changed_event;
+pub mod quality_changed_event;
 
-pub use priority_changed_event::PriorityChangedEvent;
-pub use quality_changed_event::QualityChangedEvent;
 pub use connection_created_event::ConnectionCreatedEvent;
 pub use connection_kicked_event::ConnectionKickedEvent;
+pub use priority_changed_event::PriorityChangedEvent;
+pub use quality_changed_event::QualityChangedEvent;

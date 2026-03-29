@@ -47,7 +47,10 @@ impl ApplicationBootstrap {
         let fetcher = KafkaMessageFetcher::new_with_consumer_group(
             context.config.as_ref(),
             topics,
-            context.consumer_config.kafka_consumer_group_override.as_deref(),
+            context
+                .consumer_config
+                .kafka_consumer_group_override
+                .as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("create kafka fetcher: {}", e))?;
 

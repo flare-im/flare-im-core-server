@@ -417,13 +417,18 @@ pub async fn register_service_from_registry_config_with_metadata(
         .map_err(|e| format!("Failed to register service: {}", e))?;
 
     // 记录注册时的 tags 和 metadata，用于调试
-    let tags_info: Vec<String> = instance.tags.iter()
+    let tags_info: Vec<String> = instance
+        .tags
+        .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
-    let metadata_info: Vec<String> = instance.metadata.custom.iter()
+    let metadata_info: Vec<String> = instance
+        .metadata
+        .custom
+        .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
-    
+
     tracing::info!(
         service_type = %service_type,
         instance_id = %instance.instance_id,
@@ -598,7 +603,7 @@ pub async fn create_discover_from_registry_config_with_filters(
                 pattern: Some("exact".to_string()),
             })
             .collect();
-        
+
         let config = DiscoveryConfig {
             backend: backend_type,
             backend_config,

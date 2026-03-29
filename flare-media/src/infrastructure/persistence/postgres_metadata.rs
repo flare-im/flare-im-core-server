@@ -162,9 +162,11 @@ impl PostgresMetadataStore {
 impl MediaMetadataStore for PostgresMetadataStore {
     async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()> {
         let metadata_json = Self::metadata_to_json(&metadata.metadata)?;
-        
+
         // 从 metadata 中提取 tenant_id，如果没有则使用默认值（向后兼容）
-        let tenant_id = metadata.metadata.get("tenant_id")
+        let tenant_id = metadata
+            .metadata
+            .get("tenant_id")
             .cloned()
             .unwrap_or_else(|| "default".to_string());
 
@@ -226,7 +228,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
         Ok(())
     }
 
-    async fn load_metadata(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Option<MediaFileMetadata>> {
+    async fn load_metadata(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Option<MediaFileMetadata>> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let row = sqlx::query_as::<_, MediaAssetRow>(
             r#"
@@ -377,7 +383,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
 impl MediaReferenceStore for PostgresMetadataStore {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool> {
         let metadata_json = Self::metadata_to_json(&reference.metadata)?;
-        
+
         // 从 reference.metadata 中提取 tenant_id，如果没有则从 file_id 对应的 media_asset 中获取
         let tenant_id = if let Some(tenant_id) = reference.metadata.get("tenant_id") {
             tenant_id.clone()
@@ -388,7 +394,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
                 .fetch_optional(self.pool())
                 .await
                 .context("failed to get tenant_id from media_assets")?;
-            
+
             if let Some(row) = row {
                 row.get("tenant_id")
             } else {
@@ -440,7 +446,11 @@ impl MediaReferenceStore for PostgresMetadataStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn delete_any_reference(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Option<String>> {
+    async fn delete_any_reference(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Option<String>> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let row =
             sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2 RETURNING reference_id")
@@ -461,19 +471,28 @@ impl MediaReferenceStore for PostgresMetadataStore {
         }
     }
 
-    async fn delete_all_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<u64> {
+    async fn delete_all_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<u64> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let result = sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2")
-            .bind(tenant_id)
-            .bind(file_id)
-            .execute(self.pool())
-            .await
-            .context("failed to delete all media references")?;
+        let result =
+            sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2")
+                .bind(tenant_id)
+                .bind(file_id)
+                .execute(self.pool())
+                .await
+                .context("failed to delete all media references")?;
 
         Ok(result.rows_affected())
     }
 
-    async fn list_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<Vec<MediaReference>> {
+    async fn list_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<Vec<MediaReference>> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let rows = sqlx::query_as::<_, MediaReferenceRow>(
             r#"
@@ -500,14 +519,20 @@ impl MediaReferenceStore for PostgresMetadataStore {
         rows.into_iter().map(MediaReference::try_from).collect()
     }
 
-    async fn count_references(&self, ctx: &flare_server_core::context::Context, file_id: &str) -> Result<u64> {
+    async fn count_references(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<u64> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let row = sqlx::query("SELECT COUNT(*) as count FROM media_references WHERE tenant_id = $1 AND file_id = $2")
-            .bind(tenant_id)
-            .bind(file_id)
-            .fetch_one(self.pool())
-            .await
-            .context("failed to count media references")?;
+        let row = sqlx::query(
+            "SELECT COUNT(*) as count FROM media_references WHERE tenant_id = $1 AND file_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(file_id)
+        .fetch_one(self.pool())
+        .await
+        .context("failed to count media references")?;
 
         let count: i64 = row
             .try_get("count")

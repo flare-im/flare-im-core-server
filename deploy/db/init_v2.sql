@@ -398,6 +398,7 @@ CREATE TABLE conversations (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_message_seq BIGINT,
     member_count INT DEFAULT 0,
+    channel_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (tenant_id, conversation_id)
 );
 COMMENT ON TABLE conversations IS '会话元数据（ConversationDetail）';
@@ -419,6 +420,7 @@ COMMENT ON COLUMN conversations.created_at IS '创建时间';
 COMMENT ON COLUMN conversations.updated_at IS '更新时间';
 COMMENT ON COLUMN conversations.last_message_seq IS '最后一条消息的 seq（未读数计算）';
 COMMENT ON COLUMN conversations.member_count IS '成员数';
+COMMENT ON COLUMN conversations.channel_id IS '路由频道：单聊库中为空（读模型组装对端 user_id）；群/频道等为消息 channel_id（如群业务 ID）';
 CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated ON conversations(tenant_id, updated_at DESC);
 
 CREATE TABLE conversation_participants (

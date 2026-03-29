@@ -1,19 +1,21 @@
-
 // =============================================================================
 // 解码：PayloadCommand.payload → 业务类型
 // =============================================================================
 
-use std::collections::HashMap;
-use flare_proto::common::data_packet::Payload as DataPacketPayload;
-use flare_proto::common::{ack, Ack, CustomData, DataKind, DataPacket, Event, EventAck, Message as ProtoMessage, SendAck};
-use prost::Message as _;
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
 use flare_core::common::protocol::{
+    PayloadCommand, Reliability,
     builder::{FrameBuilder, current_timestamp},
     flare::core::commands::command::Type as CommandType,
+    frame_with_payload_command,
     payload_command::Type as PayloadType,
-    Reliability, frame_with_payload_command, PayloadCommand,
 };
+use flare_proto::common::data_packet::Payload as DataPacketPayload;
+use flare_proto::common::{
+    Ack, CustomData, DataKind, DataPacket, Event, EventAck, Message as ProtoMessage, SendAck, ack,
+};
+use prost::Message as _;
+use std::collections::HashMap;
 /// 解码 MESSAGE 通道 payload 为 Message
 #[inline]
 pub fn decode_message_payload(payload: &[u8]) -> Result<ProtoMessage, String> {
@@ -37,7 +39,6 @@ pub fn decode_event_payload(payload: &[u8]) -> Result<Event, String> {
 pub fn decode_data_packet(payload: &[u8]) -> Result<DataPacket, String> {
     DataPacket::decode(payload).map_err(|e| format!("decode DataPacket: {e}"))
 }
-
 
 // =============================================================================
 // MESSAGE 响应：SendAck（封装为 Ack 放入 PayloadCommand）
@@ -93,9 +94,8 @@ pub fn build_message_ack_frame(
     };
 
     let mut payload = Vec::new();
-    ack.encode(&mut payload).map_err(|e| {
-        CoreFlareError::serialization_error(format!("encode Ack(SendAck): {}", e))
-    })?;
+    ack.encode(&mut payload)
+        .map_err(|e| CoreFlareError::serialization_error(format!("encode Ack(SendAck): {}", e)))?;
 
     let ack_cmd = PayloadCommand {
         r#type: PayloadType::Ack as i32,
@@ -104,7 +104,10 @@ pub fn build_message_ack_frame(
         metadata: HashMap::new(),
         seq: 0,
     };
-    Ok(frame_with_payload_command(ack_cmd, Reliability::AtLeastOnce))
+    Ok(frame_with_payload_command(
+        ack_cmd,
+        Reliability::AtLeastOnce,
+    ))
 }
 
 // =============================================================================
@@ -113,7 +116,10 @@ pub fn build_message_ack_frame(
 
 /// 将原始 payload 封装为 DATA 类型 Frame（通常为已编码的 [`DataPacket`]）
 #[inline]
-pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> flare_core::common::protocol::Frame {
+pub fn build_data_frame_with_payload(
+    message_id: String,
+    payload: Vec<u8>,
+) -> flare_core::common::protocol::Frame {
     let cmd = PayloadCommand {
         r#type: PayloadType::Data as i32,
         message_id: message_id.clone(),
@@ -122,9 +128,11 @@ pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> fl
         seq: 0,
     };
     FrameBuilder::new()
-        .with_command(flare_core::common::protocol::flare::core::commands::Command {
-            r#type: Some(CommandType::Payload(cmd)),
-        })
+        .with_command(
+            flare_core::common::protocol::flare::core::commands::Command {
+                r#type: Some(CommandType::Payload(cmd)),
+            },
+        )
         .with_message_id(message_id)
         .with_reliability(Reliability::AtLeastOnce)
         .with_timestamp(current_timestamp())
@@ -133,7 +141,11 @@ pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> fl
 
 /// 构建 DATA 通道错误响应：`DataPacket { kind=USER_CUSTOM, user_custom }`（`CustomData.type` 为错误类别）
 #[inline]
-pub fn build_data_error_frame(message_id: String, error_type: &str, error_message: &str) -> flare_core::common::protocol::Frame {
+pub fn build_data_error_frame(
+    message_id: String,
+    error_type: &str,
+    error_message: &str,
+) -> flare_core::common::protocol::Frame {
     let mut meta = HashMap::new();
     meta.insert("error".to_string(), error_message.to_string());
     let inner = CustomData {
@@ -161,14 +173,17 @@ pub fn build_event_ack_operation_frame(
     use flare_proto::common::AckType;
     use flare_proto::common::ErrorCode;
 
-    let status = operation.status.clone().unwrap_or_else(|| flare_proto::common::RpcStatus {
-        code: ErrorCode::Internal as i32,
-        message: "missing operation status".to_string(),
-        details: Vec::new(),
-        context: None,
-        localization_key: String::new(),
-        localization_params: HashMap::new(),
-    });
+    let status = operation
+        .status
+        .clone()
+        .unwrap_or_else(|| flare_proto::common::RpcStatus {
+            code: ErrorCode::Internal as i32,
+            message: "missing operation status".to_string(),
+            details: Vec::new(),
+            context: None,
+            localization_key: String::new(),
+            localization_params: HashMap::new(),
+        });
 
     let event_ack = EventAck {
         event_id: event_id.to_string(),
@@ -184,9 +199,8 @@ pub fn build_event_ack_operation_frame(
     };
 
     let mut payload = Vec::new();
-    ack.encode(&mut payload).map_err(|e| {
-        CoreFlareError::serialization_error(format!("encode Ack(EventAck): {}", e))
-    })?;
+    ack.encode(&mut payload)
+        .map_err(|e| CoreFlareError::serialization_error(format!("encode Ack(EventAck): {}", e)))?;
 
     let ack_cmd = PayloadCommand {
         r#type: PayloadType::Ack as i32,
@@ -195,5 +209,8 @@ pub fn build_event_ack_operation_frame(
         metadata: HashMap::new(),
         seq: 0,
     };
-    Ok(frame_with_payload_command(ack_cmd, Reliability::AtLeastOnce))
+    Ok(frame_with_payload_command(
+        ack_cmd,
+        Reliability::AtLeastOnce,
+    ))
 }

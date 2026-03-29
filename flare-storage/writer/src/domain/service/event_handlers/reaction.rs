@@ -1,10 +1,10 @@
 //! 反应事件应用
 
-use anyhow::Result;
 use crate::domain::model::{Event, ReactionPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use anyhow::Result;
 
-use super::{append_event_and_stream, EventContext};
+use super::{EventContext, append_event_and_stream};
 
 // 与 proto ReactionAction 对齐：ADD=1
 const REACTION_ACTION_ADD: i32 = 1;

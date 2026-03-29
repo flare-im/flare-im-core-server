@@ -18,7 +18,8 @@ impl ApplicationBootstrap {
         use flare_im_core::load_config;
 
         let app_config = load_config(Some("config"));
-        let listen = std::env::var("PUSH_PROXY_LISTEN").unwrap_or_else(|_| "0.0.0.0:50090".to_string());
+        let listen =
+            std::env::var("PUSH_PROXY_LISTEN").unwrap_or_else(|_| "0.0.0.0:50090".to_string());
         let address: SocketAddr = listen
             .parse()
             .context("PUSH_PROXY_LISTEN must be host:port (e.g. 0.0.0.0:50090)")?;
@@ -62,7 +63,7 @@ impl ApplicationBootstrap {
             .run_with_registration(|addr| {
                 Box::pin(async move {
                     match flare_im_core::discovery::register_service_only(PUSH_PROXY, addr, None)
-                    .await
+                        .await
                     {
                         Ok(Some(registry)) => {
                             info!("✅ Push Proxy registered ({})", PUSH_PROXY);

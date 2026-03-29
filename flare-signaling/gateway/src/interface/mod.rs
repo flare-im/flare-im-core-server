@@ -1,3 +1,2 @@
-
-pub mod link;
 pub mod grpc;
+pub mod link;

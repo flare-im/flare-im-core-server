@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use flare_proto::common::Message;
 use flare_proto::common::{
-    ConflictResolution as ProtoConflictResolution, DeviceState as ProtoDeviceState,
+    ConflictResolution as ProtoConflictResolution,
     ConversationLifecycleState as ProtoConversationLifecycleState,
-    ConversationVisibility as ProtoConversationVisibility,
+    ConversationVisibility as ProtoConversationVisibility, DeviceState as ProtoDeviceState,
 };
 
 #[derive(Clone, Debug)]
@@ -22,6 +22,10 @@ pub struct ConversationSummary {
     pub metadata: HashMap<String, String>,
     pub server_cursor_ts: Option<i64>,
     pub display_name: Option<String>,
+    /// 会话当前最大消息 seq（与会话表 last_message_seq 对齐），供 Sync 快照拉消息与摘要
+    pub last_message_seq: Option<i64>,
+    /// 与库 `conversations.channel_id` 一致；单聊为空，Bootstrap 前组装修成对端 id
+    pub channel_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +154,8 @@ pub struct Conversation {
     pub conversation_id: String,
     pub conversation_type: String,
     pub business_type: String,
+    /// 单聊须空；群/频道等存消息 channel_id
+    pub channel_id: String,
     pub display_name: Option<String>,
     pub attributes: HashMap<String, String>,
     pub participants: Vec<ConversationParticipant>,
@@ -219,7 +225,9 @@ impl ConversationLifecycleState {
     pub fn from_proto(value: i32) -> Self {
         match ProtoConversationLifecycleState::try_from(value).ok() {
             Some(ProtoConversationLifecycleState::ConversationLifecycleActive) => Self::Active,
-            Some(ProtoConversationLifecycleState::ConversationLifecycleSuspended) => Self::Suspended,
+            Some(ProtoConversationLifecycleState::ConversationLifecycleSuspended) => {
+                Self::Suspended
+            }
             Some(ProtoConversationLifecycleState::ConversationLifecycleArchived) => Self::Archived,
             Some(ProtoConversationLifecycleState::ConversationLifecycleDeleted) => Self::Deleted,
             _ => Self::Unspecified,
@@ -228,7 +236,9 @@ impl ConversationLifecycleState {
 
     pub fn as_proto(&self) -> i32 {
         match self {
-            ConversationLifecycleState::Unspecified => ProtoConversationLifecycleState::Unspecified as i32,
+            ConversationLifecycleState::Unspecified => {
+                ProtoConversationLifecycleState::Unspecified as i32
+            }
             ConversationLifecycleState::Active => {
                 ProtoConversationLifecycleState::ConversationLifecycleActive as i32
             }

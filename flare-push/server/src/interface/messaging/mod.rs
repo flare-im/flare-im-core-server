@@ -1,5 +1,6 @@
-pub mod ack_request_consumer;
-pub mod custom_request_consumer;
-pub mod event_request_consumer;
-pub mod message_request_consumer;
-pub mod notification_request_consumer;
+pub mod ack_consumer;
+pub mod custom_consumer;
+pub mod event_consumer;
+pub mod main_consumer;
+pub mod message_consumer;
+pub mod notification_consumer;

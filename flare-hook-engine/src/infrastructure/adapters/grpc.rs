@@ -14,9 +14,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
-use flare_im_core::{
-    DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
-};
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_proto::hooks::hook_extension_client::HookExtensionClient;
 use flare_proto::hooks::{
     DeliveryHookRequest, PostSendHookRequest, PreSendHookRequest, RecallHookRequest,
@@ -26,9 +24,8 @@ use flare_server_core::context::Context;
 
 use crate::domain::model::LoadBalanceStrategy;
 use crate::infrastructure::adapters::conversion::{
-    context_to_proto, delivery_event_to_proto, message_draft_to_proto,
-    message_record_to_proto, proto_to_pre_send_decision, proto_to_recall_decision,
-    recall_event_to_proto,
+    context_to_proto, delivery_event_to_proto, message_draft_to_proto, message_record_to_proto,
+    proto_to_pre_send_decision, proto_to_recall_decision, recall_event_to_proto,
 };
 
 // 导入服务发现相关模块
@@ -158,11 +155,7 @@ impl GrpcHookAdapter {
     }
 
     /// 设置请求元数据（包括静态 metadata 和从 Context 提取的 Context）
-    fn set_request_metadata<T>(
-        &self,
-        mut request: Request<T>,
-        ctx: &Context,
-    ) -> Request<T> {
+    fn set_request_metadata<T>(&self, mut request: Request<T>, ctx: &Context) -> Request<T> {
         // 1. 设置静态 metadata
         for (key, value) in &self.metadata {
             if let Ok(key) = key.parse::<tonic::metadata::MetadataKey<_>>() {
@@ -197,7 +190,9 @@ impl GrpcHookAdapter {
         request = self.set_request_metadata(request, ctx);
 
         // 使用一致性哈希时，以 conversation_id 作为 key
-        let key = ctx.session_id().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx
+            .session_id()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
         let mut client = self.get_client(key).await?;
 
         let response = client
@@ -227,7 +222,9 @@ impl GrpcHookAdapter {
         request = self.set_request_metadata(request, ctx);
 
         // 使用一致性哈希时，以 conversation_id 作为 key
-        let key = ctx.session_id().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx
+            .session_id()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
         let mut client = self.get_client(key).await?;
 
         let response = client
@@ -309,7 +306,9 @@ impl GrpcHookAdapter {
         request = self.set_request_metadata(request, ctx);
 
         // 使用一致性哈希时，以 conversation_id 作为 key
-        let key = ctx.session_id().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx
+            .session_id()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
         let mut client = self.get_client(key).await?;
 
         let response = client

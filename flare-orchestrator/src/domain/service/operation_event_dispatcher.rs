@@ -20,5 +20,9 @@ pub trait OperationEventDispatcher: Send + Sync {
     ) -> crate::error::Result<()>;
 
     /// 仅发布 proto Event 到操作 topic（无 Push，用于 Mark/Unmark 等）
-    async fn dispatch_event_only(&self, ctx: &Ctx, proto_event: flare_proto::common::Event) -> crate::error::Result<()>;
+    async fn dispatch_event_only(
+        &self,
+        ctx: &Ctx,
+        proto_event: flare_proto::common::Event,
+    ) -> crate::error::Result<()>;
 }

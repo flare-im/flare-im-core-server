@@ -1,97 +1,43 @@
-//! 编排侧 Kafka 发布：基于 [flare_server_core::event_bus::MqEventBus] / [EventPublisher]，
+//! 编排侧 Kafka 发布:基于 [flare_server_core::event_bus::MqEventBus] / [EventPublisher],
 //! Topic 与 [flare_im_core::constants::topics] 对齐。
 
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
-use flare_im_core::abstractions::topics::{
-    event_type_str_from_proto_event, message_to_topic_event_envelope, topic_event_envelope_from_event,
-    to_event_envelope, EVENT_TYPE_CONVERSATION_ENSURE,
-};
 use flare_im_core::constants::topics::{
-    TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS, TOPIC_PUSH_MESSAGES,
-    TOPIC_PUSH_NOTIFICATIONS,
+    TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_CREATED as TOPIC_MESSAGE_STORAGE,
+    TOPIC_MESSAGE_EVENTS, TOPIC_MESSAGE_MAIN, TOPIC_PUSH_MESSAGES,
 };
+use flare_im_core::event::event_type_str_from_proto_event;
+use flare_im_core::event::EVENT_TYPE_OPERATION_CONVERSATION_ENSURE;
 use flare_im_core::event::types::types;
-use flare_proto::common::event::Payload as EventPayload;
-use flare_proto::common::{CustomEvent, Event, EventType, TopicEventEnvelope};
-use flare_proto::push::{Notification, PushMessageRequest, PushNotificationRequest};
+use flare_proto::common::Event;
+use flare_proto::push::PushMessageRequest;
 use flare_server_core::context::Ctx;
 use flare_server_core::event_bus::{EventEnvelope, EventPublisher, MqEventBus};
 use flare_server_core::mq::kafka::KafkaProducerBuilder;
-use prost::Message as ProstMessage;
-use tokio::sync::Mutex;
+use prost::Message as _;
 
 use crate::config::MessageOrchestratorConfig;
 use crate::domain::repository::MessageEventPublisher;
 use crate::error::{FlareError, Result};
 
-fn tenant_id_from_message(msg: &flare_proto::common::Message, config_default: &str) -> String {
-    msg.extra
-        .get("x-tenant-id")
-        .or_else(|| msg.extra.get("tenant_id"))
-        .cloned()
-        .unwrap_or_else(|| config_default.to_string())
-}
+const MAIN_KIND_MESSAGE: u8 = 1;
+const MAIN_KIND_EVENT: u8 = 2;
 
-fn flush_ctx() -> Ctx {
-    Ctx::default()
-}
-
-fn partition_key_push(req: &PushMessageRequest) -> String {
-    req.user_ids
-        .first()
-        .cloned()
-        .or_else(|| req.message.as_ref().map(|m| m.conversation_id.clone()))
-        .unwrap_or_default()
-}
-
-/// 通知类推送：走 [TOPIC_PUSH_NOTIFICATIONS]，载荷为 [PushNotificationRequest]。
-fn push_message_to_notification_request(req: &PushMessageRequest) -> Option<PushNotificationRequest> {
-    let opt = req.options.as_ref()?;
-    if !(opt.require_online && !opt.persist_if_offline) {
-        return None;
-    }
-    let msg = req.message.as_ref()?;
-    let title = msg
-        .offline_push_info
-        .as_ref()
-        .map(|i| i.title.clone())
-        .unwrap_or_default();
-    let body = msg
-        .offline_push_info
-        .as_ref()
-        .filter(|i| !i.body.is_empty())
-        .map(|i| i.body.clone())
-        .unwrap_or_else(|| String::from_utf8_lossy(&msg.content).into_owned());
-    let notification = Notification {
-        title,
-        body,
-        data: Default::default(),
-        metadata: Default::default(),
-        click_action: String::new(),
-        icon: String::new(),
-        sound: String::new(),
-    };
-    Some(PushNotificationRequest {
-        user_ids: req.user_ids.clone(),
-        notification: Some(notification),
-        options: req.options.clone(),
-        metadata: req.metadata.clone(),
-    })
-}
-
-/// MQ 发布器：缓冲 + 周期 flush，与 Push Proxy 一致使用 JSON [EventEnvelope] 入 Kafka。
+/// MQ 发布器:发布消息和事件到对应的 topic
 pub struct MqMessagePublisher {
     bus: Arc<MqEventBus>,
-    config: Arc<MessageOrchestratorConfig>,
-    storage_buffer: Arc<Mutex<Vec<flare_proto::common::Message>>>,
-    event_buffer: Arc<Mutex<Vec<Event>>>,
-    push_buffer: Arc<Mutex<Vec<PushMessageRequest>>>,
-    storage_last_flush: Arc<Mutex<std::time::Instant>>,
-    event_last_flush: Arc<Mutex<std::time::Instant>>,
-    push_last_flush: Arc<Mutex<std::time::Instant>>,
+}
+
+fn encode_main_payload(kind: u8, first: &[u8], second: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 4 + first.len() + 4 + second.len());
+    payload.push(kind);
+    payload.extend_from_slice(&(first.len() as u32).to_be_bytes());
+    payload.extend_from_slice(first);
+    payload.extend_from_slice(&(second.len() as u32).to_be_bytes());
+    payload.extend_from_slice(second);
+    payload
 }
 
 impl MqMessagePublisher {
@@ -100,312 +46,177 @@ impl MqMessagePublisher {
             .build(config.as_ref())
             .map_err(|e| FlareError::system(format!("Kafka producer: {}", e)))?;
         let bus = MqEventBus::new(Arc::new(producer));
-        let now = std::time::Instant::now();
-        let publisher = Arc::new(Self {
-            bus,
-            config: config.clone(),
-            storage_buffer: Arc::new(Mutex::new(Vec::new())),
-            event_buffer: Arc::new(Mutex::new(Vec::new())),
-            push_buffer: Arc::new(Mutex::new(Vec::new())),
-            storage_last_flush: Arc::new(Mutex::new(now)),
-            event_last_flush: Arc::new(Mutex::new(now)),
-            push_last_flush: Arc::new(Mutex::new(now)),
-        });
-
-        let publisher_clone = Arc::clone(&publisher);
-        let flush_interval = Duration::from_millis(config.kafka_flush_interval_ms);
-        tokio::spawn(async move {
-            publisher_clone.auto_flush_loop(flush_interval).await;
-        });
-
-        Ok(publisher)
+        Ok(Arc::new(Self { bus }))
     }
 
-    async fn auto_flush_loop(self: Arc<Self>, flush_interval: Duration) {
-        let mut interval = tokio::time::interval(flush_interval);
-        loop {
-            interval.tick().await;
-
-            let storage_messages = {
-                let mut buffer = self.storage_buffer.lock().await;
-                let last_flush = self.storage_last_flush.lock().await;
-                let should_flush = buffer.len() >= self.config.kafka_batch_size
-                    || last_flush.elapsed() >= flush_interval;
-                if should_flush && !buffer.is_empty() {
-                    let messages = buffer.drain(..).collect();
-                    drop(buffer);
-                    Some(messages)
-                } else {
-                    None
-                }
-            };
-            if let Some(messages) = storage_messages {
-                if let Err(e) = self.publish_storage_batch(messages).await {
-                    tracing::error!(error = %e, "flush storage batch failed");
-                }
-                *self.storage_last_flush.lock().await = std::time::Instant::now();
-            }
-
-            let events = {
-                let mut buffer = self.event_buffer.lock().await;
-                let last_flush = self.event_last_flush.lock().await;
-                let should_flush = buffer.len() >= self.config.kafka_batch_size
-                    || last_flush.elapsed() >= flush_interval;
-                if should_flush && !buffer.is_empty() {
-                    let ev = buffer.drain(..).collect();
-                    drop(buffer);
-                    Some(ev)
-                } else {
-                    None
-                }
-            };
-            if let Some(ev) = events {
-                if let Err(e) = self.publish_event_batch(ev).await {
-                    tracing::error!(error = %e, "flush event batch failed");
-                }
-                *self.event_last_flush.lock().await = std::time::Instant::now();
-            }
-
-            let push_messages = {
-                let mut buffer = self.push_buffer.lock().await;
-                let last_flush = self.push_last_flush.lock().await;
-                let should_flush = buffer.len() >= self.config.kafka_batch_size
-                    || last_flush.elapsed() >= flush_interval;
-                if should_flush && !buffer.is_empty() {
-                    let messages = buffer.drain(..).collect();
-                    drop(buffer);
-                    Some(messages)
-                } else {
-                    None
-                }
-            };
-            if let Some(messages) = push_messages {
-                if let Err(e) = self.publish_push_batch(messages).await {
-                    tracing::error!(error = %e, "flush push batch failed");
-                }
-                *self.push_last_flush.lock().await = std::time::Instant::now();
-            }
-        }
-    }
-
-    async fn publish_topic_envelope(
+    /// 发布消息到存储 topic
+    pub async fn publish_storage_message(
         &self,
         ctx: &Ctx,
-        topic: &str,
-        envelope: &TopicEventEnvelope,
+        message: &flare_proto::common::Message,
     ) -> Result<()> {
-        let ev = to_event_envelope(envelope);
-        self.bus
-            .publish(ctx, topic, &ev)
-            .await
-            .map_err(|e| FlareError::system(e.to_string()))
-    }
-
-    /// 供 [crate::infrastructure::messaging::event_bus_adapter::OrchestratorEventBusAdapter] 写入 [TOPIC_MESSAGE_EVENTS]
-    pub async fn publish_topic_event_envelope_to_events_topic(
-        &self,
-        ctx: &Ctx,
-        envelope: &TopicEventEnvelope,
-    ) -> Result<()> {
-        self.publish_topic_envelope(ctx, TOPIC_MESSAGE_EVENTS, envelope)
-            .await
-    }
-
-    async fn publish_storage_batch(&self, payloads: Vec<flare_proto::common::Message>) -> Result<()> {
-        if payloads.is_empty() {
-            return Ok(());
-        }
-        let batch_len = payloads.len();
-        let ctx = flush_ctx();
-        let config_default = self.config.default_tenant_id.as_deref().unwrap_or("default");
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-        for payload in payloads {
-            let tenant_id = tenant_id_from_message(&payload, config_default);
-            let seq = payload.seq as u64;
-            let te = message_to_topic_event_envelope(&payload, tenant_id.as_str(), seq);
-            let encoded = ProstMessage::encode_to_vec(&te);
-            if encoded.len() > MAX_MESSAGE_SIZE {
-                tracing::error!(
-                    payload_size = encoded.len(),
-                    conversation_id = %payload.conversation_id,
-                    "TopicEventEnvelope too large, skip"
-                );
-                continue;
-            }
-            self.publish_topic_envelope(&ctx, TOPIC_MESSAGE_CREATED, &te).await?;
-        }
-        tracing::info!(
-            topic = %TOPIC_MESSAGE_CREATED,
-            batch_size = batch_len,
-            "Published storage batch"
-        );
-        Ok(())
-    }
-
-    async fn publish_event_batch(&self, events: Vec<Event>) -> Result<()> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let batch_len = events.len();
-        let ctx = flush_ctx();
-        let tenant_id = self.config.default_tenant_id.as_deref().unwrap_or("default");
-        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-
-        for event in events {
-            let event_type = match event_type_str_from_proto_event(&event) {
-                Some(s) => s.to_string(),
-                None => {
-                    tracing::warn!(conversation_id = %event.conversation_id, "skip unsupported event type");
-                    continue;
-                }
-            };
-            let te = topic_event_envelope_from_event(
-                event.conversation_id.clone(),
-                Some(event.clone()),
-                tenant_id,
-                event_type,
-                event.seq as u64,
-                event.request_id.clone().unwrap_or_default(),
+        let payload = message.encode_to_vec();
+        if payload.len() > MAX_MESSAGE_SIZE {
+            tracing::error!(
+                payload_size = payload.len(),
+                conversation_id = %message.conversation_id,
+                "Message too large, reject publish"
             );
-            let buf = ProstMessage::encode_to_vec(&te);
-            if buf.len() > MAX_MESSAGE_SIZE {
-                tracing::error!(payload_size = buf.len(), "TopicEventEnvelope too large, skip");
-                continue;
-            }
-            self.publish_topic_envelope(&ctx, TOPIC_MESSAGE_EVENTS, &te).await?;
+            return Err(FlareError::system("Message too large"));
         }
-        tracing::info!(topic = %TOPIC_MESSAGE_EVENTS, batch_size = batch_len, "Published event batch");
-        Ok(())
-    }
 
-    async fn publish_push_batch(&self, payloads: Vec<PushMessageRequest>) -> Result<()> {
-        if payloads.is_empty() {
-            return Ok(());
-        }
-        let batch_len = payloads.len();
-        let ctx = flush_ctx();
-        for req in payloads {
-            self.publish_push_one(&ctx, &req).await?;
-        }
-        tracing::info!(
-            topics = %format!("{}/{}", TOPIC_PUSH_MESSAGES, TOPIC_PUSH_NOTIFICATIONS),
-            count = batch_len,
-            "Published push batch"
-        );
-        Ok(())
-    }
+        let envelope = EventEnvelope::new(
+            types::MESSAGE,
+            &message.conversation_id,
+            message.seq as u64,
+            payload,
+        )
+        .with_source("flare-orchestrator");
 
-    async fn publish_push_one(&self, ctx: &Ctx, req: &PushMessageRequest) -> Result<()> {
-        let key = partition_key_push(req);
-        if let Some(pnr) = push_message_to_notification_request(req) {
-            let env = EventEnvelope::new(types::NOTIFICATION, &key, 0, pnr.encode_to_vec());
-            return self
-                .bus
-                .publish(ctx, TOPIC_PUSH_NOTIFICATIONS, &env)
-                .await
-                .map_err(|e| FlareError::system(e.to_string()));
-        }
-        let env = EventEnvelope::new(types::MESSAGE, &key, 0, req.encode_to_vec());
         self.bus
-            .publish(ctx, TOPIC_PUSH_MESSAGES, &env)
+            .publish(ctx, TOPIC_MESSAGE_STORAGE, &envelope)
             .await
             .map_err(|e| FlareError::system(e.to_string()))
     }
 
-    pub async fn flush(&self) -> Result<()> {
-        let storage_messages = {
-            let mut buffer = self.storage_buffer.lock().await;
-            if !buffer.is_empty() {
-                Some(buffer.drain(..).collect())
-            } else {
-                None
+    /// 发布领域事件到事件 topic
+    pub async fn publish_domain_event(
+        &self,
+        ctx: &Ctx,
+        event: &flare_proto::common::Event,
+    ) -> Result<()> {
+        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+        let event_type = match event_type_str_from_proto_event(event) {
+            Some(s) => s.to_string(),
+            None => {
+                tracing::warn!(conversation_id = %event.conversation_id, "reject unsupported event type");
+                return Err(FlareError::system("unsupported event type"));
             }
         };
-        if let Some(messages) = storage_messages {
-            self.publish_storage_batch(messages).await?;
+
+        let payload = event.encode_to_vec();
+        if payload.len() > MAX_MESSAGE_SIZE {
+            tracing::error!(
+                payload_size = payload.len(),
+                "Event too large, reject publish"
+            );
+            return Err(FlareError::system("Event too large"));
         }
 
-        let events = {
-            let mut buffer = self.event_buffer.lock().await;
-            if !buffer.is_empty() {
-                Some(buffer.drain(..).collect())
-            } else {
-                None
-            }
-        };
-        if let Some(ev) = events {
-            self.publish_event_batch(ev).await?;
-        }
+        let envelope = EventEnvelope::new(
+            event_type,
+            &event.conversation_id,
+            event.seq as u64,
+            payload,
+        )
+        .with_source("flare-orchestrator");
 
-        let push_messages = {
-            let mut buffer = self.push_buffer.lock().await;
-            if !buffer.is_empty() {
-                Some(buffer.drain(..).collect())
-            } else {
-                None
-            }
-        };
-        if let Some(messages) = push_messages {
-            self.publish_push_batch(messages).await?;
-        }
-
-        let now = std::time::Instant::now();
-        *self.storage_last_flush.lock().await = now;
-        *self.event_last_flush.lock().await = now;
-        *self.push_last_flush.lock().await = now;
-        Ok(())
+        self.bus
+            .publish(ctx, TOPIC_MESSAGE_EVENTS, &envelope)
+            .await
+            .map_err(|e| FlareError::system(e.to_string()))
     }
 
-    /// 会话 ensure（异步创建）：发往 [TOPIC_CONVERSATION_ENSURE]
+    /// 发布会话 ensure 事件
     pub async fn publish_conversation_ensure(
         &self,
+        ctx: &Ctx,
         conversation_id: &str,
-        tenant_id: &str,
+        _tenant_id: &str,
         conversation_type: &str,
         business_type: &str,
         participants: Vec<String>,
+        stored_channel_id: String,
     ) -> Result<()> {
         #[derive(serde::Serialize)]
         struct EnsurePayload {
             conversation_type: String,
             business_type: String,
             participants: Vec<String>,
+            channel_id: String,
         }
+
         let payload = EnsurePayload {
             conversation_type: conversation_type.to_string(),
             business_type: business_type.to_string(),
             participants,
+            channel_id: stored_channel_id,
         };
-        let json_bytes = serde_json::to_vec(&payload).map_err(|e| FlareError::system(e.to_string()))?;
-        let event = Event {
-            conversation_id: conversation_id.to_string(),
-            seq: 0,
-            r#type: EventType::EventCustom as i32,
-            created_at: None,
-            event_id: format!("{}:conv_ensure:0", conversation_id),
-            event_seq: None,
-            request_id: None,
-            payload: Some(EventPayload::Custom(CustomEvent {
-                namespace: String::new(),
-                name: EVENT_TYPE_CONVERSATION_ENSURE.to_string(),
-                version: String::new(),
-                payload: json_bytes,
-                metadata: std::collections::HashMap::new(),
-            })),
-        };
-        let envelope = TopicEventEnvelope {
-            conversation_id: conversation_id.to_string(),
-            event: Some(event),
-            tenant_id: tenant_id.to_string(),
-            event_type: EVENT_TYPE_CONVERSATION_ENSURE.to_string(),
-            seq: 0,
-            request_id: String::new(),
-        };
-        let ctx = flush_ctx();
-        self.publish_topic_envelope(&ctx, TOPIC_CONVERSATION_ENSURE, &envelope).await?;
-        tracing::debug!(topic = %TOPIC_CONVERSATION_ENSURE, conversation_id = %conversation_id, "Published conversation.ensure");
+
+        let json_bytes =
+            serde_json::to_vec(&payload).map_err(|e| FlareError::system(e.to_string()))?;
+
+        let envelope = EventEnvelope::new(
+            EVENT_TYPE_OPERATION_CONVERSATION_ENSURE,
+            conversation_id,
+            0,
+            json_bytes,
+        )
+        .with_source("flare-orchestrator");
+
+        self.bus
+            .publish(ctx, TOPIC_CONVERSATION_ENSURE, &envelope)
+            .await
+            .map_err(|e| FlareError::system(e.to_string()))
+    }
+
+    pub async fn flush(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn publish_main_message(
+        &self,
+        ctx: &Ctx,
+        message: &flare_proto::common::Message,
+        push: &flare_proto::push::PushMessageRequest,
+    ) -> Result<()> {
+        let payload = encode_main_payload(
+            MAIN_KIND_MESSAGE,
+            &message.encode_to_vec(),
+            &push.encode_to_vec(),
+        );
+        let envelope = EventEnvelope::new(
+            types::MESSAGE,
+            &message.conversation_id,
+            message.seq as u64,
+            payload,
+        )
+        .with_source("flare-orchestrator");
+
+        self.bus
+            .publish(ctx, TOPIC_MESSAGE_MAIN, &envelope)
+            .await
+            .map_err(|e| FlareError::system(e.to_string()))
+    }
+
+    async fn publish_main_event(
+        &self,
+        ctx: &Ctx,
+        event: &flare_proto::common::Event,
+    ) -> Result<()> {
+        let event_type = match event_type_str_from_proto_event(event) {
+            Some(s) => s.to_string(),
+            None => {
+                tracing::warn!(conversation_id = %event.conversation_id, "reject unsupported event type");
+                return Err(FlareError::system("unsupported event type"));
+            }
+        };
+        let payload = encode_main_payload(MAIN_KIND_EVENT, &event.encode_to_vec(), &[]);
+        let envelope = EventEnvelope::new(
+            event_type,
+            &event.conversation_id,
+            event.seq as u64,
+            payload,
+        )
+        .with_source("flare-orchestrator");
+
+        self.bus
+            .publish(ctx, TOPIC_MESSAGE_MAIN, &envelope)
+            .await
+            .map_err(|e| FlareError::system(e.to_string()))
     }
 }
 
@@ -417,24 +228,13 @@ impl MessageEventPublisher for MqMessagePublisher {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         let msg = match payload.with_context(ctx).to_message() {
             Some(m) => m,
-            None => return Box::pin(async { Err(FlareError::system("storage payload has no message")) }),
-        };
-        Box::pin(async move {
-            let should_flush = {
-                let mut buffer = self.storage_buffer.lock().await;
-                buffer.push(msg);
-                buffer.len() >= self.config.kafka_batch_size
-            };
-            if should_flush {
-                let messages: Vec<flare_proto::common::Message> = {
-                    let mut buffer = self.storage_buffer.lock().await;
-                    buffer.drain(..).collect()
-                };
-                self.publish_storage_batch(messages).await?;
-                *self.storage_last_flush.lock().await = std::time::Instant::now();
+            None => {
+                return Box::pin(async {
+                    Err(FlareError::system("storage payload has no message"))
+                });
             }
-            Ok(())
-        })
+        };
+        Box::pin(async move { self.publish_storage_message(ctx, &msg).await })
     }
 
     fn publish_event<'a>(
@@ -451,32 +251,85 @@ impl MessageEventPublisher for MqMessagePublisher {
             {
                 event.request_id = Some(ctx.request_id().to_string());
             }
-            self.publish_event_batch(vec![event]).await?;
-            *self.event_last_flush.lock().await = std::time::Instant::now();
-            Ok(())
+            self.publish_main_event(ctx, &event).await
         })
     }
 
     fn publish_push<'a>(
         &'a self,
-        _ctx: &'a Ctx,
+        ctx: &'a Ctx,
         payload: PushMessageRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        // 临时消息等仅推送场景走 push topic。
         Box::pin(async move {
-            let should_flush = {
-                let mut buffer = self.push_buffer.lock().await;
-                buffer.push(payload);
-                buffer.len() >= self.config.kafka_batch_size
+            let message = match payload.message.as_ref() {
+                Some(m) => m,
+                None => return Err(FlareError::system("push payload has no message")),
             };
-            if should_flush {
-                let messages: Vec<PushMessageRequest> = {
-                    let mut buffer = self.push_buffer.lock().await;
-                    buffer.drain(..).collect()
-                };
-                self.publish_push_batch(messages).await?;
-            }
-            Ok(())
+            let envelope = EventEnvelope::new(
+                types::MESSAGE,
+                &message.conversation_id,
+                message.seq as u64,
+                payload.encode_to_vec(),
+            )
+            .with_source("flare-orchestrator");
+            self.bus
+                .publish(ctx, TOPIC_PUSH_MESSAGES, &envelope)
+                .await
+                .map_err(|e| FlareError::system(e.to_string()))
         })
+    }
+
+    fn publish_both<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        storage_payload: flare_im_core::abstractions::storage_payload::StorageMessagePayload,
+        push_payload: flare_proto::push::PushMessageRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        let msg = match storage_payload.with_context(ctx).to_message() {
+            Some(m) => m,
+            None => {
+                return Box::pin(async {
+                    Err(FlareError::system("storage payload has no message"))
+                });
+            }
+        };
+        Box::pin(async move { self.publish_main_message(ctx, &msg, &push_payload).await })
+    }
+}
+
+/// 领域 [MessageEventPublisher] 外壳，并暴露 `publish_conversation_ensure`。
+pub struct OrchestratorPublisher(pub Arc<MqMessagePublisher>);
+
+impl std::fmt::Debug for OrchestratorPublisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OrchestratorPublisher").finish()
+    }
+}
+
+impl MessageEventPublisher for OrchestratorPublisher {
+    fn publish_storage<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        payload: flare_im_core::abstractions::storage_payload::StorageMessagePayload,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        self.0.publish_storage(ctx, payload)
+    }
+
+    fn publish_event<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        event: Event,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        self.0.publish_event(ctx, event)
+    }
+
+    fn publish_push<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        payload: PushMessageRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        self.0.publish_push(ctx, payload)
     }
 
     fn publish_both<'a>(
@@ -485,25 +338,31 @@ impl MessageEventPublisher for MqMessagePublisher {
         storage_payload: flare_im_core::abstractions::storage_payload::StorageMessagePayload,
         push_payload: PushMessageRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-        let msg = match storage_payload.with_context(ctx).to_message() {
-            Some(m) => m,
-            None => return Box::pin(async { Err(FlareError::system("storage payload has no message")) }),
-        };
-        Box::pin(async move {
-            let (storage_should_flush, push_should_flush) = {
-                let mut storage_buffer = self.storage_buffer.lock().await;
-                let mut push_buffer = self.push_buffer.lock().await;
-                storage_buffer.push(msg);
-                push_buffer.push(push_payload);
-                (
-                    storage_buffer.len() >= self.config.kafka_batch_size,
-                    push_buffer.len() >= self.config.kafka_batch_size,
-                )
-            };
-            if storage_should_flush || push_should_flush {
-                self.flush().await?;
-            }
-            Ok(())
-        })
+        self.0.publish_both(ctx, storage_payload, push_payload)
+    }
+}
+
+impl OrchestratorPublisher {
+    pub async fn publish_conversation_ensure(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        conversation_type: &str,
+        business_type: &str,
+        participants: Vec<String>,
+        stored_channel_id: String,
+    ) -> Result<()> {
+        let ctx = Ctx::default();
+        self.0
+            .publish_conversation_ensure(
+                &ctx,
+                conversation_id,
+                tenant_id,
+                conversation_type,
+                business_type,
+                participants,
+                stored_channel_id,
+            )
+            .await
     }
 }

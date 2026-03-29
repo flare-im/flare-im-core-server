@@ -63,8 +63,14 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         Ok(())
     }
 
-    async fn remove_subscription(&self, ctx: &flare_server_core::context::Context, topics: &[String]) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+    async fn remove_subscription(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        topics: &[String],
+    ) -> Result<()> {
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
 
@@ -90,7 +96,9 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         &self,
         ctx: &flare_server_core::context::Context,
     ) -> Result<Vec<(String, HashMap<String, String>)>> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
         let subscriptions: HashMap<String, String> = conn

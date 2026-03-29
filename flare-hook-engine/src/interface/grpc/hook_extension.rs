@@ -13,14 +13,12 @@ use crate::application::handlers::HookCommandHandler;
 use crate::domain::model::HookExecutionPlan;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
-    context_to_proto, delivery_event_to_proto, message_draft_to_proto,
-    message_record_to_proto, proto_to_message_draft, proto_to_pre_send_decision,
-    proto_to_recall_decision, recall_event_to_proto, timestamp_to_system_time,
+    context_to_proto, delivery_event_to_proto, message_draft_to_proto, message_record_to_proto,
+    proto_to_message_draft, proto_to_pre_send_decision, proto_to_recall_decision,
+    recall_event_to_proto, timestamp_to_system_time,
 };
 use crate::service::registry::CoreHookRegistry;
-use flare_im_core::{
-    DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
-};
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 /// HookExtension gRPC服务实现
@@ -66,12 +64,18 @@ impl HookExtensionServer {
             client_message_id: None,
             conversation_id: message.conversation_id.clone(),
             sender_id: message.sender_id.clone(),
-            conversation_type: match message.conversation_type {
-                v if v == flare_proto::common::ConversationType::Unspecified as i32 => None,
-                1 => Some("single".to_string()),
-                2 => Some("group".to_string()),
-                3 => Some("channel".to_string()),
-                _ => Some("unspecified".to_string()),
+            conversation_type: match flare_proto::common::ConversationType::try_from(
+                message.conversation_type,
+            ) {
+                Ok(flare_proto::common::ConversationType::Unspecified) => None,
+                Ok(flare_proto::common::ConversationType::Single) => Some("single".to_string()),
+                Ok(flare_proto::common::ConversationType::Group) => Some("group".to_string()),
+                Ok(flare_proto::common::ConversationType::Channel) => Some("channel".to_string()),
+                Ok(flare_proto::common::ConversationType::Ai) => Some("ai".to_string()),
+                Ok(flare_proto::common::ConversationType::Customer) => Some("customer".to_string()),
+                Ok(flare_proto::common::ConversationType::System) => Some("system".to_string()),
+                Ok(flare_proto::common::ConversationType::Temp) => Some("temp".to_string()),
+                Err(_) => Some("unspecified".to_string()),
             },
             message_type: None,
             persisted_at,
@@ -453,8 +457,7 @@ impl HookExtension for HookExtensionServer {
 
         // 执行Hook（目前只记录日志，后续可以根据Hook类型实现具体逻辑）
         use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
-        let conversation_id = get_hook_context_data(&ctx)
-            .and_then(|d| d.conversation_id.as_ref());
+        let conversation_id = get_hook_context_data(&ctx).and_then(|d| d.conversation_id.as_ref());
         for plan in execution_plans {
             tracing::debug!(
                 hook = %plan.name(),
@@ -487,8 +490,7 @@ impl HookExtension for HookExtensionServer {
 
         // Presence Hook 目前没有专门的配置，记录日志
         use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
-        let conversation_id = get_hook_context_data(&ctx)
-            .and_then(|d| d.conversation_id.as_ref());
+        let conversation_id = get_hook_context_data(&ctx).and_then(|d| d.conversation_id.as_ref());
         tracing::debug!(
             user_id = ?conversation_id,
             "Presence hook notification received"

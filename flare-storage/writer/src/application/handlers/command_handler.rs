@@ -48,7 +48,11 @@ where
 
     /// 处理存储消息命令 - 只处理普通消息，如果是操作消息则返回 None
     #[instrument(skip(self), fields(tenant_id, message_id))]
-    pub async fn handle(&self, ctx: &Ctx, command: ProcessStoreMessageCommand) -> Result<Option<PersistenceResult>> {
+    pub async fn handle(
+        &self,
+        ctx: &Ctx,
+        command: ProcessStoreMessageCommand,
+    ) -> Result<Option<PersistenceResult>> {
         let start = Instant::now();
 
         let message_id_for_error = command.message.as_ref().map(|m| m.server_id.clone());
@@ -249,7 +253,11 @@ where
                     .any(|m| m.message_id == prepared.message_id);
 
             // 清理 WAL
-            if let Err(e) = self.domain_service.cleanup_wal(ctx, &prepared.message_id).await {
+            if let Err(e) = self
+                .domain_service
+                .cleanup_wal(ctx, &prepared.message_id)
+                .await
+            {
                 tracing::warn!(error = %e, message_id = %prepared.message_id, "Failed to cleanup WAL");
             }
 

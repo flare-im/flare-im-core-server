@@ -52,7 +52,11 @@ impl PostgresEventStreamStore {
 
 impl EventStreamRepository for PostgresEventStreamStore {
     #[instrument(skip(self, event), fields(tenant_id = %event.tenant_id, conversation_id = %event.conversation_id, seq = %event.seq))]
-    async fn append_event_to_stream(&self, ctx: &Ctx, event: &crate::domain::model::Event) -> Result<()> {
+    async fn append_event_to_stream(
+        &self,
+        ctx: &Ctx,
+        event: &crate::domain::model::Event,
+    ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         let tenant_id = event.tenant_id.as_str();
         let proto_ev = crate::convert::event_to_proto(event);

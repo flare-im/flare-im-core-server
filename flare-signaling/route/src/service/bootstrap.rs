@@ -21,12 +21,9 @@ impl ApplicationBootstrap {
         let service_config = app_config.signaling_route_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr = ServiceHelper::parse_server_addr(
-            app_config,
-            &service_config.runtime,
-            SIGNALING_ROUTE,
-        )
-        .with_context(|| "invalid signaling route server address")?;
+        let address: SocketAddr =
+            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, SIGNALING_ROUTE)
+                .with_context(|| "invalid signaling route server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         let context = wire::initialize(app_config).await?;

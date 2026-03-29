@@ -29,12 +29,20 @@ impl MediaQueryHandler {
     }
 
     /// 获取文件信息（包含缓存逻辑，使用领域服务）
-    pub async fn handle_get_file_info(&self, ctx: &Context, file_id: &str) -> Result<MediaFileMetadata> {
+    pub async fn handle_get_file_info(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<MediaFileMetadata> {
         self.domain_service.get_metadata(ctx, file_id).await
     }
 
     /// 获取文件URL（包含默认值处理和URL构建逻辑，使用领域服务）
-    pub async fn handle_get_file_url(&self, ctx: &Context, request: GetFileUrlRequest) -> Result<PresignedUrl> {
+    pub async fn handle_get_file_url(
+        &self,
+        ctx: &Context,
+        request: GetFileUrlRequest,
+    ) -> Result<PresignedUrl> {
         let expires_in = i64::from(request.expires_in);
         self.domain_service
             .create_presigned_url(ctx, &request.file_id, expires_in)
@@ -42,7 +50,11 @@ impl MediaQueryHandler {
     }
 
     /// 列出文件引用（通过领域服务）
-    pub async fn handle_list_references(&self, ctx: &Context, file_id: &str) -> Result<Vec<MediaReference>> {
+    pub async fn handle_list_references(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<Vec<MediaReference>> {
         self.domain_service.list_references(ctx, file_id).await
     }
 

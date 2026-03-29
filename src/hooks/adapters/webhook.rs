@@ -11,8 +11,8 @@ use crate::error::{ErrorBuilder, ErrorCode, Result};
 
 use super::super::config::HookDefinition;
 use super::super::types::{
-    DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord,
-    PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
+    PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
 use flare_server_core::context::Ctx;
 
@@ -310,12 +310,7 @@ struct WebhookPostSendHook {
 
 #[async_trait]
 impl PostSendHook for WebhookPostSendHook {
-    async fn handle(
-        &self,
-        ctx: &Ctx,
-        record: &MessageRecord,
-        draft: &MessageDraft,
-    ) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome {
         let request_body = PostSendWebhookRequest {
             context: webhook_context(ctx),
             record: record.clone(),

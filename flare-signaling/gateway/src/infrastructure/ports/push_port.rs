@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_core::common::protocol::{
-    payload_command::Type as PayloadType,
     PayloadCommand, Reliability, frame_with_payload_command, generate_message_id,
+    payload_command::Type as PayloadType,
 };
 use flare_core::server::handle::ServerHandle;
 use flare_im_core::Ctx;
@@ -34,12 +34,9 @@ impl IPushPort for PushRepository {
         let handle = {
             let guard = self.server_handle.lock().await;
             Arc::clone(guard.as_ref().ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InternalError,
-                    "ServerHandle not initialized",
-                )
-                .details("push_message_to_user")
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InternalError, "ServerHandle not initialized")
+                    .details("push_message_to_user")
+                    .build_error()
             })?)
         };
 
@@ -52,14 +49,11 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle
-            .send_to_user(user_id, &frame)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(ErrorCode::InternalError, "Failed to send message to user")
-                    .details(format!("user_id={}, error={}", user_id, e))
-                    .build_error()
-            })?;
+        handle.send_to_user(user_id, &frame).await.map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "Failed to send message to user")
+                .details(format!("user_id={}, error={}", user_id, e))
+                .build_error()
+        })?;
 
         info!(user_id = %user_id, "Message pushed to user");
         Ok(())
@@ -74,12 +68,9 @@ impl IPushPort for PushRepository {
         let handle = {
             let guard = self.server_handle.lock().await;
             Arc::clone(guard.as_ref().ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InternalError,
-                    "ServerHandle not initialized",
-                )
-                .details("push_message_to_connection")
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InternalError, "ServerHandle not initialized")
+                    .details("push_message_to_connection")
+                    .build_error()
             })?)
         };
 
@@ -92,14 +83,14 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle
-            .send_to(connection_id, &frame)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(ErrorCode::InternalError, "Failed to send message to connection")
-                    .details(format!("connection_id={}, error={}", connection_id, e))
-                    .build_error()
-            })?;
+        handle.send_to(connection_id, &frame).await.map_err(|e| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "Failed to send message to connection",
+            )
+            .details(format!("connection_id={}, error={}", connection_id, e))
+            .build_error()
+        })?;
 
         debug!(connection_id = %connection_id, "Message pushed to connection");
         Ok(())
@@ -115,12 +106,9 @@ impl IPushPort for PushRepository {
         let handle = {
             let guard = self.server_handle.lock().await;
             Arc::clone(guard.as_ref().ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InternalError,
-                    "ServerHandle not initialized",
-                )
-                .details("push_payload_to_connection")
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InternalError, "ServerHandle not initialized")
+                    .details("push_payload_to_connection")
+                    .build_error()
             })?)
         };
 
@@ -134,14 +122,14 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle
-            .send_to(connection_id, &frame)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(ErrorCode::InternalError, "Failed to send payload to connection")
-                    .details(format!("connection_id={}, error={}", connection_id, e))
-                    .build_error()
-            })?;
+        handle.send_to(connection_id, &frame).await.map_err(|e| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "Failed to send payload to connection",
+            )
+            .details(format!("connection_id={}, error={}", connection_id, e))
+            .build_error()
+        })?;
 
         debug!(
             connection_id = %connection_id,
@@ -161,12 +149,9 @@ impl IPushPort for PushRepository {
         let handle = {
             let guard = self.server_handle.lock().await;
             Arc::clone(guard.as_ref().ok_or_else(|| {
-                ErrorBuilder::new(
-                    ErrorCode::InternalError,
-                    "ServerHandle not initialized",
-                )
-                .details("push_payload_to_user")
-                .build_error()
+                ErrorBuilder::new(ErrorCode::InternalError, "ServerHandle not initialized")
+                    .details("push_payload_to_user")
+                    .build_error()
             })?)
         };
 
@@ -180,14 +165,11 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle
-            .send_to_user(user_id, &frame)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(ErrorCode::InternalError, "Failed to send payload to user")
-                    .details(format!("user_id={}, error={}", user_id, e))
-                    .build_error()
-            })?;
+        handle.send_to_user(user_id, &frame).await.map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "Failed to send payload to user")
+                .details(format!("user_id={}, error={}", user_id, e))
+                .build_error()
+        })?;
 
         info!(
             user_id = %user_id,

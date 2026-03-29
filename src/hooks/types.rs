@@ -202,12 +202,7 @@ pub trait PreSendHook: Send + Sync {
 /// 注意：此 trait 使用 #[async_trait] 是因为 Hook 系统需要运行时多态。
 #[async_trait]
 pub trait PostSendHook: Send + Sync {
-    async fn handle(
-        &self,
-        ctx: &Ctx,
-        record: &MessageRecord,
-        draft: &MessageDraft,
-    ) -> HookOutcome;
+    async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome;
 }
 
 /// Delivery Hook Trait
@@ -266,12 +261,7 @@ impl<T> PostSendHook for Arc<T>
 where
     T: PostSendHook + ?Sized,
 {
-    async fn handle(
-        &self,
-        ctx: &Ctx,
-        record: &MessageRecord,
-        draft: &MessageDraft,
-    ) -> HookOutcome {
+    async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome {
         (**self).handle(ctx, record, draft).await
     }
 }

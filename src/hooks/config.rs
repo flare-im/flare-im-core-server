@@ -181,7 +181,9 @@ impl HookConfigLoader {
                 if let Ok(cfg) = self.load_from_directory(path) {
                     return Ok(cfg);
                 }
-            } else if path.is_file() && let Ok(cfg) = self.load_from_file(path) {
+            } else if path.is_file()
+                && let Ok(cfg) = self.load_from_file(path)
+            {
                 return Ok(cfg);
             }
         }

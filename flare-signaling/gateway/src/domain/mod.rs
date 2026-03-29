@@ -8,6 +8,5 @@ pub use model::{
 };
 pub use service::{
     ConnectionDomainService, ConnectionQualityService, PushDomainService, SendAckDomainService,
-    SendDataDomainService, SendEventDomainService, SendMessageDomainService,
-    SyncService,
+    SendDataDomainService, SendEventDomainService, SendMessageDomainService, SyncService,
 };

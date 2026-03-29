@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::DomainEvent;
-use crate::domain::value_object::{DeviceId, DevicePriority, ConnectionId, TokenVersion, UserId};
+use crate::domain::value_object::{ConnectionId, DeviceId, DevicePriority, TokenVersion, UserId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionCreatedEvent {

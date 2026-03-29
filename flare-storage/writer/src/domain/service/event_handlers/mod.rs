@@ -39,7 +39,9 @@ where
     A: ArchiveStoreRepository + Send + Sync,
     E: EventStreamRepository + Send + Sync,
 {
-    ctx.repo.append_event(ctx.ctx, ctx.tenant_id, message_id, event).await?;
+    ctx.repo
+        .append_event(ctx.ctx, ctx.tenant_id, message_id, event)
+        .await?;
     if let Some(stream) = ctx.stream {
         let _ = stream.append_event_to_stream(ctx.ctx, event).await;
     }

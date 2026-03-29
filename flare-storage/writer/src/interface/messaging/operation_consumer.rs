@@ -50,8 +50,9 @@ impl EventHandler for OperationEventHandler {
         }
 
         // 从 payload 解析 Event
-        let proto_event = Event::decode(&*envelope.payload)
-            .map_err(|e| FlareError::deserialization_error(format!("Failed to decode Event: {}", e)))?;
+        let proto_event = Event::decode(&*envelope.payload).map_err(|e| {
+            FlareError::deserialization_error(format!("Failed to decode Event: {}", e))
+        })?;
 
         let event = event_from_proto(&proto_event);
 

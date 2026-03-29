@@ -1,6 +1,7 @@
 //! gRPC 出站适配器：发现下游 Channel 并调用 Conversation（读 + 游标写）/ Storage Reader。
 
-use flare_im_core::service_names::{get_service_name, CONVERSATION, STORAGE_READER};
+use flare_im_core::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
+use flare_proto::Message;
 use flare_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_proto::conversation::{
@@ -10,7 +11,6 @@ use flare_proto::storage::storage_reader_service_client::StorageReaderServiceCli
 use flare_proto::storage::{
     GetConversationMessageHeadRequest, QueryConversationEventsRequest, QueryMessagesBySeqRequest,
 };
-use flare_proto::Message;
 use flare_server_core::client::request_with_context;
 use flare_server_core::context::Ctx;
 use flare_server_core::discovery::ServiceClient;
@@ -19,8 +19,8 @@ use tonic::transport::Channel;
 
 use crate::application::error::{discovery_unavailable, flare_from_tonic_status};
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage, StorageConversationMessageHead,
-    StorageReadPort,
+    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage,
+    StorageConversationMessageHead, StorageReadPort,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -39,13 +39,15 @@ impl GrpcSyncAdapters {
             .map_err(|e| discovery_unavailable(service_name, e))
     }
 
-    async fn conversation_read_client() -> Result<ConversationReadServiceClient<Channel>, FlareError> {
+    async fn conversation_read_client() -> Result<ConversationReadServiceClient<Channel>, FlareError>
+    {
         let name = get_service_name(CONVERSATION);
         let ch = Self::create_channel(&name).await?;
         Ok(ConversationReadServiceClient::new(ch))
     }
 
-    async fn conversation_manage_client() -> Result<ConversationManageServiceClient<Channel>, FlareError> {
+    async fn conversation_manage_client()
+    -> Result<ConversationManageServiceClient<Channel>, FlareError> {
         let name = get_service_name(CONVERSATION);
         let ch = Self::create_channel(&name).await?;
         Ok(ConversationManageServiceClient::new(ch))
@@ -72,7 +74,11 @@ impl ConversationSyncPort for GrpcSyncAdapters {
         Ok(resp.into_inner())
     }
 
-    async fn update_read_cursor(&self, ctx: &Ctx, req: UpdateCursorRequest) -> Result<(), FlareError> {
+    async fn update_read_cursor(
+        &self,
+        ctx: &Ctx,
+        req: UpdateCursorRequest,
+    ) -> Result<(), FlareError> {
         let mut client = Self::conversation_manage_client().await?;
         client
             .update_cursor(request_with_context(req, ctx))

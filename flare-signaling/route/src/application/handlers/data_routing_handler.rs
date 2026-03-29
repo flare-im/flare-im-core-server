@@ -9,7 +9,7 @@ use flare_server_core::context::Context;
 use flare_server_core::error::ErrorCode;
 use tracing::instrument;
 
-use crate::application::dto::{build_route_metadata, MessageRouteResult};
+use crate::application::dto::{MessageRouteResult, build_route_metadata};
 use crate::infrastructure::forwarder::MessageForwarder;
 
 pub struct DataRoutingHandler {

@@ -1,6 +1,6 @@
-//! # Simple Gateway Handler
+//! # Gateway gRPC 代理
 //!
-//! 简单网关处理器，仅作为代理层转发请求到后端服务
+//! 透明转发到后端服务（本 crate 仅此一种实现）。
 //! 职责：
 //! - 媒体服务代理 (media.proto)
 //! - Hook管理代理 (hooks.proto)
@@ -23,8 +23,8 @@ use flare_proto::message::message_send_service_server::MessageSendService;
 use flare_proto::message::*;
 
 // 在线状态服务（已合并为 OnlineService）
-use flare_proto::signaling::online::*;
 use flare_proto::signaling::online::online_service_server::OnlineService;
+use flare_proto::signaling::online::*;
 
 use crate::infrastructure::hook::GrpcHookClient;
 use crate::infrastructure::media::GrpcMediaClient;
@@ -394,7 +394,7 @@ impl OnlineService for SimpleGatewayHandler {
             .await?
             .into_inner();
         Ok(Response::new(Box::pin(stream)))
-}
+    }
 
     // ========== 用户在线状态 RPC ==========
 
@@ -451,4 +451,3 @@ impl OnlineService for SimpleGatewayHandler {
         self.online_client.get_device(request).await
     }
 }
-

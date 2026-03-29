@@ -19,11 +19,13 @@ pub fn build_gateway_ctx_from_info(
     connection_info: &DomainConnectionInfo,
     default_tenant_id: &str,
 ) -> Ctx {
-    Arc::new(crate::infrastructure::connection_context::build_context_from_connection(
-        connection_info.metadata.as_ref(),
-        Some(connection_info.user_id.as_str()),
-        default_tenant_id,
-    ))
+    Arc::new(
+        crate::infrastructure::connection_context::build_context_from_connection(
+            connection_info.metadata.as_ref(),
+            Some(connection_info.user_id.as_str()),
+            default_tenant_id,
+        ),
+    )
 }
 
 /// 基于 [`IConnectionPort::build_ctx`] 解析 `Ctx`

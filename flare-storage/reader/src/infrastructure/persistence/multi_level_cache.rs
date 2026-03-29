@@ -57,7 +57,11 @@ impl LocalMessageCache {
         Ok(())
     }
 
-    pub async fn get_session_messages(&self, _conversation_id: &str, _limit: usize) -> Result<Vec<Message>> {
+    pub async fn get_session_messages(
+        &self,
+        _conversation_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<Message>> {
         Ok(vec![])
     }
 
@@ -113,7 +117,11 @@ impl MultiLevelMessageCache {
     }
 
     /// 获取单条消息 - 按 L1 -> L2 -> DB 顺序查找
-    pub async fn get_message(&self, conversation_id: &str, message_id: &str) -> Result<Option<Message>> {
+    pub async fn get_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Message>> {
         // 先查 L1 缓存
         if let Some(message) = self.local_cache.get_message(message_id) {
             debug!("L1 cache hit for message: {}", message_id);
@@ -141,7 +149,11 @@ impl MultiLevelMessageCache {
     }
 
     /// 批量获取消息
-    pub async fn get_messages_batch(&self, conversation_id: &str, message_ids: &[String]) -> Result<Vec<Message>> {
+    pub async fn get_messages_batch(
+        &self,
+        conversation_id: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<Message>> {
         let mut result = Vec::new();
         let mut remaining_ids = Vec::new();
 
@@ -157,8 +169,10 @@ impl MultiLevelMessageCache {
         // L1 未命中的查 L2 缓存
         if !remaining_ids.is_empty() {
             if let Some(ref redis_cache) = self.redis_cache {
-                let redis_results = redis_cache.get_messages_batch(conversation_id, &remaining_ids).await?;
-                
+                let redis_results = redis_cache
+                    .get_messages_batch(conversation_id, &remaining_ids)
+                    .await?;
+
                 for (_, message) in &redis_results {
                     // 异步回填 L1 缓存
                     let local_cache = self.local_cache.clone();
@@ -168,7 +182,7 @@ impl MultiLevelMessageCache {
                             warn!("Failed to cache message to L1: {}", e);
                         }
                     });
-                    
+
                     result.push(message.clone());
                 }
             }
@@ -206,7 +220,10 @@ impl MultiLevelMessageCache {
             let redis_cache_clone = redis_cache.clone();
             let messages_clone = messages.to_vec();
             tokio::spawn(async move {
-                if let Err(e) = redis_cache_clone.cache_messages_batch(&messages_clone).await {
+                if let Err(e) = redis_cache_clone
+                    .cache_messages_batch(&messages_clone)
+                    .await
+                {
                     warn!("Failed to cache messages to L2: {}", e);
                 }
             });
@@ -234,19 +251,20 @@ impl MultiLevelMessageCache {
             .await
         {
             if !messages.is_empty() {
-                debug!(
-                    "L1 session cache hit for conversation: {}",
-                    conversation_id
-                );
+                debug!("L1 session cache hit for conversation: {}", conversation_id);
                 return Ok(Some(messages));
             }
         }
 
         // L1 未命中，查 L2 缓存
         if let Some(ref redis_cache) = self.redis_cache {
-            let start_time_utc = DateTime::from_timestamp(start_time / 1000, ((start_time % 1000) * 1_000_000) as u32);
-            let end_time_utc = DateTime::from_timestamp(end_time / 1000, ((end_time % 1000) * 1_000_000) as u32);
-            
+            let start_time_utc = DateTime::from_timestamp(
+                start_time / 1000,
+                ((start_time % 1000) * 1_000_000) as u32,
+            );
+            let end_time_utc =
+                DateTime::from_timestamp(end_time / 1000, ((end_time % 1000) * 1_000_000) as u32);
+
             if let (Some(start_time_utc), Some(end_time_utc)) = (start_time_utc, end_time_utc) {
                 if let Ok(Some(messages)) = redis_cache
                     .get_session_messages(conversation_id, start_time_utc, end_time_utc, 100) // 添加 limit 参数
@@ -261,10 +279,7 @@ impl MultiLevelMessageCache {
                     let conv_id = conversation_id.to_string();
                     let msgs = messages.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = local_cache
-                            .cache_session_messages(&conv_id, &msgs)
-                            .await
-                        {
+                        if let Err(e) = local_cache.cache_session_messages(&conv_id, &msgs).await {
                             warn!("Failed to cache session messages to L1: {}", e);
                         }
                     });
@@ -294,9 +309,13 @@ impl MultiLevelMessageCache {
 
         // 异步写入 L2 缓存
         if let Some(ref redis_cache) = self.redis_cache {
-            let start_time_utc = DateTime::from_timestamp(start_time / 1000, ((start_time % 1000) * 1_000_000) as u32);
-            let end_time_utc = DateTime::from_timestamp(end_time / 1000, ((end_time % 1000) * 1_000_000) as u32);
-            
+            let start_time_utc = DateTime::from_timestamp(
+                start_time / 1000,
+                ((start_time % 1000) * 1_000_000) as u32,
+            );
+            let end_time_utc =
+                DateTime::from_timestamp(end_time / 1000, ((end_time % 1000) * 1_000_000) as u32);
+
             if let (Some(start_time_utc), Some(end_time_utc)) = (start_time_utc, end_time_utc) {
                 let redis_cache_clone = redis_cache.clone();
                 let conv_id = conversation_id.to_string();
@@ -326,7 +345,10 @@ impl MultiLevelMessageCache {
             let conv_id = conversation_id.to_string();
             let msg_id = message_id.to_string();
             tokio::spawn(async move {
-                if let Err(e) = redis_cache_clone.invalidate_message(&conv_id, &msg_id).await {
+                if let Err(e) = redis_cache_clone
+                    .invalidate_message(&conv_id, &msg_id)
+                    .await
+                {
                     warn!("Failed to invalidate message in L2 cache: {}", e);
                 }
             });
@@ -365,7 +387,7 @@ impl MultiLevelMessageCache {
         let l1_stats = self.get_l1_stats();
         info!("MultiLevelCache Stats:");
         l1_stats.print_stats();
-        
+
         if let Some(ref _redis_cache) = self.redis_cache {
             // 注意：这里假设Redis缓存也有类似的统计方法
             // 如果没有，我们需要在Redis缓存中也实现统计功能
@@ -387,11 +409,16 @@ mod tests {
         let mut message = Message::default();
         message.server_id = "test_msg_1".to_string();
         message.conversation_id = "test_conv_1".to_string();
-        message.content = Some(flare_proto::common::MessageContent::Text("test content".to_string()));
+        message.content = Some(flare_proto::common::MessageContent::Text(
+            "test content".to_string(),
+        ));
 
         // 测试缓存和获取
         cache.cache_message(&message).await.unwrap();
-        let retrieved = cache.get_message("test_conv_1", "test_msg_1").await.unwrap();
+        let retrieved = cache
+            .get_message("test_conv_1", "test_msg_1")
+            .await
+            .unwrap();
         assert!(retrieved.is_some());
 
         // 测试统计信息

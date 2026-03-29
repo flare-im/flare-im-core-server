@@ -21,10 +21,7 @@ pub struct PushDomainService {
 }
 
 impl PushDomainService {
-    pub fn new(
-        push_port: Arc<dyn IPushPort>,
-        connection_query: Arc<dyn ConnectionQuery>,
-    ) -> Self {
+    pub fn new(push_port: Arc<dyn IPushPort>, connection_query: Arc<dyn ConnectionQuery>) -> Self {
         Self {
             push_port,
             connection_query,
@@ -60,7 +57,8 @@ impl PushDomainService {
                     return false;
                 }
                 let platform = conn.platform.as_deref().unwrap_or("");
-                if !options.platforms.is_empty() && !options.platforms.iter().any(|p| p == platform) {
+                if !options.platforms.is_empty() && !options.platforms.iter().any(|p| p == platform)
+                {
                     return false;
                 }
                 true
@@ -113,7 +111,10 @@ impl PushDomainService {
         payload_bytes: &[u8],
     ) -> Result<(i32, i32)> {
         let _ = user_id;
-        let connection_ids: Vec<String> = connections.iter().map(|c| c.connection_id.clone()).collect();
+        let connection_ids: Vec<String> = connections
+            .iter()
+            .map(|c| c.connection_id.clone())
+            .collect();
         self.push_port
             .push_payload_to_connections(tx, &connection_ids, payload_type, payload_bytes.to_vec())
             .await
@@ -181,7 +182,12 @@ impl PushDomainService {
 
     /// 推送 ACK 字节给用户（payload 为 common::Ack encode_to_vec）
     #[instrument(skip(self, tx, ack_payload), fields(user_id = %user_id))]
-    pub async fn push_ack_to_user(&self, tx: &Ctx, user_id: &str, ack_payload: Vec<u8>) -> Result<()> {
+    pub async fn push_ack_to_user(
+        &self,
+        tx: &Ctx,
+        user_id: &str,
+        ack_payload: Vec<u8>,
+    ) -> Result<()> {
         let payload_type = flare_core::common::protocol::payload_command::Type::Ack as i32;
         self.push_port
             .push_payload_to_user(tx, user_id, payload_type, ack_payload)
@@ -216,10 +222,7 @@ impl PushDomainService {
         platforms: &[String],
         limit: i32,
     ) -> Result<Vec<ConnectionInfo>> {
-        let connections = self
-            .connection_query
-            .list_user_connections(user_id)
-            .await?;
+        let connections = self.connection_query.list_user_connections(user_id).await?;
         let limit = limit.max(0).min(500) as usize;
         let filtered: Vec<ConnectionInfo> = if platforms.is_empty() {
             connections

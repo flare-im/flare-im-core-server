@@ -1,5 +1,3 @@
-
-
 use thiserror::Error;
 
 /// 信令服务错误类型

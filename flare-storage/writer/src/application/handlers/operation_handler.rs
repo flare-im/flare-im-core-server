@@ -10,8 +10,8 @@ use tracing::instrument;
 use crate::application::commands::ProcessEventCommand;
 use crate::domain::model::PersistenceResult;
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use crate::domain::service::event_handlers;
 use crate::domain::service::EventApplicationService;
+use crate::domain::service::event_handlers;
 use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
 use crate::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
 
@@ -37,7 +37,11 @@ impl MessageOperationCommandHandler {
     }
 
     #[instrument(skip(self))]
-    pub async fn handle(&self, ctx: &Ctx, command: ProcessEventCommand) -> Result<PersistenceResult> {
+    pub async fn handle(
+        &self,
+        ctx: &Ctx,
+        command: ProcessEventCommand,
+    ) -> Result<PersistenceResult> {
         let start = Instant::now();
         let event = command.event;
 

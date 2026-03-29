@@ -1,17 +1,40 @@
+use crate::domain::model::MessageSubmission;
+use crate::domain::repository::WalRepository;
+use crate::error::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::error::Result;
+
+/// 无 WAL 时的占位实现。
+#[derive(Debug, Default)]
+pub struct NoopWalRepository;
+
+impl WalRepository for NoopWalRepository {
+    fn append<'a>(
+        &'a self,
+        _submission: &'a MessageSubmission,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn find_by_message_id<'a>(
+        &'a self,
+        _message_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<flare_proto::common::Message>>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+}
 
 /// WalRepository 的枚举封装，用于在 Rust 2024 下避免 `dyn` + async trait 带来的
 /// `E0038: trait is not dyn compatible` 问题。
 #[derive(Debug)]
 pub enum WalRepositoryItem {
-    Noop(Arc<crate::infrastructure::persistence::noop_wal::NoopWalRepository>),
+    Noop(Arc<NoopWalRepository>),
     Redis(Arc<crate::infrastructure::persistence::redis_wal::RedisWalRepository>),
 }
 
-impl crate::domain::repository::wal_repository::WalRepository for WalRepositoryItem {
+impl WalRepository for WalRepositoryItem {
     fn append<'a>(
         &'a self,
         submission: &'a crate::domain::model::MessageSubmission,
@@ -25,7 +48,8 @@ impl crate::domain::repository::wal_repository::WalRepository for WalRepositoryI
     fn find_by_message_id<'a>(
         &'a self,
         message_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<flare_proto::common::Message>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<flare_proto::common::Message>>> + Send + 'a>>
+    {
         match self {
             WalRepositoryItem::Noop(repo) => Box::pin(repo.find_by_message_id(message_id)),
             WalRepositoryItem::Redis(repo) => Box::pin(repo.find_by_message_id(message_id)),

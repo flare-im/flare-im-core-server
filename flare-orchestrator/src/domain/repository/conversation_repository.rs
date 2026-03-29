@@ -1,6 +1,6 @@
+use crate::error::Result;
 use std::future::Future;
 use std::pin::Pin;
-use crate::error::Result;
 
 /// Conversation 仓储接口 - 用于确保 conversation 存在（Rust 2024: 原生异步 trait）
 pub trait ConversationRepository: Send + Sync {
@@ -12,6 +12,8 @@ pub trait ConversationRepository: Send + Sync {
         conversation_type: &'a str,
         business_type: &'a str,
         participants: Vec<String>,
+        // 落库 conversations.channel_id：单聊须空；非单聊为消息 channel_id
+        stored_channel_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     /// 标记会话已读（更新未读数；read_seq 为 0 时由 Conversation 服务用 last_message_seq）

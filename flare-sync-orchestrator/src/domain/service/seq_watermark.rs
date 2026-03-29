@@ -1,6 +1,6 @@
+use flare_proto::Message;
 use flare_proto::common::Event;
 use flare_proto::common::SnapshotConversationRow;
-use flare_proto::Message;
 
 /// 从快照条目中取全局水位（多会话取 max last_seq）。
 pub fn snapshot_global_seq(items: &[SnapshotConversationRow]) -> i64 {

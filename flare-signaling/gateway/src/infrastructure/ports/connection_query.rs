@@ -10,9 +10,9 @@ use flare_im_core::Ctx;
 use flare_server_core::context::Context;
 use flare_server_core::error::Result;
 
+use super::connection_port::core_info_to_domain;
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;
 use crate::domain::ports::ConnectionQuery;
-use super::connection_port::core_info_to_domain;
 
 /// 从连接管理器查询用户连接列表
 pub struct ManagerConnectionQuery {

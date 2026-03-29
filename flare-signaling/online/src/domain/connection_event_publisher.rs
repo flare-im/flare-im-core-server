@@ -3,7 +3,6 @@
 //! 当 Gateway 在 Login/Logout 的 metadata 中传入 connection_id 时，Online 可选择性发布
 //! core 的 ConnectionEvent，便于跨 BC 溯源与审计。默认不注入则为 no-op。
 
-
 use flare_im_core::ConnectionEvent;
 
 pub trait ConnectionEventPublisher: Send + Sync {

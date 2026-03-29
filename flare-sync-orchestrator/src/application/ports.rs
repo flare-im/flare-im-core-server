@@ -1,8 +1,8 @@
 //! 出站端口（防腐层）：由 `infrastructure` 实现，对接 Conversation / Storage Reader 等。
 #![allow(async_fn_in_trait)] // 内部端口，由具体类型实现并 `Send`；与仓库 Rust 2024 异步 trait 风格一致。
 
-use flare_proto::common::{Event, MultiDeviceCursor};
 use flare_proto::Message;
+use flare_proto::common::{Event, MultiDeviceCursor};
 use flare_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, UpdateCursorRequest,
 };
@@ -19,7 +19,11 @@ pub trait ConversationSyncPort: Send + Sync {
         req: ConversationBootstrapRequest,
     ) -> Result<ConversationBootstrapResponse, FlareError>;
 
-    async fn update_read_cursor(&self, ctx: &Ctx, req: UpdateCursorRequest) -> Result<(), FlareError>;
+    async fn update_read_cursor(
+        &self,
+        ctx: &Ctx,
+        req: UpdateCursorRequest,
+    ) -> Result<(), FlareError>;
 }
 
 /// 存储读侧返回的会话最新消息水位（`messages` 表，按 `seq` 最大的一行）

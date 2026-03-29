@@ -21,7 +21,7 @@ use crate::domain::connection_event_publisher::{
 use crate::domain::model::OnlineStatusRecord;
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{
-    ConnectionQuality, DeviceId, DevicePriority, ConnectionId, TokenVersion, UserId,
+    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
 use crate::util;
 
@@ -87,7 +87,9 @@ where
                         device_id = %device_id,
                         "Exclusive strategy: removing all existing sessions"
                     );
-                    self.repository.remove_user_connections(&user_vo, None).await?;
+                    self.repository
+                        .remove_user_connections(&user_vo, None)
+                        .await?;
                 }
                 DeviceConflictStrategy::PlatformExclusive => {
                     // 平台互斥：只踢出同平台的旧设备
@@ -122,7 +124,9 @@ where
                         user_id = %user_id,
                         "No conflict strategy specified, using Exclusive"
                     );
-                    self.repository.remove_user_connections(&user_vo, None).await?;
+                    self.repository
+                        .remove_user_connections(&user_vo, None)
+                        .await?;
                 }
             }
         }
@@ -297,7 +301,11 @@ where
         })
     }
 
-    pub async fn get_online_status(&self, ctx: &Context, user_ids: &[String]) -> Result<GetOnlineStatusResponse> {
+    pub async fn get_online_status(
+        &self,
+        ctx: &Context,
+        user_ids: &[String],
+    ) -> Result<GetOnlineStatusResponse> {
         tracing::debug!(
             trace_id = %ctx.trace_id(),
             user_count = %user_ids.len(),
@@ -348,17 +356,47 @@ where
 pub struct NoopConversationRepository;
 
 impl ConversationRepository for NoopConversationRepository {
-    async fn save_connection(&self, _connection: &Connection) -> Result<()> { Ok(()) }
-    async fn remove_connection(&self, _conversation_id: &ConnectionId, _user_id: &UserId) -> Result<()> { Ok(()) }
-    async fn touch_connection(&self, _user_id: &UserId) -> Result<()> { Ok(()) }
-    async fn fetch_statuses(&self, _user_ids: &[String]) -> Result<HashMap<String, OnlineStatusRecord>> { Ok(HashMap::new()) }
-    async fn get_user_connections(&self, _user_id: &UserId) -> Result<Vec<Connection>> { Ok(vec![]) }
-    async fn remove_user_connections(&self, _user_id: &UserId, _device_ids: Option<&[DeviceId]>) -> Result<()> { Ok(()) }
-    async fn get_connection_by_device(&self, _user_id: &UserId, _device_id: &DeviceId) -> Result<Option<Connection>> { Ok(None) }
-    async fn list_user_connections(&self, _ctx: &Context) -> Result<Vec<Connection>> { Ok(vec![]) }
+    async fn save_connection(&self, _connection: &Connection) -> Result<()> {
+        Ok(())
+    }
+    async fn remove_connection(
+        &self,
+        _conversation_id: &ConnectionId,
+        _user_id: &UserId,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn touch_connection(&self, _user_id: &UserId) -> Result<()> {
+        Ok(())
+    }
+    async fn fetch_statuses(
+        &self,
+        _user_ids: &[String],
+    ) -> Result<HashMap<String, OnlineStatusRecord>> {
+        Ok(HashMap::new())
+    }
+    async fn get_user_connections(&self, _user_id: &UserId) -> Result<Vec<Connection>> {
+        Ok(vec![])
+    }
+    async fn remove_user_connections(
+        &self,
+        _user_id: &UserId,
+        _device_ids: Option<&[DeviceId]>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn get_connection_by_device(
+        &self,
+        _user_id: &UserId,
+        _device_id: &DeviceId,
+    ) -> Result<Option<Connection>> {
+        Ok(None)
+    }
+    async fn list_user_connections(&self, _ctx: &Context) -> Result<Vec<Connection>> {
+        Ok(vec![])
+    }
 }
 
 /// 默认的在线状态服务类型
 pub type DefaultOnlineStatusService =
     OnlineStatusService<NoopConversationRepository, NoopConnectionEventPublisher>;
-

@@ -12,7 +12,12 @@ pub trait MessageIdempotencyRepository: Send + Sync {
     async fn is_new(&self, ctx: &Ctx, message_id: &str) -> Result<bool>;
 
     /// 检查客户端消息ID是否为新消息（用于去重）；默认委托给 is_new。
-    async fn is_new_by_client_msg_id(&self, ctx: &Ctx, client_msg_id: &str, _sender_id: Option<&str>) -> Result<bool> {
+    async fn is_new_by_client_msg_id(
+        &self,
+        ctx: &Ctx,
+        client_msg_id: &str,
+        _sender_id: Option<&str>,
+    ) -> Result<bool> {
         if client_msg_id.is_empty() {
             return Ok(true);
         }

@@ -5,8 +5,8 @@ use std::env;
 use flare_im_core::config::{FlareAppConfig, ServiceEndpointConfig};
 use flare_im_core::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{
-    TOPIC_PUSH_ACKS, TOPIC_PUSH_CUSTOM, TOPIC_PUSH_DLQ, TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
-    TOPIC_PUSH_NOTIFICATIONS, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+    TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ACKS, TOPIC_PUSH_CUSTOM, TOPIC_PUSH_DLQ, TOPIC_PUSH_EVENTS,
+    TOPIC_PUSH_MESSAGES, TOPIC_PUSH_NOTIFICATIONS, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 
@@ -16,6 +16,7 @@ pub struct PushServerConfig {
     pub consumer_group: String,
 
     pub push_message_topic: String,
+    pub message_main_topic: String,
     pub push_event_topic: String,
     pub push_notification_topic: String,
     pub push_ack_topic: String,
@@ -69,6 +70,9 @@ impl PushServerConfig {
         let push_message_topic = env::var("PUSH_SERVER_PUSH_MESSAGE_TOPIC")
             .ok()
             .unwrap_or_else(|| TOPIC_PUSH_MESSAGES.to_string());
+        let message_main_topic = env::var("PUSH_SERVER_MESSAGE_MAIN_TOPIC")
+            .ok()
+            .unwrap_or_else(|| TOPIC_MESSAGE_MAIN.to_string());
         let push_event_topic = env::var("PUSH_SERVER_PUSH_EVENT_TOPIC")
             .ok()
             .unwrap_or_else(|| TOPIC_PUSH_EVENTS.to_string());
@@ -104,6 +108,7 @@ impl PushServerConfig {
             kafka_bootstrap,
             consumer_group,
             push_message_topic,
+            message_main_topic,
             push_event_topic,
             push_notification_topic,
             push_ack_topic,
@@ -179,4 +184,3 @@ impl KafkaProducerConfig for PushServerConfig {
         300_000
     }
 }
-

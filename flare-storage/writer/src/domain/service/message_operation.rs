@@ -2,7 +2,7 @@
 //! 与 common/event.proto 对齐，通过 ArchiveStoreRepository 更新写模型与旁路表。
 //! 具体 Payload 处理委托给 [event_handlers] 策略分发。
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
 use crate::domain::model::Event;
@@ -10,7 +10,7 @@ use flare_server_core::context::Ctx;
 use tracing::instrument;
 
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use crate::domain::service::event_handlers::{dispatch, EventContext};
+use crate::domain::service::event_handlers::{EventContext, dispatch};
 
 /// 领域事件应用服务
 pub struct EventApplicationService<A, E>
@@ -27,10 +27,7 @@ where
     A: ArchiveStoreRepository + Send + Sync,
     E: EventStreamRepository + Send + Sync,
 {
-    pub fn new(
-        archive_repo: Option<Arc<A>>,
-        event_stream_repo: Option<Arc<E>>,
-    ) -> Self {
+    pub fn new(archive_repo: Option<Arc<A>>, event_stream_repo: Option<Arc<E>>) -> Self {
         Self {
             archive_repo,
             event_stream_repo,
@@ -53,7 +50,10 @@ where
         // 撤回/编辑一致性：幂等——若该事件已写入 events 表则跳过应用，避免重复更新
         let seq = event.seq as i64;
         if let Some(stream) = &self.event_stream_repo {
-            if stream.event_exists(ctx, tenant_id, conversation_id, seq).await? {
+            if stream
+                .event_exists(ctx, tenant_id, conversation_id, seq)
+                .await?
+            {
                 tracing::debug!(
                     tenant_id = %tenant_id,
                     conversation_id = %conversation_id,

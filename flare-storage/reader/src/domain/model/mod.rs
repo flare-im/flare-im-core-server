@@ -9,7 +9,8 @@ pub use conversation_head::ConversationMessageHead;
 pub use event::{Event, EventType};
 pub use message::{Attachment, Message};
 pub use storage_dtos::{
-    EditHistoryEntry, FilterExpression, MarkEntry, PinnedMessageInfo, ReactionItem, ReadListEntry, SyncCursor, VisibilityStatus,
+    EditHistoryEntry, FilterExpression, MarkEntry, PinnedMessageInfo, ReactionItem, ReadListEntry,
+    SyncCursor, VisibilityStatus,
 };
 
 /// 消息更新结构（读模型侧，写操作如已读/撤回/反应更新）

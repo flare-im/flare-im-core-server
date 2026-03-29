@@ -11,8 +11,8 @@ pub struct AccessGatewayConfig {
     pub route_service: Option<String>, // Route 服务（新增）
     pub message_service: String,
     pub push_service: String,
-    pub default_svid: String,    // 默认 SVID（新增，默认 "svid.im"）
-    pub use_route_service: bool, // 是否使用 Route 服务（新增，默认 true）
+    pub default_svid: String,      // 默认 SVID（新增，默认 "svid.im"）
+    pub use_route_service: bool,   // 是否使用 Route 服务（新增，默认 true）
     pub default_tenant_id: String, // 默认租户ID（新增，默认 "0"）
     pub token_secret: String,
     pub token_issuer: String,

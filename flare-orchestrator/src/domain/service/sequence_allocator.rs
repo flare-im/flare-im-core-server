@@ -258,17 +258,17 @@ impl SequenceAllocator {
     ///     Ok(seq) => seq,
     ///     Err(e) => {
     ///         warn!("Redis unavailable: {}, using degraded mode", e);
-    ///         allocator.allocate_seq_degraded()
+    ///         allocator.allocate_seq_degraded()?
     ///     }
     /// };
     /// ```
-    pub fn allocate_seq_degraded(&self) -> u64 {
+    pub fn allocate_seq_degraded(&self) -> Result<u64> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // 获取当前时间戳（毫秒）
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .context("System time went backwards")?
             .as_millis() as u64;
 
         // 生成 16 位随机数
@@ -284,7 +284,7 @@ impl SequenceAllocator {
             "Using degraded sequence allocation (timestamp-based)"
         );
 
-        seq
+        Ok(seq)
     }
 
     /// 构建 Redis key（格式：seq:{tenant_id}:{conversation_id}）
@@ -347,9 +347,18 @@ mod tests {
         let tenant_id = "test-tenant";
 
         // 分配 3 次，验证递增
-        let seq1 = allocator.allocate_seq(conversation_id, tenant_id).await.unwrap();
-        let seq2 = allocator.allocate_seq(conversation_id, tenant_id).await.unwrap();
-        let seq3 = allocator.allocate_seq(conversation_id, tenant_id).await.unwrap();
+        let seq1 = allocator
+            .allocate_seq(conversation_id, tenant_id)
+            .await
+            .unwrap();
+        let seq2 = allocator
+            .allocate_seq(conversation_id, tenant_id)
+            .await
+            .unwrap();
+        let seq3 = allocator
+            .allocate_seq(conversation_id, tenant_id)
+            .await
+            .unwrap();
 
         assert!(seq2 > seq1);
         assert!(seq3 > seq2);
@@ -404,9 +413,9 @@ mod tests {
             key_ttl_seconds: 7 * 24 * 3600,
         };
 
-        let seq1 = allocator.allocate_seq_degraded();
+        let seq1 = allocator.allocate_seq_degraded().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let seq2 = allocator.allocate_seq_degraded();
+        let seq2 = allocator.allocate_seq_degraded().unwrap();
 
         // 验证趋势递增（但不保证严格递增）
         assert!(seq2 > seq1);

@@ -3,7 +3,6 @@
 //! 注意：communication_core.proto 已删除
 //! 如果需要转换功能，应该使用对应的proto类型
 
-
 // 注意：communication_core.proto 已删除，以下函数已注释
 // 如果需要转换功能，应该使用对应的proto类型
 // pub fn core_push_options_to_push(options: &Option<PushOptions>) -> flare_proto::push::PushOptions { ... }

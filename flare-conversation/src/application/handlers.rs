@@ -5,16 +5,16 @@ use flare_server_core::context::Context;
 use tracing::{debug, info};
 
 use crate::application::commands::{
-    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
-    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateCursorCommand, UpdatePresenceCommand,
-    UpdateConversationCommand,
+    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
+    ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
+    UpdateConversationCommand, UpdateCursorCommand, UpdatePresenceCommand,
 };
 use crate::application::queries::{
-    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery, SearchConversationsQuery,
-    SyncMessagesQuery,
+    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
+    SearchConversationsQuery, SyncMessagesQuery,
 };
-use crate::domain::service::conversation_domain_service::ConversationBootstrapOutput;
 use crate::domain::service::DefaultConversationDomainService;
+use crate::domain::service::conversation_domain_service::ConversationBootstrapOutput;
 use crate::infrastructure::persistence::PostgresConversationRepository;
 use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
 
@@ -37,8 +37,11 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: BatchAcknowledgeCommand,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             count = command.cursors.len(),
@@ -59,7 +62,6 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: CreateConversationCommand,
     ) -> Result<crate::domain::model::Conversation> {
-        
         debug!(
             conversation_type = %command.conversation_type,
             business_type = %command.business_type,
@@ -75,6 +77,7 @@ impl ConversationCommandHandler {
                 command.participants,
                 command.attributes,
                 command.visibility,
+                command.channel_id,
             )
             .await?;
 
@@ -88,7 +91,6 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: DeleteConversationCommand,
     ) -> Result<()> {
-        
         debug!(
             conversation_id = %command.conversation_id,
             hard_delete = command.hard_delete,
@@ -109,8 +111,11 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: ForceConversationSyncCommand,
     ) -> Result<Vec<String>> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             session_count = command.conversation_ids.len(),
@@ -119,11 +124,7 @@ impl ConversationCommandHandler {
 
         let missing = self
             .domain_service
-            .force_conversation_sync(
-                ctx,
-                &command.conversation_ids,
-                command.reason.as_deref(),
-            )
+            .force_conversation_sync(ctx, &command.conversation_ids, command.reason.as_deref())
             .await?;
 
         Ok(missing)
@@ -135,7 +136,6 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: ManageParticipantsCommand,
     ) -> Result<Vec<crate::domain::model::ConversationParticipant>> {
-        
         debug!(
             conversation_id = %command.conversation_id,
             to_add = command.to_add.len(),
@@ -164,8 +164,11 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: UpdateCursorCommand,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             conversation_id = %command.conversation_id,
@@ -186,7 +189,10 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: MarkConversationAsReadCommand,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
 
         debug!(
             user_id = %user_id,
@@ -208,8 +214,11 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: UpdatePresenceCommand,
     ) -> Result<()> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             device_id = %command.device_id,
@@ -238,7 +247,6 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: UpdateConversationCommand,
     ) -> Result<crate::domain::model::Conversation> {
-        
         debug!(
             conversation_id = %command.conversation_id,
             "Handling update conversation command"
@@ -285,8 +293,11 @@ impl ConversationQueryHandler {
         Option<String>,
         bool,
     )> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             cursor = ?query.cursor,
@@ -308,7 +319,10 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: GetConversationDetailQuery,
     ) -> Result<crate::domain::model::Conversation> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
         if query.conversation_id.trim().is_empty() {
             anyhow::bail!("GET_CONV_DETAIL_BAD_REQUEST");
         }
@@ -335,7 +349,6 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: SearchConversationsQuery,
     ) -> Result<(Vec<crate::domain::model::ConversationSummary>, usize)> {
-        
         debug!(
             filter_count = query.filters.len(),
             sort_count = query.sort.len(),
@@ -345,13 +358,7 @@ impl ConversationQueryHandler {
 
         let result = self
             .domain_service
-            .search_conversations(
-                ctx,
-                query.filters,
-                query.sort,
-                query.limit,
-                query.offset,
-            )
+            .search_conversations(ctx, query.filters, query.sort, query.limit, query.offset)
             .await?;
 
         Ok(result)
@@ -363,8 +370,11 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: ConversationBootstrapQuery,
     ) -> Result<ConversationBootstrapOutput> {
-        let user_id = ctx.user_id().ok_or_else(|| anyhow::anyhow!("user_id is required"))?.to_string();
-        
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
+            .to_string();
+
         debug!(
             user_id = %user_id,
             include_recent = query.include_recent,
@@ -390,7 +400,6 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: SyncMessagesQuery,
     ) -> Result<crate::domain::model::MessageSyncResult> {
-        
         debug!(
             conversation_id = %query.conversation_id,
             since_ts = query.since_ts,

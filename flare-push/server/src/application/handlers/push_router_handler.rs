@@ -51,7 +51,11 @@ impl PushRouterHandler {
         let metadata = merge_envelope_metadata(&req.options, &req.metadata);
 
         for user_id in &req.user_ids {
-            let online = self.online_status.is_online(ctx, user_id).await.unwrap_or(false);
+            let online = self
+                .online_status
+                .is_online(ctx, user_id)
+                .await
+                .unwrap_or(false);
 
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -111,7 +115,11 @@ impl PushRouterHandler {
         let push_payload = req.encode_to_vec();
 
         for user_id in &req.user_ids {
-            let online = self.online_status.is_online(ctx, user_id).await.unwrap_or(false);
+            let online = self
+                .online_status
+                .is_online(ctx, user_id)
+                .await
+                .unwrap_or(false);
 
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -182,7 +190,11 @@ impl PushRouterHandler {
         let metadata = merge_envelope_metadata(&req.options, &req.metadata);
 
         for user_id in &req.user_ids {
-            let online = self.online_status.is_online(ctx, user_id).await.unwrap_or(false);
+            let online = self
+                .online_status
+                .is_online(ctx, user_id)
+                .await
+                .unwrap_or(false);
 
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -234,7 +246,11 @@ impl PushRouterHandler {
         let metadata = merge_envelope_metadata(&req.options, &req.metadata);
 
         for user_id in &req.user_ids {
-            let online = self.online_status.is_online(ctx, user_id).await.unwrap_or(false);
+            let online = self
+                .online_status
+                .is_online(ctx, user_id)
+                .await
+                .unwrap_or(false);
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
                 message_id: message_id.clone(),
@@ -292,7 +308,11 @@ impl PushRouterHandler {
         let push_payload = req.encode_to_vec();
 
         for user_id in &req.user_ids {
-            let online = self.online_status.is_online(ctx, user_id).await.unwrap_or(false);
+            let online = self
+                .online_status
+                .is_online(ctx, user_id)
+                .await
+                .unwrap_or(false);
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
                 message_id: message_id.clone(),

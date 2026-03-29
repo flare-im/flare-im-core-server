@@ -20,15 +20,12 @@ pub struct SendMessageDomainService {
 
 impl SendMessageDomainService {
     pub fn new(message_port: Arc<dyn IMessageCommandPort>) -> Self {
-        Self {
-            message_port,
-        }
+        Self { message_port }
     }
 
     /// 处理发送消息：解析上下文 → 调用端口发送 → 返回 (server_msg_id, seq)
     #[instrument(skip(self, tx, cmd), fields(connection_id = %cmd.connection_id))]
     pub async fn execute(&self, tx: &Ctx, cmd: &SendMessageCommand) -> Result<(String, u64)> {
-
         let ack = self
             .message_port
             .send_message(tx, cmd.msg.clone())

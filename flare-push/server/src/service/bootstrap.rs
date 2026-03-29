@@ -19,7 +19,9 @@ impl ApplicationBootstrap {
     }
 
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        info!("Starting Push Server (push-request -> push-online/push-offline) via ServiceRuntime...");
+        info!(
+            "Starting Push Server (push-request -> push-online/push-offline) via ServiceRuntime..."
+        );
 
         let topics = context.dispatcher.topics();
         if topics.is_empty() {
@@ -29,7 +31,10 @@ impl ApplicationBootstrap {
         let fetcher = KafkaMessageFetcher::new_with_consumer_group(
             context.config.as_ref(),
             topics,
-            context.consumer_config.kafka_consumer_group_override.as_deref(),
+            context
+                .consumer_config
+                .kafka_consumer_group_override
+                .as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("create kafka fetcher error: {}", e))?;
 
@@ -45,4 +50,3 @@ impl ApplicationBootstrap {
             .await
     }
 }
-

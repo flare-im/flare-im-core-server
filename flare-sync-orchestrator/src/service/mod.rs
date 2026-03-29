@@ -15,7 +15,8 @@ impl ApplicationBootstrap {
         // 初始化全局配置，供 discovery/register_service_only 使用。
         let _ = flare_im_core::load_config(Some("config"));
 
-        let host = std::env::var("SYNC_ORCHESTRATOR_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host =
+            std::env::var("SYNC_ORCHESTRATOR_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port = std::env::var("SYNC_ORCHESTRATOR_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
@@ -44,7 +45,13 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    match flare_im_core::discovery::register_service_only(SYNC_ORCHESTRATOR, addr, None).await {
+                    match flare_im_core::discovery::register_service_only(
+                        SYNC_ORCHESTRATOR,
+                        addr,
+                        None,
+                    )
+                    .await
+                    {
                         Ok(Some(registry)) => {
                             info!("service registered: {}", SYNC_ORCHESTRATOR);
                             Ok(Some(registry))

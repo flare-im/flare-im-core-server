@@ -10,7 +10,10 @@ use tracing::info;
 use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
 
 /// 订阅领域服务 - 包含所有业务逻辑（泛型依赖，避免 `dyn` 异步 trait）
-pub struct SubscriptionService<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sync> {
+pub struct SubscriptionService<
+    SR: SubscriptionRepository + Send + Sync,
+    PP: PresencePublisher + Send + Sync,
+> {
     subscription_repo: Arc<SR>,
     presence_publisher: Arc<PP>,
 }
@@ -29,9 +32,11 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
     pub async fn subscribe_user_presence(&self, user_id: String) -> Result<Vec<UserPresenceEvent>> {
         // 检查用户是否存在
         if user_id.is_empty() {
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id cannot be empty")
-                .build_error()
-                .into());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id cannot be empty")
+                    .build_error()
+                    .into(),
+            );
         }
 
         // 记录订阅
@@ -46,13 +51,18 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
     }
 
     /// 订阅在线状态流
-    pub async fn watch_presence(&self, request: WatchPresenceRequest) -> Result<Vec<PresenceEvent>> {
+    pub async fn watch_presence(
+        &self,
+        request: WatchPresenceRequest,
+    ) -> Result<Vec<PresenceEvent>> {
         let user_ids = &request.user_ids;
 
         if user_ids.is_empty() {
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "user_ids cannot be empty")
-                .build_error()
-                .into());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "user_ids cannot be empty")
+                    .build_error()
+                    .into(),
+            );
         }
 
         // 为每个用户添加订阅

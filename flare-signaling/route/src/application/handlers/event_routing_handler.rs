@@ -6,16 +6,16 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::Event;
+use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::signaling::router::RouteOptions;
 use flare_server_core::context::{ActorType, Context, ContextExt};
 use flare_server_core::error::ErrorCode;
 use tracing::instrument;
 
-use crate::application::dto::{build_route_metadata, EventRouteResult};
+use crate::application::dto::{EventRouteResult, build_route_metadata};
 use crate::domain::service::RouteContext;
-use crate::domain::value_objects::{FlowController, DefaultFlowController};
+use crate::domain::value_objects::{DefaultFlowController, FlowController};
 use crate::infrastructure::forwarder::MessageForwarder;
 
 /// 从 Event 构建流控用 RouteContext（operator_id 由 metadata/ctx 注入，proto Event 无此字段）
@@ -98,7 +98,10 @@ impl EventRoutingHandler {
 
         if is_hard_delete_event(&event) && !is_admin_actor(ctx) {
             let total_duration = start_time.elapsed();
-            let op_id = ctx.actor().map(|a| a.actor_id().to_string()).unwrap_or_default();
+            let op_id = ctx
+                .actor()
+                .map(|a| a.actor_id().to_string())
+                .unwrap_or_default();
             tracing::warn!(
                 operator_id = %op_id,
                 conversation_id = %event.conversation_id,
@@ -137,8 +140,8 @@ impl EventRoutingHandler {
                         0,
                         decision_duration.as_millis() as i64,
                         svid,
-                    route_options.load_balance_strategy,
-                ),
+                        route_options.load_balance_strategy,
+                    ),
                     error_code: Some(ErrorCode::ResourceExhausted as u32),
                     error_message: Some(e.to_string()),
                 };
@@ -148,7 +151,12 @@ impl EventRoutingHandler {
         let business_start = Instant::now();
         match self
             .message_forwarder
-            .forward_event(ctx, svid, &event, Arc::new(crate::domain::repository::NoopRouteRepository))
+            .forward_event(
+                ctx,
+                svid,
+                &event,
+                Arc::new(crate::domain::repository::NoopRouteRepository),
+            )
             .await
         {
             Ok((endpoint, response_data)) => {
@@ -167,8 +175,8 @@ impl EventRoutingHandler {
                         business_duration.as_millis() as i64,
                         decision_duration.as_millis() as i64,
                         svid,
-                    route_options.load_balance_strategy,
-                ),
+                        route_options.load_balance_strategy,
+                    ),
                     error_code: None,
                     error_message: None,
                 }
@@ -184,8 +192,8 @@ impl EventRoutingHandler {
                         0,
                         decision_duration.as_millis() as i64,
                         svid,
-                    route_options.load_balance_strategy,
-                ),
+                        route_options.load_balance_strategy,
+                    ),
                     error_code: Some(ErrorCode::InternalError as u32),
                     error_message: Some(format!("Failed to forward event: {}", e)),
                 }

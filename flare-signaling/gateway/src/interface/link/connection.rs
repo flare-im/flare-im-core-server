@@ -9,21 +9,18 @@ use flare_core::server::connection::ConnectionManagerTrait;
 use flare_core::server::handle::ServerHandle;
 use tracing::{instrument, warn};
 
-use crate::application::handlers::{ConnectionHandler,SendHandler};
+use crate::application::handlers::{ConnectionHandler, SendHandler};
 use crate::infrastructure::error::server_error_to_core;
 
 /// 长连接处理器：断开/刷新/连接建立均委托 ConnectionHandler，依赖显式注入。
 #[derive(Clone)]
 pub struct LongConnectionHandler {
     pub connection_handler: Arc<ConnectionHandler>,
-    pub send_handler: Arc<SendHandler>
+    pub send_handler: Arc<SendHandler>,
 }
 
 impl LongConnectionHandler {
-    pub fn new(
-        connection_handler: Arc<ConnectionHandler>,
-        send_handler: Arc<SendHandler>,
-    ) -> Self {
+    pub fn new(connection_handler: Arc<ConnectionHandler>, send_handler: Arc<SendHandler>) -> Self {
         Self {
             connection_handler,
             send_handler,
@@ -32,7 +29,11 @@ impl LongConnectionHandler {
 
     /// 断开连接：组装 DisconnectCommand，委托 ConnectionHandler 做会话清理。
     pub async fn disconnect_connection(&self, connection_id: &str) {
-        if let Err(err) = self.connection_handler.handle_disconnect(connection_id).await {
+        if let Err(err) = self
+            .connection_handler
+            .handle_disconnect(connection_id)
+            .await
+        {
             warn!(?err, %connection_id, "failed to handle disconnect");
         }
     }

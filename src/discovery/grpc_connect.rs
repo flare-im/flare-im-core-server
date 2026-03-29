@@ -56,11 +56,12 @@ pub async fn build_gateway_router_from_app_config(
 ) -> Result<Arc<GatewayRouter>, Box<dyn std::error::Error + Send + Sync>> {
     match create_discover_from_config(app_config, access_gateway_service_name).await? {
         Some(discover_lb) => {
-            let discover_filter = create_discover_from_config(app_config, access_gateway_service_name)
-                .await?
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                    "access gateway second discover missing (registry misconfigured)".into()
-                })?;
+            let discover_filter =
+                create_discover_from_config(app_config, access_gateway_service_name)
+                    .await?
+                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                        "access gateway second discover missing (registry misconfigured)".into()
+                    })?;
             let service_client = ServiceClient::new(discover_lb);
             Ok(GatewayRouter::with_service_client_and_discover(
                 GatewayRouterConfig {

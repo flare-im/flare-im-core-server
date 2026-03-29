@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{
     CallSignalEvent, ConversationDeleteEvent, ConversationUpdateEvent, CustomEvent, Event,
-    EventType as ProtoEventType, Message, MessageDeleteEvent, MessageEditEvent, MessageRecallEvent,
-    MarkEvent, PinEvent, PresenceEvent, ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent,
-    UnpinEvent,
+    EventType as ProtoEventType, MarkEvent, Message, MessageDeleteEvent, MessageEditEvent,
+    MessageRecallEvent, PinEvent, PresenceEvent, ReactionEvent, ReadReceiptEvent, TypingEvent,
+    UnmarkEvent, UnpinEvent,
 };
 use prost::Message as ProstMessage;
 
@@ -41,10 +41,7 @@ pub fn proto_event_from_events_row(
     })
 }
 
-fn decode_payload_oneof(
-    event_type: i32,
-    payload: &[u8],
-) -> anyhow::Result<Option<EventPayload>> {
+fn decode_payload_oneof(event_type: i32, payload: &[u8]) -> anyhow::Result<Option<EventPayload>> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -52,7 +49,9 @@ fn decode_payload_oneof(
         return Ok(None);
     };
     let p = match ty {
-        ProtoEventType::EventMessage => EventPayload::Message(Message::decode(payload).context("decode Message")?),
+        ProtoEventType::EventMessage => {
+            EventPayload::Message(Message::decode(payload).context("decode Message")?)
+        }
         ProtoEventType::EventMessageRecall => {
             EventPayload::Recall(MessageRecallEvent::decode(payload).context("decode Recall")?)
         }
@@ -65,7 +64,9 @@ fn decode_payload_oneof(
         ProtoEventType::EventReadReceipt => {
             EventPayload::Read(ReadReceiptEvent::decode(payload).context("decode Read")?)
         }
-        ProtoEventType::EventTyping => EventPayload::Typing(TypingEvent::decode(payload).context("decode Typing")?),
+        ProtoEventType::EventTyping => {
+            EventPayload::Typing(TypingEvent::decode(payload).context("decode Typing")?)
+        }
         ProtoEventType::EventConversationUpdate => EventPayload::Conversation(
             ConversationUpdateEvent::decode(payload).context("decode ConversationUpdate")?,
         ),
@@ -81,9 +82,15 @@ fn decode_payload_oneof(
         ProtoEventType::EventReaction => {
             EventPayload::Reaction(ReactionEvent::decode(payload).context("decode Reaction")?)
         }
-        ProtoEventType::EventPin => EventPayload::Pin(PinEvent::decode(payload).context("decode Pin")?),
-        ProtoEventType::EventUnpin => EventPayload::Unpin(UnpinEvent::decode(payload).context("decode Unpin")?),
-        ProtoEventType::EventMark => EventPayload::Mark(MarkEvent::decode(payload).context("decode Mark")?),
+        ProtoEventType::EventPin => {
+            EventPayload::Pin(PinEvent::decode(payload).context("decode Pin")?)
+        }
+        ProtoEventType::EventUnpin => {
+            EventPayload::Unpin(UnpinEvent::decode(payload).context("decode Unpin")?)
+        }
+        ProtoEventType::EventMark => {
+            EventPayload::Mark(MarkEvent::decode(payload).context("decode Mark")?)
+        }
         ProtoEventType::EventUnmark => {
             EventPayload::Unmark(UnmarkEvent::decode(payload).context("decode Unmark")?)
         }

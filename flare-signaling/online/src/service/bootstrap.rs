@@ -22,12 +22,9 @@ impl ApplicationBootstrap {
         let service_config = app_config.signaling_online_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr = ServiceHelper::parse_server_addr(
-            app_config,
-            &service_config.runtime,
-            SIGNALING_ONLINE,
-        )
-        .with_context(|| "invalid signaling online server address")?;
+        let address: SocketAddr =
+            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, SIGNALING_ONLINE)
+                .with_context(|| "invalid signaling online server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -58,11 +55,11 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("signaling-online-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let online_service = ContextLayer::new()
                     .allow_missing()
                     .layer(OnlineServiceServer::new(online_handler));
-                
+
                 Server::builder()
                     .add_service(online_service)
                     .serve_with_shutdown(address_clone, async move {

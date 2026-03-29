@@ -50,4 +50,3 @@ pub fn build_context_from_connection(
     );
     ctx
 }
-

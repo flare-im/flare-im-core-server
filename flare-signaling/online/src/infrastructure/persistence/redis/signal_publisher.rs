@@ -48,7 +48,8 @@ impl SignalPublisher for RedisSignalPublisher {
         use std::fmt::Write;
         let mut payload_hex = String::with_capacity(payload.len() * 2);
         for byte in payload {
-            write!(&mut payload_hex, "{:02x}", byte).unwrap();
+            write!(&mut payload_hex, "{:02x}", byte)
+                .map_err(|e| anyhow::anyhow!("Failed to encode payload hex: {}", e))?;
         }
 
         let message = json!({

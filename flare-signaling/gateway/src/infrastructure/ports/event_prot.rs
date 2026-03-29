@@ -51,12 +51,13 @@ impl IEventCommandPort for RouterEventCommandPort {
         let inner = resp.into_inner();
 
         if let Some(st) = inner.status.as_ref()
-            && st.code != ErrorCode::Ok as i32 {
-                return Ok(OperationResponse {
-                    request_id: None,
-                    status: inner.status,
-                });
-            }
+            && st.code != ErrorCode::Ok as i32
+        {
+            return Ok(OperationResponse {
+                request_id: None,
+                status: inner.status,
+            });
+        }
 
         if inner.response_data.is_empty() {
             return Ok(OperationResponse {

@@ -13,18 +13,16 @@ use flare_proto::hooks::{
     ListHookConfigsResponse, QueryHookExecutionsRequest, QueryHookExecutionsResponse,
     SetHookStatusRequest, SetHookStatusResponse, UpdateHookConfigRequest, UpdateHookConfigResponse,
 };
-use std::sync::Arc;
-use tonic::{Request, Response, Status};
 use flare_server_core::context::Context;
 use flare_server_core::utils::require_ctx_from_request;
+use std::sync::Arc;
+use tonic::{Request, Response, Status};
 
-use crate::domain::model::{
-    HookConfigItem, HookSelectorConfig, HookTransportConfig,
-};
-use std::str::FromStr;
+use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConfig};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use crate::service::registry::CoreHookRegistry;
 use chrono::Utc;
+use std::str::FromStr;
 
 /// 从gRPC请求中提取租户ID（向后兼容函数）
 ///
@@ -75,7 +73,8 @@ impl HookService for HookServiceServer {
         &self,
         request: Request<CreateHookConfigRequest>,
     ) -> Result<Response<CreateHookConfigResponse>, Status> {
-        let ctx = require_ctx_from_request(&request).map_err(|_| Status::internal("Context not found"))?;
+        let ctx = require_ctx_from_request(&request)
+            .map_err(|_| Status::internal("Context not found"))?;
         let req = request.into_inner();
 
         // 提取租户ID（优先从 Context，其次从请求参数）
@@ -128,12 +127,7 @@ impl HookService for HookServiceServer {
             .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
 
         // 保存到数据库（优先从 Context 提取，其次从请求参数）
-        let created_by = ctx
-            .user_id()
-            .map(|s: &str| s.as_ref())
-            .or_else(|| {
-                None
-            });
+        let created_by = ctx.user_id().map(|s: &str| s.as_ref()).or_else(|| None);
 
         let hook_id = self
             .repository
@@ -315,7 +309,8 @@ impl HookService for HookServiceServer {
 
                     // 解析负载均衡策略
                     let load_balance = if !transport.load_balance.is_empty() {
-                        crate::domain::model::LoadBalanceStrategy::from_str(&transport.load_balance).ok()
+                        crate::domain::model::LoadBalanceStrategy::from_str(&transport.load_balance)
+                            .ok()
                     } else {
                         None
                     };

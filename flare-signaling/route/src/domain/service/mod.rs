@@ -15,4 +15,3 @@ pub struct RouteContext {
     pub client_geo: Option<String>,
     pub login_gateway: Option<String>,
 }
-

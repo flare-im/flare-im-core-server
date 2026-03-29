@@ -1,10 +1,10 @@
 //! 取消置顶事件应用
 
-use anyhow::Result;
 use crate::domain::model::{Event, UnpinPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use anyhow::Result;
 
-use super::{append_event_and_stream, EventContext};
+use super::{EventContext, append_event_and_stream};
 
 pub async fn apply_unpin<A, E>(
     ctx: &EventContext<'_, A, E>,

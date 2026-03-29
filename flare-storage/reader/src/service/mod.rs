@@ -23,12 +23,9 @@ impl ApplicationBootstrap {
         let service_config = app_config.storage_reader_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr = ServiceHelper::parse_server_addr(
-            app_config,
-            &service_config.runtime,
-            STORAGE_READER,
-        )
-        .context("invalid storage reader server address")?;
+        let address: SocketAddr =
+            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, STORAGE_READER)
+                .context("invalid storage reader server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -41,7 +38,10 @@ impl ApplicationBootstrap {
     }
 
     /// 运行服务（带应用上下文）
-    async fn run_with_context(context: ApplicationContext<MessageStorageType>, address: SocketAddr) -> Result<()> {
+    async fn run_with_context(
+        context: ApplicationContext<MessageStorageType>,
+        address: SocketAddr,
+    ) -> Result<()> {
         use flare_proto::storage::storage_reader_service_server::StorageReaderServiceServer;
         use tonic::transport::Server;
 
@@ -59,11 +59,11 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("storage-reader-grpc", move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
-                
+
                 let storage_reader_service = ContextLayer::new()
                     .allow_missing()
                     .layer(StorageReaderServiceServer::new(handler));
-                
+
                 Server::builder()
                     .add_service(storage_reader_service)
                     .serve_with_shutdown(address_clone, async move {

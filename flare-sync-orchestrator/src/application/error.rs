@@ -9,7 +9,10 @@ pub fn flare_from_tonic_status(status: &Status) -> FlareError {
     use tonic::Code;
     let msg = status.message().to_string();
     match status.code() {
-        Code::Ok => FlareError::localized(ErrorCode::GeneralError, "unexpected OK in sync error mapper"),
+        Code::Ok => FlareError::localized(
+            ErrorCode::GeneralError,
+            "unexpected OK in sync error mapper",
+        ),
         Code::Cancelled => ErrorBuilder::new(ErrorCode::OperationFailed, msg)
             .param("grpc_code", "CANCELLED")
             .build_error(),
@@ -83,7 +86,10 @@ pub fn require_nonempty_conversation_id(conversation_id: &str) -> Result<(), Fla
     Ok(())
 }
 
-pub fn require_same_user(authenticated_user_id: &str, claimed_user_id: &str) -> Result<(), FlareError> {
+pub fn require_same_user(
+    authenticated_user_id: &str,
+    claimed_user_id: &str,
+) -> Result<(), FlareError> {
     if authenticated_user_id != claimed_user_id {
         return Err(
             ErrorBuilder::new(ErrorCode::PermissionDenied, "禁止访问其他用户的同步游标")
@@ -98,7 +104,10 @@ pub fn require_same_user(authenticated_user_id: &str, claimed_user_id: &str) -> 
 impl From<SyncDomainError> for FlareError {
     fn from(e: SyncDomainError) -> Self {
         match e {
-            SyncDomainError::CursorRegression { previous, attempted } => ErrorBuilder::new(
+            SyncDomainError::CursorRegression {
+                previous,
+                attempted,
+            } => ErrorBuilder::new(
                 ErrorCode::SyncCursorRegression,
                 "同步游标不可回退，请重新拉取快照后再上报",
             )

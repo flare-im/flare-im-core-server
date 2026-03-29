@@ -3,8 +3,8 @@
 use crate::service::service_manager::PortConfig;
 use crate::service::startup::start_services;
 use anyhow::Result;
-use flare_im_core::service_names::ACCESS_GATEWAY;
 use flare_im_core::FlareAppConfig;
+use flare_im_core::service_names::ACCESS_GATEWAY;
 use tracing::{error, info};
 
 use super::wire;
@@ -33,7 +33,7 @@ impl ApplicationBootstrap {
                 None
             })
             .unwrap_or_else(|| "config".to_string()); // 默认使用 "config"
-        
+
         info!(config_path = %config_path, "Loading configuration");
         let app_config = load_config(Some(&config_path));
         // 初始化 OpenTelemetry 追踪
@@ -95,8 +95,7 @@ impl ApplicationBootstrap {
         use super::wire;
 
         let service_cfg = config.access_gateway_service();
-        let runtime_config =
-            config.compose_service_config(&service_cfg.runtime, ACCESS_GATEWAY);
+        let runtime_config = config.compose_service_config(&service_cfg.runtime, ACCESS_GATEWAY);
 
         // 计算端口分配（使用统一的环境变量解析逻辑）
         let port_config = PortConfig::from_env_or_config(runtime_config.server.port);

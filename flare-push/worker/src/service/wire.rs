@@ -24,7 +24,9 @@ pub struct ApplicationContext {
     pub dispatcher: Arc<dyn Dispatcher>,
 }
 
-pub async fn initialize(app_config: &flare_im_core::config::FlareAppConfig) -> Result<ApplicationContext> {
+pub async fn initialize(
+    app_config: &flare_im_core::config::FlareAppConfig,
+) -> Result<ApplicationContext> {
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config));
 
     let dlq = Arc::new(DlqPublisher::new(config.clone())?);
@@ -63,11 +65,19 @@ pub async fn initialize(app_config: &flare_im_core::config::FlareAppConfig) -> R
     let mut dispatcher = TopicDispatcher::new();
     let online_handler: Arc<dyn EventHandler> = Arc::new(online_handler);
     let online_adapter: Arc<dyn MessageHandler> = Arc::new(MqEventHandler::new(online_handler));
-    Dispatcher::register(&mut dispatcher, config.push_online_topic.clone(), online_adapter)?;
+    Dispatcher::register(
+        &mut dispatcher,
+        config.push_online_topic.clone(),
+        online_adapter,
+    )?;
 
     let offline_handler: Arc<dyn EventHandler> = Arc::new(offline_handler);
     let offline_adapter: Arc<dyn MessageHandler> = Arc::new(MqEventHandler::new(offline_handler));
-    Dispatcher::register(&mut dispatcher, config.push_offline_topic.clone(), offline_adapter)?;
+    Dispatcher::register(
+        &mut dispatcher,
+        config.push_offline_topic.clone(),
+        offline_adapter,
+    )?;
 
     Ok(ApplicationContext {
         config,

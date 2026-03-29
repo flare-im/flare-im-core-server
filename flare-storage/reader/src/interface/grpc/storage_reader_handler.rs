@@ -11,8 +11,8 @@ use crate::application::queries::{
     GetMessageQuery, ListMessageTagsQuery, QueryMessagesBySeqQuery, QueryMessagesQuery,
     SearchMessagesQuery,
 };
-use crate::domain::repository::MessageStorage;
 use crate::convert::{filter_expression_from_proto, message_to_proto};
+use crate::domain::repository::MessageStorage;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 
 #[derive(Clone)]
@@ -27,12 +27,8 @@ impl<M> StorageReaderGrpcHandler<M>
 where
     M: MessageStorage + Send + Sync + Clone + 'static,
 {
-    pub async fn new(
-        query_handler: Arc<MessageStorageQueryHandler<M>>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            query_handler,
-        })
+    pub async fn new(query_handler: Arc<MessageStorageQueryHandler<M>>) -> anyhow::Result<Self> {
+        Ok(Self { query_handler })
     }
 }
 
@@ -51,7 +47,7 @@ where
 
         let req = request.into_inner();
         let cursor_clone = req.cursor.clone();
-            
+
         let query = QueryMessagesQuery {
             conversation_id: req.conversation_id,
             start_time: req.start_time,
@@ -71,7 +67,8 @@ where
         {
             Ok(result) => {
                 // 转换消息为 proto 类型
-                let proto_messages: Vec<flare_proto::Message> = result.messages
+                let proto_messages: Vec<flare_proto::Message> = result
+                    .messages
                     .into_iter()
                     .map(|msg| message_to_proto(&msg))
                     .collect();
@@ -123,7 +120,11 @@ where
             },
         };
 
-        match self.query_handler.handle_query_messages_by_seq(&ctx, query).await {
+        match self
+            .query_handler
+            .handle_query_messages_by_seq(&ctx, query)
+            .await
+        {
             Ok((messages, last_seq)) => {
                 let message_count = messages.len() as i32;
 
@@ -144,15 +145,13 @@ where
                     .unwrap_or_default();
                 let has_more = message_count >= req.limit;
 
-                Ok(Response::new(
-                    QueryMessagesBySeqResponse {
-                        messages: proto_messages,
-                        next_cursor: next_cursor.clone(),
-                        has_more,
-                        last_seq: last_seq.unwrap_or(0),
-                        status: Some(flare_server_core::error::ok_status()),
-                    },
-                ))
+                Ok(Response::new(QueryMessagesBySeqResponse {
+                    messages: proto_messages,
+                    next_cursor: next_cursor.clone(),
+                    has_more,
+                    last_seq: last_seq.unwrap_or(0),
+                    status: Some(flare_server_core::error::ok_status()),
+                }))
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages by seq");
@@ -187,7 +186,11 @@ where
         };
 
         let query = SearchMessagesQuery {
-            filters: req.filters.iter().map(filter_expression_from_proto).collect(),
+            filters: req
+                .filters
+                .iter()
+                .map(filter_expression_from_proto)
+                .collect(),
             start_time: start_time.map(|dt| dt.timestamp()).unwrap_or(0),
             end_time: end_time.map(|dt| dt.timestamp()).unwrap_or(0),
             limit: req.pagination.as_ref().map(|p| p.limit).unwrap_or(200),
@@ -260,7 +263,11 @@ where
 
         let query = ListMessageTagsQuery {};
 
-        match self.query_handler.handle_list_message_tags(&ctx, query).await {
+        match self
+            .query_handler
+            .handle_list_message_tags(&ctx, query)
+            .await
+        {
             Ok(tags) => Ok(Response::new(ListMessageTagsResponse {
                 tags,
                 status: Some(flare_server_core::error::ok_status()),
@@ -344,15 +351,15 @@ where
             )
             .await
         {
-            Ok((events, last_seq, has_more, next_cursor)) => Ok(Response::new(
-                QueryConversationEventsResponse {
+            Ok((events, last_seq, has_more, next_cursor)) => {
+                Ok(Response::new(QueryConversationEventsResponse {
                     events,
                     last_seq,
                     has_more,
                     next_cursor,
                     status: Some(flare_server_core::error::ok_status()),
-                },
-            )),
+                }))
+            }
             Err(err) => {
                 error!(error = ?err, "query_conversation_events failed");
                 Err(Status::internal(err.to_string()))
@@ -375,14 +382,14 @@ where
             .get_conversation_message_head_grpc(&ctx, &req.conversation_id)
             .await
         {
-            Ok(Some((max_seq, last_message_id, last_timestamp))) => Ok(Response::new(
-                GetConversationMessageHeadResponse {
+            Ok(Some((max_seq, last_message_id, last_timestamp))) => {
+                Ok(Response::new(GetConversationMessageHeadResponse {
                     max_seq,
                     last_message_id,
                     last_timestamp,
                     status: Some(flare_server_core::error::ok_status()),
-                },
-            )),
+                }))
+            }
             Ok(None) => Ok(Response::new(GetConversationMessageHeadResponse {
                 max_seq: 0,
                 last_message_id: String::new(),

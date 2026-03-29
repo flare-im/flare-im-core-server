@@ -1,10 +1,10 @@
 //! 取消标记事件应用
 
-use anyhow::Result;
 use crate::domain::model::{Event, UnmarkPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
+use anyhow::Result;
 
-use super::{append_event_and_stream, EventContext};
+use super::{EventContext, append_event_and_stream};
 
 const MARK_IMPORTANT: i32 = 1;
 const MARK_TODO: i32 = 2;

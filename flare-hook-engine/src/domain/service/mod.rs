@@ -2,14 +2,13 @@
 //!
 //! 定义Hook引擎的核心领域服务
 
-use std::sync::Arc;
 use anyhow::Result;
 use futures_util::future::join_all;
+use std::sync::Arc;
 
 use crate::domain::model::HookExecutionPlan;
 use flare_im_core::{
-    DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision,
-    RecallEvent,
+    DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
 

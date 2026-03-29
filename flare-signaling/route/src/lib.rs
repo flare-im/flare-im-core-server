@@ -13,6 +13,6 @@ pub mod interface;
 pub mod service;
 pub mod util;
 
+pub use domain::Ctx;
 pub use service::ApplicationBootstrap;
 pub use service::ApplicationContext;
-pub use domain::Ctx;

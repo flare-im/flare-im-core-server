@@ -5,17 +5,13 @@
 use prost_types::Timestamp;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flare_im_core::{
-    DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
-};
+use crate::infrastructure::adapters::hook_context_data::{HookContextData, set_hook_context_data};
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_proto::hooks::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
 };
 use flare_server_core::context::Context;
-use crate::infrastructure::adapters::hook_context_data::{
-    HookContextData, set_hook_context_data,
-};
 
 /// 将 flare_server_core::Context 转换为 HookInvocationContext
 pub fn context_to_proto(ctx: &Context) -> HookInvocationContext {

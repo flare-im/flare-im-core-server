@@ -14,25 +14,30 @@ use crate::domain::repository::{
 };
 use crate::domain::service::{MessageDomainService, MessageTemporaryService, SequenceAllocator};
 use crate::infrastructure::external::session_client::GrpcConversationClient;
-use crate::infrastructure::messaging::event_bus_adapter::OrchestratorEventBusAdapter;
+use crate::infrastructure::messaging::main_queue_consumer::MainQueueEventHandler;
 use crate::infrastructure::messaging::mq_publisher::MqMessagePublisher;
-use crate::infrastructure::persistence::noop_wal::NoopWalRepository;
-use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
-use crate::interface::grpc::MessageGrpcHandler;
 use crate::infrastructure::messaging::operation_dispatcher_impl::OperationEventDispatcherImpl;
+use crate::infrastructure::persistence::wal_repository_impl::NoopWalRepository;
+use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
+use crate::interface::grpc::{MessageActionGrpcHandler, MessageSendGrpcHandler};
+use flare_im_core::constants::topics::TOPIC_MESSAGE_MAIN;
 use flare_im_core::hooks::adapters::DefaultHookFactory;
 use flare_im_core::hooks::{HookConfigLoader, HookDispatcher, HookRegistry};
 use flare_im_core::metrics::MessageOrchestratorMetrics;
+use flare_server_core::event_bus::{EventHandler, MqEventHandler};
+use flare_server_core::mq::consumer::dispatcher::Dispatcher;
+use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
 // 会话 gRPC：`ConversationManageService`（创建、MarkAsRead、游标等）；跨域同步编排见 flare-sync-orchestrator。
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
-    pub handler: MessageGrpcHandler,
+    pub message_send_grpc: MessageSendGrpcHandler,
+    pub message_action_grpc: MessageActionGrpcHandler,
     pub config: Arc<MessageOrchestratorConfig>,
+    pub consumer_config: ConsumerConfig,
+    pub dispatcher: Arc<dyn Dispatcher>,
     /// IM 核心 MessageCommandHandler 适配器，供 Gateway 注入后长连接发消息/操作走本编排器
     pub core_message_command_handler: Arc<CoreMessageCommandHandlerAdapter>,
-    /// 统一事件流发布端口；`async fn` trait 不做 `dyn`，此处为具体适配器类型
-    pub event_bus_publisher: Option<Arc<OrchestratorEventBusAdapter>>,
 }
 
 /// 构建应用上下文
@@ -53,9 +58,6 @@ pub async fn initialize(
     // 2. 构建 MQ 发布器（Topic 与 flare_im_core::constants::topics 对齐，内部 MqEventBus）
     let mq_publisher = MqMessagePublisher::new(config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to create MQ publisher: {}", e))?;
-    let event_bus_publisher = Some(Arc::new(OrchestratorEventBusAdapter::new(Arc::clone(
-        &mq_publisher,
-    ))));
     let publisher = Arc::new(OrchestratorPublisher(Arc::clone(&mq_publisher)));
 
     // 4. 构建 WAL Repository
@@ -95,24 +97,18 @@ pub async fn initialize(
     // 10. 构建 Storage Reader 客户端（如果配置了 reader_endpoint）
     let reader_client = build_storage_reader_client(&config).await;
 
-    // 11. 构建查询处理器
-    let query_handler = Arc::new(crate::application::handlers::MessageQueryHandler::new(
-        domain_service.clone(),
-        reader_client.clone().map(|client| Arc::new(client)),
-    ));
-
-    // 12. 构建消息操作服务（Storage Reader 或 Noop 仓储，单态 MessageOperationService）
+    // 11. 构建消息操作服务（Storage Reader 或 Noop 仓储，单态 MessageOperationService）
     use crate::domain::service::MessageOperationService;
     use crate::infrastructure::persistence::message_repository_adapter::StorageReaderMessageRepository;
     use crate::infrastructure::persistence::message_repository_kind::MessageRepositoryKind;
-    use crate::infrastructure::persistence::noop_message_repository::NoopMessageRepository;
+    use crate::infrastructure::persistence::message_repository_kind::NoopMessageRepository;
 
     let operation_event_dispatcher = Arc::new(OperationEventDispatcherImpl::new(publisher.clone()));
 
     let message_repo: Arc<MessageRepositoryKind> = if let Some(ref reader_client) = reader_client {
-        Arc::new(MessageRepositoryKind::Storage(StorageReaderMessageRepository::new(
-            Arc::new(reader_client.clone()),
-        )))
+        Arc::new(MessageRepositoryKind::Storage(
+            StorageReaderMessageRepository::new(Arc::new(reader_client.clone())),
+        ))
     } else {
         Arc::new(MessageRepositoryKind::Noop(NoopMessageRepository))
     };
@@ -139,24 +135,37 @@ pub async fn initialize(
     // 15. 构建操作处理器
     let operation_handler = Arc::new(crate::application::handlers::MessageOperationHandler::new(
         command_handler.clone(),
-        query_handler.clone(),
     ));
-    
-    // 16. 构建 gRPC 处理器（依赖 command_handler、query_handler 和 operation_handler）
-    let handler = MessageGrpcHandler::new(
+
+    // 16. 构建 gRPC 处理器（发送与操作分离；读模型由 Storage Reader 提供）
+    let message_send_grpc = MessageSendGrpcHandler::new(
         command_handler.clone(),
-        query_handler,
-        operation_handler,
+        operation_handler.clone(),
     );
+    let message_action_grpc = MessageActionGrpcHandler::new(operation_handler);
 
     // 17. 构建 IM 核心 trait 适配器（Gateway 可注入为 dyn flare_im_core::MessageCommandHandler）
-    let core_message_command_handler = Arc::new(CoreMessageCommandHandlerAdapter::new(command_handler));
+    let core_message_command_handler =
+        Arc::new(CoreMessageCommandHandlerAdapter::new(command_handler));
+
+    let consumer_config = ConsumerConfig::default().with_concurrency(64);
+    let mut dispatcher = TopicDispatcher::new();
+    let main_event_handler: Arc<dyn EventHandler> =
+        Arc::new(MainQueueEventHandler::new(Arc::clone(&mq_publisher)));
+    let main_adapter: Arc<dyn MessageHandler> = Arc::new(MqEventHandler::new(main_event_handler));
+    Dispatcher::register(
+        &mut dispatcher,
+        TOPIC_MESSAGE_MAIN.to_string(),
+        main_adapter,
+    )?;
 
     Ok(ApplicationContext {
-        handler,
+        message_send_grpc,
+        message_action_grpc,
         config,
+        consumer_config,
+        dispatcher: Arc::new(dispatcher),
         core_message_command_handler,
-        event_bus_publisher,
     })
 }
 

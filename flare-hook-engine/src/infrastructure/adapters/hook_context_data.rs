@@ -3,5 +3,5 @@
 //! 重新导出 `flare_im_core::hooks::hook_context_data` 中的类型和函数
 
 pub use flare_im_core::hooks::hook_context_data::{
-    get_hook_context_data, set_hook_context_data, HookContextData,
+    HookContextData, get_hook_context_data, set_hook_context_data,
 };

@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
-use sqlx::postgres::PgConnectOptions;
 use sqlx::ConnectOptions;
+use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::application::handlers::MessageStorageQueryHandler;
 use crate::config::StorageReaderConfig;
 use crate::domain::repository::MessageStorage;
-use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::optimized_postgres_store::OptimizedPostgresMessageStorageImpl;
+use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use crate::interface::grpc::StorageReaderGrpcHandler;
 
@@ -73,20 +73,25 @@ pub async fn initialize(
         .with_context(|| "Failed to connect to PostgreSQL")?;
     let cache: Option<Arc<RedisMessageCache>> = match &config.redis_url {
         Some(redis_url) => {
-            let client = redis::Client::open(redis_url.as_str())
-                .with_context(|| "Invalid Redis URL")?;
-            Some(Arc::new(RedisMessageCache::new(Arc::new(client), config.as_ref())))
+            let client =
+                redis::Client::open(redis_url.as_str()).with_context(|| "Invalid Redis URL")?;
+            Some(Arc::new(RedisMessageCache::new(
+                Arc::new(client),
+                config.as_ref(),
+            )))
         }
         None => None,
     };
     let postgres_base_storage = PostgresBaseStorage::from_pool_and_cache(pool, cache.clone())
         .await
         .with_context(|| "Failed to create PostgreSQL base storage")?;
-    
+
     // 3. 创建优化的消息存储实例（实现 MessageStorage trait）
-    let storage: Arc<MessageStorageType> = Arc::new(
-        MessageStorageType::new(postgres_base_storage.clone(), cache, None),
-    );
+    let storage: Arc<MessageStorageType> = Arc::new(MessageStorageType::new(
+        postgres_base_storage.clone(),
+        cache,
+        None,
+    ));
     tracing::info!("Using PostgreSQL storage with optimizations");
 
     // 4. 构建查询处理器（直接使用存储层）

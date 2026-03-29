@@ -57,7 +57,10 @@ impl MessageFsmState {
 
     /// 是否为终态（不可再变更）
     pub fn is_terminal(&self) -> bool {
-        matches!(self, MessageFsmState::Recalled | MessageFsmState::DeletedHard)
+        matches!(
+            self,
+            MessageFsmState::Recalled | MessageFsmState::DeletedHard
+        )
     }
 
     /// 是否可以编辑
@@ -77,7 +80,10 @@ impl MessageFsmState {
 
     /// 是否可以软删除
     pub fn can_delete_soft(&self) -> bool {
-        matches!(self, MessageFsmState::Sent | MessageFsmState::Edited | MessageFsmState::Recalled)
+        matches!(
+            self,
+            MessageFsmState::Sent | MessageFsmState::Edited | MessageFsmState::Recalled
+        )
     }
 }
 
@@ -278,22 +284,14 @@ mod tests {
         assert_eq!(msg.fsm_state, MessageFsmState::Sent);
 
         // SENT -> EDITED
-        msg.edit(
-            b"Hello World".to_vec(),
-            "user-1".to_string(),
-            None,
-        )
-        .unwrap();
+        msg.edit(b"Hello World".to_vec(), "user-1".to_string(), None)
+            .unwrap();
         assert_eq!(msg.fsm_state, MessageFsmState::Edited);
         assert_eq!(msg.edit_version, 1);
 
         // EDITED -> EDITED (再次编辑)
-        msg.edit(
-            b"Hello World!".to_vec(),
-            "user-1".to_string(),
-            None,
-        )
-        .unwrap();
+        msg.edit(b"Hello World!".to_vec(), "user-1".to_string(), None)
+            .unwrap();
         assert_eq!(msg.fsm_state, MessageFsmState::Edited);
         assert_eq!(msg.edit_version, 2);
 
@@ -302,7 +300,10 @@ mod tests {
         assert_eq!(msg.fsm_state, MessageFsmState::Recalled);
 
         // RECALLED 后不能再编辑
-        assert!(msg.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(
+            msg.edit(b"New".to_vec(), "user-1".to_string(), None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -326,7 +327,10 @@ mod tests {
 
         // SOFT_DELETED 不是终态，理论上可以恢复（但目前没有实现恢复功能）
         // 但不能进行其他操作如编辑、撤回等
-        assert!(msg.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(
+            msg.edit(b"New".to_vec(), "user-1".to_string(), None)
+                .is_err()
+        );
         assert!(msg.recall(None).is_err());
     }
 
@@ -342,7 +346,10 @@ mod tests {
         );
 
         // INIT 状态不能直接编辑
-        assert!(msg.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(
+            msg.edit(b"New".to_vec(), "user-1".to_string(), None)
+                .is_err()
+        );
 
         // INIT -> SENT
         msg.mark_as_sent().unwrap();
@@ -366,8 +373,10 @@ mod tests {
         );
         msg2.mark_as_sent().unwrap();
         msg2.recall(None).unwrap();
-        assert!(msg2.edit(b"New".to_vec(), "user-1".to_string(), None).is_err());
+        assert!(
+            msg2.edit(b"New".to_vec(), "user-1".to_string(), None)
+                .is_err()
+        );
         assert!(msg2.recall(None).is_err());
     }
 }
-

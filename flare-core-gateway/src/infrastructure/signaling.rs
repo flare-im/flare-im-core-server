@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use async_trait::async_trait;
 use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, LoginRequest, LoginResponse, LogoutRequest,
@@ -7,10 +5,10 @@ use flare_proto::signaling::online::{
 };
 use flare_server_core::discovery::ServiceClient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-#[async_trait]
 pub trait SignalingClient: Send + Sync {
     async fn login(&self, request: LoginRequest) -> Result<LoginResponse>;
     async fn logout(&self, request: LogoutRequest) -> Result<LogoutResponse>;
@@ -96,7 +94,6 @@ impl GrpcSignalingClient {
     }
 }
 
-#[async_trait]
 impl SignalingClient for GrpcSignalingClient {
     async fn login(&self, request: LoginRequest) -> Result<LoginResponse> {
         let mut client = self.ensure_client().await?;

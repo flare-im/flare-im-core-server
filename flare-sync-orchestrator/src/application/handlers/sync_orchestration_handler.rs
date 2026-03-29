@@ -5,36 +5,56 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use flare_proto::Message;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::sync_res::Payload as SyncResPayload;
 use flare_proto::common::{
     ConversationDetail, ConversationDetailSync, ConversationDetailSyncRes, ConversationLight,
     ConversationMaxSeqSync, ConversationMaxSeqSyncRes, ConversationPatch, ConversationPatchType,
-    ConversationSummary, ConversationsAllSync, ConversationsAllSyncRes, ConversationsIncrementalSync,
-    ConversationsIncrementalSyncRes, ErrorCode, EventEnvelope, EventStreamAckSyncRes,
-    GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview, MultiConversationSync, MultiConversationSyncRes,
-    MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes, RpcStatus, SingleConversationSync,
-    SingleConversationSyncRes, SnapshotConversationRow, SyncKind, SyncRes, SyncSliceItem,
-    SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
+    ConversationSummary, ConversationsAllSync, ConversationsAllSyncRes,
+    ConversationsIncrementalSync, ConversationsIncrementalSyncRes, ErrorCode, EventEnvelope,
+    EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview,
+    MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync,
+    QueryEventsSyncRes, RpcStatus, SingleConversationSync, SingleConversationSyncRes,
+    SnapshotConversationRow, SyncKind, SyncRes, SyncSliceItem, SyncSnapshotSync,
+    SyncSnapshotSyncRes, UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
 };
 use flare_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
-use flare_proto::Message;
 use flare_server_core::context::Ctx;
-use flare_server_core::error::{proto::ok_status, proto::to_rpc_status, FlareError};
+use flare_server_core::error::{FlareError, proto::ok_status, proto::to_rpc_status};
 use prost::Message as ProstMessage;
 use tracing::{debug, trace};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, StorageReadPort, SyncCursorCachePort,
+    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, StorageReadPort,
+    SyncCursorCachePort,
 };
 use crate::domain::model::{
-    clamp_messages_per_conversation, clamp_query_events_limit, normalize_query_event_types, SyncIntent,
+    SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
+    normalize_query_event_types,
 };
 use crate::domain::service::{
-    build_snapshot_cursor, ensure_cursor_monotonic, max_seq_from_events, parse_snapshot_cursor, snapshot_global_seq,
-    ts_millis,
+    build_snapshot_cursor, ensure_cursor_monotonic, max_seq_from_events, parse_snapshot_cursor,
+    snapshot_global_seq, ts_millis,
 };
+
+/// 与 `SyncSnapshotSyncRes.conversations` 逐行对齐，来自 ConversationBootstrap 摘要（单聊 `channel_id` 等对端路由）
+#[derive(Clone, Default)]
+struct ConversationSyncRoutingHint {
+    channel_id: String,
+    conversation_type: String,
+}
+
+pub struct SyncSnapshotOutcome {
+    pub res: SyncSnapshotSyncRes,
+    pub routing: Vec<ConversationSyncRoutingHint>,
+}
+
+struct MergedSnapshotRow {
+    row: SnapshotConversationRow,
+    bootstrap: ConversationSummary,
+}
 
 pub struct SyncOrchestrationHandler<I>
 where
@@ -49,11 +69,19 @@ where
     I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
 {
     pub fn new(infra: Arc<I>, cursor_cache: Arc<MemorySyncCursorCache>) -> Self {
-        Self { infra, cursor_cache }
+        Self {
+            infra,
+            cursor_cache,
+        }
     }
 
     /// 统一入口：`Sync` → 编排逻辑 → `SyncRes`（业务错误写入 `RpcStatus`，便于网关直转）。
-    pub async fn execute_sync(&self, ctx: &Ctx, user_id: &str, mut sync: flare_proto::common::Sync) -> SyncRes {
+    pub async fn execute_sync(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        mut sync: flare_proto::common::Sync,
+    ) -> SyncRes {
         fn reject(msg: &str) -> SyncRes {
             SyncRes {
                 status: Some(RpcStatus {
@@ -121,14 +149,18 @@ where
                     Err(e) => from_flare(e),
                 }
             }
-            (SyncKind::QueryEvents, SyncPayload::QueryEvents(req)) => match self.query_events_sync(ctx, user_id, req).await {
-                Ok(v) => ok_pay(SyncResPayload::QueryEvents(v)),
-                Err(e) => from_flare(e),
-            },
-            (SyncKind::GetSyncCursor, SyncPayload::GetSyncCursor(req)) => match self.get_sync_cursor_sync(user_id, req).await {
-                Ok(v) => ok_pay(SyncResPayload::GetSyncCursor(v)),
-                Err(e) => from_flare(e),
-            },
+            (SyncKind::QueryEvents, SyncPayload::QueryEvents(req)) => {
+                match self.query_events_sync(ctx, user_id, req).await {
+                    Ok(v) => ok_pay(SyncResPayload::QueryEvents(v)),
+                    Err(e) => from_flare(e),
+                }
+            }
+            (SyncKind::GetSyncCursor, SyncPayload::GetSyncCursor(req)) => {
+                match self.get_sync_cursor_sync(user_id, req).await {
+                    Ok(v) => ok_pay(SyncResPayload::GetSyncCursor(v)),
+                    Err(e) => from_flare(e),
+                }
+            }
             (SyncKind::UpdateSyncCursor, SyncPayload::UpdateSyncCursor(req)) => {
                 match self.update_sync_cursor_sync(ctx, user_id, req).await {
                     Ok(v) => ok_pay(SyncResPayload::UpdateSyncCursor(v)),
@@ -138,10 +170,12 @@ where
             (SyncKind::EventStreamAck, SyncPayload::EventStreamAck(_)) => {
                 ok_pay(SyncResPayload::EventStreamAckRes(EventStreamAckSyncRes {}))
             }
-            (SyncKind::SyncSnapshot, SyncPayload::SyncSnapshot(req)) => match self.get_sync_snapshot(ctx, user_id, req).await {
-                Ok(v) => ok_pay(SyncResPayload::SyncSnapshotRes(v)),
-                Err(e) => from_flare(e),
-            },
+            (SyncKind::SyncSnapshot, SyncPayload::SyncSnapshot(req)) => {
+                match self.get_sync_snapshot(ctx, user_id, req).await {
+                    Ok(outcome) => ok_pay(SyncResPayload::SyncSnapshotRes(outcome.res)),
+                    Err(e) => from_flare(e),
+                }
+            }
             (SyncKind::ConversationMaxSeq, SyncPayload::ConversationMaxSeq(req)) => {
                 match self.conversation_max_seq_sync(ctx, user_id, req).await {
                     Ok(v) => ok_pay(SyncResPayload::ConversationMaxSeqRes(v)),
@@ -157,7 +191,7 @@ where
         ctx: &Ctx,
         user_id: &str,
         req: SyncSnapshotSync,
-    ) -> Result<SyncSnapshotSyncRes, FlareError> {
+    ) -> Result<SyncSnapshotOutcome, FlareError> {
         let started = std::time::Instant::now();
         let message_limit = clamp_messages_per_conversation(req.messages_per_conversation);
         debug!(
@@ -197,24 +231,24 @@ where
             Some(req.conversation_ids.iter().map(String::as_str).collect())
         };
 
-        let mut merged: HashMap<String, SnapshotConversationRow> = HashMap::new();
+        let mut merged: HashMap<String, MergedSnapshotRow> = HashMap::new();
         let mut filtered_out = 0usize;
 
-        for summary in conv_resp.conversations {
+        for bootstrap in conv_resp.conversations {
             if let Some(set) = &filter_set {
-                if !set.contains(summary.conversation_id.as_str()) {
+                if !set.contains(bootstrap.conversation_id.as_str()) {
                     filtered_out += 1;
                     continue;
                 }
             }
-            let conversation_id = summary.conversation_id;
-            let max_seq = summary.max_seq as i64;
+            let conversation_id = bootstrap.conversation_id.clone();
+            let max_seq = bootstrap.max_seq as i64;
             let mut item = SnapshotConversationRow {
                 conversation_id: conversation_id.clone(),
                 messages: Vec::new(),
                 last_seq: max_seq.max(0),
-                last_timestamp: summary.updated_at,
-                unread_count: (summary.unread_count as i32).max(0),
+                last_timestamp: bootstrap.updated_at.clone(),
+                unread_count: (bootstrap.unread_count as i32).max(0),
             };
 
             if message_limit > 0 && max_seq > 0 {
@@ -229,7 +263,14 @@ where
                 );
                 let (messages, last_seq) = self
                     .infra
-                    .query_messages_by_seq(ctx, &conversation_id, after_seq, 0, message_limit, user_id)
+                    .query_messages_by_seq(
+                        ctx,
+                        &conversation_id,
+                        after_seq,
+                        0,
+                        message_limit,
+                        user_id,
+                    )
                     .await?;
 
                 item.messages = messages;
@@ -237,16 +278,26 @@ where
                     item.last_seq = last_seq;
                 }
                 if item.last_timestamp.is_none() {
-                    item.last_timestamp = item.messages.iter().filter_map(|m| m.timestamp.clone()).max_by_key(
-                        |ts| (ts.seconds, ts.nanos),
-                    );
+                    item.last_timestamp = item
+                        .messages
+                        .iter()
+                        .filter_map(|m| m.timestamp.clone())
+                        .max_by_key(|ts| (ts.seconds, ts.nanos));
                 }
             }
 
-            merged.insert(conversation_id, item);
+            merged.insert(
+                conversation_id,
+                MergedSnapshotRow {
+                    row: item,
+                    bootstrap,
+                },
+            );
         }
 
-        let page_limit = req.messages_per_conversation.max(crate::domain::model::MIN_SNAPSHOT_PAGE_SIZE) as usize;
+        let page_limit = req
+            .messages_per_conversation
+            .max(crate::domain::model::MIN_SNAPSHOT_PAGE_SIZE) as usize;
         let page_cursor = parse_snapshot_cursor(&req.snapshot_cursor);
         debug!(
             user_id = %user_id,
@@ -259,9 +310,9 @@ where
 
         let mut sorted = merged
             .into_values()
-            .map(|item| {
-                let patched_ms = ts_millis(item.last_timestamp.as_ref());
-                (patched_ms, item.conversation_id.clone(), item)
+            .map(|m| {
+                let patched_ms = ts_millis(m.row.last_timestamp.as_ref());
+                (patched_ms, m.row.conversation_id.clone(), m)
             })
             .collect::<Vec<_>>();
         sorted.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
@@ -284,7 +335,17 @@ where
         } else {
             String::new()
         };
-        let conversations = page.into_iter().map(|(_, _, item)| item).collect::<Vec<_>>();
+        let mut routing = Vec::with_capacity(page.len());
+        let conversations: Vec<SnapshotConversationRow> = page
+            .into_iter()
+            .map(|(_, _, m)| {
+                routing.push(ConversationSyncRoutingHint {
+                    channel_id: m.bootstrap.channel_id.clone(),
+                    conversation_type: m.bootstrap.conversation_type.clone(),
+                });
+                m.row
+            })
+            .collect();
 
         let snapshot_seq = snapshot_global_seq(&conversations);
         let snapshot_timestamp = conversations
@@ -303,12 +364,15 @@ where
             "sync snapshot response prepared"
         );
 
-        Ok(SyncSnapshotSyncRes {
-            conversations,
-            snapshot_seq,
-            snapshot_timestamp,
-            next_cursor,
-            has_more,
+        Ok(SyncSnapshotOutcome {
+            res: SyncSnapshotSyncRes {
+                conversations,
+                snapshot_seq,
+                snapshot_timestamp,
+                next_cursor,
+                has_more,
+            },
+            routing,
         })
     }
 
@@ -335,7 +399,11 @@ where
         let has_more = messages.len() as i32 >= limit;
         let next_cursor = messages
             .last()
-            .and_then(|m| m.extra.get("seq").map(|s| format!("seq:{}:{}", s, m.server_id)))
+            .and_then(|m| {
+                m.extra
+                    .get("seq")
+                    .map(|s| format!("seq:{}:{}", s, m.server_id))
+            })
             .unwrap_or_default();
         let mut items = Vec::with_capacity(messages.len());
         for m in &messages {
@@ -378,7 +446,11 @@ where
             }
             let next_cursor = messages
                 .last()
-                .and_then(|m| m.extra.get("seq").map(|s| format!("seq:{}:{}", s, m.server_id)))
+                .and_then(|m| {
+                    m.extra
+                        .get("seq")
+                        .map(|s| format!("seq:{}:{}", s, m.server_id))
+                })
                 .unwrap_or_default();
             let mut items = Vec::with_capacity(messages.len());
             for m in &messages {
@@ -416,17 +488,19 @@ where
             include_conversations: true,
             snapshot_cursor: build_snapshot_cursor_from_ts(req.client_conversation_cursor.as_ref()),
         };
-        let response = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
+        let outcome = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
+        let response = outcome.res;
         let fallback_patched_at = response.snapshot_timestamp.clone();
         let patches = response
             .conversations
             .iter()
-            .filter_map(|c| {
+            .zip(outcome.routing.iter())
+            .filter_map(|(c, hint)| {
                 let patched_at = c
                     .last_timestamp
                     .clone()
                     .or_else(|| fallback_patched_at.clone());
-                let summary = snapshot_row_to_summary(c);
+                let summary = snapshot_row_to_summary(c, hint);
                 Some(ConversationPatch {
                     conversation_id: c.conversation_id.clone(),
                     patch_type: ConversationPatchType::ConversationPatchSummary as i32,
@@ -439,7 +513,8 @@ where
 
         Ok(ConversationsIncrementalSyncRes {
             patches,
-            server_conversation_cursor: snapshot_cursor_to_ts(&response.next_cursor).or(response.snapshot_timestamp),
+            server_conversation_cursor: snapshot_cursor_to_ts(&response.next_cursor)
+                .or(response.snapshot_timestamp),
             has_more: response.has_more,
             hints: None,
         })
@@ -460,15 +535,21 @@ where
         let snap_req = SyncSnapshotSync {
             conversation_ids: Vec::new(),
             messages_per_conversation: limit,
-            include_deleted: req.sync_options.as_ref().map(|o| o.include_deleted).unwrap_or(false),
+            include_deleted: req
+                .sync_options
+                .as_ref()
+                .map(|o| o.include_deleted)
+                .unwrap_or(false),
             include_conversations: true,
             snapshot_cursor: String::new(),
         };
-        let response = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
+        let outcome = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
+        let response = outcome.res;
         let conversations = response
             .conversations
             .iter()
-            .map(snapshot_row_to_summary)
+            .zip(outcome.routing.iter())
+            .map(|(c, hint)| snapshot_row_to_summary(c, hint))
             .collect::<Vec<_>>();
 
         Ok(ConversationsAllSyncRes {
@@ -496,7 +577,7 @@ where
                 },
             )
             .await?;
-        let snap = self
+        let outcome = self
             .get_sync_snapshot(
                 ctx,
                 user_id,
@@ -509,7 +590,12 @@ where
                 },
             )
             .await?;
-        let summary = snap.conversations.first().map(snapshot_row_to_summary);
+        let snap = outcome.res;
+        let summary = snap
+            .conversations
+            .first()
+            .zip(outcome.routing.first())
+            .map(|(c, hint)| snapshot_row_to_summary(c, hint));
         let mut ext = summary.as_ref().map(|s| s.ext.clone()).unwrap_or_default();
         ext.insert("max_seq".to_string(), max.max_seq.to_string());
         ext.insert("last_message_id".to_string(), max.last_message_id.clone());
@@ -517,14 +603,29 @@ where
         Ok(ConversationDetailSyncRes {
             detail: Some(ConversationDetail {
                 conversation_id: req.conversation_id,
-                conversation_type: summary.as_ref().map(|s| s.conversation_type.clone()).unwrap_or_default(),
-                business_type: summary.as_ref().map(|s| s.business_type.clone()).unwrap_or_default(),
-                display_name: summary.as_ref().map(|s| s.display_name.clone()).unwrap_or_default(),
-                avatar_url: summary.as_ref().map(|s| s.avatar_url.clone()).unwrap_or_default(),
+                conversation_type: summary
+                    .as_ref()
+                    .map(|s| s.conversation_type.clone())
+                    .unwrap_or_default(),
+                business_type: summary
+                    .as_ref()
+                    .map(|s| s.business_type.clone())
+                    .unwrap_or_default(),
+                display_name: summary
+                    .as_ref()
+                    .map(|s| s.display_name.clone())
+                    .unwrap_or_default(),
+                avatar_url: summary
+                    .as_ref()
+                    .map(|s| s.avatar_url.clone())
+                    .unwrap_or_default(),
                 description: ext.get("description").cloned().unwrap_or_default(),
                 announcement: ext.get("announcement").cloned().unwrap_or_default(),
                 announcement_updated_at: None,
-                announcement_updated_by: ext.get("announcement_updated_by").cloned().unwrap_or_default(),
+                announcement_updated_by: ext
+                    .get("announcement_updated_by")
+                    .cloned()
+                    .unwrap_or_default(),
                 visibility: 0,
                 lifecycle_state: 0,
                 policy: None,
@@ -537,6 +638,7 @@ where
                     .or(max.last_timestamp.clone()),
                 member_count: summary.as_ref().map(|s| s.member_count).unwrap_or(0),
                 attributes: HashMap::new(),
+                channel_id: summary.as_ref().map(|s| s.channel_id.clone()).unwrap_or_default(),
                 ext,
             }),
             metadata: HashMap::new(),
@@ -624,7 +726,11 @@ where
         })
     }
 
-    async fn get_sync_cursor_sync(&self, user_id: &str, req: GetSyncCursorSync) -> Result<GetSyncCursorSyncRes, FlareError> {
+    async fn get_sync_cursor_sync(
+        &self,
+        user_id: &str,
+        req: GetSyncCursorSync,
+    ) -> Result<GetSyncCursorSyncRes, FlareError> {
         require_nonempty_conversation_id(&req.conversation_id)?;
         if let Some(cursor) = self.cursor_cache.get(user_id, &req.conversation_id).await {
             debug!(
@@ -655,7 +761,10 @@ where
         req: UpdateSyncCursorSync,
     ) -> Result<UpdateSyncCursorSyncRes, FlareError> {
         let cursor = req.cursor.as_ref().ok_or_else(|| {
-            FlareError::localized(flare_server_core::error::ErrorCode::InvalidParameter, "cursor is required")
+            FlareError::localized(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "cursor is required",
+            )
         })?;
         require_nonempty_conversation_id(&cursor.conversation_id)?;
         debug!(
@@ -762,7 +871,25 @@ fn conversation_type_str(message: Option<&Message>) -> String {
     }
 }
 
-fn message_preview(message: Option<&Message>, sent_at: Option<prost_types::Timestamp>) -> Option<MessagePreview> {
+/// 同步补丁摘要 `channel_id`：最新消息体优先，否则 Bootstrap 摘要
+fn merge_sync_summary_channel_id(from_message: &str, hint: &ConversationSyncRoutingHint) -> String {
+    if !from_message.is_empty() {
+        return from_message.to_string();
+    }
+    hint.channel_id.clone()
+}
+
+fn merge_sync_summary_conversation_type(from_message: &str, hint: &str) -> String {
+    if !from_message.is_empty() {
+        return from_message.to_string();
+    }
+    hint.to_string()
+}
+
+fn message_preview(
+    message: Option<&Message>,
+    sent_at: Option<prost_types::Timestamp>,
+) -> Option<MessagePreview> {
     message.map(|m| MessagePreview {
         message_id: m.server_id.clone(),
         sender_id: m.sender_id.clone(),
@@ -772,35 +899,52 @@ fn message_preview(message: Option<&Message>, sent_at: Option<prost_types::Times
     })
 }
 
-fn snapshot_row_to_summary(item: &SnapshotConversationRow) -> ConversationSummary {
+fn snapshot_row_to_summary(
+    item: &SnapshotConversationRow,
+    hint: &ConversationSyncRoutingHint,
+) -> ConversationSummary {
     let latest = latest_message(item);
     let mut ext = HashMap::new();
     if let Some(msg) = latest {
         ext.extend(msg.extra.clone());
-        if !msg.channel_id.is_empty() {
-            ext.entry("channel_id".to_string()).or_insert_with(|| msg.channel_id.clone());
-        }
     }
     let display_name = ext.get("display_name").cloned().unwrap_or_default();
     let avatar_url = ext.get("avatar_url").cloned().unwrap_or_default();
+    let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
+    let channel_id = merge_sync_summary_channel_id(channel_from_msg, hint);
+    let type_from_msg = conversation_type_str(latest);
+    let conversation_type =
+        merge_sync_summary_conversation_type(type_from_msg.as_str(), hint.conversation_type.as_str());
     ConversationSummary {
         conversation_id: item.conversation_id.clone(),
-        conversation_type: conversation_type_str(latest),
+        conversation_type,
         business_type: ext.get("business_type").cloned().unwrap_or_default(),
         display_name,
         avatar_url,
         last_message: message_preview(latest, item.last_timestamp.clone()),
         unread_count: item.unread_count as u32,
         max_seq: item.last_seq as u64,
-        last_read_seq: ext.get("last_read_seq").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
-        is_muted: ext.get("is_muted").map(|v| v == "true" || v == "1").unwrap_or(false),
-        is_pinned: ext.get("is_pinned").map(|v| v == "true" || v == "1").unwrap_or(false),
+        last_read_seq: ext
+            .get("last_read_seq")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0),
+        is_muted: ext
+            .get("is_muted")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
+        is_pinned: ext
+            .get("is_pinned")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
         mute_until: None,
         updated_at: item.last_timestamp.clone(),
         created_at: None,
         labels: Vec::new(),
-        member_count: ext.get("member_count").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0),
-        channel_id: latest.map(|m| m.channel_id.clone()).unwrap_or_default(),
+        member_count: ext
+            .get("member_count")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0),
+        channel_id,
         ext,
     }
 }
@@ -818,6 +962,7 @@ fn summary_to_light(summary: &ConversationSummary) -> ConversationLight {
         is_pinned: summary.is_pinned,
         mute_until: summary.mute_until.clone(),
         labels: summary.labels.clone(),
+        channel_id: summary.channel_id.clone(),
         ext: summary.ext.clone(),
     }
 }

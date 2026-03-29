@@ -33,24 +33,24 @@ impl EventHandler for OfflinePushTaskHandler {
             return Ok(());
         }
         match PushTaskEnvelope::decode(event.payload.as_slice()) {
-                    Ok(env) => {
-                        info!(
-                            trace_id = %ctx.trace_id(),
-                            user_id = %env.user_id,
-                            tenant_id = %env.tenant_id,
-                            message_id = %env.message_id,
-                            conversation_id = %env.conversation_id,
-                            "[离线推送占位实现] offline task received"
-                        );
-                    }
-                    Err(e) => {
-                        error!(error = %e, "invalid push task envelope payload, sending to dlq");
-                        self.dlq
-                            .publish(ctx, Some(event.partition_key.as_str()), event.payload)
-                            .await
-                            .map_err(|err| FlareError::general_error(err.to_string()))?;
-                    }
-                }
+            Ok(env) => {
+                info!(
+                    trace_id = %ctx.trace_id(),
+                    user_id = %env.user_id,
+                    tenant_id = %env.tenant_id,
+                    message_id = %env.message_id,
+                    conversation_id = %env.conversation_id,
+                    "[离线推送占位实现] offline task received"
+                );
+            }
+            Err(e) => {
+                error!(error = %e, "invalid push task envelope payload, sending to dlq");
+                self.dlq
+                    .publish(ctx, Some(event.partition_key.as_str()), event.payload)
+                    .await
+                    .map_err(|err| FlareError::general_error(err.to_string()))?;
+            }
+        }
         Ok(())
     }
 

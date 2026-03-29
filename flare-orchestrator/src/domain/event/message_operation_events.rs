@@ -158,4 +158,3 @@ pub enum MessageOperationDomainEvent {
     Favorited(MessageFavoritedEvent),
     Unfavorited(MessageUnfavoritedEvent),
 }
-

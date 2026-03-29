@@ -52,7 +52,8 @@ pub async fn initialize(
 
     // 2. 创建 Redis 客户端
     let redis_client = Arc::new(
-        Client::open(online_config.redis_url.as_str()).with_context(|| "Failed to create Redis client")?,
+        Client::open(online_config.redis_url.as_str())
+            .with_context(|| "Failed to create Redis client")?,
     );
 
     // 3. 构建仓储（具体类型，禁止 `Arc<dyn>` + 异步 trait）
@@ -80,10 +81,7 @@ pub async fn initialize(
     let online_domain_service = Arc::new(OnlineStatusService::<
         RedisConversationRepository,
         NoopConnectionEventPublisher,
-    >::new(
-        conversation_repository.clone(),
-        gateway_id,
-    ));
+    >::new(conversation_repository.clone(), gateway_id));
 
     let subscription_domain_service = Arc::new(SubscriptionService::new(
         subscription_repository,
@@ -93,7 +91,8 @@ pub async fn initialize(
     let user_domain_service = Arc::new(UserService::new(conversation_repository.clone()));
 
     let user_handler = Arc::new(OnlineUserHandler::new(user_domain_service.clone()));
-    let presence_watcher_handler = Arc::new(OnlinePresenceWatcherHandler::new(presence_watcher.clone()));
+    let presence_watcher_handler =
+        Arc::new(OnlinePresenceWatcherHandler::new(presence_watcher.clone()));
 
     // 5. 构建应用层 handlers
     let command_handler = Arc::new(OnlineCommandHandler::new(
@@ -112,9 +111,7 @@ pub async fn initialize(
         presence_watcher_handler,
     );
 
-    Ok(ApplicationContext {
-        online_handler,
-    })
+    Ok(ApplicationContext { online_handler })
 }
 
 use flare_proto::signaling::online::online_service_server::OnlineService;

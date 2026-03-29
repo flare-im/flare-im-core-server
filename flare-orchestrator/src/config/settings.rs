@@ -1,7 +1,9 @@
 use std::env;
 
 use flare_im_core::config::FlareAppConfig;
+use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
 use flare_server_core::kafka::KafkaProducerConfig;
+use flare_server_core::mq::kafka::KafkaConsumerConfig;
 
 use crate::domain::model::MessageDefaults;
 
@@ -203,15 +205,10 @@ impl MessageOrchestratorConfig {
         .unwrap_or(SessionCreationMode::Async);
 
         // 从环境变量获取 server_id 和 svid
-        let server_id = env_or_fallback(
-            "MESSAGE_ORCHESTRATOR_SERVER_ID",
-            "SERVER_ID",
-        );
-        
-        let svid = env_or_fallback(
-            "MESSAGE_ORCHESTRATOR_SVID",
-            "SVID",
-        ).or_else(|| Some("svid.im".to_string())); // 默认为 svid.im
+        let server_id = env_or_fallback("MESSAGE_ORCHESTRATOR_SERVER_ID", "SERVER_ID");
+
+        let svid = env_or_fallback("MESSAGE_ORCHESTRATOR_SVID", "SVID")
+            .or_else(|| Some("svid.im".to_string())); // 默认为 svid.im
 
         Self {
             kafka_bootstrap,
@@ -289,6 +286,48 @@ impl KafkaProducerConfig for MessageOrchestratorConfig {
 
     fn retry_backoff_ms(&self) -> u64 {
         100
+    }
+
+    fn metadata_max_age_ms(&self) -> u64 {
+        300_000
+    }
+}
+
+impl KafkaConsumerConfig for MessageOrchestratorConfig {
+    fn kafka_bootstrap(&self) -> &str {
+        &self.kafka_bootstrap
+    }
+
+    fn consumer_group(&self) -> &str {
+        ORCHESTRATOR_MAIN_GROUP_DEFAULT
+    }
+
+    fn enable_auto_commit(&self) -> bool {
+        false
+    }
+
+    fn session_timeout_ms(&self) -> u64 {
+        10_000
+    }
+
+    fn auto_offset_reset(&self) -> &str {
+        "earliest"
+    }
+
+    fn fetch_min_bytes(&self) -> usize {
+        1
+    }
+
+    fn fetch_max_wait_ms(&self) -> u64 {
+        50
+    }
+
+    fn fetch_message_max_bytes(&self) -> usize {
+        10 * 1024 * 1024
+    }
+
+    fn max_partition_fetch_bytes(&self) -> usize {
+        10 * 1024 * 1024
     }
 
     fn metadata_max_age_ms(&self) -> u64 {

@@ -53,9 +53,8 @@ pub fn select_push_targets(
         PushStrategy::AllDevices => routes.into_iter().map(|(t, _, _)| t).collect(),
         PushStrategy::BestDevice => {
             routes.sort_by(|a, b| {
-                b.1.cmp(&a.1).then_with(|| {
-                    b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-                })
+                b.1.cmp(&a.1)
+                    .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
             });
             routes.into_iter().take(1).map(|(t, _, _)| t).collect()
         }
@@ -115,7 +114,10 @@ fn merge_user_ids_for_gateway(
 }
 
 fn device_ids_for_gateway(gateway_targets: &[GatewayPushTarget]) -> Vec<String> {
-    gateway_targets.iter().map(|t| t.device_id.clone()).collect()
+    gateway_targets
+        .iter()
+        .map(|t| t.device_id.clone())
+        .collect()
 }
 
 fn apply_device_filter(opt: Option<PushOptions>, device_ids: Vec<String>) -> Option<PushOptions> {

@@ -1,12 +1,11 @@
-//! 消息操作命令（Command）
+//! 消息操作命令：撤回、编辑、删除、已读、反应、置顶、标记及对应 App* DTO。
 //!
-//! 根据 CQRS 架构，Command 用于修改状态，不返回查询结果
-//! 现在包含从protobuf请求转换的实现
+//! Command 仅表达写路径；读模型由 Storage Reader 提供。
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use flare_proto::common::Pagination as ProtoPagination;
 use flare_proto::message_content_ext::MessageContentExt;
+use serde::{Deserialize, Serialize};
 
 /// 本地分页结构体（用于序列化/反序列化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,11 +25,27 @@ pub struct LocalPagination {
 impl From<&ProtoPagination> for LocalPagination {
     fn from(pagination: &ProtoPagination) -> Self {
         Self {
-            cursor: if pagination.cursor.is_empty() { None } else { Some(pagination.cursor.clone()) },
-            limit: if pagination.limit > 0 { Some(pagination.limit) } else { None },
+            cursor: if pagination.cursor.is_empty() {
+                None
+            } else {
+                Some(pagination.cursor.clone())
+            },
+            limit: if pagination.limit > 0 {
+                Some(pagination.limit)
+            } else {
+                None
+            },
             has_more: Some(pagination.has_more),
-            previous_cursor: if pagination.previous_cursor.is_empty() { None } else { Some(pagination.previous_cursor.clone()) },
-            total_size: if pagination.total_size > 0 { Some(pagination.total_size) } else { None },
+            previous_cursor: if pagination.previous_cursor.is_empty() {
+                None
+            } else {
+                Some(pagination.previous_cursor.clone())
+            },
+            total_size: if pagination.total_size > 0 {
+                Some(pagination.total_size)
+            } else {
+                None
+            },
         }
     }
 }
@@ -74,7 +89,7 @@ impl RecallMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -83,8 +98,16 @@ impl RecallMessageCommand {
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
                 conversation_id: String::new(), // 会在后续填充
             },
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
-            time_limit_seconds: if request.recall_time_limit_seconds > 0 { Some(request.recall_time_limit_seconds) } else { None },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
+            time_limit_seconds: if request.recall_time_limit_seconds > 0 {
+                Some(request.recall_time_limit_seconds)
+            } else {
+                None
+            },
             allow_admin_override: false,
         }
     }
@@ -114,13 +137,13 @@ impl EditMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         let new_content = request
             .new_content
             .as_ref()
             .and_then(|content| content.encode_to_bytes().ok())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -130,7 +153,11 @@ impl EditMessageCommand {
                 conversation_id: String::new(), // 会在后续填充
             },
             new_content,
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             allow_admin_override: false,
         }
     }
@@ -170,7 +197,7 @@ impl DeleteMessageCommand {
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
         let target_user_id = operator_id.clone();
-        
+
         let delete_type = if request.delete_type == 2 {
             DeleteType::Hard
         } else {
@@ -180,7 +207,7 @@ impl DeleteMessageCommand {
             .scope
             .and_then(DeleteScope::from_proto_value)
             .unwrap_or_else(|| DeleteScope::default_for_type(delete_type));
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: String::new(), // 批量删除不需要特定消息ID
@@ -191,7 +218,11 @@ impl DeleteMessageCommand {
             },
             delete_type,
             delete_scope,
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             message_ids: request.message_ids.clone(),
             notify_others: request.notify_others,
             target_user_id: Some(target_user_id),
@@ -268,7 +299,7 @@ impl ReadMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -307,7 +338,7 @@ impl AddReactionCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -341,7 +372,7 @@ impl RemoveReactionCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -377,7 +408,7 @@ impl PinMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -386,7 +417,11 @@ impl PinMessageCommand {
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
                 conversation_id: String::new(), // 会在后续填充
             },
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             expire_at: request.expire_at.clone().map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .unwrap_or_else(|| chrono::Utc::now())
@@ -413,7 +448,7 @@ impl UnpinMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -446,7 +481,7 @@ impl MarkMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -482,7 +517,7 @@ impl UnmarkMessageCommand {
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
-        
+
         Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
@@ -491,7 +526,11 @@ impl UnmarkMessageCommand {
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
                 conversation_id: String::new(), // 会在后续填充
             },
-            mark_type: if request.mark_type < 0 { None } else { Some(request.mark_type) },
+            mark_type: if request.mark_type < 0 {
+                None
+            } else {
+                Some(request.mark_type)
+            },
             user_id: String::new(), // 由 handler 从 context 填充
         }
     }
@@ -529,7 +568,10 @@ impl BatchMarkMessageReadCommand {
 
         Self {
             conversation_id: request.conversation_id.clone(),
-            user_id: ctx.actor().map(|a| a.actor_id().to_string()).unwrap_or_default(),
+            user_id: ctx
+                .actor()
+                .map(|a| a.actor_id().to_string())
+                .unwrap_or_default(),
             message_ids: request.message_ids.clone(),
             read_at: Some(read_at),
             tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
@@ -567,7 +609,10 @@ impl MarkConversationReadCommand {
 
         Self {
             conversation_id: request.conversation_id.clone(),
-            user_id: ctx.actor().map(|a| a.actor_id().to_string()).unwrap_or_default(),
+            user_id: ctx
+                .actor()
+                .map(|a| a.actor_id().to_string())
+                .unwrap_or_default(),
             read_at: Some(read_at),
             tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
         }
@@ -602,12 +647,6 @@ impl MarkAllConversationsReadCommand {
     }
 }
 
-/// 处理临时消息命令（只推送，不持久化）
-#[derive(Debug, Clone)]
-pub struct HandleTemporaryMessageCommand {
-    /// 消息（proto 类型）
-    pub message: flare_proto::common::Message,
-}
 
 // 定义独立的应用层命令结构，完全与protobuf解耦
 // 这些是真正的应用层命令，不依赖protobuf结构
@@ -633,10 +672,18 @@ impl From<&flare_proto::message::RecallMessageRequest> for AppRecallMessageComma
     fn from(request: &flare_proto::message::RecallMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
-            time_limit_seconds: if request.recall_time_limit_seconds > 0 { Some(request.recall_time_limit_seconds) } else { None },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
+            time_limit_seconds: if request.recall_time_limit_seconds > 0 {
+                Some(request.recall_time_limit_seconds)
+            } else {
+                None
+            },
             operator_id: String::new(), // 从context填充
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),   // 从context填充
             conversation_id: request.conversation_id.clone(), // 客户端可选提供，便于无 StorageReader 时解析
         }
     }
@@ -670,15 +717,19 @@ impl From<&flare_proto::message::EditMessageRequest> for AppEditMessageCommand {
             .as_ref()
             .and_then(|content| content.encode_to_bytes().ok())
             .unwrap_or_default();
-        
+
         Self {
             message_id: request.message_id.clone(),
             new_content,
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             show_edited_mark: request.show_edited_mark,
             edit_version: request.edit_version,
             operator_id: String::new(), // 从context填充
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),   // 从context填充
             conversation_id: request.conversation_id.clone(), // 客户端可选提供，便于无 StorageReader 时解析
         }
     }
@@ -721,18 +772,22 @@ impl From<&flare_proto::message::DeleteMessageRequest> for AppDeleteMessageComma
             .scope
             .and_then(DeleteScope::from_proto_value)
             .unwrap_or_else(|| DeleteScope::default_for_type(delete_type));
-        
+
         Self {
             message_ids: request.message_ids.clone(),
             conversation_id: request.conversation_id.clone(),
             delete_type,
             delete_scope,
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             notify_others: request.notify_others,
             target_user_id: None,
             hard_delete: request.delete_type == 2,
             operator_id: String::new(), // 从context填充
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),   // 从context填充
         }
     }
 }
@@ -758,7 +813,7 @@ impl From<&flare_proto::message::AddReactionRequest> for AppAddReactionCommand {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             emoji: request.emoji.clone(),
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -785,7 +840,7 @@ impl From<&flare_proto::message::RemoveReactionRequest> for AppRemoveReactionCom
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             emoji: request.emoji.clone(),
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -813,12 +868,16 @@ impl From<&flare_proto::message::PinMessageRequest> for AppPinMessageCommand {
         Self {
             message_id: request.message_id.clone(),
             operator_id: String::new(), // 由 handler 从 context 填充
-            reason: if request.reason.is_empty() { None } else { Some(request.reason.clone()) },
+            reason: if request.reason.is_empty() {
+                None
+            } else {
+                Some(request.reason.clone())
+            },
             expire_at: request.expire_at.clone().map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .unwrap_or_else(|| chrono::Utc::now())
             }),
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -841,8 +900,8 @@ impl From<&flare_proto::message::UnpinMessageRequest> for AppUnpinMessageCommand
     fn from(request: &flare_proto::message::UnpinMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
-            operator_id: String::new(), // 由 handler 从 context 填充
-            tenant_id: String::new(), // 从context填充
+            operator_id: String::new(),     // 由 handler 从 context 填充
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -871,8 +930,12 @@ impl From<&flare_proto::message::MarkMessageRequest> for AppMarkMessageCommand {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             mark_type: request.mark_type,
-            color: if request.color.is_empty() { None } else { Some(request.color.clone()) },
-            tenant_id: String::new(), // 从context填充
+            color: if request.color.is_empty() {
+                None
+            } else {
+                Some(request.color.clone())
+            },
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -899,7 +962,7 @@ impl From<&flare_proto::message::UnmarkMessageRequest> for AppUnmarkMessageComma
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             mark_type: request.mark_type,
-            tenant_id: String::new(), // 从context填充
+            tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
     }
@@ -975,7 +1038,9 @@ pub struct AppMarkAllConversationsReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::MarkAllConversationsReadRequest> for AppMarkAllConversationsReadCommand {
+impl From<&flare_proto::message::MarkAllConversationsReadRequest>
+    for AppMarkAllConversationsReadCommand
+{
     fn from(request: &flare_proto::message::MarkAllConversationsReadRequest) -> Self {
         Self {
             user_id: String::new(), // 由 handler 从 context 填充
@@ -1015,96 +1080,6 @@ impl From<&flare_proto::message::MarkMessagesReadUntilRequest> for AppMarkMessag
                     .unwrap_or_else(|| chrono::Utc::now())
             }),
             tenant_id: String::new(), // 从context填充
-        }
-    }
-}
-
-/// 应用层获取置顶消息命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppGetPinnedMessagesCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 租户ID
-    pub tenant_id: String,
-    /// 分页信息（可选）
-    pub pagination: Option<LocalPagination>,
-}
-
-impl From<&flare_proto::message::GetPinnedMessagesRequest> for AppGetPinnedMessagesCommand {
-    fn from(request: &flare_proto::message::GetPinnedMessagesRequest) -> Self {
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            tenant_id: String::new(), // 从context填充
-            pagination: request.pagination.as_ref().map(LocalPagination::from),
-        }
-    }
-}
-
-/// 应用层获取标记消息命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppGetMarkedMessagesCommand {
-    /// 用户ID
-    pub user_id: String,
-    /// 标记类型筛选（可选）
-    pub mark_type: Option<i32>,
-    /// 租户ID
-    pub tenant_id: String,
-    /// 分页信息（可选）
-    pub pagination: Option<LocalPagination>,
-}
-
-impl From<&flare_proto::message::GetMarkedMessagesRequest> for AppGetMarkedMessagesCommand {
-    fn from(request: &flare_proto::message::GetMarkedMessagesRequest) -> Self {
-        Self {
-            user_id: String::new(), // 由 handler 从 context 填充
-            mark_type: if request.mark_type == 0 { None } else { Some(request.mark_type) },
-            tenant_id: String::new(), // 从context填充
-            pagination: request.pagination.as_ref().map(LocalPagination::from),
-        }
-    }
-}
-
-/// 应用层获取话题命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppGetThreadsCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 话题状态（可选）
-    pub status: i32,
-    /// 租户ID
-    pub tenant_id: String,
-    /// 分页信息（可选）
-    pub pagination: Option<LocalPagination>,
-}
-
-impl From<&flare_proto::message::GetThreadsRequest> for AppGetThreadsCommand {
-    fn from(request: &flare_proto::message::GetThreadsRequest) -> Self {
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            status: request.status,
-            tenant_id: String::new(), // 从context填充
-            pagination: request.pagination.as_ref().map(LocalPagination::from),
-        }
-    }
-}
-
-/// 应用层获取话题回复命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppGetThreadRepliesCommand {
-    /// 话题ID
-    pub thread_id: String,
-    /// 租户ID
-    pub tenant_id: String,
-    /// 分页信息（可选）
-    pub pagination: Option<LocalPagination>,
-}
-
-impl From<&flare_proto::message::GetThreadRepliesRequest> for AppGetThreadRepliesCommand {
-    fn from(request: &flare_proto::message::GetThreadRepliesRequest) -> Self {
-        Self {
-            thread_id: request.thread_id.clone(),
-            tenant_id: String::new(), // 从context填充
-            pagination: request.pagination.as_ref().map(LocalPagination::from),
         }
     }
 }
