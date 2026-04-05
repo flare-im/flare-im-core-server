@@ -1,0 +1,4 @@
+# 工作区内大量 gRPC/领域 trait 使用 `async fn`；在稳定 API 上显式改为 `impl Future + Send` 前统一压制该 lint。
+# `grpc::*` 扁平 re-export 存在故意重叠的 glob，避免噪声。
+[build]
+rustflags = ["-A", "async_fn_in_trait", "-A", "ambiguous_glob_reexports"]
