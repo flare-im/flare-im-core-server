@@ -1,142 +1,152 @@
-//! 消息领域服务 - 包含所有业务逻辑实现
+//! 消息领域服务 - 重构版
 //!
-//! ## 会话生成（Session/Conversation Ensure）
+//! ## 核心职责
+//! 1. 消息校验（使用策略模式）
+//! 2. 序列号分配（使用公共 SequenceAllocator）
+//! 3. WAL 写入
+//! 4. 消息装饰
+//! 5. 消息推送（使用 PushRepository）
 //!
-//! 若会话不存在则创建，支持两种模式（见 [crate::config::SessionCreationMode] 与 docs/SESSION_CREATION_DESIGN.md）：
-//! - **Sync（默认）**：同步调用 Conversation 服务 ensure_conversation，强一致；失败/超时后继续发消息，Storage Writer 兜底。
-//! - **Async**：发布 conversation.ensure 事件到 Kafka，由 Conversation 服务消费并幂等创建，低延迟、最终一致。
+//! ## 设计原则
+//! - 单一职责：每个服务只负责一件事
+//! - 依赖注入：通过构造函数注入依赖
+//! - 纯领域逻辑：不包含 Hook 执行
 
 use std::sync::Arc;
-use std::time::Instant;
 
-use anyhow::{Context as AnyhowContext, Result};
-use flare_im_core::abstractions::builders::PushMessageRequestBuilder;
+use flare_im_core::Ctx;
 use flare_im_core::abstractions::decorator::{MessageDecorator, NoopMessageDecorator};
-use flare_im_core::abstractions::messaging::MessageEventPublisher;
-use flare_im_core::abstractions::storage_payload::StorageMessagePayload;
-use flare_im_core::hooks::HookDispatcher;
 use flare_im_core::tracing::create_span;
 use flare_proto::common::Message;
-use flare_proto::push::{PushMessageRequest, PushOptions};
-use flare_server_core::context::{Context, Ctx};
-use prost::Message as ProstMessage;
-use tracing::{Span, instrument};
+use flare_server_core::{flare_err, flare_err_details};
+use tracing::instrument;
 
-use crate::config::SessionCreationMode;
-use crate::domain::model::MessageProfile;
+use crate::error::{ErrorCode, Result};
+use crate::domain::{MessageProfile, PersistenceMode};
 use crate::domain::model::{MessageDefaults, MessageSubmission};
-use crate::domain::repository::{
-    ConversationRepository, ConversationRepositoryItem, OrchestratorPublisher, WalRepository,
-    WalRepositoryItem,
-};
-use crate::domain::service::hook_builder::{
-    apply_draft_to_request, build_draft_from_request, build_hook_context,
-    build_hook_context_from_ctx, build_message_record, draft_from_submission, merge_context,
-};
+use crate::domain::repository::{PushRepository, RecipientRepository, WalRepositoryItem, WalRepository};
 use crate::domain::service::sequence_allocator::SequenceAllocator;
+use crate::domain::service::validation_strategy::{
+    CompositeMessageValidationStrategy, MessageValidationStrategy, ValidationContext,
+};
+use crate::infrastructure::messaging::push_repository::MqPushRepository;
 
-/// 写入会话表 `channel_id`：单聊须空；群/频道等取消息 `channel_id`（与 Conversation 域一致）
-fn persisted_conversation_channel_id(conversation_type: &str, message_channel_id: &str) -> String {
-    match conversation_type {
-        "single" => String::new(),
-        _ => message_channel_id.to_string(),
-    }
-}
-
-/// 消息领域服务 - 包含所有业务逻辑
+/// 消息领域服务
 pub struct MessageDomainService {
-    publisher: Arc<OrchestratorPublisher>,
+    /// 推送仓储（使用具体类型以支持 async fn in traits）
+    push_repository: Arc<MqPushRepository>,
+    /// 接收者仓储
+    recipient_repository: Arc<dyn RecipientRepository>,
+    /// WAL 仓储
     wal_repository: Arc<WalRepositoryItem>,
-    conversation_repository: Option<Arc<ConversationRepositoryItem>>,
-    /// 序列号分配器（核心能力：保证同会话消息顺序）
+    /// 序列号分配器
     sequence_allocator: Arc<SequenceAllocator>,
+    /// 默认值配置
     defaults: MessageDefaults,
-    hooks: Arc<HookDispatcher>,
-    /// Decorator 模式：消息增强（已读标记、@提及等），默认 Noop
+    /// 消息装饰器
     message_decorator: Arc<dyn MessageDecorator>,
-    /// 会话生成模式：Sync 同步 gRPC / Async 发布 conversation.ensure 事件
-    session_creation_mode: SessionCreationMode,
+    /// 消息校验策略
+    validation_strategy: Arc<dyn MessageValidationStrategy>,
 }
 
 impl MessageDomainService {
     pub fn new(
-        publisher: Arc<OrchestratorPublisher>,
+        push_repository: Arc<MqPushRepository>,
+        recipient_repository: Arc<dyn RecipientRepository>,
         wal_repository: Arc<WalRepositoryItem>,
-        conversation_repository: Option<Arc<ConversationRepositoryItem>>,
         sequence_allocator: Arc<SequenceAllocator>,
         defaults: MessageDefaults,
-        hooks: Arc<HookDispatcher>,
         message_decorator: Option<Arc<dyn MessageDecorator>>,
-        session_creation_mode: SessionCreationMode,
+        validation_strategy: Option<Arc<dyn MessageValidationStrategy>>,
     ) -> Self {
         Self {
-            publisher,
+            push_repository,
+            recipient_repository,
             wal_repository,
-            conversation_repository,
             sequence_allocator,
             defaults,
-            hooks,
             message_decorator: message_decorator.unwrap_or_else(|| Arc::new(NoopMessageDecorator)),
-            session_creation_mode,
+            validation_strategy: validation_strategy
+                .unwrap_or_else(|| Arc::new(CompositeMessageValidationStrategy::default_composite())),
         }
     }
 
-    /// 编排消息存储流程（业务逻辑）
-    /// 按照"PreSend Hook → WAL → Kafka → PostSend Hook"的顺序编排消息写入流程；请求为 common.Message，envelope 在 extra。
-    #[instrument(skip(self), fields(tenant_id, message_id, message_type))]
-    pub async fn orchestrate_message_storage(
+    /// 校验消息
+    ///
+    /// # 参数
+    /// - `ctx`: 上下文
+    /// - `tenant_id`: 租户 ID
+    /// - `message`: 消息
+    ///
+    /// # 返回
+    /// - `Ok(())`: 校验通过
+    /// - `Err`: 校验失败
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_type = message.message_type,
+    ))]
+    pub async fn validate_message(
         &self,
         ctx: &Ctx,
-        mut request: Message,
-        execute_pre_send: bool,
-    ) -> Result<(String, u64)> {
-        let _start = Instant::now();
-        let _span = Span::current();
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-        if !request.server_id.is_empty() {
-            _span.record("message_id", &request.server_id);
+        tenant_id: &str,
+        message: &Message,
+    ) -> Result<()> {
+        let validation_context = ValidationContext {
+            ctx,
+            tenant_id,
+            conversation_id: &message.conversation_id,
+        };
+        
+        let validation_result = self.validation_strategy
+            .validate(&validation_context, message)
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, &format!("Message validation failed: {}", e)))?;
+        
+        if !validation_result.is_valid {
+            return Err(flare_err_details!(
+                ErrorCode::InvalidParameter,
+                "Message validation failed",
+                format!("{:?}", validation_result.errors)
+            ));
         }
-        if !request.sender_id.is_empty() {}
-        _span.record("message_type", request.message_type);
+        
+        Ok(())
+    }
 
-        // 从Context构建hook_context（确保tenant_id从Context获取）
-        let original_context = build_hook_context_from_ctx(ctx, &request);
-        let mut draft = build_draft_from_request(&request)
-            .with_context(|| "Failed to build draft from request")?;
+    /// 准备消息提交并分配序列号
+    ///
+    /// # 参数
+    /// - `ctx`: 上下文
+    /// - `tenant_id`: 租户 ID
+    /// - `message`: 消息
+    ///
+    /// # 返回
+    /// - `Ok((submission, profile))`: 消息提交和消息配置
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_type = message.message_type,
+    ))]
+    pub async fn prepare_and_allocate_seq(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message: Message,
+    ) -> Result<(MessageSubmission, MessageProfile)> {
+        // 准备消息提交
+        let submission = MessageSubmission::prepare(message, &self.defaults)
+            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, &format!("Failed to prepare message: {}", e)))?;
 
-        // 执行 PreSend Hook（如果启用）
-        if execute_pre_send {
-            let _hook_span = create_span("message-orchestrator", "pre_send_hook");
-
-            self.hooks
-                .pre_send(&original_context, &mut draft)
-                .await
-                .with_context(|| "PreSend hook failed")?;
-
-            // 让 _hook_span 离开作用域以结束 span
-
-            apply_draft_to_request(&mut request, &draft);
-        }
-
-        let updated_context =
-            build_hook_context(&request, self.defaults.default_tenant_id.as_ref());
-        let hook_context = merge_context(&original_context, updated_context);
-
-        let submission = MessageSubmission::prepare(request, &self.defaults)
-            .context("Failed to prepare message")?;
-
-        // 🔹 核心能力：分配 session_seq（保证消息顺序）
-        // 参考微信 MsgService 设计：每个会话维护独立的递增序列号
+        // 分配序列号
         let session_seq = self
             .sequence_allocator
-            .allocate_seq(&submission.message.conversation_id, &tenant_id)
+            .allocate_seq(&submission.message.conversation_id, tenant_id)
             .await
-            .with_context(|| {
-                format!(
-                    "allocate seq failed for conversation_id={}",
-                    submission.message.conversation_id
-                )
-            })?;
+            .map_err(|e| flare_err!(
+                ErrorCode::InternalError,
+                &format!("allocate seq failed for conversation_id={}: {}", submission.message.conversation_id, e)
+            ))?;
+
         tracing::debug!(
             conversation_id = %submission.message.conversation_id,
             seq = session_seq,
@@ -145,317 +155,224 @@ impl MessageDomainService {
 
         let mut submission = submission;
         submission.message.seq = session_seq;
-        submission.kafka_payload.seq = session_seq;
-
-        // 获取消息类型信息（用于判断是否需要持久化）
-        // 注意：MessageProfile::ensure 会修改 message，所以需要 clone
+        
+        // 获取消息类型信息
         let mut message_for_profile = submission.message.clone();
         let profile = MessageProfile::ensure(&mut message_for_profile);
-
-        // 仅普通消息需要写入WAL
-        if profile.needs_wal() {
-            let _wal_span = create_span("message-orchestrator", "wal_write");
-
-            self.wal_repository
-                .append(&submission)
-                .await
-                .context("Failed to append WAL entry")?;
-
-            // 让 _wal_span 离开作用域以结束 span
-        }
-
-        // 会话生成：如会话不存在则创建（Sync 同步 gRPC / Async 发布 conversation.ensure 事件）
-        let mut participants = vec![submission.message.sender_id.clone()];
-        if submission.message.conversation_type
-            == flare_proto::common::ConversationType::Single as i32
-            && !submission.message.channel_id.is_empty()
-        {
-            participants.push(submission.message.channel_id.clone());
-        }
-        let conversation_id = submission.message.conversation_id.clone();
-        let conversation_type = match flare_proto::common::ConversationType::try_from(
-            submission.message.conversation_type,
-        ) {
-            Ok(st) => match st {
-                flare_proto::common::ConversationType::Unspecified => "unspecified".to_string(),
-                flare_proto::common::ConversationType::Single => "single".to_string(),
-                flare_proto::common::ConversationType::Group => "group".to_string(),
-                flare_proto::common::ConversationType::Channel => "channel".to_string(),
-                flare_proto::common::ConversationType::Ai => "ai".to_string(),
-                flare_proto::common::ConversationType::Customer => "customer".to_string(),
-                flare_proto::common::ConversationType::System => "system".to_string(),
-                flare_proto::common::ConversationType::Temp => "temp".to_string(),
-            },
-            Err(_) => "unknown".to_string(),
-        };
-        let business_type = submission
-            .message
-            .extra
-            .get("business_type")
-            .cloned()
-            .unwrap_or_default();
-
-        let stored_channel_id = persisted_conversation_channel_id(
-            conversation_type.as_str(),
-            submission.message.channel_id.as_str(),
-        );
-
-        match self.session_creation_mode {
-            SessionCreationMode::Sync => {
-                if let Some(conversation_repo) = &self.conversation_repository {
-                    let mut ensure_ctx = (**ctx).clone();
-                    if ensure_ctx.tenant_id().is_none() {
-                        ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
-                    }
-                    if ensure_ctx.request_id().is_empty() {
-                        use uuid::Uuid;
-                        let new_request_id = Uuid::new_v4().to_string();
-                        let trace_id = ensure_ctx.trace_id().to_string();
-                        ensure_ctx = Context::with_request_id(new_request_id);
-                        if !trace_id.is_empty() {
-                            ensure_ctx = ensure_ctx.with_trace_id(trace_id);
-                        }
-                        if let Some(t) = ctx.tenant_id() {
-                            ensure_ctx = ensure_ctx.with_tenant_id(t.to_string());
-                        } else {
-                            ensure_ctx = ensure_ctx.with_tenant_id(tenant_id.clone());
-                        }
-                    }
-                    let ensure_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        conversation_repo.ensure_conversation(
-                            &ensure_ctx,
-                            &conversation_id,
-                            &conversation_type,
-                            &business_type,
-                            participants.clone(),
-                            stored_channel_id.clone(),
-                        ),
-                    )
-                    .await;
-                    match ensure_result {
-                        Ok(Ok(_)) => {
-                            tracing::debug!(conversation_id = %conversation_id, "Conversation ensured (sync)");
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!(
-                                error = %e,
-                                conversation_id = %conversation_id,
-                                "Failed to ensure conversation (sync), Storage Writer will use UPSERT as fallback"
-                            );
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                conversation_id = %conversation_id,
-                                "Timeout ensuring conversation (2s), Storage Writer will use UPSERT as fallback"
-                            );
-                        }
-                    }
-                }
-            }
-            SessionCreationMode::Async => {
-                let tenant_id_str = ctx.tenant_id().unwrap_or("0");
-                if let Err(e) = self
-                    .publisher
-                    .publish_conversation_ensure(
-                        &conversation_id,
-                        tenant_id_str,
-                        &conversation_type,
-                        &business_type,
-                        participants,
-                        stored_channel_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        conversation_id = %conversation_id,
-                        "Failed to publish conversation.ensure event (async), Conversation service may create on demand"
-                    );
-                } else {
-                    tracing::debug!(
-                        conversation_id = %conversation_id,
-                        "Published conversation.ensure event (async)"
-                    );
-                }
-            }
-        }
-
-        // Decorator 模式：对消息做增强（已读标记、@提及等）后再构建推送
-        submission.message = self
-            .message_decorator
-            .decorate(submission.message.clone())
-            .await
-            .context("Message decorator failed")?;
-
-        // 构建推送任务
-        let push_request = self.build_push_request(&submission, &profile)?;
-
-        // 最终一致性语义：存储与推送并行分发，降低端到端延迟。
-        // 若任一分发失败则本次返回错误，由上层重试/补偿。
-        let _kafka_span = create_span("message-orchestrator", "kafka_produce");
-        let storage_payload = StorageMessagePayload::from(&submission.kafka_payload);
-        self.publisher
-            .publish_both(ctx, storage_payload, push_request)
-            .await
-            .context("Failed to publish message")?;
-
-        // 让 _kafka_span 离开作用域以结束 span
-
-        let record = build_message_record(&submission, &submission.message);
-        let post_draft =
-            draft_from_submission(&submission).context("Failed to build draft from submission")?;
-
-        // 执行 PostSend Hook（使用hook_context，确保tenant_id正确）
-        self.hooks
-            .post_send(&hook_context, &record, &post_draft)
-            .await
-            .context("PostSend hook failed")?;
-
-        Ok((submission.message_id, submission.message.seq))
+        
+        Ok((submission, profile))
     }
 
-    /// 构建推送请求
+    /// 写入 WAL（如果需要）
     ///
-    /// 优化：优先使用 receiver_id 和 channel_id，避免查询会话服务
-    fn build_push_request(
+    /// # 参数
+    /// - `submission`: 消息提交
+    /// - `profile`: 消息配置
+    ///
+    /// # 返回
+    /// - `Ok(())`: 成功
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %submission.message.conversation_id,
+        message_id = %submission.message_id,
+    ))]
+    pub async fn write_wal_if_needed(
         &self,
         submission: &MessageSubmission,
         profile: &MessageProfile,
-    ) -> Result<PushMessageRequest> {
-        // 提取接收者ID列表（优先使用 receiver_id 和 channel_id）
-        let mut user_ids = Vec::new();
-
-        if let Ok(conversation_type) =
-            flare_proto::common::ConversationType::try_from(submission.message.conversation_type)
-        {
-            match conversation_type {
-                flare_proto::common::ConversationType::Single => {
-                    // 单聊：优先使用 receiver_id，性能最优
-                    if !submission.message.channel_id.is_empty() {
-                        user_ids.push(submission.message.channel_id.clone());
-                        tracing::debug!(
-                            "Single chat message using channel_id: conversation_id={}, sender_id={}, channel_id={}",
-                            submission.message.conversation_id,
-                            submission.message.sender_id,
-                            submission.message.channel_id
-                        );
-                    } else {
-                        // receiver_id 为空，降级到从 conversation_id 提取（向后兼容）
-                        tracing::warn!(
-                            "Single chat message missing receiver_id, falling back to conversation_id extraction. conversation_id={}, sender_id={}",
-                            submission.message.conversation_id,
-                            submission.message.sender_id
-                        );
-                        if let Some(participants) = self.extract_participants_from_conversation_id(
-                            &submission.message.conversation_id,
-                            &submission.message.sender_id,
-                        ) {
-                            user_ids = participants;
-                        }
-                    }
-                }
-                flare_proto::common::ConversationType::Group
-                | flare_proto::common::ConversationType::Channel
-                | flare_proto::common::ConversationType::Ai
-                | flare_proto::common::ConversationType::Customer
-                | flare_proto::common::ConversationType::System
-                | flare_proto::common::ConversationType::Temp => {
-                    // 群/频道/AI/客服/系统/临时：成员由推送侧按 conversation_id 解析，user_ids 留空
-                    tracing::debug!(
-                        "Non-direct message. Push worker will resolve members. conversation_id={}",
-                        submission.message.conversation_id
-                    );
-                }
-                flare_proto::common::ConversationType::Unspecified => {}
-            }
+    ) -> Result<()> {
+        if profile.needs_wal() {
+            let _wal_span = create_span("message-domain", "wal_write");
+            self.wal_repository
+                .append(submission)
+                .await
+                .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to append WAL entry: {}", e)))?;
         }
-
-        // 克隆消息并清理字段，确保所有字符串字段都是有效的 UTF-8
-        // 这是为了避免 Protobuf 解码错误
-        let mut message_for_push = submission.message.clone();
-
-        // 验证单聊时 channel_id（对方 user_id）在克隆后仍然存在
-        if message_for_push.conversation_type
-            == flare_proto::common::ConversationType::Single as i32
-        {
-            if message_for_push.channel_id.is_empty() {
-                tracing::error!(
-                    message_id = %message_for_push.server_id,
-                    conversation_id = %message_for_push.conversation_id,
-                    sender_id = %message_for_push.sender_id,
-                    "Single chat message missing channel_id after clone"
-                );
-                anyhow::bail!(
-                    "Single chat message must provide channel_id (receiver). message_id={}, conversation_id={}, sender_id={}",
-                    message_for_push.server_id,
-                    message_for_push.conversation_id,
-                    message_for_push.sender_id
-                );
-            }
-        }
-
-        // 清理字符串字段，确保它们是有效的 UTF-8 字符串
-        // 注意：新版 Message 结构已移除 sender_platform_id、sender_nickname、sender_avatar_url、group_id 等字段
-        // 这些信息现在通过 attributes 或 extra 字段存储
-        // 但 channel_id、conversation_id 等仍是 Message 的字段，必须保留
-        message_for_push.client_msg_id =
-            String::from_utf8_lossy(message_for_push.client_msg_id.as_bytes()).to_string();
-        if let Some(rr) = message_for_push.extra.get("recall_reason").cloned() {
-            message_for_push.extra.insert(
-                "recall_reason".to_string(),
-                String::from_utf8_lossy(rr.as_bytes()).to_string(),
-            );
-        }
-
-        // 验证消息大小，防止异常大的消息
-        // 先序列化消息以计算大小
-        let message_bytes = message_for_push.encode_to_vec();
-        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
-        if message_bytes.len() > MAX_MESSAGE_SIZE {
-            anyhow::bail!(
-                "Message size {} bytes exceeds maximum allowed size {} bytes",
-                message_bytes.len(),
-                MAX_MESSAGE_SIZE
-            );
-        }
-
-        // Builder 模式（ARCHITECTURE_REFACTOR §3）：使用 flare_im_core::abstractions::builders::PushMessageRequestBuilder 组装
-        let push_options = PushOptions {
-            require_online: profile.processing_type()
-                == crate::domain::model::message_kind::MessageProcessingType::Notification,
-            persist_if_offline: profile.processing_type()
-                == crate::domain::model::message_kind::MessageProcessingType::Normal,
-            priority: 5, // 默认优先级
-            metadata: std::collections::HashMap::new(),
-            channel: String::new(),
-            mute_when_quiet: false,
-        };
-
-        Ok(PushMessageRequestBuilder::new()
-            .user_ids(user_ids)
-            .message(Some(message_for_push))
-            .options(Some(push_options))
-            .build())
+        Ok(())
     }
 
-    /// 从会话ID中提取参与者
-    ///
-    /// 注意：新格式（1-{hash}）无法从哈希反推用户ID，需要查询会话服务获取参与者
+    /// 装饰消息
     ///
     /// # 参数
-    /// * `conversation_id` - 会话ID（格式：1-{hash}）
-    /// * `sender_id` - 发送者ID（用于过滤）
+    /// - `message`: 原始消息
     ///
     /// # 返回
-    /// * `None` - 新格式无法直接解析，需要查询会话服务
-    fn extract_participants_from_conversation_id(
+    /// - `Ok(decorated_message)`: 装饰后的消息
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_id = %message.server_id,
+    ))]
+    pub async fn decorate_message(&self, message: Message) -> Result<Message> {
+        self.message_decorator
+            .decorate(message)
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Message decorator failed: {}", e)))
+    }
+
+    /// 获取接收者用户 ID 列表
+    ///
+    /// # 参数
+    /// - `ctx`: 上下文
+    /// - `message`: 消息
+    ///
+    /// # 返回
+    /// - `Ok(recipient_user_ids)`: 接收者用户 ID 列表
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+    ))]
+    pub async fn get_recipient_user_ids(&self, ctx: &Ctx, message: &Message) -> Result<Vec<String>> {
+        use crate::domain::model::ConversationType;
+        let conversation_type = ConversationType::from_proto(message.conversation_type);
+        
+        self.recipient_repository
+            .get_message_recipients(
+                ctx,
+                &message.conversation_id,
+                conversation_type,
+                if message.channel_id.is_empty() { None } else { Some(&message.channel_id) },
+                &message.sender_id,
+            )
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to get message recipients: {}", e)))
+    }
+
+    /// 仅推送消息（不持久化），接收者由调用方显式提供
+    ///
+    /// 适用于上游已完成路由决策的场景，避免重复成员查询。
+    #[instrument(skip(self, recipient_user_ids), fields(
+        conversation_id = %message.conversation_id,
+        message_id = %message.server_id,
+        recipient_count = recipient_user_ids.len(),
+    ))]
+    pub async fn push_only_with_recipients(
         &self,
-        _conversation_id: &str,
-        _sender_id: &str,
-    ) -> Option<Vec<String>> {
-        // 新格式（1-{hash}）无法从哈希反推用户ID，返回None
-        // 调用方需要查询会话服务获取参与者
-        None
+        ctx: &Ctx,
+        message: Message,
+        recipient_user_ids: Vec<String>,
+    ) -> Result<()> {
+        tracing::debug!(
+            conversation_id = %message.conversation_id,
+            message_id = %message.server_id,
+            recipient_count = recipient_user_ids.len(),
+            "Pushing message only (no persistence)"
+        );
+
+        let conversation_id = message.conversation_id.clone();
+        self.push_repository
+            .push_only_message(
+                ctx,
+                message,
+                recipient_user_ids,
+                conversation_id,
+            )
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish push-only message to MQ: {}", e)))
+    }
+
+    /// 仅推送消息（不持久化），由服务内部自动解析接收者
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_id = %message.server_id,
+    ))]
+    pub async fn push_only(
+        &self,
+        ctx: &Ctx,
+        message: Message,
+    ) -> Result<()> {
+        let recipient_user_ids = self.get_recipient_user_ids(ctx, &message).await?;
+        self.push_only_with_recipients(ctx, message, recipient_user_ids)
+            .await
+    }
+
+    /// 仅持久化消息（不推送）
+    ///
+    /// 用于主队列二段处理：
+    /// - 已在上游完成收件人路由决策
+    /// - 只需投递到存储队列落库
+    /// - 不应再次做实时推送，避免重复下行
+    ///
+    /// # 参数
+    /// - `ctx`: 上下文
+    /// - `message`: 消息
+    /// - `recipient_user_ids`: 接收者用户 ID 列表
+    ///
+    /// # 返回
+    /// - `Ok(())`: 成功
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_id = %message.server_id,
+    ))]
+    pub async fn persistence_only(
+        &self,
+        ctx: &Ctx,
+        message: Message,
+        _recipient_user_ids: Vec<String>,
+    ) -> Result<()> {
+        tracing::debug!(
+            conversation_id = %message.conversation_id,
+            message_id = %message.server_id,
+            "Persisting message only (no push)"
+        );
+
+        let conversation_id = message.conversation_id.clone();
+        self.push_repository
+            .persistence_only_message(
+                ctx,
+                message,
+                conversation_id,
+            )
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish persistence-only message to MQ: {}", e)))
+    }
+
+    /// 推送消息
+    ///
+    /// # 参数
+    /// - `ctx`: 上下文
+    /// - `submission`: 消息提交
+    /// - `profile`: 消息配置
+    /// - `persistence_mode`: 持久化模式
+    ///
+    /// # 返回
+    /// - `Ok(())`: 成功
+    /// - `Err`: 错误
+    #[instrument(skip(self), fields(
+        conversation_id = %submission.message.conversation_id,
+        message_id = %submission.message_id,
+        message_type = profile.message_type_label(),
+    ))]
+    pub async fn push_message(
+        &self,
+        ctx: &Ctx,
+        submission: &MessageSubmission,
+        profile: &MessageProfile,
+        persistence_mode: PersistenceMode,
+    ) -> Result<()> {
+        let should_push_only = persistence_mode.should_push_only(profile.is_temporary());
+        if should_push_only {
+            return self.push_only(ctx, submission.message.clone()).await;
+        }
+
+        let recipient_user_ids = self.get_recipient_user_ids(ctx, &submission.message).await?;
+        tracing::debug!(
+            conversation_id = %submission.message.conversation_id,
+            message_id = %submission.message_id,
+            message_type = profile.message_type_label(),
+            persistence_mode = ?persistence_mode,
+            "Publishing message (persistence + push)"
+        );
+
+        self.push_repository
+            .publish_message(
+                ctx,
+                submission.message.clone(),
+                recipient_user_ids,
+                submission.message.conversation_id.clone(),
+            )
+            .await
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish message to MQ: {}", e)))
     }
 }

@@ -6,13 +6,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::signaling::online::{GetOnlineStatusResponse, OnlineStatus};
+use flare_grpc_proto::signaling::online::{GetOnlineStatusResponse, OnlineStatus};
 use prost_types::Timestamp;
 use tracing::instrument;
 
 use crate::application::queries::GetOnlineStatusQuery;
 use crate::domain::model::OnlineStatusRecord;
+use crate::error::Result;
 /// 在线状态查询处理器（查询侧）
 ///
 /// 直接调用基础设施层的仓储实现，不经过领域服务
@@ -70,7 +70,6 @@ impl<R: crate::domain::repository::ConversationRepository + Send + Sync> OnlineQ
 
         Ok(GetOnlineStatusResponse {
             statuses: result,
-            status: crate::util::rpc_status_ok(),
         })
     }
 }

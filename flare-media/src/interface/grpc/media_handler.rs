@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use flare_proto::common::StatusOnlyResponse;
-use flare_proto::media::media_service_server::MediaService;
-use flare_proto::media::upload_file_request;
-use flare_proto::media::{
+use flare_grpc_proto::media::media_service_server::MediaService;
+use flare_grpc_proto::media::upload_file_request;
+use flare_grpc_proto::media::{
     AbortMultipartUploadRequest, AbortMultipartUploadResponse, CleanupOrphanedAssetsRequest,
     CleanupOrphanedAssetsResponse, CompleteMultipartUploadRequest, CreateReferenceRequest,
     CreateReferenceResponse, DeleteFileRequest, DeleteFileResponse, DeleteReferenceRequest,
@@ -15,7 +14,7 @@ use flare_proto::media::{
     ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest, UploadFileRequest,
     UploadFileResponse, UploadMultipartChunkRequest, UploadMultipartChunkResponse,
 };
-use flare_server_core::error::ok_status;
+use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
 use prost_types::Timestamp;
 use tokio_stream::StreamExt;
@@ -90,13 +89,13 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_upload_file(&ctx, upload_metadata, payload)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         // 上传完成后，返回预签名URL
         let presigned = self
             .query_handler
             .handle_get_file_url(
                 &ctx,
-                flare_proto::media::GetFileUrlRequest {
+                flare_grpc_proto::media::GetFileUrlRequest {
                     file_id: metadata.file_id.clone(),
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
@@ -104,7 +103,7 @@ impl MediaService for MediaGrpcHandler {
                 },
             )
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(UploadFileResponse {
             file_id: metadata.file_id.clone(),
             url: presigned.url,
@@ -112,7 +111,6 @@ impl MediaService for MediaGrpcHandler {
             info: Some(to_proto_file_info(&metadata)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -127,7 +125,7 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_initiate_multipart_upload(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         Ok(Response::new(InitiateMultipartUploadResponse {
             upload_id: session.upload_id,
@@ -135,7 +133,6 @@ impl MediaService for MediaGrpcHandler {
             expires_at: Some(to_proto_timestamp(session.expires_at)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -151,7 +148,7 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_upload_multipart_chunk(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         Ok(Response::new(UploadMultipartChunkResponse {
             upload_id: session.upload_id,
@@ -160,7 +157,6 @@ impl MediaService for MediaGrpcHandler {
             expires_at: Some(to_proto_timestamp(session.expires_at)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -175,13 +171,13 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_complete_multipart_upload(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         // 完成分片上传后也返回预签名URL
         let presigned = self
             .query_handler
             .handle_get_file_url(
                 &ctx,
-                flare_proto::media::GetFileUrlRequest {
+                flare_grpc_proto::media::GetFileUrlRequest {
                     file_id: metadata.file_id.clone(),
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
@@ -189,7 +185,7 @@ impl MediaService for MediaGrpcHandler {
                 },
             )
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(UploadFileResponse {
             file_id: metadata.file_id.clone(),
             url: presigned.url,
@@ -197,7 +193,6 @@ impl MediaService for MediaGrpcHandler {
             info: Some(to_proto_file_info(&metadata)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -211,12 +206,11 @@ impl MediaService for MediaGrpcHandler {
         self.command_handler
             .handle_abort_multipart_upload(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         Ok(Response::new(AbortMultipartUploadResponse {
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -267,13 +261,12 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_attach_reference(&ctx, &req.file_id, scope, metadata)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         Ok(Response::new(CreateReferenceResponse {
             info: Some(to_proto_file_info(&file_metadata)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -299,13 +292,12 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_release_reference(&ctx, &req.file_id, reference_id)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         Ok(Response::new(DeleteReferenceResponse {
             info: Some(to_proto_file_info(&metadata)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -325,7 +317,7 @@ impl MediaService for MediaGrpcHandler {
             .query_handler
             .handle_list_references(&ctx, &req.file_id)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         let references_proto = references
             .iter()
@@ -337,7 +329,6 @@ impl MediaService for MediaGrpcHandler {
             pagination: None,
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -353,7 +344,7 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_cleanup_orphaned_assets(&ctx)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
 
         let scanned = cleaned.len() as u32;
         Ok(Response::new(CleanupOrphanedAssetsResponse {
@@ -361,7 +352,6 @@ impl MediaService for MediaGrpcHandler {
             success: true,
             error_message: String::new(),
             scanned,
-            status: Some(ok_status()),
         }))
     }
 
@@ -376,14 +366,13 @@ impl MediaService for MediaGrpcHandler {
             .query_handler
             .handle_get_file_url(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(GetFileUrlResponse {
             url: presigned.url,
             cdn_url: presigned.cdn_url,
             expires_at: Some(to_proto_timestamp(presigned.expires_at)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -398,12 +387,11 @@ impl MediaService for MediaGrpcHandler {
             .query_handler
             .handle_get_file_info(&ctx, &req.file_id)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(GetFileInfoResponse {
             info: Some(to_proto_file_info(&metadata)),
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -417,11 +405,10 @@ impl MediaService for MediaGrpcHandler {
         self.command_handler
             .handle_delete_file(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(DeleteFileResponse {
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -436,14 +423,13 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_process_image(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(ProcessImageResponse {
             processed_file_id: result.file_id,
             url: result.url,
             cdn_url: result.cdn_url,
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
@@ -458,21 +444,20 @@ impl MediaService for MediaGrpcHandler {
             .command_handler
             .handle_process_video(&ctx, req)
             .await
-            .map_err(status_internal)?;
+            .into_grpc()?;
         Ok(Response::new(ProcessVideoResponse {
             processed_file_id: result.file_id,
             url: result.url,
             cdn_url: result.cdn_url,
             success: true,
             error_message: String::new(),
-            status: Some(ok_status()),
         }))
     }
 
     async fn set_object_acl(
         &self,
         _request: Request<SetObjectAclRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         Err(unimplemented_status("SetObjectAcl"))
     }
 

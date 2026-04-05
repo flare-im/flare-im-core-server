@@ -8,7 +8,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use base64::Engine;
 use reqwest::Client;
 
-use flare_im_core::hooks::hook_context_data::{HookContextData, get_hook_context_data};
+use flare_im_core::hooks::hook_context_data::get_hook_context_data;
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
@@ -157,7 +157,7 @@ impl WebhookHookAdapter {
         &self,
         ctx: &Context,
         record: &MessageRecord,
-        draft: &MessageDraft,
+        _draft: &MessageDraft,
     ) -> Result<()> {
         use serde_json::json;
         use std::time::{SystemTime, UNIX_EPOCH};

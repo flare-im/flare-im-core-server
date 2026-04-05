@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
-use flare_proto::access_gateway::PushOptions;
-use flare_proto::common::{Message, MessagePush};
+use flare_grpc_proto::access_gateway::PushOptions;
+use flare_proto::common::{Event, EventEnvelope, Message, MessagePush};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use prost::Message as ProstMessage;
 use tracing::{info, instrument};
@@ -174,6 +174,54 @@ impl PushDomainService {
                 pushed = ok,
                 failed = fail,
                 "push_message: MessagePush delivered"
+            );
+            out.push((user_id.clone(), ok, fail, 0));
+        }
+        Ok(out)
+    }
+
+    /// 将领域事件批下行给多个用户：载荷为 `EventEnvelope` 编码字节（与客户端 SDK `ProtobufCodec::decode_server` 一致，走 `PayloadCommand::Message` 内层解码）。
+    ///
+    /// 返回 `(user_id, pushed_device_count, failed_count, offline_pending_count)` 与 [`Self::push_message_push_to_users`] 对齐。
+    #[instrument(skip(self, tx, events), fields(user_count = user_ids.len(), event_count = events.len()))]
+    pub async fn push_event_envelope_to_users(
+        &self,
+        tx: &Ctx,
+        user_ids: &[String],
+        events: Vec<Event>,
+        options: &PushOptions,
+    ) -> Result<Vec<(String, i32, i32, i32)>> {
+        let max_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
+        let envelope = EventEnvelope {
+            events,
+            max_seq,
+            has_more: false,
+            next_cursor: String::new(),
+            window_id: String::new(),
+        };
+        let mut payload = Vec::new();
+        envelope.encode(&mut payload).map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "encode EventEnvelope failed")
+                .details(e.to_string())
+                .build_error()
+        })?;
+
+        let mut out = Vec::with_capacity(user_ids.len());
+        for user_id in user_ids {
+            let connections = self.get_filtered_connections(tx, user_id, options).await?;
+            if connections.is_empty() {
+                info!(user_id = %user_id, "push_event: user has no matching online connection");
+                out.push((user_id.clone(), 0, 0, 1));
+                continue;
+            }
+            let (ok, fail) = self
+                .push_to_connections(tx, user_id, &connections, &payload)
+                .await?;
+            info!(
+                user_id = %user_id,
+                pushed = ok,
+                failed = fail,
+                "push_event: EventEnvelope delivered"
             );
             out.push((user_id.clone(), ok, fail, 0));
         }

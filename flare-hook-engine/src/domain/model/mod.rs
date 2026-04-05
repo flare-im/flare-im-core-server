@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use flare_im_core::{
-    DeliveryEvent, HookErrorPolicy, HookGroup, HookMetadata, MessageDraft, MessageRecord,
-    PreSendDecision, PreSendHook, RecallEvent,
+    DeliveryEvent, HookGroup, HookMetadata, MessageDraft, MessageRecord, PreSendDecision,
+    PreSendHook, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
 

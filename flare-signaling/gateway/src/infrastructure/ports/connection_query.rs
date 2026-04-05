@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use flare_core::server::connection::ConnectionManagerTrait;
 use flare_im_core::Ctx;
 use flare_server_core::context::Context;
-use flare_server_core::error::Result;
+use flare_im_core::error::Result;
 
 use super::connection_port::core_info_to_domain;
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;

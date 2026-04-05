@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_server_core::context::Context;
+
+use crate::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
 use tracing::{debug, info};
 
 use crate::application::commands::{
@@ -16,7 +17,7 @@ use crate::application::queries::{
 use crate::domain::service::DefaultConversationDomainService;
 use crate::domain::service::conversation_domain_service::ConversationBootstrapOutput;
 use crate::infrastructure::persistence::PostgresConversationRepository;
-use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
+use crate::infrastructure::rpc::StorageReaderClient;
 
 /// 会话命令处理器
 ///
@@ -37,10 +38,7 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: BatchAcknowledgeCommand,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -63,7 +61,7 @@ impl ConversationCommandHandler {
         command: CreateConversationCommand,
     ) -> Result<crate::domain::model::Conversation> {
         debug!(
-            conversation_type = %command.conversation_type,
+            conversation_type = command.conversation_type.as_int(),
             business_type = %command.business_type,
             "Handling create session command"
         );
@@ -111,10 +109,7 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: ForceConversationSyncCommand,
     ) -> Result<Vec<String>> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -164,10 +159,7 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: UpdateCursorCommand,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -189,10 +181,7 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: MarkConversationAsReadCommand,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -214,10 +203,7 @@ impl ConversationCommandHandler {
         ctx: &Context,
         command: UpdatePresenceCommand,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -277,7 +263,7 @@ pub struct ConversationQueryHandler {
 impl ConversationQueryHandler {
     pub fn new(
         _conversation_repo: Arc<PostgresConversationRepository>,
-        _message_provider: Option<Arc<StorageReaderMessageProvider>>,
+        _message_provider: Option<Arc<StorageReaderClient>>,
         domain_service: Arc<DefaultConversationDomainService>,
     ) -> Self {
         Self { domain_service }
@@ -293,10 +279,7 @@ impl ConversationQueryHandler {
         Option<String>,
         bool,
     )> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,
@@ -319,12 +302,12 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: GetConversationDetailQuery,
     ) -> Result<crate::domain::model::Conversation> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
         if query.conversation_id.trim().is_empty() {
-            anyhow::bail!("GET_CONV_DETAIL_BAD_REQUEST");
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "conversation_id is required")
+                    .build_error(),
+            );
         }
 
         let Some(conv) = self
@@ -332,12 +315,18 @@ impl ConversationQueryHandler {
             .get_conversation(ctx, query.conversation_id.trim())
             .await?
         else {
-            anyhow::bail!("GET_CONV_DETAIL_NOT_FOUND");
+            return Err(
+                ErrorBuilder::new(ErrorCode::MessageNotFound, "conversation not found")
+                    .build_error(),
+            );
         };
 
         let member = conv.participants.iter().any(|p| p.user_id == user_id);
         if !member {
-            anyhow::bail!("GET_CONV_DETAIL_NOT_FOUND");
+            return Err(
+                ErrorBuilder::new(ErrorCode::MessageNotFound, "conversation not found")
+                    .build_error(),
+            );
         }
 
         Ok(conv)
@@ -370,10 +359,7 @@ impl ConversationQueryHandler {
         ctx: &Context,
         query: ConversationBootstrapQuery,
     ) -> Result<ConversationBootstrapOutput> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required"))?
-            .to_string();
+        let user_id = require_user_id(ctx)?;
 
         debug!(
             user_id = %user_id,

@@ -1,60 +1,84 @@
+//! 离线推送消费者 - 处理 TOPIC_PUSH_OFFLINE 中的 PushTaskEnvelope 消息
+//!
+//! ## 核心职责
+//! 1. 消费 TOPIC_PUSH_OFFLINE 中的 PushTaskEnvelope 消息
+//! 2. 处理离线推送逻辑（当前为占位实现）
+//!
+//! ## 设计原则
+//! - Interface 层：负责 MQ 消息的接收和反序列化
+//! - 上下文重建：从 MQ headers 中提取追踪信息
+
 use std::sync::Arc;
 
-use flare_im_core::event::types::types;
 use flare_proto::common::PushTaskEnvelope;
-use flare_server_core::context::Ctx;
-use flare_server_core::event_bus::EventEnvelope;
-use flare_server_core::event_bus::EventHandler;
-use flare_server_core::{FlareError, Result};
+use flare_server_core::mq::consumer::{
+    MessageHandler, Message, MessageResult, ConsumerError,
+};
 use prost::Message as _;
-use tracing::{error, info};
+use tracing::instrument;
 
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 
-pub struct OfflinePushTaskHandler {
+/// 离线推送消费者处理器
+pub struct OfflinePushHandler {
+    #[allow(dead_code)]
     dlq: Arc<DlqPublisher>,
 }
 
-impl OfflinePushTaskHandler {
+impl OfflinePushHandler {
     pub fn new(dlq: Arc<DlqPublisher>) -> Self {
         Self { dlq }
+    }
+
+    fn decode_task_envelope(message: &Message) -> Result<PushTaskEnvelope, ConsumerError> {
+        PushTaskEnvelope::decode(message.payload.as_slice())
+            .map_err(|e| ConsumerError::Deserialization(format!("PushTaskEnvelope: {}", e)))
     }
 }
 
 #[async_trait::async_trait]
-impl EventHandler for OfflinePushTaskHandler {
-    async fn handle(&self, ctx: &Ctx, event: EventEnvelope) -> Result<()> {
-        if event.event_type != types::SYSTEM {
-            error!(event_type = %event.event_type, "unexpected event_type, sending to dlq");
-            self.dlq
-                .publish(ctx, Some(event.partition_key.as_str()), event.payload)
-                .await
-                .map_err(|e| FlareError::general_error(e.to_string()))?;
-            return Ok(());
-        }
-        match PushTaskEnvelope::decode(event.payload.as_slice()) {
-            Ok(env) => {
-                info!(
-                    trace_id = %ctx.trace_id(),
-                    user_id = %env.user_id,
-                    tenant_id = %env.tenant_id,
-                    message_id = %env.message_id,
-                    conversation_id = %env.conversation_id,
-                    "[离线推送占位实现] offline task received"
-                );
-            }
-            Err(e) => {
-                error!(error = %e, "invalid push task envelope payload, sending to dlq");
-                self.dlq
-                    .publish(ctx, Some(event.partition_key.as_str()), event.payload)
-                    .await
-                    .map_err(|err| FlareError::general_error(err.to_string()))?;
-            }
-        }
-        Ok(())
+impl MessageHandler for OfflinePushHandler {
+    #[instrument(skip(self), fields(
+        topic = %message.context.topic,
+        partition = message.context.partition,
+        offset = message.context.offset,
+    ))]
+    async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
+        let envelope = Self::decode_task_envelope(&message)?;
+
+        let ctx = &message.context.ctx;
+
+        tracing::info!(
+            trace_id = %ctx.trace_id(),
+            user_id = %envelope.user_id,
+            tenant_id = %envelope.tenant_id,
+            message_id = %envelope.message_id,
+            conversation_id = %envelope.conversation_id,
+            "[离线推送占位实现] offline task received"
+        );
+
+        // TODO: 实现离线推送逻辑
+        Ok(MessageResult::Ack)
     }
 
     fn name(&self) -> &str {
-        "push_offline_handler"
+        "push-offline-handler"
+    }
+}
+
+/// 离线推送消费者工厂
+pub struct OfflinePushConsumerFactory;
+
+impl OfflinePushConsumerFactory {
+    pub fn create_handler(dlq: Arc<DlqPublisher>) -> Arc<dyn MessageHandler> {
+        Arc::new(OfflinePushHandler::new(dlq))
+    }
+
+    pub fn topic() -> &'static str {
+        flare_im_core::constants::topics::TOPIC_PUSH_OFFLINE
+    }
+
+    pub fn consumer_group() -> &'static str {
+        flare_im_core::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }

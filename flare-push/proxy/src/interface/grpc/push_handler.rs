@@ -2,10 +2,8 @@
 
 use std::sync::Arc;
 
-use flare_proto::RpcStatusExt;
-use flare_proto::common::RpcStatus;
-use flare_proto::push::push_service_server::PushService;
-use flare_proto::push::{
+use flare_grpc_proto::push::push_service_server::PushService;
+use flare_grpc_proto::push::{
     PushCustomRequest, PushCustomResponse, PushMessageRequest, PushMessageResponse,
     PushNotificationRequest, PushNotificationResponse, QueryPushStatusRequest,
     QueryPushStatusResponse,
@@ -54,7 +52,6 @@ impl PushService for PushServiceHandler {
                 failed_user_ids: vec![],
                 failures: vec![],
                 task_id: String::new(),
-                status: Some(RpcStatus::default()),
             }));
         }
         self.command_handler
@@ -72,7 +69,6 @@ impl PushService for PushServiceHandler {
             failed_user_ids: vec![],
             failures: vec![],
             task_id,
-            status: Some(RpcStatus::ok()),
         }))
     }
 
@@ -89,7 +85,6 @@ impl PushService for PushServiceHandler {
                 fail_count: 0,
                 failures: vec![],
                 task_id: String::new(),
-                status: Some(RpcStatus::default()),
             }));
         }
         self.command_handler
@@ -106,7 +101,6 @@ impl PushService for PushServiceHandler {
             fail_count: 0,
             failures: vec![],
             task_id,
-            status: Some(RpcStatus::ok()),
         }))
     }
 
@@ -124,7 +118,6 @@ impl PushService for PushServiceHandler {
                 failed_user_ids: vec![],
                 failures: vec![],
                 task_id: String::new(),
-                status: Some(RpcStatus::default()),
             }));
         }
         self.command_handler
@@ -142,7 +135,6 @@ impl PushService for PushServiceHandler {
             failed_user_ids: vec![],
             failures: vec![],
             task_id,
-            status: Some(RpcStatus::ok()),
         }))
     }
 
@@ -162,7 +154,6 @@ impl PushService for PushServiceHandler {
         Ok(Response::new(QueryPushStatusResponse {
             task_id: req.task_id,
             status,
-            rpc_status: Some(RpcStatus::ok()),
         }))
     }
 }

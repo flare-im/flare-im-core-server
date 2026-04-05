@@ -1,16 +1,16 @@
 //! 连接端口接口（领域层）
 //!
-//! 请求/响应类型与 [`flare_proto::signaling`]（`online` 服务）一致；网关基础设施实现见
+//! 请求/响应类型与 [`flare_grpc_proto::signaling`]（`online` 服务）一致；网关基础设施实现见
 //! [`crate::infrastructure::ports::connection_port::ConnectionRepository`]。
 
 use crate::domain::model::ConnectionInfo;
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::signaling::{
+use flare_grpc_proto::signaling::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
 };
-use flare_server_core::error::Result;
+use flare_im_core::error::Result;
 use std::collections::HashMap;
 
 #[async_trait]

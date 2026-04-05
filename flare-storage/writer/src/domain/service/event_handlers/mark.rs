@@ -2,7 +2,8 @@
 
 use crate::domain::model::{Event, MarkPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use anyhow::{Result, anyhow};
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::flare_err;
 
 use super::{EventContext, append_event_and_stream};
 
@@ -27,7 +28,7 @@ where
         MARK_TODO => "TODO",
         MARK_DONE => "DONE",
         MARK_CUSTOM => "CUSTOM",
-        _ => return Err(anyhow!("Invalid mark_type")),
+        _ => return Err(flare_err!(ErrorCode::InvalidParameter, "Invalid mark_type")),
     };
     let color = (!mark.color.is_empty()).then_some(mark.color.as_str());
     ctx.repo
@@ -41,6 +42,6 @@ where
             color,
             true,
         )
-        .await?;
+        .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     append_event_and_stream(ctx, message_id, event).await
 }

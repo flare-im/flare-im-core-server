@@ -1,7 +1,7 @@
 //! 领域事件 Payload 处理器（策略式分发）- 使用领域 Event，不依赖 proto
 
-use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_im_core::Ctx;
 
 use crate::domain::model::{Event, EventPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
@@ -41,7 +41,7 @@ where
 {
     ctx.repo
         .append_event(ctx.ctx, ctx.tenant_id, message_id, event)
-        .await?;
+        .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     if let Some(stream) = ctx.stream {
         let _ = stream.append_event_to_stream(ctx.ctx, event).await;
     }

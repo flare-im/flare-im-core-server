@@ -15,8 +15,8 @@ use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
-use flare_proto::hooks::hook_extension_client::HookExtensionClient;
-use flare_proto::hooks::{
+use flare_grpc_proto::hooks::hook_extension_client::HookExtensionClient;
+use flare_grpc_proto::hooks::{
     DeliveryHookRequest, PostSendHookRequest, PreSendHookRequest, RecallHookRequest,
 };
 use flare_server_core::client::set_context_metadata;
@@ -32,6 +32,7 @@ use crate::infrastructure::adapters::conversion::{
 use flare_server_core::{ServiceClient, ServiceDiscover};
 
 /// gRPC Hook适配器
+#[allow(dead_code)]
 pub struct GrpcHookAdapter {
     // 模式1: 直接地址模式（固定客户端）
     client: Option<Arc<Mutex<HookExtensionClient<Channel>>>>,
@@ -236,21 +237,11 @@ impl GrpcHookAdapter {
         if response.success {
             Ok(())
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
-            let error = response
-                .status
-                .map(|s| {
-                    ErrorBuilder::new(
-                        ErrorCode::from_u32(s.code as u32).unwrap_or(ErrorCode::GeneralError),
-                        &s.message,
-                    )
-                    .build_error()
-                })
-                .unwrap_or_else(|| {
-                    ErrorBuilder::new(ErrorCode::InternalError, "PostSend hook failed")
-                        .build_error()
-                });
-            Err(error.into())
+            use flare_im_core::error::ErrorCode;
+            Err(
+                flare_server_core::flare_err!(ErrorCode::InternalError, "PostSend hook failed")
+                    .into(),
+            )
         }
     }
 
@@ -277,21 +268,11 @@ impl GrpcHookAdapter {
         if response.success {
             Ok(())
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
-            let error = response
-                .status
-                .map(|s| {
-                    ErrorBuilder::new(
-                        ErrorCode::from_u32(s.code as u32).unwrap_or(ErrorCode::GeneralError),
-                        &s.message,
-                    )
-                    .build_error()
-                })
-                .unwrap_or_else(|| {
-                    ErrorBuilder::new(ErrorCode::InternalError, "Delivery hook failed")
-                        .build_error()
-                });
-            Err(error.into())
+            use flare_im_core::error::ErrorCode;
+            Err(
+                flare_server_core::flare_err!(ErrorCode::InternalError, "Delivery hook failed")
+                    .into(),
+            )
         }
     }
 

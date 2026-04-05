@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
-use prost::Message;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use serde_json::json;
 
@@ -35,7 +34,7 @@ impl RedisConversationRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .context("failed to open redis connection")
+            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
     }
 
     fn to_timestamp(seconds: i64) -> Option<DateTime<Utc>> {
@@ -60,11 +59,11 @@ impl ConversationRepository for RedisConversationRepository {
         let _: () = conn
             .set(&key, value.to_string())
             .await
-            .context("failed to store session")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .context("failed to set session ttl")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         Ok(())
     }
 
@@ -75,7 +74,10 @@ impl ConversationRepository for RedisConversationRepository {
     ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
-        let _: usize = conn.del(&key).await.context("failed to delete session")?;
+        let _: usize = conn
+            .del(&key)
+            .await
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         tracing::info!(conversation_id = %conversation_id.as_ref(), user_id = %user_id.as_ref(), "session removed from redis");
         Ok(())
     }
@@ -86,7 +88,7 @@ impl ConversationRepository for RedisConversationRepository {
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .context("failed to refresh session ttl")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         Ok(())
     }
 
@@ -98,10 +100,13 @@ impl ConversationRepository for RedisConversationRepository {
         let mut result = HashMap::new();
         for user_id in user_ids {
             let key = self.connection_key(user_id.as_str());
-            let value: Option<String> = conn.get(&key).await.context("failed to read session")?;
+            let value: Option<String> = conn
+                .get(&key)
+                .await
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
             if let Some(payload) = value {
-                let json: serde_json::Value =
-                    serde_json::from_str(&payload).context("failed to decode session json")?;
+                let json: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
                 let last_seen = json
                     .get("last_seen")
                     .and_then(|v| v.as_i64())
@@ -140,11 +145,14 @@ impl ConversationRepository for RedisConversationRepository {
     async fn get_user_connections(&self, user_id: &UserId) -> Result<Vec<Connection>> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
-        let value: Option<String> = conn.get(&key).await.context("failed to read session")?;
+        let value: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
         if let Some(payload) = value {
-            let json: serde_json::Value =
-                serde_json::from_str(&payload).context("failed to decode session json")?;
+            let json: serde_json::Value = serde_json::from_str(&payload)
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
             let conversation_id_str = json
                 .get("conversation_id")
@@ -234,11 +242,14 @@ impl ConversationRepository for RedisConversationRepository {
         // 未来如果需要支持多设备，可以扩展为Hash结构存储多个设备会话
         if let Some(device_ids) = device_ids {
             // 获取当前会话
-            let value: Option<String> = conn.get(&key).await.context("failed to read session")?;
+            let value: Option<String> = conn
+                .get(&key)
+                .await
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
             if let Some(payload) = value {
-                let json: serde_json::Value =
-                    serde_json::from_str(&payload).context("failed to decode session json")?;
+                let json: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
                 let current_device_id = json
                     .get("device_id")
@@ -247,12 +258,18 @@ impl ConversationRepository for RedisConversationRepository {
 
                 // 只删除匹配的设备
                 if device_ids.iter().any(|d| d.as_str() == current_device_id) {
-                    let _: usize = conn.del(&key).await.context("failed to delete session")?;
+                    let _: usize = conn
+                        .del(&key)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
                 }
             }
         } else {
             // 删除所有会话
-            let _: usize = conn.del(&key).await.context("failed to delete session")?;
+            let _: usize = conn
+                .del(&key)
+                .await
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         }
 
         Ok(())
@@ -300,7 +317,7 @@ impl RedisSubscriptionRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .context("failed to open redis connection")
+            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
     }
 }
 
@@ -311,22 +328,22 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         let _: () = conn
             .set(&key, "1")
             .await
-            .context("failed to store subscription")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .context("failed to set subscription ttl")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
         // 添加到主题订阅者集合
         let topic_key = self.topic_subscribers_key(&topic);
         let _: () = conn
             .sadd(&topic_key, &user_id)
             .await
-            .context("failed to add user to topic subscribers")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         let _: bool = conn
             .expire(&topic_key, self.config.redis_ttl_seconds as i64)
             .await
-            .context("failed to set topic subscribers ttl")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
         Ok(())
     }
@@ -346,14 +363,14 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
             let _: usize = conn
                 .del(&key)
                 .await
-                .context("failed to delete subscription")?;
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
             // 从主题订阅者集合中移除
             let topic_key = self.topic_subscribers_key(topic);
             let _: () = conn
                 .srem(&topic_key, &user_id)
                 .await
-                .context("failed to remove user from topic subscribers")?;
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         }
 
         Ok(())
@@ -374,7 +391,7 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
             .arg(&pattern)
             .query_async(&mut conn)
             .await
-            .context("failed to find user subscriptions")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
         let mut subscriptions = Vec::new();
         for key in keys {
@@ -393,7 +410,7 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         let subscribers: Vec<String> = conn
             .smembers(&key)
             .await
-            .context("failed to get topic subscribers")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         Ok(subscribers)
     }
 }
@@ -411,34 +428,34 @@ impl RedisPresencePublisher {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .context("failed to open redis connection")
+            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
     }
 }
 
 impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
     async fn publish_presence_event(
         &self,
-        event: flare_proto::signaling::online::PresenceEvent,
+        event: flare_grpc_proto::signaling::online::PresenceEvent,
     ) -> Result<()> {
         let mut conn = self.connection().await?;
         let payload = prost::Message::encode_to_vec(&event);
         let _: () = conn
             .publish("presence_events", payload)
             .await
-            .context("failed to publish presence event")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         Ok(())
     }
 
     async fn publish_user_presence_event(
         &self,
-        event: flare_proto::signaling::online::UserPresenceEvent,
+        event: flare_grpc_proto::signaling::online::UserPresenceEvent,
     ) -> Result<()> {
         let mut conn = self.connection().await?;
         let payload = prost::Message::encode_to_vec(&event);
         let _: () = conn
             .publish("user_presence_events", payload)
             .await
-            .context("failed to publish user presence event")?;
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         Ok(())
     }
 }

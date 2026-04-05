@@ -22,3 +22,4 @@ mod utils;
 
 pub use config::AccessGatewayConfig;
 pub use service::ApplicationBootstrap;
+pub mod error;

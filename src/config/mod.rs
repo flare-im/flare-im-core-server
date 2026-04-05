@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use flare_server_core::{Config, RegistryConfig};
+use crate::{Config, RegistryConfig, ServerConfig, ServiceConfig};
 use serde::Deserialize;
 use std::sync::OnceLock;
 use toml::Value;
@@ -1233,15 +1233,15 @@ fn merge_value(base: &mut Value, overlay: Value) {
 fn default_config() -> FlareAppConfig {
     FlareAppConfig {
         core: Config {
-            service: flare_server_core::ServiceConfig {
+            service: ServiceConfig {
                 name: "flare-im-core".to_string(),
                 version: "0.1.0".to_string(),
             },
-            server: flare_server_core::ServerConfig {
+            server: ServerConfig {
                 address: "0.0.0.0".to_string(),
                 port: 50051,
             },
-            registry: Some(flare_server_core::RegistryConfig {
+            registry: Some(RegistryConfig {
                 registry_type: "consul".to_string(),
                 endpoints: vec!["http://localhost:28500".to_string()],
                 namespace: "flare".to_string(),

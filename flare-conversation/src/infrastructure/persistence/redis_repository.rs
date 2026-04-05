@@ -1,20 +1,31 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
-    ConversationSort, ConversationSummary,
+    ConversationSort, ConversationSummary, ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
     config: Arc<ConversationConfig>,
+}
+
+fn redis_not_supported(method: &str) -> crate::error::FlareError {
+    ErrorBuilder::new(
+        ErrorCode::OperationNotSupported,
+        format!(
+            "RedisConversationRepository does not support {}. Use PostgresConversationRepository instead.",
+            method
+        ),
+    )
+    .build_error()
 }
 
 impl RedisConversationRepository {
@@ -23,7 +34,9 @@ impl RedisConversationRepository {
     }
 
     async fn connection(&self) -> Result<ConnectionManager> {
-        Ok(ConnectionManager::new(self.client.as_ref().clone()).await?)
+        ConnectionManager::new(self.client.as_ref().clone())
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis connection"))
     }
 
     fn session_state_key(&self, conversation_id: &str) -> String {
@@ -51,20 +64,18 @@ impl ConversationRepository for RedisConversationRepository {
         ctx: &flare_server_core::context::Context,
         client_cursor: &HashMap<String, i64>,
     ) -> Result<ConversationBootstrapResult> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
 
-        let cursor_key = self.user_cursor_key(user_id);
+        let cursor_key = self.user_cursor_key(&user_id);
         let mut server_cursor: HashMap<String, i64> = conn
             .hgetall::<_, HashMap<String, String>>(&cursor_key)
-            .await?
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hgetall user cursor"))?
             .into_iter()
             .filter_map(|(k, v)| v.parse::<i64>().ok().map(|ts| (k, ts)))
             .collect();
 
-        // merge client cursor hints to ensure we cover requested conversations
         for (conversation_id, ts) in client_cursor {
             server_cursor.entry(conversation_id.clone()).or_insert(*ts);
         }
@@ -76,14 +87,23 @@ impl ConversationRepository for RedisConversationRepository {
             let state: HashMap<String, String> = conn
                 .hgetall::<_, HashMap<String, String>>(&state_key)
                 .await
-                .with_context(|| format!("load session state {}", conversation_id))?;
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        format!("load session state {}", conversation_id),
+                    )
+                })?;
 
             if state.is_empty() {
                 continue;
             }
 
             let unread_key = self.session_unread_key(conversation_id);
-            let unread_raw: Option<String> = conn.hget(&unread_key, user_id.to_string()).await?;
+            let unread_raw: Option<String> = conn
+                .hget(&unread_key, user_id.clone())
+                .await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hget unread"))?;
             let unread: i32 = unread_raw
                 .and_then(|v| v.parse::<i32>().ok())
                 .unwrap_or_default();
@@ -94,7 +114,9 @@ impl ConversationRepository for RedisConversationRepository {
 
             let summary = ConversationSummary {
                 conversation_id: conversation_id.clone(),
-                conversation_type: state.get("conversation_type").cloned(),
+                conversation_type: ConversationType::from_db_optional(
+                    state.get("conversation_type").cloned(),
+                ),
                 business_type: state.get("business_type").cloned(),
                 last_message_id: state.get("last_message_id").cloned(),
                 last_message_time: last_ts.and_then(|ts| Utc.timestamp_millis_opt(ts).single()),
@@ -104,6 +126,7 @@ impl ConversationRepository for RedisConversationRepository {
                     .and_then(|v| v.parse::<i32>().ok()),
                 last_content_type: state.get("last_content_type").cloned(),
                 unread_count: unread,
+                last_read_seq: 0,
                 metadata: HashMap::new(),
                 server_cursor_ts: last_ts.or_else(|| server_cursor.get(conversation_id).copied()),
                 display_name: state.get("display_name").cloned(),
@@ -136,12 +159,13 @@ impl ConversationRepository for RedisConversationRepository {
         conversation_id: &str,
         ts: i64,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
-        let cursor_key = self.user_cursor_key(user_id);
-        let _: () = conn.hset(cursor_key, conversation_id, ts).await?;
+        let cursor_key = self.user_cursor_key(&user_id);
+        let _: () = conn
+            .hset(cursor_key, conversation_id, ts)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset cursor"))?;
         Ok(())
     }
 
@@ -150,9 +174,7 @@ impl ConversationRepository for RedisConversationRepository {
         _ctx: &flare_server_core::context::Context,
         _session: &Conversation,
     ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support create_conversation. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("create_conversation"))
     }
 
     async fn get_conversation(
@@ -160,9 +182,7 @@ impl ConversationRepository for RedisConversationRepository {
         _ctx: &flare_server_core::context::Context,
         _conversation_id: &str,
     ) -> Result<Option<Conversation>> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support get_conversation. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("get_conversation"))
     }
 
     async fn update_conversation(
@@ -170,9 +190,7 @@ impl ConversationRepository for RedisConversationRepository {
         _ctx: &flare_server_core::context::Context,
         _session: &Conversation,
     ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support update_conversation. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("update_conversation"))
     }
 
     async fn delete_conversation(
@@ -181,9 +199,7 @@ impl ConversationRepository for RedisConversationRepository {
         _conversation_id: &str,
         _hard_delete: bool,
     ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support delete_conversation. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("delete_conversation"))
     }
 
     async fn manage_participants(
@@ -194,9 +210,7 @@ impl ConversationRepository for RedisConversationRepository {
         _to_remove: &[String],
         _role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support manage_participants. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("manage_participants"))
     }
 
     async fn batch_acknowledge(
@@ -204,13 +218,14 @@ impl ConversationRepository for RedisConversationRepository {
         ctx: &flare_server_core::context::Context,
         cursors: &[(String, i64)],
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
-        let cursor_key = self.user_cursor_key(user_id);
+        let cursor_key = self.user_cursor_key(&user_id);
         for (conversation_id, ts) in cursors {
-            let _: () = conn.hset(&cursor_key, conversation_id, ts).await?;
+            let _: () = conn
+                .hset(&cursor_key, conversation_id, *ts)
+                .await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset batch ack"))?;
         }
         Ok(())
     }
@@ -223,9 +238,7 @@ impl ConversationRepository for RedisConversationRepository {
         _limit: usize,
         _offset: usize,
     ) -> Result<(Vec<ConversationSummary>, usize)> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support search_conversations. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("search_conversations"))
     }
 
     async fn mark_as_read(
@@ -234,9 +247,7 @@ impl ConversationRepository for RedisConversationRepository {
         _conversation_id: &str,
         _seq: i64,
     ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support mark_as_read. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("mark_as_read"))
     }
 
     async fn get_last_message_seq(
@@ -244,9 +255,7 @@ impl ConversationRepository for RedisConversationRepository {
         _ctx: &flare_server_core::context::Context,
         _conversation_id: &str,
     ) -> Result<Option<i64>> {
-        Err(anyhow::anyhow!(
-            "RedisConversationRepository does not support get_last_message_seq. Use PostgresConversationRepository instead."
-        ))
+        Err(redis_not_supported("get_last_message_seq"))
     }
 
     async fn get_unread_count(
@@ -254,13 +263,13 @@ impl ConversationRepository for RedisConversationRepository {
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
     ) -> Result<i32> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        // Redis repository 支持读取未读数（从缓存）
+        let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
         let unread_key = self.session_unread_key(conversation_id);
-        let unread_raw: Option<String> = conn.hget(&unread_key, user_id.to_string()).await?;
+        let unread_raw: Option<String> = conn
+            .hget(&unread_key, user_id.clone())
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hget unread"))?;
         let unread: i32 = unread_raw
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or_default();

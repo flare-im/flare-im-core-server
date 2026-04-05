@@ -6,13 +6,14 @@
 //! - 设备优先级管理（用于推送策略）
 //! - 链接质量排序（选择最优设备）
 
-use anyhow::Result;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::domain::model::{ConnectionQualityRecord, ConnectionRecord};
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{ConnectionId, UserId};
+use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::flare_err;
 
 /// 设备管理领域服务（泛型仓储，避免 `dyn` 异步 trait）
 pub struct DeviceManagerService<R: ConversationRepository + Send + Sync> {
@@ -26,8 +27,10 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
 
     /// 获取用户的所有在线设备会话
     pub async fn get_user_devices(&self, user_id: &str) -> Result<Vec<ConnectionRecord>> {
-        let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
-        let sessions = self.repository.get_user_connections(&uid).await?;
+        let uid = UserId::new(user_id.to_string())
+            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("invalid user_id: {}", e)))?;
+        let sessions = self.repository.get_user_connections(&uid).await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
         let records: Vec<ConnectionRecord> = sessions
             .into_iter()
             .map(|s| ConnectionRecord {

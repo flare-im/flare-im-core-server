@@ -18,6 +18,7 @@
 //! }
 //! ```
 
+pub mod adapter;
 pub mod grpc_connect;
 pub mod init;
 
@@ -41,8 +42,12 @@ pub use init::{
     init_from_registry_config, register_service_from_config,
     register_service_from_config_with_metadata, register_service_from_registry_config,
     register_service_from_registry_config_with_metadata, register_service_only,
-    register_service_only_with_metadata,
+    register_service_only_with_metadata, register_runtime_service_only,
+    register_runtime_service_only_with_metadata,
 };
+
+// 适配器
+pub use adapter::{ServiceRegistryAdapter, adapt_registry};
 
 // 类型别名，方便使用
 pub type Registry = ServiceRegistry;

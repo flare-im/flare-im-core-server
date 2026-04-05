@@ -5,7 +5,7 @@ use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
 use flare_server_core::kafka::KafkaProducerConfig;
 use flare_server_core::mq::kafka::KafkaConsumerConfig;
 
-use crate::domain::model::MessageDefaults;
+use crate::domain::model::{ConversationType, MessageDefaults};
 
 /// 会话生成模式：同步 gRPC 创建 vs 事件异步创建
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl SessionCreationMode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MessageOrchestratorConfig {
     pub kafka_bootstrap: String,
     pub kafka_timeout_ms: u64,
@@ -39,7 +39,7 @@ pub struct MessageOrchestratorConfig {
     pub wal_ttl_seconds: u64,
     pub default_tenant_id: Option<String>,
     pub default_business_type: String,
-    pub default_conversation_type: String,
+    pub default_conversation_type: i32,
     pub default_sender_type: String,
     pub reader_endpoint: Option<String>,
     pub hook_config: Option<String>,
@@ -157,7 +157,8 @@ impl MessageOrchestratorConfig {
             "MESSAGE_ORCHESTRATOR_DEFAULT_SESSION_TYPE",
             "STORAGE_DEFAULT_SESSION_TYPE",
         )
-        .unwrap_or_else(|| "single".to_string());
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(flare_proto::common::ConversationType::Single as i32);
 
         let default_sender_type = env_or_fallback(
             "MESSAGE_ORCHESTRATOR_DEFAULT_SENDER_TYPE",
@@ -244,9 +245,11 @@ impl MessageOrchestratorConfig {
     }
 
     pub fn defaults(&self) -> MessageDefaults {
+        let default_conversation_type = ConversationType::from_proto(self.default_conversation_type);
+
         MessageDefaults {
             default_business_type: self.default_business_type.clone(),
-            default_conversation_type: self.default_conversation_type.clone(),
+            default_conversation_type,
             default_sender_type: self.default_sender_type.clone(),
             default_tenant_id: self.default_tenant_id.clone(),
         }

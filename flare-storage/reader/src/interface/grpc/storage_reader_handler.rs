@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use flare_proto::storage::storage_reader_service_server::StorageReaderService;
-use flare_proto::storage::*;
+use flare_grpc_proto::storage::storage_reader_service_server::StorageReaderService;
+use flare_grpc_proto::storage::*;
 use tonic::{Request, Response, Status};
 use tracing::error;
 
-use crate::application::handlers::{MessageStorageQueryHandler, QueryMessagesResult};
+use crate::application::handlers::MessageStorageQueryHandler;
 use crate::application::queries::{
     GetMessageQuery, ListMessageTagsQuery, QueryMessagesBySeqQuery, QueryMessagesQuery,
     SearchMessagesQuery,
@@ -84,7 +84,6 @@ where
                         previous_cursor: String::new(),
                         total_size: result.total_size,
                     }),
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Err(err) => {
@@ -150,7 +149,6 @@ where
                     next_cursor: next_cursor.clone(),
                     has_more,
                     last_seq: last_seq.unwrap_or(0),
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Err(err) => {
@@ -211,7 +209,6 @@ where
                 Ok(Response::new(SearchMessagesResponse {
                     messages: proto_messages,
                     pagination,
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Err(err) => {
@@ -241,7 +238,6 @@ where
                 let proto_message = message.map(|msg| message_to_proto(&msg));
                 Ok(Response::new(GetMessageResponse {
                     message: proto_message,
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Err(err) => {
@@ -270,13 +266,11 @@ where
         {
             Ok(tags) => Ok(Response::new(ListMessageTagsResponse {
                 tags,
-                status: Some(flare_server_core::error::ok_status()),
             })),
             Err(err) => {
                 error!(error = ?err, "Failed to list message tags");
                 Ok(Response::new(ListMessageTagsResponse {
                     tags: vec![],
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
         }
@@ -290,7 +284,6 @@ where
         // TODO: 实现导出消息功能
         Ok(Response::new(ExportMessagesResponse {
             export_task_id: format!("export_{}", uuid::Uuid::new_v4()),
-            status: Some(flare_server_core::error::ok_status()),
         }))
     }
 
@@ -357,7 +350,6 @@ where
                     last_seq,
                     has_more,
                     next_cursor,
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Err(err) => {
@@ -387,14 +379,12 @@ where
                     max_seq,
                     last_message_id,
                     last_timestamp,
-                    status: Some(flare_server_core::error::ok_status()),
                 }))
             }
             Ok(None) => Ok(Response::new(GetConversationMessageHeadResponse {
                 max_seq: 0,
                 last_message_id: String::new(),
                 last_timestamp: None,
-                status: Some(flare_server_core::error::ok_status()),
             })),
             Err(err) => {
                 error!(error = ?err, "get_conversation_message_head failed");

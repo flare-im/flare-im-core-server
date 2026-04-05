@@ -19,6 +19,7 @@ pub const TOPIC_PUSH_EVENTS: &str = "push-events";
 pub const TOPIC_PUSH_NOTIFICATIONS: &str = "push-notifications";
 pub const TOPIC_PUSH_ACKS: &str = "push-acks";
 pub const TOPIC_PUSH_CUSTOM: &str = "push-custom";
+pub const TOPIC_PUSH_ENVELOPE: &str = "push-envelope"; // 统一推送信封 Topic
 
 // --- Push Server → Worker ---
 

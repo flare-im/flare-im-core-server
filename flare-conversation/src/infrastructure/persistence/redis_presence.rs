@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::{map_infra_error, ErrorCode, Result};
 use chrono::{TimeZone, Utc};
 use redis::{AsyncCommands, aio::ConnectionManager};
 
@@ -19,7 +19,9 @@ impl RedisPresenceRepository {
     }
 
     async fn connection(&self) -> Result<ConnectionManager> {
-        Ok(ConnectionManager::new(self.client.as_ref().clone()).await?)
+        ConnectionManager::new(self.client.as_ref().clone())
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis connection"))
     }
 
     fn device_key(&self, user_id: &str, device_id: &str) -> String {
@@ -34,14 +36,20 @@ impl RedisPresenceRepository {
 impl PresenceRepository for RedisPresenceRepository {
     async fn list_devices(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         user_id: &str,
     ) -> Result<Vec<DevicePresence>> {
         let mut conn = self.connection().await?;
         let mut devices = Vec::new();
-        let keys: Vec<String> = conn.keys(self.device_pattern(user_id)).await?;
+        let keys: Vec<String> = conn
+            .keys(self.device_pattern(user_id))
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis keys"))?;
         for key in keys {
-            let map: std::collections::HashMap<String, String> = conn.hgetall(&key).await?;
+            let map: std::collections::HashMap<String, String> = conn
+                .hgetall(&key)
+                .await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hgetall"))?;
             if let Some((_, device_id)) = key.rsplit_once(':') {
                 let state = map
                     .get("state")
@@ -65,7 +73,7 @@ impl PresenceRepository for RedisPresenceRepository {
 
     async fn update_presence(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         update: PresenceUpdate,
     ) -> Result<()> {
         let mut conn = self.connection().await?;
@@ -103,7 +111,10 @@ impl PresenceRepository for RedisPresenceRepository {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let _: () = conn.hset_multiple(&key, &field_refs).await?;
+        let _: () = conn
+            .hset_multiple(&key, &field_refs)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset_multiple"))?;
 
         Ok(())
     }

@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use flare_proto::common::Message;
-use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 // TODO: 暂时注释掉，等 local_cache 模块实现后再启用
@@ -239,9 +238,9 @@ impl MultiLevelMessageCache {
         start_time: i64,
         end_time: i64,
     ) -> Result<Option<Vec<Message>>> {
-        use chrono::{DateTime, Utc};
+        use chrono::DateTime;
 
-        let cache_key = format!("{}:{}:{}", conversation_id, start_time, end_time);
+        let _cache_key = format!("{}:{}:{}", conversation_id, start_time, end_time);
         let limit = 100; // 默认限制
 
         // 先查 L1 缓存
@@ -337,7 +336,7 @@ impl MultiLevelMessageCache {
     /// 使消息缓存失效 - 同时清理 L1 和 L2
     pub async fn invalidate_message(&self, conversation_id: &str, message_id: &str) {
         // 清理 L1 缓存
-        self.local_cache.invalidate_message(message_id).await;
+        let _ = self.local_cache.invalidate_message(message_id).await;
 
         // 异步清理 L2 缓存
         if let Some(ref redis_cache) = self.redis_cache {
@@ -358,7 +357,7 @@ impl MultiLevelMessageCache {
     /// 使会话缓存失效
     pub async fn invalidate_session(&self, conversation_id: &str) {
         // 清理 L1 缓存
-        self.local_cache.invalidate_session(conversation_id).await;
+        let _ = self.local_cache.invalidate_session(conversation_id).await;
 
         // 异步清理 L2 缓存
         if let Some(ref redis_cache) = self.redis_cache {

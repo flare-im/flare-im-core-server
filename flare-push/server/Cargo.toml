@@ -11,8 +11,10 @@ name = "flare-push-server"
 path = "cmd/main.rs"
 
 [dependencies]
-flare-server-core = { workspace = true, features = ["kafka"] }
+flare-server-core = { workspace = true, features = ["kafka", "grpc"] }
+flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
 flare-im-core = { path = "../..", features = ["tracing"] }
 flare-hook-engine = { path = "../../flare-hook-engine" }
 flare-core = { path = "../../../flare-core" }

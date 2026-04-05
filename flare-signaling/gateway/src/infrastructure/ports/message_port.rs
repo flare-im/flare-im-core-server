@@ -1,14 +1,15 @@
 //! [`IMessageCommandPort`]：经 Signaling **Router** `RouteMessage` 转发（与 `domain/ports/message_port.rs` 对应）
 //!
-//! 请求体为 [`flare_proto::common::Message`]；响应解码为 [`flare_proto::message::SendMessageResponse`] 并映射为 [`flare_proto::common::SendAck`]。
+//! 请求体为 [`flare_proto::common::Message`]；响应解码为 [`flare_grpc_proto::message::SendMessageResponse`] 并映射为 [`flare_proto::common::SendAck`]。
+//! 路由层错误仅通过 gRPC `Status` 表达；`RouteMessageResponse` / `SendMessageResponse` 不再携带 `RpcStatus`。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::{ErrorCode, Message, RpcStatus, SendAck};
-use flare_proto::message::SendMessageResponse;
-use flare_proto::signaling::router::{RouteMessageRequest, RouteOptions};
+use flare_proto::common::{ErrorCode, Message, SendAck};
+use flare_grpc_proto::message::SendMessageResponse;
+use flare_grpc_proto::signaling::router::{RouteMessageRequest, RouteOptions};
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode as ServerErrorCode, Result};
 use prost::Message as ProstMessage;
@@ -60,12 +61,6 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             })?
             .into_inner();
 
-        if let Some(st) = resp.status.as_ref()
-            && st.code != ErrorCode::Ok as i32
-        {
-            return Ok(send_ack_from_failure(&message, st.code, st.message.clone()));
-        }
-
         if resp.response_data.is_empty() {
             return Ok(send_ack_from_failure(
                 &message,
@@ -81,20 +76,12 @@ impl IMessageCommandPort for RouterMessageCommandPort {
                     .build_error()
             })?;
 
-        let status = send_resp
-            .status
-            .or(resp.status)
-            .unwrap_or_else(|| RpcStatus {
-                code: ErrorCode::Internal as i32,
-                message: "missing status".to_string(),
-                details: Vec::new(),
-                context: None,
-                localization_key: String::new(),
-                localization_params: Default::default(),
-            });
-
-        if status.code != ErrorCode::Ok as i32 || !send_resp.success {
-            return Ok(send_ack_from_failure(&message, status.code, status.message));
+        if !send_resp.success {
+            return Ok(send_ack_from_failure(
+                &message,
+                ErrorCode::Internal as i32,
+                "SendMessageResponse.success is false".to_string(),
+            ));
         }
 
         Ok(SendAck {

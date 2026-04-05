@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::infrastructure::adapters::hook_context_data::{HookContextData, set_hook_context_data};
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
-use flare_proto::hooks::{
+use flare_grpc_proto::hooks::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
 };
@@ -136,15 +136,13 @@ pub fn proto_to_pre_send_decision(
         }
         PreSendDecision::Continue
     } else {
-        // 如果不允许发送，从 status 构建错误
-        use flare_im_core::error::{ErrorBuilder, ErrorCode};
-        let error = if let Some(ref status) = response.status {
-            let code = ErrorCode::from_u32(status.code as u32).unwrap_or(ErrorCode::GeneralError);
-            ErrorBuilder::new(code, &status.message).build_error()
-        } else {
-            ErrorBuilder::new(ErrorCode::PermissionDenied, "Hook rejected the request")
-                .build_error()
-        };
+        // 如果不允许发送：proto 中不再携带 status，统一用 PermissionDenied。
+        // 额外信息可由 annotations 承载（若上游需要，可在此解析）。
+        use flare_im_core::error::ErrorCode;
+        let error = flare_server_core::flare_err!(
+            ErrorCode::PermissionDenied,
+            "Hook rejected the request"
+        );
         PreSendDecision::Reject { error }
     }
 }
@@ -154,17 +152,11 @@ pub fn proto_to_recall_decision(response: &RecallHookResponse) -> PreSendDecisio
     if response.allow {
         PreSendDecision::Continue
     } else {
-        use flare_im_core::error::{ErrorBuilder, ErrorCode};
-        let error = if let Some(ref status) = response.status {
-            let code = ErrorCode::from_u32(status.code as u32).unwrap_or(ErrorCode::GeneralError);
-            ErrorBuilder::new(code, &status.message).build_error()
-        } else {
-            ErrorBuilder::new(
-                ErrorCode::PermissionDenied,
-                "Hook rejected the recall request",
-            )
-            .build_error()
-        };
+        use flare_im_core::error::ErrorCode;
+        let error = flare_server_core::flare_err!(
+            ErrorCode::PermissionDenied,
+            "Hook rejected the recall request"
+        );
         PreSendDecision::Reject { error }
     }
 }

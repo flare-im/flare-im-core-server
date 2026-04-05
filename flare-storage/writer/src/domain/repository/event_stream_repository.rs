@@ -2,7 +2,7 @@
 
 use crate::domain::model::Event;
 use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 
 pub trait EventStreamRepository: Send + Sync {
     /// 追加一条领域事件到事件流（EVENT_MESSAGE / EVENT_MESSAGE_RECALL / ...）

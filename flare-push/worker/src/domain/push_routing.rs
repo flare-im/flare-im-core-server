@@ -2,12 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use flare_proto::access_gateway::{
+use flare_grpc_proto::access_gateway::{
     PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
     PushNotificationRequest, PushOptions,
 };
-use flare_proto::signaling::online::DeviceInfo;
-use flare_proto::signaling::router::PushStrategy;
+use flare_grpc_proto::signaling::online::DeviceInfo;
+use flare_grpc_proto::signaling::router::PushStrategy;
 
 use super::model::GatewayPushTarget;
 

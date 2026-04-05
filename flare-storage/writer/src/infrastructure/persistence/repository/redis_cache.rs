@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use prost::Message as _;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use std::convert::TryInto;

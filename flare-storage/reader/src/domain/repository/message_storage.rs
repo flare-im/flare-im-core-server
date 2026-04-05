@@ -19,7 +19,7 @@ use crate::domain::model::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use std::collections::HashMap;
 
 /// 使用 `async-trait` 保证返回的 Future 为 `Send`，满足 tonic gRPC 对 `async` 方法的线程间调度要求。

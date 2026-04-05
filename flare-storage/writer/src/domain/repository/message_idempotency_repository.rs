@@ -4,12 +4,11 @@
 //! - 写入前调用 `is_new` / `is_new_by_client_msg_id`，若已存在则跳过或返回 Duplicate ack。
 //! - 典型实现：Redis 等 KV 存储，key 为 message_id，TTL 与业务保留策略一致。
 
-use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 
 pub trait MessageIdempotencyRepository: Send + Sync {
     /// 检查消息ID是否为新消息（基于服务端消息ID）
-    async fn is_new(&self, ctx: &Ctx, message_id: &str) -> Result<bool>;
+    async fn is_new(&self, ctx: &Ctx, message_id: &str) -> anyhow::Result<bool>;
 
     /// 检查客户端消息ID是否为新消息（用于去重）；默认委托给 is_new。
     async fn is_new_by_client_msg_id(
@@ -17,7 +16,7 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         ctx: &Ctx,
         client_msg_id: &str,
         _sender_id: Option<&str>,
-    ) -> Result<bool> {
+    ) -> anyhow::Result<bool> {
         if client_msg_id.is_empty() {
             return Ok(true);
         }

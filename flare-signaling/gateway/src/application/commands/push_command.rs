@@ -2,7 +2,7 @@
 //!
 //! PushMessage / PushEvent / PushNotification / PushAck / PushCustom 均使用 user_ids + options。
 
-use flare_proto::access_gateway::PushOptions;
+use flare_grpc_proto::access_gateway::PushOptions;
 use flare_proto::common::{Ack, CustomData, Event, Message, NotificationMessage};
 
 /// 推送消息命令（对应 PushMessageRequest）

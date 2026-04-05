@@ -1,113 +1,191 @@
-use anyhow::Result;
-use flare_im_core::config::FlareAppConfig;
-use std::env;
+use anyhow::{Context, Result};
+use serde::Deserialize;
 
-#[derive(Debug, Clone)]
-pub struct GatewayConfig {
-    pub signaling_service: String,
-    pub push_service: String,
-    pub message_service: String,
-    #[allow(dead_code)] // 保留用于未来扩展
-    pub media_service: String,
-    #[allow(dead_code)] // 保留用于未来扩展
-    pub hook_engine_service: String,
-    pub storage_service: String,
-    pub access_gateway_service: String,
-    pub route_service: String,
-    pub use_route_service: bool,
-    pub default_svid: String,
+/// 网关配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct Settings {
+    /// HTTP 服务器配置
+    pub server: ServerConfig,
+    /// gRPC 客户端配置
+    pub grpc: GrpcConfig,
+    /// 限流配置
+    pub rate_limit: RateLimitConfig,
+    /// 追踪配置
+    pub tracing: TracingConfig,
 }
 
-impl GatewayConfig {
-    /// 从应用配置加载（新方式，推荐）
-    pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
-        // 优先从配置文件加载服务名，如果没有则使用默认服务名
-        let cfg = app.core_gateway_service();
+/// HTTP 服务器配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    /// 监听地址
+    pub bind: String,
+    /// HTTP 端口
+    pub port: u16,
+    /// 请求超时(秒)
+    pub timeout_secs: u64,
+    /// 最大请求体大小(字节)
+    pub max_body_size: usize,
+}
 
-        Ok(Self {
-            // 注意：服务名必须与注册中心中的服务类型一致（不带 flare- 前缀）
-            signaling_service: cfg
-                .signaling_service
-                .or_else(|| {
-                    cfg._signaling_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("signaling-online".to_string()))
-                })
-                .unwrap_or_else(|| "signaling-online".to_string()),
-            push_service: cfg
-                .push_service
-                .or_else(|| {
-                    cfg._push_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("push-server".to_string()))
-                })
-                .unwrap_or_else(|| "push-server".to_string()),
-            message_service: cfg
-                .message_service
-                .or_else(|| {
-                    cfg._message_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("message-orchestrator".to_string()))
-                })
-                .unwrap_or_else(|| "message-orchestrator".to_string()),
-            storage_service: cfg
-                .storage_service
-                .or_else(|| {
-                    cfg._storage_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("storage-reader".to_string()))
-                })
-                .unwrap_or_else(|| "storage-reader".to_string()),
-            media_service: cfg
-                .media_service
-                .or_else(|| {
-                    cfg._media_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("media".to_string()))
-                })
-                .unwrap_or_else(|| "media".to_string()),
-            hook_engine_service: cfg
-                .hook_engine_service
-                .or_else(|| {
-                    cfg._hook_engine_endpoint
-                        .as_ref()
-                        .and_then(|_| Some("hook-engine".to_string()))
-                })
-                .unwrap_or_else(|| "hook-engine".to_string()),
-            access_gateway_service: "access-gateway".to_string(),
-            route_service: cfg
-                .route_service
-                .unwrap_or_else(|| "signaling-route".to_string()),
-            use_route_service: cfg.use_route_service.unwrap_or(false),
-            default_svid: cfg.default_svid.unwrap_or_else(|| "svid.im".to_string()),
-        })
+/// gRPC 客户端配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrpcConfig {
+    /// MediaService 地址
+    pub media_service_url: String,
+    /// MessageService 地址
+    pub message_service_url: String,
+    /// ConversationService 地址
+    pub conversation_service_url: String,
+    /// 连接超时(秒)
+    pub connect_timeout_secs: u64,
+    /// 请求超时(秒)
+    pub request_timeout_secs: u64,
+}
+
+/// 限流配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// 是否启用
+    pub enabled: bool,
+    /// 每秒请求数
+    pub requests_per_second: u32,
+    /// 突发容量
+    pub burst_capacity: u32,
+}
+
+/// 追踪配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct TracingConfig {
+    /// 是否启用
+    pub enabled: bool,
+    /// 服务名称
+    pub service_name: String,
+    /// 采样率 (0.0 - 1.0)
+    pub sample_rate: f64,
+}
+
+impl Settings {
+    /// 从环境变量加载配置
+    pub fn from_env() -> Result<Self> {
+        dotenvy::dotenv().ok();
+
+        let server = ServerConfig {
+            bind: std::env::var("SERVER_BIND")
+                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            port: std::env::var("SERVER_PORT")
+                .unwrap_or_else(|_| "50050".to_string())
+                .parse()
+                .context("Invalid SERVER_PORT")?,
+            timeout_secs: std::env::var("SERVER_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .context("Invalid SERVER_TIMEOUT_SECS")?,
+            max_body_size: std::env::var("SERVER_MAX_BODY_SIZE")
+                .unwrap_or_else(|_| "10485760".to_string()) // 10MB
+                .parse()
+                .context("Invalid SERVER_MAX_BODY_SIZE")?,
+        };
+
+        let grpc = GrpcConfig {
+            media_service_url: std::env::var("GRPC_MEDIA_SERVICE_URL")
+                .unwrap_or_else(|_| "http://localhost:50051".to_string()),
+            message_service_url: std::env::var("GRPC_MESSAGE_SERVICE_URL")
+                .unwrap_or_else(|_| "http://localhost:50052".to_string()),
+            conversation_service_url: std::env::var("GRPC_CONVERSATION_SERVICE_URL")
+                .unwrap_or_else(|_| "http://localhost:50053".to_string()),
+            connect_timeout_secs: std::env::var("GRPC_CONNECT_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .context("Invalid GRPC_CONNECT_TIMEOUT_SECS")?,
+            request_timeout_secs: std::env::var("GRPC_REQUEST_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .context("Invalid GRPC_REQUEST_TIMEOUT_SECS")?,
+        };
+
+        let rate_limit = RateLimitConfig {
+            enabled: std::env::var("RATE_LIMIT_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .context("Invalid RATE_LIMIT_ENABLED")?,
+            requests_per_second: std::env::var("RATE_LIMIT_RPS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .context("Invalid RATE_LIMIT_RPS")?,
+            burst_capacity: std::env::var("RATE_LIMIT_BURST")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()
+                .context("Invalid RATE_LIMIT_BURST")?,
+        };
+
+        let tracing = TracingConfig {
+            enabled: std::env::var("TRACING_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .context("Invalid TRACING_ENABLED")?,
+            service_name: std::env::var("TRACING_SERVICE_NAME")
+                .unwrap_or_else(|_| "flare-gateway".to_string()),
+            sample_rate: std::env::var("TRACING_SAMPLE_RATE")
+                .unwrap_or_else(|_| "1.0".to_string())
+                .parse()
+                .context("Invalid TRACING_SAMPLE_RATE")?,
+        };
+
+        let settings = Settings {
+            server,
+            grpc,
+            rate_limit,
+            tracing,
+        };
+
+        // 验证配置
+        settings.validate()?;
+
+        Ok(settings)
     }
 
-    /// 从环境变量加载（保留用于向后兼容，但不推荐使用）
-    #[deprecated(note = "Use from_app_config instead")]
-    #[allow(dead_code)] // 保留用于向后兼容
-    pub fn from_env() -> Self {
-        Self {
-            access_gateway_service: env::var("ACCESS_GATEWAY_SERVICE")
-                .unwrap_or_else(|_| "flare-access-gateway".to_string()),
-            signaling_service: env::var("SIGNALING_SERVICE")
-                .unwrap_or_else(|_| "flare-signaling-online".to_string()),
-            push_service: env::var("PUSH_SERVICE")
-                .unwrap_or_else(|_| "flare-push-server".to_string()),
-            message_service: env::var("MESSAGE_SERVICE")
-                .unwrap_or_else(|_| "flare-message-orchestrator".to_string()),
-            storage_service: env::var("STORAGE_SERVICE")
-                .unwrap_or_else(|_| "flare-storage-reader".to_string()),
-            media_service: env::var("MEDIA_SERVICE").unwrap_or_else(|_| "flare-media".to_string()),
-            hook_engine_service: env::var("HOOK_ENGINE_SERVICE")
-                .unwrap_or_else(|_| "flare-hook-engine".to_string()),
-            route_service: env::var("ROUTE_SERVICE")
-                .unwrap_or_else(|_| "signaling-route".to_string()),
-            use_route_service: env::var("USE_ROUTE_SERVICE")
-                .unwrap_or_else(|_| "false".to_string())
-                .parse()
-                .unwrap_or(false),
-            default_svid: env::var("DEFAULT_SVID").unwrap_or_else(|_| "svid.im".to_string()),
+    /// 验证配置
+    fn validate(&self) -> Result<()> {
+        // 验证端口范围
+        if self.server.port == 0 {
+            anyhow::bail!("Server port cannot be 0");
         }
+
+        // 验证超时
+        if self.server.timeout_secs == 0 {
+            anyhow::bail!("Server timeout cannot be 0");
+        }
+
+        // 验证 gRPC URL
+        if !self.grpc.media_service_url.starts_with("http://") 
+            && !self.grpc.media_service_url.starts_with("https://") {
+            anyhow::bail!("gRPC URL must start with http:// or https://");
+        }
+
+        // 验证限流配置
+        if self.rate_limit.enabled {
+            if self.rate_limit.requests_per_second == 0 {
+                anyhow::bail!("Rate limit RPS cannot be 0 when enabled");
+            }
+        }
+
+        // 验证追踪采样率
+        if self.tracing.sample_rate < 0.0 || self.tracing.sample_rate > 1.0 {
+            anyhow::bail!("Tracing sample rate must be between 0.0 and 1.0");
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_settings() {
+        let settings = Settings::from_env().unwrap();
+        assert_eq!(settings.server.port, 50050);
+        assert!(settings.rate_limit.enabled);
     }
 }

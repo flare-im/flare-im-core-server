@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use flare_proto::common::CustomData;
-use flare_proto::signaling::router::RouteOptions;
+use flare_grpc_proto::signaling::router::RouteOptions;
 use flare_server_core::context::Context;
-use flare_server_core::error::ErrorCode;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use tracing::instrument;
 
 use crate::application::dto::{MessageRouteResult, build_route_metadata};
@@ -28,12 +28,12 @@ impl DataRoutingHandler {
         svid: &str,
         data: CustomData,
         route_options: RouteOptions,
-    ) -> MessageRouteResult {
+    ) -> Result<MessageRouteResult> {
         let start_time = Instant::now();
         let decision_duration = start_time.elapsed();
         let business_start = Instant::now();
 
-        match self
+        let (endpoint, response_data) = self
             .forwarder
             .forward_custom_data(
                 ctx,
@@ -42,41 +42,21 @@ impl DataRoutingHandler {
                 Arc::new(crate::domain::repository::NoopRouteRepository),
             )
             .await
-        {
-            Ok((endpoint, response_data)) => {
-                let business_duration = business_start.elapsed();
-                let total_duration = start_time.elapsed();
-                MessageRouteResult {
-                    response_data,
-                    routed_endpoint: endpoint,
-                    metadata: build_route_metadata(
-                        total_duration.as_millis() as i64,
-                        business_duration.as_millis() as i64,
-                        decision_duration.as_millis() as i64,
-                        svid,
-                        route_options.load_balance_strategy,
-                    ),
-                    error_code: None,
-                    error_message: None,
-                }
-            }
-            Err(e) => {
-                let total_duration = start_time.elapsed();
-                tracing::error!(error = %e, svid = %svid, "RouteData forward failed");
-                MessageRouteResult {
-                    response_data: vec![],
-                    routed_endpoint: String::new(),
-                    metadata: build_route_metadata(
-                        total_duration.as_millis() as i64,
-                        0,
-                        decision_duration.as_millis() as i64,
-                        svid,
-                        route_options.load_balance_strategy,
-                    ),
-                    error_code: Some(ErrorCode::InternalError as u32),
-                    error_message: Some(format!("forward custom data: {e}")),
-                }
-            }
-        }
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "forward custom data"))?;
+
+        let business_duration = business_start.elapsed();
+        let total_duration = start_time.elapsed();
+        
+        Ok(MessageRouteResult {
+            response_data,
+            routed_endpoint: endpoint,
+            metadata: build_route_metadata(
+                total_duration.as_millis() as i64,
+                business_duration.as_millis() as i64,
+                decision_duration.as_millis() as i64,
+                svid,
+                route_options.load_balance_strategy,
+            ),
+        })
     }
 }

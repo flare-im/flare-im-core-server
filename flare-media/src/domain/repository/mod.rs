@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::Result;
 use chrono::{DateTime, Utc};
 
 use crate::domain::model::{

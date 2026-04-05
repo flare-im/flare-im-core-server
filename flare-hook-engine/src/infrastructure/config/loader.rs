@@ -11,9 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::domain::model::HookConfig;
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
-use flare_server_core::{
-    BackendType, DiscoveryConfig, DiscoveryFactory, KvBackend, KvStore, ServiceDiscover,
-};
+use flare_server_core::KvStore;
 
 /// Hook配置加载器接口
 pub trait ConfigLoader: Send + Sync {

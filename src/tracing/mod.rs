@@ -91,13 +91,3 @@ fn init_otlp_tracing(
 pub fn create_span(_tracer_name: &str, _span_name: &str) -> Span {
     Span::current()
 }
-
-#[cfg(feature = "tracing")]
-pub fn get_trace_info() -> Option<(String, String)> {
-    None
-}
-
-#[cfg(feature = "tracing")]
-pub fn shutdown_tracing() {
-    info!("Tracing shutdown (OpenTelemetry cleanup pending)");
-}

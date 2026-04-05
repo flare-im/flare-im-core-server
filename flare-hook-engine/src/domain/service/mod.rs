@@ -2,7 +2,7 @@
 //!
 //! 定义Hook引擎的核心领域服务
 
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use futures_util::future::join_all;
 use std::sync::Arc;
 
@@ -67,7 +67,7 @@ impl HookOrchestrationService {
 
         // 先执行validation组（串行，快速失败）
         for hook in &grouped.validation {
-            let decision = hook.execute(&ctx_arc, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -76,7 +76,7 @@ impl HookOrchestrationService {
 
         // 再执行critical组（串行，保证顺序）
         for hook in &grouped.critical {
-            let decision = hook.execute(&ctx_arc, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -85,7 +85,7 @@ impl HookOrchestrationService {
 
         // 最后执行business组（串行执行，因为draft是&mut不能并发）
         for hook in &grouped.business {
-            let decision = hook.execute(&ctx_arc, draft).await?;
+            let decision = hook.execute(&ctx_arc, draft).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => {
                     // business组即使失败也不中断主流程，只记录日志
@@ -113,7 +113,7 @@ impl HookOrchestrationService {
         for hook in grouped.validation.iter().chain(grouped.critical.iter()) {
             if let Err(e) = hook.execute_post_send(&ctx_arc, record, draft).await {
                 if hook.require_success() {
-                    return Err(e);
+                    return Err(e.into());
                 }
                 tracing::warn!(hook = %hook.name(), error = %e, "PostSend hook failed but continuing");
             }
@@ -154,7 +154,7 @@ impl HookOrchestrationService {
         for hook in grouped.validation.iter().chain(grouped.critical.iter()) {
             if let Err(e) = hook.execute_delivery(&ctx_arc, event).await {
                 if hook.require_success() {
-                    return Err(e);
+                    return Err(e.into());
                 }
                 tracing::warn!(hook = %hook.name(), error = %e, "Delivery hook failed but continuing");
             }
@@ -193,7 +193,7 @@ impl HookOrchestrationService {
 
         // 先执行validation组（串行，快速失败）
         for hook in &grouped.validation {
-            let decision = hook.execute_recall(&ctx_arc, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -202,7 +202,7 @@ impl HookOrchestrationService {
 
         // 再执行critical组（串行，保证顺序）
         for hook in &grouped.critical {
-            let decision = hook.execute_recall(&ctx_arc, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => return Ok(decision),
                 PreSendDecision::Continue => continue,
@@ -211,7 +211,7 @@ impl HookOrchestrationService {
 
         // 最后执行business组（串行执行）
         for hook in &grouped.business {
-            let decision = hook.execute_recall(&ctx_arc, event).await?;
+            let decision = hook.execute_recall(&ctx_arc, event).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
             match decision {
                 PreSendDecision::Reject { .. } => {
                     // business组即使失败也不中断主流程，只记录日志

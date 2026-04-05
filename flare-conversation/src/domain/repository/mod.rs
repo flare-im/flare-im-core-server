@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
 use flare_proto::common::Message;
+
+use crate::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationBootstrapResult, ConversationParticipant,
@@ -159,9 +160,13 @@ pub trait MessageProvider: Send + Sync {
         _limit: i32,
     ) -> Result<MessageSyncResult> {
         // 默认实现：返回错误，提示使用基于时间戳的同步
-        Err(anyhow::anyhow!(
-            "sync_messages_by_seq not implemented, use sync_messages instead"
-        ))
+        Err(
+            ErrorBuilder::new(
+                ErrorCode::OperationNotSupported,
+                "sync_messages_by_seq not implemented, use sync_messages instead",
+            )
+            .build_error(),
+        )
     }
 }
 

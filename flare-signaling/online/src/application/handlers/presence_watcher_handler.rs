@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::domain::repository::{PresenceChangeEvent, PresenceWatcher};
+use crate::error::{Result, map_infra_error, ErrorCode};
 
 #[derive(Clone)]
 pub struct OnlinePresenceWatcherHandler<PW: PresenceWatcher + Send + Sync> {
@@ -23,6 +23,9 @@ impl<PW: PresenceWatcher + Send + Sync> OnlinePresenceWatcherHandler<PW> {
         &self,
         user_ids: &[String],
     ) -> Result<mpsc::Receiver<anyhow::Result<PresenceChangeEvent>>> {
-        self.inner.watch_presence(user_ids).await
+        self.inner
+            .watch_presence(user_ids)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to watch presence"))
     }
 }

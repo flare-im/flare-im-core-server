@@ -1,3 +1,4 @@
+use crate::domain::model::ConversationType;
 use crate::error::Result;
 use std::future::Future;
 use std::pin::Pin;
@@ -9,7 +10,7 @@ pub trait ConversationRepository: Send + Sync {
         &'a self,
         ctx: &'a flare_server_core::context::Context,
         conversation_id: &'a str,
-        conversation_type: &'a str,
+        conversation_type: ConversationType,
         business_type: &'a str,
         participants: Vec<String>,
         // 落库 conversations.channel_id：单聊须空；非单聊为消息 channel_id

@@ -1,5 +1,5 @@
 use crate::domain::model::{Thread, ThreadSortOrder};
-use anyhow::Result;
+use crate::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::context::Context;
 use std::sync::Arc;
 use tracing::instrument;
@@ -37,7 +37,10 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
         self.thread_repo
             .get_thread(ctx, &thread_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Thread not found after creation"))
+            .ok_or_else(|| {
+                ErrorBuilder::new(ErrorCode::InternalError, "thread not found after creation")
+                    .build_error()
+            })
     }
 
     /// 获取话题列表
@@ -87,7 +90,10 @@ impl<TR: ThreadRepository> ThreadDomainService<TR> {
         self.thread_repo
             .get_thread(ctx, thread_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Thread not found after update"))
+            .ok_or_else(|| {
+                ErrorBuilder::new(ErrorCode::InternalError, "thread not found after update")
+                    .build_error()
+            })
     }
 
     /// 删除话题

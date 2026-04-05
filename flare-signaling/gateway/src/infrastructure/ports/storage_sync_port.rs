@@ -26,7 +26,7 @@ impl StorageSyncPort {
 #[async_trait]
 impl ISyncPort for StorageSyncPort {
     async fn forward_sync(&self, tx: &Ctx, sync: Sync) -> anyhow::Result<SyncRes> {
-        let _ = require_user_id_from_context(tx).map_err(|s| anyhow::anyhow!("{}", s.message()))?;
+        let _ = require_user_id_from_context(tx).map_err(|s| anyhow::anyhow!("{}", s))?;
         let mut client = self
             .pool
             .ensure_sync_client()

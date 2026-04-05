@@ -1,5 +1,6 @@
 pub mod application;
 pub mod config;
+pub mod error;
 pub mod domain;
 pub mod infrastructure;
 pub mod interface;

@@ -2,17 +2,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::Ctx;
+use crate::error::{ErrorBuilder, ErrorCode, Result};
 use async_trait::async_trait;
 use prost_types::Timestamp;
 use tonic::IntoRequest;
 use tonic::transport::{Channel, Endpoint};
-
-use crate::error::{ErrorBuilder, ErrorCode, Result, from_rpc_status};
+use flare_grpc_proto::hooks::hook_extension_client::HookExtensionClient;
 use flare_proto::common::Message as ProtoStorageMessage;
-use flare_proto::{
-    HookExtensionClient, ProtoDeliveryHookRequest, ProtoDeliveryHookResponse,
-    ProtoHookDeliveryEvent, ProtoHookInvocationContext, ProtoHookMessageDraft,
-    ProtoHookMessageRecord, ProtoPostSendHookRequest, ProtoPreSendHookRequest,
+use flare_grpc_proto::{
+    ProtoDeliveryHookRequest, ProtoDeliveryHookResponse, ProtoHookDeliveryEvent,
+    ProtoHookInvocationContext, ProtoHookMessageDraft, ProtoHookMessageRecord,
+    ProtoHookRecallEvent, ProtoPostSendHookRequest, ProtoPreSendHookRequest,
     ProtoRecallHookRequest, ProtoRecallHookResponse,
 };
 
@@ -21,7 +22,6 @@ use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
     PreSendDecision, PreSendHook, RecallEvent, RecallHook,
 };
-use flare_server_core::context::Ctx;
 
 #[derive(Clone)]
 pub struct GrpcHookFactory;
@@ -117,8 +117,9 @@ impl PreSendHook for GrpcPreSendHook {
             Ok(resp) => {
                 let inner = resp.into_inner();
                 if !inner.allow {
-                    let status = inner.status.unwrap_or_default();
-                    let err = from_rpc_status(&status);
+                    let err = ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+                        .details("allow=false")
+                        .build_error();
                     return PreSendDecision::Reject { error: err };
                 }
                 if let Some(draft_resp) = inner.draft {
@@ -157,8 +158,10 @@ impl PostSendHook for GrpcPostSendHook {
                 if inner.success {
                     HookOutcome::Completed
                 } else {
-                    let status = inner.status.unwrap_or_default();
-                    HookOutcome::Failed(from_rpc_status(&status))
+                    HookOutcome::Failed(
+                        ErrorBuilder::new(ErrorCode::OperationFailed, "post-send hook reported failure")
+                            .build_error(),
+                    )
                 }
             }
             Err(status) => {
@@ -191,8 +194,10 @@ impl DeliveryHook for GrpcDeliveryHook {
                 if inner.success {
                     HookOutcome::Completed
                 } else {
-                    let status = inner.status.unwrap_or_default();
-                    HookOutcome::Failed(from_rpc_status(&status))
+                    HookOutcome::Failed(
+                        ErrorBuilder::new(ErrorCode::OperationFailed, "delivery hook reported failure")
+                            .build_error(),
+                    )
                 }
             }
             Err(status) => {
@@ -225,8 +230,10 @@ impl RecallHook for GrpcRecallHook {
                 if inner.allow {
                     HookOutcome::Completed
                 } else {
-                    let status = inner.status.unwrap_or_default();
-                    HookOutcome::Failed(from_rpc_status(&status))
+                    HookOutcome::Failed(
+                        ErrorBuilder::new(ErrorCode::OperationFailed, "recall hook rejected")
+                            .build_error(),
+                    )
                 }
             }
             Err(status) => {
@@ -321,7 +328,8 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
                 flare_proto::common::ConversationType::Group as i32
             }
             "channel" | "conversation_type_channel" | "3" => {
-                flare_proto::common::ConversationType::Channel as i32
+                // Channel is treated as Group for now
+                flare_proto::common::ConversationType::Group as i32
             }
             "ai" | "conversation_type_ai" | "4" => {
                 flare_proto::common::ConversationType::Ai as i32
@@ -390,8 +398,8 @@ fn build_delivery_event(event: &DeliveryEvent) -> ProtoHookDeliveryEvent {
     }
 }
 
-fn build_recall_event(event: &RecallEvent) -> flare_proto::ProtoHookRecallEvent {
-    flare_proto::ProtoHookRecallEvent {
+fn build_recall_event(event: &RecallEvent) -> ProtoHookRecallEvent {
+    ProtoHookRecallEvent {
         message_id: event.message_id.clone(),
         operator_id: event.operator_id.clone(),
         recalled_at: Some(system_time_to_timestamp(event.recalled_at)),

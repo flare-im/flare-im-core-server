@@ -18,16 +18,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as AnyhowContext, Result};
 
-use flare_proto::access_gateway::{
+use flare_grpc_proto::access_gateway::access_gateway_client::AccessGatewayClient;
+use flare_grpc_proto::access_gateway::{
     PushAckRequest, PushAckResponse, PushCustomRequest, PushEventRequest, PushMessageRequest,
     PushNotificationRequest, PushNotificationResponse, PushResponse,
-    access_gateway_client::AccessGatewayClient,
 };
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info, warn};
 
-use flare_server_core::discovery::{ServiceClient, discover::ServiceDiscover};
+use crate::{ServiceClient, ServiceDiscover};
 
 /// Gateway Router 错误类型
 #[derive(Debug, thiserror::Error)]

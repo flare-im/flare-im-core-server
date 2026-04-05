@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::application::handlers::{HookCommandHandler, HookQueryHandler};
+use crate::application::handlers::HookCommandHandler;
 use crate::domain::service::HookOrchestrationService;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::config::ConfigWatcher;
@@ -18,7 +18,8 @@ use crate::interface::grpc::{HookExtensionServer, HookServiceServer};
 use crate::service::bootstrap::HookEngineConfig;
 use crate::service::registry::CoreHookRegistry;
 
-use flare_server_core::{BackendType, DiscoveryConfig, KvBackend, KvStore};
+use flare_server_core::discovery::{BackendType, DiscoveryConfig};
+use flare_server_core::{KvBackend, KvStore};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -81,11 +82,11 @@ pub async fn initialize(config: HookEngineConfig) -> Result<ApplicationContext> 
 
                     // 创建Consul后端
                     // 直接创建ConsulBackend实例，这样我们可以同时获得DiscoveryBackend和KvBackend的实现
-                    if let Ok(backend) =
-                        flare_server_core::discovery::backend::consul::ConsulBackend::new(
-                            &discovery_config,
-                        )
-                        .await
+                    if flare_server_core::discovery::backend::consul::ConsulBackend::new(
+                        &discovery_config,
+                    )
+                    .await
+                    .is_ok()
                     {
                         // 由于ConsulBackend没有实现Clone trait，我们需要创建一个新的实例用于KvBackend
                         if let Ok(kv_backend) =
@@ -150,7 +151,6 @@ pub async fn initialize(config: HookEngineConfig) -> Result<ApplicationContext> 
 
     // 6. 创建命令和查询处理器
     let command_handler = Arc::new(HookCommandHandler::new(orchestration_service.clone()));
-    let query_handler = Arc::new(HookQueryHandler::new(metrics_collector.clone()));
 
     // 7. 创建Hook注册表
     let registry = Arc::new(CoreHookRegistry::new(config_watcher.clone()));

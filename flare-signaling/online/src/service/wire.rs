@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as AnyhowContext, Result};
 use redis::Client;
 
 use crate::application::handlers::{
@@ -13,6 +12,7 @@ use crate::application::handlers::{
 use crate::config::OnlineConfig;
 use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
 use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
+use crate::error::{map_infra_error, ErrorCode, Result};
 use crate::infrastructure::persistence::redis::{
     RedisConversationRepository, RedisPresencePublisher, RedisPresenceWatcher,
     RedisSubscriptionRepository,
@@ -47,13 +47,13 @@ pub async fn initialize(
     // 1. 加载在线服务配置
     let online_config = Arc::new(
         OnlineConfig::from_app_config(app_config)
-            .with_context(|| "Failed to load online service configuration")?,
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to load online service configuration"))?,
     );
 
     // 2. 创建 Redis 客户端
     let redis_client = Arc::new(
         Client::open(online_config.redis_url.as_str())
-            .with_context(|| "Failed to create Redis client")?,
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "Failed to create Redis client"))?,
     );
 
     // 3. 构建仓储（具体类型，禁止 `Arc<dyn>` + 异步 trait）
@@ -114,8 +114,8 @@ pub async fn initialize(
     Ok(ApplicationContext { online_handler })
 }
 
-use flare_proto::signaling::online::online_service_server::OnlineService;
-use flare_proto::signaling::online::*;
+use flare_grpc_proto::signaling::online::online_service_server::OnlineService;
+use flare_grpc_proto::signaling::online::*;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 

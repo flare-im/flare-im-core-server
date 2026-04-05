@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use flare_im_core::Ctx;
 use flare_proto::common::CustomData;
-use flare_server_core::error::Result;
+use flare_im_core::error::Result;
 
 #[async_trait]
 pub trait IDataCommandPort: Send + Sync {

@@ -3,10 +3,10 @@
 
 use flare_proto::Message;
 use flare_proto::common::{Event, MultiDeviceCursor};
-use flare_proto::conversation::{
+use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, UpdateCursorRequest,
 };
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use flare_server_core::error::FlareError;
 use std::collections::HashMap;
 

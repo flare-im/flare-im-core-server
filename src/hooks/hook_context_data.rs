@@ -1,13 +1,14 @@
 //! # Hook 上下文数据
 //!
-//! 存储 Hook 特定的上下文信息，这些信息会被存储到 `flare_server_core::Context` 的自定义数据中
+//! 存储 Hook 特定的上下文信息，这些信息会被存储到 `Context` 的自定义数据中
 
 use std::collections::HashMap;
 use std::time::SystemTime;
+use flare_core_base::context::Context;
 
 /// Hook 特定的上下文数据
 ///
-/// 这些字段会被存储到 `flare_server_core::Context` 的自定义数据中
+/// 这些字段会被存储到 `Context` 的自定义数据中
 #[derive(Debug, Clone, Default)]
 pub struct HookContextData {
     pub conversation_id: Option<String>,
@@ -66,17 +67,12 @@ impl HookContextData {
     }
 }
 
-/// 从 `flare_server_core::Context` 中提取 Hook 上下文数据
-pub fn get_hook_context_data(
-    ctx: &flare_server_core::context::Context,
-) -> Option<&HookContextData> {
+/// 从 `Context` 中提取 Hook 上下文数据
+pub fn get_hook_context_data(ctx: &Context) -> Option<&HookContextData> {
     ctx.get_data::<HookContextData>()
 }
 
-/// 将 Hook 上下文数据存储到 `flare_server_core::Context` 中
-pub fn set_hook_context_data(
-    ctx: flare_server_core::context::Context,
-    data: HookContextData,
-) -> flare_server_core::context::Context {
+/// 将 Hook 上下文数据存储到 `Context` 中
+pub fn set_hook_context_data(ctx: Context, data: HookContextData) -> Context {
     ctx.insert_data(data)
 }

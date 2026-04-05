@@ -3,7 +3,7 @@
 //! 在 CQRS 架构中，查询侧通常直接调用基础设施层（仓储实现），
 //! 因为查询是只读操作，不涉及业务逻辑，不需要经过领域层。
 
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use chrono::{DateTime, Utc};
 use flare_im_core::message::{Message, message_to_proto};
 use flare_im_core::utils::extract_seq_from_message;
@@ -79,6 +79,7 @@ where
                 query.limit,
             )
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to query messages"))
     }
 
     /// 查询消息列表（带分页结果）
@@ -113,7 +114,7 @@ where
                 end_time,
                 query.limit,
             )
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
 
         // 构建简化的 QueryMessagesResult
         let message_count = messages.len() as i32;
@@ -145,7 +146,10 @@ where
         query: GetMessageQuery,
     ) -> Result<Option<Message>> {
         let _ = ctx; // 上下文用于日志追踪
-        self.storage.get_message(ctx, &query.message_id).await
+        self.storage
+            .get_message(ctx, &query.message_id)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get message"))
     }
 
     /// 获取消息的时间戳
@@ -156,7 +160,10 @@ where
         message_id: &str,
     ) -> Result<Option<DateTime<Utc>>> {
         let _ = ctx; // 上下文用于日志追踪
-        self.storage.get_message_timestamp(ctx, message_id).await
+        self.storage
+            .get_message_timestamp(ctx, message_id)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get message timestamp"))
     }
 
     /// 搜索消息
@@ -182,6 +189,7 @@ where
         self.storage
             .search_messages(ctx, &query.filters, start_time, end_time, query.limit)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to search messages"))
     }
 
     /// 列出所有标签
@@ -192,7 +200,10 @@ where
         _query: ListMessageTagsQuery,
     ) -> Result<Vec<String>> {
         let _ = ctx; // 上下文用于日志追踪
-        self.storage.list_all_tags(ctx).await
+        self.storage
+            .list_all_tags(ctx)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to list tags"))
     }
 
     /// 基于 seq 查询消息列表
@@ -215,7 +226,7 @@ where
                 query.before_seq,
                 query.limit,
             )
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
 
         // 提取最后一条消息的 seq（使用工具函数）
         let last_seq = messages
@@ -236,6 +247,7 @@ where
         self.storage
             .query_message_operations(ctx, &query.message_id)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to query message operations"))
     }
 
     /// 获取同步快照
@@ -250,6 +262,7 @@ where
         self.storage
             .get_sync_snapshot(ctx, "", "", conversation_ids, messages_per_conversation)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync snapshot"))
     }
 
     /// 查询事件
@@ -274,6 +287,7 @@ where
                 vec![],
             )
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to query events"))
     }
 
     /// 会话事件分页（多取 1 条判断 `has_more`），供 gRPC `QueryConversationEvents` 使用
@@ -299,7 +313,7 @@ where
                 want + 1,
                 event_type_filter,
             )
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
         let has_more = rows.len() as i32 > want;
         if has_more {
             rows.truncate(want as usize);
@@ -324,7 +338,7 @@ where
         let head = self
             .storage
             .get_conversation_message_head(ctx, conversation_id)
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
         Ok(head.map(|h| {
             let ts = datetime_to_timestamp(h.last_at);
             (h.max_seq, h.last_message_id, ts)
@@ -342,6 +356,7 @@ where
         self.storage
             .get_conversation_max_seq(ctx, "", conversation_id)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get conversation max seq"))
     }
 
     /// 获取同步游标
@@ -356,6 +371,7 @@ where
         self.storage
             .get_sync_cursor(ctx, "", user_id, conversation_id)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync cursor"))
     }
 
     /// 更新同步游标
@@ -380,5 +396,6 @@ where
                 None,
             )
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update sync cursor"))
     }
 }

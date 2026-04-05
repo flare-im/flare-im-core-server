@@ -61,7 +61,7 @@ use tracing::{debug, error, info, warn};
 
 use chrono::{DateTime, Local, Utc};
 use flare_core::common::conversation::generate_single_chat_conversation_id;
-use flare_proto::access_gateway::PushMessageRequest;
+use flare_grpc_proto::access_gateway::PushMessageRequest;
 use flare_proto::common::{
     Ack, AckType, ConversationAck, EventEnvelope, Message as ProtoMessage, MessageContent,
     MessagePush, SendAck, ack::Payload as AckPayload, event::Payload as EventPayload,

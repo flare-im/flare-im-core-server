@@ -1,34 +1,14 @@
 use flare_proto::common::{Message as StorageMessage, MessageType};
 use prost::Message as _;
 
-/// 消息类别（用于决定处理策略）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageCategory {
-    /// 临时消息（TYPING、SYSTEM_EVENT）：只推送，不持久化，不经过 WAL
-    Temporary,
-    /// 通知消息（NOTIFICATION）：根据 persistent 标志决定是否持久化，但都推送
-    Notification,
-    /// 操作消息（OPERATION）：根据操作类型决定同步/异步处理
-    Operation,
-    /// 普通消息：推送+持久化+WAL
-    Normal,
-}
+use crate::domain::MessageCategory;
 
-/// 消息处理类型（用于决定是否需要持久化）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageProcessingType {
-    /// 普通消息：需要持久化+推送
-    Normal,
-    /// 通知消息：仅推送，不持久化，离线舍弃
-    Notification,
-}
-
-/// 统一的消息类型推断与归一化。
+/// 统一的消息类型推断与归一化
+#[derive(Debug, Clone)]
 pub struct MessageProfile {
     message_type: MessageType,
     message_type_label: String,
     category: MessageCategory,
-    processing_type: MessageProcessingType,
 }
 
 impl MessageProfile {
@@ -146,22 +126,13 @@ impl MessageProfile {
         // 判断消息类别（Temporary/Notification/Operation/Normal）
         let category = Self::determine_category(&message_type, &message_type_label, &message.extra);
 
-        // 判断消息处理类型（Normal vs Notification）
-        let processing_type = Self::determine_processing_type(
-            &category,
-            &message_type_label,
-            &message.content,
-            &message.extra,
-        );
-
         MessageProfile {
             message_type,
             message_type_label,
             category,
-            processing_type,
         }
     }
-
+    
     /// 判断消息类别
     ///
     /// 规则：
@@ -204,47 +175,6 @@ impl MessageProfile {
         }
     }
 
-    /// 判断消息处理类型
-    ///
-    /// 规则：
-    /// - Temporary 类别：Notification（不持久化）
-    /// - Notification 类别：根据 NotificationContent.persistent 标志决定，默认 Notification
-    /// - Operation 类别：Normal（需要持久化）
-    /// - Normal 类别：Normal（需要持久化）
-    fn determine_processing_type(
-        category: &MessageCategory,
-        _message_type_label: &str,
-        content: &[u8],
-        extra: &std::collections::HashMap<String, String>,
-    ) -> MessageProcessingType {
-        match *category {
-            MessageCategory::Temporary => MessageProcessingType::Notification,
-            MessageCategory::Notification => {
-                if !content.is_empty() {
-                    if let Ok(msg_content) = flare_proto::common::MessageContent::decode(content) {
-                        if let Some(flare_proto::common::message_content::Content::Notification(
-                            notif,
-                        )) = &msg_content.content
-                        {
-                            if notif.persistent {
-                                return MessageProcessingType::Normal;
-                            }
-                        }
-                    }
-                }
-                // 如果 content 中没有，检查 extra 中的 persistent 标志（兼容性处理）
-                if let Some(flag) = extra.get("persistent") {
-                    if flag == "true" || flag == "1" {
-                        return MessageProcessingType::Normal;
-                    }
-                }
-                MessageProcessingType::Notification
-            }
-            MessageCategory::Operation => MessageProcessingType::Normal,
-            MessageCategory::Normal => MessageProcessingType::Normal,
-        }
-    }
-
     pub fn message_type(&self) -> MessageType {
         self.message_type
     }
@@ -257,44 +187,29 @@ impl MessageProfile {
         self.category
     }
 
-    pub fn processing_type(&self) -> MessageProcessingType {
-        self.processing_type
-    }
-
     /// 判断是否需要持久化
     pub fn needs_persistence(&self) -> bool {
-        self.processing_type == MessageProcessingType::Normal
+        self.category.needs_persistence()
     }
 
     /// 判断是否需要写入WAL
-    ///
-    /// 规则：
-    /// - Temporary: 不需要
-    /// - Notification: 根据 persistent 标志
-    /// - Operation: 需要
-    /// - Normal: 需要
     pub fn needs_wal(&self) -> bool {
-        match self.category {
-            MessageCategory::Temporary => false,
-            MessageCategory::Notification => self.processing_type == MessageProcessingType::Normal,
-            MessageCategory::Operation => true,
-            MessageCategory::Normal => true,
-        }
+        self.category.needs_wal()
     }
 
     /// 判断是否为临时消息（只推送，不持久化）
     pub fn is_temporary(&self) -> bool {
-        self.category == MessageCategory::Temporary
+        self.category.is_temporary()
     }
 
     /// 判断是否为操作消息
     pub fn is_operation(&self) -> bool {
-        self.category == MessageCategory::Operation
+        self.category.is_operation()
     }
 
     /// 判断是否为通知消息
     pub fn is_notification(&self) -> bool {
-        self.category == MessageCategory::Notification
+        self.category.is_notification()
     }
 }
 
@@ -316,7 +231,6 @@ mod tests {
                     mentions: vec![],
                 },
             )),
-            extensions: vec![],
         };
         msg.content = msg_content.encode_to_vec();
         msg

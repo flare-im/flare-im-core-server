@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 当 registry 被 drop 时，会自动注销服务
         
         // 使用 discover 进行服务发现
-        use flare_server_core::discovery::ServiceClient;
+        use flare_im_core::ServiceClient;
         let mut client = ServiceClient::new(discover);
         let channel = client.get_channel().await?;
 
@@ -107,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use std::net::SocketAddr;
 use flare_im_core::discovery::init_from_app_config;
-use flare_server_core::discovery::{ServiceRegistry, ServiceDiscover, ServiceDiscoverUpdater};
+use flare_im_core::{ServiceDiscover, ServiceDiscoverUpdater, ServiceRegistry};
 
 pub struct ConversationServiceApp {
     handler: ConversationGrpcHandler,
@@ -157,7 +157,7 @@ impl ConversationServiceApp {
 
 ```rust
 use flare_im_core::discovery::init_from_registry_config;
-use flare_server_core::RegistryConfig;
+use flare_im_core::RegistryConfig;
 use std::net::SocketAddr;
 
 let registry_config = RegistryConfig {
@@ -197,7 +197,7 @@ let (registry, discover, updater) = init_from_registry_config(
 初始化后，可以使用 `ServiceClient` 进行服务发现：
 
 ```rust
-use flare_server_core::discovery::ServiceClient;
+use flare_im_core::ServiceClient;
 
 // 假设已经初始化了 discover
 let mut client = ServiceClient::new(discover);

@@ -4,10 +4,11 @@
 
 use std::collections::HashMap;
 
+use super::EventEnvelope;
+use crate::Ctx;
+use crate::TopicEventBus;
+use crate::error::Result as ServerResult;
 use flare_proto::common::EventType;
-use flare_server_core::TopicEventBus;
-use flare_server_core::context::Ctx;
-use flare_server_core::error::Result as ServerResult;
 use prost::Message as _;
 use prost_types::Timestamp;
 
@@ -82,9 +83,9 @@ fn timestamp_ms_from_proto(ts: Option<&Timestamp>) -> Option<u64> {
 
 pub fn to_event_envelope(
     envelope: &flare_proto::common::TopicEventEnvelope,
-) -> flare_server_core::EventEnvelope {
+) -> EventEnvelope {
     let payload = envelope.encode_to_vec();
-    let mut core = flare_server_core::EventEnvelope::new(
+    let mut core = EventEnvelope::new(
         envelope.event_type.as_str(),
         envelope.conversation_id.as_str(),
         envelope.seq,

@@ -11,8 +11,10 @@ name = "flare-signaling-route"
 path = "cmd/main.rs"
 
 [dependencies]
-flare-server-core = { workspace = true }
+flare-server-core = { workspace = true, features = ["grpc", "discovery"] }
+flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
 flare-im-core = { path = "../.." }
 tokio = { workspace = true }
 tonic = { workspace = true }

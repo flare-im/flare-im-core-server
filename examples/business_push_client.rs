@@ -30,7 +30,7 @@
 use std::env;
 
 use anyhow::Result;
-use flare_proto::access_gateway::{
+use flare_grpc_proto::access_gateway::{
     PushMessageRequest, PushMessageResponse, access_gateway_client::AccessGatewayClient,
 };
 use flare_proto::common::{

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
-use flare_server_core::context::Ctx;
+use flare_grpc_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
+use flare_im_core::Ctx;
 use tracing::instrument;
 
 use crate::infrastructure::PushProxyMqPublisher;

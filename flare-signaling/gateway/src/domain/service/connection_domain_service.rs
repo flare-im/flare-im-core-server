@@ -2,7 +2,7 @@
 //!
 //! 封装连接管理的核心业务逻辑
 
-use flare_proto::signaling::{HeartbeatRequest, LoginRequest, LogoutRequest};
+use flare_grpc_proto::signaling::{HeartbeatRequest, LoginRequest, LogoutRequest};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};

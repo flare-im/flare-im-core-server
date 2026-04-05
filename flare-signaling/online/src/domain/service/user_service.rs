@@ -2,19 +2,19 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use chrono::Utc;
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, DeviceInfo, GetDeviceRequest,
     GetDeviceResponse, GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest,
     KickDeviceResponse, ListUserDevicesRequest, ListUserDevicesResponse, UserPresence,
 };
-use flare_server_core::error::ErrorCode;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::flare_err;
 use prost_types::Timestamp;
 use tracing::{info, warn};
 
 use crate::domain::repository::ConversationRepository;
-use crate::util;
+use crate::domain::value_object::UserId;
 
 /// 用户领域服务 - 包含所有业务逻辑（泛型仓储，避免 `dyn` 异步 trait）
 pub struct UserService<R: ConversationRepository + Send + Sync> {
@@ -36,12 +36,13 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         let user_id = &request.user_id;
 
         // 获取用户的所有会话
-        let user_id_vo = crate::domain::value_object::UserId::new(user_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let user_id_vo = UserId::new(user_id.to_string())
+            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("invalid user_id: {}", e)))?;
         let sessions = self
             .conversation_repository
             .get_user_connections(&user_id_vo)
-            .await?;
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
 
         // 计算在线状态
         let is_online = !sessions.is_empty();
@@ -81,7 +82,6 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         Ok(GetUserPresenceResponse {
             presence: Some(presence),
-            status: util::rpc_status_ok(),
         })
     }
 
@@ -95,18 +95,11 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         if user_ids.is_empty() {
             return Ok(BatchGetUserPresenceResponse {
                 presences: std::collections::HashMap::new(),
-                status: util::rpc_status_ok(),
             });
         }
 
         if user_ids.len() > 100 {
-            return Ok(BatchGetUserPresenceResponse {
-                presences: std::collections::HashMap::new(),
-                status: util::rpc_status_error(
-                    ErrorCode::InvalidParameter,
-                    "maximum 100 user_ids allowed",
-                ),
-            });
+            return Err(flare_err!(ErrorCode::InvalidParameter, "maximum 100 user_ids allowed"));
         }
 
         let mut presences = std::collections::HashMap::new();
@@ -131,7 +124,6 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         Ok(BatchGetUserPresenceResponse {
             presences,
-            status: util::rpc_status_ok(),
         })
     }
 
@@ -178,7 +170,6 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     server_id: s.server_id().to_string(),
                 })
                 .collect(),
-            status: util::rpc_status_ok(),
         })
     }
 
@@ -212,13 +203,9 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
             Ok(KickDeviceResponse {
                 success: true,
-                status: util::rpc_status_ok(),
             })
         } else {
-            Ok(KickDeviceResponse {
-                success: false,
-                status: util::rpc_status_error(ErrorCode::UserNotFound, "device not found"),
-            })
+            Err(flare_err!(ErrorCode::UserNotFound, "device not found"))
         }
     }
 
@@ -259,13 +246,9 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     gateway_id: session.gateway_id().to_string(),
                     server_id: session.server_id().to_string(),
                 }),
-                status: util::rpc_status_ok(),
             })
         } else {
-            Ok(GetDeviceResponse {
-                device: None,
-                status: util::rpc_status_error(ErrorCode::InvalidParameter, "device not found"),
-            })
+            Err(flare_err!(ErrorCode::InvalidParameter, "device not found"))
         }
     }
 }

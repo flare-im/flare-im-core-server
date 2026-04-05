@@ -40,7 +40,8 @@
 ///
 /// - 微信 MsgService 序列号设计：https://cloud.tencent.com/developer/article/1006035
 /// - Telegram Sequence Number：https://core.telegram.org/mtproto/description#message-identifier-msg-id
-use anyhow::{Context, Result};
+use crate::error::{ErrorCode, Result};
+use flare_server_core::{error::AnyhowContext, flare_err};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
@@ -207,7 +208,7 @@ impl SequenceAllocator {
         let end_seq: u64 = conn
             .incr(&key, self.batch_size)
             .await
-            .context("Failed to increment batch sequence in Redis")?;
+            .with_context(|| "Failed to increment batch sequence in Redis")?;
 
         // 设置 TTL
         let _: () = conn
@@ -268,7 +269,7 @@ impl SequenceAllocator {
         // 获取当前时间戳（毫秒）
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .context("System time went backwards")?
+            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("System time went backwards: {}", e)))?
             .as_millis() as u64;
 
         // 生成 16 位随机数

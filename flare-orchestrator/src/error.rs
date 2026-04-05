@@ -3,9 +3,14 @@
 //! 统一处理消息操作相关的错误，遵循FlareError标准。
 //! 重新导出 flare_im_core 的 to_system_err / to_system_err_with 供本服务统一使用。
 
-pub use flare_server_core::error::{FlareError, Result};
+pub use flare_server_core::error::{
+    LocalizedError,
+    ErrorBuilder, ErrorCode, FlareError, Result,
+    map_infra_error, InfraResultExt,
+};
+pub use flare_server_core::{flare_err, flare_err_details};
+pub use flare_server_core::error::grpc::IntoGrpc;
 
-pub use flare_server_core::error::{ErrorBuilder, ErrorCode, LocalizedError};
 
 /// 统一错误映射（委托 flare_im_core）
 pub use flare_im_core::error::{to_system_err, to_system_err_with};

@@ -3,7 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use flare_proto::common::ConversationDetail as ProtoConversationDetail;
 use flare_proto::common::ConversationSummary as ProtoConversationSummary;
-use flare_proto::conversation::{
+use flare_grpc_proto::conversation::{
     Conversation as ProtoConversation, ConversationParticipant as ProtoConversationParticipant,
     ConversationPolicy as ProtoConversationPolicy, DevicePresence as ProtoDevicePresence,
 };
@@ -25,7 +25,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
 
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
-        conversation_type: summary.conversation_type.unwrap_or_default(),
+        conversation_type: summary.conversation_type.as_int().to_string(),
         business_type: summary.business_type.unwrap_or_default(),
         display_name: summary.display_name.unwrap_or_default(),
         avatar_url: String::new(),
@@ -38,7 +38,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         }),
         unread_count: summary.unread_count as u32,
         max_seq: summary.last_message_seq.unwrap_or(0).max(0) as u64,
-        last_read_seq: 0,
+        last_read_seq: summary.last_read_seq.max(0) as u64,
         is_muted: false,
         is_pinned: false,
         mute_until: None,
@@ -91,10 +91,6 @@ pub fn timestamp_from_datetime(dt: DateTime<Utc>) -> Option<Timestamp> {
     })
 }
 
-pub fn internal_error(err: anyhow::Error) -> tonic::Status {
-    tonic::Status::internal(err.to_string())
-}
-
 pub fn participant_proto_to_domain(p: ProtoConversationParticipant) -> ConversationParticipant {
     ConversationParticipant {
         user_id: p.user_id,
@@ -131,7 +127,7 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
 
     ProtoConversationDetail {
         conversation_id: conversation.conversation_id,
-        conversation_type: conversation.conversation_type,
+        conversation_type: conversation.conversation_type.as_int().to_string(),
         business_type: conversation.business_type,
         display_name,
         avatar_url,
@@ -178,7 +174,7 @@ pub fn participant_domain_to_proto(p: ConversationParticipant) -> ProtoConversat
 pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversation {
     ProtoConversation {
         conversation_id: conversation.conversation_id,
-        conversation_type: conversation.conversation_type,
+        conversation_type: conversation.conversation_type.as_proto(),
         business_type: conversation.business_type,
         channel_id: conversation.channel_id,
         attributes: conversation.attributes,

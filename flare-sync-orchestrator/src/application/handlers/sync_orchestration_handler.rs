@@ -1,6 +1,6 @@
 //! 同步编排应用服务：组合 Conversation + Storage +（可选）事件读端口，落实初始化/离线/增量策略。
 //!
-//! 对外统一为 `flare.common.v1.Sync` / `SyncRes`（gRPC `ExecuteSync` 与 DATA 信道一致）。
+//! 对外统一为 `flare.common.v1.Sync` / `SyncRes`（gRPC `ExecuteSync` 与 DATA 信道一致；`SyncRes` 仅承载 `payload`，错误走 gRPC `Status`）。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -12,16 +12,16 @@ use flare_proto::common::{
     ConversationDetail, ConversationDetailSync, ConversationDetailSyncRes, ConversationLight,
     ConversationMaxSeqSync, ConversationMaxSeqSyncRes, ConversationPatch, ConversationPatchType,
     ConversationSummary, ConversationsAllSync, ConversationsAllSyncRes,
-    ConversationsIncrementalSync, ConversationsIncrementalSyncRes, ErrorCode, EventEnvelope,
+    ConversationsIncrementalSync, ConversationsIncrementalSyncRes, EventEnvelope,
     EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview,
     MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync,
-    QueryEventsSyncRes, RpcStatus, SingleConversationSync, SingleConversationSyncRes,
+    QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes,
     SnapshotConversationRow, SyncKind, SyncRes, SyncSliceItem, SyncSnapshotSync,
     SyncSnapshotSyncRes, UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
 };
-use flare_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
-use flare_server_core::context::Ctx;
-use flare_server_core::error::{FlareError, proto::ok_status, proto::to_rpc_status};
+use flare_grpc_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
+use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
+use flare_im_core::Ctx;
 use prost::Message as ProstMessage;
 use tracing::{debug, trace};
 
@@ -43,12 +43,12 @@ use crate::domain::service::{
 #[derive(Clone, Default)]
 struct ConversationSyncRoutingHint {
     channel_id: String,
-    conversation_type: String,
+    conversation_type: i32,
 }
 
 pub struct SyncSnapshotOutcome {
     pub res: SyncSnapshotSyncRes,
-    pub routing: Vec<ConversationSyncRoutingHint>,
+    routing: Vec<ConversationSyncRoutingHint>,
 }
 
 struct MergedSnapshotRow {
@@ -75,114 +75,101 @@ where
         }
     }
 
-    /// 统一入口：`Sync` → 编排逻辑 → `SyncRes`（业务错误写入 `RpcStatus`，便于网关直转）。
+    /// 统一入口：`Sync` → 编排逻辑 → `SyncRes`。失败返回 `FlareError`；gRPC 层用 `IntoGrpc` 转为 `tonic::Status`（与 media 等服务一致）。
     pub async fn execute_sync(
         &self,
         ctx: &Ctx,
         user_id: &str,
         mut sync: flare_proto::common::Sync,
-    ) -> SyncRes {
-        fn reject(msg: &str) -> SyncRes {
-            SyncRes {
-                status: Some(RpcStatus {
-                    code: ErrorCode::InvalidArgument as i32,
-                    message: msg.to_string(),
-                    details: Vec::new(),
-                    context: None,
-                    localization_key: String::new(),
-                    localization_params: Default::default(),
-                }),
-                payload: None,
-            }
-        }
-
-        fn ok_pay(p: SyncResPayload) -> SyncRes {
-            SyncRes {
-                status: Some(ok_status()),
-                payload: Some(p),
-            }
-        }
-
-        fn from_flare(e: FlareError) -> SyncRes {
-            SyncRes {
-                status: Some(to_rpc_status(&e)),
-                payload: None,
-            }
-        }
-
+    ) -> Result<SyncRes, FlareError> {
         let kind = decode_sync_kind(sync.kind);
         if kind == SyncKind::Unspecified {
-            return reject("sync kind must not be SYNC_KIND_UNSPECIFIED");
+            return Err(
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "sync kind must not be SYNC_KIND_UNSPECIFIED",
+                )
+                .build_error(),
+            );
         }
         let Some(payload) = sync.payload.take() else {
-            return reject("sync payload is required");
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "sync payload is required")
+                    .build_error(),
+            );
         };
 
         match (kind, payload) {
             (SyncKind::SingleConversation, SyncPayload::SingleConversation(req)) => {
-                match self.single_conversation_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::SingleConversation(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.single_conversation_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::SingleConversation(v)),
+                })
             }
             (SyncKind::MultiConversation, SyncPayload::MultiConversation(req)) => {
-                match self.multi_conversation_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::MultiConversation(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.multi_conversation_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::MultiConversation(v)),
+                })
             }
             (SyncKind::ConversationsIncremental, SyncPayload::ConversationsIncremental(req)) => {
-                match self.conversations_incremental_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::ConversationsIncremental(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.conversations_incremental_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::ConversationsIncremental(v)),
+                })
             }
             (SyncKind::ConversationsAll, SyncPayload::ConversationsAll(req)) => {
-                match self.conversations_all_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::ConversationsAll(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.conversations_all_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::ConversationsAll(v)),
+                })
             }
             (SyncKind::ConversationDetail, SyncPayload::ConversationDetail(req)) => {
-                match self.conversation_detail_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::ConversationDetail(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.conversation_detail_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::ConversationDetail(v)),
+                })
             }
             (SyncKind::QueryEvents, SyncPayload::QueryEvents(req)) => {
-                match self.query_events_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::QueryEvents(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.query_events_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::QueryEvents(v)),
+                })
             }
             (SyncKind::GetSyncCursor, SyncPayload::GetSyncCursor(req)) => {
-                match self.get_sync_cursor_sync(user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::GetSyncCursor(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.get_sync_cursor_sync(user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::GetSyncCursor(v)),
+                })
             }
             (SyncKind::UpdateSyncCursor, SyncPayload::UpdateSyncCursor(req)) => {
-                match self.update_sync_cursor_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::UpdateSyncCursor(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.update_sync_cursor_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::UpdateSyncCursor(v)),
+                })
             }
-            (SyncKind::EventStreamAck, SyncPayload::EventStreamAck(_)) => {
-                ok_pay(SyncResPayload::EventStreamAckRes(EventStreamAckSyncRes {}))
-            }
+            (SyncKind::EventStreamAck, SyncPayload::EventStreamAck(_)) => Ok(SyncRes {
+                payload: Some(SyncResPayload::EventStreamAckRes(EventStreamAckSyncRes {})),
+            }),
             (SyncKind::SyncSnapshot, SyncPayload::SyncSnapshot(req)) => {
-                match self.get_sync_snapshot(ctx, user_id, req).await {
-                    Ok(outcome) => ok_pay(SyncResPayload::SyncSnapshotRes(outcome.res)),
-                    Err(e) => from_flare(e),
-                }
+                let outcome = self.get_sync_snapshot(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::SyncSnapshotRes(outcome.res)),
+                })
             }
             (SyncKind::ConversationMaxSeq, SyncPayload::ConversationMaxSeq(req)) => {
-                match self.conversation_max_seq_sync(ctx, user_id, req).await {
-                    Ok(v) => ok_pay(SyncResPayload::ConversationMaxSeqRes(v)),
-                    Err(e) => from_flare(e),
-                }
+                let v = self.conversation_max_seq_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::ConversationMaxSeqRes(v)),
+                })
             }
-            _ => reject("sync kind does not match payload oneof"),
+            _ => Err(
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "sync kind does not match payload oneof",
+                )
+                .build_error(),
+            ),
         }
     }
 
@@ -341,7 +328,7 @@ where
             .map(|(_, _, m)| {
                 routing.push(ConversationSyncRoutingHint {
                     channel_id: m.bootstrap.channel_id.clone(),
-                    conversation_type: m.bootstrap.conversation_type.clone(),
+                    conversation_type: m.bootstrap.conversation_type.parse::<i32>().unwrap_or(0),
                 });
                 m.row
             })
@@ -859,16 +846,11 @@ fn latest_message(item: &SnapshotConversationRow) -> Option<&Message> {
     item.messages.iter().max_by_key(|m| m.seq)
 }
 
-fn conversation_type_str(message: Option<&Message>) -> String {
+fn conversation_type_int(message: Option<&Message>) -> i32 {
     let Some(msg) = message else {
-        return String::new();
+        return 0;
     };
-    match msg.conversation_type {
-        1 => "single".to_string(),
-        2 => "group".to_string(),
-        3 => "channel".to_string(),
-        _ => String::new(),
-    }
+    msg.conversation_type
 }
 
 /// 同步补丁摘要 `channel_id`：最新消息体优先，否则 Bootstrap 摘要
@@ -879,11 +861,11 @@ fn merge_sync_summary_channel_id(from_message: &str, hint: &ConversationSyncRout
     hint.channel_id.clone()
 }
 
-fn merge_sync_summary_conversation_type(from_message: &str, hint: &str) -> String {
-    if !from_message.is_empty() {
-        return from_message.to_string();
+fn merge_sync_summary_conversation_type(from_message: i32, hint: i32) -> i32 {
+    if from_message > 0 {
+        return from_message;
     }
-    hint.to_string()
+    hint
 }
 
 fn message_preview(
@@ -912,12 +894,12 @@ fn snapshot_row_to_summary(
     let avatar_url = ext.get("avatar_url").cloned().unwrap_or_default();
     let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
     let channel_id = merge_sync_summary_channel_id(channel_from_msg, hint);
-    let type_from_msg = conversation_type_str(latest);
+    let type_from_msg = conversation_type_int(latest);
     let conversation_type =
-        merge_sync_summary_conversation_type(type_from_msg.as_str(), hint.conversation_type.as_str());
+        merge_sync_summary_conversation_type(type_from_msg, hint.conversation_type);
     ConversationSummary {
         conversation_id: item.conversation_id.clone(),
-        conversation_type,
+        conversation_type: conversation_type.to_string(),
         business_type: ext.get("business_type").cloned().unwrap_or_default(),
         display_name,
         avatar_url,

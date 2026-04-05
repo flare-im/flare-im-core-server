@@ -1,58 +1,47 @@
+//! 推送主队列消费者 - 处理 TOPIC_MESSAGE_MAIN 中的 MqEnvelope 消息
+//!
+//! ## 核心职责
+//! 1. 消费 TOPIC_MESSAGE_MAIN 中的 MqEnvelope 消息
+//! 2. 根据 MqPayloadKind 分发到不同的处理逻辑
+//! 3. 处理 push_only 和 persistence_only 标记
+//!
+//! ## 设计原则
+//! - Interface 层：负责 MQ 消息的接收和反序列化
+//! - 上下文重建：从 MQ headers 中提取追踪信息
+//! - Payload 分发：根据 payload_kind 分发到 Message 或 Event 处理逻辑
+
 use std::sync::Arc;
 
-use flare_proto::common::Event;
-use flare_proto::push::PushMessageRequest;
-use flare_server_core::context::Ctx;
-use flare_server_core::event_bus::{EventEnvelope, EventHandler};
-use flare_server_core::{FlareError, Result};
-use prost::Message as _;
-use tracing::{debug, error};
+use async_trait::async_trait;
+use flare_grpc_proto::access_gateway::{PushEventRequest, PushMessageRequest};
+use flare_proto::common::{mq_envelope, MqEnvelope, MqPayloadKind};
+use flare_server_core::mq::consumer::{
+    MessageHandler, Message, MessageResult, ConsumerError,
+};
+use tracing::instrument;
 
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 
-const MAIN_KIND_MESSAGE: u8 = 1;
-const MAIN_KIND_EVENT: u8 = 2;
-
-fn decode_main_payload(payload: &[u8]) -> Result<(u8, &[u8], &[u8])> {
-    if payload.len() < 9 {
-        return Err(FlareError::general_error("invalid main payload: too short"));
-    }
-    let kind = payload[0];
-    let first_len = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
-    let first_start = 5usize;
-    let first_end = first_start.saturating_add(first_len);
-    if payload.len() < first_end + 4 {
-        return Err(FlareError::general_error(
-            "invalid main payload: first length overflow",
-        ));
-    }
-    let second_len = u32::from_be_bytes([
-        payload[first_end],
-        payload[first_end + 1],
-        payload[first_end + 2],
-        payload[first_end + 3],
-    ]) as usize;
-    let second_start = first_end + 4;
-    let second_end = second_start.saturating_add(second_len);
-    if payload.len() < second_end {
-        return Err(FlareError::general_error(
-            "invalid main payload: second length overflow",
-        ));
-    }
-    Ok((
-        kind,
-        &payload[first_start..first_end],
-        &payload[second_start..second_end],
-    ))
-}
-
-pub struct PushMainRequestHandler {
+/// 推送主队列消费者处理器
+///
+/// 处理 `TOPIC_MESSAGE_MAIN` 中的 MqEnvelope 消息，根据 payload_kind 分发处理
+pub struct PushMainHandler {
+    /// 推送路由处理器（应用层）
     route_handler: Arc<PushRouterHandler>,
+    /// MQ 发布器（用于发送 DLQ）
     publisher: Arc<PushServerMqPublisher>,
 }
 
-impl PushMainRequestHandler {
+impl PushMainHandler {
+    /// 创建新的推送主队列消费者处理器
+    ///
+    /// # 参数
+    /// - `route_handler`: 推送路由处理器
+    /// - `publisher`: MQ 发布器
+    ///
+    /// # 返回
+    /// - `Self`: 推送主队列消费者处理器实例
     pub fn new(
         route_handler: Arc<PushRouterHandler>,
         publisher: Arc<PushServerMqPublisher>,
@@ -62,59 +51,183 @@ impl PushMainRequestHandler {
             publisher,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl EventHandler for PushMainRequestHandler {
-    async fn handle(&self, ctx: &Ctx, envelope: EventEnvelope) -> Result<()> {
-        debug!(trace_id = %ctx.trace_id(), "received main queue event");
-        let (kind, first, second) = match decode_main_payload(envelope.payload.as_slice()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(error = %e, "invalid main payload, sending to dlq");
-                self.publisher
-                    .publish_dlq(ctx, Some(envelope.partition_key.as_str()), envelope.payload)
-                    .await
-                    .map_err(|err| FlareError::general_error(err.to_string()))?;
-                return Ok(());
-            }
-        };
-
-        let push_req = match kind {
-            MAIN_KIND_MESSAGE => PushMessageRequest::decode(second),
-            MAIN_KIND_EVENT => {
-                if second.is_empty() {
-                    let _ = Event::decode(first);
-                    return Ok(());
-                }
-                PushMessageRequest::decode(second)
-            }
-            _ => return Ok(()),
-        };
-
-        match push_req {
-            Ok(req) => {
-                if let Err(e) = self.route_handler.handle_message(ctx, req).await {
-                    error!(error = %e, "route main push request failed, sending to dlq");
-                    self.publisher
-                        .publish_dlq(ctx, Some(envelope.partition_key.as_str()), envelope.payload)
-                        .await
-                        .map_err(|err| FlareError::general_error(err.to_string()))?;
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "decode main push request failed, sending to dlq");
-                self.publisher
-                    .publish_dlq(ctx, Some(envelope.partition_key.as_str()), envelope.payload)
-                    .await
-                    .map_err(|err| FlareError::general_error(err.to_string()))?;
-            }
+    /// 处理 Message payload
+    async fn handle_message_payload(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        envelope: &MqEnvelope,
+        original_payload: Vec<u8>,
+    ) -> Result<MessageResult, ConsumerError> {
+        // 检查 persistence_only 标记
+        if envelope.persistence_only {
+            tracing::debug!(
+                envelope_id = %envelope.envelope_id,
+                "Message marked as persistence_only, skipping push"
+            );
+            return Ok(MessageResult::Ack);
         }
 
-        Ok(())
+        let proto_message = match &envelope.payload {
+            Some(mq_envelope::Payload::Message(m)) => m,
+            _ => {
+                tracing::error!(
+                    envelope_id = %envelope.envelope_id,
+                    "Message payload missing or wrong variant"
+                );
+                return Err(ConsumerError::Deserialization(
+                    "Message payload missing or wrong variant".to_string(),
+                ));
+            }
+        };
+
+        // 构建 PushMessageRequest
+        let req = PushMessageRequest {
+            user_ids: envelope.recipient_user_ids.clone(),
+            messages: vec![proto_message.clone()],
+            options: None,
+        };
+
+        // 调用 Application 层
+        match self.route_handler.handle_message(ctx, req).await {
+            Ok(()) => Ok(MessageResult::Ack),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    envelope_id = %envelope.envelope_id,
+                    "Failed to handle message payload, sending to DLQ"
+                );
+                // 发送到 DLQ
+                if let Err(dlq_err) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), original_payload).await {
+                    tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
+                }
+                Ok(MessageResult::Ack)
+            }
+        }
     }
 
+    /// 处理 Event payload
+    async fn handle_event_payload(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        envelope: &MqEnvelope,
+        original_payload: Vec<u8>,
+    ) -> Result<MessageResult, ConsumerError> {
+        // 检查 recipient_user_ids
+        if envelope.recipient_user_ids.is_empty() {
+            tracing::warn!(
+                envelope_id = %envelope.envelope_id,
+                "Event MqEnvelope without recipients, skipping push"
+            );
+            return Ok(MessageResult::Ack);
+        }
+
+        let proto_event = match &envelope.payload {
+            Some(mq_envelope::Payload::Event(e)) => e,
+            _ => {
+                tracing::error!(
+                    envelope_id = %envelope.envelope_id,
+                    "Event payload missing or wrong variant"
+                );
+                return Err(ConsumerError::Deserialization(
+                    "Event payload missing or wrong variant".to_string(),
+                ));
+            }
+        };
+
+        // 构建 PushEventRequest
+        let req = PushEventRequest {
+            user_ids: envelope.recipient_user_ids.clone(),
+            events: vec![proto_event.clone()],
+            options: None,
+        };
+
+        // 调用 Application 层
+        match self.route_handler.handle_event(ctx, req).await {
+            Ok(()) => Ok(MessageResult::Ack),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    envelope_id = %envelope.envelope_id,
+                    "Failed to handle event payload, sending to DLQ"
+                );
+                // 发送到 DLQ
+                if let Err(dlq_err) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), original_payload).await {
+                    tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
+                }
+                Ok(MessageResult::Ack)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl MessageHandler for PushMainHandler {
+    /// 处理 MQ 消息
+    ///
+    /// # 处理流程
+    /// 1. 反序列化 MqEnvelope
+    /// 2. 根据 payload_kind 分发到不同的处理逻辑
+    /// 3. 处理 push_only 和 persistence_only 标记
+    /// 4. 失败时发送到 DLQ
+    ///
+    /// # 参数
+    /// - `message`: MQ 消息
+    ///
+    /// # 返回
+    /// - `Ok(MessageResult::Ack)`: 处理成功
+    /// - `Err(ConsumerError)`: 处理失败
+    #[instrument(skip(self), fields(
+        topic = %message.context.topic,
+        partition = message.context.partition,
+        offset = message.context.offset,
+    ))]
+    async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
+        // 1. 反序列化 MqEnvelope
+        let envelope = message.decode_protobuf::<MqEnvelope>()
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    topic = %message.context.topic,
+                    "Failed to deserialize MqEnvelope"
+                );
+                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+            })?;
+
+        tracing::debug!(
+            envelope_id = %envelope.envelope_id,
+            conversation_id = %envelope.conversation_id,
+            payload_kind = ?envelope.payload_kind,
+            seq = envelope.seq,
+            push_only = envelope.push_only,
+            persistence_only = envelope.persistence_only,
+            "Processing MqEnvelope from TOPIC_MESSAGE_MAIN"
+        );
+
+        // 2. 从 headers 中重建上下文
+        let ctx = &message.context.ctx;
+
+        // 3. 根据 payload_kind 分发
+        match MqPayloadKind::try_from(envelope.payload_kind) {
+            Ok(MqPayloadKind::Message) => {
+                self.handle_message_payload(ctx, &envelope, message.payload.clone()).await
+            }
+            Ok(MqPayloadKind::Event) => {
+                self.handle_event_payload(ctx, &envelope, message.payload.clone()).await
+            }
+            _ => {
+                tracing::warn!(
+                    envelope_id = %envelope.envelope_id,
+                    payload_kind = ?envelope.payload_kind,
+                    "Unknown payload_kind, skipping"
+                );
+                Ok(MessageResult::Ack)
+            }
+        }
+    }
+
+    /// 获取处理器名称
     fn name(&self) -> &str {
-        "push_main_request_handler"
+        "push-main-handler"
     }
 }

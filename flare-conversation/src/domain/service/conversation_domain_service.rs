@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use crate::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
 use flare_core::common::conversation::{
     generate_ai_conversation_id, generate_customer_conversation_id, generate_group_conversation_id,
     generate_single_chat_conversation_id, generate_system_conversation_id,
@@ -19,7 +19,8 @@ use uuid::Uuid;
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
     ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
-    ConversationSummary, ConversationVisibility, DevicePresence, DeviceState, MessageSyncResult,
+    ConversationSummary, ConversationType, ConversationVisibility, DevicePresence, DeviceState,
+    MessageSyncResult,
 };
 use crate::domain::repository::{
     ConversationRepository, MessageProvider, PresenceRepository, PresenceUpdate,
@@ -222,12 +223,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             }
         }
 
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         let devices = self
             .presence_repo
-            .list_devices(ctx, user_id)
+            .list_devices(ctx, &user_id)
             .await
             .unwrap_or_default();
 
@@ -286,10 +285,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         cursor: Option<&str>,
         limit: i32,
     ) -> Result<MessageSyncResult> {
-        let provider = self
-            .message_provider
-            .as_ref()
-            .ok_or_else(|| anyhow!("message provider not configured"))?;
+        let provider = self.message_provider.as_ref().ok_or_else(|| {
+            ErrorBuilder::new(ErrorCode::ConfigurationError, "message provider not configured")
+                .build_error()
+        })?;
         provider
             .sync_messages(ctx, conversation_id, since_ts, cursor, limit)
             .await
@@ -318,9 +317,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         notify_conflict: bool,
         conflict_reason: Option<String>,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         let update = PresenceUpdate {
             user_id: user_id.to_string(),
             device_id: device_id.to_string(),
@@ -361,9 +358,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .cloned()
             .collect();
 
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         if missing.is_empty() {
             info!(
                 user_id = %user_id,
@@ -392,7 +387,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
     pub async fn create_conversation(
         &self,
         ctx: &Context,
-        conversation_type: String,
+        conversation_type: ConversationType,
         business_type: String,
         participants: Vec<ConversationParticipant>,
         mut attributes: HashMap<String, String>,
@@ -400,8 +395,8 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         stored_channel_id: String,
     ) -> Result<Conversation> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let normalized_channel_id = match conversation_type.as_str() {
-            "single" => String::new(),
+        let normalized_channel_id = match conversation_type {
+            ConversationType::Single => String::new(),
             _ => stored_channel_id,
         };
         // 尝试从 attributes 中提取指定的 conversation_id
@@ -489,20 +484,26 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             }
         } else {
             // 没有指定 conversation_id，根据会话类型生成
-            let conversation_id = match conversation_type.as_str() {
-                "single" => {
+            let conversation_id = match conversation_type {
+                ConversationType::Single => {
                     // 单聊：从参与者中提取两个用户ID，使用 generate_single_chat_conversation_id
                     if participants.len() != 2 {
-                        return Err(anyhow::anyhow!(
-                            "Single chat session must have exactly 2 participants, got {}",
-                            participants.len()
-                        ));
+                        return Err(
+                            ErrorBuilder::new(
+                                ErrorCode::InvalidParameter,
+                                format!(
+                                    "single chat must have exactly 2 participants, got {}",
+                                    participants.len()
+                                ),
+                            )
+                            .build_error(),
+                        );
                     }
                     let user1 = &participants[0].user_id;
                     let user2 = &participants[1].user_id;
                     generate_single_chat_conversation_id(user1, user2)
                 }
-                "group" => {
+                ConversationType::Group => {
                     // 群聊：使用 UUID 作为 group_id，或从 attributes 中获取
                     let group_id = attributes
                         .get("group_id")
@@ -510,7 +511,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
                     generate_group_conversation_id(&group_id)
                 }
-                "assistant" | "ai" => {
+                ConversationType::Ai => {
                     // AI 助手：从参与者中提取用户ID，ai_scope 从 attributes 或默认值
                     let user_id = participants
                         .first()
@@ -522,7 +523,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                         .unwrap_or("0");
                     generate_ai_conversation_id(user_id, ai_scope)
                 }
-                "system" => {
+                ConversationType::System => {
                     // 系统会话：system_id 从 attributes 或使用 tenant_id
                     let system_id = attributes
                         .get("system_id")
@@ -532,7 +533,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     let scope = attributes.get("scope").cloned();
                     generate_system_conversation_id(&system_id, scope)
                 }
-                "customer" => {
+                ConversationType::Customer => {
                     // 客服会话：customer_id 和 channel 从 attributes 获取
                     let customer_id = attributes
                         .get("customer_id")
@@ -544,12 +545,12 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                         .unwrap_or_else(|| "0".to_string());
                     generate_customer_conversation_id(&customer_id, &channel)
                 }
-                "temp" => generate_temp_conversation_id(),
-                _ => {
+                ConversationType::Temp => generate_temp_conversation_id(),
+                ConversationType::Unspecified => {
                     // 默认使用UUID（向后兼容）
                     warn!(
-                        conversation_type = %conversation_type,
-                        "Unknown session type, using UUID for conversation_id (backward compatibility)"
+                        conversation_type = ?conversation_type,
+                        "Unspecified session type, using UUID for conversation_id (backward compatibility)"
                     );
                     Uuid::new_v4().to_string()
                 }
@@ -607,7 +608,11 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .conversation_repo
             .get_conversation(ctx, conversation_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Conversation not found: {}", conversation_id))?;
+            .ok_or_else(|| {
+                ErrorBuilder::new(ErrorCode::MessageNotFound, "conversation not found")
+                    .details(format!("conversation_id={}", conversation_id))
+                    .build_error()
+            })?;
 
         if let Some(name) = display_name {
             conversation.display_name = Some(name);
@@ -673,9 +678,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         ctx: &Context,
         cursors: Vec<(String, i64)>,
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         self.conversation_repo
             .batch_acknowledge(ctx, &cursors)
             .await?;

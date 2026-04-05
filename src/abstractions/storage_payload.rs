@@ -4,8 +4,8 @@
 //! Context 与 metadata 通过 [context_to_mq_metadata] / [context_from_mq_metadata] 双向编解码。
 
 use crate::utils::{context_from_mq_metadata, context_to_mq_metadata};
+use crate::Ctx;
 use flare_proto::common::Message;
-use flare_server_core::context::Ctx;
 use std::collections::HashMap;
 
 /// Message.extra 中用于 envelope 的约定键（与业务 extra 区分）

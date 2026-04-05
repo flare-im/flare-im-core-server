@@ -122,6 +122,10 @@ impl OperationStore {
             }
         };
 
+        if !extra.is_object() {
+            extra = Value::Object(serde_json::Map::new());
+        }
+
         let next_version_row = sqlx::query_scalar::<_, i32>(
             r#"
             SELECT COALESCE(MAX(edit_version), 0) + 1 FROM message_edit_history
@@ -137,10 +141,19 @@ impl OperationStore {
                 .unwrap_or(1)
                 .max(if edit_version > 0 { edit_version } else { 1 });
 
-        if let Some(text) = content_text_for_extra {
-            if let Value::Object(ref mut map) = extra {
+        if let Value::Object(ref mut map) = extra {
+            if let Some(text) = content_text_for_extra {
                 map.insert("content_text".to_string(), Value::String(text.to_string()));
             }
+            // 与编排/Reader 约定一致：同步下行时 SDK 用 extra 识别「已编辑」（proto 无独立 EDITED 状态位）
+            map.insert(
+                "message_fsm_state".to_string(),
+                Value::String("EDITED".to_string()),
+            );
+            map.insert(
+                "current_edit_version".to_string(),
+                Value::String(final_edit_version.to_string()),
+            );
         }
 
         sqlx::query(
@@ -183,20 +196,22 @@ impl OperationStore {
         tenant_id: &str,
         message_id: &str,
         user_id: &str,
+        scope: i32,
         visibility_status: &str,
     ) -> Result<()> {
         let status_int = visibility_status_to_int(visibility_status);
         sqlx::query(
             r#"
-            INSERT INTO message_visibility (tenant_id, message_id, user_id, visibility_status, changed_at)
-            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-            ON CONFLICT (tenant_id, message_id, user_id)
+            INSERT INTO message_visibility (tenant_id, message_id, user_id, scope, visibility_status, changed_at)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+            ON CONFLICT (tenant_id, message_id, user_id, scope)
             DO UPDATE SET visibility_status = EXCLUDED.visibility_status, changed_at = EXCLUDED.changed_at
             "#,
         )
         .bind(tenant_id)
         .bind(message_id)
         .bind(user_id)
+        .bind(scope)
         .bind(status_int)
         .execute(&self.pool)
         .await?;

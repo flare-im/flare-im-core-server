@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_proto::common::Ack;
 use flare_server_core::context::Context;
 use tracing::debug;
+
+use crate::error::Result;
 
 /// 客户端 ACK 转发器（当前为 no-op，占位）。
 pub struct AckToPushProxyForwarder;

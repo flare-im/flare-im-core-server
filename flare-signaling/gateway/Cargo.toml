@@ -13,7 +13,9 @@ path = "cmd/main.rs"
 [dependencies]
 flare-core = { workspace = true }
 flare-server-core = { workspace = true, features = ["discovery"] }
+flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
 flare-im-core = { path = "../..", features = ["discovery"] }
 tokio = { workspace = true }
 tonic = { workspace = true }

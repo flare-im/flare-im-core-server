@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context as AnyhowContext, Result};
-use flare_proto::media::{
+use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_grpc_proto::media::{
     AbortMultipartUploadRequest, CompleteMultipartUploadRequest, DeleteFileRequest,
     InitiateMultipartUploadRequest, ProcessImageRequest, ProcessVideoRequest, UploadFileMetadata,
     UploadMultipartChunkRequest,
@@ -93,7 +93,6 @@ impl MediaCommandHandler {
         self.domain_service
             .store_media_file(ctx, upload_context)
             .await
-            .context("store media file")
     }
 
     pub async fn handle_delete_file(
@@ -112,15 +111,11 @@ impl MediaCommandHandler {
         request: InitiateMultipartUploadRequest,
     ) -> Result<MultipartUploadSession> {
         // 使用领域服务准备分片上传初始化（业务逻辑下沉到领域层）
-        let init = self
-            .domain_service
-            .prepare_multipart_upload_init(&request)
-            .context("prepare multipart upload init")?;
+        let init = self.domain_service.prepare_multipart_upload_init(&request)?;
 
         self.domain_service
             .initiate_multipart_upload(ctx, init)
             .await
-            .context("initiate multipart upload")
     }
 
     pub async fn handle_upload_multipart_chunk(
@@ -129,10 +124,16 @@ impl MediaCommandHandler {
         request: UploadMultipartChunkRequest,
     ) -> Result<MultipartUploadSession> {
         if request.upload_id.is_empty() {
-            anyhow::bail!("upload_id is required");
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "upload_id is required"
+            ));
         }
         if request.payload.is_empty() {
-            anyhow::bail!("chunk payload is empty");
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "chunk payload is empty"
+            ));
         }
 
         let payload = MultipartChunkPayload {
@@ -141,10 +142,7 @@ impl MediaCommandHandler {
             bytes: request.payload,
         };
 
-        self.domain_service
-            .upload_multipart_chunk(ctx, payload)
-            .await
-            .context("upload multipart chunk")
+        self.domain_service.upload_multipart_chunk(ctx, payload).await
     }
 
     pub async fn handle_complete_multipart_upload(
@@ -155,7 +153,6 @@ impl MediaCommandHandler {
         self.domain_service
             .complete_multipart_upload(ctx, &request.upload_id)
             .await
-            .context("complete multipart upload")
     }
 
     pub async fn handle_abort_multipart_upload(
@@ -166,7 +163,6 @@ impl MediaCommandHandler {
         self.domain_service
             .abort_multipart_upload(ctx, &request.upload_id)
             .await
-            .context("abort multipart upload")
     }
 
     pub async fn handle_attach_reference(
@@ -224,16 +220,16 @@ impl MediaCommandHandler {
         self.process_video_pipeline(ctx, request).await
     }
 
-    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_proto::media::FileInfo {
+    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_grpc_proto::media::FileInfo {
         crate::application::utils::to_proto_file_info(metadata)
     }
 
     /// 将flare_proto::ImageOperation转换为domain::model::MediaOperation
     fn convert_image_operation(
         &self,
-        operation: &flare_proto::media::ImageOperation,
+        operation: &flare_grpc_proto::media::ImageOperation,
     ) -> Result<crate::domain::model::MediaOperation> {
-        use flare_proto::media::image_operation::Operation::*;
+        use flare_grpc_proto::media::image_operation::Operation::*;
         use serde_json::Value;
         use std::collections::HashMap;
 
@@ -259,7 +255,12 @@ impl MediaCommandHandler {
                 parameters.insert("text".to_string(), Value::String(watermark_op.text.clone()));
                 "watermark".to_string()
             }
-            None => return Err(anyhow::anyhow!("Invalid image operation")),
+            None => {
+                return Err(flare_server_core::flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "Invalid image operation"
+                ));
+            }
         };
 
         Ok(crate::domain::model::MediaOperation {
@@ -273,9 +274,9 @@ impl MediaCommandHandler {
     /// 将flare_proto::VideoOperation转换为domain::model::MediaOperation
     fn convert_video_operation(
         &self,
-        operation: &flare_proto::media::VideoOperation,
+        operation: &flare_grpc_proto::media::VideoOperation,
     ) -> Result<crate::domain::model::MediaOperation> {
-        use flare_proto::media::video_operation::Operation::*;
+        use flare_grpc_proto::media::video_operation::Operation::*;
         use serde_json::Value;
         use std::collections::HashMap;
 
@@ -316,7 +317,12 @@ impl MediaCommandHandler {
                 );
                 "subtitle_burn".to_string()
             }
-            None => return Err(anyhow::anyhow!("Invalid video operation")),
+            None => {
+                return Err(flare_server_core::flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "Invalid video operation"
+                ));
+            }
         };
 
         Ok(crate::domain::model::MediaOperation {
@@ -352,7 +358,7 @@ impl MediaCommandHandler {
             .domain_service
             .get_metadata(ctx, &request.file_id)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get original file: {}", e))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to get original file"))?;
 
         // 2. 执行图片处理操作
         let mut processing_results = Vec::new();
@@ -382,9 +388,10 @@ impl MediaCommandHandler {
                         .await?
                 }
                 _ => {
-                    return Err(anyhow::anyhow!(
-                        "Unsupported image operation: {}",
-                        media_operation.r#type
+                    return Err(flare_server_core::flare_err_details!(
+                        ErrorCode::InvalidParameter,
+                        "Unsupported image operation",
+                        media_operation.r#type.clone()
                     ));
                 }
             };
@@ -441,7 +448,9 @@ impl MediaCommandHandler {
             .domain_service
             .get_metadata(ctx, &request.file_id)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get original video file: {}", e))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::InternalError, "Failed to get original video file")
+            })?;
 
         // 2. 执行视频处理操作
         let mut processing_results = Vec::new();
@@ -471,9 +480,10 @@ impl MediaCommandHandler {
                         .await?
                 }
                 _ => {
-                    return Err(anyhow::anyhow!(
-                        "Unsupported video operation: {}",
-                        media_operation.r#type
+                    return Err(flare_server_core::flare_err_details!(
+                        ErrorCode::InvalidParameter,
+                        "Unsupported video operation",
+                        media_operation.r#type.clone()
                     ));
                 }
             };

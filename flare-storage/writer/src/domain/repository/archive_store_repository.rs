@@ -2,7 +2,7 @@
 
 use crate::domain::model::{Event, Message};
 use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 
 pub trait ArchiveStoreRepository: Send + Sync {
     async fn store_archive(&self, ctx: &Ctx, message: &Message) -> Result<()>;
@@ -60,9 +60,10 @@ pub trait ArchiveStoreRepository: Send + Sync {
         tenant_id: &str,
         message_id: &str,
         user_id: &str,
+        scope: i32,
         visibility_status: &str,
     ) -> Result<()> {
-        let _ = (ctx, tenant_id, message_id, user_id, visibility_status);
+        let _ = (ctx, tenant_id, message_id, user_id, scope, visibility_status);
         Ok(())
     }
 

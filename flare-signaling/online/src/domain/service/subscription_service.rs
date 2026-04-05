@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::signaling::online::{PresenceEvent, UserPresenceEvent, WatchPresenceRequest};
+use flare_grpc_proto::signaling::online::{PresenceEvent, UserPresenceEvent, WatchPresenceRequest};
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use tracing::info;
 
 use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
+use crate::error::Result;
 
 /// 订阅领域服务 - 包含所有业务逻辑（泛型依赖，避免 `dyn` 异步 trait）
 pub struct SubscriptionService<
@@ -35,7 +35,6 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
             return Err(
                 ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id cannot be empty")
                     .build_error()
-                    .into(),
             );
         }
 

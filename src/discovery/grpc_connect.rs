@@ -9,8 +9,8 @@ use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::config::FlareAppConfig;
+use crate::ServiceClient;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
-use flare_server_core::discovery::ServiceClient;
 
 use super::init::create_discover_from_config;
 

@@ -1,6 +1,6 @@
 //! 命令结构体定义（Command DTO）
 
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::{
     HeartbeatRequest, LoginRequest, LogoutRequest, SubscribeUserPresenceRequest,
     WatchPresenceRequest,
 };

@@ -12,7 +12,9 @@ path = "cmd/main.rs"
 
 [dependencies]
 flare-server-core = { workspace = true, features = ["kafka"] }
+flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
 flare-im-core = { path = "../..", features = ["tracing"] }
 tokio = { workspace = true }
 tracing = { workspace = true }

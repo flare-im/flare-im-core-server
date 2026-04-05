@@ -1,15 +1,14 @@
 //! 领域事件命令处理器：将 Event 应用到存储（撤回/编辑/删除/已读/反应/置顶/标记）
 
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
 
 use crate::application::commands::ProcessEventCommand;
 use crate::domain::model::PersistenceResult;
-use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
 use crate::domain::service::EventApplicationService;
 use crate::domain::service::event_handlers;
 use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
@@ -45,7 +44,7 @@ impl MessageOperationCommandHandler {
         let start = Instant::now();
         let event = command.event;
 
-        self.event_service.process_event(ctx, &event).await?;
+        self.event_service.process_event(ctx, &event).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
 
         let message_id = event_handlers::primary_message_id_for_metrics(&event);
 

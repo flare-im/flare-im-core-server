@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::signaling::online::GetOnlineStatusRequest;
-use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
-use flare_server_core::context::Ctx;
+use flare_grpc_proto::signaling::online::GetOnlineStatusRequest;
+use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
+use flare_im_core::Ctx;
 use tonic::transport::Channel;
 
 use crate::config::PushServerConfig;
@@ -27,7 +27,10 @@ impl OnlineStatusService {
         let mut req = tonic::Request::new(GetOnlineStatusRequest {
             user_ids: vec![user_id.to_string()],
         });
-        flare_server_core::utils::encode_context_to_metadata(req.metadata_mut(), ctx.as_ref());
+        flare_server_core::grpc::client::encode_context_to_metadata(
+            req.metadata_mut(),
+            ctx.as_ref(),
+        );
         let resp = client.get_online_status(req).await?.into_inner();
         Ok(resp
             .statuses

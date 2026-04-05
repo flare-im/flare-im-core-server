@@ -1,11 +1,11 @@
 use anyhow::Result;
 use flare_server_core::kafka::KafkaMessageFetcher;
-use flare_server_core::mq::consumer::ConsumerRuntimeTask;
-use flare_server_core::runtime::ServiceRuntime;
+use flare_server_core::mq::consumer::{ConsumerRuntimeTask, MqConsumerTask};
+use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::PUSH_WORKER;
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_im_core::service_names::PUSH_WORKER;
 
 pub struct ApplicationBootstrap;
 
@@ -36,14 +36,20 @@ impl ApplicationBootstrap {
         )
         .map_err(|e| anyhow::anyhow!("create kafka fetcher error: {}", e))?;
 
-        let task = ConsumerRuntimeTask::from_parts(
+        let consumer = ConsumerRuntimeTask::from_parts(
             context.consumer_config,
             context.dispatcher.clone(),
             fetcher,
         );
 
-        ServiceRuntime::new_consumer_only(PUSH_WORKER)
-            .add_mq_consumer_runtime("push-delivery-consumer", task)
+        let task = MqConsumerTask::new("push-delivery-consumer", Box::new(consumer));
+
+        flare_im_core::health::attach_runtime_health_checks(
+            ServiceRuntime::mq_consumer()
+                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .add_task(Box::new(task)),
+            PUSH_WORKER,
+        )
             .run()
             .await
     }

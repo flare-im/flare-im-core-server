@@ -4,7 +4,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::Message;
-use prost::Message as _;
 use serde_json::{Map, Value, to_value};
 
 /// 编码消息内容为字节数组（proto Message.content）

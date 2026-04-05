@@ -17,7 +17,7 @@ pub use thread_domain_service::ThreadDomainService;
 pub type DefaultConversationDomainService = ConversationDomainService<
     crate::infrastructure::persistence::postgres_repository::PostgresConversationRepository,
     crate::infrastructure::persistence::redis_presence::RedisPresenceRepository,
-    crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider,
+    crate::infrastructure::rpc::StorageReaderClient,
 >;
 
 /// 默认的话题领域服务类型（使用 Postgres 实现）

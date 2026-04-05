@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
 use flare_im_core::utils::{
     current_millis, embed_timeline_in_extra_map, extract_timeline_from_extra,
 };
-use flare_server_core::context::Ctx;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_im_core::Ctx;
+use flare_server_core::flare_err;
 use tracing::{instrument, warn};
 
 use flare_im_core::utils::datetime_to_timestamp;
@@ -86,7 +87,7 @@ where
 
         let mut message = request
             .message
-            .ok_or_else(|| anyhow!("missing message payload"))?;
+            .ok_or_else(|| flare_err!(ErrorCode::InvalidParameter, "missing message payload"))?;
 
         if let Some(ref tenant) = request.tenant {
             message
@@ -101,7 +102,7 @@ where
             message.conversation_id = conversation_id.clone();
         }
         if message.server_id.is_empty() {
-            return Err(anyhow!("Message server_id cannot be empty"));
+            return Err(flare_err!(ErrorCode::InvalidParameter, "Message server_id cannot be empty"));
         }
 
         // 与 proto MessageStatus 语义对齐：Created=1, Sent=2
@@ -140,10 +141,12 @@ where
                         Err(e) => {
                             warn!(error = ?e, "idempotency by client_msg_id failed, fallback to message_id");
                             repo.is_new(ctx, &prepared.message_id).await
+                                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to check idempotency"))
                         }
                     }
                 } else {
                     repo.is_new(ctx, &prepared.message_id).await
+                        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to check idempotency"))
                 }
             }
             None => Ok(true),
@@ -154,10 +157,12 @@ where
     #[instrument(skip(self), fields(message_id = %prepared.message_id))]
     pub async fn persist_message(&self, ctx: &Ctx, prepared: PreparedMessage) -> Result<()> {
         if let Some(repo) = &self.hot_cache_repo {
-            repo.store_hot(ctx, &prepared.message).await?;
+            repo.store_hot(ctx, &prepared.message).await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to store hot cache"))?;
         }
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive(ctx, &prepared.message).await?;
+            repo.store_archive(ctx, &prepared.message).await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive"))?;
         }
         if let Some(repo) = &self.event_stream_repo {
             let event = build_event_message(&prepared.message);
@@ -177,10 +182,12 @@ where
         let messages: Vec<crate::domain::model::Message> =
             prepared.iter().map(|p| p.message.clone()).collect();
         if let Some(repo) = &self.hot_cache_repo {
-            repo.store_hot_batch(ctx, &messages).await?;
+            repo.store_hot_batch(ctx, &messages).await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to store hot cache batch"))?;
         }
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive_batch(ctx, &messages).await?;
+            repo.store_archive_batch(ctx, &messages).await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive batch"))?;
         }
         if let Some(repo) = &self.event_stream_repo {
             for msg in &prepared {

@@ -7,5 +7,6 @@ async fn main() -> Result<()> {
     init_tracing_from_config(None);
 
     // 创建应用并启动
-    flare_orchestrator::ApplicationBootstrap::run().await
+    flare_orchestrator::ApplicationBootstrap::run().await?;
+    Ok(())
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::domain::model::{
     ConflictResolutionPolicy, ConversationLifecycleState, ConversationParticipant,
-    ConversationVisibility, DeviceState,
+    ConversationType, ConversationVisibility, DeviceState,
 };
 
 /// 批量确认命令
@@ -14,7 +14,7 @@ pub struct BatchAcknowledgeCommand {
 /// 创建会话命令
 #[derive(Debug, Clone)]
 pub struct CreateConversationCommand {
-    pub conversation_type: String,
+    pub conversation_type: ConversationType,
     pub business_type: String,
     pub participants: Vec<ConversationParticipant>,
     pub attributes: HashMap<String, String>,

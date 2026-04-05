@@ -2,10 +2,10 @@
 //!
 //! 实现HookService服务的所有gRPC接口，提供Hook配置的CRUD操作
 
-use anyhow::Result;
-use flare_proto::common::{ErrorCode, ErrorContext, RpcStatus};
-use flare_proto::hooks::hook_service_server::HookService;
-use flare_proto::hooks::{
+use crate::error::{ErrorBuilder, ErrorCode};
+use flare_server_core::error::Result as FlareResult;
+use flare_grpc_proto::hooks::hook_service_server::HookService;
+use flare_grpc_proto::hooks::{
     CreateHookConfigRequest, CreateHookConfigResponse, DeleteHookConfigRequest,
     DeleteHookConfigResponse, GetHookConfigRequest, GetHookConfigResponse,
     GetHookStatisticsRequest, GetHookStatisticsResponse, HookConfig, HookExecution,
@@ -13,7 +13,6 @@ use flare_proto::hooks::{
     ListHookConfigsResponse, QueryHookExecutionsRequest, QueryHookExecutionsResponse,
     SetHookStatusRequest, SetHookStatusResponse, UpdateHookConfigRequest, UpdateHookConfigResponse,
 };
-use flare_server_core::context::Context;
 use flare_server_core::utils::require_ctx_from_request;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -157,20 +156,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(CreateHookConfigResponse {
             config: Some(hook_config),
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -227,20 +212,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(GetHookConfigResponse {
             config: Some(hook_config),
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -401,20 +372,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(UpdateHookConfigResponse {
             config: Some(hook_config),
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -491,20 +448,6 @@ impl HookService for HookServiceServer {
         Ok(Response::new(ListHookConfigsResponse {
             configs,
             pagination: Some(pagination),
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -564,20 +507,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(DeleteHookConfigResponse {
             success: true,
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -639,20 +568,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(SetHookStatusResponse {
             success: true,
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -747,20 +662,6 @@ impl HookService for HookServiceServer {
 
         Ok(Response::new(GetHookStatisticsResponse {
             statistics: Some(statistics),
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 
@@ -868,20 +769,6 @@ impl HookService for HookServiceServer {
         Ok(Response::new(QueryHookExecutionsResponse {
             executions,
             pagination: req.pagination,
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: "OK".to_string(),
-                details: vec![],
-                context: Some(ErrorContext {
-                    service: "hook-engine".to_string(),
-                    instance: "default".to_string(),
-                    region: String::new(),
-                    zone: String::new(),
-                    attributes: std::collections::HashMap::new(),
-                }),
-                localization_key: String::new(),
-                localization_params: std::collections::HashMap::new(),
-            }),
         }))
     }
 }
@@ -908,11 +795,11 @@ fn domain_to_protobuf_statistics(
 fn protobuf_to_hook_config_item(
     req: &CreateHookConfigRequest,
     _existing: Option<&HookConfigItem>,
-) -> Result<HookConfigItem> {
+) -> FlareResult<HookConfigItem> {
     let transport = req
         .transport
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("transport is required"))?;
+        .ok_or_else(|| ErrorBuilder::new(ErrorCode::InvalidParameter, "transport is required").build_error())?;
 
     let selector = req
         .selector
@@ -978,10 +865,9 @@ fn protobuf_to_hook_config_item(
             target: transport.target.clone(),
         },
         _ => {
-            return Err(anyhow::anyhow!(
-                "Unsupported transport type: {}",
-                transport.r#type
-            ));
+            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "Unsupported transport type")
+                .details(transport.r#type.clone())
+                .build_error());
         }
     };
 
@@ -1019,7 +905,7 @@ fn hook_config_item_to_protobuf(
     tenant_id: &str,
     hook_type: &str,
     item: &HookConfigItem,
-) -> Result<HookConfig> {
+) -> FlareResult<HookConfig> {
     let now = Utc::now();
 
     Ok(HookConfig {

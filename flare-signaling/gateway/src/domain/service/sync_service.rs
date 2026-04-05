@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use flare_core::common::error::Result;
+use flare_core::common::error::{FlareError, Result};
 use flare_im_core::Ctx;
-use flare_proto::common::{ErrorCode, RpcStatus, Sync, SyncRes};
+use flare_proto::common::{Sync, SyncRes};
 
 use crate::domain::ports::ISyncPort;
 
@@ -19,30 +19,15 @@ impl SyncService {
         Self { port }
     }
 
-    /// 处理同步：仅连接态补全 → 下游原样返回（含 `RpcStatus` 业务错误）。
+    /// 处理同步：仅连接态补全 → 下游返回 `SyncRes`；传输/RPC 失败返回领域错误。
     pub async fn execute(&self, tx: &Ctx, _connection_id: &str, mut sync: Sync) -> Result<SyncRes> {
         if sync.device_id.is_empty() {
             sync.device_id = tx.device_id().map(str::to_string).unwrap_or_default();
         }
 
-        match self.port.forward_sync(tx, sync).await {
-            Ok(res) => Ok(res),
-            Err(e) => Ok(sync_transport_err(e)),
-        }
-    }
-}
-
-/// 传输层 / 网关侧失败（非下游 `SyncRes.status`）。
-fn sync_transport_err(e: anyhow::Error) -> SyncRes {
-    SyncRes {
-        status: Some(RpcStatus {
-            code: ErrorCode::Internal as i32,
-            message: format!("sync forward: {e}"),
-            details: Vec::new(),
-            context: None,
-            localization_key: String::new(),
-            localization_params: Default::default(),
-        }),
-        payload: None,
+        self.port
+            .forward_sync(tx, sync)
+            .await
+            .map_err(|e| FlareError::system(format!("sync forward: {e}")))
     }
 }

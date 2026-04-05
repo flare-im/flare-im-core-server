@@ -3,13 +3,13 @@
 //! 提供快速构建 EventEnvelope 的方法和事件类型定义
 //! 具体操作类型由事件 payload 中的字段定义
 
-pub mod builder;
+pub mod main_queue_payload;
 pub mod topic_envelope;
 pub mod types;
 
-pub use builder::{
-    EventEnvelopeBuilder, from_protobuf, from_protobuf_full, from_protobuf_with_current_timestamp,
-    from_protobuf_with_source, from_protobuf_with_timestamp,
+pub use main_queue_payload::{
+    MqEnvelopeDecodeError, decode_mq_envelope, mq_envelope_for_main_queue_event,
+    mq_envelope_for_main_queue_message,
 };
 pub use topic_envelope::{
     CONVERSATION_UPDATE_TYPE_REMOVE, CONVERSATION_UPDATE_TYPE_SUMMARY,
@@ -29,4 +29,4 @@ pub use types::{
 };
 
 // 重新导出 EventEnvelope 以便使用（与 `pub mod types` 并存；常量见 `types::types`）
-pub use flare_server_core::event_bus::EventEnvelope;
+pub use crate::EventEnvelope;

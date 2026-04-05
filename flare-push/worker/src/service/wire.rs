@@ -1,3 +1,5 @@
+//! Wire 风格依赖注入：组装 Push Worker 相关组件
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,17 +8,16 @@ use flare_im_core::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,
 };
 use flare_im_core::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
-use flare_server_core::event_bus::{EventHandler, MqEventHandler};
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
-use flare_server_core::mq::consumer::{MessageHandler, TopicDispatcher};
+use flare_server_core::mq::consumer::TopicDispatcher;
 
 use crate::application::GatewayPushExecutor;
 use crate::config::PushWorkerConfig;
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
-use crate::infrastructure::online_client::OnlineServiceClient;
-use crate::interface::messaging::offline_consumer::OfflinePushTaskHandler;
-use crate::interface::messaging::online_consumer::OnlinePushTaskHandler;
+use crate::infrastructure::rpc::OnlineServiceClient;
+use crate::interface::messaging::offline_consumer::OfflinePushConsumerFactory;
+use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
 
 pub struct ApplicationContext {
     pub config: Arc<PushWorkerConfig>,
@@ -29,8 +30,10 @@ pub async fn initialize(
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config));
 
+    // 1. 创建 DLQ 发布器
     let dlq = Arc::new(DlqPublisher::new(config.clone())?);
 
+    // 2. 创建 Online 服务客户端
     let online_service = get_service_name(SIGNALING_ONLINE);
     tracing::info!(
         service = %online_service,
@@ -46,6 +49,7 @@ pub async fn initialize(
     .map_err(|e| anyhow::anyhow!("Online gRPC channel: {}", e))?;
     let online_client = Arc::new(OnlineServiceClient::from_channel(online_channel));
 
+    // 3. 创建 Gateway Router
     let access_gateway_service = get_service_name(ACCESS_GATEWAY);
     let gateway_router = build_gateway_router_from_app_config(
         app_config,
@@ -55,28 +59,32 @@ pub async fn initialize(
     .await
     .map_err(|e| anyhow::anyhow!("GatewayRouter: {}", e))?;
 
+    // 4. 创建 GatewayPushExecutor
     let gateway_push = Arc::new(GatewayPushExecutor::new(online_client, gateway_router));
 
-    let online_handler = OnlinePushTaskHandler::new(gateway_push, dlq.clone());
-    let offline_handler = OfflinePushTaskHandler::new(dlq);
+    // 5. 创建 MessageHandler（直接实现，无适配器）
+    let online_handler = OnlinePushConsumerFactory::create_handler(
+        gateway_push,
+        dlq.clone(),
+    );
+    let offline_handler = OfflinePushConsumerFactory::create_handler(dlq);
 
+    // 6. 配置 ConsumerConfig
     let consumer_cfg = ConsumerConfig::default().with_concurrency(128);
 
+    // 7. 注册到 Dispatcher
     let mut dispatcher = TopicDispatcher::new();
-    let online_handler: Arc<dyn EventHandler> = Arc::new(online_handler);
-    let online_adapter: Arc<dyn MessageHandler> = Arc::new(MqEventHandler::new(online_handler));
+
     Dispatcher::register(
         &mut dispatcher,
         config.push_online_topic.clone(),
-        online_adapter,
+        online_handler,
     )?;
 
-    let offline_handler: Arc<dyn EventHandler> = Arc::new(offline_handler);
-    let offline_adapter: Arc<dyn MessageHandler> = Arc::new(MqEventHandler::new(offline_handler));
     Dispatcher::register(
         &mut dispatcher,
         config.push_offline_topic.clone(),
-        offline_adapter,
+        offline_handler,
     )?;
 
     Ok(ApplicationContext {

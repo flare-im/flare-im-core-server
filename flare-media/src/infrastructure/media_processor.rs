@@ -2,9 +2,10 @@
 //!
 //! 使用 image crate 处理图片，使用 ffmpeg-next 处理视频
 
-use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::instrument;
+
+use crate::error::{ErrorCode, Result, map_infra_error};
 
 /// 图片处理操作
 #[derive(Debug, Clone)]
@@ -53,8 +54,13 @@ impl MediaProcessor {
         let mut results = Vec::new();
 
         // 加载图片
-        let img = image::open(input_path)
-            .with_context(|| format!("Failed to open image: {}", input_path))?;
+        let img = image::open(input_path).map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("Failed to open image: {}", input_path),
+            )
+        })?;
 
         let mut processed_img = img.clone();
 
@@ -89,12 +95,20 @@ impl MediaProcessor {
 
                     // 保存处理后的图片
                     let op_output_path = format!("{}_{}", output_path, operation.operation_type);
-                    processed_img.save(&op_output_path).with_context(|| {
-                        format!("Failed to save processed image: {}", op_output_path)
+                    processed_img.save(&op_output_path).map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::InternalError,
+                            format!("Failed to save processed image: {}", op_output_path),
+                        )
                     })?;
 
-                    let metadata = std::fs::metadata(&op_output_path).with_context(|| {
-                        format!("Failed to get file metadata: {}", op_output_path)
+                    let metadata = std::fs::metadata(&op_output_path).map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::InternalError,
+                            format!("Failed to get file metadata: {}", op_output_path),
+                        )
                     })?;
 
                     results.push(ProcessingResult {
@@ -207,8 +221,13 @@ impl MediaProcessor {
 
             match result {
                 Ok(output_file) => {
-                    let metadata = std::fs::metadata(&output_file)
-                        .with_context(|| format!("Failed to get file metadata: {}", output_file))?;
+                    let metadata = std::fs::metadata(&output_file).map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::InternalError,
+                            format!("Failed to get file metadata: {}", output_file),
+                        )
+                    })?;
 
                     results.push(ProcessingResult {
                         operation_type: operation.operation_type.clone(),
@@ -246,12 +265,22 @@ impl MediaProcessor {
 
         // 检查输入文件是否存在
         if !Path::new(input_path).exists() {
-            return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::InvalidParameter,
+                "Input file does not exist",
+                input_path
+            ));
         }
 
         // 创建一个空的输出文件作为示例
         std::fs::write(&op_output_path, "")
-            .with_context(|| format!("Failed to create output file: {}", op_output_path))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    format!("Failed to create output file: {}", op_output_path),
+                )
+            })?;
 
         Ok(op_output_path)
     }

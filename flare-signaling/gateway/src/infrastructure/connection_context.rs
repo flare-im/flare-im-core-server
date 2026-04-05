@@ -2,7 +2,7 @@
 //!
 //! 从连接信息中提取上下文（租户ID、用户ID等）并设置到 Context，与 flare_server_core::context 对齐。
 
-use flare_server_core::context::Context;
+use flare_server_core::context::{ActorContext, ActorType, Context};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -42,7 +42,11 @@ pub fn build_context_from_connection(
     let uid = user_id
         .map(str::to_string)
         .or_else(|| connection_metadata.and_then(|m| m.get(METADATA_KEY_USER_ID).cloned()));
-    ctx = ctx.with_user_id(uid.unwrap_or_default());
+    let uid = uid.unwrap_or_default();
+    ctx = ctx.with_user_id(uid.clone());
+    if !uid.is_empty() {
+        ctx = ctx.with_actor(ActorContext::new(uid).with_type(ActorType::User));
+    }
     ctx = ctx.with_device_id(
         connection_metadata
             .and_then(|m| m.get(METADATA_KEY_DEVICE_ID).cloned())

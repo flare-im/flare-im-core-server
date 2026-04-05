@@ -1,16 +1,15 @@
 //! `ConversationManageService`：会话写命令与侧效应（游标、已读、在线等）
 
 use flare_proto::common::DeviceState as ProtoDeviceState;
-use flare_proto::common::StatusOnlyResponse;
-use flare_proto::conversation::conversation_manage_service_server::ConversationManageService;
-use flare_proto::conversation::{
+use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageService;
+use flare_grpc_proto::conversation::{
     BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse,
     DeleteConversationRequest, ForceConversationSyncRequest, ManageParticipantsRequest,
     ManageParticipantsResponse, MarkConversationAsReadRequest, SearchConversationsRequest,
     SearchConversationsResponse, UpdateConversationRequest, UpdateConversationResponse,
     UpdateCursorRequest, UpdatePresenceRequest,
 };
-use flare_server_core::error;
+use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
@@ -21,13 +20,15 @@ use crate::application::commands::{
 };
 use crate::application::queries::SearchConversationsQuery;
 use crate::domain::model::{
-    ConflictResolutionPolicy, ConversationLifecycleState, ConversationVisibility, DeviceState,
+    ConflictResolutionPolicy, ConversationLifecycleState, ConversationType, ConversationVisibility,
+    DeviceState,
 };
+use crate::error::{ErrorBuilder, ErrorCode};
 
 use super::ConversationGrpcHandler;
 use super::shared::{
-    domain_to_proto_conversation, internal_error, participant_domain_to_proto,
-    participant_proto_to_domain, proto_summary,
+    domain_to_proto_conversation, participant_domain_to_proto, participant_proto_to_domain,
+    proto_summary,
 };
 
 #[tonic::async_trait]
@@ -49,7 +50,7 @@ impl ConversationManageService for ConversationGrpcHandler {
             .handle_create_conversation(
                 &ctx,
                 CreateConversationCommand {
-                    conversation_type: req.conversation_type,
+                    conversation_type: ConversationType::from_proto(req.conversation_type),
                     business_type: req.business_type,
                     participants,
                     attributes: req.attributes,
@@ -58,10 +59,9 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
         Ok(Response::new(CreateConversationResponse {
             conversation: Some(domain_to_proto_conversation(conv)),
-            status: Some(error::ok_status()),
         }))
     }
 
@@ -104,17 +104,16 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
         Ok(Response::new(UpdateConversationResponse {
             conversation: Some(domain_to_proto_conversation(conv)),
-            status: Some(error::ok_status()),
         }))
     }
 
     async fn delete_conversation(
         &self,
         request: Request<DeleteConversationRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         self.command_handler
@@ -126,10 +125,8 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+            .into_grpc()?;
+        Ok(Response::new(()))
     }
 
     async fn manage_participants(
@@ -160,20 +157,19 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
         Ok(Response::new(ManageParticipantsResponse {
             participants: participants
                 .into_iter()
                 .map(participant_domain_to_proto)
                 .collect(),
-            status: Some(error::ok_status()),
         }))
     }
 
     async fn batch_acknowledge(
         &self,
         request: Request<BatchAcknowledgeRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         let cursors: Vec<(String, i64)> = req
@@ -184,10 +180,8 @@ impl ConversationManageService for ConversationGrpcHandler {
         self.command_handler
             .handle_batch_acknowledge(&ctx, BatchAcknowledgeCommand { cursors })
             .await
-            .map_err(internal_error)?;
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+            .into_grpc()?;
+        Ok(Response::new(()))
     }
 
     async fn search_conversations(
@@ -218,7 +212,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
         let conversations: Vec<_> = summaries.into_iter().map(proto_summary).collect();
         Ok(Response::new(SearchConversationsResponse {
             conversations,
@@ -229,14 +223,13 @@ impl ConversationManageService for ConversationGrpcHandler {
                 previous_cursor: String::new(),
                 total_size: total as i64,
             }),
-            status: Some(error::ok_status()),
         }))
     }
 
     async fn update_cursor(
         &self,
         request: Request<UpdateCursorRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         self.command_handler
@@ -248,17 +241,15 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
 
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+        Ok(Response::new(()))
     }
 
     async fn mark_conversation_as_read(
         &self,
         request: Request<MarkConversationAsReadRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         self.command_handler
@@ -270,16 +261,14 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+            .into_grpc()?;
+        Ok(Response::new(()))
     }
 
     async fn update_presence(
         &self,
         request: Request<UpdatePresenceRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         let state = match ProtoDeviceState::try_from(req.state).ok() {
@@ -317,17 +306,15 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
 
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+        Ok(Response::new(()))
     }
 
     async fn force_conversation_sync(
         &self,
         request: Request<ForceConversationSyncRequest>,
-    ) -> Result<Response<StatusOnlyResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
         let missing = self
@@ -344,17 +331,19 @@ impl ConversationManageService for ConversationGrpcHandler {
                 },
             )
             .await
-            .map_err(internal_error)?;
+            .into_grpc()?;
 
         if !missing.is_empty() {
-            return Err(Status::failed_precondition(format!(
-                "unknown conversations: {}",
-                missing.join(",")
-            )));
+            return Err(
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    format!("unknown conversations: {}", missing.join(",")),
+                )
+                .build_error()
+                .into(),
+            );
         }
 
-        Ok(Response::new(StatusOnlyResponse {
-            status: Some(error::ok_status()),
-        }))
+        Ok(Response::new(()))
     }
 }

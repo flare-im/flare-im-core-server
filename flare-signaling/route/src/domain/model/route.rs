@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use flare_server_core::flare_err;
+
+use crate::error::{ErrorCode, Result};
 
 /// 路由聚合根
 ///
@@ -53,7 +56,7 @@ impl Route {
     /// # 业务规则
     /// - 新端点必须有效
     /// - 版本号递增
-    pub fn update_endpoint(&mut self, new_endpoint: Endpoint) -> Result<(), RouteError> {
+    pub fn update_endpoint(&mut self, new_endpoint: Endpoint) -> Result<()> {
         self.endpoint = new_endpoint;
         self.version += 1;
         Ok(())
@@ -96,9 +99,12 @@ impl Svid {
     /// # 验证规则
     /// - 不能为空
     /// - 格式：svid.{service} 或直接 service
-    pub fn new(value: String) -> Result<Self, RouteError> {
+    pub fn new(value: String) -> Result<Self> {
         if value.is_empty() {
-            return Err(RouteError::InvalidSvid("SVID cannot be empty".to_string()));
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "SVID cannot be empty"
+            ));
         }
         Ok(Self(normalize_svid(&value)))
     }
@@ -130,16 +136,18 @@ impl Endpoint {
     /// # 验证规则
     /// - 不能为空
     /// - 格式：http://host:port 或 host:port
-    pub fn new(value: String) -> Result<Self, RouteError> {
+    pub fn new(value: String) -> Result<Self> {
         if value.is_empty() {
-            return Err(RouteError::InvalidEndpoint(
-                "Endpoint cannot be empty".to_string(),
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "Endpoint cannot be empty"
             ));
         }
         // 基本格式验证
         if !value.contains(':') {
-            return Err(RouteError::InvalidEndpoint(
-                "Endpoint must contain ':' (host:port format)".to_string(),
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "Endpoint must contain ':' (host:port format)"
             ));
         }
         Ok(Self(value))
@@ -215,19 +223,6 @@ impl RouteMetadata {
     pub fn attributes(&self) -> &HashMap<String, String> {
         &self.attributes
     }
-}
-
-/// 路由错误
-#[derive(Debug, thiserror::Error)]
-pub enum RouteError {
-    #[error("Invalid SVID: {0}")]
-    InvalidSvid(String),
-    #[error("Invalid endpoint: {0}")]
-    InvalidEndpoint(String),
-    #[error("Route not found: {0}")]
-    NotFound(String),
-    #[error("Route already exists: {0}")]
-    AlreadyExists(String),
 }
 
 /// 规范化 SVID（将旧格式转换为新格式）

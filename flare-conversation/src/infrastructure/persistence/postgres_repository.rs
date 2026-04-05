@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use crate::error::{map_infra_error, ErrorCode, Result, require_user_id};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use tracing::info;
@@ -13,17 +13,16 @@ use tracing::info;
 use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
-    ConversationSort, ConversationSummary,
+    ConversationSort, ConversationSummary, ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
-use flare_im_core::utils::calculate_unread_count;
 
 /// 会话查询行结构（与 init_v2 一致：visibility 为 INT）
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
 struct ConversationRow {
     conversation_id: String,
-    conversation_type: String,
+    conversation_type: i32,
     business_type: String,
     display_name: Option<String>,
     attributes: serde_json::Value,
@@ -57,10 +56,10 @@ impl PostgresConversationRepository {
                 if !s.channel_id.is_empty() {
                     return false;
                 }
-                match s.conversation_type.as_deref() {
-                    Some("single") => true,
-                    Some(_) => false,
-                    None => s.conversation_id.starts_with("1A"),
+                match s.conversation_type {
+                    ConversationType::Single => true,
+                    ConversationType::Unspecified => s.conversation_id.starts_with("1A"),
+                    _ => false,
                 }
             })
             .map(|s| s.conversation_id.clone())
@@ -84,7 +83,7 @@ impl PostgresConversationRepository {
         .bind(current_user_id)
         .fetch_all(pool)
         .await
-        .map_err(|e| anyhow::anyhow!("fill single chat channel_id: {}", e))?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "fill single chat channel_id"))?;
 
         let mut peer_by_cid: HashMap<String, String> = HashMap::new();
         for row in rows {
@@ -112,9 +111,7 @@ impl ConversationRepository for PostgresConversationRepository {
         client_cursor: &HashMap<String, i64>,
     ) -> Result<ConversationBootstrapResult> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         // 1. 从user_sync_cursor表加载用户的光标映射
         let cursor_rows = sqlx::query(
             r#"
@@ -124,10 +121,10 @@ impl ConversationRepository for PostgresConversationRepository {
             "#,
         )
         .bind(tenant_id)
-        .bind(user_id)
+        .bind(&user_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to load user cursors: {}", e))?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to load user cursors"))?;
 
         let mut server_cursor: HashMap<String, i64> = cursor_rows
             .into_iter()
@@ -158,7 +155,15 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.last_message_seq,
                 COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(sp.last_read_seq, 0) as last_read_seq,
-                COALESCE(sp.unread_count, 0) as unread_count
+                COALESCE((
+                    SELECT COUNT(1)::INT
+                    FROM messages m
+                    WHERE m.tenant_id = s.tenant_id
+                      AND m.conversation_id = s.conversation_id
+                      AND m.seq > COALESCE(sp.last_read_seq, 0)
+                      AND m.sender_id <> $2
+                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                ), 0) as unread_count
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
             WHERE s.tenant_id = $1
@@ -170,16 +175,18 @@ impl ConversationRepository for PostgresConversationRepository {
             "#,
         )
         .bind(tenant_id)
-        .bind(user_id)
+        .bind(&user_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to load user conversations: {}", e))?;
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to load user conversations")
+        })?;
 
         let mut summaries = Vec::new();
 
         for row in session_rows {
             let conversation_id: String = row.get("conversation_id");
-            let conversation_type: Option<String> = row.get("conversation_type");
+            let conversation_type: Option<i32> = row.get("conversation_type");
             let business_type: Option<String> = row.get("business_type");
             let display_name: Option<String> = row.get("display_name");
             let attributes: Option<serde_json::Value> = row.get("attributes");
@@ -202,25 +209,19 @@ impl ConversationRepository for PostgresConversationRepository {
                 .copied()
                 .or_else(|| Some(effective_updated_at.timestamp_millis()));
 
-            // 计算未读数：基于 last_message_seq - last_read_seq（init_v2 列名）
-            // 如果数据库中的 unread_count 已更新，直接使用；否则计算
-            let calculated_unread = if last_message_seq.is_some() {
-                // 使用工具函数计算未读数
-                calculate_unread_count(last_message_seq, last_read_seq)
-            } else {
-                unread_count // 使用数据库中的值
-            };
-
             let summary = ConversationSummary {
                 conversation_id,
-                conversation_type,
+                conversation_type: conversation_type
+                    .map(ConversationType::from_int)
+                    .unwrap_or(ConversationType::Unspecified),
                 business_type,
                 last_message_id: None,           // 将在ApplicationService层补充
                 last_message_time: None,         // 将在ApplicationService层补充
                 last_sender_id: None,            // 将在ApplicationService层补充
                 last_message_type: None,         // 将在ApplicationService层补充
                 last_content_type: None,         // 将在ApplicationService层补充
-                unread_count: calculated_unread, // 基于 seq 计算的未读数
+                unread_count,
+                last_read_seq,
                 metadata: attributes,
                 server_cursor_ts,
                 display_name,
@@ -231,7 +232,7 @@ impl ConversationRepository for PostgresConversationRepository {
             summaries.push(summary);
         }
 
-        Self::fill_single_chat_channel_ids(&self.pool, tenant_id, user_id, &mut summaries).await?;
+        Self::fill_single_chat_channel_ids(&self.pool, tenant_id, &user_id, &mut summaries).await?;
 
         // 按server_cursor_ts降序排序
         summaries.sort_by(|a, b| {
@@ -255,9 +256,7 @@ impl ConversationRepository for PostgresConversationRepository {
         ts: i64,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         sqlx::query(
             r#"
             INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_ts, updated_at)
@@ -267,12 +266,12 @@ impl ConversationRepository for PostgresConversationRepository {
             "#,
         )
         .bind(tenant_id)
-        .bind(user_id)
+        .bind(&user_id)
         .bind(conversation_id)
         .bind(ts)
         .execute(&*self.pool)
         .await
-        .context("Failed to update cursor")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update cursor"))?;
 
         Ok(())
     }
@@ -283,7 +282,11 @@ impl ConversationRepository for PostgresConversationRepository {
         session: &Conversation,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "begin transaction"))?;
 
         // 插入会话记录（幂等：ON CONFLICT DO NOTHING，支持异步 conversation.ensure 事件并发消费）
         let result = sqlx::query(
@@ -298,16 +301,20 @@ impl ConversationRepository for PostgresConversationRepository {
         )
         .bind(tenant_id)
         .bind(&session.conversation_id)
-        .bind(&session.conversation_type)
+        .bind(session.conversation_type.as_int())
         .bind(&session.business_type)
         .bind(&session.display_name)
-        .bind(serde_json::to_value(&session.attributes)?)
+        .bind(
+            serde_json::to_value(&session.attributes).map_err(|e| {
+                map_infra_error(e, ErrorCode::SerializationError, "serialize session attributes")
+            })?,
+        )
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
         .bind(&session.channel_id)
         .execute(&mut *tx)
         .await
-        .context("Failed to create conversation")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to create conversation"))?;
         if result.rows_affected() > 0 {
             info!(conversation_id = %session.conversation_id, "Conversation row inserted");
         }
@@ -335,13 +342,19 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(&participant.roles)
             .bind(participant.muted)
             .bind(participant.pinned)
-            .bind(serde_json::to_value(&participant.attributes)?)
+            .bind(
+                serde_json::to_value(&participant.attributes).map_err(|e| {
+                    map_infra_error(e, ErrorCode::SerializationError, "serialize participant attributes")
+                })?,
+            )
             .execute(&mut *tx)
             .await
-            .context("Failed to create participant")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to create participant"))?;
         }
 
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "commit transaction"))?;
         info!(conversation_id = %session.conversation_id, "Conversation created");
         Ok(())
     }
@@ -365,14 +378,15 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .fetch_optional(&*self.pool)
         .await
-        .context("Failed to get conversation")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get conversation"))?;
 
         let Some(row) = row else {
             return Ok(None);
         };
 
         let conversation_id: String = row.get("conversation_id");
-        let conversation_type: String = row.get("conversation_type");
+        let conversation_type_raw: i32 = row.get("conversation_type");
+        let conversation_type = ConversationType::from_int(conversation_type_raw);
         let business_type: String = row.get("business_type");
         let channel_id: String = row.get("channel_id");
         let display_name: Option<String> = row.get("display_name");
@@ -408,7 +422,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(&conversation_id)
         .fetch_all(&*self.pool)
         .await
-        .context("Failed to get participants")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get participants"))?;
 
         let mut participants = Vec::new();
         for p_row in participant_rows {
@@ -466,7 +480,11 @@ impl ConversationRepository for PostgresConversationRepository {
             "#,
         )
         .bind(&session.display_name)
-        .bind(serde_json::to_value(&session.attributes)?)
+        .bind(
+            serde_json::to_value(&session.attributes).map_err(|e| {
+                map_infra_error(e, ErrorCode::SerializationError, "serialize session attributes")
+            })?,
+        )
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
         .bind(&session.channel_id)
@@ -474,7 +492,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(&session.conversation_id)
         .execute(&*self.pool)
         .await
-        .context("Failed to update conversation")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update conversation"))?;
 
         info!(conversation_id = %session.conversation_id, "Conversation updated");
         Ok(())
@@ -494,7 +512,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 .bind(conversation_id)
                 .execute(&*self.pool)
                 .await
-                .context("Failed to delete conversation")?;
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation"))?;
         } else {
             // 软删除（更新生命周期状态）
             sqlx::query(
@@ -508,7 +526,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(conversation_id)
             .execute(&*self.pool)
             .await
-            .context("Failed to delete conversation")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation"))?;
         }
 
         info!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
@@ -524,7 +542,11 @@ impl ConversationRepository for PostgresConversationRepository {
         role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "begin transaction"))?;
 
         // 添加参与者
         for participant in to_add {
@@ -549,10 +571,14 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(&participant.roles)
             .bind(participant.muted)
             .bind(participant.pinned)
-            .bind(serde_json::to_value(&participant.attributes)?)
+            .bind(
+                serde_json::to_value(&participant.attributes).map_err(|e| {
+                    map_infra_error(e, ErrorCode::SerializationError, "serialize participant attributes")
+                })?,
+            )
             .execute(&mut *tx)
             .await
-            .context("Failed to add participant")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to add participant"))?;
         }
 
         // 删除参与者
@@ -563,7 +589,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 .bind(user_id)
                 .execute(&mut *tx)
                 .await
-                .context("Failed to remove participant")?;
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to remove participant"))?;
         }
 
         // 更新角色
@@ -581,10 +607,12 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(user_id)
             .execute(&mut *tx)
             .await
-            .context("Failed to update participant roles")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update participant roles"))?;
         }
 
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "commit transaction"))?;
 
         // 返回更新后的参与者列表
         let participant_rows = sqlx::query(
@@ -598,7 +626,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .fetch_all(&*self.pool)
         .await
-        .context("Failed to get participants")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get participants"))?;
 
         let mut participants = Vec::new();
         for p_row in participant_rows {
@@ -629,10 +657,12 @@ impl ConversationRepository for PostgresConversationRepository {
         cursors: &[(String, i64)],
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        let mut tx = self.pool.begin().await?;
+        let user_id = require_user_id(ctx)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "begin transaction"))?;
 
         for (conversation_id, ts) in cursors {
             sqlx::query(
@@ -644,15 +674,17 @@ impl ConversationRepository for PostgresConversationRepository {
                 "#,
             )
             .bind(tenant_id)
-            .bind(user_id)
+            .bind(&user_id)
             .bind(conversation_id)
             .bind(*ts)
             .execute(&mut *tx)
             .await
-            .context("Failed to acknowledge cursor")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge cursor"))?;
         }
 
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "commit transaction"))?;
         Ok(())
     }
 
@@ -783,7 +815,7 @@ impl ConversationRepository for PostgresConversationRepository {
         // 绑定过滤器参数
         for filter in filters {
             if let Some(ref st) = filter.conversation_type {
-                query_builder = query_builder.bind(st);
+                query_builder = query_builder.bind(st.as_int());
             }
             if let Some(ref bt) = filter.business_type {
                 query_builder = query_builder.bind(bt);
@@ -805,14 +837,14 @@ impl ConversationRepository for PostgresConversationRepository {
         let rows = query_builder
             .fetch_all(&*self.pool)
             .await
-            .context("Failed to search conversations")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to search conversations"))?;
 
         // 转换为ConversationSummary
         let mut summaries: Vec<ConversationSummary> = rows
             .into_iter()
             .map(|row| {
                 let conversation_id: String = row.get("conversation_id");
-                let conversation_type: String = row.get("conversation_type");
+                let conversation_type: i32 = row.get("conversation_type");
                 let business_type: String = row.get("business_type");
                 let display_name: Option<String> = row.get("display_name");
                 let attributes: Option<serde_json::Value> = row.get("attributes");
@@ -826,7 +858,7 @@ impl ConversationRepository for PostgresConversationRepository {
 
                 ConversationSummary {
                     conversation_id,
-                    conversation_type: Some(conversation_type),
+                    conversation_type: ConversationType::from_int(conversation_type),
                     business_type: Some(business_type),
                     last_message_id: None,
                     last_message_time: None,
@@ -834,6 +866,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     last_message_type: None,
                     last_content_type: None,
                     unread_count: 0, // 将在ApplicationService层通过MessageProvider精确计算
+                    last_read_seq: 0,
                     metadata: attributes,
                     server_cursor_ts,
                     display_name,
@@ -866,7 +899,7 @@ impl ConversationRepository for PostgresConversationRepository {
         // 绑定过滤器参数（与上面相同）
         for filter in filters {
             if let Some(ref st) = filter.conversation_type {
-                count_builder = count_builder.bind(st);
+                count_builder = count_builder.bind(st.as_int());
             }
             if let Some(ref bt) = filter.business_type {
                 count_builder = count_builder.bind(bt);
@@ -894,18 +927,35 @@ impl ConversationRepository for PostgresConversationRepository {
         seq: i64,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         // 更新 conversation_participants 的 last_read_seq 和 unread_count（init_v2 列名）
         sqlx::query(
             r#"
+            WITH current_state AS (
+                SELECT
+                    LEAST(
+                        GREATEST(COALESCE(sp.last_read_seq, 0), $1),
+                        COALESCE((
+                            SELECT c.last_message_seq
+                            FROM conversations c
+                            WHERE c.tenant_id = $2 AND c.conversation_id = $3
+                        ), 0)
+                    ) AS next_read_seq
+                FROM conversation_participants sp
+                WHERE sp.tenant_id = $2 AND sp.conversation_id = $3 AND sp.user_id = $4
+            )
             UPDATE conversation_participants sp
             SET
-                last_read_seq = $1,
-                unread_count = GREATEST(0, COALESCE((
-                    SELECT last_message_seq FROM conversations WHERE tenant_id = $2 AND conversation_id = $3
-                ), 0) - $1),
+                last_read_seq = (SELECT next_read_seq FROM current_state),
+                unread_count = COALESCE((
+                    SELECT COUNT(1)::INT
+                    FROM messages m
+                    WHERE m.tenant_id = $2
+                      AND m.conversation_id = $3
+                      AND m.seq > (SELECT next_read_seq FROM current_state)
+                      AND m.sender_id <> $4
+                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                ), 0),
                 updated_at = CURRENT_TIMESTAMP
             WHERE sp.tenant_id = $2 AND sp.conversation_id = $3 AND sp.user_id = $4
             "#,
@@ -913,10 +963,10 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(seq)
         .bind(tenant_id)
         .bind(conversation_id)
-        .bind(user_id)
+        .bind(&user_id)
         .execute(&*self.pool)
         .await
-        .context("Failed to mark as read")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to mark as read"))?;
 
         info!(
             user_id = %user_id,
@@ -941,7 +991,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .fetch_optional(&*self.pool)
         .await
-        .context("Failed to get last_message_seq")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get last_message_seq"))?;
         Ok(row.and_then(|r| r.get("last_message_seq")))
     }
 
@@ -951,9 +1001,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
     ) -> Result<i32> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = require_user_id(ctx)?;
         // 从 conversation_participants 表读取未读数
         let row = sqlx::query(
             r#"
@@ -967,7 +1015,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(user_id)
         .fetch_optional(&*self.pool)
         .await
-        .context("Failed to get unread count")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get unread count"))?;
 
         let unread_count = if let Some(row) = row {
             row.get("unread_count")

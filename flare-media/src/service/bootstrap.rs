@@ -3,9 +3,10 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::info;
 
-use flare_server_core::runtime::ServiceRuntime;
+use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::MEDIA;
 
 use super::wire;
 
@@ -41,7 +42,7 @@ impl ApplicationBootstrap {
         context: wire::ApplicationContext,
         address: SocketAddr,
     ) -> Result<()> {
-        use flare_proto::media::media_service_server::MediaServiceServer;
+        use flare_grpc_proto::media::media_service_server::MediaServiceServer;
         use tonic::transport::Server;
 
         let handler = context.handler.clone();
@@ -54,61 +55,34 @@ impl ApplicationBootstrap {
 
         // 使用 ServiceRuntime 管理服务生命周期
         let address_clone = address;
-        let runtime = ServiceRuntime::new("media", address)
-            .add_spawn_with_shutdown("media-grpc", move |shutdown_rx| async move {
-                // 使用 ContextLayer 包裹 Service
-                use flare_server_core::middleware::ContextLayer;
+        let runtime = flare_im_core::health::attach_runtime_health_checks(
+            ServiceRuntime::new(MEDIA)
+                .with_address(address)
+                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .add_spawn_with_shutdown("media-grpc", move |shutdown_rx| async move {
+                    // 使用 ContextLayer 包裹 Service
+                    use flare_server_core::middleware::ContextLayer;
 
-                let media_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(MediaServiceServer::new(handler));
+                    let media_service = ContextLayer::new()
+                        .allow_missing()
+                        .layer(MediaServiceServer::new(handler));
 
-                Server::builder()
-                    .add_service(media_service)
-                    .serve_with_shutdown(address_clone, async move {
-                        info!(
-                            address = %address_clone,
-                            port = %address_clone.port(),
-                            "✅ Media gRPC service is listening"
-                        );
-
-                        // 同时监听 Ctrl+C 和关闭通道
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => {
-                                tracing::info!("shutdown signal received (Ctrl+C)");
-                            }
-                            _ = shutdown_rx => {
-                                tracing::info!("shutdown signal received (service registration failed)");
-                            }
-                        }
-                    })
-                    .await
-                    .map_err(|e| format!("gRPC server error: {}", e).into())
-            });
+                    Server::builder()
+                        .add_service(media_service)
+                        .serve_with_shutdown(address_clone, async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| format!("gRPC server error: {}", e).into())
+                }),
+            MEDIA,
+        );
 
         // 运行服务（带服务注册）
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    // 注册服务（使用常量）
-                    use flare_im_core::service_names::MEDIA;
-                    match flare_im_core::discovery::register_service_only(MEDIA, addr, None).await {
-                        Ok(Some(registry)) => {
-                            info!("✅ Service registered: {}", MEDIA);
-                            Ok(Some(registry))
-                        }
-                        Ok(None) => {
-                            info!("Service discovery not configured, skipping registration");
-                            Ok(None)
-                        }
-                        Err(e) => {
-                            error!(
-                                error = %e,
-                                "❌ Service registration failed"
-                            );
-                            Err(format!("Service registration failed: {}", e).into())
-                        }
-                    }
+                    flare_im_core::discovery::register_runtime_service_only(MEDIA, addr, None).await
                 })
             })
             .await

@@ -65,7 +65,7 @@ toml = "0.9"
 
 # 数据库
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono"] }
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 deadpool-redis = "0.18"
 
 # 消息队列
@@ -98,6 +98,7 @@ ulid = "1.1"
 # Service Mesh 和中间件
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+axum = "0.8"
 
 # etcd 客户端
 etcd-client = "0.17"
@@ -106,10 +107,13 @@ etcd-client = "0.17"
 flare-core = { path = "../flare-core" }
 
 # Flare Server Core (启用 proto feature 以使用错误转换函数)
-flare-server-core = { path = "../flare-server-core", features = ["proto"] }
+flare-server-core = { path = "../flare-server-core", features = ["proto", "grpc", "http"] }
+flare-core-base = { path = "../flare-server-core/flare-core-base" }
+flare-core-runtime = { path = "../flare-server-core/flare-core-runtime" }
 
 # Flare Proto
 flare-proto = { path = "../flare-proto" }
+flare-grpc-proto = { path = "../flare-grpc-proto" }
 
 # Prometheus 指标收集
 prometheus = "0.14"
@@ -145,7 +149,9 @@ name = "flare_im_core"
 path = "src/lib.rs"
 
 [dependencies]
-flare-server-core = { workspace = true, features = ["proto"] }
+flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
+flare-core-base = { workspace = true }
+flare-core-runtime = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -158,6 +164,7 @@ tonic = { workspace = true }
 prost = { workspace = true }
 rdkafka = { workspace = true }
 flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
@@ -193,6 +200,8 @@ discovery = []  # 服务发现功能（默认启用，但可以通过 feature �
 [lints.rust]
 # 允许 tracing feature（用于条件编译）
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tracing"))'] }
+async_fn_in_trait = "allow"
+ambiguous_glob_reexports = "allow"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

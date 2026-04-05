@@ -1,9 +1,9 @@
 //! Storage + Sync gRPC 客户端池
 
 use flare_im_core::service_names::{STORAGE_READER, SYNC_ORCHESTRATOR, get_service_name};
-use flare_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
-use flare_proto::sync::sync_service_client::SyncServiceClient;
-use flare_server_core::discovery::ServiceClient;
+use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
+use flare_grpc_proto::sync::sync_service_client::SyncServiceClient;
+use flare_im_core::ServiceClient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;

@@ -190,11 +190,9 @@ impl LongConnectionHandler {
             .await
             .map_err(|e| CoreFlareError::system(format!("Send event failed: {}", e)))?;
         match outcome {
-            EventUplinkOutcome::Operation {
-                event_id,
-                operation,
-            } => build_event_ack_operation_frame(&command.message_id, &event_id, &operation)
-                .map(Some),
+            EventUplinkOutcome::Operation { event_id } => {
+                build_event_ack_operation_frame(&command.message_id, &event_id).map(Some)
+            }
         }
     }
 

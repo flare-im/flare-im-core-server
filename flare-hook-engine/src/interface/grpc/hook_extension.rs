@@ -2,10 +2,10 @@
 //!
 //! 实现HookExtension服务的所有gRPC接口
 
-use anyhow::Result;
-use flare_proto::common::{ErrorCode as ProtoErrorCode, ErrorContext, RpcStatus};
-use flare_proto::hooks::hook_extension_server::HookExtension;
-use flare_proto::hooks::*;
+use crate::error::{ErrorBuilder, ErrorCode};
+use flare_server_core::error::Result as FlareResult;
+use flare_grpc_proto::hooks::hook_extension_server::HookExtension;
+use flare_grpc_proto::hooks::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -13,12 +13,10 @@ use crate::application::handlers::HookCommandHandler;
 use crate::domain::model::HookExecutionPlan;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
-    context_to_proto, delivery_event_to_proto, message_draft_to_proto, message_record_to_proto,
-    proto_to_message_draft, proto_to_pre_send_decision, proto_to_recall_decision,
-    recall_event_to_proto, timestamp_to_system_time,
+    message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
 };
 use crate::service::registry::CoreHookRegistry;
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
+use flare_im_core::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 /// HookExtension gRPC服务实现
@@ -47,11 +45,11 @@ impl HookExtensionServer {
     }
 
     /// 将 protobuf HookMessageRecord 转换为 MessageRecord
-    fn proto_to_message_record(proto: &HookMessageRecord) -> Result<MessageRecord> {
+    fn proto_to_message_record(proto: &HookMessageRecord) -> FlareResult<MessageRecord> {
         let message = proto
             .message
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Message is required in HookMessageRecord"))?;
+            .ok_or_else(|| ErrorBuilder::new(ErrorCode::InvalidParameter, "Message is required").build_error())?;
 
         let persisted_at = proto
             .persisted_at
@@ -70,7 +68,6 @@ impl HookExtensionServer {
                 Ok(flare_proto::common::ConversationType::Unspecified) => None,
                 Ok(flare_proto::common::ConversationType::Single) => Some("single".to_string()),
                 Ok(flare_proto::common::ConversationType::Group) => Some("group".to_string()),
-                Ok(flare_proto::common::ConversationType::Channel) => Some("channel".to_string()),
                 Ok(flare_proto::common::ConversationType::Ai) => Some("ai".to_string()),
                 Ok(flare_proto::common::ConversationType::Customer) => Some("customer".to_string()),
                 Ok(flare_proto::common::ConversationType::System) => Some("system".to_string()),
@@ -84,7 +81,7 @@ impl HookExtensionServer {
     }
 
     /// 将 protobuf HookDeliveryEvent 转换为 DeliveryEvent
-    fn proto_to_delivery_event(proto: &HookDeliveryEvent) -> Result<DeliveryEvent> {
+    fn proto_to_delivery_event(proto: &HookDeliveryEvent) -> FlareResult<DeliveryEvent> {
         let delivered_at = proto
             .delivered_at
             .as_ref()
@@ -101,7 +98,7 @@ impl HookExtensionServer {
     }
 
     /// 将 protobuf HookRecallEvent 转换为 RecallEvent
-    fn proto_to_recall_event(proto: &HookRecallEvent) -> Result<RecallEvent> {
+    fn proto_to_recall_event(proto: &HookRecallEvent) -> FlareResult<RecallEvent> {
         let recalled_at = proto
             .recalled_at
             .as_ref()
@@ -125,7 +122,7 @@ impl HookExtensionServer {
         &self,
         config: crate::domain::model::HookConfigItem,
         hook_type: &str,
-    ) -> Result<HookExecutionPlan> {
+    ) -> FlareResult<HookExecutionPlan> {
         let mut plan = HookExecutionPlan::from_hook_config(config.clone(), hook_type);
 
         // 如果配置已启用且不是 Local Plugin，创建适配器
@@ -145,35 +142,7 @@ impl HookExtensionServer {
         Ok(plan)
     }
 
-    /// 构建 RpcStatus
-    fn build_rpc_status(code: i32, message: &str) -> RpcStatus {
-        RpcStatus {
-            code,
-            message: message.to_string(),
-            details: vec![],
-            context: Some(ErrorContext {
-                service: "hook-engine".to_string(),
-                instance: "default".to_string(),
-                region: String::new(),
-                zone: String::new(),
-                attributes: std::collections::HashMap::new(),
-            }),
-            localization_key: String::new(),
-            localization_params: std::collections::HashMap::new(),
-        }
-    }
-
-    /// 从 PreSendDecision 构建 RpcStatus
-    fn decision_to_rpc_status(decision: &PreSendDecision) -> RpcStatus {
-        match decision {
-            PreSendDecision::Continue => Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK"),
-            PreSendDecision::Reject { error } => {
-                // 从错误中提取错误码，如果无法提取则使用默认值
-                let code = ProtoErrorCode::FailedPrecondition as i32;
-                Self::build_rpc_status(code, &error.to_string())
-            }
-        }
-    }
+    // proto 响应不再携带 `status` 字段；失败通过 gRPC `Status` 或业务字段表达。
 }
 
 #[tonic::async_trait]
@@ -202,7 +171,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "pre_send").await {
@@ -227,18 +196,15 @@ impl HookExtension for HookExtensionServer {
         draft = message_draft_to_proto(&message_draft);
 
         // 转换响应
-        let status = Self::decision_to_rpc_status(&decision);
         let response = match decision {
             PreSendDecision::Continue => PreSendHookResponse {
                 allow: true,
                 draft: Some(draft),
-                status: Some(status),
                 annotations: std::collections::HashMap::new(),
             },
             PreSendDecision::Reject { .. } => PreSendHookResponse {
                 allow: false,
                 draft: None,
-                status: Some(status),
                 annotations: std::collections::HashMap::new(),
             },
         };
@@ -275,7 +241,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "post_send").await {
@@ -297,7 +263,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(PostSendHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -326,7 +291,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "delivery").await {
@@ -348,7 +313,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(DeliveryHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -377,7 +341,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "recall").await {
@@ -399,16 +363,13 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to execute hooks: {}", e)))?;
 
         // 转换响应
-        let status = Self::decision_to_rpc_status(&decision);
         let response = match decision {
             PreSendDecision::Continue => RecallHookResponse {
                 allow: true,
-                status: Some(status),
                 annotations: std::collections::HashMap::new(),
             },
             PreSendDecision::Reject { .. } => RecallHookResponse {
                 allow: false,
-                status: Some(status),
                 annotations: std::collections::HashMap::new(),
             },
         };
@@ -439,7 +400,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self
@@ -469,7 +430,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(ConversationLifecycleHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -498,7 +458,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(PresenceHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -525,7 +484,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(CustomHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -552,7 +510,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self
@@ -581,7 +539,6 @@ impl HookExtension for HookExtensionServer {
         Ok(Response::new(PushPreSendHookResponse {
             allow: true,
             draft: Some(draft),
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
             annotations: std::collections::HashMap::new(),
         }))
     }
@@ -612,7 +569,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self
@@ -638,7 +595,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(PushPostSendHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -665,7 +621,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self
@@ -694,7 +650,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(PushDeliveryHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -721,7 +676,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "user_login").await {
@@ -746,7 +701,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(UserLoginHookResponse {
             allow: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
             annotations: std::collections::HashMap::new(),
         }))
     }
@@ -774,7 +728,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "user_logout").await {
@@ -799,7 +753,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(UserLogoutHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -826,7 +779,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self.create_execution_plan(hook_config, "user_online").await {
@@ -851,7 +804,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(UserOnlineHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 
@@ -878,7 +830,7 @@ impl HookExtension for HookExtensionServer {
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
         // 创建HookExecutionPlan（包含适配器）
-        let mut execution_plans = Vec::new();
+        let mut execution_plans: Vec<HookExecutionPlan> = Vec::new();
         for hook_config in hooks {
             if hook_config.enabled {
                 match self
@@ -907,7 +859,6 @@ impl HookExtension for HookExtensionServer {
 
         Ok(Response::new(UserOfflineHookResponse {
             success: true,
-            status: Some(Self::build_rpc_status(ProtoErrorCode::Ok as i32, "OK")),
         }))
     }
 }

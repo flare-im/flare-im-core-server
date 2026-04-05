@@ -9,6 +9,7 @@ use crate::domain::model::{
 };
 use flare_proto::common;
 use flare_proto::common::message_content::Content;
+use flare_im_core::Ctx;
 
 /// 统一从 flare-im-core 重导出，供本 crate 其他处使用
 pub use flare_im_core::message::{message_from_proto, message_to_proto};
@@ -30,6 +31,26 @@ pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
         event_seq: p.event_seq,
         request_id: p.request_id.clone(),
         payload,
+    }
+}
+
+/// 为 Kafka 消费到的操作事件补全 `tenant_id` / `operator_id`（common::Event 无此字段；信封亦无 tenant）。
+pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) {
+    if event.tenant_id.is_empty() {
+        event.tenant_id = ctx
+            .tenant_id()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "0".to_string());
+    }
+    if event.operator_id.is_empty() {
+        event.operator_id = ctx
+            .user_id()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_default();
     }
 }
 

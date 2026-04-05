@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use flare_im_core::utils::require_user_id_from_context;
 use flare_proto::common::{Sync, SyncRes};
-use flare_proto::sync::sync_service_server::SyncService;
+use flare_grpc_proto::sync::sync_service_server::SyncService;
+use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 use tonic::{Request, Response, Status};
 
 use crate::application::handlers::SyncOrchestrationHandler;
 use crate::application::ports::MemorySyncCursorCache;
-use crate::infrastructure::grpc::GrpcSyncAdapters;
+use crate::infrastructure::rpc::GrpcSyncAdapters;
 
 /// gRPC 入口：`user_id` 仅从认证上下文读取。
 pub struct SyncOrchestratorGrpcHandler {
@@ -32,8 +33,13 @@ impl SyncService for SyncOrchestratorGrpcHandler {
         let ctx = extract_ctx_from_request_opt(&request)
             .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
         let sync = request.into_inner();
-        let user_id = require_user_id_from_context(&ctx)?;
-        let res = self.inner.execute_sync(&ctx, &user_id, sync).await;
+        let user_id = require_user_id_from_context(&ctx)
+            .map_err(|e| Status::unauthenticated(e))?;
+        let res = self
+            .inner
+            .execute_sync(&ctx, &user_id, sync)
+            .await
+            .into_grpc()?;
         Ok(Response::new(res))
     }
 }

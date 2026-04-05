@@ -1,6 +1,6 @@
 use anyhow::Result;
 use base64::Engine;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use serde_json::to_value;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use tracing::instrument;
@@ -14,6 +14,7 @@ use crate::domain::repository::ArchiveStoreRepository;
 
 /// 与 init_v2.sql messages 表结构对齐（无 receiver_id，与 common/message.proto 一致）
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct MessageRow {
     tenant_id: String,
     server_id: String,
@@ -331,11 +332,12 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         tenant_id: &str,
         message_id: &str,
         user_id: &str,
+        scope: i32,
         visibility_status: &str,
     ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         self.operation_store
-            .update_message_visibility(tenant_id, message_id, user_id, visibility_status)
+            .update_message_visibility(tenant_id, message_id, user_id, scope, visibility_status)
             .await
     }
 

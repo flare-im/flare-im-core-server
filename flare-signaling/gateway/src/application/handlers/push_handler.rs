@@ -5,14 +5,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use chrono::Utc;
 use flare_im_core::Ctx;
-use flare_proto::RpcStatus;
-use flare_proto::access_gateway::{
+use flare_grpc_proto::access_gateway::{
     PushAckResponse, PushNotificationResponse, PushResponse, PushResult, UserPushResult,
 };
-use flare_proto::common::ErrorCode;
 use prost_types::Timestamp;
 use tracing::instrument;
 
@@ -21,14 +18,7 @@ use crate::application::commands::{
     PushNotificationCommand,
 };
 use crate::domain::service::PushDomainService;
-
-fn ok_status() -> RpcStatus {
-    RpcStatus {
-        code: ErrorCode::Ok as i32,
-        message: String::new(),
-        ..Default::default()
-    }
-}
+use crate::error::{ErrorBuilder, Result};
 
 fn push_result_at_now(
     pushed_device_count: i32,
@@ -66,18 +56,25 @@ impl PushHandler {
         req: PushMessageCommand,
     ) -> Result<PushResponse> {
         if req.user_ids.is_empty() {
-            anyhow::bail!("PushMessage: user_ids is empty");
+            return Err(ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "PushMessage: user_ids is empty",
+            )
+            .build_error());
         }
         if req.messages.is_empty() {
-            anyhow::bail!("PushMessage: messages is empty");
+            return Err(ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "PushMessage: messages is empty",
+            )
+            .build_error());
         }
 
         let options = req.options.unwrap_or_default();
         let per_user = self
             .push_domain_service
             .push_message_push_to_users(ctx, &req.user_ids, req.messages, &options)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .await?;
 
         let window_id = uuid::Uuid::new_v4().to_string();
         let at = Timestamp {
@@ -104,7 +101,6 @@ impl PushHandler {
         }
 
         Ok(PushResponse {
-            status: Some(ok_status()),
             result: Some(PushResult {
                 pushed_device_count: total_pushed,
                 offline_pending_count: total_offline,
@@ -115,19 +111,66 @@ impl PushHandler {
         })
     }
 
-    /// PushEvent：编排领域层
-    #[instrument(skip(self))]
+    /// PushEvent：将 `Event` 列表封装为 `EventEnvelope` 下行（与 PushMessage 对称，客户端走同一 `PayloadCommand::Message` + 内层 proto 解码）。
+    #[instrument(skip(self, req), fields(user_count = req.user_ids.len(), event_count = req.events.len()))]
     pub async fn handle_push_event(
         &self,
         ctx: &Ctx,
         req: PushEventCommand,
     ) -> Result<PushResponse> {
-        let _ = req;
+        if req.user_ids.is_empty() {
+            return Err(ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "PushEvent: user_ids is empty",
+            )
+            .build_error());
+        }
+        if req.events.is_empty() {
+            return Err(ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "PushEvent: events is empty",
+            )
+            .build_error());
+        }
+
+        let options = req.options.unwrap_or_default();
+        let per_user = self
+            .push_domain_service
+            .push_event_envelope_to_users(ctx, &req.user_ids, req.events, &options)
+            .await?;
+
         let window_id = uuid::Uuid::new_v4().to_string();
+        let at = Timestamp {
+            seconds: Utc::now().timestamp(),
+            nanos: 0,
+        };
+
+        let mut total_pushed: i32 = 0;
+        let mut total_offline: i32 = 0;
+        let mut user_results: Vec<UserPushResult> = Vec::with_capacity(per_user.len());
+
+        for (user_id, pushed, _fail, offline) in per_user {
+            total_pushed = total_pushed.saturating_add(pushed);
+            total_offline = total_offline.saturating_add(offline);
+            user_results.push(UserPushResult {
+                user_id,
+                result: Some(PushResult {
+                    pushed_device_count: pushed,
+                    offline_pending_count: offline,
+                    window_id: window_id.clone(),
+                    at: Some(at.clone()),
+                }),
+            });
+        }
+
         Ok(PushResponse {
-            status: Some(ok_status()),
-            result: Some(push_result_at_now(0, 0, window_id)),
-            user_results: vec![],
+            result: Some(PushResult {
+                pushed_device_count: total_pushed,
+                offline_pending_count: total_offline,
+                window_id: window_id.clone(),
+                at: Some(at),
+            }),
+            user_results,
         })
     }
 
@@ -141,7 +184,6 @@ impl PushHandler {
         let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
         Ok(PushNotificationResponse {
-            status: Some(ok_status()),
             result: Some(push_result_at_now(0, 0, window_id)),
             user_results: vec![],
             notification_id: None,
@@ -154,7 +196,6 @@ impl PushHandler {
         let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
         Ok(PushAckResponse {
-            status: Some(ok_status()),
             result: Some(push_result_at_now(0, 0, window_id)),
             user_results: vec![],
         })
@@ -170,7 +211,6 @@ impl PushHandler {
         let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
         Ok(PushResponse {
-            status: Some(ok_status()),
             result: Some(push_result_at_now(0, 0, window_id)),
             user_results: vec![],
         })

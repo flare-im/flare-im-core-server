@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_im_core::error::Result;
 
 use crate::domain::model::HookExecutionPlan;
 use crate::domain::service::HookOrchestrationService;

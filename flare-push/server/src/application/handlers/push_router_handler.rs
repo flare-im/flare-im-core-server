@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::access_gateway;
-use flare_proto::common::{NotificationMessage, PushTaskEnvelope, PushTaskPayloadKind};
-use flare_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_grpc_proto::access_gateway;
+use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind, PushEnvelope, PushPayloadKind};
 use prost::Message as _;
 
-use crate::domain::merge_envelope_metadata;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
 
@@ -30,25 +28,20 @@ impl PushRouterHandler {
     pub async fn handle_message(
         &self,
         ctx: &flare_server_core::context::Ctx,
-        req: PushMessageRequest,
+        req: access_gateway::PushMessageRequest,
     ) -> Result<()> {
         if req.user_ids.is_empty() {
             return Ok(());
         }
 
-        let message = req.message.clone().unwrap_or_default();
+        let message = req.messages.first().cloned().unwrap_or_default();
         let conversation_id = message.conversation_id.clone();
         let message_id = message.server_id.clone();
-        let priority = req.options.as_ref().map(|o| o.priority).unwrap_or(5);
+        let priority = 5;
         let expire_at_ms = 0;
 
-        let ag_req = access_gateway::PushMessageRequest {
-            user_ids: req.user_ids.clone(),
-            messages: vec![message],
-            options: None,
-        };
-        let push_payload = ag_req.encode_to_vec();
-        let metadata = merge_envelope_metadata(&req.options, &req.metadata);
+        let push_payload = req.encode_to_vec();
+        let metadata = HashMap::new();
 
         for user_id in &req.user_ids {
             let online = self
@@ -73,11 +66,13 @@ impl PushRouterHandler {
             if online {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
             }
         }
 
@@ -137,202 +132,105 @@ impl PushRouterHandler {
             if online {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
             }
         }
 
         Ok(())
     }
 
-    pub async fn handle_notification(
+    /// 处理统一推送信封
+    ///
+    /// ## 设计
+    /// - 统一处理 ACK、通知、CustomData、系统消息
+    /// - 支持全量推送、用户列表推送、设备列表推送
+    pub async fn handle_push_envelope(
         &self,
         ctx: &flare_server_core::context::Ctx,
-        req: PushNotificationRequest,
+        envelope: PushEnvelope,
     ) -> Result<()> {
-        if req.user_ids.is_empty() {
+        // 提取推送选项
+        let priority = envelope.options.as_ref().map(|o| o.priority).unwrap_or(5);
+        let expire_at_ms = envelope.options.as_ref().map(|o| o.expire_at_ms).unwrap_or(0);
+
+        // 根据目标类型处理
+        let target_user_ids = match flare_proto::common::PushTargetType::try_from(envelope.target_type) {
+            Ok(flare_proto::common::PushTargetType::All) => {
+                // 全量推送：需要查询所有在线用户
+                // TODO: 实现全量推送逻辑
+                tracing::warn!("Full broadcast push not yet implemented");
+                return Ok(());
+            }
+            Ok(flare_proto::common::PushTargetType::Users) => {
+                envelope.target_user_ids.clone()
+            }
+            Ok(flare_proto::common::PushTargetType::Devices) => {
+                // 设备级推送：需要从设备ID反查用户ID
+                // TODO: 实现设备级推送逻辑
+                tracing::warn!("Device-level push not yet implemented");
+                return Ok(());
+            }
+            _ => {
+                envelope.target_user_ids.clone()
+            }
+        };
+
+        if target_user_ids.is_empty() {
             return Ok(());
         }
 
-        let priority = req.options.as_ref().map(|o| o.priority).unwrap_or(5);
-        let expire_at_ms = 0;
-        let message_id = format!("notif-{}", uuid::Uuid::new_v4());
+        // 序列化 PushEnvelope 作为推送载荷
+        let push_payload = envelope.encode_to_vec();
+        let message_id = envelope.envelope_id.clone();
         let conversation_id = String::new();
 
-        let common_notification = req.notification.map(|n| NotificationMessage {
-            kind: 6,
-            notification_id: uuid::Uuid::new_v4().to_string(),
-            title: n.title,
-            body: n.body,
-            priority: 2,
-            expire_at: None,
-            created_at: None,
-            action: if n.click_action.is_empty() {
-                None
-            } else {
-                Some(flare_proto::common::notification_message::Action::Deeplink(
-                    n.click_action,
-                ))
-            },
-            payload: None,
-            extra: n.metadata,
-        });
-
-        let ag_req = access_gateway::PushNotificationRequest {
-            user_ids: req.user_ids.clone(),
-            notification: common_notification,
-            options: None,
+        // 转换 payload_kind
+        let payload_kind = match PushPayloadKind::try_from(envelope.payload_kind) {
+            Ok(PushPayloadKind::Ack) => PushTaskPayloadKind::Ack as i32,
+            Ok(PushPayloadKind::Notification) => PushTaskPayloadKind::Notification as i32,
+            Ok(PushPayloadKind::Custom) => PushTaskPayloadKind::Custom as i32,
+            Ok(PushPayloadKind::System) => PushTaskPayloadKind::Custom as i32, // 系统消息映射为 Custom
+            _ => PushTaskPayloadKind::Unspecified as i32,
         };
-        let push_payload = ag_req.encode_to_vec();
-        let metadata = merge_envelope_metadata(&req.options, &req.metadata);
 
-        for user_id in &req.user_ids {
+        // 为每个用户创建推送任务
+        for user_id in &target_user_ids {
             let online = self
                 .online_status
                 .is_online(ctx, user_id)
                 .await
                 .unwrap_or(false);
 
-            let env = PushTaskEnvelope {
+            let task = PushTaskEnvelope {
                 user_id: user_id.clone(),
                 message_id: message_id.clone(),
                 conversation_id: conversation_id.clone(),
-                tenant_id: self.online_status.default_tenant_id().to_string(),
+                tenant_id: envelope.tenant_id.clone(),
                 priority,
                 expire_at_ms,
                 push_payload: push_payload.clone(),
-                metadata: metadata.clone(),
-                payload_kind: PushTaskPayloadKind::Notification as i32,
+                metadata: envelope.headers.clone(),
+                payload_kind,
             };
 
-            let payload = env.encode_to_vec();
+            let payload = task.encode_to_vec();
+            
             if online {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn handle_custom(
-        &self,
-        ctx: &flare_server_core::context::Ctx,
-        req: PushCustomRequest,
-    ) -> Result<()> {
-        if req.user_ids.is_empty() {
-            return Ok(());
-        }
-
-        let priority = req.options.as_ref().map(|o| o.priority).unwrap_or(5);
-        let expire_at_ms = 0;
-        let message_id = format!("custom-{}", uuid::Uuid::new_v4());
-        let conversation_id = String::new();
-
-        let ag_req = access_gateway::PushCustomRequest {
-            user_ids: req.user_ids.clone(),
-            custom_data: req.custom_data,
-            options: None,
-        };
-        let push_payload = ag_req.encode_to_vec();
-        let metadata = merge_envelope_metadata(&req.options, &req.metadata);
-
-        for user_id in &req.user_ids {
-            let online = self
-                .online_status
-                .is_online(ctx, user_id)
-                .await
-                .unwrap_or(false);
-            let env = PushTaskEnvelope {
-                user_id: user_id.clone(),
-                message_id: message_id.clone(),
-                conversation_id: conversation_id.clone(),
-                tenant_id: self.online_status.default_tenant_id().to_string(),
-                priority,
-                expire_at_ms,
-                push_payload: push_payload.clone(),
-                metadata: metadata.clone(),
-                payload_kind: PushTaskPayloadKind::Custom as i32,
-            };
-            let payload = env.encode_to_vec();
-            if online {
-                self.publisher
-                    .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
-            } else {
-                self.publisher
-                    .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn handle_ack(
-        &self,
-        ctx: &flare_server_core::context::Ctx,
-        req: access_gateway::PushAckRequest,
-    ) -> Result<()> {
-        if req.user_ids.is_empty() {
-            return Ok(());
-        }
-
-        let priority = req.options.as_ref().map(|o| o.priority).unwrap_or(5);
-        let expire_at_ms = req.options.as_ref().map(|o| o.expire_at_ms).unwrap_or(0);
-        let conversation_id = req
-            .ack
-            .as_ref()
-            .and_then(|a| a.payload.as_ref())
-            .and_then(|p| match p {
-                flare_proto::common::ack::Payload::Conversation(c) => {
-                    Some(c.conversation_id.clone())
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        let message_id = req
-            .ack
-            .as_ref()
-            .and_then(|a| a.ack_id.clone())
-            .filter(|ack_id| !ack_id.is_empty())
-            .unwrap_or_else(|| format!("ack-{}", uuid::Uuid::new_v4()));
-        let push_payload = req.encode_to_vec();
-
-        for user_id in &req.user_ids {
-            let online = self
-                .online_status
-                .is_online(ctx, user_id)
-                .await
-                .unwrap_or(false);
-            let env = PushTaskEnvelope {
-                user_id: user_id.clone(),
-                message_id: message_id.clone(),
-                conversation_id: conversation_id.clone(),
-                tenant_id: self.online_status.default_tenant_id().to_string(),
-                priority,
-                expire_at_ms,
-                push_payload: push_payload.clone(),
-                metadata: HashMap::new(),
-                payload_kind: PushTaskPayloadKind::Ack as i32,
-            };
-            let payload = env.encode_to_vec();
-            if online {
-                self.publisher
-                    .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
-            } else {
-                self.publisher
-                    .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await?;
+                    .await
+                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
             }
         }
 

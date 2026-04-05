@@ -1,28 +1,26 @@
 //! 应用层数据传输对象（DTO）
 //!
 //! 用于封装应用层到接口层的数据传输
+//!
+//! 错误处理：使用 flare_server_core::error::Result 和 FlareError
 
-use flare_proto::signaling::router::RouteMetadata;
+use flare_grpc_proto::signaling::router::RouteMetadata;
 use std::collections::HashMap;
 
-/// 消息路由结果
+/// 消息路由结果（只包含业务数据）
 #[derive(Debug, Clone)]
 pub struct MessageRouteResult {
     pub response_data: Vec<u8>,
     pub routed_endpoint: String,
     pub metadata: RouteMetadata,
-    pub error_code: Option<u32>,
-    pub error_message: Option<String>,
 }
 
-/// 操作事件路由结果（response_data 为 protobuf 编码的 OperationResponse）
+/// 操作事件路由结果（只包含业务数据，response_data 为 protobuf 编码的响应）
 #[derive(Debug, Clone)]
 pub struct EventRouteResult {
     pub response_data: Vec<u8>,
     pub routed_endpoint: String,
     pub metadata: RouteMetadata,
-    pub error_code: Option<u32>,
-    pub error_message: Option<String>,
 }
 
 /// 工具函数：构建路由元数据（与 proto RouteMetadata 一致，无 trace 字段）

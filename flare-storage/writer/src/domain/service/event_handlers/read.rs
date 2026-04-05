@@ -2,7 +2,7 @@
 
 use crate::domain::model::{Event, ReadPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 
 use super::EventContext;
 
@@ -23,10 +23,10 @@ where
                 msg_id.as_str(),
                 read.user_id.as_str(),
             )
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
         ctx.repo
             .append_event(ctx.ctx, ctx.tenant_id, msg_id.as_str(), event)
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     }
     if let Some(stream) = ctx.stream {
         let _ = stream.append_event_to_stream(ctx.ctx, event).await;

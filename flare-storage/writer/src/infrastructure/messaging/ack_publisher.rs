@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::to_vec;
 use tracing::instrument;

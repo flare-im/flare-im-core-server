@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 
 use crate::domain::model::{HookTransportConfig, LoadBalanceStrategy};
 use crate::infrastructure::adapters::grpc::GrpcHookAdapter;

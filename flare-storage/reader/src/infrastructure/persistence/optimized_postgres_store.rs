@@ -20,10 +20,9 @@ use crate::domain::model::{
 };
 use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
-use crate::infrastructure::persistence::helpers::*;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
 // use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
@@ -143,8 +142,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 WHERE m.conversation_id = $1 AND m.timestamp >= $2 AND m.timestamp <= $3
                   AND NOT EXISTS (
                       SELECT 1 FROM message_visibility mv
-                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id AND mv.user_id = $4
+                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
                         AND mv.visibility_status IN (1, 2)
+                        AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
                   )
                 ORDER BY m.timestamp DESC, m.seq DESC NULLS LAST
                 LIMIT $5
@@ -253,8 +253,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 WHERE m.conversation_id = $1 AND m.seq > $2 AND ($3::BIGINT IS NULL OR m.seq < $3)
                   AND NOT EXISTS (
                       SELECT 1 FROM message_visibility mv
-                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id AND mv.user_id = $4
+                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
                         AND mv.visibility_status IN (1, 2)
+                        AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
                   )
                 ORDER BY m.seq ASC
                 LIMIT $5
@@ -490,12 +491,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         let result = sqlx::query(
             r#"
-            INSERT INTO message_visibility (tenant_id, message_id, user_id, visibility_status, changed_at)
-            SELECT m.tenant_id, m.server_id, $1, $2, CURRENT_TIMESTAMP
+            INSERT INTO message_visibility (tenant_id, message_id, user_id, scope, visibility_status, changed_at)
+            SELECT m.tenant_id, m.server_id, $1, 1, $2, CURRENT_TIMESTAMP
             FROM messages m
             WHERE m.server_id = ANY($3)
-            ON CONFLICT (tenant_id, message_id, user_id)
-            DO UPDATE SET visibility_status = $2, changed_at = CURRENT_TIMESTAMP
+            ON CONFLICT (tenant_id, message_id, user_id, scope)
+            DO UPDATE SET visibility_status = EXCLUDED.visibility_status, changed_at = CURRENT_TIMESTAMP
             "#,
         )
         .bind(user_id)
@@ -537,9 +538,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             query.push("SELECT 1 FROM message_visibility mv ");
             query.push("WHERE mv.tenant_id = messages.tenant_id ");
             query.push("AND mv.message_id = messages.server_id ");
-            query.push("AND mv.user_id = ");
+            query.push("AND mv.visibility_status IN (1, 2) ");
+            query.push("AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = ");
             query.push_bind(uid);
-            query.push(" AND mv.visibility_status IN (1, 2))");
+            query.push(")))");
         }
 
         let count: i64 = query
@@ -725,7 +727,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_edit_history(
         &self,
         ctx: &Ctx,
-        message_id: &str,
+        _message_id: &str,
     ) -> Result<Vec<crate::domain::model::EditHistoryEntry>> {
         let _ = ctx; // 上下文用于日志追踪
         // TODO: 实现编辑历史查询
@@ -736,7 +738,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_read_records(
         &self,
         ctx: &Ctx,
-        message_id: &str,
+        _message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReadListEntry>> {
         let _ = ctx; // 上下文用于日志追踪
         // TODO: 实现已读记录查询
@@ -747,8 +749,8 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_visibility(
         &self,
         ctx: &Ctx,
-        message_id: &str,
-        user_id: &str,
+        _message_id: &str,
+        _user_id: &str,
     ) -> Result<Option<crate::domain::model::VisibilityStatus>> {
         let _ = ctx; // 上下文用于日志追踪
         // TODO: 实现可见性查询
@@ -759,7 +761,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_reactions(
         &self,
         ctx: &Ctx,
-        message_id: &str,
+        _message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReactionItem>> {
         let _ = ctx; // 上下文用于日志追踪
         // TODO: 实现反应查询
@@ -770,7 +772,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_pinned_messages(
         &self,
         ctx: &Ctx,
-        conversation_id: &str,
+        _conversation_id: &str,
     ) -> Result<Vec<crate::domain::model::PinnedMessageInfo>> {
         let _ = ctx; // 上下文用于日志追踪
         // TODO: 实现置顶消息查询

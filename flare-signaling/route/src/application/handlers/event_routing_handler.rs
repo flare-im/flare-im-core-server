@@ -8,19 +8,23 @@ use std::time::Instant;
 
 use flare_proto::common::Event;
 use flare_proto::common::event::Payload as EventPayload;
-use flare_proto::signaling::router::RouteOptions;
+use flare_grpc_proto::signaling::router::RouteOptions;
 use flare_server_core::context::{ActorType, Context, ContextExt};
-use flare_server_core::error::ErrorCode;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::flare_err;
 use tracing::instrument;
 
 use crate::application::dto::{EventRouteResult, build_route_metadata};
 use crate::domain::service::RouteContext;
-use crate::domain::value_objects::{DefaultFlowController, FlowController};
+use crate::domain::value_objects::DefaultFlowController;
 use crate::infrastructure::forwarder::MessageForwarder;
 
 /// 从 Event 构建流控用 RouteContext（operator_id 由 metadata/ctx 注入，proto Event 无此字段）
 fn build_route_ctx_from_event(ctx: &Context, svid: &str, event: &Event) -> RouteContext {
-    let user_id = ctx.actor().map(|a| a.actor_id().to_string());
+    let user_id = ctx
+        .actor()
+        .map(|a| a.actor_id().to_string())
+        .or_else(|| ctx.user_id().map(|u| u.to_string()));
     RouteContext {
         svid: svid.to_string(),
         conversation_id: if event.conversation_id.is_empty() {
@@ -52,7 +56,34 @@ fn is_hard_delete_event(event: &Event) -> bool {
     let Some(EventPayload::Delete(delete)) = event.payload.as_ref() else {
         return false;
     };
-    matches!(delete.delete_type, Some(2)) || matches!(delete.scope, Some(2))
+    matches!(delete.delete_type, Some(2))
+}
+
+fn operator_id_from_ctx(ctx: &Context) -> String {
+    ctx.actor()
+        .map(|a| a.actor_id().to_string())
+        .or_else(|| ctx.user_id().map(|u| u.to_string()))
+        .unwrap_or_default()
+}
+
+fn validate_delete_scope(ctx: &Context, event: &Event) -> Result<()> {
+    let Some(EventPayload::Delete(delete)) = event.payload.as_ref() else {
+        return Ok(());
+    };
+    // 私有删除仅允许指定为当前操作者本人，防止伪造 target_user_id 删除他人私有视图。
+    if matches!(delete.scope, Some(1)) {
+        let target = delete.target_user_id.as_deref().unwrap_or_default();
+        if !target.is_empty() {
+            let operator_id = operator_id_from_ctx(ctx);
+            if operator_id.is_empty() || operator_id != target {
+                return Err(flare_err!(
+                    ErrorCode::PermissionDenied,
+                    "delete.user_private.target_must_be_operator"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 事件路由处理器（Command 侧）
@@ -89,10 +120,11 @@ impl EventRoutingHandler {
         svid: &str,
         event: Event,
         route_options: RouteOptions,
-    ) -> EventRouteResult {
+    ) -> Result<EventRouteResult> {
         ctx.ensure_not_cancelled().ok();
         let start_time = Instant::now();
         let decision_start = Instant::now();
+        validate_delete_scope(ctx, &event)?;
 
         let decision_duration = decision_start.elapsed();
 
@@ -105,51 +137,31 @@ impl EventRoutingHandler {
             tracing::warn!(
                 operator_id = %op_id,
                 conversation_id = %event.conversation_id,
+                decision_duration_ms = decision_duration.as_millis(),
+                total_duration_ms = total_duration.as_millis(),
                 "Route rejected hard delete event: operator is not admin/owner"
             );
-            return EventRouteResult {
-                response_data: vec![],
-                routed_endpoint: String::new(),
-                metadata: build_route_metadata(
-                    total_duration.as_millis() as i64,
-                    0,
-                    decision_duration.as_millis() as i64,
-                    svid,
-                    route_options.load_balance_strategy,
-                ),
-                error_code: Some(ErrorCode::PermissionDenied as u32),
-                error_message: Some("Hard delete requires admin or owner role".to_string()),
-            };
+            return Err(flare_err!(ErrorCode::PermissionDenied, "Hard delete requires admin or owner role"));
         }
 
         if let Some(ref fc) = self.flow_controller {
             let route_ctx = build_route_ctx_from_event(ctx, svid, &event);
-            if let Err(e) = fc.check(&route_ctx).await {
+            fc.check(&route_ctx).await.map_err(|e| {
                 let total_duration = start_time.elapsed();
                 tracing::warn!(
                     error = %e,
                     svid = %svid,
                     conversation_id = ?route_ctx.conversation_id,
+                    decision_duration_ms = decision_duration.as_millis(),
+                    total_duration_ms = total_duration.as_millis(),
                     "Flow control rejected event"
                 );
-                return EventRouteResult {
-                    response_data: vec![],
-                    routed_endpoint: String::new(),
-                    metadata: build_route_metadata(
-                        total_duration.as_millis() as i64,
-                        0,
-                        decision_duration.as_millis() as i64,
-                        svid,
-                        route_options.load_balance_strategy,
-                    ),
-                    error_code: Some(ErrorCode::ResourceExhausted as u32),
-                    error_message: Some(e.to_string()),
-                };
-            }
+                map_infra_error(e, ErrorCode::ResourceExhausted, "Flow control rejected")
+            })?;
         }
 
         let business_start = Instant::now();
-        match self
+        let (endpoint, response_data) = self
             .message_forwarder
             .forward_event(
                 ctx,
@@ -158,46 +170,38 @@ impl EventRoutingHandler {
                 Arc::new(crate::domain::repository::NoopRouteRepository),
             )
             .await
-        {
-            Ok((endpoint, response_data)) => {
-                let business_duration = business_start.elapsed();
+            .map_err(|e| {
                 let total_duration = start_time.elapsed();
-                tracing::info!(
+                tracing::error!(
+                    error = %e,
                     svid = %svid,
-                    routed_endpoint = %endpoint,
-                    "Event routed successfully"
+                    decision_duration_ms = decision_duration.as_millis(),
+                    total_duration_ms = total_duration.as_millis(),
+                    "Failed to forward event"
                 );
-                EventRouteResult {
-                    response_data,
-                    routed_endpoint: endpoint,
-                    metadata: build_route_metadata(
-                        total_duration.as_millis() as i64,
-                        business_duration.as_millis() as i64,
-                        decision_duration.as_millis() as i64,
-                        svid,
-                        route_options.load_balance_strategy,
-                    ),
-                    error_code: None,
-                    error_message: None,
-                }
-            }
-            Err(e) => {
-                let total_duration = start_time.elapsed();
-                tracing::error!(error = %e, svid = %svid, "Failed to forward event");
-                EventRouteResult {
-                    response_data: vec![],
-                    routed_endpoint: String::new(),
-                    metadata: build_route_metadata(
-                        total_duration.as_millis() as i64,
-                        0,
-                        decision_duration.as_millis() as i64,
-                        svid,
-                        route_options.load_balance_strategy,
-                    ),
-                    error_code: Some(ErrorCode::InternalError as u32),
-                    error_message: Some(format!("Failed to forward event: {}", e)),
-                }
-            }
-        }
+                map_infra_error(e, ErrorCode::InternalError, "Failed to forward event")
+            })?;
+
+        let business_duration = business_start.elapsed();
+        let total_duration = start_time.elapsed();
+        tracing::info!(
+            svid = %svid,
+            routed_endpoint = %endpoint,
+            business_duration_ms = business_duration.as_millis(),
+            total_duration_ms = total_duration.as_millis(),
+            "Event routed successfully"
+        );
+        
+        Ok(EventRouteResult {
+            response_data,
+            routed_endpoint: endpoint,
+            metadata: build_route_metadata(
+                total_duration.as_millis() as i64,
+                business_duration.as_millis() as i64,
+                decision_duration.as_millis() as i64,
+                svid,
+                route_options.load_balance_strategy,
+            ),
+        })
     }
 }

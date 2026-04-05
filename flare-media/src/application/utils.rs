@@ -6,7 +6,7 @@ use crate::domain::model::MediaFileMetadata;
 use crate::domain::model::MediaReference;
 
 /// 将领域模型转换为 protobuf FileInfo
-pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_proto::media::FileInfo {
+pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_grpc_proto::media::FileInfo {
     let bucket = metadata
         .storage_bucket()
         .map(|s| s.to_string())
@@ -16,7 +16,7 @@ pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_proto::media::F
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    flare_proto::media::FileInfo {
+    flare_grpc_proto::media::FileInfo {
         file_id: metadata.file_id.clone(),
         file_name: metadata.file_name.clone(),
         mime_type: metadata.mime_type.clone(),
@@ -37,8 +37,8 @@ pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_proto::media::F
 }
 
 /// 将领域模型转换为 protobuf MediaReferenceInfo
-pub fn to_proto_reference(reference: &MediaReference) -> flare_proto::media::MediaReferenceInfo {
-    flare_proto::media::MediaReferenceInfo {
+pub fn to_proto_reference(reference: &MediaReference) -> flare_grpc_proto::media::MediaReferenceInfo {
+    flare_grpc_proto::media::MediaReferenceInfo {
         reference_id: reference.reference_id.clone(),
         file_id: reference.file_id.clone(),
         namespace: reference.namespace.clone(),

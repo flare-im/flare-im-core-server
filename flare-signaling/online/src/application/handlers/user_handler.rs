@@ -4,8 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, GetDeviceRequest, GetDeviceResponse,
     GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest, KickDeviceResponse,
     ListUserDevicesRequest, ListUserDevicesResponse,
@@ -14,6 +13,7 @@ use flare_server_core::context::Context;
 
 use crate::domain::repository::ConversationRepository;
 use crate::domain::service::UserService;
+use crate::error::Result;
 
 #[derive(Clone)]
 pub struct OnlineUserHandler<R: ConversationRepository + Send + Sync> {

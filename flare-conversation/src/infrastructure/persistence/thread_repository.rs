@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use crate::error::{map_infra_error, ErrorCode, Result};
 use chrono::Utc;
 use sqlx::{PgPool, Row};
 use tracing::instrument;
@@ -57,7 +57,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(now)
         .fetch_optional(&*self.pool)
         .await
-        .context("Failed to create thread")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to create thread"))?;
 
         // 添加创建者为参与者
         self.add_participant(ctx, &thread_id, creator_id).await?;
@@ -65,10 +65,10 @@ impl ThreadRepository for PostgresThreadRepository {
         Ok(thread_id)
     }
 
-    #[instrument(skip(self, ctx), fields(conversation_id = %conversation_id))]
+    #[instrument(skip(self, _ctx), fields(conversation_id = %conversation_id))]
     async fn list_threads(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         conversation_id: &str,
         limit: i32,
         offset: i32,
@@ -99,7 +99,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(conversation_id)
         .fetch_one(&*self.pool)
         .await
-        .context("Failed to count threads")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to count threads"))?;
 
         // 查询话题列表
         let rows = sqlx::query(&format!(
@@ -121,7 +121,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(offset)
         .fetch_all(&*self.pool)
         .await
-        .context("Failed to list threads")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to list threads"))?;
 
         let threads: Vec<Thread> = rows
             .into_iter()
@@ -154,10 +154,10 @@ impl ThreadRepository for PostgresThreadRepository {
         Ok((threads, total_count as i32))
     }
 
-    #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
+    #[instrument(skip(self, _ctx), fields(thread_id = %thread_id))]
     async fn get_thread(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<Option<Thread>> {
         let row = sqlx::query(
@@ -174,7 +174,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .fetch_optional(&*self.pool)
         .await
-        .context("Failed to get thread")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get thread"))?;
 
         let Some(row) = row else {
             return Ok(None);
@@ -204,10 +204,10 @@ impl ThreadRepository for PostgresThreadRepository {
         }))
     }
 
-    #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
+    #[instrument(skip(self, _ctx), fields(thread_id = %thread_id))]
     async fn update_thread(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         thread_id: &str,
         title: Option<&str>,
         is_pinned: Option<bool>,
@@ -255,22 +255,22 @@ impl ThreadRepository for PostgresThreadRepository {
             .build()
             .execute(&*self.pool)
             .await
-            .context("Failed to update thread")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update thread"))?;
 
         Ok(())
     }
 
-    #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
+    #[instrument(skip(self, _ctx), fields(thread_id = %thread_id))]
     async fn delete_thread(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<()> {
         sqlx::query("DELETE FROM threads WHERE id = $1")
             .bind(thread_id)
             .execute(&*self.pool)
             .await
-            .context("Failed to delete thread")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete thread"))?;
 
         Ok(())
     }
@@ -303,7 +303,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .execute(&*self.pool)
         .await
-        .context("Failed to increment thread reply count")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to increment thread reply count"))?;
 
         // 更新参与者信息
         self.add_participant(ctx, thread_id, reply_user_id).await?;
@@ -311,10 +311,10 @@ impl ThreadRepository for PostgresThreadRepository {
         Ok(())
     }
 
-    #[instrument(skip(self, ctx), fields(thread_id = %thread_id, user_id = %user_id))]
+    #[instrument(skip(self, _ctx), fields(thread_id = %thread_id, user_id = %user_id))]
     async fn add_participant(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         thread_id: &str,
         user_id: &str,
     ) -> Result<()> {
@@ -336,7 +336,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(now)
         .execute(&*self.pool)
         .await
-        .context("Failed to add thread participant")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to add thread participant"))?;
 
         // 更新话题的参与者数量
         sqlx::query(
@@ -353,15 +353,15 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .execute(&*self.pool)
         .await
-        .context("Failed to update thread participant count")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update thread participant count"))?;
 
         Ok(())
     }
 
-    #[instrument(skip(self, ctx), fields(thread_id = %thread_id))]
+    #[instrument(skip(self, _ctx), fields(thread_id = %thread_id))]
     async fn get_participants(
         &self,
-        ctx: &flare_server_core::context::Context,
+        _ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<Vec<String>> {
         let rows = sqlx::query(
@@ -375,7 +375,7 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .fetch_all(&*self.pool)
         .await
-        .context("Failed to get thread participants")?;
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get thread participants"))?;
 
         Ok(rows.into_iter().map(|row| row.get("user_id")).collect())
     }

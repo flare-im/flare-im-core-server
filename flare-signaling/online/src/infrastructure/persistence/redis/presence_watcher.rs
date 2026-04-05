@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use flare_im_core::ErrorCode;
 use tokio::sync::mpsc;
 
 use crate::config::OnlineConfig;
@@ -33,8 +34,8 @@ impl RedisPresenceWatcher {
     fn parse_presence_event(user_id: &str, payload: &str) -> Result<PresenceChangeEvent> {
         use serde_json::Value;
 
-        let json: Value =
-            serde_json::from_str(payload).context("failed to parse presence event")?;
+        let json: Value = serde_json::from_str(payload)
+            .map_err(|e|   flare_server_core::flare_err!(ErrorCode::InternalError, format!("Failed to parse presence event: {}", e)))?;
 
         let status = OnlineStatusRecord {
             online: json
@@ -43,29 +44,29 @@ impl RedisPresenceWatcher {
                 .unwrap_or(false),
             server_id: json
                 .get("server_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string())
                 .unwrap_or_default(),
             gateway_id: json
                 .get("gateway_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string()),
             cluster_id: json
                 .get("cluster_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string()),
             last_seen: json
                 .get("last_seen")
-                .and_then(|v| v.as_i64())
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                .and_then(|v: &Value| v.as_i64())
+                .and_then(|ts: i64| chrono::DateTime::from_timestamp(ts, 0)),
             device_id: json
                 .get("device_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string()),
             device_platform: json
                 .get("device_platform")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string()),
         };
 
         Ok(PresenceChangeEvent {
@@ -73,11 +74,11 @@ impl RedisPresenceWatcher {
             status,
             occurred_at: json
                 .get("occurred_at")
-                .and_then(|v| v.as_i64())
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .and_then(|v: &Value| v.as_i64())
+                .and_then(|ts: i64| chrono::DateTime::from_timestamp(ts, 0))
                 .unwrap_or_else(chrono::Utc::now),
-            conflict_action: json.get("conflict_action").and_then(|v| {
-                v.as_i64().and_then(|i| {
+            conflict_action: json.get("conflict_action").and_then(|v: &Value| {
+                v.as_i64().and_then(|i: i64| {
                     if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
                         Some(i as i32)
                     } else {
@@ -87,8 +88,8 @@ impl RedisPresenceWatcher {
             }),
             reason: json
                 .get("reason")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .and_then(|v: &Value| v.as_str())
+                .map(|s: &str| s.to_string()),
         })
     }
 }

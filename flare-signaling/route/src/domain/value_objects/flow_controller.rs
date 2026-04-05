@@ -36,6 +36,7 @@ pub type DefaultFlowController = FlowController<NoopMonitoringClient>;
 
 /// 热点会话信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HotSessionInfo {
     last_detected: std::time::SystemTime,
     current_qps: u32,

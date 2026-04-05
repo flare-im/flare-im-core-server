@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use flare_proto::push::PushOptions;
+use flare_grpc_proto::push::PushOptions;
 
 pub fn merge_envelope_metadata(
     options: &Option<PushOptions>,

@@ -3,7 +3,7 @@
 use crate::convert;
 use crate::domain::model::{EditPayload, Event};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 
 use super::{EventContext, append_event_and_stream};
 
@@ -30,6 +30,6 @@ where
             (!edit.reason.is_empty()).then_some(edit.reason.as_str()),
             content_text,
         )
-        .await?;
+        .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     append_event_and_stream(ctx, message_id, event).await
 }

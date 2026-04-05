@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use crate::error::{ErrorCode, Result, map_infra_error};
 use chrono::{Duration, Utc};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
@@ -22,8 +22,12 @@ impl RedisUploadSessionStore {
         namespace: impl Into<String>,
         ttl_seconds: i64,
     ) -> Result<Self> {
-        let client = redis::Client::open(redis_url)?;
-        let connection = client.get_connection_manager().await?;
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "redis client open"))?;
+        let connection = client
+            .get_connection_manager()
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "redis connection manager"))?;
         Ok(Self {
             namespace: namespace.into(),
             ttl: Duration::seconds(ttl_seconds.max(60)),
@@ -61,7 +65,9 @@ impl UploadSessionStore for RedisUploadSessionStore {
     async fn create_session(&self, session: &UploadSession) -> Result<()> {
         let mut session = session.clone();
         Self::ensure_session_defaults(&mut session);
-        let payload = serde_json::to_string(&session)?;
+        let payload = serde_json::to_string(&session).map_err(|e| {
+            map_infra_error(e, ErrorCode::SerializationError, "serialize upload session")
+        })?;
         let mut conn = self.connection.lock().await;
         let _: () = conn
             .set_ex(
@@ -70,7 +76,9 @@ impl UploadSessionStore for RedisUploadSessionStore {
                 self.ttl_for_session(&session),
             )
             .await
-            .context("failed to create upload session in redis")?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::NetworkError, "failed to create upload session in redis")
+            })?;
         Ok(())
     }
 
@@ -79,10 +87,21 @@ impl UploadSessionStore for RedisUploadSessionStore {
         let payload: Option<String> = conn
             .get(self.key(upload_id))
             .await
-            .context("failed to fetch upload session from redis")?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to fetch upload session from redis",
+                )
+            })?;
         if let Some(payload) = payload {
-            let session: UploadSession =
-                serde_json::from_str(&payload).context("failed to deserialize upload session")?;
+            let session: UploadSession = serde_json::from_str(&payload).map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DeserializationError,
+                    "failed to deserialize upload session",
+                )
+            })?;
             if session.expires_at < Utc::now() {
                 drop(conn);
                 self.delete_session(upload_id).await.ok();
@@ -97,7 +116,9 @@ impl UploadSessionStore for RedisUploadSessionStore {
     async fn upsert_session(&self, session: &UploadSession) -> Result<()> {
         let mut session = session.clone();
         Self::ensure_session_defaults(&mut session);
-        let payload = serde_json::to_string(&session)?;
+        let payload = serde_json::to_string(&session).map_err(|e| {
+            map_infra_error(e, ErrorCode::SerializationError, "serialize upload session")
+        })?;
         let mut conn = self.connection.lock().await;
         let _: () = conn
             .set_ex(
@@ -106,7 +127,9 @@ impl UploadSessionStore for RedisUploadSessionStore {
                 self.ttl_for_session(&session),
             )
             .await
-            .context("failed to upsert upload session in redis")?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::NetworkError, "failed to upsert upload session in redis")
+            })?;
         Ok(())
     }
 
@@ -115,7 +138,13 @@ impl UploadSessionStore for RedisUploadSessionStore {
         let _: () = conn
             .del(self.key(upload_id))
             .await
-            .context("failed to delete upload session from redis")?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to delete upload session from redis",
+                )
+            })?;
         Ok(())
     }
 }

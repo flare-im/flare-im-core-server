@@ -94,7 +94,7 @@ impl WalRepository for RedisWalRepository {
             // 注意：submission.message_id 应该等于 submission.message.server_id，但为了安全起见，直接使用 message.server_id
             let wal_message_id = _submission.message.server_id.clone();
 
-            let encoded_payload = BASE64.encode(_submission.kafka_payload.clone().encode_to_vec());
+            let encoded_payload = BASE64.encode(_submission.message.encode_to_vec());
             let entry = WalEntrySnapshot {
                 message_id: wal_message_id.clone(),
                 encoded: encoded_payload,

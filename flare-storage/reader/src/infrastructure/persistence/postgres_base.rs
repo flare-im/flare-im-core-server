@@ -5,17 +5,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use flare_im_core::message::Message;
-use flare_im_core::utils::{datetime_to_timestamp, timestamp_to_datetime};
-use prost::Message as ProstMessage;
-use prost_types;
+use flare_im_core::utils::datetime_to_timestamp;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 
 use crate::config::StorageReaderConfig;
-use crate::infrastructure::persistence::helpers::*;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 
 #[derive(Clone)]

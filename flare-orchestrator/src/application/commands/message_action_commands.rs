@@ -7,6 +7,13 @@ use flare_proto::common::Pagination as ProtoPagination;
 use flare_proto::message_content_ext::MessageContentExt;
 use serde::{Deserialize, Serialize};
 
+fn operator_id_from_ctx(ctx: &flare_server_core::context::Ctx) -> String {
+    ctx.actor()
+        .map(|a| a.actor_id().to_string())
+        .or_else(|| ctx.user_id().map(|u| u.to_string()))
+        .unwrap_or_default()
+}
+
 /// 本地分页结构体（用于序列化/反序列化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalPagination {
@@ -82,13 +89,10 @@ pub struct RecallMessageCommand {
 impl RecallMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::RecallMessageRequest,
+        request: &flare_grpc_proto::message::RecallMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
 
         Self {
             base: MessageOperationCommand {
@@ -130,13 +134,10 @@ pub struct EditMessageCommand {
 impl EditMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::EditMessageRequest,
+        request: &flare_grpc_proto::message::EditMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
 
         let new_content = request
             .new_content
@@ -189,13 +190,10 @@ pub struct DeleteMessageCommand {
 impl DeleteMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::DeleteMessageRequest,
+        request: &flare_grpc_proto::message::DeleteMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
         let target_user_id = operator_id.clone();
 
         let delete_type = if request.delete_type == 2 {
@@ -292,7 +290,7 @@ pub struct ReadMessageCommand {
 impl ReadMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::MarkMessageReadRequest,
+        request: &flare_grpc_proto::message::MarkMessageReadRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -331,7 +329,7 @@ pub struct AddReactionCommand {
 impl AddReactionCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::AddReactionRequest,
+        request: &flare_grpc_proto::message::AddReactionRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -365,7 +363,7 @@ pub struct RemoveReactionCommand {
 impl RemoveReactionCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::RemoveReactionRequest,
+        request: &flare_grpc_proto::message::RemoveReactionRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -401,7 +399,7 @@ pub struct PinMessageCommand {
 impl PinMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::PinMessageRequest,
+        request: &flare_grpc_proto::message::PinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -441,7 +439,7 @@ pub struct UnpinMessageCommand {
 impl UnpinMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::UnpinMessageRequest,
+        request: &flare_grpc_proto::message::UnpinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -474,7 +472,7 @@ pub struct MarkMessageCommand {
 impl MarkMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::MarkMessageRequest,
+        request: &flare_grpc_proto::message::MarkMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -510,7 +508,7 @@ pub struct UnmarkMessageCommand {
 impl UnmarkMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::UnmarkMessageRequest,
+        request: &flare_grpc_proto::message::UnmarkMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let operator_id = ctx
@@ -554,7 +552,7 @@ pub struct BatchMarkMessageReadCommand {
 impl BatchMarkMessageReadCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::BatchMarkMessageReadRequest,
+        request: &flare_grpc_proto::message::BatchMarkMessageReadRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let read_at = request
@@ -595,7 +593,7 @@ pub struct MarkConversationReadCommand {
 impl MarkConversationReadCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        request: &flare_proto::message::MarkConversationReadRequest,
+        request: &flare_grpc_proto::message::MarkConversationReadRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         let read_at = request
@@ -635,7 +633,7 @@ pub struct MarkAllConversationsReadCommand {
 impl MarkAllConversationsReadCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
-        _request: &flare_proto::message::MarkAllConversationsReadRequest,
+        _request: &flare_grpc_proto::message::MarkAllConversationsReadRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
         Self {
@@ -668,8 +666,8 @@ pub struct AppRecallMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::RecallMessageRequest> for AppRecallMessageCommand {
-    fn from(request: &flare_proto::message::RecallMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::RecallMessageRequest> for AppRecallMessageCommand {
+    fn from(request: &flare_grpc_proto::message::RecallMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             reason: if request.reason.is_empty() {
@@ -710,8 +708,8 @@ pub struct AppEditMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::EditMessageRequest> for AppEditMessageCommand {
-    fn from(request: &flare_proto::message::EditMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::EditMessageRequest> for AppEditMessageCommand {
+    fn from(request: &flare_grpc_proto::message::EditMessageRequest) -> Self {
         let new_content = request
             .new_content
             .as_ref()
@@ -761,8 +759,8 @@ pub struct AppDeleteMessageCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::DeleteMessageRequest> for AppDeleteMessageCommand {
-    fn from(request: &flare_proto::message::DeleteMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::DeleteMessageRequest> for AppDeleteMessageCommand {
+    fn from(request: &flare_grpc_proto::message::DeleteMessageRequest) -> Self {
         let delete_type = if request.delete_type == 2 {
             DeleteType::Hard
         } else {
@@ -807,8 +805,8 @@ pub struct AppAddReactionCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::AddReactionRequest> for AppAddReactionCommand {
-    fn from(request: &flare_proto::message::AddReactionRequest) -> Self {
+impl From<&flare_grpc_proto::message::AddReactionRequest> for AppAddReactionCommand {
+    fn from(request: &flare_grpc_proto::message::AddReactionRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -834,8 +832,8 @@ pub struct AppRemoveReactionCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::RemoveReactionRequest> for AppRemoveReactionCommand {
-    fn from(request: &flare_proto::message::RemoveReactionRequest) -> Self {
+impl From<&flare_grpc_proto::message::RemoveReactionRequest> for AppRemoveReactionCommand {
+    fn from(request: &flare_grpc_proto::message::RemoveReactionRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -863,8 +861,8 @@ pub struct AppPinMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::PinMessageRequest> for AppPinMessageCommand {
-    fn from(request: &flare_proto::message::PinMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::PinMessageRequest> for AppPinMessageCommand {
+    fn from(request: &flare_grpc_proto::message::PinMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             operator_id: String::new(), // 由 handler 从 context 填充
@@ -896,8 +894,8 @@ pub struct AppUnpinMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::UnpinMessageRequest> for AppUnpinMessageCommand {
-    fn from(request: &flare_proto::message::UnpinMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::UnpinMessageRequest> for AppUnpinMessageCommand {
+    fn from(request: &flare_grpc_proto::message::UnpinMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             operator_id: String::new(),     // 由 handler 从 context 填充
@@ -924,8 +922,8 @@ pub struct AppMarkMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::MarkMessageRequest> for AppMarkMessageCommand {
-    fn from(request: &flare_proto::message::MarkMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::MarkMessageRequest> for AppMarkMessageCommand {
+    fn from(request: &flare_grpc_proto::message::MarkMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -956,8 +954,8 @@ pub struct AppUnmarkMessageCommand {
     pub conversation_id: String,
 }
 
-impl From<&flare_proto::message::UnmarkMessageRequest> for AppUnmarkMessageCommand {
-    fn from(request: &flare_proto::message::UnmarkMessageRequest) -> Self {
+impl From<&flare_grpc_proto::message::UnmarkMessageRequest> for AppUnmarkMessageCommand {
+    fn from(request: &flare_grpc_proto::message::UnmarkMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -983,8 +981,8 @@ pub struct AppBatchMarkMessageReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::BatchMarkMessageReadRequest> for AppBatchMarkMessageReadCommand {
-    fn from(request: &flare_proto::message::BatchMarkMessageReadRequest) -> Self {
+impl From<&flare_grpc_proto::message::BatchMarkMessageReadRequest> for AppBatchMarkMessageReadCommand {
+    fn from(request: &flare_grpc_proto::message::BatchMarkMessageReadRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -1011,8 +1009,8 @@ pub struct AppMarkConversationReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::MarkConversationReadRequest> for AppMarkConversationReadCommand {
-    fn from(request: &flare_proto::message::MarkConversationReadRequest) -> Self {
+impl From<&flare_grpc_proto::message::MarkConversationReadRequest> for AppMarkConversationReadCommand {
+    fn from(request: &flare_grpc_proto::message::MarkConversationReadRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
@@ -1038,10 +1036,10 @@ pub struct AppMarkAllConversationsReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::MarkAllConversationsReadRequest>
+impl From<&flare_grpc_proto::message::MarkAllConversationsReadRequest>
     for AppMarkAllConversationsReadCommand
 {
-    fn from(request: &flare_proto::message::MarkAllConversationsReadRequest) -> Self {
+    fn from(request: &flare_grpc_proto::message::MarkAllConversationsReadRequest) -> Self {
         Self {
             user_id: String::new(), // 由 handler 从 context 填充
             read_at: request.read_at.clone().map(|ts| {
@@ -1069,8 +1067,8 @@ pub struct AppMarkMessagesReadUntilCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_proto::message::MarkMessagesReadUntilRequest> for AppMarkMessagesReadUntilCommand {
-    fn from(request: &flare_proto::message::MarkMessagesReadUntilRequest) -> Self {
+impl From<&flare_grpc_proto::message::MarkMessagesReadUntilRequest> for AppMarkMessagesReadUntilCommand {
+    fn from(request: &flare_grpc_proto::message::MarkMessagesReadUntilRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充

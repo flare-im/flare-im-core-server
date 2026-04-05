@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::{
     HeartbeatResponse, LoginResponse, LogoutResponse, WatchPresenceRequest,
 };
 use flare_server_core::context::Context;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use tracing::instrument;
 
 use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
@@ -47,7 +47,10 @@ where
         ctx: &Context,
         command: LoginCommand,
     ) -> Result<LoginResponse> {
-        self.online_domain_service.login(ctx, command.request).await
+        self.online_domain_service
+            .login(ctx, command.request)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to login"))
     }
 
     /// 处理登出命令
@@ -60,6 +63,7 @@ where
         self.online_domain_service
             .logout(ctx, command.request)
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to logout"))
     }
 
     /// 处理心跳命令
@@ -77,6 +81,7 @@ where
                 command.request.current_quality.as_ref(),
             )
             .await
+            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to heartbeat"))
     }
 
     /// 处理订阅用户状态命令
@@ -84,7 +89,7 @@ where
     pub async fn handle_subscribe_user_presence(
         &self,
         user_id: String,
-    ) -> Result<Vec<flare_proto::signaling::online::UserPresenceEvent>> {
+    ) -> Result<Vec<flare_grpc_proto::signaling::online::UserPresenceEvent>> {
         self.subscription_domain_service
             .subscribe_user_presence(user_id)
             .await
@@ -95,7 +100,7 @@ where
     pub async fn handle_watch_presence(
         &self,
         request: WatchPresenceRequest,
-    ) -> Result<Vec<flare_proto::signaling::online::PresenceEvent>> {
+    ) -> Result<Vec<flare_grpc_proto::signaling::online::PresenceEvent>> {
         self.subscription_domain_service
             .watch_presence(request)
             .await

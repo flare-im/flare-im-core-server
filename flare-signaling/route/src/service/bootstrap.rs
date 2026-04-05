@@ -3,11 +3,11 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context as AnyhowContext, Result};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
 use flare_im_core::service_names::SIGNALING_ROUTE;
-use flare_server_core::runtime::ServiceRuntime;
+use flare_core_runtime::ServiceRuntime;
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -35,7 +35,7 @@ impl ApplicationBootstrap {
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
-        use flare_proto::signaling::router::router_upstream_service_server::RouterUpstreamServiceServer;
+        use flare_grpc_proto::signaling::router::router_upstream_service_server::RouterUpstreamServiceServer;
         use tonic::transport::Server;
 
         let upstream_handler = context.upstream_handler;
@@ -47,62 +47,37 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let runtime = ServiceRuntime::new(SIGNALING_ROUTE, address)
-            .add_spawn_with_shutdown("router-grpc", move |shutdown_rx| async move {
-                use flare_server_core::middleware::ContextLayer;
+        let runtime = flare_im_core::health::attach_runtime_health_checks(
+            ServiceRuntime::new(SIGNALING_ROUTE)
+                .with_address(address)
+                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .add_spawn_with_shutdown("router-grpc", move |shutdown_rx| async move {
+                    use flare_server_core::middleware::ContextLayer;
 
-                let upstream_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(RouterUpstreamServiceServer::new(upstream_handler));
+                    let upstream_service = ContextLayer::new()
+                        .allow_missing()
+                        .layer(RouterUpstreamServiceServer::new(upstream_handler));
 
-                Server::builder()
-                    .add_service(upstream_service)
-                    .serve_with_shutdown(address_clone, async move {
-                        info!(
-                            address = %address_clone,
-                            port = %address_clone.port(),
-                            "✅ Router gRPC upstream is listening"
-                        );
-
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => {
-                                tracing::info!("shutdown signal received (Ctrl+C)");
-                            }
-                            _ = shutdown_rx => {
-                                tracing::info!("shutdown signal received (service registration failed)");
-                            }
-                        }
-                    })
-                    .await
-                    .map_err(|e| format!("gRPC server error: {}", e).into())
-            });
+                    Server::builder()
+                        .add_service(upstream_service)
+                        .serve_with_shutdown(address_clone, async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| format!("gRPC server error: {}", e).into())
+                }),
+            SIGNALING_ROUTE,
+        );
 
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    match flare_im_core::discovery::register_service_only(
+                    flare_im_core::discovery::register_runtime_service_only(
                         SIGNALING_ROUTE,
                         addr,
                         None,
                     )
                     .await
-                    {
-                        Ok(Some(registry)) => {
-                            info!("✅ Service registered: {}", SIGNALING_ROUTE);
-                            Ok(Some(registry))
-                        }
-                        Ok(None) => {
-                            info!("Service discovery not configured, skipping registration");
-                            Ok(None)
-                        }
-                        Err(e) => {
-                            error!(
-                                error = %e,
-                                "❌ Service registration failed"
-                            );
-                            Err(format!("Service registration failed: {}", e).into())
-                        }
-                    }
                 })
             })
             .await

@@ -9,12 +9,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
 use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
-use flare_proto::signaling::online::online_service_client::OnlineServiceClient;
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
+use flare_grpc_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
 };
-use flare_server_core::discovery::ServiceClient;
+use flare_im_core::ServiceClient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, InfraResult, InfraResultExt, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;

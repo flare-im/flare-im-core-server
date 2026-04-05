@@ -7,7 +7,7 @@
 //! 典型实现：MQ（如 MqAckPublisher），消费端为网关或推送服务。
 
 use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 
 use crate::domain::events::AckEvent;
 

@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::media::GetFileUrlRequest;
+use crate::error::Result;
+use flare_grpc_proto::media::GetFileUrlRequest;
 use flare_server_core::context::Context;
 
 use crate::domain::model::{MediaFileMetadata, MediaReference, PresignedUrl};
@@ -58,7 +58,7 @@ impl MediaQueryHandler {
         self.domain_service.list_references(ctx, file_id).await
     }
 
-    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_proto::media::FileInfo {
+    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_grpc_proto::media::FileInfo {
         crate::application::utils::to_proto_file_info(metadata)
     }
 }

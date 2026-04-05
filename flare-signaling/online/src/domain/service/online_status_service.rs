@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_im_core::ConnectionEvent;
-use flare_proto::signaling::online::{
+use flare_grpc_proto::signaling::online::{
     DeviceConflictStrategy, GetOnlineStatusResponse, HeartbeatResponse, LoginRequest,
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
 use flare_server_core::context::Context;
+use flare_server_core::error::{Result, ErrorCode,  map_infra_error};
+use flare_server_core::flare_err;
 use prost_types::Timestamp;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -23,7 +24,6 @@ use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{
     ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
-use crate::util;
 
 #[derive(Debug, Clone)]
 struct InMemoryConnection {
@@ -67,6 +67,14 @@ where
             "Handling login request"
         );
 
+        // 参数验证
+        if request.user_id.is_empty() {
+            return Err(flare_err!(ErrorCode::InvalidParameter, "user_id is required"));
+        }
+        if request.device_id.is_empty() {
+            return Err(flare_err!(ErrorCode::InvalidParameter, "device_id is required"));
+        }
+
         let user_id = &request.user_id;
         let device_id = &request.device_id;
         let device_platform = request.device_platform.as_str();
@@ -75,7 +83,8 @@ where
 
         // 检查现有会话
         let user_vo = UserId::new(user_id.clone()).unwrap();
-        let existing_sessions = self.repository.get_user_connections(&user_vo).await?;
+        let existing_sessions = self.repository.get_user_connections(&user_vo).await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
 
         // 根据冲突策略处理现有会话
         if !existing_sessions.is_empty() {
@@ -179,7 +188,7 @@ where
             );
         }
 
-        self.repository.save_connection(&session).await?;
+        self.repository.save_connection(&session).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to save connection"))?;
 
         if let (Some(publisher), Some(_connection_id)) = (
             &self.connection_event_publisher,
@@ -208,7 +217,6 @@ where
             conversation_id,
             route_server: request.server_id,
             error_message: String::new(),
-            status: util::rpc_status_ok(),
             applied_conflict_strategy: applied_strategy as i32,
         })
     }
@@ -245,7 +253,6 @@ where
 
         Ok(LogoutResponse {
             success: true,
-            status: util::rpc_status_ok(),
         })
     }
 
@@ -267,13 +274,7 @@ where
         {
             let map = self.sessions.read().await;
             if !map.contains_key(conversation_id) {
-                return Ok(HeartbeatResponse {
-                    success: false,
-                    status: util::rpc_status_error(
-                        flare_server_core::error::ErrorCode::InvalidParameter,
-                        "Connection not found",
-                    ),
-                });
+                return Err(flare_err!(ErrorCode::InvalidParameter, "Connection not found"));
             }
         }
 
@@ -293,11 +294,10 @@ where
 
         // 更新Redis中的会话TTL
         let user_vo = UserId::new(user_id.to_string()).unwrap();
-        self.repository.touch_connection(&user_vo).await?;
+        self.repository.touch_connection(&user_vo).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to touch connection"))?;
 
         Ok(HeartbeatResponse {
             success: true,
-            status: util::rpc_status_ok(),
         })
     }
 
@@ -312,7 +312,7 @@ where
             "Handling get online status request"
         );
 
-        let statuses = self.repository.fetch_statuses(user_ids).await?;
+        let statuses = self.repository.fetch_statuses(user_ids).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to fetch statuses"))?;
 
         let mut result = HashMap::new();
         for user_id in user_ids {
@@ -347,7 +347,6 @@ where
 
         Ok(GetOnlineStatusResponse {
             statuses: result,
-            status: util::rpc_status_ok(),
         })
     }
 }
@@ -356,43 +355,43 @@ where
 pub struct NoopConversationRepository;
 
 impl ConversationRepository for NoopConversationRepository {
-    async fn save_connection(&self, _connection: &Connection) -> Result<()> {
+    async fn save_connection(&self, _connection: &Connection) -> anyhow::Result<()> {
         Ok(())
     }
     async fn remove_connection(
         &self,
         _conversation_id: &ConnectionId,
         _user_id: &UserId,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn touch_connection(&self, _user_id: &UserId) -> Result<()> {
+    async fn touch_connection(&self, _user_id: &UserId) -> anyhow::Result<()> {
         Ok(())
     }
     async fn fetch_statuses(
         &self,
         _user_ids: &[String],
-    ) -> Result<HashMap<String, OnlineStatusRecord>> {
+    ) -> anyhow::Result<HashMap<String, OnlineStatusRecord>> {
         Ok(HashMap::new())
     }
-    async fn get_user_connections(&self, _user_id: &UserId) -> Result<Vec<Connection>> {
+    async fn get_user_connections(&self, _user_id: &UserId) -> anyhow::Result<Vec<Connection>> {
         Ok(vec![])
     }
     async fn remove_user_connections(
         &self,
         _user_id: &UserId,
         _device_ids: Option<&[DeviceId]>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         Ok(())
     }
     async fn get_connection_by_device(
         &self,
         _user_id: &UserId,
         _device_id: &DeviceId,
-    ) -> Result<Option<Connection>> {
+    ) -> anyhow::Result<Option<Connection>> {
         Ok(None)
     }
-    async fn list_user_connections(&self, _ctx: &Context) -> Result<Vec<Connection>> {
+    async fn list_user_connections(&self, _ctx: &Context) -> anyhow::Result<Vec<Connection>> {
         Ok(vec![])
     }
 }

@@ -9,10 +9,6 @@ use crate::application::handlers::{
     MessageOperationCommandHandler, MessagePersistenceCommandHandler,
 };
 use crate::config::StorageWriterConfig;
-use crate::domain::repository::{
-    AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
-    MessageIdempotencyRepository, WalCleanupRepository,
-};
 use crate::domain::service::{EventApplicationService, MessagePersistenceDomainService};
 use crate::infrastructure::messaging::ack_publisher::MqAckPublisher;
 use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
@@ -20,10 +16,9 @@ use crate::infrastructure::persistence::repository::postgres_store::PostgresMess
 use crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
 use crate::infrastructure::persistence::repository::redis_idempotency::RedisIdempotencyRepository;
 use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
-use crate::interface::messaging::{MessageEventConsumerFactory, OperationEventConsumerFactory};
+use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_server_core::event_bus::{EventHandler, MqEventHandler};
 use flare_server_core::kafka::build_kafka_producer;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
@@ -134,26 +129,24 @@ pub async fn initialize(
         metrics.clone(),
     ));
 
-    let message_event_handler: Arc<dyn EventHandler> =
-        MessageEventConsumerFactory::create_handler(command_handler);
-    let operation_event_handler: Arc<dyn EventHandler> =
-        OperationEventConsumerFactory::create_handler(operation_command_handler);
+    let message_event_handler =
+        MessageCreatedConsumerFactory::create_handler(command_handler);
+    let operation_event_handler =
+        MessageEventsConsumerFactory::create_handler(operation_command_handler);
 
     let consumer_cfg = ConsumerConfig::default().with_concurrency(32);
 
     let mut dispatcher = TopicDispatcher::new();
-    let message_adapter: Arc<dyn MessageHandler> =
-        Arc::new(MqEventHandler::new(message_event_handler));
+    let message_adapter: Arc<dyn MessageHandler> = message_event_handler;
     Dispatcher::register(
         &mut dispatcher,
-        MessageEventConsumerFactory::topic().to_string(),
+        MessageCreatedConsumerFactory::topic().to_string(),
         message_adapter,
     )?;
-    let operation_adapter: Arc<dyn MessageHandler> =
-        Arc::new(MqEventHandler::new(operation_event_handler));
+    let operation_adapter: Arc<dyn MessageHandler> = operation_event_handler;
     Dispatcher::register(
         &mut dispatcher,
-        OperationEventConsumerFactory::topic().to_string(),
+        MessageEventsConsumerFactory::topic().to_string(),
         operation_adapter,
     )?;
 

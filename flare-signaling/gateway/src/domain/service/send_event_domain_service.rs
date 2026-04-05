@@ -29,15 +29,13 @@ impl SendEventDomainService {
     /// 处理上行 Event：按 `EventType` 分发至同步或普通事件链路
     #[instrument(skip(self, tx, cmd), fields(connection_id = %cmd.connection_id, event_type = %cmd.event.r#type))]
     pub async fn execute(&self, tx: &Ctx, cmd: &SendEventCommand) -> Result<EventUplinkOutcome> {
-        let operation = self
-            .event_port
+        self.event_port
             .send_event(tx, cmd.event.clone())
             .await
             .map_err(|e| FlareError::system(format!("send event failed: {}", e)))?;
 
         Ok(EventUplinkOutcome::Operation {
             event_id: cmd.event.event_id.clone(),
-            operation,
         })
     }
 }

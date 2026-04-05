@@ -1,3 +1,2 @@
-mod sync_adapters;
-
-pub use sync_adapters::GrpcSyncAdapters;
+// grpc 模块已迁移到 rpc 模块
+// 保留此文件用于未来的 gRPC 相关适配器

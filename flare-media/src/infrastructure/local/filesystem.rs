@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use tokio::fs;
 
 use crate::domain::model::UploadContext;
 use crate::domain::repository::MediaLocalStore;
+use crate::error::{ErrorCode, Result, map_infra_error};
 
 #[derive(Clone)]
 pub struct FilesystemMediaStore {
@@ -31,7 +31,9 @@ impl MediaLocalStore for FilesystemMediaStore {
         let path = self.file_path(context.file_id);
         fs::write(&path, context.payload)
             .await
-            .with_context(|| format!("write file to {:?}", path))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::InternalError, format!("write file to {:?}", path))
+            })?;
         Ok(context.file_id.to_string())
     }
 
@@ -40,7 +42,9 @@ impl MediaLocalStore for FilesystemMediaStore {
         if path.exists() {
             fs::remove_file(&path)
                 .await
-                .with_context(|| format!("remove file {:?}", path))?;
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::InternalError, format!("remove file {:?}", path))
+                })?;
         }
         Ok(())
     }

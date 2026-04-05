@@ -83,9 +83,9 @@ fn event_type_from_i32(v: i32) -> EventType {
 /// 领域编辑历史条目 -> proto MessageEditHistoryEntry
 pub fn edit_history_entry_to_proto(
     e: &EditHistoryEntry,
-) -> flare_proto::storage::MessageEditHistoryEntry {
+) -> flare_grpc_proto::storage::MessageEditHistoryEntry {
     let content = MessageContent::decode(e.content_bytes.as_slice()).ok();
-    flare_proto::storage::MessageEditHistoryEntry {
+    flare_grpc_proto::storage::MessageEditHistoryEntry {
         edit_version: e.edit_version,
         content,
         edited_at: datetime_to_timestamp(e.edited_at),
@@ -96,8 +96,8 @@ pub fn edit_history_entry_to_proto(
 }
 
 /// 领域已读条目 -> proto MessageReadListEntry
-pub fn read_list_entry_to_proto(e: &ReadListEntry) -> flare_proto::storage::MessageReadListEntry {
-    flare_proto::storage::MessageReadListEntry {
+pub fn read_list_entry_to_proto(e: &ReadListEntry) -> flare_grpc_proto::storage::MessageReadListEntry {
+    flare_grpc_proto::storage::MessageReadListEntry {
         user_id: e.user_id.clone(),
         read_at: datetime_to_timestamp(e.read_at),
         burned_at: datetime_to_timestamp(e.burned_at),
@@ -105,8 +105,8 @@ pub fn read_list_entry_to_proto(e: &ReadListEntry) -> flare_proto::storage::Mess
 }
 
 /// 领域标记条目 -> proto MessageMarkEntry
-pub fn mark_entry_to_proto(e: &MarkEntry) -> flare_proto::storage::MessageMarkEntry {
-    flare_proto::storage::MessageMarkEntry {
+pub fn mark_entry_to_proto(e: &MarkEntry) -> flare_grpc_proto::storage::MessageMarkEntry {
+    flare_grpc_proto::storage::MessageMarkEntry {
         user_id: e.user_id.clone(),
         mark_type: e.mark_type,
         color: e.color.as_deref().unwrap_or("").to_string(),
@@ -115,8 +115,8 @@ pub fn mark_entry_to_proto(e: &MarkEntry) -> flare_proto::storage::MessageMarkEn
 }
 
 /// 领域反应条目 -> proto MessageReactionItem
-pub fn reaction_item_to_proto(r: &ReactionItem) -> flare_proto::storage::MessageReactionItem {
-    flare_proto::storage::MessageReactionItem {
+pub fn reaction_item_to_proto(r: &ReactionItem) -> flare_grpc_proto::storage::MessageReactionItem {
+    flare_grpc_proto::storage::MessageReactionItem {
         emoji: r.emoji.clone(),
         user_ids: r.user_ids.clone(),
         count: r.count,
@@ -127,10 +127,10 @@ pub fn reaction_item_to_proto(r: &ReactionItem) -> flare_proto::storage::Message
 // ---------- Proto -> 领域（用于 MessageUpdate 等从外部入参） ----------
 
 pub fn visibility_status_from_proto(v: i32) -> VisibilityStatus {
-    match flare_proto::VisibilityStatus::try_from(v) {
-        Ok(flare_proto::VisibilityStatus::Visible) => VisibilityStatus::Visible,
-        Ok(flare_proto::VisibilityStatus::Hidden) => VisibilityStatus::Hidden,
-        Ok(flare_proto::VisibilityStatus::Deleted) => VisibilityStatus::Deleted,
+    match flare_grpc_proto::VisibilityStatus::try_from(v) {
+        Ok(flare_grpc_proto::VisibilityStatus::Visible) => VisibilityStatus::Visible,
+        Ok(flare_grpc_proto::VisibilityStatus::Hidden) => VisibilityStatus::Hidden,
+        Ok(flare_grpc_proto::VisibilityStatus::Deleted) => VisibilityStatus::Deleted,
         _ => VisibilityStatus::Visible,
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use crate::error::{ErrorCode, Result, map_infra_error};
 use aws_config::BehaviorVersion;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client as S3Client;
@@ -32,7 +32,12 @@ impl S3ObjectStore {
         let bucket = cfg
             .bucket
             .clone()
-            .ok_or_else(|| anyhow!("object storage bucket is required"))?;
+            .ok_or_else(|| {
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "object storage bucket is required"
+                )
+            })?;
 
         let region_name = cfg
             .region
@@ -168,10 +173,18 @@ impl S3ObjectStore {
                 aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
                     (expires_in.max(1) as u64).min(7 * 24 * 3600), // 最大7天
                 ))
-                .map_err(|e| anyhow!("invalid presign config: {}", e))?,
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "invalid presign config")
+                })?,
             )
             .await
-            .with_context(|| format!("failed to presign s3 get url, key={}", key))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to presign s3 get url, key={}", key),
+                )
+            })?;
 
         let url = presigned.uri().to_string();
         tracing::debug!(key = &key, presigned_url = &url, "已生成预签名GET URL");
@@ -258,7 +271,13 @@ impl MediaObjectRepository for S3ObjectStore {
             .body(bs)
             .send()
             .await
-            .with_context(|| format!("failed to upload object to s3, key={}", key))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to upload object to s3, key={}", key),
+                )
+            })?;
 
         tracing::debug!(
             file_id = context.file_id,
@@ -282,7 +301,13 @@ impl MediaObjectRepository for S3ObjectStore {
             .key(object_path)
             .send()
             .await
-            .with_context(|| format!("failed to delete object from s3, key={}", object_path))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to delete object from s3, key={}", object_path),
+                )
+            })?;
 
         tracing::debug!(
             key = object_path,
@@ -309,10 +334,18 @@ impl MediaObjectRepository for S3ObjectStore {
                 aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
                     (expires_in.max(1) as u64).min(7 * 24 * 3600),
                 ))
-                .map_err(|e| anyhow!("invalid presign config: {}", e))?,
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "invalid presign config")
+                })?,
             )
             .await
-            .with_context(|| format!("failed to presign s3 url, key={}", object_path))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to presign s3 url, key={}", object_path),
+                )
+            })?;
 
         let url = presigned.uri().to_string();
         tracing::debug!(key = object_path, presigned_url = &url, "已生成预签名URL");

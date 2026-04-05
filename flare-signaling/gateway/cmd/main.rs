@@ -7,5 +7,7 @@ async fn main() -> Result<()> {
     init_tracing_from_config(None);
 
     // 创建应用并启动
-    flare_signaling_gateway::ApplicationBootstrap::run().await
+    flare_signaling_gateway::ApplicationBootstrap::run()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }

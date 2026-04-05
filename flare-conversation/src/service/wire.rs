@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use crate::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
@@ -14,7 +14,7 @@ use crate::infrastructure::event_consumer::{
     ConversationEnsureEventConsumer, ReadReceiptEventConsumer,
 };
 use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
-use crate::infrastructure::transport::storage_reader::StorageReaderMessageProvider;
+use crate::infrastructure::rpc::StorageReaderClient;
 use crate::interface::grpc::ConversationGrpcHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
@@ -37,23 +37,32 @@ pub async fn initialize(
     // 1. 加载会话配置
     let conversation_config = Arc::new(
         ConversationConfig::from_app_config(app_config)
-            .context("Failed to load conversation service configuration")?,
+            .map_err(|e| ErrorBuilder::new(ErrorCode::InternalError, "Failed to load conversation service configuration")
+                .details(e.to_string())
+                .build_error())?,
     );
 
     // 2. 创建 Redis 客户端
-    let redis_client = Arc::new(redis::Client::open(conversation_config.redis_url.clone())?);
+    let redis_client = Arc::new(redis::Client::open(conversation_config.redis_url.clone())
+        .map_err(|e| ErrorBuilder::new(ErrorCode::NetworkError, "Failed to create Redis client")
+            .details(e.to_string())
+            .build_error())?);
 
     // 3. 创建 PostgreSQL 连接池（可选）
     let postgres_pool = if let Some(ref postgres_url) = conversation_config.postgres_url {
         Arc::new(
             sqlx::PgPool::connect(postgres_url)
                 .await
-                .context("Failed to connect to PostgreSQL")?,
+                .map_err(|e| ErrorBuilder::new(ErrorCode::DatabaseError, "Failed to connect to PostgreSQL")
+                    .details(e.to_string())
+                    .build_error())?,
         )
     } else {
-        return Err(anyhow::anyhow!(
-            "postgres config is required for conversation service"
-        ));
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "postgres config is required for conversation service",
+        )
+        .build_error());
     };
 
     // 4. 创建会话仓储（硬切到 Postgres，会话元数据必须来自持久化读模型）
@@ -71,7 +80,7 @@ pub async fn initialize(
     ));
 
     // 6. 创建消息提供者（可选）
-    let message_provider: Option<Arc<StorageReaderMessageProvider>> = {
+    let message_provider: Option<Arc<StorageReaderClient>> = {
         use flare_im_core::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
 
@@ -79,20 +88,19 @@ pub async fn initialize(
         let storage_discover = flare_im_core::discovery::create_discover(&storage_reader_service)
             .await
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create storage reader service discover for {}: {}",
-                    storage_reader_service,
-                    e
-                )
+                ErrorBuilder::new(
+                    ErrorCode::NetworkError,
+                    &format!("Failed to create storage reader service discover for {}: {}", storage_reader_service, e)
+                ).build_error()
             })?;
 
         let provider = if let Some(discover) = storage_discover {
             let service_client = flare_server_core::discovery::ServiceClient::new(discover);
-            StorageReaderMessageProvider::with_service_client(service_client)
+            StorageReaderClient::with_service_client(service_client)
         } else {
             // Fallback: construct provider with service name; provider will try env direct connect
             tracing::warn!("Storage Reader service discovery not configured, using env fallback");
-            StorageReaderMessageProvider::new(storage_reader_service)
+            StorageReaderClient::new(storage_reader_service)
         };
 
         Some(Arc::new(provider))

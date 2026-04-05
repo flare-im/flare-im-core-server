@@ -4,7 +4,7 @@ use anyhow::Result;
 use flare_im_core::service_names::STORAGE_WRITER;
 use tracing::info;
 
-use flare_server_core::runtime::ServiceRuntime;
+use flare_core_runtime::ServiceRuntime;
 
 mod wire;
 
@@ -35,7 +35,7 @@ impl ApplicationBootstrap {
     /// 使用 ServiceRuntime 管理消费者生命周期，支持优雅停机
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
         use flare_server_core::kafka::KafkaMessageFetcher;
-        use flare_server_core::mq::consumer::ConsumerRuntimeTask;
+        use flare_server_core::mq::consumer::{ConsumerRuntimeTask, MqConsumerTask};
 
         info!("Starting Storage Writer (Kafka consumer via ServiceRuntime)");
 
@@ -54,14 +54,20 @@ impl ApplicationBootstrap {
         )
         .map_err(|e| anyhow::anyhow!("create kafka fetcher: {}", e))?;
 
-        let task = ConsumerRuntimeTask::from_parts(
+        let consumer = ConsumerRuntimeTask::from_parts(
             context.consumer_config,
             context.dispatcher.clone(),
             fetcher,
         );
 
-        ServiceRuntime::new_consumer_only(STORAGE_WRITER)
-            .add_mq_consumer_runtime("storage-kafka-consumer", task)
+        let task = MqConsumerTask::new("storage-kafka-consumer", Box::new(consumer));
+
+        flare_im_core::health::attach_runtime_health_checks(
+            ServiceRuntime::mq_consumer()
+                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .add_task(Box::new(task)),
+            STORAGE_WRITER,
+        )
             .run()
             .await
     }

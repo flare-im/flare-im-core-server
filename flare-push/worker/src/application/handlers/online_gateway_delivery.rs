@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::access_gateway::{
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_grpc_proto::access_gateway::{
     PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
     PushNotificationRequest,
 };
-use flare_proto::signaling::router::PushStrategy;
-use flare_server_core::context::Ctx;
+use flare_grpc_proto::signaling::router::PushStrategy;
+use flare_im_core::Ctx;
 
 use flare_im_core::gateway::{GatewayRouter, GatewayRouterTrait};
 
@@ -17,7 +17,7 @@ use crate::domain::push_routing::{
     merge_push_message_for_gateway, merge_push_notification_for_gateway,
     partition_targets_by_gateway, select_push_targets,
 };
-use crate::infrastructure::online_client::OnlineServiceClient;
+use crate::infrastructure::rpc::OnlineServiceClient;
 
 pub struct GatewayPushExecutor {
     online: Arc<OnlineServiceClient>,
@@ -40,12 +40,14 @@ impl GatewayPushExecutor {
         push: PushMessageRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self.online.list_user_devices(core, target_user_id).await?;
+        let devices_resp = self.online.list_user_devices(core, target_user_id).await
+            .map_err(|e| map_infra_error(e, ErrorCode::ServiceUnavailable, "Failed to list user devices"))?;
         let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         for (gid, ts) in by_gw {
             let push_g = merge_push_message_for_gateway(push.clone(), &ts);
-            self.gateway_router.route_push_message(&gid, push_g).await?;
+            self.gateway_router.route_push_message(&gid, push_g).await
+                .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to route push message"))?;
         }
         Ok(())
     }
@@ -58,12 +60,12 @@ impl GatewayPushExecutor {
         push: PushEventRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self.online.list_user_devices(core, target_user_id).await?;
+        let devices_resp = self.online.list_user_devices(core, target_user_id).await.map_err(|e| map_infra_error(e, ErrorCode::ServiceUnavailable, "Failed to list user devices"))?;
         let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         for (gid, ts) in by_gw {
             let push_g = merge_push_event_for_gateway(push.clone(), &ts);
-            self.gateway_router.route_push_event(&gid, push_g).await?;
+            self.gateway_router.route_push_event(&gid, push_g).await.map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to route push event"))?;
         }
         Ok(())
     }
@@ -76,7 +78,7 @@ impl GatewayPushExecutor {
         push: PushNotificationRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self.online.list_user_devices(core, target_user_id).await?;
+        let devices_resp = self.online.list_user_devices(core, target_user_id).await.map_err(|e| map_infra_error(e, ErrorCode::ServiceUnavailable, "Failed to list user devices"))?;
         let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         for (gid, ts) in by_gw {
@@ -96,12 +98,12 @@ impl GatewayPushExecutor {
         push: PushAckRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self.online.list_user_devices(core, target_user_id).await?;
+        let devices_resp = self.online.list_user_devices(core, target_user_id).await.map_err(|e| map_infra_error(e, ErrorCode::ServiceUnavailable, "Failed to list user devices"))?;
         let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         for (gid, ts) in by_gw {
             let push_g = merge_push_ack_for_gateway(push.clone(), &ts);
-            self.gateway_router.route_push_ack(&gid, push_g).await?;
+            self.gateway_router.route_push_ack(&gid, push_g).await.map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to route push ack"))?;
         }
         Ok(())
     }
@@ -114,12 +116,12 @@ impl GatewayPushExecutor {
         push: PushCustomRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self.online.list_user_devices(core, target_user_id).await?;
+        let devices_resp = self.online.list_user_devices(core, target_user_id).await.map_err(|e| map_infra_error(e, ErrorCode::ServiceUnavailable, "Failed to list user devices"))?;
         let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         for (gid, ts) in by_gw {
             let push_g = merge_push_custom_for_gateway(push.clone(), &ts);
-            self.gateway_router.route_push_custom(&gid, push_g).await?;
+            self.gateway_router.route_push_custom(&gid, push_g).await.map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to route push custom"))?;
         }
         Ok(())
     }

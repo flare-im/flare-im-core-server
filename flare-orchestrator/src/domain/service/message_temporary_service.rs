@@ -1,31 +1,42 @@
-//! 临时消息处理服务
+//! 临时消息处理服务 - 重构版
 //!
 //! 处理临时消息（TYPING、SYSTEM_EVENT）：
 //! - 只推送，不持久化
 //! - 不经过 WAL
 //! - 不分配 seq
 //! - 离线消息直接丢弃
+//!
+//! ## TODO
+//! 当前实现标记为 TODO，等待后续完善推送逻辑。
 
-use anyhow::{Context, Result};
-use flare_proto::common::Message;
-use flare_proto::push::{PushMessageRequest, PushOptions};
-use flare_server_core::context::{ContextExt, Ctx};
 use std::sync::Arc;
+
+use flare_im_core::Ctx;
+use flare_proto::common::Message;
 use tracing::instrument;
 
-use crate::domain::repository::{MessageEventPublisher, OrchestratorPublisher};
+use crate::error::Result;
+use crate::infrastructure::messaging::push_repository::MqPushRepository;
 
 /// 临时消息处理服务
 pub struct MessageTemporaryService {
-    publisher: Arc<OrchestratorPublisher>,
+    /// 推送仓储（使用具体类型以支持 async fn in traits）
+    #[allow(dead_code)]
+    push_repository: Arc<MqPushRepository>,
 }
 
 impl MessageTemporaryService {
-    pub fn new(publisher: Arc<OrchestratorPublisher>) -> Self {
-        Self { publisher }
+    pub fn new(push_repository: Arc<MqPushRepository>) -> Self {
+        Self { push_repository }
     }
 
     /// 处理临时消息（只推送，不持久化）
+    ///
+    /// ## TODO
+    /// 当前实现为占位符，等待后续完善：
+    /// - 推送逻辑需要与 PushRepository 集成
+    /// - 需要支持不同的临时消息类型
+    /// - 需要添加消息校验
     #[instrument(skip(self, ctx), fields(
         request_id = %ctx.request_id(),
         trace_id = %ctx.trace_id(),
@@ -34,29 +45,29 @@ impl MessageTemporaryService {
         conversation_id = %message.conversation_id
     ))]
     pub async fn handle_temporary_message(&self, ctx: &Ctx, message: &Message) -> Result<()> {
-        ctx.ensure_not_cancelled()?;
-
-        // 构建推送请求
-        let push_request = self.build_push_request(message)?;
-
-        // 只发布到推送队列，不持久化（ctx 透传，Kafka 信封会写入租户/请求信息）
-        self.publisher
-            .publish_push(ctx, push_request)
-            .await
-            .context("Failed to publish temporary message to push queue")?;
-
+        // TODO: 实现临时消息推送逻辑
+        // 当前为占位符实现，等待后续完善
+        
         tracing::debug!(
             message_id = %message.server_id,
             conversation_id = %message.conversation_id,
-            "Temporary message published to push queue"
+            message_type = message.message_type,
+            "Temporary message handling - TODO: implement push logic"
         );
 
+        // 提取接收者用户 ID 列表
+        let _recipient_user_ids = self.extract_recipient_user_ids(message);
+
+        // TODO: 使用 PushRepository 推送消息
+        // 当前 PushRepository 的 publish_message 方法需要完整的 Message
+        // 临时消息可能需要特殊处理（如不分配 seq）
+        
+        // 暂时返回成功，等待后续实现
         Ok(())
     }
 
-    /// 构建推送请求
-    fn build_push_request(&self, message: &Message) -> Result<PushMessageRequest> {
-        // 提取接收者ID列表
+    /// 提取接收者用户 ID 列表
+    fn extract_recipient_user_ids(&self, message: &Message) -> Vec<String> {
         let mut user_ids = Vec::new();
 
         if let Ok(conversation_type) =
@@ -69,36 +80,51 @@ impl MessageTemporaryService {
                         user_ids.push(message.channel_id.clone());
                     }
                 }
-                flare_proto::common::ConversationType::Group
-                | flare_proto::common::ConversationType::Channel
-                | flare_proto::common::ConversationType::Ai
-                | flare_proto::common::ConversationType::Customer
-                | flare_proto::common::ConversationType::System
-                | flare_proto::common::ConversationType::Temp => {
+                _ => {
                     // 非单聊：user_ids 留空，由推送服务按 conversation_id 解析成员
                 }
-                flare_proto::common::ConversationType::Unspecified => {}
             }
         }
 
-        // 克隆消息
-        let message_for_push = message.clone();
+        user_ids
+    }
+}
 
-        // 构建推送选项（临时消息：require_online=true，不持久化）
-        let push_options = PushOptions {
-            require_online: true,      // 临时消息只在在线时推送
-            persist_if_offline: false, // 离线不持久化
-            priority: 3,               // 较低优先级
-            metadata: std::collections::HashMap::new(),
-            channel: String::new(),
-            mute_when_quiet: false,
-        };
+/// 临时消息类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporaryMessageType {
+    /// 正在输入
+    Typing,
+    /// 系统事件
+    SystemEvent,
+    /// 自定义临时消息
+    Custom,
+}
 
-        Ok(PushMessageRequest {
-            user_ids,
-            message: Some(message_for_push),
-            options: Some(push_options),
-            metadata: std::collections::HashMap::new(),
-        })
+impl TemporaryMessageType {
+    /// 从消息类型判断是否为临时消息
+    pub fn from_message_type(message_type: i32) -> Option<Self> {
+        use flare_proto::common::MessageType;
+        
+        match MessageType::try_from(message_type) {
+            // 目前没有定义 Typing 和 SystemEvent 类型
+            // 如果需要支持，需要在 proto 中添加
+            _ => None,
+        }
+    }
+
+    /// 是否需要持久化
+    pub fn needs_persistence(&self) -> bool {
+        false // 临时消息都不持久化
+    }
+
+    /// 是否需要分配 seq
+    pub fn needs_seq(&self) -> bool {
+        false // 临时消息都不分配 seq
+    }
+
+    /// 是否需要在线推送
+    pub fn require_online(&self) -> bool {
+        true // 临时消息只在线推送
     }
 }

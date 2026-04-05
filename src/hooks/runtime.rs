@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
+use crate::Ctx;
 use crate::error::Result;
+use std::sync::Arc;
 
 use super::registry::HookRegistry;
 use super::types::{MessageDraft, MessageRecord, PreSendDecision};
-use flare_server_core::context::Ctx;
 
 /// Hook 调度器，封装常用执行入口
 #[derive(Clone)]

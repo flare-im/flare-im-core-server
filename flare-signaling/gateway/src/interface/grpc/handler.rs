@@ -12,13 +12,12 @@ use crate::application::commands::{
 };
 use crate::application::handlers::{ConnectionQueryHandler, PushHandler};
 use flare_im_core::require_context;
-use flare_proto::access_gateway::access_gateway_server::AccessGateway;
-use flare_proto::access_gateway::{
+use flare_grpc_proto::access_gateway::access_gateway_server::AccessGateway;
+use flare_grpc_proto::access_gateway::{
     ConnectionInfo as ProtoConnectionInfo, GetUserConnectionsRequest, GetUserConnectionsResponse,
     PushAckRequest, PushAckResponse, PushCustomRequest, PushEventRequest, PushMessageRequest,
     PushNotificationRequest, PushNotificationResponse, PushResponse,
 };
-use flare_proto::common::{ErrorCode, RpcStatus};
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -193,14 +192,6 @@ impl AccessGateway for AccessGatewayHandler {
         let total_online = connections.len() as i32;
 
         Ok(Response::new(GetUserConnectionsResponse {
-            status: Some(RpcStatus {
-                code: ErrorCode::Ok as i32,
-                message: String::new(),
-                details: Vec::new(),
-                context: None,
-                localization_key: String::new(),
-                localization_params: Default::default(),
-            }),
             connections,
             total_online,
         }))

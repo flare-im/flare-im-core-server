@@ -1,4 +1,3 @@
-use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use chrono::{Duration, Utc};
 use flare_server_core::context::{Context, ContextExt};
 use md5::compute as md5_compute;
@@ -21,6 +20,7 @@ use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
     UploadSessionStoreRef,
 };
+use crate::error::{ErrorCode, Result, map_context_error, map_infra_error};
 
 pub struct MediaService {
     object_repo: Option<ObjectRepositoryRef>,
@@ -71,10 +71,15 @@ impl MediaService {
         ctx: &Context,
         init: MultipartUploadInit,
     ) -> Result<MultipartUploadSession> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            bail!("multipart upload is not configured");
+            return Err(
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "multipart upload is not configured"
+                ),
+            );
         };
 
         let chunk_size = init
@@ -129,31 +134,48 @@ impl MediaService {
         ctx: &Context,
         chunk: MultipartChunkPayload,
     ) -> Result<MultipartUploadSession> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            bail!("multipart upload is not configured");
+            return Err(
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "multipart upload is not configured"
+                ),
+            );
         };
 
         let mut session = store
             .get_session(&chunk.upload_id)
             .await?
-            .ok_or_else(|| anyhow!("upload session not found: {}", chunk.upload_id))?;
+            .ok_or_else(|| {
+                flare_server_core::flare_err_details!(
+                    ErrorCode::MessageNotFound,
+                    "upload session not found",
+                    format!("upload_id={}", chunk.upload_id)
+                )
+            })?;
 
         if session.status != UploadSessionStatus::Pending {
-            bail!("upload session is not pending");
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "upload session is not pending"
+            ));
         }
 
         let chunk_len = chunk.bytes.len() as i64;
         if chunk_len == 0 {
-            bail!("chunk payload is empty");
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "chunk payload is empty"
+            ));
         }
         if chunk_len > self.config.max_chunk_size_bytes {
-            bail!(
-                "chunk size {} exceeds limit {}",
-                chunk_len,
-                self.config.max_chunk_size_bytes
-            );
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::MessageTooLarge,
+                "chunk size exceeds limit",
+                format!("chunk_size={} max={}", chunk_len, self.config.max_chunk_size_bytes)
+            ));
         }
 
         let session_dir = self.ensure_session_dir(&chunk.upload_id).await?;
@@ -174,12 +196,16 @@ impl MediaService {
             }
         }
 
-        let mut file = fs::File::create(&chunk_path)
-            .await
-            .with_context(|| format!("failed to create chunk file {:?}", chunk_path))?;
-        file.write_all(&chunk.bytes)
-            .await
-            .context("failed to write chunk data")?;
+        let mut file = fs::File::create(&chunk_path).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("failed to create chunk file {:?}", chunk_path),
+            )
+        })?;
+        file.write_all(&chunk.bytes).await.map_err(|e| {
+            map_infra_error(e, ErrorCode::InternalError, "failed to write chunk data")
+        })?;
         file.flush().await.ok();
 
         session.add_chunk(chunk.chunk_index, chunk_len);
@@ -205,19 +231,34 @@ impl MediaService {
         ctx: &Context,
         upload_id: &str,
     ) -> Result<MediaFileMetadata> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            bail!("multipart upload is not configured");
+            return Err(
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "multipart upload is not configured"
+                ),
+            );
         };
 
         let mut session = store
             .get_session(upload_id)
             .await?
-            .ok_or_else(|| anyhow!("upload session not found: {}", upload_id))?;
+            .ok_or_else(|| {
+                flare_server_core::flare_err_details!(
+                    ErrorCode::MessageNotFound,
+                    "upload session not found",
+                    format!("upload_id={upload_id}")
+                )
+            })?;
 
         if session.uploaded_chunks.is_empty() {
-            bail!("no chunks uploaded for session {upload_id}");
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::InvalidParameter,
+                "no chunks uploaded for session",
+                format!("upload_id={upload_id}")
+            ));
         }
 
         session.uploaded_chunks.sort_unstable();
@@ -270,10 +311,15 @@ impl MediaService {
         upload_id = %upload_id,
     ))]
     pub async fn abort_multipart_upload(&self, ctx: &Context, upload_id: &str) -> Result<()> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            bail!("multipart upload is not configured");
+            return Err(
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "multipart upload is not configured"
+                ),
+            );
         };
 
         if let Some(mut session) = store.get_session(upload_id).await? {
@@ -300,7 +346,7 @@ impl MediaService {
         ctx: &Context,
         mut context: UploadContext<'_>,
     ) -> Result<MediaFileMetadata> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         tracing::debug!(
             file_id = context.file_id,
@@ -451,7 +497,12 @@ impl MediaService {
             )
         } else {
             tracing::error!(file_id = context.file_id, "未配置媒体存储后端");
-            return Err(anyhow!("no media storage backend configured"));
+            return Err(
+                flare_server_core::flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "no media storage backend configured"
+                ),
+            );
         };
 
         if let Some(ref path) = storage_path {
@@ -501,9 +552,9 @@ impl MediaService {
 
         tracing::debug!(file_id = context.file_id, "准备保存文件元数据");
 
-        self.save_and_cache(&metadata)
-            .await
-            .context("persist metadata")?;
+        self.save_and_cache(&metadata).await.map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "persist metadata")
+        })?;
 
         tracing::debug!(file_id = context.file_id, "文件元数据已保存");
 
@@ -543,9 +594,9 @@ impl MediaService {
                 metadata.grace_expires_at = None;
             }
 
-            self.save_and_cache(&metadata)
-                .await
-                .context("persist metadata reference update")?;
+            self.save_and_cache(&metadata).await.map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "persist metadata reference update")
+            })?;
 
             return Ok(());
         }
@@ -596,7 +647,11 @@ impl MediaService {
             }
         }
 
-        Err(anyhow!("metadata not found: {file_id}"))
+        Err(flare_server_core::flare_err_details!(
+            ErrorCode::MessageNotFound,
+            "metadata not found",
+            file_id.to_string()
+        ))
     }
 
     #[instrument(skip(self, ctx), fields(
@@ -610,11 +665,14 @@ impl MediaService {
         file_id: &str,
         expires_in: i64,
     ) -> Result<PresignedUrl> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
-        let _tenant_id = ctx
-            .tenant_id()
-            .ok_or_else(|| anyhow::anyhow!("tenant_id is required in context"))?;
+        let _tenant_id = ctx.tenant_id().ok_or_else(|| {
+            flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "tenant_id is required in context"
+            )
+        })?;
         let metadata = self.get_metadata(ctx, file_id).await?;
         let expires_in = if expires_in > 0 {
             expires_in
@@ -724,7 +782,7 @@ impl MediaService {
         scope: MediaReferenceScope,
         metadata: HashMap<String, String>,
     ) -> Result<MediaFileMetadata> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let _tenant_id = ctx.tenant_id().unwrap_or("0");
         let mut file_metadata = self.get_metadata(ctx, file_id).await?;
 
         if let Some(reference_store) = &self.reference_store {
@@ -774,7 +832,7 @@ impl MediaService {
         file_id: &str,
         reference_id: Option<&str>,
     ) -> Result<MediaFileMetadata> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let _tenant_id = ctx.tenant_id().unwrap_or("0");
         let mut file_metadata = self.get_metadata(ctx, file_id).await?;
 
         if let Some(reference_store) = &self.reference_store {
@@ -826,7 +884,7 @@ impl MediaService {
         trace_id = %ctx.trace_id(),
     ))]
     pub async fn cleanup_orphaned_assets(&self, ctx: &Context) -> Result<Vec<String>> {
-        ctx.ensure_not_cancelled()?;
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.metadata_store else {
             return Ok(vec![]);
@@ -835,7 +893,7 @@ impl MediaService {
         let expired = store
             .list_orphaned_assets(Utc::now())
             .await
-            .context("list orphaned media assets")?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets"))?;
 
         for asset in &expired {
             let storage_path = asset
@@ -845,7 +903,7 @@ impl MediaService {
                 .unwrap_or_else(|| asset.file_id.clone());
 
             // 从 metadata 中提取 tenant_id，如果没有则使用默认值
-            let tenant_id = asset
+            let _tenant_id = asset
                 .metadata
                 .get("tenant_id")
                 .map(|s| s.as_str())
@@ -883,9 +941,13 @@ impl MediaService {
 
     async fn ensure_session_dir(&self, upload_id: &str) -> Result<PathBuf> {
         let dir = self.session_dir(upload_id);
-        fs::create_dir_all(&dir)
-            .await
-            .with_context(|| format!("failed to prepare session directory {:?}", dir))?;
+        fs::create_dir_all(&dir).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("failed to prepare session directory {:?}", dir),
+            )
+        })?;
         Ok(dir)
     }
 
@@ -895,13 +957,21 @@ impl MediaService {
 
         for index in chunks {
             let chunk_path = dir.join(format!("{:06}.part", index));
-            let mut file = fs::File::open(&chunk_path)
-                .await
-                .with_context(|| format!("missing chunk file {:?}", chunk_path))?;
+            let mut file = fs::File::open(&chunk_path).await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    format!("missing chunk file {:?}", chunk_path),
+                )
+            })?;
             let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer)
-                .await
-                .with_context(|| format!("failed to read chunk {:?}", chunk_path))?;
+            file.read_to_end(&mut buffer).await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    format!("failed to read chunk {:?}", chunk_path),
+                )
+            })?;
             payload.extend_from_slice(&buffer);
         }
 
@@ -911,9 +981,13 @@ impl MediaService {
     async fn cleanup_chunks(&self, upload_id: &str) -> Result<()> {
         let dir = self.session_dir(upload_id);
         if fs::metadata(&dir).await.is_ok() {
-            fs::remove_dir_all(&dir)
-                .await
-                .with_context(|| format!("failed to cleanup chunk directory {:?}", dir))?;
+            fs::remove_dir_all(&dir).await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    format!("failed to cleanup chunk directory {:?}", dir),
+                )
+            })?;
         }
         Ok(())
     }
@@ -1075,7 +1149,7 @@ impl MediaService {
             store
                 .save_metadata(metadata)
                 .await
-                .context("persist metadata")?;
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "persist metadata"))?;
         }
 
         if let Some(cache) = &self.metadata_cache {
@@ -1091,7 +1165,7 @@ impl MediaService {
     /// 返回包含所有数据的结构，调用者需要构建 UploadContext（因为 UploadContext 需要生命周期参数）
     pub fn prepare_upload_context_data<'a>(
         &self,
-        metadata: &'a flare_proto::media::UploadFileMetadata,
+        metadata: &'a flare_grpc_proto::media::UploadFileMetadata,
     ) -> (
         String,
         String,
@@ -1157,12 +1231,14 @@ impl MediaService {
     /// 这是领域服务方法，负责将应用层的 protobuf 类型转换为领域模型
     pub fn prepare_multipart_upload_init(
         &self,
-        request: &flare_proto::media::InitiateMultipartUploadRequest,
+        request: &flare_grpc_proto::media::InitiateMultipartUploadRequest,
     ) -> Result<MultipartUploadInit> {
-        let metadata = request
-            .metadata
-            .as_ref()
-            .ok_or_else(|| anyhow!("multipart metadata missing"))?;
+        let metadata = request.metadata.as_ref().ok_or_else(|| {
+            flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "multipart metadata missing"
+            )
+        })?;
 
         let desired_chunk_size = if request.desired_chunk_size > 0 {
             request.desired_chunk_size

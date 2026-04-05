@@ -2,7 +2,7 @@
 
 use crate::domain::model::{Event, UnmarkPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 
 use super::{EventContext, append_event_and_stream};
 
@@ -40,7 +40,7 @@ where
                 None,
                 false,
             )
-            .await?;
+            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     } else {
         for mt in ["IMPORTANT", "TODO", "DONE", "CUSTOM"] {
             let _ = ctx

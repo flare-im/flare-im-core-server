@@ -106,7 +106,7 @@ CREATE TABLE messages (
     source INT NOT NULL DEFAULT 1,  -- MessageSource: USER=1, SYSTEM=2, BOT=3, ADMIN=4
     seq BIGINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    conversation_type INT NOT NULL DEFAULT 0,  -- ConversationType: SINGLE=1, GROUP=2, CHANNEL=3
+    conversation_type INT NOT NULL DEFAULT 0,  -- ConversationType: SINGLE=1, GROUP=2, AI=3, SYSTEM=4, CUSTOMER=5, TEMP=6
     message_type INT NOT NULL DEFAULT 0,      -- MessageType 枚举值
     content BYTEA,
     status INT NOT NULL DEFAULT 1,  -- MessageStatus: CREATED=1, SENT=2, DELIVERED=3, READ=4, FAILED=5, RECALLED=6, DELETED_HARD=7, DELETED_SOFT=8
@@ -130,7 +130,7 @@ COMMENT ON COLUMN messages.channel_id IS '会话频道 ID：单聊=对方 user_i
 COMMENT ON COLUMN messages.source IS '消息来源：1=USER 2=SYSTEM 3=BOT 4=ADMIN';
 COMMENT ON COLUMN messages.seq IS '会话内序列号（读扩散主序）';
 COMMENT ON COLUMN messages.timestamp IS '消息时间戳';
-COMMENT ON COLUMN messages.conversation_type IS '会话类型：0=UNSPECIFIED 1=SINGLE 2=GROUP 3=CHANNEL';
+COMMENT ON COLUMN messages.conversation_type IS '会话类型：0=UNSPECIFIED 1=SINGLE 2=GROUP 3=AI 4=SYSTEM 5=CUSTOMER 6=TEMP（与 CID 前缀一致）';
 COMMENT ON COLUMN messages.message_type IS '消息类型（MessageType 枚举值，见 message.proto）';
 COMMENT ON COLUMN messages.content IS '消息体 bytes（按 message_type 解析，见 message_content.proto）';
 COMMENT ON COLUMN messages.status IS '消息状态：1=CREATED 2=SENT 3=DELIVERED 4=READ 5=FAILED 6=RECALLED 7=DELETED_HARD 8=DELETED_SOFT';
@@ -231,19 +231,26 @@ CREATE TABLE message_visibility (
     id BIGSERIAL PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
+    scope INT NOT NULL DEFAULT 1,           -- DeleteScope: USER_PRIVATE=1, CONVERSATION_GLOBAL=2
     visibility_status INT NOT NULL DEFAULT 0,  -- VisibilityStatus: VISIBLE=0, HIDDEN=1, DELETED=2
     changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(tenant_id, message_id, user_id)
+    CHECK (
+        (scope = 1 AND user_id <> '')
+        OR (scope = 2 AND user_id = '')
+    ),
+    UNIQUE(tenant_id, message_id, user_id, scope)
 );
 COMMENT ON TABLE message_visibility IS '用户维度消息可见性（storage.proto VisibilityStatus）';
 COMMENT ON COLUMN message_visibility.id IS '自增主键';
 COMMENT ON COLUMN message_visibility.tenant_id IS '租户 ID';
 COMMENT ON COLUMN message_visibility.message_id IS '消息 server_id';
-COMMENT ON COLUMN message_visibility.user_id IS '用户 ID';
+COMMENT ON COLUMN message_visibility.user_id IS '用户 ID（scope=2 时为空串）';
+COMMENT ON COLUMN message_visibility.scope IS '删除作用域：1=仅自己 2=所有人';
 COMMENT ON COLUMN message_visibility.visibility_status IS '可见性：0=VISIBLE 1=HIDDEN 2=DELETED';
 COMMENT ON COLUMN message_visibility.changed_at IS '状态变更时间';
 CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_message_scope ON message_visibility(tenant_id, message_id, scope);
 
 DROP TABLE IF EXISTS message_reactions CASCADE;
 CREATE TABLE message_reactions (
@@ -382,7 +389,7 @@ DROP TABLE IF EXISTS conversations CASCADE;
 CREATE TABLE conversations (
     tenant_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
-    conversation_type TEXT NOT NULL,
+    conversation_type INT NOT NULL DEFAULT 0,  -- ConversationType: SINGLE=1, GROUP=2, AI=3, SYSTEM=4, CUSTOMER=5, TEMP=6（与 CID 前缀一致）
     business_type TEXT NOT NULL DEFAULT '',
     display_name TEXT,
     avatar_url TEXT,
@@ -404,7 +411,7 @@ CREATE TABLE conversations (
 COMMENT ON TABLE conversations IS '会话元数据（ConversationDetail）';
 COMMENT ON COLUMN conversations.tenant_id IS '租户 ID';
 COMMENT ON COLUMN conversations.conversation_id IS '会话 ID（主键）';
-COMMENT ON COLUMN conversations.conversation_type IS '会话类型（single/group/channel）';
+COMMENT ON COLUMN conversations.conversation_type IS '会话类型：0=UNSPECIFIED 1=SINGLE 2=GROUP 3=AI 4=SYSTEM 5=CUSTOMER 6=TEMP（与 CID 前缀一致）';
 COMMENT ON COLUMN conversations.business_type IS '业务类型';
 COMMENT ON COLUMN conversations.display_name IS '展示名称';
 COMMENT ON COLUMN conversations.avatar_url IS '头像 URL';

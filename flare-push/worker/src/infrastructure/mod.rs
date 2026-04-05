@@ -1,2 +1,2 @@
 pub mod mq;
-pub mod online_client;
+pub mod rpc;

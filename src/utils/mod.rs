@@ -16,13 +16,48 @@ pub use helpers::ServiceHelper;
 
 // 重新导出 flare-server-core 的 context 工具函数
 pub use flare_server_core::utils::{
-    ctx_to_map as context_to_mq_metadata, extract_ctx_from_request_opt as extract_context_opt,
-    extract_session_id_from_ctx as extract_session_id_from_context,
-    map_to_ctx as context_from_mq_metadata, require_ctx_from_request as require_context,
-    require_request_id_from_ctx as require_request_id_from_context,
-    require_tenant_id_from_ctx as require_tenant_id_from_context,
-    require_user_id_from_ctx as require_user_id_from_context,
+    ctx_to_map as context_to_mq_metadata,
+    map_to_ctx as context_from_mq_metadata,
 };
+
+// 从 flare_server_core 根导入 gRPC 相关函数
+pub use flare_server_core::{
+    require_ctx_from_request as require_context,
+    extract_ctx_from_request_opt as extract_context_opt,
+};
+
+// 从 flare_core_base 导入 context 相关函数
+pub use flare_core_base::context::{
+    Ctx, Context,
+};
+
+// 提供便捷函数
+pub fn extract_session_id_from_context(ctx: &Ctx) -> Option<String> {
+    ctx.session_id().map(|s: &str| s.to_string())
+}
+
+pub fn require_request_id_from_context(ctx: &Ctx) -> Result<String, &'static str> {
+    let request_id = ctx.request_id();
+    if request_id.is_empty() {
+        Err("Request ID is required in context")
+    } else {
+        Ok(request_id.to_string())
+    }
+}
+
+pub fn require_tenant_id_from_context(ctx: &Ctx) -> Result<String, &'static str> {
+    ctx.tenant_id()
+        .filter(|s: &&str| !s.is_empty())
+        .map(|s: &str| s.to_string())
+        .ok_or("Tenant ID is required in context")
+}
+
+pub fn require_user_id_from_context(ctx: &Ctx) -> Result<String, &'static str> {
+    ctx.user_id()
+        .filter(|s: &&str| !s.is_empty())
+        .map(|s: &str| s.to_string())
+        .ok_or("User ID is required in context")
+}
 
 #[cfg(test)]
 mod seq_utils_tests;

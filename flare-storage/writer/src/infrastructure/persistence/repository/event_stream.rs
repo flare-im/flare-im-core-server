@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use flare_proto::common::event::Payload;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use prost::Message as _;
 use sqlx::Pool;
 use tracing::instrument;

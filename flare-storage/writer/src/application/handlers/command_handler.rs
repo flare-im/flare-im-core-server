@@ -1,8 +1,8 @@
 //! 命令处理器（编排层）- 轻量级，只负责编排领域服务
 
-use anyhow::Result;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
@@ -73,7 +73,7 @@ where
                     message_id = ?message_id_for_error,
                     "Failed to prepare message"
                 );
-                return Err(e);
+                return Err(map_infra_error(e, ErrorCode::InternalError, "Failed to prepare message"));
             }
         };
 
@@ -84,13 +84,10 @@ where
         let timeline = prepared.timeline.clone();
 
         // 检查幂等性
-        let is_new = match self.domain_service.check_idempotency(ctx, &prepared).await {
-            Ok(new) => new,
-            Err(e) => {
-                tracing::error!(error = %e, message_id = %message_id, "Failed to check idempotency");
-                return Err(e);
-            }
-        };
+        let is_new = self.domain_service.check_idempotency(ctx, &prepared).await.map_err(|e| {
+            tracing::error!(error = %e, message_id = %message_id, "Failed to check idempotency");
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to check idempotency")
+        })?;
         let deduplicated = !is_new;
 
         // 记录去重统计（应用层关注点）
@@ -102,42 +99,39 @@ where
         if is_new {
             // 数据库写入
             let db_start = Instant::now();
-            match self.domain_service.persist_message(ctx, prepared).await {
-                Ok(_) => {
-                    let db_duration = db_start.elapsed();
+            self.domain_service.persist_message(ctx, prepared).await.map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    message_id = %message_id,
+                    conversation_id = %conversation_id,
+                    "Failed to persist message to database"
+                );
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to persist message")
+            })?;
 
-                    // 记录数据库写入耗时（应用层关注点）
-                    self.metrics
-                        .db_write_duration_seconds
-                        .observe(db_duration.as_secs_f64());
+            let db_duration = db_start.elapsed();
 
-                    // 记录总耗时和持久化计数（应用层关注点）
-                    let total_duration = start.elapsed();
-                    self.metrics
-                        .messages_persisted_duration_seconds
-                        .observe(total_duration.as_secs_f64());
-                    self.metrics
-                        .messages_persisted_total
-                        .with_label_values(&[tenant_id.as_str()])
-                        .inc();
+            // 记录数据库写入耗时（应用层关注点）
+            self.metrics
+                .db_write_duration_seconds
+                .observe(db_duration.as_secs_f64());
 
-                    tracing::info!(
-                        message_id = %message_id,
-                        conversation_id = %conversation_id,
-                        duration_ms = total_duration.as_millis(),
-                        "Message persisted successfully"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        message_id = %message_id,
-                        conversation_id = %conversation_id,
-                        "Failed to persist message to database"
-                    );
-                    return Err(e);
-                }
-            }
+            // 记录总耗时和持久化计数（应用层关注点）
+            let total_duration = start.elapsed();
+            self.metrics
+                .messages_persisted_duration_seconds
+                .observe(total_duration.as_secs_f64());
+            self.metrics
+                .messages_persisted_total
+                .with_label_values(&[tenant_id.as_str()])
+                .inc();
+
+            tracing::info!(
+                message_id = %message_id,
+                conversation_id = %conversation_id,
+                duration_ms = total_duration.as_millis(),
+                "Message persisted successfully"
+            );
         }
 
         // 清理 WAL（即使失败也不影响消息持久化，只记录警告）

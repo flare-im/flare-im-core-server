@@ -3,16 +3,17 @@
 //! - ReadReceipt：消费 TOPIC_MESSAGE_EVENTS（与 Orchestrator `publish_domain_event` 对齐）
 //! - ConversationEnsure：消费 TOPIC_CONVERSATION_ENSURE（与 Orchestrator `publish_conversation_ensure` 对齐）
 //!
-//! 消息体与 [flare_server_core::event_bus::MqEventBus] 一致：**JSON 序列化的 EventEnvelope**（`partition_key` 为会话等业务分区键）。
+//! 注意：当前主链路投递为 **protobuf MqEnvelope**（`payload_kind=Event`）；
+//! 历史链路可能仍有 JSON EventEnvelope 或 raw Event，本文件需兼容三种格式。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_proto::common::Event;
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_proto::common::event::Payload;
 use flare_server_core::context::Context;
-use flare_server_core::event_bus::EventEnvelope;
+use flare_server_core::eventbus::EventEnvelope;
 use flare_server_core::kafka::{build_kafka_consumer, subscribe_and_wait_for_assignment};
 use prost::Message as _;
 use rdkafka::Message as RdkafkaMessage;
@@ -27,13 +28,14 @@ use flare_im_core::event::{
 };
 
 use crate::config::ConversationConfig;
-use crate::domain::model::{ConversationParticipant, ConversationVisibility};
+use crate::domain::model::{ConversationParticipant, ConversationType, ConversationVisibility};
 use crate::domain::service::DefaultConversationDomainService;
 
 /// Kafka 消费者配置（实现 KafkaConsumerConfig）
 struct ReadReceiptConsumerConfig {
     bootstrap: String,
     group: String,
+    #[allow(dead_code)]
     topic: String,
 }
 
@@ -103,12 +105,12 @@ impl ReadReceiptEventConsumer {
         };
 
         let consumer = build_kafka_consumer(&consumer_config)
-            .map_err(|e| anyhow::anyhow!("build kafka consumer: {}", e))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::ConfigurationError, "build kafka consumer"))?;
 
         let topic_slice: &[&str] = &[topic];
         subscribe_and_wait_for_assignment(&consumer, topic_slice)
             .await
-            .map_err(|e| anyhow::anyhow!("subscribe kafka: {}", e))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "subscribe kafka"))?;
 
         info!(
             topic = %topic,
@@ -149,15 +151,12 @@ impl ReadReceiptEventConsumer {
     }
 
     async fn process_message(&self, message: &BorrowedMessage<'_>) -> Result<()> {
-        let raw =
-            RdkafkaMessage::payload(message).ok_or_else(|| anyhow::anyhow!("empty payload"))?;
-        let envelope: EventEnvelope = serde_json::from_slice(raw)
-            .map_err(|e| anyhow::anyhow!("parse EventEnvelope JSON: {}", e))?;
-        if envelope.event_type != EVENT_TYPE_OPERATION_READ_RECEIPT {
+        let raw = RdkafkaMessage::payload(message).ok_or_else(|| {
+            ErrorBuilder::new(ErrorCode::MessageFormatError, "empty kafka payload").build_error()
+        })?;
+        let Some(event) = decode_read_receipt_event(raw)? else {
             return Ok(());
-        }
-        let event = Event::decode(&*envelope.payload)
-            .map_err(|e| anyhow::anyhow!("decode Event proto from envelope.payload: {}", e))?;
+        };
 
         let Some(Payload::Read(read)) = event.payload.as_ref() else {
             return Ok(());
@@ -196,13 +195,59 @@ impl ReadReceiptEventConsumer {
     }
 }
 
+fn decode_read_receipt_event(raw: &[u8]) -> Result<Option<Event>> {
+    // 优先：当前链路是 protobuf MqEnvelope（topic=flare.im.message.events）
+    if let Ok(mq) = MqEnvelope::decode(raw) {
+        if mq.payload_kind != MqPayloadKind::Event as i32 {
+            return Ok(None);
+        }
+        if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
+            return Ok(matches_read_receipt_event(&event).then_some(event));
+        }
+        return Ok(None);
+    }
+
+    // 兼容：旧链路 JSON EventEnvelope
+    if let Ok(envelope) = serde_json::from_slice::<EventEnvelope>(raw) {
+        if envelope.event_type != EVENT_TYPE_OPERATION_READ_RECEIPT {
+            return Ok(None);
+        }
+        // EventEnvelope.payload 可能是 MqEnvelope(proto)，也可能是 Event(proto)
+        if let Ok(mq) = MqEnvelope::decode(&*envelope.payload) {
+            if mq.payload_kind == MqPayloadKind::Event as i32 {
+                if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
+                    return Ok(matches_read_receipt_event(&event).then_some(event));
+                }
+            }
+            return Ok(None);
+        }
+        if let Ok(event) = Event::decode(&*envelope.payload) {
+            return Ok(matches_read_receipt_event(&event).then_some(event));
+        }
+        return Ok(None);
+    }
+
+    // 兼容：某些链路可能直接把 Event(proto) 作为 Kafka payload 投递，而非 EventEnvelope(JSON)。
+    if let Ok(event) = Event::decode(raw) {
+        return Ok(matches_read_receipt_event(&event).then_some(event));
+    }
+
+    // 该 topic 可能混入非 ReadReceipt 业务消息；无法识别时直接跳过，避免误报错误刷屏。
+    debug!("Skip kafka payload: unsupported format for ReadReceipt consumer");
+    Ok(None)
+}
+
+fn matches_read_receipt_event(event: &Event) -> bool {
+    event.r#type == EventType::EventReadReceipt as i32 || matches!(event.payload, Some(Payload::Read(_)))
+}
+
 // -----------------------------------------------------------------------------
 // ConversationEnsure 消费者（Orchestrator 异步会话创建）
 // -----------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
 struct ConversationEnsurePayload {
-    conversation_type: String,
+    conversation_type: i32,
     business_type: String,
     participants: Vec<String>,
     /// 非单聊时与消息 channel_id 一致；单聊应为空（由读路径组装对端）
@@ -213,6 +258,7 @@ struct ConversationEnsurePayload {
 struct ConversationEnsureConsumerConfig {
     bootstrap: String,
     group: String,
+    #[allow(dead_code)]
     topic: String,
 }
 
@@ -264,7 +310,11 @@ impl ConversationEnsureEventConsumer {
         domain_service: Arc<DefaultConversationDomainService>,
     ) -> Result<Self> {
         let bootstrap = config.kafka_bootstrap.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("kafka_bootstrap required for ConversationEnsure consumer")
+            ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "kafka_bootstrap required for ConversationEnsure consumer",
+            )
+            .build_error()
         })?;
         let topic = config
             .kafka_ensure_topic
@@ -281,13 +331,14 @@ impl ConversationEnsureEventConsumer {
             topic: topic.to_string(),
         };
 
-        let consumer = build_kafka_consumer(&consumer_config)
-            .map_err(|e| anyhow::anyhow!("build kafka consumer for ensure: {}", e))?;
+        let consumer = build_kafka_consumer(&consumer_config).map_err(|e| {
+            map_infra_error(e, ErrorCode::ConfigurationError, "build kafka consumer for ensure")
+        })?;
 
         let topic_slice: &[&str] = &[topic];
         subscribe_and_wait_for_assignment(&consumer, topic_slice)
             .await
-            .map_err(|e| anyhow::anyhow!("subscribe kafka ensure topic: {}", e))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "subscribe kafka ensure"))?;
 
         info!(
             topic = %topic,
@@ -327,17 +378,19 @@ impl ConversationEnsureEventConsumer {
     }
 
     async fn process_message(&self, message: &BorrowedMessage<'_>) -> Result<()> {
-        let raw =
-            RdkafkaMessage::payload(message).ok_or_else(|| anyhow::anyhow!("empty payload"))?;
-        let envelope: EventEnvelope = serde_json::from_slice(raw)
-            .map_err(|e| anyhow::anyhow!("parse EventEnvelope JSON: {}", e))?;
+        let raw = RdkafkaMessage::payload(message).ok_or_else(|| {
+            ErrorBuilder::new(ErrorCode::MessageFormatError, "empty kafka payload").build_error()
+        })?;
+        let envelope: EventEnvelope = serde_json::from_slice(raw).map_err(|e| {
+            map_infra_error(e, ErrorCode::DeserializationError, "parse EventEnvelope JSON")
+        })?;
 
         if envelope.event_type != EVENT_TYPE_OPERATION_CONVERSATION_ENSURE {
             return Ok(());
         }
 
         let ensure_payload: ConversationEnsurePayload = serde_json::from_slice(&envelope.payload)
-            .map_err(|e| anyhow::anyhow!("parse ensure payload: {}", e))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "parse ensure"))?;
 
         let conversation_id = envelope.partition_key.as_str();
         if conversation_id.is_empty() {
@@ -367,7 +420,7 @@ impl ConversationEnsureEventConsumer {
         self.domain_service
             .create_conversation(
                 &ctx,
-                ensure_payload.conversation_type,
+                ConversationType::from_proto(ensure_payload.conversation_type),
                 ensure_payload.business_type,
                 participants,
                 attributes,

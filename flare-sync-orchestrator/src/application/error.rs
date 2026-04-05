@@ -1,68 +1,10 @@
-//! 同步编排错误：统一为 `FlareError`，经 `flare-server-core::error::proto::to_rpc_status` / `grpc::Status` 暴露给客户端。
+//! 同步编排错误：统一为 `FlareError`，gRPC 层经 `IntoGrpc` / `tonic::Status` 暴露给客户端。
 
 use crate::domain::SyncDomainError;
-use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
-use tonic::Status;
+use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
 
-/// 将下游 `tonic::Status` 分类为 `FlareError`，便于客户端按 `ErrorCode::is_retryable()` 做退避重试（飞书式体验）。
-pub fn flare_from_tonic_status(status: &Status) -> FlareError {
-    use tonic::Code;
-    let msg = status.message().to_string();
-    match status.code() {
-        Code::Ok => FlareError::localized(
-            ErrorCode::GeneralError,
-            "unexpected OK in sync error mapper",
-        ),
-        Code::Cancelled => ErrorBuilder::new(ErrorCode::OperationFailed, msg)
-            .param("grpc_code", "CANCELLED")
-            .build_error(),
-        Code::Unknown => ErrorBuilder::new(ErrorCode::InternalError, msg)
-            .param("grpc_code", "UNKNOWN")
-            .build_error(),
-        Code::InvalidArgument => ErrorBuilder::new(ErrorCode::InvalidParameter, msg)
-            .param("grpc_code", "INVALID_ARGUMENT")
-            .build_error(),
-        Code::DeadlineExceeded => ErrorBuilder::new(ErrorCode::OperationTimeout, msg)
-            .param("grpc_code", "DEADLINE_EXCEEDED")
-            .build_error(),
-        Code::NotFound => ErrorBuilder::new(ErrorCode::MessageNotFound, msg)
-            .param("grpc_code", "NOT_FOUND")
-            .build_error(),
-        Code::AlreadyExists => ErrorBuilder::new(ErrorCode::OperationFailed, msg)
-            .param("grpc_code", "ALREADY_EXISTS")
-            .build_error(),
-        Code::PermissionDenied => ErrorBuilder::new(ErrorCode::PermissionDenied, msg)
-            .param("grpc_code", "PERMISSION_DENIED")
-            .build_error(),
-        Code::ResourceExhausted => ErrorBuilder::new(ErrorCode::ResourceExhausted, msg)
-            .param("grpc_code", "RESOURCE_EXHAUSTED")
-            .build_error(),
-        Code::FailedPrecondition => ErrorBuilder::new(ErrorCode::OperationFailed, msg)
-            .param("grpc_code", "FAILED_PRECONDITION")
-            .build_error(),
-        Code::Aborted => ErrorBuilder::new(ErrorCode::OperationFailed, msg)
-            .param("grpc_code", "ABORTED")
-            .build_error(),
-        Code::OutOfRange => ErrorBuilder::new(ErrorCode::InvalidParameter, msg)
-            .param("grpc_code", "OUT_OF_RANGE")
-            .build_error(),
-        Code::Unimplemented => ErrorBuilder::new(ErrorCode::OperationNotSupported, msg)
-            .param("grpc_code", "UNIMPLEMENTED")
-            .build_error(),
-        Code::Internal => ErrorBuilder::new(ErrorCode::InternalError, msg)
-            .param("grpc_code", "INTERNAL")
-            .build_error(),
-        Code::Unavailable => ErrorBuilder::new(ErrorCode::ServiceUnavailable, msg)
-            .param("grpc_code", "UNAVAILABLE")
-            .build_error(),
-        Code::DataLoss => ErrorBuilder::new(ErrorCode::InternalError, msg)
-            .param("grpc_code", "DATA_LOSS")
-            .build_error(),
-        Code::Unauthenticated => ErrorBuilder::new(ErrorCode::AuthenticationFailed, msg)
-            .param("grpc_code", "UNAUTHENTICATED")
-            .build_error(),
-    }
-}
+// 重导出 infrastructure 层的错误转换函数
+pub use crate::infrastructure::grpc_error::flare_from_tonic_status;
 
 pub fn discovery_unavailable(service: &str, cause: impl std::fmt::Display) -> FlareError {
     ErrorBuilder::new(

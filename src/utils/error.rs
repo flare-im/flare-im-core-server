@@ -5,10 +5,8 @@
 //! - 提供各服务共用的错误映射辅助（to_system_err / to_system_err_with）
 
 pub use flare_server_core::error::{
-    ErrorBuilder, ErrorCategory, ErrorCode, FlareError, FlareServerError, GrpcError, GrpcErrorExt,
-    GrpcResult, InfraResult, InfraResultExt, LocalizedError, Result, from_rpc_status,
-    localized_to_rpc_status, map_error_code_to_proto, map_infra_error, map_proto_code_to_error,
-    ok_status, to_localized, to_rpc_status,
+    ErrorBuilder, ErrorCategory, ErrorCode, FlareError, FlareServerError, InfraResult, InfraResultExt,
+    LocalizedError, Result, map_infra_error,
 };
 
 /// 将内部错误映射为系统错误，供各服务 handler 层统一使用（如 `.map_err(to_system_err)?`）。

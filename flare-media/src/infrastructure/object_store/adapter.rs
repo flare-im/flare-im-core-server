@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::Result;
 
 use super::s3::S3ObjectStore;
 use crate::domain::repository::ObjectRepositoryRef;

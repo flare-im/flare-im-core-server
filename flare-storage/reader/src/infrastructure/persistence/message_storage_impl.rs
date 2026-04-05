@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use flare_im_core::utils::{datetime_to_timestamp, timestamp_to_datetime};
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use prost_types;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgRow};
@@ -105,9 +105,10 @@ impl MessageStorage for PostgresMessageStorageImpl {
             query.push(" AND NOT EXISTS (");
             query.push("SELECT 1 FROM message_visibility mv ");
             query.push("WHERE mv.message_id = messages.server_id ");
-            query.push("AND mv.user_id = ");
+            query.push("AND mv.visibility_status IN ('HIDDEN', 'DELETED') ");
+            query.push("AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = ");
             query.push_bind(uid);
-            query.push(" AND mv.visibility_status IN ('HIDDEN', 'DELETED'))");
+            query.push(")))");
         }
 
         // 使用索引优化：conversation_id + timestamp DESC（复合索引）
@@ -191,9 +192,10 @@ impl MessageStorage for PostgresMessageStorageImpl {
             query.push(" AND NOT EXISTS (");
             query.push("SELECT 1 FROM message_visibility mv ");
             query.push("WHERE mv.message_id = messages.server_id ");
-            query.push("AND mv.user_id = ");
+            query.push("AND mv.visibility_status IN ('HIDDEN', 'DELETED') ");
+            query.push("AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = ");
             query.push_bind(uid);
-            query.push(" AND mv.visibility_status IN ('HIDDEN', 'DELETED'))");
+            query.push(")))");
         }
 
         query.push(" ORDER BY seq ASC LIMIT ");
@@ -435,25 +437,25 @@ impl MessageStorage for PostgresMessageStorageImpl {
             return Ok(0);
         }
 
-        // 获取可见性状态字符串
+        // init_v2: visibility_status 为 INT（0=VISIBLE,1=HIDDEN,2=DELETED）
         let vis_status = match visibility {
-            VisibilityStatus::VisibilityVisible => "VISIBLE",
-            VisibilityStatus::VisibilityHidden => "HIDDEN",
-            VisibilityStatus::VisibilityDeleted => "DELETED",
+            VisibilityStatus::VisibilityVisible => 0i32,
+            VisibilityStatus::VisibilityHidden => 1i32,
+            VisibilityStatus::VisibilityDeleted => 2i32,
             #[allow(unreachable_patterns)]
-            _ => "VISIBLE", // 默认为可见
+            _ => 0i32, // 默认为可见
         };
 
         // 使用 INSERT ... ON CONFLICT DO UPDATE 语法更新或插入可见性记录
         let result = sqlx::query(
             r#"
-            INSERT INTO message_visibility (tenant_id, message_id, user_id, visibility_status, changed_at, created_at, updated_at)
-            SELECT m.tenant_id, m.server_id, $1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            INSERT INTO message_visibility (tenant_id, message_id, user_id, scope, visibility_status, changed_at, created_at, updated_at)
+            SELECT m.tenant_id, m.server_id, $1, 1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM messages m
             WHERE m.server_id = ANY($3)
-            ON CONFLICT (tenant_id, message_id, user_id) 
+            ON CONFLICT (tenant_id, message_id, user_id, scope)
             DO UPDATE SET 
-                visibility_status = $2,
+                visibility_status = EXCLUDED.visibility_status,
                 changed_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             "#,
@@ -494,9 +496,10 @@ impl MessageStorage for PostgresMessageStorageImpl {
             query.push(" AND NOT EXISTS (");
             query.push("SELECT 1 FROM message_visibility mv ");
             query.push("WHERE mv.message_id = messages.server_id ");
-            query.push("AND mv.user_id = ");
+            query.push("AND mv.visibility_status IN ('HIDDEN', 'DELETED') ");
+            query.push("AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = ");
             query.push_bind(uid);
-            query.push(" AND mv.visibility_status IN ('HIDDEN', 'DELETED'))");
+            query.push(")))");
         }
 
         let count: i64 = query
@@ -940,14 +943,19 @@ impl MessageStorage for PostgresMessageStorageImpl {
         &self,
         message_id: &str,
         user_id: &str,
-    ) -> Result<Option<flare_proto::common::VisibilityStatus>> {
-        // 从 message_visibility 表中查询可见性状态
+    ) -> Result<Option<flare_grpc_proto::VisibilityStatus>> {
+        // 全局作用域(scope=2)优先，其次用户私有作用域(scope=1)。
         let row = sqlx::query(
             r#"
             SELECT 
                 visibility_status
             FROM message_visibility
-            WHERE message_id = $1 AND user_id = $2
+            WHERE message_id = $1
+              AND (
+                scope = 2
+                OR (scope = 1 AND user_id = $2)
+              )
+            ORDER BY scope DESC, changed_at DESC
             LIMIT 1
             "#,
         )
@@ -958,17 +966,14 @@ impl MessageStorage for PostgresMessageStorageImpl {
         .context("Failed to query message visibility")?;
 
         if let Some(row) = row {
-            let status_str: String = row.get("visibility_status");
-            let status = match status_str.as_str() {
-                "VISIBLE" => flare_proto::common::VisibilityStatus::VisibilityVisible as i32,
-                "HIDDEN" => flare_proto::common::VisibilityStatus::VisibilityHidden as i32,
-                "DELETED" => flare_proto::common::VisibilityStatus::VisibilityDeleted as i32,
-                _ => flare_proto::common::VisibilityStatus::VisibilityVisible as i32,
-            };
-            Ok(Some(flare_proto::common::VisibilityStatus::try_from(status).unwrap_or(flare_proto::common::VisibilityStatus::VisibilityVisible)))
+            let status_int: i32 = row.get("visibility_status");
+            Ok(Some(
+                flare_grpc_proto::VisibilityStatus::try_from(status_int)
+                    .unwrap_or(flare_grpc_proto::VisibilityStatus::Visible),
+            ))
         } else {
             // 如果没有找到记录，默认为可见
-            Ok(Some(flare_proto::common::VisibilityStatus::VisibilityVisible))
+            Ok(Some(flare_grpc_proto::VisibilityStatus::Visible))
         }
     }
 

@@ -2,11 +2,12 @@
 //! 与 common/event.proto 对齐，通过 ArchiveStoreRepository 更新写模型与旁路表。
 //! 具体 Payload 处理委托给 [event_handlers] 策略分发。
 
-use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
 use crate::domain::model::Event;
-use flare_server_core::context::Ctx;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_im_core::Ctx;
+use flare_server_core::flare_err;
 use tracing::instrument;
 
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
@@ -39,12 +40,12 @@ where
         let repo = self
             .archive_repo
             .as_ref()
-            .ok_or_else(|| anyhow!("Archive repository not configured"))?;
+            .ok_or_else(|| flare_err!(ErrorCode::InternalError, "Archive repository not configured"))?;
 
         let conversation_id = event.conversation_id.as_str();
         let tenant_id = event.tenant_id.as_str();
         if tenant_id.is_empty() {
-            return Err(anyhow!("Event.tenant_id is required"));
+            return Err(flare_err!(ErrorCode::InvalidParameter, "Event.tenant_id is required"));
         }
 
         // 撤回/编辑一致性：幂等——若该事件已写入 events 表则跳过应用，避免重复更新
@@ -52,7 +53,7 @@ where
         if let Some(stream) = &self.event_stream_repo {
             if stream
                 .event_exists(ctx, tenant_id, conversation_id, seq)
-                .await?
+                .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to check event exists"))?
             {
                 tracing::debug!(
                     tenant_id = %tenant_id,

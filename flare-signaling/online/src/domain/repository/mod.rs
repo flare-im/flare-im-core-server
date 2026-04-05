@@ -69,12 +69,12 @@ pub trait PresencePublisher: Send + Sync {
     /// 发布在线状态事件
     async fn publish_presence_event(
         &self,
-        event: flare_proto::signaling::online::PresenceEvent,
+        event: flare_grpc_proto::signaling::online::PresenceEvent,
     ) -> Result<()>;
     /// 发布用户状态事件
     async fn publish_user_presence_event(
         &self,
-        event: flare_proto::signaling::online::UserPresenceEvent,
+        event: flare_grpc_proto::signaling::online::UserPresenceEvent,
     ) -> Result<()>;
 }
 

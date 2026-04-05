@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_server_core::context::Ctx;
+use flare_im_core::Ctx;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use std::convert::TryInto;
 use tracing::instrument;

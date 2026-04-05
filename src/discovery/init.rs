@@ -7,12 +7,10 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::config::FlareAppConfig;
-use flare_server_core::{
-    RegistryConfig,
-    discovery::{
-        BackendType, DiscoveryFactory, ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance,
-        ServiceRegistry, TagFilter,
-    },
+use crate::RegistryConfig;
+use super::{
+    BackendType, DiscoveryFactory, ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance,
+    ServiceRegistry, TagFilter,
 };
 
 /// 将注册中心类型字符串转换为 BackendType
@@ -198,6 +196,22 @@ pub async fn register_service_only(
     register_service_only_with_metadata(service_type, service_address, instance_id, None).await
 }
 
+/// 仅注册服务并适配为 runtime 注册器
+///
+/// 用于 `flare_core_runtime::ServiceRuntime::run_with_registration`，避免各服务重复写
+/// `register_service_only + adapt_registry` 样板代码。
+pub async fn register_runtime_service_only(
+    service_type: &str,
+    service_address: SocketAddr,
+    instance_id: Option<String>,
+) -> Result<
+    Option<Box<dyn flare_core_runtime::registry::ServiceRegistry>>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let registry = register_service_only(service_type, service_address, instance_id).await?;
+    Ok(crate::discovery::adapt_registry(registry))
+}
+
 /// 注册服务（支持元数据）
 ///
 /// # 参数
@@ -226,6 +240,22 @@ pub async fn register_service_only_with_metadata(
         metadata,
     )
     .await
+}
+
+/// 注册服务（带元数据）并适配为 runtime 注册器
+pub async fn register_runtime_service_only_with_metadata(
+    service_type: &str,
+    service_address: SocketAddr,
+    instance_id: Option<String>,
+    metadata: Option<std::collections::HashMap<String, String>>,
+) -> Result<
+    Option<Box<dyn flare_core_runtime::registry::ServiceRegistry>>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let registry =
+        register_service_only_with_metadata(service_type, service_address, instance_id, metadata)
+            .await?;
+    Ok(crate::discovery::adapt_registry(registry))
 }
 
 /// 从应用配置只注册服务（不进行服务发现）
@@ -368,7 +398,7 @@ pub async fn register_service_from_registry_config_with_metadata(
         }
     }
 
-    use flare_server_core::discovery::{DiscoveryConfig, HealthCheckConfig, LoadBalanceStrategy};
+    use crate::discovery::{DiscoveryConfig, HealthCheckConfig, LoadBalanceStrategy};
     let config = DiscoveryConfig {
         backend: backend_type,
         backend_config,
@@ -465,7 +495,7 @@ pub async fn register_service_from_registry_config_with_metadata(
 /// # 示例
 /// ```rust,ignore
 /// use flare_im_core::discovery::create_discover;
-/// use flare_server_core::discovery::ServiceClient;
+/// use flare_im_core::ServiceClient;
 ///
 /// // 创建服务发现器
 /// if let Some(discover) = create_discover("signaling-online").await? {
@@ -593,7 +623,7 @@ pub async fn create_discover_from_registry_config_with_filters(
             }
         }
 
-        use flare_server_core::discovery::{DiscoveryConfig, LoadBalanceStrategy};
+        use crate::discovery::{DiscoveryConfig, LoadBalanceStrategy};
         // 将 HashMap 转换为 TagFilter 向量
         let tag_filters: Vec<TagFilter> = filters
             .into_iter()

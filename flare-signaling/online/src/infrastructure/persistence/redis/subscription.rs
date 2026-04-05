@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use anyhow::anyhow;
 use redis::{AsyncCommands, aio::ConnectionManager};
-use serde_json::json;
+
 
 use crate::config::OnlineConfig;
-use crate::domain::repository::SubscriptionRepository;
 
 const SUBSCRIPTION_KEY_PREFIX: &str = "subscription";
 const TOPIC_SUBSCRIBERS_KEY_PREFIX: &str = "topic:subscribers";
@@ -32,7 +32,7 @@ impl RedisSubscriptionRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .context("failed to open redis connection")
+            .map_err(|e| anyhow!("failed to open redis connection: {}", e))
     }
 }
 
@@ -46,19 +46,19 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         let _: () = conn
             .hset(&user_key, &topic, "1")
             .await
-            .context("failed to add subscription")?;
+            .map_err(|e| anyhow!("failed to add subscription: {}", e))?;
 
         // 添加到主题的订阅者列表
         let _: () = conn
             .sadd(&topic_key, &user_id)
             .await
-            .context("failed to add topic subscriber")?;
+            .map_err(|e| anyhow!("operation failed: {}", e))?;
 
         // 设置过期时间
         let _: bool = conn
             .expire(&user_key, self.config.redis_ttl_seconds as i64)
             .await
-            .context("failed to set subscription ttl")?;
+            .map_err(|e| anyhow!("operation failed: {}", e))?;
 
         Ok(())
     }
@@ -70,7 +70,7 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
     ) -> Result<()> {
         let user_id = ctx
             .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+            .ok_or_else(|| anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
 
@@ -79,14 +79,14 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
             let _: i64 = conn
                 .hdel(&user_key, topic)
                 .await
-                .context("failed to remove subscription")?;
+                .map_err(|e| anyhow!("failed to remove subscription: {}", e))?;
 
             // 从主题的订阅者列表中移除
             let topic_key = self.topic_subscribers_key(topic);
             let _: i64 = conn
                 .srem(&topic_key, user_id)
                 .await
-                .context("failed to remove topic subscriber")?;
+                .map_err(|e| anyhow!("failed to remove subscriber: {}", e))?;
         }
 
         Ok(())
@@ -98,18 +98,18 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
     ) -> Result<Vec<(String, HashMap<String, String>)>> {
         let user_id = ctx
             .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+            .ok_or_else(|| anyhow!("user_id is required in context"))?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
         let subscriptions: HashMap<String, String> = conn
             .hgetall(&user_key)
             .await
-            .context("failed to get user subscriptions")?;
+            .map_err(|e| anyhow!("failed to get subscriptions: {}", e))?;
 
         let mut result = Vec::new();
         for (topic, value_str) in subscriptions {
-            let value: serde_json::Value =
-                serde_json::from_str(&value_str).context("failed to parse subscription")?;
+            let value: serde_json::Value = serde_json::from_str(&value_str)
+                .map_err(|e| anyhow!("failed to parse subscription: {}", e))?;
 
             let params: HashMap<String, String> = value
                 .get("params")
@@ -128,7 +128,7 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         let subscribers: Vec<String> = conn
             .smembers(&topic_key)
             .await
-            .context("failed to get topic subscribers")?;
+            .map_err(|e| anyhow!("operation failed: {}", e))?;
 
         Ok(subscribers)
     }
