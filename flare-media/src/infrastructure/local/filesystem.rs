@@ -37,6 +37,13 @@ impl MediaLocalStore for FilesystemMediaStore {
         Ok(context.file_id.to_string())
     }
 
+    async fn read(&self, file_id: &str) -> Result<Vec<u8>> {
+        let path = self.file_path(file_id);
+        fs::read(&path).await.map_err(|e| {
+            map_infra_error(e, ErrorCode::InternalError, format!("read file from {:?}", path))
+        })
+    }
+
     async fn delete(&self, file_id: &str) -> Result<()> {
         let path = self.file_path(file_id);
         if path.exists() {

@@ -1,18 +1,25 @@
+use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_grpc_proto::media::media_service_server::MediaService;
 use flare_grpc_proto::media::upload_file_request;
 use flare_grpc_proto::media::{
-    AbortMultipartUploadRequest, AbortMultipartUploadResponse, CleanupOrphanedAssetsRequest,
-    CleanupOrphanedAssetsResponse, CompleteMultipartUploadRequest, CreateReferenceRequest,
+    AbortDirectUploadRequest, AbortMultipartUploadRequest, AbortMultipartUploadResponse,
+    CleanupOrphanedAssetsRequest, CleanupOrphanedAssetsResponse,
+    CommitDirectUploadPartsRequest, CommitDirectUploadPartsResponse,
+    CompleteDirectUploadRequest, CompleteMultipartUploadRequest, CreateReferenceRequest,
     CreateReferenceResponse, DeleteFileRequest, DeleteFileResponse, DeleteReferenceRequest,
-    DeleteReferenceResponse, DescribeBucketRequest, DescribeBucketResponse,
-    GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetFileInfoRequest, GetFileInfoResponse,
-    GetFileUrlRequest, GetFileUrlResponse, InitiateMultipartUploadRequest,
-    InitiateMultipartUploadResponse, ListObjectsRequest, ListObjectsResponse,
-    ListReferencesRequest, ListReferencesResponse, ProcessImageRequest, ProcessImageResponse,
-    ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest, UploadFileRequest,
-    UploadFileResponse, UploadMultipartChunkRequest, UploadMultipartChunkResponse,
+    DeleteReferenceResponse, DescribeBucketRequest, DescribeBucketResponse, DownloadFileChunk,
+    DownloadFileRequest,
+    GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetDirectUploadStatusRequest,
+    GetDirectUploadStatusResponse, GetFileInfoRequest, GetFileInfoResponse, GetFileUrlRequest,
+    GetFileUrlResponse, InitiateDirectUploadRequest, InitiateDirectUploadResponse,
+    InitiateMultipartUploadRequest, InitiateMultipartUploadResponse, ListObjectsRequest,
+    ListObjectsResponse, ListReferencesRequest, ListReferencesResponse,
+    PresignDirectUploadPartsRequest, PresignDirectUploadPartsResponse, ProcessImageRequest,
+    ProcessImageResponse, ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest,
+    UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
+    UploadMultipartChunkResponse,
 };
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
@@ -45,6 +52,9 @@ impl MediaGrpcHandler {
 
 #[tonic::async_trait]
 impl MediaService for MediaGrpcHandler {
+    type DownloadFileStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<DownloadFileChunk, Status>> + Send + 'static>>;
+
     #[instrument(skip(self, request))]
     async fn upload_file(
         &self,
@@ -208,6 +218,127 @@ impl MediaService for MediaGrpcHandler {
             .await
             .into_grpc()?;
 
+        Ok(Response::new(AbortMultipartUploadResponse {
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn initiate_direct_upload(
+        &self,
+        request: Request<InitiateDirectUploadRequest>,
+    ) -> Result<Response<InitiateDirectUploadResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let session = self
+            .command_handler
+            .handle_initiate_direct_upload(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(to_initiate_direct_upload_response(session)))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn get_direct_upload_status(
+        &self,
+        request: Request<GetDirectUploadStatusRequest>,
+    ) -> Result<Response<GetDirectUploadStatusResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let response = self
+            .query_handler
+            .handle_get_direct_upload_status(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn presign_direct_upload_parts(
+        &self,
+        request: Request<PresignDirectUploadPartsRequest>,
+    ) -> Result<Response<PresignDirectUploadPartsResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let response = self
+            .query_handler
+            .handle_presign_direct_upload_parts(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn commit_direct_upload_parts(
+        &self,
+        request: Request<CommitDirectUploadPartsRequest>,
+    ) -> Result<Response<CommitDirectUploadPartsResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let session = self
+            .command_handler
+            .handle_commit_direct_upload_parts(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(CommitDirectUploadPartsResponse {
+            committed_parts: session
+                .uploaded_parts
+                .iter()
+                .map(|part| part.part_number)
+                .collect(),
+            uploaded_size: session.uploaded_size,
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn complete_direct_upload(
+        &self,
+        request: Request<CompleteDirectUploadRequest>,
+    ) -> Result<Response<UploadFileResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let metadata = self
+            .command_handler
+            .handle_complete_direct_upload(&ctx, req)
+            .await
+            .into_grpc()?;
+        let presigned = self
+            .query_handler
+            .handle_get_file_url(
+                &ctx,
+                flare_grpc_proto::media::GetFileUrlRequest {
+                    file_id: metadata.file_id.clone(),
+                    expires_in: 0,
+                    download: false,
+                    response_headers: Default::default(),
+                },
+            )
+            .await
+            .into_grpc()?;
+        Ok(Response::new(UploadFileResponse {
+            file_id: metadata.file_id.clone(),
+            url: presigned.url,
+            cdn_url: presigned.cdn_url,
+            info: Some(to_proto_file_info(&metadata)),
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    #[instrument(skip(self, request))]
+    async fn abort_direct_upload(
+        &self,
+        request: Request<AbortDirectUploadRequest>,
+    ) -> Result<Response<AbortMultipartUploadResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        self.command_handler
+            .handle_abort_direct_upload(&ctx, req)
+            .await
+            .into_grpc()?;
         Ok(Response::new(AbortMultipartUploadResponse {
             success: true,
             error_message: String::new(),
@@ -396,6 +527,22 @@ impl MediaService for MediaGrpcHandler {
     }
 
     #[instrument(skip(self, request))]
+    async fn download_file(
+        &self,
+        request: Request<DownloadFileRequest>,
+    ) -> Result<Response<Self::DownloadFileStream>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let chunks = self
+            .query_handler
+            .handle_download_file(&ctx, req)
+            .await
+            .into_grpc()?;
+        let stream = tokio_stream::iter(chunks.into_iter().map(Ok));
+        Ok(Response::new(Box::pin(stream) as Self::DownloadFileStream))
+    }
+
+    #[instrument(skip(self, request))]
     async fn delete_file(
         &self,
         request: Request<DeleteFileRequest>,
@@ -456,30 +603,53 @@ impl MediaService for MediaGrpcHandler {
 
     async fn set_object_acl(
         &self,
-        _request: Request<SetObjectAclRequest>,
+        request: Request<SetObjectAclRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(unimplemented_status("SetObjectAcl"))
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        self.command_handler
+            .handle_set_object_acl(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(()))
     }
 
     async fn list_objects(
         &self,
-        _request: Request<ListObjectsRequest>,
+        request: Request<ListObjectsRequest>,
     ) -> Result<Response<ListObjectsResponse>, Status> {
-        Err(unimplemented_status("ListObjects"))
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let response = self.query_handler.handle_list_objects(&ctx, req).await.into_grpc()?;
+        Ok(Response::new(response))
     }
 
     async fn generate_upload_url(
         &self,
-        _request: Request<GenerateUploadUrlRequest>,
+        request: Request<GenerateUploadUrlRequest>,
     ) -> Result<Response<GenerateUploadUrlResponse>, Status> {
-        Err(unimplemented_status("GenerateUploadUrl"))
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let response = self
+            .query_handler
+            .handle_generate_upload_url(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
     }
 
     async fn describe_bucket(
         &self,
-        _request: Request<DescribeBucketRequest>,
+        request: Request<DescribeBucketRequest>,
     ) -> Result<Response<DescribeBucketResponse>, Status> {
-        Err(unimplemented_status("DescribeBucket"))
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let response = self
+            .query_handler
+            .handle_describe_bucket(&ctx, req)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
     }
 }
 
@@ -498,6 +668,29 @@ fn to_proto_timestamp(value: chrono::DateTime<chrono::Utc>) -> Timestamp {
     }
 }
 
-fn unimplemented_status(method: &str) -> Status {
-    Status::unimplemented(format!("{method} is not implemented yet"))
+fn to_initiate_direct_upload_response(
+    state: crate::domain::model::DirectUploadSessionState,
+) -> InitiateDirectUploadResponse {
+    InitiateDirectUploadResponse {
+        upload_id: state.upload_id,
+        file_id: state.file_id,
+        transport_kind: match state.transport_kind {
+            crate::domain::model::DirectUploadTransportKind::SinglePut => {
+                flare_grpc_proto::media::DirectUploadTransportKind::SinglePut as i32
+            }
+            crate::domain::model::DirectUploadTransportKind::MultipartPut => {
+                flare_grpc_proto::media::DirectUploadTransportKind::MultipartPut as i32
+            }
+        },
+        bucket: state.bucket,
+        object_key: state.object_key,
+        storage_upload_id: state.storage_upload_id.unwrap_or_default(),
+        part_size: state.part_size,
+        total_parts: state.total_parts,
+        upload_url: state.upload_url.unwrap_or_default(),
+        expires_at: Some(to_proto_timestamp(state.expires_at)),
+        success: true,
+        error_message: String::new(),
+    }
 }
+

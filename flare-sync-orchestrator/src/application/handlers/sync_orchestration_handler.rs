@@ -897,6 +897,17 @@ fn snapshot_row_to_summary(
     let type_from_msg = conversation_type_int(latest);
     let conversation_type =
         merge_sync_summary_conversation_type(type_from_msg, hint.conversation_type);
+    // SnapshotConversationRow 当前不包含 last_read_seq。
+    // 若仅从 ext 取值（缺省为 0），会在会话增量同步后把客户端读位重置，
+    // 导致重登后 unread 计算与 read_states 上报失真。
+    let derived_last_read_seq = item
+        .last_seq
+        .saturating_sub((item.unread_count.max(0)) as i64)
+        .max(0) as u64;
+    let last_read_seq = ext
+        .get("last_read_seq")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(derived_last_read_seq);
     ConversationSummary {
         conversation_id: item.conversation_id.clone(),
         conversation_type: conversation_type.to_string(),
@@ -906,10 +917,7 @@ fn snapshot_row_to_summary(
         last_message: message_preview(latest, item.last_timestamp.clone()),
         unread_count: item.unread_count as u32,
         max_seq: item.last_seq as u64,
-        last_read_seq: ext
-            .get("last_read_seq")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0),
+        last_read_seq,
         is_muted: ext
             .get("is_muted")
             .map(|v| v == "true" || v == "1")

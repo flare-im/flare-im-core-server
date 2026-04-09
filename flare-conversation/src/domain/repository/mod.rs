@@ -88,6 +88,16 @@ pub trait ConversationRepository: Send + Sync {
         seq: i64,
     ) -> Result<()>;
 
+    /// 应用新消息事件：推进会话最大 seq，并为非发送者增量维护 unread_count。
+    async fn apply_message_event(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        sender_id: &str,
+        seq: i64,
+        status: i32,
+    ) -> Result<()>;
+
     /// 获取会话当前 last_message_seq（用于「标记已读」未传 seq 时解析为已读位置）
     async fn get_last_message_seq(
         &self,

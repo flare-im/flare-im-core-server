@@ -1,12 +1,15 @@
 use axum::{
+    middleware,
+    response::Html,
     routing::{get, post, delete},
-    Router,
+    Json, Router,
 };
 use std::sync::Arc;
 use utoipa::OpenApi;
 
 use crate::infrastructure::grpc::GrpcClients;
-use super::handler;
+use flare_server_core::http::middleware::auth_middleware;
+use super::media_handler;
 use super::message_handler;
 use super::conversation_handler;
 
@@ -15,31 +18,82 @@ use super::conversation_handler;
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        handler::generate_upload_url,
-        handler::get_file_url,
-        handler::get_file_info,
-        handler::delete_file,
+        media_handler::generate_upload_url,
+        media_handler::upload_file,
+        media_handler::initiate_multipart_upload,
+        media_handler::upload_multipart_chunk,
+        media_handler::complete_multipart_upload,
+        media_handler::abort_multipart_upload,
+        media_handler::initiate_direct_upload,
+        media_handler::get_direct_upload_status,
+        media_handler::presign_direct_upload_parts,
+        media_handler::commit_direct_upload_parts,
+        media_handler::complete_direct_upload,
+        media_handler::abort_direct_upload,
+        media_handler::get_file_url,
+        media_handler::get_file_info,
+        media_handler::delete_file,
+        media_handler::create_reference,
+        media_handler::delete_reference,
+        media_handler::list_references,
+        media_handler::cleanup_orphaned_assets,
+        media_handler::process_image,
+        media_handler::process_video,
+        media_handler::set_object_acl,
+        media_handler::list_objects,
+        media_handler::describe_bucket,
         message_handler::send_message,
         message_handler::recall_message,
         message_handler::mark_message_read,
     ),
     components(
         schemas(
-            super::response::ErrorResponse,
-            super::response::GenerateUploadUrlHttpRequest,
-            super::response::GenerateUploadUrlHttpResponse,
-            super::response::GetFileUrlHttpRequest,
-            super::response::GetFileUrlHttpResponse,
-            super::response::GetFileInfoHttpRequest,
-            super::response::FileInfoHttpResponse,
-            super::response::DeleteFileHttpRequest,
-            super::response::DeleteFileHttpResponse,
-            super::response::SendMessageHttpRequest,
-            super::response::SendMessageHttpResponse,
-            super::response::RecallMessageHttpRequest,
-            super::response::RecallMessageHttpResponse,
-            super::response::MarkReadHttpRequest,
-            super::response::MarkReadHttpResponse,
+            super::media_handler::ListObjectsHttpRequest,
+            crate::application::dto::UploadFileMetadataHttp,
+            crate::application::dto::UploadFileHttpRequest,
+            crate::application::dto::UploadFileHttpResponse,
+            crate::application::dto::InitiateMultipartUploadHttpRequest,
+            crate::application::dto::InitiateMultipartUploadHttpResponse,
+            crate::application::dto::UploadMultipartChunkHttpRequest,
+            crate::application::dto::UploadMultipartChunkHttpResponse,
+            crate::application::dto::CompleteMultipartUploadHttpRequest,
+            crate::application::dto::AbortMultipartUploadHttpRequest,
+            crate::application::dto::AbortMultipartUploadHttpResponse,
+            crate::application::dto::DirectUploadTransportKindHttp,
+            crate::application::dto::InitiateDirectUploadHttpRequest,
+            crate::application::dto::InitiateDirectUploadHttpResponse,
+            crate::application::dto::GetDirectUploadStatusHttpRequest,
+            crate::application::dto::GetDirectUploadStatusHttpResponse,
+            crate::application::dto::UploadedPartInfoHttp,
+            crate::application::dto::PresignDirectUploadPartsHttpRequest,
+            crate::application::dto::PresignedUploadPartHttp,
+            crate::application::dto::PresignDirectUploadPartsHttpResponse,
+            crate::application::dto::CommitDirectUploadPartsHttpRequest,
+            crate::application::dto::CommitDirectUploadPartsHttpResponse,
+            crate::application::dto::CompleteDirectUploadHttpRequest,
+            crate::application::dto::AbortDirectUploadHttpRequest,
+            crate::application::dto::ImageOperationHttp,
+            crate::application::dto::ProcessImageHttpRequest,
+            crate::application::dto::ProcessImageHttpResponse,
+            crate::application::dto::VideoOperationHttp,
+            crate::application::dto::ProcessVideoHttpRequest,
+            crate::application::dto::ProcessVideoHttpResponse,
+            crate::application::dto::GetFileUrlHttpResponse,
+            crate::application::dto::FileInfoHttpResponse,
+            crate::application::dto::CreateReferenceHttpResponse,
+            crate::application::dto::DeleteReferenceHttpResponse,
+            crate::application::dto::MediaReferenceHttpResponse,
+            crate::application::dto::ListReferencesHttpResponse,
+            crate::application::dto::ListObjectsHttpResponse,
+            crate::application::dto::SendMessageHttpRequest,
+            crate::application::dto::SendMessageHttpResponse,
+            crate::application::dto::RecallMessageHttpRequest,
+            crate::application::dto::RecallMessageHttpResponse,
+            crate::application::dto::MarkReadHttpRequest,
+            crate::application::dto::MarkReadHttpResponse,
+            super::conversation_handler::ListConversationsHttpRequest,
+            super::conversation_handler::ConversationHttpResponse,
+            super::conversation_handler::ListConversationsHttpResponse,
         )
     ),
     tags(
@@ -49,33 +103,92 @@ use super::conversation_handler;
 )]
 struct ApiDoc;
 
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+async fn swagger_ui_html() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Flare Core Gateway API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: '/api-doc/openapi.json',
+        dom_id: '#swagger-ui'
+      });
+    </script>
+  </body>
+</html>
+"#,
+    )
+}
+
 /// 创建路由
 pub fn create_router(clients: Arc<GrpcClients>) -> Router {
+    let media_public_router = Router::new()
+        .route("/files/{file_id}", get(media_handler::serve_file))
+        .layer(axum::Extension(clients.clone()));
+
     // Media API 路由
     let media_router = Router::new()
-        .route("/upload-url", post(handler::generate_upload_url))
-        .route("/file-url", post(handler::get_file_url))
-        .route("/file-info", get(handler::get_file_info))
-        .route("/file", delete(handler::delete_file))
-        .layer(axum::Extension(clients.clone()));
+        .route("/upload-url", post(media_handler::generate_upload_url))
+        .route("/upload-file", post(media_handler::upload_file))
+        .route("/multipart/initiate", post(media_handler::initiate_multipart_upload))
+        .route("/multipart/chunk", post(media_handler::upload_multipart_chunk))
+        .route("/multipart/complete", post(media_handler::complete_multipart_upload))
+        .route("/multipart/abort", post(media_handler::abort_multipart_upload))
+        .route("/uploads/initiate", post(media_handler::initiate_direct_upload))
+        .route("/uploads/status", get(media_handler::get_direct_upload_status))
+        .route("/uploads/presign-parts", post(media_handler::presign_direct_upload_parts))
+        .route("/uploads/commit-parts", post(media_handler::commit_direct_upload_parts))
+        .route("/uploads/complete", post(media_handler::complete_direct_upload))
+        .route("/uploads/abort", post(media_handler::abort_direct_upload))
+        .route("/file-url", post(media_handler::get_file_url))
+        .route("/file-info", get(media_handler::get_file_info))
+        .route("/file", delete(media_handler::delete_file))
+        .route("/references", post(media_handler::create_reference))
+        .route("/references", delete(media_handler::delete_reference))
+        .route("/references", get(media_handler::list_references))
+        .route("/cleanup-orphaned-assets", post(media_handler::cleanup_orphaned_assets))
+        .route("/process-image", post(media_handler::process_image))
+        .route("/process-video", post(media_handler::process_video))
+        .route("/object-acl", post(media_handler::set_object_acl))
+        .route("/objects", get(media_handler::list_objects))
+        .route("/bucket", get(media_handler::describe_bucket))
+        .layer(axum::Extension(clients.clone()))
+        .route_layer(middleware::from_fn(auth_middleware));
 
     // Message API 路由
     let message_router = Router::new()
         .route("/send", post(message_handler::send_message))
         .route("/recall", post(message_handler::recall_message))
         .route("/read", post(message_handler::mark_message_read))
-        .layer(axum::Extension(clients.clone()));
+        .layer(axum::Extension(clients.clone()))
+        .route_layer(middleware::from_fn(auth_middleware));
 
     // Conversation API 路由
     let conversation_router = Router::new()
         .route("/", get(conversation_handler::list_conversations))
-        .layer(axum::Extension(clients));
+        .layer(axum::Extension(clients))
+        .route_layer(middleware::from_fn(auth_middleware));
 
     // 主路由
     Router::new()
-        .nest("/api/v1/medias", media_router)
+        .nest("/api/v1/medias", media_public_router.merge(media_router))
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)
+        .route("/api-doc/openapi.json", get(openapi_json))
+        .route("/swagger-ui", get(swagger_ui_html))
+        .route("/swagger-ui/", get(swagger_ui_html))
         // 健康检查
         .route("/health", get(|| async { "OK" }))
 }

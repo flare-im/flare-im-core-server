@@ -224,20 +224,18 @@ services:
     networks:
       - flare-network
     ports:
-      - "29000:9000" # S3 API
-      - "29001:9001" # 管理 API 控制台
+      - "29000:9000"
+      - "29001:9001"
     environment:
       RUSTFS_ACCESS_KEY: rustfsadmin
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_CONSOLE_ENABLE: "true"
-      RUSTFS_SERVER_DOMAINS: "localhost:29001"
     volumes:
       - ./data/rustfs:/data
     command: [
       "--address", ":9000",
       "--console-address", ":9001",
       "--console-enable",
-      "--server-domains", "localhost:29001",
       "--access-key", "rustfsadmin",
       "--secret-key", "rustfsadmin",
       "/data"

@@ -86,7 +86,7 @@ impl OperationStore {
         Ok(())
     }
 
-    /// init_v2: messages 仅更新 content、extra；无 current_edit_version/last_edited_at/status
+    /// init_v2: messages 仅更新 content、extra；extra 内编辑元数据为 camelCase（`currentEditVersion` 等）
     pub async fn update_message_content(
         &self,
         tenant_id: &str,
@@ -143,15 +143,15 @@ impl OperationStore {
 
         if let Value::Object(ref mut map) = extra {
             if let Some(text) = content_text_for_extra {
-                map.insert("content_text".to_string(), Value::String(text.to_string()));
+                map.insert("contentText".to_string(), Value::String(text.to_string()));
             }
             // 与编排/Reader 约定一致：同步下行时 SDK 用 extra 识别「已编辑」（proto 无独立 EDITED 状态位）
             map.insert(
-                "message_fsm_state".to_string(),
+                "messageFsmState".to_string(),
                 Value::String("EDITED".to_string()),
             );
             map.insert(
-                "current_edit_version".to_string(),
+                "currentEditVersion".to_string(),
                 Value::String(final_edit_version.to_string()),
             );
         }

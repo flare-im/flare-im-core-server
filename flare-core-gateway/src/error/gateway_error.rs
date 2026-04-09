@@ -3,112 +3,98 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
+use flare_server_core::http::ApiResponse;
 use thiserror::Error;
 
-/// 网关错误类型
-#[derive(Debug, Error)]
-pub enum GatewayError {
-    /// 配置错误
-    #[error("Configuration error: {0}")]
-    Config(String),
-
-    /// 参数验证错误
-    #[error("Validation error: {0}")]
-    Validation(String),
-
-    /// gRPC 调用错误
-    #[error("gRPC error: {0}")]
-    Grpc(String),
-
-    /// 序列化错误
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-
-    /// 未找到资源
-    #[error("Resource not found: {0}")]
-    NotFound(String),
-
-    /// 未授权
-    #[error("Unauthorized: {0}")]
-    Unauthorized(String),
-
-    /// 限流错误
-    #[error("Rate limit exceeded")]
-    RateLimitExceeded,
-
-    /// 超时错误
-    #[error("Request timeout")]
-    Timeout,
-
-    /// 内部错误
-    #[error("Internal error: {0}")]
-    Internal(String),
-}
+/// 网关错误类型（统一承载 flare-core-base 的 FlareError）
+#[derive(Debug, Error, Clone)]
+#[error("{0}")]
+pub struct GatewayError(pub FlareError);
 
 /// 结果类型别名
 pub type Result<T> = std::result::Result<T, GatewayError>;
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let (status, error_code, message) = match self {
-            GatewayError::Config(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_ERROR", msg)
-            }
-            GatewayError::Validation(msg) => {
-                (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", msg)
-            }
-            GatewayError::Grpc(msg) => {
-                (StatusCode::BAD_GATEWAY, "GRPC_ERROR", msg)
-            }
-            GatewayError::Serialization(msg) => {
-                (StatusCode::BAD_REQUEST, "SERIALIZATION_ERROR", msg)
-            }
-            GatewayError::NotFound(msg) => {
-                (StatusCode::NOT_FOUND, "NOT_FOUND", msg)
-            }
-            GatewayError::Unauthorized(msg) => {
-                (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg)
-            }
-            GatewayError::RateLimitExceeded => {
-                (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMIT_EXCEEDED", "Too many requests".to_string())
-            }
-            GatewayError::Timeout => {
-                (StatusCode::REQUEST_TIMEOUT, "TIMEOUT", "Request timeout".to_string())
-            }
-            GatewayError::Internal(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
-            }
-        };
-
-        let body = Json(json!({
-            "success": false,
-            "error": {
-                "code": error_code,
-                "message": message,
-            }
-        }));
-
+        let status = status_from_flare_error(&self.0);
+        let body: ApiResponse<()> = ApiResponse::from(self.0);
+        let body = Json(body);
         (status, body).into_response()
+    }
+}
+
+impl GatewayError {
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self(
+            ErrorBuilder::new(ErrorCode::HttpNotFound, "NOT_FOUND")
+                .details(message)
+                .build_error(),
+        )
+    }
+
+    pub fn bad_request(reason: impl Into<String>, message: impl Into<String>) -> Self {
+        Self(
+            ErrorBuilder::new(ErrorCode::HttpBadRequest, reason)
+                .details(message)
+                .build_error(),
+        )
+    }
+
+    pub fn internal(reason: impl Into<String>, message: impl Into<String>) -> Self {
+        Self(
+            ErrorBuilder::new(ErrorCode::HttpInternalServerError, reason)
+                .details(message)
+                .build_error(),
+        )
+    }
+}
+
+fn status_from_flare_error(error: &FlareError) -> StatusCode {
+    match error.code() {
+        Some(ErrorCode::HttpBadRequest) => StatusCode::BAD_REQUEST,
+        Some(ErrorCode::HttpUnauthorized) => StatusCode::UNAUTHORIZED,
+        Some(ErrorCode::HttpForbidden) => StatusCode::FORBIDDEN,
+        Some(ErrorCode::HttpNotFound) => StatusCode::NOT_FOUND,
+        Some(ErrorCode::HttpMethodNotAllowed) => StatusCode::METHOD_NOT_ALLOWED,
+        Some(ErrorCode::HttpRequestTimeout) => StatusCode::REQUEST_TIMEOUT,
+        Some(ErrorCode::HttpConflict) => StatusCode::CONFLICT,
+        Some(ErrorCode::HttpUnprocessableEntity) => StatusCode::UNPROCESSABLE_ENTITY,
+        Some(ErrorCode::HttpTooManyRequests) => StatusCode::TOO_MANY_REQUESTS,
+        Some(ErrorCode::HttpBadGateway) => StatusCode::BAD_GATEWAY,
+        Some(ErrorCode::HttpServiceUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
+        Some(ErrorCode::HttpGatewayTimeout) => StatusCode::GATEWAY_TIMEOUT,
+        Some(ErrorCode::HttpInternalServerError) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 // 实现从其他错误类型的转换
 impl From<serde_json::Error> for GatewayError {
     fn from(err: serde_json::Error) -> Self {
-        GatewayError::Serialization(err.to_string())
+        GatewayError::bad_request("SERIALIZATION_ERROR", err.to_string())
     }
 }
 
 impl From<tonic::Status> for GatewayError {
     fn from(status: tonic::Status) -> Self {
-        GatewayError::Grpc(status.message().to_string())
+        GatewayError(
+            ErrorBuilder::new(ErrorCode::HttpBadGateway, "GRPC_ERROR")
+                .details(status.message())
+                .build_error(),
+        )
     }
 }
 
 impl From<anyhow::Error> for GatewayError {
     fn from(err: anyhow::Error) -> Self {
-        GatewayError::Internal(err.to_string())
+        GatewayError::internal("INTERNAL_ERROR", err.to_string())
+    }
+}
+
+impl From<FlareError> for GatewayError {
+    fn from(err: FlareError) -> Self {
+        GatewayError(err)
     }
 }
 
@@ -118,14 +104,15 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = GatewayError::Validation("invalid parameter".to_string());
-        assert_eq!(err.to_string(), "Validation error: invalid parameter");
+        let err = GatewayError::bad_request("VALIDATION_ERROR", "invalid parameter");
+        assert!(err.to_string().contains("错误 [BAD_REQUEST]"));
     }
 
     #[test]
     fn test_error_from_tonic() {
         let status = tonic::Status::invalid_argument("test error");
         let err: GatewayError = status.into();
-        assert!(matches!(err, GatewayError::Grpc(_)));
+        let localized = err.0.as_localized().expect("must be localized");
+        assert_eq!(localized.code, ErrorCode::HttpBadGateway);
     }
 }

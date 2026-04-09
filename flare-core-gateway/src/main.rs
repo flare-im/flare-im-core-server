@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use axum::extract::DefaultBodyLimit;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -13,6 +14,7 @@ use flare_core_gateway::{
 };
 use flare_im_core::service_names::CORE_GATEWAY;
 use flare_core_runtime::ServiceRuntime;
+use flare_server_core::TokenService;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,9 +24,10 @@ async fn main() -> Result<()> {
 
     // gRPC/限流等仍走环境变量；HTTP 监听与仓库内 check_services.sh（50050）及 config/services/core_gateway.toml 对齐
     let settings = Settings::from_env()?;
+    let gateway_config = app_config.core_gateway_service();
     let address: SocketAddr = flare_im_core::ServiceHelper::parse_server_addr(
         app_config,
-        &app_config.core_gateway_service().runtime,
+        &gateway_config.runtime,
         CORE_GATEWAY,
     )
     .context("invalid core-gateway listen address (check config/services/core_gateway.toml)")?;
@@ -32,13 +35,31 @@ async fn main() -> Result<()> {
 
     // 初始化 gRPC 客户端
     info!("Connecting to gRPC services...");
+    info!(
+        media_service_url = %settings.grpc.media_service_url,
+        "Using media grpc endpoint"
+    );
     let clients = Arc::new(
         GrpcClients::new(&settings.grpc.media_service_url).await?,
     );
     info!("gRPC clients initialized");
 
+    let token_service = Arc::new(TokenService::new(
+        gateway_config
+            .token_secret
+            .clone()
+            .unwrap_or_else(|| "insecure-secret".to_string()),
+        gateway_config
+            .token_issuer
+            .clone()
+            .unwrap_or_else(|| "flare-im-core".to_string()),
+        gateway_config.token_ttl_seconds.unwrap_or(3600),
+    ));
+
     // 创建路由
     let app = create_router(clients)
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(axum::Extension(token_service))
         .layer(
             ServiceBuilder::new()
                 // 追踪

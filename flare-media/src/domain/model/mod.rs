@@ -165,6 +165,52 @@ pub struct PresignedUrl {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectUploadTransportKind {
+    SinglePut,
+    MultipartPut,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct UploadedPartRecord {
+    pub part_number: u32,
+    pub etag: String,
+    pub size: i64,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectUploadSessionState {
+    pub upload_id: String,
+    pub file_id: String,
+    pub transport_kind: DirectUploadTransportKind,
+    pub bucket: String,
+    pub object_key: String,
+    pub storage_upload_id: Option<String>,
+    pub part_size: i64,
+    pub total_size: i64,
+    pub total_parts: u32,
+    pub upload_url: Option<String>,
+    pub uploaded_parts: Vec<UploadedPartRecord>,
+    pub uploaded_size: i64,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ObjectStat {
+    pub size: Option<i64>,
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PresignedUploadPartUrl {
+    pub part_number: u32,
+    pub upload_url: String,
+    pub headers: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadContext<'a> {
     pub file_id: &'a str,
@@ -216,6 +262,8 @@ impl Default for UploadSessionStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UploadSession {
     pub upload_id: String,
+    #[serde(default)]
+    pub file_id: Option<String>,
     pub file_name: String,
     pub mime_type: String,
     pub file_type: String,
@@ -224,6 +272,26 @@ pub struct UploadSession {
     pub uploaded_size: i64,
     #[serde(default)]
     pub uploaded_chunks: Vec<u32>,
+    #[serde(default)]
+    pub uploaded_parts: Vec<UploadedPartRecord>,
+    #[serde(default)]
+    pub transport_kind: Option<DirectUploadTransportKind>,
+    #[serde(default)]
+    pub storage_upload_id: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub object_key: Option<String>,
+    #[serde(default)]
+    pub single_part_upload_url: Option<String>,
+    #[serde(default)]
+    pub file_fingerprint: Option<String>,
+    #[serde(default)]
+    pub head_tail_sha256: Option<String>,
+    #[serde(default)]
+    pub full_sha256: Option<String>,
+    #[serde(default)]
+    pub total_parts: Option<u32>,
     pub user_id: String,
     pub namespace: Option<String>,
     pub business_tag: Option<String>,
@@ -245,6 +313,25 @@ impl UploadSession {
             self.uploaded_chunks.push(index);
             self.uploaded_size += size;
         }
+    }
+
+    pub fn merge_uploaded_part(&mut self, part: UploadedPartRecord) {
+        if let Some(existing) = self
+            .uploaded_parts
+            .iter_mut()
+            .find(|item| item.part_number == part.part_number)
+        {
+            *existing = part;
+        } else {
+            self.uploaded_parts.push(part);
+        }
+        self.uploaded_parts.sort_by_key(|item| item.part_number);
+        self.uploaded_chunks = self
+            .uploaded_parts
+            .iter()
+            .map(|item| item.part_number)
+            .collect();
+        self.uploaded_size = self.uploaded_parts.iter().map(|item| item.size).sum();
     }
 }
 

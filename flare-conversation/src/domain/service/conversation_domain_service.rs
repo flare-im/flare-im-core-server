@@ -158,7 +158,6 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                                                 Content::Card(_) => "card".to_string(),
                                                 Content::Sticker(_) => "sticker".to_string(),
                                                 Content::Emoji(_) => "emoji".to_string(),
-                                                Content::Gif(_) => "gif".to_string(),
                                                 Content::Quote(_) => "quote".to_string(),
                                                 Content::LinkCard(_) => "link_card".to_string(),
                                                 Content::Forward(_) => "forward".to_string(),
@@ -167,7 +166,6 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                                                     "mini_program".to_string()
                                                 }
                                                 Content::RichText(_) => "rich_text".to_string(),
-                                                Content::Markdown(_) => "markdown".to_string(),
                                                 Content::ImageGroup(_) => "image_group".to_string(),
                                                 Content::System(_) => "system".to_string(),
                                                 Content::Notification(_) => {
@@ -701,6 +699,20 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             "Marked messages as read"
         );
         Ok(())
+    }
+
+    /// 应用消息事件（写时维护未读计数）。
+    pub async fn apply_message_event(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        sender_id: &str,
+        seq: i64,
+        status: i32,
+    ) -> Result<()> {
+        self.conversation_repo
+            .apply_message_event(ctx, conversation_id, sender_id, seq, status)
+            .await
     }
 
     pub async fn get_unread_count(&self, ctx: &Context, conversation_id: &str) -> Result<i32> {

@@ -8,7 +8,11 @@ use tracing::{info, instrument};
 use crate::context::Ctx;
 use crate::error::Result;
 use crate::infrastructure::grpc::GrpcClients;
-use crate::interface::http::response::*;
+use crate::application::dto::{
+    MarkReadHttpRequest, MarkReadHttpResponse, RecallMessageHttpRequest, RecallMessageHttpResponse,
+    SendMessageHttpRequest, SendMessageHttpResponse,
+};
+use flare_server_core::http::ApiResponse;
 
 /// 发送消息
 #[utoipa::path(
@@ -18,7 +22,7 @@ use crate::interface::http::response::*;
     request_body = SendMessageHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<SendMessageHttpResponse>),
-        (status = 400, description = "参数错误", body = ErrorResponse),
+        (status = 400, description = "参数错误"),
     ),
 )]
 #[instrument(skip(headers, _clients))]
@@ -54,7 +58,7 @@ pub async fn send_message(
     request_body = RecallMessageHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<RecallMessageHttpResponse>),
-        (status = 400, description = "参数错误", body = ErrorResponse),
+        (status = 400, description = "参数错误"),
     ),
 )]
 #[instrument(skip(headers, _clients))]
@@ -87,7 +91,7 @@ pub async fn recall_message(
     request_body = MarkReadHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<MarkReadHttpResponse>),
-        (status = 400, description = "参数错误", body = ErrorResponse),
+        (status = 400, description = "参数错误"),
     ),
 )]
 #[instrument(skip(headers, _clients))]

@@ -1,7 +1,7 @@
 # Media 服务配置
 
 [services.media]
-metadata_store = "media"
+metadata_store = "flare-media"
 metadata_cache = "media_metadata"
 object_store = "default"  # 使用默认的对象存储配置（现在是 rusFS）
 redis_ttl_seconds = 3600
@@ -11,8 +11,13 @@ chunk_upload_dir = "./data/media/chunks"
 chunk_ttl_seconds = 172800
 max_chunk_size_bytes = 52428800
 local_storage_dir = "./data/media"
-local_base_url = "http://localhost:50092/files"
-cdn_base_url = "http://localhost:29000/flare-media"
+# 本地文件回退统一走 flare-core-gateway 代理，避免客户端直连宿主机文件服务。
+# 默认开发端口与 flare-core-gateway 当前配置保持一致：50050。
+local_base_url = "http://127.0.0.1:50050/api/v1/medias/files"
+# 开发环境不要在服务层强制覆盖 cdn_base_url。
+# 否则对象存储失败回退到本地文件系统时，仍会把 RustFS 地址回写给客户端。
+# 让 flare-media 根据实际落点选择 object_store.cdn_base_url 或 local_base_url。
+# cdn_base_url = "http://127.0.0.1:29000/flare-media"
 
 [services.media.server]
 address = "0.0.0.0"

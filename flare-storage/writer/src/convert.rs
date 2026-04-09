@@ -237,7 +237,7 @@ pub fn tenant_context_from_tenant_id(tenant_id: Option<&str>) -> TenantContext {
     }
 }
 
-/// 从编辑内容 bytes 中解析出纯文本（用于更新 extra.content_text），不依赖在 domain 暴露 proto
+/// 从编辑内容 bytes 中解析出纯文本（用于更新 extra.contentText），不依赖在 domain 暴露 proto
 pub fn content_bytes_to_text(bytes: &[u8]) -> Option<String> {
     let content = flare_proto::decode_message_content(bytes).ok()?;
     match content.content? {

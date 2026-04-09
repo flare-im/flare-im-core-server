@@ -154,55 +154,89 @@ impl ReadReceiptEventConsumer {
         let raw = RdkafkaMessage::payload(message).ok_or_else(|| {
             ErrorBuilder::new(ErrorCode::MessageFormatError, "empty kafka payload").build_error()
         })?;
-        let Some(event) = decode_read_receipt_event(raw)? else {
+        let Some(event) = decode_message_event(raw)? else {
             return Ok(());
         };
 
-        let Some(Payload::Read(read)) = event.payload.as_ref() else {
-            return Ok(());
-        };
+        match event.payload.as_ref() {
+            Some(Payload::Read(read)) => {
+                let conversation_id = event.conversation_id.as_str();
+                if conversation_id.is_empty() {
+                    debug!("ReadReceipt with empty conversation_id, skip");
+                    return Ok(());
+                }
 
-        let conversation_id = event.conversation_id.as_str();
-        if conversation_id.is_empty() {
-            debug!("ReadReceipt with empty conversation_id, skip");
-            return Ok(());
+                let tenant_id = "0";
+                let user_id = read.user_id.as_str();
+                if user_id.is_empty() {
+                    debug!("ReadReceipt with empty user_id, skip");
+                    return Ok(());
+                }
+
+                let read_seq = read.read_seq as i64;
+
+                let ctx = Context::root()
+                    .with_tenant_id(tenant_id)
+                    .with_user_id(user_id);
+
+                self.domain_service
+                    .mark_as_read(&ctx, conversation_id, read_seq)
+                    .await?;
+
+                debug!(
+                    conversation_id = %conversation_id,
+                    user_id = %user_id,
+                    read_seq = read_seq,
+                    "Unread updated from ReadReceipt"
+                );
+            }
+            Some(Payload::Message(msg)) => {
+                let conversation_id = if event.conversation_id.is_empty() {
+                    msg.conversation_id.as_str()
+                } else {
+                    event.conversation_id.as_str()
+                };
+                if conversation_id.is_empty() {
+                    debug!("Message event with empty conversation_id, skip");
+                    return Ok(());
+                }
+                let sender_id = msg.sender_id.as_str();
+                if sender_id.is_empty() {
+                    debug!("Message event with empty sender_id, skip");
+                    return Ok(());
+                }
+                let seq = msg.seq as i64;
+                if seq <= 0 {
+                    debug!(conversation_id = %conversation_id, seq, "Message event with invalid seq, skip");
+                    return Ok(());
+                }
+
+                let ctx = Context::root().with_tenant_id("0");
+                self.domain_service
+                    .apply_message_event(&ctx, conversation_id, sender_id, seq, msg.status)
+                    .await?;
+                debug!(
+                    conversation_id = %conversation_id,
+                    sender_id = %sender_id,
+                    seq,
+                    status = msg.status,
+                    "Unread increment applied from message event"
+                );
+            }
+            _ => {}
         }
-
-        let tenant_id = "0";
-        let user_id = read.user_id.as_str();
-        if user_id.is_empty() {
-            debug!("ReadReceipt with empty user_id, skip");
-            return Ok(());
-        }
-
-        let read_seq = read.read_seq as i64;
-
-        let ctx = Context::root()
-            .with_tenant_id(tenant_id)
-            .with_user_id(user_id);
-
-        self.domain_service
-            .mark_as_read(&ctx, conversation_id, read_seq)
-            .await?;
-
-        debug!(
-            conversation_id = %conversation_id,
-            user_id = %user_id,
-            read_seq = read_seq,
-            "Unread updated from ReadReceipt"
-        );
         Ok(())
     }
 }
 
-fn decode_read_receipt_event(raw: &[u8]) -> Result<Option<Event>> {
+fn decode_message_event(raw: &[u8]) -> Result<Option<Event>> {
     // 优先：当前链路是 protobuf MqEnvelope（topic=flare.im.message.events）
     if let Ok(mq) = MqEnvelope::decode(raw) {
         if mq.payload_kind != MqPayloadKind::Event as i32 {
             return Ok(None);
         }
         if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
-            return Ok(matches_read_receipt_event(&event).then_some(event));
+            return Ok(matches_supported_event(&event).then_some(event));
         }
         return Ok(None);
     }
@@ -216,29 +250,31 @@ fn decode_read_receipt_event(raw: &[u8]) -> Result<Option<Event>> {
         if let Ok(mq) = MqEnvelope::decode(&*envelope.payload) {
             if mq.payload_kind == MqPayloadKind::Event as i32 {
                 if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
-                    return Ok(matches_read_receipt_event(&event).then_some(event));
+                    return Ok(matches_supported_event(&event).then_some(event));
                 }
             }
             return Ok(None);
         }
         if let Ok(event) = Event::decode(&*envelope.payload) {
-            return Ok(matches_read_receipt_event(&event).then_some(event));
+            return Ok(matches_supported_event(&event).then_some(event));
         }
         return Ok(None);
     }
 
     // 兼容：某些链路可能直接把 Event(proto) 作为 Kafka payload 投递，而非 EventEnvelope(JSON)。
     if let Ok(event) = Event::decode(raw) {
-        return Ok(matches_read_receipt_event(&event).then_some(event));
+        return Ok(matches_supported_event(&event).then_some(event));
     }
 
     // 该 topic 可能混入非 ReadReceipt 业务消息；无法识别时直接跳过，避免误报错误刷屏。
-    debug!("Skip kafka payload: unsupported format for ReadReceipt consumer");
+    debug!("Skip kafka payload: unsupported format for conversation event consumer");
     Ok(None)
 }
 
-fn matches_read_receipt_event(event: &Event) -> bool {
-    event.r#type == EventType::EventReadReceipt as i32 || matches!(event.payload, Some(Payload::Read(_)))
+fn matches_supported_event(event: &Event) -> bool {
+    event.r#type == EventType::EventReadReceipt as i32
+        || event.r#type == EventType::EventMessage as i32
+        || matches!(event.payload, Some(Payload::Read(_)) | Some(Payload::Message(_)))
 }
 
 // -----------------------------------------------------------------------------

@@ -8,7 +8,7 @@ use tracing::{info, instrument};
 use crate::context::Ctx;
 use crate::error::Result;
 use crate::infrastructure::grpc::GrpcClients;
-use crate::interface::http::response::*;
+use flare_server_core::http::ApiResponse;
 
 /// 获取会话列表请求
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -58,7 +58,7 @@ pub struct ListConversationsHttpResponse {
     ),
     responses(
         (status = 200, description = "成功", body = ApiResponse<ListConversationsHttpResponse>),
-        (status = 400, description = "参数错误", body = ErrorResponse),
+        (status = 400, description = "参数错误"),
     ),
 )]
 #[instrument(skip(headers, _clients))]

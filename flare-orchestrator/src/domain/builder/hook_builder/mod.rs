@@ -562,7 +562,7 @@ fn infer_from_content_type(raw: &str) -> &'static str {
         "video" | "video/mp4" | "video/mpeg" => "video",
         "audio" | "audio/aac" | "audio/mpeg" | "voice" => "audio",
         "file" | "application/octet-stream" | "application/pdf" | "application/zip" => "file",
-        "sticker" | "emoji" | "gif" => "sticker",
+        "sticker" | "emoji" => "sticker",
         "location" | "geo" | "geolocation" => "location",
         "card" | "share_card" | "invite_card" => "card",
         "command" | "cmd" => "command",

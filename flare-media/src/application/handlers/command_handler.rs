@@ -6,16 +6,17 @@ use std::sync::Arc;
 
 use crate::error::{ErrorCode, Result, map_infra_error};
 use flare_grpc_proto::media::{
-    AbortMultipartUploadRequest, CompleteMultipartUploadRequest, DeleteFileRequest,
-    InitiateMultipartUploadRequest, ProcessImageRequest, ProcessVideoRequest, UploadFileMetadata,
-    UploadMultipartChunkRequest,
+    AbortDirectUploadRequest, AbortMultipartUploadRequest, CommitDirectUploadPartsRequest,
+    CompleteDirectUploadRequest, CompleteMultipartUploadRequest, DeleteFileRequest,
+    InitiateDirectUploadRequest, InitiateMultipartUploadRequest, ProcessImageRequest,
+    ProcessVideoRequest, SetObjectAclRequest, UploadFileMetadata, UploadMultipartChunkRequest,
 };
 use flare_server_core::context::Context;
 use tracing::info;
 
 use crate::domain::model::{
-    MediaFileMetadata, MediaReferenceScope, MultipartChunkPayload, MultipartUploadSession,
-    UploadContext,
+    DirectUploadSessionState, MediaFileMetadata, MediaReferenceScope, MultipartChunkPayload,
+    MultipartUploadSession, UploadContext, UploadedPartRecord,
 };
 use crate::domain::service::MediaService;
 use crate::infrastructure::media_processor::{ImageOperation, MediaProcessor, VideoOperation};
@@ -165,6 +166,82 @@ impl MediaCommandHandler {
             .await
     }
 
+    pub async fn handle_initiate_direct_upload(
+        &self,
+        ctx: &Context,
+        request: InitiateDirectUploadRequest,
+    ) -> Result<DirectUploadSessionState> {
+        let metadata = request.metadata.ok_or_else(|| {
+            flare_server_core::flare_err!(ErrorCode::InvalidParameter, "direct upload metadata missing")
+        })?;
+        self.domain_service
+            .initiate_direct_upload(
+                ctx,
+                &metadata,
+                request.desired_part_size,
+                if request.file_fingerprint.is_empty() {
+                    None
+                } else {
+                    Some(request.file_fingerprint)
+                },
+                if request.head_tail_sha256.is_empty() {
+                    None
+                } else {
+                    Some(request.head_tail_sha256)
+                },
+                if request.full_sha256.is_empty() {
+                    None
+                } else {
+                    Some(request.full_sha256)
+                },
+            )
+            .await
+    }
+
+    pub async fn handle_commit_direct_upload_parts(
+        &self,
+        ctx: &Context,
+        request: CommitDirectUploadPartsRequest,
+    ) -> Result<DirectUploadSessionState> {
+        let parts = request
+            .parts
+            .into_iter()
+            .map(|part| UploadedPartRecord {
+                part_number: part.part_number,
+                etag: part.etag,
+                size: part.size,
+                sha256: if part.sha256.is_empty() {
+                    None
+                } else {
+                    Some(part.sha256)
+                },
+            })
+            .collect::<Vec<_>>();
+        self.domain_service
+            .commit_direct_upload_parts(ctx, &request.upload_id, &parts)
+            .await
+    }
+
+    pub async fn handle_complete_direct_upload(
+        &self,
+        ctx: &Context,
+        request: CompleteDirectUploadRequest,
+    ) -> Result<MediaFileMetadata> {
+        self.domain_service
+            .complete_direct_upload(ctx, &request.upload_id)
+            .await
+    }
+
+    pub async fn handle_abort_direct_upload(
+        &self,
+        ctx: &Context,
+        request: AbortDirectUploadRequest,
+    ) -> Result<()> {
+        self.domain_service
+            .abort_direct_upload(ctx, &request.upload_id)
+            .await
+    }
+
     pub async fn handle_attach_reference(
         &self,
         ctx: &Context,
@@ -190,6 +267,20 @@ impl MediaCommandHandler {
 
     pub async fn handle_cleanup_orphaned_assets(&self, ctx: &Context) -> Result<Vec<String>> {
         self.domain_service.cleanup_orphaned_assets(ctx).await
+    }
+
+    pub async fn handle_set_object_acl(
+        &self,
+        ctx: &Context,
+        request: SetObjectAclRequest,
+    ) -> Result<()> {
+        if request.file_id.is_empty() {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "file_id is required"
+            ));
+        }
+        self.domain_service.set_object_acl(ctx, &request.file_id).await
     }
 
     pub async fn handle_process_image(

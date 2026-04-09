@@ -7,9 +7,13 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{
+    BucketLocationConstraint, CompletedMultipartUpload, CompletedPart,
+    CreateBucketConfiguration,
+};
 use chrono::{Datelike, Utc};
 
-use crate::domain::model::UploadContext;
+use crate::domain::model::{ObjectStat, UploadContext, UploadedPartRecord};
 use crate::domain::repository::MediaObjectRepository;
 use flare_im_core::config::ObjectStoreConfig;
 
@@ -75,6 +79,9 @@ impl S3ObjectStore {
         }
         let s3_config = s3_builder.build();
         let client = S3Client::from_conf(s3_config);
+        if endpoint.is_some() {
+            Self::ensure_bucket_exists(&client, &bucket, &region_name).await?;
+        }
 
         // 配置中的预签名TTL（秒），默认3600
         let presign_url_ttl_seconds = cfg.presign_url_ttl_seconds.unwrap_or(3600) as i64;
@@ -110,6 +117,60 @@ impl S3ObjectStore {
             presign_url_ttl_seconds,
             use_presign,
         })
+    }
+
+    async fn ensure_bucket_exists(client: &S3Client, bucket: &str, region_name: &str) -> Result<()> {
+        match client.head_bucket().bucket(bucket).send().await {
+            Ok(_) => {
+                tracing::info!(bucket = bucket, "object storage bucket already exists");
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    bucket = bucket,
+                    error = %err,
+                    "object storage bucket check failed, attempting to create bucket"
+                );
+            }
+        }
+
+        let create_bucket_configuration = if region_name.eq_ignore_ascii_case("us-east-1") {
+            None
+        } else {
+            let constraint = BucketLocationConstraint::from(region_name);
+            Some(
+                CreateBucketConfiguration::builder()
+                    .location_constraint(constraint)
+                    .build(),
+            )
+        };
+
+        match client
+            .create_bucket()
+            .bucket(bucket)
+            .set_create_bucket_configuration(create_bucket_configuration)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(bucket = bucket, region = region_name, "object storage bucket created");
+                Ok(())
+            }
+            Err(create_err) => {
+                tracing::warn!(
+                    bucket = bucket,
+                    error = %create_err,
+                    "create bucket failed, re-checking if bucket became available"
+                );
+                client.head_bucket().bucket(bucket).send().await.map(|_| ()).map_err(|_| {
+                    map_infra_error(
+                        create_err,
+                        ErrorCode::ConfigurationError,
+                        format!("failed to ensure object storage bucket exists, bucket={bucket}"),
+                    )
+                })
+            }
+        }
     }
 
     fn build_object_key(&self, context: &UploadContext<'_>) -> String {
@@ -189,6 +250,24 @@ impl S3ObjectStore {
         let url = presigned.uri().to_string();
         tracing::debug!(key = &key, presigned_url = &url, "已生成预签名GET URL");
         Ok(url)
+    }
+
+    fn build_object_key_from_parts(&self, file_id: &str, file_name: &str, file_category: &str) -> String {
+        let empty = [];
+        let context = UploadContext {
+            file_id,
+            file_name,
+            mime_type: "",
+            file_size: 0,
+            payload: &empty,
+            file_category: file_category.to_string(),
+            user_id: "",
+            trace_id: None,
+            namespace: None,
+            business_tag: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        self.build_object_key(&context)
     }
 }
 
@@ -350,6 +429,182 @@ impl MediaObjectRepository for S3ObjectStore {
         let url = presigned.uri().to_string();
         tracing::debug!(key = object_path, presigned_url = &url, "已生成预签名URL");
         Ok(url)
+    }
+
+    async fn presign_put_object(
+        &self,
+        object_path: &str,
+        content_type: &str,
+        expires_in: i64,
+    ) -> Result<String> {
+        let presigned = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .content_type(content_type)
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
+                    (expires_in.max(1) as u64).min(7 * 24 * 3600),
+                ))
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "invalid presign config")
+                })?,
+            )
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to presign s3 put url, key={}", object_path),
+                )
+            })?;
+        Ok(presigned.uri().to_string())
+    }
+
+    async fn create_multipart_upload(
+        &self,
+        object_path: &str,
+        content_type: &str,
+    ) -> Result<String> {
+        let response = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to create multipart upload, key={}", object_path),
+                )
+            })?;
+        response.upload_id().map(|s| s.to_string()).ok_or_else(|| {
+            flare_server_core::flare_err!(
+                ErrorCode::InternalError,
+                "multipart upload id missing from object store response"
+            )
+        })
+    }
+
+    async fn presign_upload_part(
+        &self,
+        object_path: &str,
+        upload_id: &str,
+        part_number: u32,
+        expires_in: i64,
+    ) -> Result<String> {
+        let presigned = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .upload_id(upload_id)
+            .part_number(part_number as i32)
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
+                    (expires_in.max(1) as u64).min(7 * 24 * 3600),
+                ))
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "invalid presign config")
+                })?,
+            )
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!(
+                        "failed to presign multipart part upload, key={} part={}",
+                        object_path, part_number
+                    ),
+                )
+            })?;
+        Ok(presigned.uri().to_string())
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        object_path: &str,
+        upload_id: &str,
+        parts: &[UploadedPartRecord],
+    ) -> Result<()> {
+        let completed_parts = parts
+            .iter()
+            .map(|part| {
+                CompletedPart::builder()
+                    .set_e_tag(Some(part.etag.clone()))
+                    .part_number(part.part_number as i32)
+                    .build()
+            })
+            .collect::<Vec<_>>();
+
+        let upload = CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .upload_id(upload_id)
+            .multipart_upload(upload)
+            .send()
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to complete multipart upload, key={}", object_path),
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn abort_multipart_upload(&self, object_path: &str, upload_id: &str) -> Result<()> {
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .upload_id(upload_id)
+            .send()
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to abort multipart upload, key={}", object_path),
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn stat_object(&self, object_path: &str) -> Result<ObjectStat> {
+        let response = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(object_path)
+            .send()
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    format!("failed to stat object, key={}", object_path),
+                )
+            })?;
+        Ok(ObjectStat {
+            size: response.content_length(),
+            etag: response.e_tag().map(|s| s.to_string()),
+        })
+    }
+
+    fn build_object_key_for(&self, file_id: &str, file_name: &str, file_category: &str) -> String {
+        self.build_object_key_from_parts(file_id, file_name, file_category)
     }
 
     fn base_url(&self) -> Option<String> {

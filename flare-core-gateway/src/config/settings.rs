@@ -88,7 +88,7 @@ impl Settings {
 
         let grpc = GrpcConfig {
             media_service_url: std::env::var("GRPC_MEDIA_SERVICE_URL")
-                .unwrap_or_else(|_| "http://localhost:50051".to_string()),
+                .unwrap_or_else(|_| "http://localhost:60081".to_string()),
             message_service_url: std::env::var("GRPC_MESSAGE_SERVICE_URL")
                 .unwrap_or_else(|_| "http://localhost:50052".to_string()),
             conversation_service_url: std::env::var("GRPC_CONVERSATION_SERVICE_URL")

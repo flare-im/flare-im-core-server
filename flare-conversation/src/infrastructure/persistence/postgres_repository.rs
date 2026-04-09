@@ -155,15 +155,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.last_message_seq,
                 COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(sp.last_read_seq, 0) as last_read_seq,
-                COALESCE((
-                    SELECT COUNT(1)::INT
-                    FROM messages m
-                    WHERE m.tenant_id = s.tenant_id
-                      AND m.conversation_id = s.conversation_id
-                      AND m.seq > COALESCE(sp.last_read_seq, 0)
-                      AND m.sender_id <> $2
-                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
-                ), 0) as unread_count
+                COALESCE(sp.unread_count, 0) as unread_count
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
             WHERE s.tenant_id = $1
@@ -699,8 +691,9 @@ impl ConversationRepository for PostgresConversationRepository {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let user_id = ctx.user_id();
         // 构建基础查询
-        let mut query = String::from(
-            r#"
+        let mut query = if user_id.is_some() {
+            String::from(
+                r#"
             SELECT DISTINCT
                 s.conversation_id,
                 s.conversation_type,
@@ -710,10 +703,33 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.visibility,
                 s.lifecycle_state,
                 s.updated_at,
-                COALESCE(s.channel_id, '') as channel_id
+                COALESCE(s.channel_id, '') as channel_id,
+                COALESCE(s.last_message_seq, 0) as last_message_seq,
+                COALESCE(sp.unread_count, 0) as unread_count,
+                COALESCE(sp.last_read_seq, 0) as last_read_seq
             FROM conversations s
             "#,
-        );
+            )
+        } else {
+            String::from(
+                r#"
+            SELECT DISTINCT
+                s.conversation_id,
+                s.conversation_type,
+                s.business_type,
+                s.display_name,
+                s.attributes,
+                s.visibility,
+                s.lifecycle_state,
+                s.updated_at,
+                COALESCE(s.channel_id, '') as channel_id,
+                COALESCE(s.last_message_seq, 0) as last_message_seq,
+                0 as unread_count,
+                0 as last_read_seq
+            FROM conversations s
+            "#,
+            )
+        };
 
         // 如果指定了user_id，需要JOIN conversation_participants表
         if user_id.is_some() {
@@ -850,6 +866,9 @@ impl ConversationRepository for PostgresConversationRepository {
                 let attributes: Option<serde_json::Value> = row.get("attributes");
                 let updated_at: DateTime<Utc> = row.get("updated_at");
                 let channel_id: String = row.get("channel_id");
+                let last_message_seq: i64 = row.get("last_message_seq");
+                let unread_count: i32 = row.get("unread_count");
+                let last_read_seq: i64 = row.get("last_read_seq");
 
                 let attributes: HashMap<String, String> = attributes
                     .and_then(|v| serde_json::from_value(v).ok())
@@ -865,12 +884,12 @@ impl ConversationRepository for PostgresConversationRepository {
                     last_sender_id: None,
                     last_message_type: None,
                     last_content_type: None,
-                    unread_count: 0, // 将在ApplicationService层通过MessageProvider精确计算
-                    last_read_seq: 0,
+                    unread_count,
+                    last_read_seq: last_read_seq.max(0),
                     metadata: attributes,
                     server_cursor_ts,
                     display_name,
-                    last_message_seq: None,
+                    last_message_seq: Some(last_message_seq.max(0)),
                     channel_id,
                 }
             })
@@ -892,7 +911,10 @@ impl ConversationRepository for PostgresConversationRepository {
         let count_query = count_query.split("LIMIT").next().unwrap_or(&count_query);
         let mut count_builder = sqlx::query_scalar::<_, i64>(count_query);
 
+        count_builder = count_builder.bind(tenant_id);
+
         if let Some(uid) = user_id {
+            count_builder = count_builder.bind(tenant_id); // sp.tenant_id
             count_builder = count_builder.bind(uid);
         }
 
@@ -911,6 +933,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 count_builder = count_builder.bind(vis.as_proto());
             }
             if let Some(ref pid) = filter.participant_user_id {
+                count_builder = count_builder.bind(tenant_id); // sp2.tenant_id
                 count_builder = count_builder.bind(pid);
             }
         }
@@ -929,51 +952,165 @@ impl ConversationRepository for PostgresConversationRepository {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let user_id = require_user_id(ctx)?;
         // 更新 conversation_participants 的 last_read_seq 和 unread_count（init_v2 列名）
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
-            WITH current_state AS (
+            WITH conv_state AS (
                 SELECT
-                    LEAST(
-                        GREATEST(COALESCE(sp.last_read_seq, 0), $1),
-                        COALESCE((
-                            SELECT c.last_message_seq
-                            FROM conversations c
-                            WHERE c.tenant_id = $2 AND c.conversation_id = $3
-                        ), 0)
-                    ) AS next_read_seq
+                    COALESCE(sp.last_read_seq, 0) AS prev_read_seq,
+                    COALESCE(sp.unread_count, 0) AS prev_unread_count,
+                    GREATEST(
+                        COALESCE(c.last_message_seq, 0),
+                        COALESCE(mx.max_seq, 0),
+                        CASE WHEN $1 > 0 THEN $1 ELSE 0 END
+                    ) AS max_seq
                 FROM conversation_participants sp
-                WHERE sp.tenant_id = $2 AND sp.conversation_id = $3 AND sp.user_id = $4
+                LEFT JOIN conversations c
+                    ON c.tenant_id = sp.tenant_id
+                   AND c.conversation_id = sp.conversation_id
+                LEFT JOIN LATERAL (
+                    SELECT m.seq AS max_seq
+                    FROM messages m
+                    WHERE m.tenant_id = sp.tenant_id
+                      AND m.conversation_id = sp.conversation_id
+                    ORDER BY m.seq DESC
+                    LIMIT 1
+                ) mx ON TRUE
+                WHERE sp.tenant_id = $2
+                  AND sp.conversation_id = $3
+                  AND sp.user_id = $4
+            ),
+            target AS (
+                SELECT
+                    prev_read_seq,
+                    prev_unread_count,
+                    max_seq,
+                    LEAST(
+                        GREATEST(
+                            prev_read_seq,
+                            CASE WHEN $1 <= 0 THEN max_seq ELSE $1 END
+                        ),
+                        max_seq
+                    ) AS next_read_seq
+                FROM conv_state
             )
             UPDATE conversation_participants sp
             SET
-                last_read_seq = (SELECT next_read_seq FROM current_state),
-                unread_count = COALESCE((
-                    SELECT COUNT(1)::INT
-                    FROM messages m
-                    WHERE m.tenant_id = $2
-                      AND m.conversation_id = $3
-                      AND m.seq > (SELECT next_read_seq FROM current_state)
-                      AND m.sender_id <> $4
-                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
-                ), 0),
+                last_read_seq = target.next_read_seq,
+                unread_count = CASE
+                    WHEN target.next_read_seq <= target.prev_read_seq THEN GREATEST(target.prev_unread_count, 0)
+                    WHEN target.next_read_seq >= target.max_seq THEN 0
+                    ELSE GREATEST(
+                        target.prev_unread_count - COALESCE((
+                            SELECT COUNT(1)::INT
+                            FROM messages m
+                            WHERE m.tenant_id = $2
+                              AND m.conversation_id = $3
+                              AND m.seq > target.prev_read_seq
+                              AND m.seq <= target.next_read_seq
+                              AND m.sender_id <> $4
+                              AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                        ), 0),
+                        0
+                    )
+                END,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE sp.tenant_id = $2 AND sp.conversation_id = $3 AND sp.user_id = $4
+            FROM target
+            WHERE sp.tenant_id = $2
+              AND sp.conversation_id = $3
+              AND sp.user_id = $4
+            RETURNING
+                target.prev_read_seq AS prev_read_seq,
+                target.next_read_seq AS next_read_seq,
+                target.max_seq AS max_seq,
+                target.prev_unread_count AS prev_unread_count,
+                sp.unread_count AS next_unread_count
             "#,
         )
         .bind(seq)
         .bind(tenant_id)
         .bind(conversation_id)
         .bind(&user_id)
-        .execute(&*self.pool)
+        .fetch_optional(&*self.pool)
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to mark as read"))?;
 
-        info!(
-            user_id = %user_id,
-            conversation_id = %conversation_id,
-            seq,
-            "Marked messages as read"
-        );
+        if let Some(row) = updated {
+            let prev_read_seq = row.get::<i64, _>("prev_read_seq");
+            let next_read_seq = row.get::<i64, _>("next_read_seq");
+            let max_seq = row.get::<i64, _>("max_seq");
+            let prev_unread_count = row.get::<i32, _>("prev_unread_count");
+            let next_unread_count = row.get::<i32, _>("next_unread_count");
+            info!(
+                user_id = %user_id,
+                conversation_id = %conversation_id,
+                seq,
+                prev_read_seq,
+                next_read_seq,
+                max_seq,
+                prev_unread_count,
+                next_unread_count,
+                "Marked messages as read"
+            );
+        } else {
+            info!(
+                user_id = %user_id,
+                conversation_id = %conversation_id,
+                seq,
+                "Marked messages as read skipped (participant not found)"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn apply_message_event(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        sender_id: &str,
+        seq: i64,
+        status: i32,
+    ) -> Result<()> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+
+        sqlx::query(
+            r#"
+            WITH conv_upd AS (
+                UPDATE conversations c
+                SET
+                    last_message_seq = GREATEST(COALESCE(c.last_message_seq, 0), $1),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE c.tenant_id = $2 AND c.conversation_id = $3
+                RETURNING 1
+            )
+            UPDATE conversation_participants sp
+            SET
+                unread_count = CASE
+                    WHEN sp.user_id = $4 THEN COALESCE(sp.unread_count, 0)
+                    WHEN $5 IN (6, 7, 8) THEN COALESCE(sp.unread_count, 0)
+                    WHEN COALESCE(sp.last_read_seq, 0) >= $1 THEN COALESCE(sp.unread_count, 0)
+                    ELSE COALESCE(sp.unread_count, 0) + 1
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE sp.tenant_id = $2
+              AND sp.conversation_id = $3
+              AND NOT COALESCE(sp.is_deleted, false)
+            "#,
+        )
+        .bind(seq)
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(sender_id)
+        .bind(status)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to apply message event for unread update",
+            )
+        })?;
 
         Ok(())
     }

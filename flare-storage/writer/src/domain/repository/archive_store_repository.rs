@@ -28,7 +28,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         Ok(())
     }
 
-    /// 更新消息内容（用于编辑操作）；content_text_for_extra 用于同步更新 extra.content_text
+    /// 更新消息内容（用于编辑操作）；`content_text_for_extra` 写入 `extra.contentText`
     async fn update_message_content(
         &self,
         ctx: &Ctx,

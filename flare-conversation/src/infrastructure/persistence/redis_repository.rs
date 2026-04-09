@@ -250,6 +250,17 @@ impl ConversationRepository for RedisConversationRepository {
         Err(redis_not_supported("mark_as_read"))
     }
 
+    async fn apply_message_event(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _sender_id: &str,
+        _seq: i64,
+        _status: i32,
+    ) -> Result<()> {
+        Err(redis_not_supported("apply_message_event"))
+    }
+
     async fn get_last_message_seq(
         &self,
         _ctx: &flare_server_core::context::Context,
