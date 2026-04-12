@@ -13,6 +13,8 @@ wal_ttl_seconds = 86400
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
 
+# 默认 50181：50081 常被本机 VS Code/Cursor Gradle 语言服务占用（127.0.0.1:50081），
+# 与 Consul 注册 127.0.0.1 时会导致 Route 连错进程（SendMessage Unimplemented）。
 [services.message_orchestrator.server]
 address = "0.0.0.0"
-port = 50081
+port = 50181

@@ -148,6 +148,7 @@ impl LongConnectionHandler {
                 return Ok(Some(frame));
             }
         };
+        let client_msg_id = message.client_msg_id.clone();
         let send_command = SendMessageCommand::new(connection_id.to_string(), message, command.seq);
         let result = self
             .send_handler
@@ -159,7 +160,12 @@ impl LongConnectionHandler {
                     e.to_string(),
                 )
             });
-        build_message_ack_frame(&command.message_id, conversation_id.as_deref(), result)
+        build_message_ack_frame(
+            &command.message_id,
+            &client_msg_id,
+            conversation_id.as_deref(),
+            result,
+        )
             .map_err(|e| {
                 error!(
                     connection_id = %connection_id,

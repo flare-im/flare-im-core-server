@@ -11,7 +11,7 @@ use crate::application::queries::{
     GetMessageQuery, ListMessageTagsQuery, QueryMessagesBySeqQuery, QueryMessagesQuery,
     SearchMessagesQuery,
 };
-use crate::convert::{filter_expression_from_proto, message_to_proto};
+use crate::convert::{filter_expression_from_proto, message_to_proto, reaction_item_to_proto};
 use crate::domain::repository::MessageStorage;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 
@@ -317,9 +317,33 @@ where
 
     async fn query_message_reactions(
         &self,
-        _request: Request<QueryMessageReactionsRequest>,
+        request: Request<QueryMessageReactionsRequest>,
     ) -> Result<Response<QueryMessageReactionsResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let ctx = extract_ctx_from_request_opt(&request)
+            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let req = request.into_inner();
+        if req.message_id.trim().is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+
+        match self
+            .query_handler
+            .storage()
+            .query_message_reactions(&ctx, &req.message_id)
+            .await
+        {
+            Ok(items) => {
+                let reactions = items.iter().map(reaction_item_to_proto).collect();
+                Ok(Response::new(QueryMessageReactionsResponse {
+                    reactions,
+                    pagination: req.pagination,
+                }))
+            }
+            Err(err) => {
+                error!(error = ?err, message_id = %req.message_id, "query_message_reactions failed");
+                Err(Status::internal(err.to_string()))
+            }
+        }
     }
 
     async fn query_conversation_events(

@@ -16,7 +16,7 @@ use tracing::instrument;
 use crate::convert::{event_from_proto, message_from_proto, message_to_proto};
 use crate::domain::model::{
     ConversationMessageHead, Event, EventType, FilterExpression, Message, MessageUpdate,
-    VisibilityStatus,
+    ReactionItem, VisibilityStatus,
 };
 use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
@@ -137,7 +137,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 SELECT 
                     m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
                     m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
-                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at
+                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
+                    ), '[]'::jsonb) AS reactions_json
                 FROM messages m
                 WHERE m.conversation_id = $1 AND m.timestamp >= $2 AND m.timestamp <= $3
                   AND NOT EXISTS (
@@ -163,7 +174,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 SELECT 
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, source, seq, timestamp, conversation_type, message_type, content,
-                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
+                    ), '[]'::jsonb) AS reactions_json
                 FROM messages
                 WHERE conversation_id = $1 AND timestamp >= $2 AND timestamp <= $3
                 ORDER BY timestamp DESC, seq DESC NULLS LAST
@@ -248,7 +270,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 SELECT 
                     m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
                     m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
-                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at
+                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
+                    ), '[]'::jsonb) AS reactions_json
                 FROM messages m
                 WHERE m.conversation_id = $1 AND m.seq > $2 AND ($3::BIGINT IS NULL OR m.seq < $3)
                   AND NOT EXISTS (
@@ -273,7 +306,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 r#"
                 SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, source, seq, timestamp, conversation_type, message_type, content,
-                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
+                    ), '[]'::jsonb) AS reactions_json
                 FROM messages
                 WHERE conversation_id = $1 AND seq > $2 AND ($3::BIGINT IS NULL OR seq < $3)
                 ORDER BY seq ASC
@@ -307,7 +351,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             SELECT 
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, source, seq, timestamp, conversation_type, message_type, content,
-                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
+                COALESCE((
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'emoji', mr.emoji,
+                            'user_ids', mr.user_ids,
+                            'count', mr.count
+                        )
+                    )
+                    FROM message_reactions mr
+                    WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
+                ), '[]'::jsonb) AS reactions_json
             FROM messages
             WHERE server_id = $1 OR client_msg_id = $1
             LIMIT 1
@@ -761,11 +816,36 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_reactions(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
+        message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReactionItem>> {
         let _ = ctx; // 上下文用于日志追踪
-        // TODO: 实现反应查询
-        Ok(vec![])
+        let rows = sqlx::query(
+            r#"
+            SELECT emoji, user_ids, count, last_updated
+            FROM message_reactions
+            WHERE message_id = $1
+            ORDER BY last_updated DESC
+            "#,
+        )
+        .bind(message_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("Failed to query message reactions")?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let emoji: String = row.try_get("emoji").context("reaction emoji")?;
+            let user_ids: Vec<String> = row.try_get("user_ids").unwrap_or_default();
+            let count: i32 = row.try_get("count").unwrap_or(0);
+            let last_updated: Option<DateTime<Utc>> = row.try_get("last_updated").ok();
+            out.push(ReactionItem {
+                emoji,
+                user_ids,
+                count,
+                last_updated,
+            });
+        }
+        Ok(out)
     }
 
     #[instrument(skip(self), fields(conversation_id))]
@@ -996,7 +1076,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 SELECT 
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, source, seq, timestamp, conversation_type, message_type, content,
-                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                    status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
+                    ), '[]'::jsonb) AS reactions_json
                 FROM messages
                 WHERE conversation_id = $1
                 ORDER BY seq DESC

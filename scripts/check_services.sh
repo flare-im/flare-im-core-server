@@ -51,7 +51,7 @@ SERVICES=(
     "signaling-route:50062"
     "hook-engine:"  # 无端口配置（可能是 Kafka 消费者或其他）
     "conversation:50090"
-    "message-orchestrator:50081"
+    "message-orchestrator:50181"
     "storage-writer:"  # 无端口（Kafka 消费者）
     "storage-reader:60083"
     "sync-orchestrator:60084"

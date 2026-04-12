@@ -83,10 +83,24 @@ impl IMessageCommandPort for RouterMessageCommandPort {
                 "SendMessageResponse.success is false".to_string(),
             ));
         }
+        if send_resp.server_msg_id.trim().is_empty() {
+            return Ok(send_ack_from_failure(
+                &message,
+                ErrorCode::Internal as i32,
+                "SendMessageResponse.server_msg_id is empty".to_string(),
+            ));
+        }
+        if send_resp.seq == 0 {
+            return Ok(send_ack_from_failure(
+                &message,
+                ErrorCode::Internal as i32,
+                "SendMessageResponse.seq is zero".to_string(),
+            ));
+        }
 
         Ok(SendAck {
             client_msg_id: message.client_msg_id.clone(),
-            server_msg_id: send_resp.server_msg_id,
+            server_msg_id: send_resp.server_msg_id.trim().to_string(),
             seq: send_resp.seq,
             conversation_id: message.conversation_id.clone(),
             success: true,

@@ -155,9 +155,18 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.last_message_seq,
                 COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(sp.last_read_seq, 0) as last_read_seq,
-                COALESCE(sp.unread_count, 0) as unread_count
+                COALESCE(sp.unread_count, 0) as unread_count,
+                COALESCE(peer.max_peer_read_seq, 0) AS peer_read_seq
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
+            LEFT JOIN LATERAL (
+                SELECT MAX(COALESCE(sp2.last_read_seq, 0)) AS max_peer_read_seq
+                FROM conversation_participants sp2
+                WHERE sp2.tenant_id = s.tenant_id
+                  AND sp2.conversation_id = s.conversation_id
+                  AND sp2.user_id <> $2
+                  AND NOT COALESCE(sp2.is_deleted, false)
+            ) peer ON TRUE
             WHERE s.tenant_id = $1
               AND sp.tenant_id = $1
               AND sp.user_id = $2
@@ -189,10 +198,16 @@ impl ConversationRepository for PostgresConversationRepository {
             let channel_id: String = row.get("channel_id");
             let last_read_seq: i64 = row.get("last_read_seq");
             let unread_count: i32 = row.get("unread_count");
+            let peer_read_seq: i64 = row.get("peer_read_seq");
 
             let attributes: HashMap<String, String> = attributes
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
+            let mut attributes = attributes;
+            attributes.insert(
+                "peer_read_seq".to_string(),
+                peer_read_seq.max(0).to_string(),
+            );
 
             // 注释：最后一条消息信息将在ApplicationService层通过MessageProvider补充
             // server_cursor_ts：用户级游标优先，否则用会话与成员时间较大值（晚加入者也能被增量同步命中）

@@ -100,7 +100,7 @@ cargo run --example chatroom_client -- user2
 2. `signaling-route` - 路由目录服务（端口 50062）
 3. `hook-engine` - Hook扩展服务（端口 50110）
 4. `conversation` - 会话管理服务（端口 50090）
-5. `message-orchestrator` - 消息编排服务（端口 50081）
+5. `message-orchestrator` - 消息编排服务（端口 50181）
 6. `storage-writer` - 消息持久化服务（Kafka 消费者，不注册到服务注册中心）
 7. `push-server` - 消息推送服务（端口 50091，Kafka 消费者，不注册到服务注册中心）
 8. `access-gateway` - 客户端接入网关（默认实例，端口 60051）
@@ -249,7 +249,7 @@ lsof -i :50051  # signaling-online
 lsof -i :50062  # signaling-route
 lsof -i :50110  # hook-engine
 lsof -i :50090  # conversation
-lsof -i :50081  # message-orchestrator
+lsof -i :50181  # message-orchestrator
 lsof -i :50091  # push-server
 lsof -i :60051  # access-gateway
 lsof -i :50050  # core-gateway
@@ -381,7 +381,7 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare"
 | signaling-route | 50062 | 路由目录服务 gRPC |
 | hook-engine | 50110 | Hook扩展服务 gRPC |
 | conversation | 50090 | 会话管理服务 gRPC |
-| message-orchestrator | 50081 | 消息编排服务 gRPC |
+| message-orchestrator | 50181 | 消息编排服务 gRPC |
 | push-server | 50091 | 消息推送服务 gRPC |
 | access-gateway | 60051 | 客户端接入网关（WebSocket/QUIC） |
 | access-gateway-grpc | 60053 | 客户端接入网关 gRPC（port + 2） |

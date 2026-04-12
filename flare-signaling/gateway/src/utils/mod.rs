@@ -37,12 +37,13 @@ pub fn decode_ack_payload(payload: &[u8]) -> Result<Ack, prost::DecodeError> {
 /// 发消息结果 → `PayloadCommand.type=ACK`，载荷为 `Ack.send`（`SendAck`）。
 pub fn build_message_ack_frame(
     message_id: &str,
+    client_msg_id: &str,
     conversation_id: Option<&str>,
     result: std::result::Result<(String, u64), (i32, String)>,
 ) -> CoreResult<Frame> {
     let send_ack = match result {
         Ok((server_msg_id, seq)) => SendAck {
-            client_msg_id: message_id.to_string(),
+            client_msg_id: client_msg_id.to_string(),
             server_msg_id,
             seq,
             conversation_id: conversation_id.unwrap_or_default().to_string(),
@@ -54,7 +55,7 @@ pub fn build_message_ack_frame(
             metadata: Default::default(),
         },
         Err((code, msg)) => SendAck {
-            client_msg_id: message_id.to_string(),
+            client_msg_id: client_msg_id.to_string(),
             server_msg_id: String::new(),
             seq: 0,
             conversation_id: conversation_id.unwrap_or_default().to_string(),

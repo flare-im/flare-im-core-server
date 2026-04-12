@@ -308,6 +308,7 @@ impl PostgresBaseStorage {
         let offline_push_info: Option<Value> = row.get("offline_push_info");
         let extra: Option<Value> = row.get("extra");
         let extensions: Option<Value> = row.get("extensions");
+        let reactions_json: Option<Value> = row.try_get("reactions_json").ok();
 
         let mut extra_map = HashMap::new();
         if let Some(extra_value) = extra {
@@ -315,6 +316,16 @@ impl PostgresBaseStorage {
                 for (k, v) in extra_obj {
                     extra_map.insert(k, v.to_string().trim_matches('"').to_string());
                 }
+            }
+        }
+        if let Some(rx) = reactions_json {
+            if !rx.is_null() {
+                let serialized = if let Some(s) = rx.as_str() {
+                    s.to_string()
+                } else {
+                    rx.to_string()
+                };
+                extra_map.insert("reactionsJson".to_string(), serialized);
             }
         }
 

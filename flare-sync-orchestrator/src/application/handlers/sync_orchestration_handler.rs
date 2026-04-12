@@ -44,6 +44,7 @@ use crate::domain::service::{
 struct ConversationSyncRoutingHint {
     channel_id: String,
     conversation_type: i32,
+    peer_read_seq: u64,
 }
 
 pub struct SyncSnapshotOutcome {
@@ -329,6 +330,12 @@ where
                 routing.push(ConversationSyncRoutingHint {
                     channel_id: m.bootstrap.channel_id.clone(),
                     conversation_type: m.bootstrap.conversation_type.parse::<i32>().unwrap_or(0),
+                    peer_read_seq: m
+                        .bootstrap
+                        .ext
+                        .get("peer_read_seq")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or_default(),
                 });
                 m.row
             })
@@ -892,6 +899,8 @@ fn snapshot_row_to_summary(
     }
     let display_name = ext.get("display_name").cloned().unwrap_or_default();
     let avatar_url = ext.get("avatar_url").cloned().unwrap_or_default();
+    ext.entry("peer_read_seq".to_string())
+        .or_insert_with(|| hint.peer_read_seq.to_string());
     let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
     let channel_id = merge_sync_summary_channel_id(channel_from_msg, hint);
     let type_from_msg = conversation_type_int(latest);
