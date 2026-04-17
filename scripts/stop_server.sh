@@ -45,7 +45,7 @@ echo ""
 CORE_SERVICES=(
     "signaling-online"
     "signaling-route"
-    "hook-engine"
+    "capability"
     "conversation"
     "message-orchestrator"
     "storage-writer"

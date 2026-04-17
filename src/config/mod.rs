@@ -246,9 +246,9 @@ pub struct CoreGatewayServiceConfig {
     /// 媒体服务名（通过服务发现获取地址）
     #[serde(default)]
     pub media_service: Option<String>,
-    /// Hook引擎服务名（通过服务发现获取地址）
+    /// Capability 服务名（Hook 扩展 + 插件，通过服务发现获取地址）
     #[serde(default)]
-    pub hook_engine_service: Option<String>,
+    pub capability_service: Option<String>,
     // 保留旧字段名用于向后兼容（已废弃）
     #[serde(default, alias = "signaling_endpoint")]
     #[deprecated(note = "Use signaling_service instead")]
@@ -265,9 +265,6 @@ pub struct CoreGatewayServiceConfig {
     #[serde(default, alias = "media_endpoint")]
     #[deprecated(note = "Use media_service instead")]
     pub _media_endpoint: Option<String>,
-    #[serde(default, alias = "hook_engine_endpoint")]
-    #[deprecated(note = "Use hook_engine_service instead")]
-    pub _hook_engine_endpoint: Option<String>,
     /// 信令路由服务名（通过服务发现获取地址）
     #[serde(default)]
     pub route_service: Option<String>,
@@ -498,6 +495,17 @@ pub struct SignalingRouteServiceConfig {
     pub default_services: Option<Vec<(String, String)>>,
 }
 
+/// 能力服务（Hook + Capability gRPC）配置
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CapabilityServiceConfig {
+    /// 运行时配置
+    #[serde(flatten)]
+    pub runtime: ServiceRuntimeConfig,
+    /// PostgreSQL profile（`base.toml` 中 `[postgres.*]`），Hook 配置与能力策略库；可被 `DATABASE_URL` 覆盖
+    #[serde(default)]
+    pub postgres: Option<String>,
+}
+
 /// 存储读取服务配置
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct StorageReaderServiceConfig {
@@ -510,6 +518,9 @@ pub struct StorageReaderServiceConfig {
     /// Redis 配置（可选，用于缓存）
     #[serde(default)]
     pub redis: Option<String>,
+    /// PostgreSQL profile（`base.toml` 中 `[postgres.*]`），与 `services/storage-reader.toml` 中 `postgres = "media"` 等对齐；可被 `STORAGE_POSTGRES_URL` / `POSTGRES_URL` 覆盖
+    #[serde(default)]
+    pub postgres: Option<String>,
     /// 默认分页大小
     #[serde(default)]
     pub default_page_size: Option<u32>,
@@ -774,6 +785,11 @@ impl FlareAppConfig {
         self.services.signaling_route.clone().unwrap_or_default()
     }
 
+    /// 获取能力服务配置
+    pub fn capability_service(&self) -> CapabilityServiceConfig {
+        self.services.capability.clone().unwrap_or_default()
+    }
+
     /// 获取存储读取服务配置
     pub fn storage_reader_service(&self) -> StorageReaderServiceConfig {
         self.services.storage_reader.clone().unwrap_or_default()
@@ -934,6 +950,22 @@ impl FlareAppConfig {
             if let Some(redis) = &cfg.redis {
                 self.redis_profile(redis).ok_or_else(|| {
                     anyhow!("Redis config '{}' not found (storage_reader)", redis)
+                })?;
+            }
+            if let Some(postgres) = &cfg.postgres {
+                self.postgres_profile(postgres).ok_or_else(|| {
+                    anyhow!(
+                        "PostgreSQL config '{}' not found (storage_reader)",
+                        postgres
+                    )
+                })?;
+            }
+        }
+
+        if let Some(cfg) = &self.services.capability {
+            if let Some(postgres) = &cfg.postgres {
+                self.postgres_profile(postgres).ok_or_else(|| {
+                    anyhow!("PostgreSQL config '{}' not found (capability)", postgres)
                 })?;
             }
         }
@@ -1297,4 +1329,7 @@ pub struct ServicesConfig {
     /// 会话服务配置
     #[serde(default, rename = "conversation")]
     pub conversation: Option<ConversationServiceConfig>,
+    /// 能力服务配置（Hook + Capability）
+    #[serde(default, rename = "capability")]
+    pub capability: Option<CapabilityServiceConfig>,
 }

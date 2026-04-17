@@ -1,0 +1,64 @@
+[package]
+name = "flare-capability"
+version.workspace = true
+edition.workspace = true
+description = "Flare IM 能力服务：Hook 引擎调度 + 业务能力插件（capability 注册/路由/事件）"
+
+[lib]
+name = "flare_capability"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flare-capability"
+path = "cmd/main.rs"
+
+[dependencies]
+flare-im-core = { path = ".." }
+flare-core-base = { path = "../../flare-server-core/flare-core-base" }
+flare-sfu = { path = "../../flare-plugin/flare-sfu" }
+flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
+flare-server-core = { workspace = true, features = ["grpc", "discovery"] }
+flare-core-runtime = { workspace = true }
+
+tokio = { workspace = true }
+
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+reqwest = { workspace = true }
+
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+sqlx = { workspace = true }
+
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+once_cell = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+
+etcd-client = { workspace = true }
+
+dashmap = "6.0"
+subtle = "2.6"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tracing-subscriber = { workspace = true }
+prost-types = { workspace = true }

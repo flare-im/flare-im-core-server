@@ -12,10 +12,11 @@
 
 use std::sync::Arc;
 
-use flare_proto::common::{Event, EventType};
 use flare_im_core::Ctx;
+use flare_proto::common::{Event, EventType};
 use tracing::instrument;
 
+use crate::application::CallCapabilityBridge;
 use crate::domain::{service::EventDomainService, PersistenceMode};
 use crate::error::Result;
 
@@ -24,11 +25,19 @@ use crate::error::Result;
 pub struct EventHandler {
     /// 事件领域服务
     event_domain_service: Arc<EventDomainService>,
+    /// 可选：`EVENT_CALL_SIGNAL` → `flare-capability` `Dispatch`（RTC）
+    call_capability_bridge: Option<Arc<CallCapabilityBridge>>,
 }
 
 impl EventHandler {
-    pub fn new(event_domain_service: Arc<EventDomainService>) -> Self {
-        Self { event_domain_service }
+    pub fn new(
+        event_domain_service: Arc<EventDomainService>,
+        call_capability_bridge: Option<Arc<CallCapabilityBridge>>,
+    ) -> Self {
+        Self {
+            event_domain_service,
+            call_capability_bridge,
+        }
     }
 
     /// 处理事件
@@ -53,7 +62,7 @@ impl EventHandler {
     ))]
     pub async fn handle_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-        
+
         // 根据事件类型路由到不同的处理方法
         let event_type = EventType::try_from(event.r#type);
         match event_type {
@@ -140,8 +149,22 @@ impl EventHandler {
         &self,
         ctx: &Ctx,
         tenant_id: &str,
-        event: Event,
+        mut event: Event,
     ) -> Result<()> {
+        if let Some(ref bridge) = self.call_capability_bridge {
+            if let Err(e) = bridge
+                .enrich_call_signal_event(ctx, tenant_id, &mut event)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    event_id = %event.event_id,
+                    conversation_id = %event.conversation_id,
+                    "call_capability_bridge: CapabilityService.Dispatch failed, degrade — push event without SFU enrichment"
+                );
+            }
+        }
+
         // 1. 校验事件
         self.event_domain_service
             .validate_event(ctx, tenant_id, &event)

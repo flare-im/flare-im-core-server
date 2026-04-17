@@ -23,6 +23,7 @@ impl StorageReaderConfig {
     /// 从应用配置加载（新方式，推荐）
     pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service_config = app.storage_reader_service();
+        let postgres_profile_name = service_config.postgres.as_deref();
 
         // 解析 Redis 配置引用（可选）
         let redis_url = env::var("STORAGE_REDIS_URL").ok().or_else(|| {
@@ -34,11 +35,15 @@ impl StorageReaderConfig {
             }
         });
 
-        // 解析 PostgreSQL 配置引用（必需）
-        // 注意：StorageReaderServiceConfig 没有 postgres 字段，直接从环境变量或使用默认 postgres profile
+        // PostgreSQL：环境变量 > services.storage_reader.postgres > media（flare2）> primary
         let postgres_url = env::var("STORAGE_POSTGRES_URL")
             .ok()
             .or_else(|| env::var("POSTGRES_URL").ok())
+            .or_else(|| {
+                postgres_profile_name
+                    .and_then(|name| app.postgres_profile(name))
+                    .map(|profile| profile.url.clone())
+            })
             .or_else(|| {
                 app.postgres_profile("media")
                     .map(|profile| profile.url.clone())
@@ -59,15 +64,25 @@ impl StorageReaderConfig {
             .or_else(|| service_config.max_page_size.map(|v| v as i32))
             .unwrap_or(200);
 
-        // PostgreSQL 连接池配置
+        // PostgreSQL 连接池配置（环境变量优先，否则沿用所选 postgres profile）
         let postgres_max_connections = env::var("STORAGE_POSTGRES_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(20); // 读侧可以支持更多连接
+            .or_else(|| {
+                postgres_profile_name
+                    .and_then(|name| app.postgres_profile(name))
+                    .and_then(|p| p.max_connections)
+            })
+            .unwrap_or(20);
 
         let postgres_min_connections = env::var("STORAGE_POSTGRES_MIN_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| {
+                postgres_profile_name
+                    .and_then(|name| app.postgres_profile(name))
+                    .and_then(|p| p.min_connections)
+            })
             .unwrap_or(5);
 
         let postgres_acquire_timeout_seconds = env::var("STORAGE_POSTGRES_ACQUIRE_TIMEOUT_SECONDS")

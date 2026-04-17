@@ -49,7 +49,7 @@ echo ""
 SERVICES=(
     "signaling-online:50061"
     "signaling-route:50062"
-    "hook-engine:"  # 无端口配置（可能是 Kafka 消费者或其他）
+    "capability:"  # gRPC 端口见应用配置；此处仅检查 pid 进程
     "conversation:50090"
     "message-orchestrator:50181"
     "storage-writer:"  # 无端口（Kafka 消费者）
@@ -63,32 +63,52 @@ SERVICES=(
 
 # Access Gateway 不在此脚本中检查
 
+# 脚本内服务 key → 对外展示名（与 cargo 包/二进制一致）
+service_display_name() {
+    case "$1" in
+        capability) echo "flare-capability" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # 检查服务函数
 check_service() {
     local service=$1
     local port=$2
+    local label
+    label="$(service_display_name "$service")"
     local pid_file="$LOGS_DIR/flare-$service.pid"
     
     local process_ok=false
     local port_ok=false
+    local pid=""
     
     # 检查进程
     if [ -f "$pid_file" ]; then
-        local pid=$(cat "$pid_file" 2>/dev/null)
+        pid=$(cat "$pid_file" 2>/dev/null)
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
             process_ok=true
         fi
     fi
     
-    # 如果没有 PID 文件或进程不存在，尝试通过进程名查找
+    # 如果没有 PID 文件或进程不存在，尝试通过二进制名查找（capability 对应 flare-capability）
     if [ "$process_ok" = false ]; then
-        if pgrep -f "target/debug/flare-$service" > /dev/null 2>&1 || \
-           pgrep -f "cargo.*flare-$service" > /dev/null 2>&1; then
-            process_ok=true
+        if [ "$service" = "capability" ]; then
+            if pgrep -f "target/debug/flare-capability" > /dev/null 2>&1 || \
+               pgrep -f "target/release/flare-capability" > /dev/null 2>&1 || \
+               pgrep -f "cargo.*flare-capability" > /dev/null 2>&1; then
+                process_ok=true
+            fi
+        else
+            if pgrep -f "target/debug/flare-$service" > /dev/null 2>&1 || \
+               pgrep -f "target/release/flare-$service" > /dev/null 2>&1 || \
+               pgrep -f "cargo.*flare-$service" > /dev/null 2>&1; then
+                process_ok=true
+            fi
         fi
     fi
     
-    # 检查端口（如果配置了端口）
+    # 检查端口（仅当配置了具体端口时参与「端口异常」判断）
     if [ -n "$port" ] && [ "$port" != "" ]; then
         if command -v nc >/dev/null 2>&1 && nc -z localhost "$port" 2>/dev/null; then
             port_ok=true
@@ -96,26 +116,25 @@ check_service() {
             port_ok=true
         fi
     else
-        # 没有端口配置的服务，只需要检查进程
-        port_ok=true
+        port_ok=false
     fi
     
     # 输出检查结果
-    if [ "$process_ok" = true ] && [ "$port_ok" = true ]; then
+    if [ "$process_ok" = true ] && { [ -z "$port" ] || [ "$port_ok" = true ]; }; then
         if [ -n "$port" ] && [ "$port" != "" ]; then
-            echo -e "${GREEN}   ✓ $service (PID: $pid, 端口: $port)${NC}"
+            echo -e "${GREEN}   ✓ $label (PID: $pid, 端口: $port)${NC}"
         else
-            echo -e "${GREEN}   ✓ $service (PID: $pid)${NC}"
+            echo -e "${GREEN}   ✓ $label (PID: $pid)${NC}"
         fi
         return 0
-    elif [ "$process_ok" = true ] && [ "$port_ok" = false ]; then
-        echo -e "${YELLOW}   ⚠ $service 进程运行中但端口 $port 未监听${NC}"
+    elif [ "$process_ok" = true ] && [ -n "$port" ] && [ "$port_ok" = false ]; then
+        echo -e "${YELLOW}   ⚠ $label 进程运行中但端口 $port 未监听${NC}"
         return 1
-    elif [ "$process_ok" = false ] && [ "$port_ok" = true ]; then
-        echo -e "${YELLOW}   ⚠ $service 端口 $port 监听中但进程不存在${NC}"
+    elif [ "$process_ok" = false ] && [ -n "$port" ] && [ "$port_ok" = true ]; then
+        echo -e "${YELLOW}   ⚠ $label 端口 $port 监听中但进程不存在${NC}"
         return 1
     else
-        echo -e "${RED}   ✗ $service 未运行${NC}"
+        echo -e "${RED}   ✗ $label 未运行${NC}"
         return 1
     fi
 }
@@ -142,7 +161,11 @@ if [ "$ALL_RUNNING" = true ]; then
 else
     echo -e "${YELLOW}⚠️  部分服务未正常运行${NC}"
     if [ ${#FAILED_SERVICES[@]} -gt 0 ]; then
-        echo -e "${YELLOW}   未正常运行的服务: ${FAILED_SERVICES[*]}${NC}"
+        failed_labels=()
+        for s in "${FAILED_SERVICES[@]}"; do
+            failed_labels+=("$(service_display_name "$s")")
+        done
+        echo -e "${YELLOW}   未正常运行的服务: ${failed_labels[*]}${NC}"
         echo -e "${YELLOW}   提示: 查看日志了解详情${NC}"
         for service in "${FAILED_SERVICES[@]}"; do
             echo -e "     ${BLUE}tail -f $LOGS_DIR/flare-$service.log${NC}"

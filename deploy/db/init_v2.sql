@@ -8,7 +8,12 @@
 --   - common/models.proto    (PinnedMessageInfo, MarkedMessageInfo, EditHistory, Reaction, ThreadInfo)
 --   - common/enums.proto     (DeleteType, MarkType, ReactionAction)
 --   - storage.proto         (StoreMessage, VisibilityStatus)
+--   - flare-capability: hook_configs / hook_executions（Hook 引擎）；capability_*（CapabilityService 策略）
 -- 数据库: PostgreSQL + TimescaleDB
+-- 维护约定: 与本仓 IM 相关的 DDL 变更请在本文件增改，勿另建零散 .sql，便于单源对齐与评审。
+-- 开发阶段: 可随时删库或清空数据卷后对目标 PostgreSQL 执行本文件全量初始化（例: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f init_v2.sql）。
+-- 表结构: 凡 CREATE TABLE 前须有对应 DROP TABLE IF EXISTS ... CASCADE（与本文件既有风格一致）。
+-- 可选标记 FLARE_EXTRACT:* 仅用于在编辑器中定位第 9 节（Hook+Capability）起止；改该节 DDL 时请保持两标记包住完整 DROP/CREATE。
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
@@ -570,11 +575,18 @@ COMMENT ON COLUMN media_references.expires_at IS '过期时间';
 CREATE INDEX IF NOT EXISTS idx_media_references_tenant_file ON media_references(tenant_id, file_id);
 
 -- ============================================================================
--- 9. Hook 引擎
+-- 9. Hook 引擎 + Capability 策略（flare-capability）
 -- ============================================================================
+-- hook_configs 列与 PostgresHookConfigRepository（Rust sqlx::FromRow）一致。
+-- capability_* 与 PostgresCapabilityPolicy、CapabilityService gRPC 一致。
+-- FLARE_EXTRACT:BEGIN_HOOK_CAPABILITY（第 9 节边界标记，勿删改此行）
 
 DROP TABLE IF EXISTS hook_executions CASCADE;
 DROP TABLE IF EXISTS hook_configs CASCADE;
+DROP TABLE IF EXISTS capability_audit_log CASCADE;
+DROP TABLE IF EXISTS capability_user_grants CASCADE;
+DROP TABLE IF EXISTS capability_tenant_switches CASCADE;
+DROP TABLE IF EXISTS capability_service_settings CASCADE;
 
 CREATE TABLE hook_configs (
     id BIGSERIAL PRIMARY KEY,
@@ -586,18 +598,22 @@ CREATE TABLE hook_configs (
     description TEXT,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     priority INT NOT NULL DEFAULT 100,
+    group_name TEXT,
     timeout_ms BIGINT NOT NULL DEFAULT 1000,
     max_retries INT NOT NULL DEFAULT 0,
     error_policy TEXT NOT NULL DEFAULT 'fail_fast',
+    require_success BOOLEAN NOT NULL DEFAULT TRUE,
     selector_config JSONB NOT NULL DEFAULT '{}'::jsonb,
-    transport_config JSONB NOT NULL,
+    transport_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB,
+    created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tenant_id, hook_type, name)
 );
-COMMENT ON TABLE hook_configs IS 'Hook 配置表';
+COMMENT ON TABLE hook_configs IS 'Hook 配置表（动态加载，与 flare-capability postgres_config 对齐）';
 COMMENT ON COLUMN hook_configs.id IS '自增主键';
-COMMENT ON COLUMN hook_configs.hook_id IS 'Hook 唯一标识';
+COMMENT ON COLUMN hook_configs.hook_id IS '可选外部稳定 ID（UUID 等），与 id 二选一使用';
 COMMENT ON COLUMN hook_configs.tenant_id IS '租户 ID（空=全局）';
 COMMENT ON COLUMN hook_configs.hook_type IS 'Hook 类型（pre_send, post_send, recall 等）';
 COMMENT ON COLUMN hook_configs.name IS 'Hook 名称';
@@ -605,11 +621,15 @@ COMMENT ON COLUMN hook_configs.version IS '版本';
 COMMENT ON COLUMN hook_configs.description IS '描述';
 COMMENT ON COLUMN hook_configs.enabled IS '是否启用';
 COMMENT ON COLUMN hook_configs.priority IS '优先级（越小越高）';
+COMMENT ON COLUMN hook_configs.group_name IS '分组（validation/critical/business）';
 COMMENT ON COLUMN hook_configs.timeout_ms IS '超时（毫秒）';
 COMMENT ON COLUMN hook_configs.max_retries IS '最大重试次数';
 COMMENT ON COLUMN hook_configs.error_policy IS '错误策略（fail_fast, retry, ignore）';
+COMMENT ON COLUMN hook_configs.require_success IS '是否要求成功';
 COMMENT ON COLUMN hook_configs.selector_config IS '选择器配置（JSON）';
 COMMENT ON COLUMN hook_configs.transport_config IS '传输配置（JSON）';
+COMMENT ON COLUMN hook_configs.metadata IS '元数据（JSON）';
+COMMENT ON COLUMN hook_configs.created_by IS '创建者';
 COMMENT ON COLUMN hook_configs.created_at IS '创建时间';
 COMMENT ON COLUMN hook_configs.updated_at IS '更新时间';
 CREATE INDEX IF NOT EXISTS idx_hook_configs_tenant_type ON hook_configs(tenant_id, hook_type, enabled);
@@ -621,19 +641,23 @@ CREATE TABLE hook_executions (
     hook_type TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     message_id TEXT,
+    request_id TEXT,
+    trace_id TEXT,
     success BOOLEAN NOT NULL,
     latency_ms INT,
     error_code TEXT,
     error_message TEXT,
     executed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE hook_executions IS 'Hook 执行记录表';
+COMMENT ON TABLE hook_executions IS 'Hook 执行记录表（审计/排障）';
 COMMENT ON COLUMN hook_executions.execution_id IS '执行 ID（主键）';
-COMMENT ON COLUMN hook_executions.hook_id IS '关联 Hook 配置 ID';
+COMMENT ON COLUMN hook_executions.hook_id IS '关联 hook_configs.id 或 hook_id 文本';
 COMMENT ON COLUMN hook_executions.hook_name IS 'Hook 名称';
 COMMENT ON COLUMN hook_executions.hook_type IS 'Hook 类型';
 COMMENT ON COLUMN hook_executions.tenant_id IS '租户 ID';
 COMMENT ON COLUMN hook_executions.message_id IS '关联消息 ID（可选）';
+COMMENT ON COLUMN hook_executions.request_id IS '上游请求 ID（可选）';
+COMMENT ON COLUMN hook_executions.trace_id IS '追踪 ID（可选）';
 COMMENT ON COLUMN hook_executions.success IS '是否成功';
 COMMENT ON COLUMN hook_executions.latency_ms IS '耗时（毫秒）';
 COMMENT ON COLUMN hook_executions.error_code IS '错误码（失败时）';
@@ -641,6 +665,74 @@ COMMENT ON COLUMN hook_executions.error_message IS '错误信息（失败时）'
 COMMENT ON COLUMN hook_executions.executed_at IS '执行时间';
 CREATE INDEX IF NOT EXISTS idx_hook_executions_tenant_executed ON hook_executions(tenant_id, executed_at DESC);
 
+-- 全局总开关（单行）；无行时服务端按「启用」处理
+CREATE TABLE capability_service_settings (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    global_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE capability_service_settings IS '能力服务全局开关（与 InMemoryCapabilityGrants.global_enabled 对应）';
+
+INSERT INTO capability_service_settings (id, global_enabled) VALUES (1, TRUE)
+ON CONFLICT (id) DO NOTHING;
+
+-- 租户维度关闭某能力；无行表示不额外禁用（与内存策略一致）
+CREATE TABLE capability_tenant_switches (
+    tenant_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, capability_id)
+);
+COMMENT ON TABLE capability_tenant_switches IS '租户级能力开关（显式 false 时拒绝 Dispatch）';
+CREATE INDEX IF NOT EXISTS idx_capability_tenant_switches_tenant ON capability_tenant_switches(tenant_id);
+
+CREATE TABLE capability_user_grants (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    plan_code TEXT,
+    source TEXT,
+    PRIMARY KEY (tenant_id, user_id, capability_id)
+);
+COMMENT ON TABLE capability_user_grants IS '用户能力授权（付费/运营开通；支持 namespace.* 通配）';
+COMMENT ON COLUMN capability_user_grants.expires_at IS '过期时间，NULL 表示长期有效';
+COMMENT ON COLUMN capability_user_grants.user_id IS '用户 ID；特殊值 * 表示该 tenant_id 下任意用户（仅建议开发/内网；生产按用户灌库后应删除通配行）';
+CREATE INDEX IF NOT EXISTS idx_capability_user_grants_tenant_user ON capability_user_grants(tenant_id, user_id);
+
+-- 默认租户 0 + 租户级 RTC 通配（与编排器 ctx.tenant_id().unwrap_or("0")、Capability Dispatch 对齐）
+-- PostgresCapabilityPolicy 将 tenant_id `0` 与 `default` 视为同一默认租户查授权，故仅插 `0` 即可覆盖网关 JWT 里仍为 default 的客户端。
+INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)
+VALUES ('0', '*', 'rtc.*', 'dev', 'init_bootstrap')
+ON CONFLICT (tenant_id, user_id, capability_id) DO NOTHING;
+
+-- 策略变更审计（Grant / Revoke / SetTenantSwitch；Dispatch 高频路径默认不落库）
+CREATE TABLE capability_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    actor_id TEXT,
+    target_user_id TEXT,
+    capability_id TEXT,
+    detail JSONB,
+    trace_id TEXT
+);
+COMMENT ON TABLE capability_audit_log IS '能力策略变更审计（合规/排障）；由 flare-capability 写入';
+COMMENT ON COLUMN capability_audit_log.action IS 'grant | revoke | tenant_switch 等';
+COMMENT ON COLUMN capability_audit_log.actor_id IS '操作者（metadata x-actor-id / x-user-id）';
+COMMENT ON COLUMN capability_audit_log.detail IS '扩展字段 JSON';
+CREATE INDEX IF NOT EXISTS idx_capability_audit_tenant_time ON capability_audit_log(tenant_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_capability_audit_action_time ON capability_audit_log(action, occurred_at DESC);
+
+-- 可按用户追加（示例，与 tenant 0 一致时取消注释）
+-- INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)
+-- VALUES ('0', '具体用户ID', 'rtc.*', 'dev', 'bootstrap')
+-- ON CONFLICT (tenant_id, user_id, capability_id) DO NOTHING;
+
+-- FLARE_EXTRACT:END_HOOK_CAPABILITY（第 9 节边界标记，勿删改此行）
 -- ============================================================================
 -- 10. TimescaleDB 策略与触发器
 -- ============================================================================
@@ -683,6 +775,14 @@ CREATE TRIGGER trigger_user_sync_cursor_updated_at
 DROP TRIGGER IF EXISTS trigger_hook_configs_updated_at ON hook_configs;
 CREATE TRIGGER trigger_hook_configs_updated_at
     BEFORE UPDATE ON hook_configs FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+DROP TRIGGER IF EXISTS trigger_capability_tenant_switches_updated_at ON capability_tenant_switches;
+CREATE TRIGGER trigger_capability_tenant_switches_updated_at
+    BEFORE UPDATE ON capability_tenant_switches FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+DROP TRIGGER IF EXISTS trigger_capability_service_settings_updated_at ON capability_service_settings;
+CREATE TRIGGER trigger_capability_service_settings_updated_at
+    BEFORE UPDATE ON capability_service_settings FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
 
 DROP TRIGGER IF EXISTS trigger_threads_updated_at ON threads;
 CREATE TRIGGER trigger_threads_updated_at

@@ -39,7 +39,7 @@ docker-compose up -d
 这将启动以下服务：
 - `signaling-online` - 在线状态服务
 - `signaling-route` - 路由目录服务
-- `hook-engine` - Hook扩展服务
+- `capability`（`flare-capability`）- Hook 扩展与能力插件服务
 - `conversation` - 会话管理服务
 - `message-orchestrator` - 消息编排服务
 - `storage-writer` - 消息持久化服务
@@ -98,7 +98,7 @@ cargo run --example chatroom_client -- user2
 **服务启动顺序**：
 1. `signaling-online` - 在线状态服务（端口 50051）
 2. `signaling-route` - 路由目录服务（端口 50062）
-3. `hook-engine` - Hook扩展服务（端口 50110）
+3. `capability`（`flare-capability`）- Hook 与能力插件（gRPC 端口见应用 `config`）
 4. `conversation` - 会话管理服务（端口 50090）
 5. `message-orchestrator` - 消息编排服务（端口 50181）
 6. `storage-writer` - 消息持久化服务（Kafka 消费者，不注册到服务注册中心）
@@ -247,7 +247,7 @@ ps aux | grep flare-
 # 检查端口是否监听
 lsof -i :50051  # signaling-online
 lsof -i :50062  # signaling-route
-lsof -i :50110  # hook-engine
+lsof -i :50110  # flare-capability（若配置为该端口）
 lsof -i :50090  # conversation
 lsof -i :50181  # message-orchestrator
 lsof -i :50091  # push-server
@@ -338,11 +338,13 @@ sleep 10
    ```
 4. 确保 Push Server 配置了正确的 `signaling_endpoint` 和 `gateway_endpoints`
 
-### 4. Hook Engine 无法连接数据库
+### 4. Flare Capability 无法连接数据库 / 缺表 / 缺授权
 
-**问题**：Hook Engine 启动失败，提示数据库连接错误
+**问题**：`flare-capability` 启动失败，或报 `capability_service_settings` 不存在、或 `user capability grant missing`（`PostgresCapabilityPolicy`）
 
-**解决方案**：
+**说明**：数据库初始化与种子数据均在 **`deploy/db/init_v2.sql`**（开发阶段可删库后整文件重跑，或按需执行其中第 9 节 Hook+Capability）。
+
+**排查**：
 ```bash
 # 检查 PostgreSQL 是否运行
 docker ps | grep postgres
@@ -379,7 +381,7 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare"
 |------|------|------|
 | signaling-online | 50051 | 在线状态服务 gRPC |
 | signaling-route | 50062 | 路由目录服务 gRPC |
-| hook-engine | 50110 | Hook扩展服务 gRPC |
+| capability（flare-capability） | 见 `config` | Hook 扩展与能力插件 gRPC |
 | conversation | 50090 | 会话管理服务 gRPC |
 | message-orchestrator | 50181 | 消息编排服务 gRPC |
 | push-server | 50091 | 消息推送服务 gRPC |

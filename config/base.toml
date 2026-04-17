@@ -76,6 +76,7 @@ bootstrap_servers = "127.0.0.1:29092"
 client_id = "flare-message-orchestrator"
 timeout_ms = 30000
 
+# 消息/媒体/能力等共用 PostgreSQL（init_v2、storage、flare-capability 等均指向此库）
 [postgres.media]
 url = "postgres://flare:flare123@localhost:25432/flare2"
 max_connections = 20

@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
             "flare-im-core".to_string(),
             3600,
         );
-        match token_service.generate_token(&user_id, None, Some("default")) {
+        match token_service.generate_token(&user_id, None, Some("0")) {
             Ok(t) => {
                 info!("🔑 自动生成测试 token");
                 t

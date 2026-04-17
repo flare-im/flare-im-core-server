@@ -83,8 +83,8 @@ run-storage-reader:
 run-media:
 	$(CARGO) run -p flare-media --bin flare-media
 
-run-hook-engine:
-	$(CARGO) run -p flare-hook-engine --bin flare-hook-engine
+run-flare-capability:
+	$(CARGO) run -p flare-capability --bin flare-capability
 
 run-session:
 	$(CARGO) run -p flare-session --bin flare-session

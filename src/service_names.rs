@@ -118,11 +118,14 @@ pub mod service_names {
     /// 注册路径: `flare/flare-media`
     pub const MEDIA: &str = "flare-media";
 
-    /// Hook Engine 服务名
+    /// Capability 服务名（Hook 扩展 + 业务能力插件）
     ///
-    /// 用于钩子引擎、事件处理等功能
-    /// 注册路径: `flare/flare-hook-engine`
-    pub const HOOK_ENGINE: &str = "flare-hook-engine";
+    /// 对应工作区目录 `flare-capability/`，注册与发现必须使用此字符串，与包名、二进制名一致。
+    /// 注册路径: `flare/flare-capability`
+    pub const CAPABILITY: &str = "flare-capability";
+
+    /// 与 [`CAPABILITY`] 同义，命名便于与业务侧 `FLARE_CAPABILITY_*` 环境变量对齐
+    pub const FLARE_CAPABILITY: &str = CAPABILITY;
 }
 
 /// 服务名验证函数
@@ -144,7 +147,7 @@ pub fn validate_service_name(name: &str) -> bool {
             | service_names::STORAGE_READER
             | service_names::SYNC_ORCHESTRATOR
             | service_names::MEDIA
-            | service_names::HOOK_ENGINE
+            | service_names::CAPABILITY
     )
 }
 

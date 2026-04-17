@@ -36,12 +36,12 @@ pub use ack::{
 };
 
 pub use config::{
-    AccessGatewayServiceConfig, ConfigManager, ConversationServiceConfig, FlareAppConfig,
-    KafkaClusterConfig, MediaServiceConfig, MessageOrchestratorServiceConfig, MongoInstanceConfig,
-    ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig, ServiceEndpointConfig,
-    ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
-    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig,
-    app_config, load_config, load_config_with_validation,
+    AccessGatewayServiceConfig, CapabilityServiceConfig, ConfigManager, ConversationServiceConfig,
+    FlareAppConfig, KafkaClusterConfig, MediaServiceConfig, MessageOrchestratorServiceConfig,
+    MongoInstanceConfig, ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig,
+    ServiceEndpointConfig, ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
+    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig, app_config,
+    load_config, load_config_with_validation,
 };
 pub use discovery::{
     BackendType,

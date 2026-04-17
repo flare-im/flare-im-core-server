@@ -1,0 +1,5 @@
+# Flare Capability（Hook + Capability gRPC）
+# 与 storage 共用 base.toml [postgres.media]（flare2）；可用 DATABASE_URL 覆盖
+
+[services.capability]
+postgres = "media"

@@ -1,4 +1,5 @@
 use std::env;
+use std::sync::Once;
 
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
@@ -6,6 +7,12 @@ use flare_server_core::kafka::KafkaProducerConfig;
 use flare_server_core::mq::kafka::KafkaConsumerConfig;
 
 use crate::domain::model::{ConversationType, MessageDefaults};
+
+/// `flare-capability` gRPC 静态回退（无注册中心或与 `connect_grpc_channel_from_app_config` 的 fallback 一致）。
+/// 与 `MessageOrchestratorConfig::resolve_capability_grpc_uri` 配套。
+pub const DEFAULT_CAPABILITY_GRPC_URI: &str = "http://127.0.0.1:50095";
+
+static WARN_EMPTY_CAPABILITY_GRPC_URI: Once = Once::new();
 
 /// 会话生成模式：同步 gRPC 创建 vs 事件异步创建
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +59,16 @@ pub struct MessageOrchestratorConfig {
     /// 业务系统标识符（SVID），用于服务发现时的过滤
     /// 例如："svid.im"、"svid.customer" 等
     pub svid: Option<String>,
+    /// 是否在加载 `hooks.toml` 后 **自动追加** 指向独立进程 `flare-capability` 的
+    /// `HookExtension`（PreSend/PostSend）gRPC Hook。关闭时仅使用配置文件中的 Hook。
+    /// 环境变量：`MESSAGE_ORCHESTRATOR_CAPABILITY_HOOKS_AUTO=1|true`。
+    pub capability_hooks_auto: bool,
+    /// `flare-capability` gRPC 地址（与 HookExtension / CapabilityService 同端口），例如 `http://flare-capability:50051`。
+    /// 环境变量：`MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI`（未设且开启 auto 时使用本机默认端口，见 wire 常量）。
+    pub capability_grpc_uri: Option<String>,
+    /// `EVENT_CALL_SIGNAL` 是否经 `CapabilityService.Dispatch` 联动 RTC（invite/accept/hangup）。
+    /// `MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE=1|true` 开启。
+    pub capability_rtc_bridge_enabled: bool,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
@@ -211,6 +228,37 @@ impl MessageOrchestratorConfig {
         let svid = env_or_fallback("MESSAGE_ORCHESTRATOR_SVID", "SVID")
             .or_else(|| Some("svid.im".to_string())); // 默认为 svid.im
 
+        let capability_hooks_auto = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_CAPABILITY_HOOKS_AUTO",
+            "ORCHESTRATOR_CAPABILITY_HOOKS_AUTO",
+        )
+        .map(|v| {
+            let t = v.trim();
+            matches!(t, "1" | "true" | "on" | "yes")
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false);
+
+        let capability_grpc_uri = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI",
+            "FLARE_CAPABILITY_GRPC_URI",
+        );
+
+        let capability_rtc_bridge_enabled = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE",
+            "ORCHESTRATOR_CAPABILITY_RTC_BRIDGE",
+        )
+        .map(|v| {
+            let t = v.trim();
+            matches!(t, "1" | "true" | "on" | "yes")
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false);
+
         Self {
             kafka_bootstrap,
             kafka_timeout_ms,
@@ -230,7 +278,27 @@ impl MessageOrchestratorConfig {
             session_creation_mode,
             server_id,
             svid,
+            capability_hooks_auto,
+            capability_grpc_uri,
+            capability_rtc_bridge_enabled,
         }
+    }
+
+    /// Hook `capability_hooks_auto` 与 RTC 桥共用的能力服务 gRPC 地址（环境变量未设或为空时打一次 warn 并回退 [`DEFAULT_CAPABILITY_GRPC_URI`]）。
+    pub fn resolve_capability_grpc_uri(&self) -> String {
+        if let Some(ref u) = self.capability_grpc_uri {
+            let t = u.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+        WARN_EMPTY_CAPABILITY_GRPC_URI.call_once(|| {
+            tracing::warn!(
+                fallback = %DEFAULT_CAPABILITY_GRPC_URI,
+                "MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI unset or empty; using default for flare-capability (hooks / RTC bridge)"
+            );
+        });
+        DEFAULT_CAPABILITY_GRPC_URI.to_string()
     }
 
     /// 从应用配置加载（新方式，推荐）

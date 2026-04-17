@@ -26,10 +26,8 @@ pub struct MessageSendGrpcHandler {
 impl MessageSendGrpcHandler {
     pub fn new(
         message_handler: Arc<MessageHandler>,
-        event_domain_service: Arc<crate::domain::service::EventDomainService>,
+        execute_event_handler: Arc<EventHandler>,
     ) -> Self {
-        let execute_event_handler =
-            Arc::new(EventHandler::new(event_domain_service));
         Self {
             message_handler,
             execute_event_handler,

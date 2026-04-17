@@ -251,7 +251,7 @@ fn build_context(
     static_metadata: &HashMap<String, String>,
 ) -> ProtoHookInvocationContext {
     // 从 Context 中提取 Hook 特定的数据
-    // 注意：这里需要访问 HookContextData，但它在 flare-hook-engine 中
+    // 注意：这里需要访问 HookContextData，但它在 flare-capability 服务 crate 中
     // 为了简化，我们使用 Context 的基本字段
     use crate::hooks::hook_context_data::get_hook_context_data;
 

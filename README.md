@@ -49,7 +49,7 @@ graph TB
         Online[flare-signaling/online<br/>在线状态]
         Orchestrator[flare-orchestrator<br/>消息编排]
         SyncOrch[flare-sync-orchestrator<br/>同步编排]
-        HookEngine[flare-hook-engine<br/>Hook 引擎]
+        Capability[flare-capability<br/>Hook + 能力扩展 DDD/CQRS]
     end
 
     subgraph "存储层"
@@ -86,7 +86,7 @@ graph TB
 
     Route --> Online
     Route --> Orchestrator
-    Route --> HookEngine
+    Route --> Capability
 
     Orchestrator --> Kafka
     Kafka --> StorageWriter
@@ -117,7 +117,7 @@ graph TB
 | **flare-signaling/route** | 路由 | 设备路由、推送策略等 |
 | **flare-orchestrator** | 消息编排 | 消息入队、与存储/推送协作 |
 | **flare-sync-orchestrator** | 同步编排 | 多端会话与同步相关编排（见 crate 内实现） |
-| **flare-hook-engine** | Hook 引擎 | 扩展点调度与执行 |
+| **flare-capability** | Hook + 能力扩展 | Hook 引擎 gRPC；能力子系统按 DDD（`domain/capability` 端口）+ CQRS（`application/capability` 查询/分发）；默认集成进程内 SFU 的 `RtcCapability`、内存授权策略、与 SDK 对齐的能力管理 HTTP（`/capabilities/*`）。已移除旧 `plugin` 宿主与 outbox。 |
 | **flare-storage/writer** | 持久化 | Kafka 消费、写库 |
 | **flare-storage/reader** | 查询 | 消息查询、历史等 |
 | **flare-conversation** | 会话 | 会话元数据、光标与同步 |
@@ -165,7 +165,7 @@ flare-im-core/                    # 本 README 所在工作区根
 │   └── common/
 ├── flare-orchestrator/
 ├── flare-sync-orchestrator/      # 同步编排服务
-├── flare-hook-engine/
+├── flare-capability/             # Hook gRPC + 能力扩展（DDD/CQRS，HTTP `/capabilities/*`）
 ├── flare-storage/
 │   ├── writer/
 │   └── reader/

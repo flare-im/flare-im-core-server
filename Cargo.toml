@@ -22,8 +22,8 @@ members = [
 
     "flare-orchestrator",
     
-    # Hook引擎
-    "flare-hook-engine",
+    # Hook 引擎 + 能力插件（capability）
+    "flare-capability",
     
     # 媒体服务
     "flare-media",
@@ -179,7 +179,6 @@ prometheus = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 ulid = { workspace = true }
-
 # ACK模块依赖
 dashmap = "6.0"
 redis = { workspace = true }

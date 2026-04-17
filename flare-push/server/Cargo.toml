@@ -16,7 +16,6 @@ flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-core = { path = "../..", features = ["tracing"] }
-flare-hook-engine = { path = "../../flare-hook-engine" }
 flare-core = { path = "../../../flare-core" }
 tokio = { workspace = true }
 tonic = { workspace = true }
