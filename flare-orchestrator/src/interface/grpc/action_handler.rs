@@ -5,14 +5,18 @@ use std::sync::Arc;
 use crate::application::handlers::MessageActionHandler;
 use flare_grpc_proto::message::{
     AddReactionRequest as MessageAddReactionRequest,
-    AddReactionResponse as MessageAddReactionResponse,
-    DeleteMessageRequest as MessageDeleteMessageRequest,
+    AddReactionResponse as MessageAddReactionResponse, BatchMarkMessageReadRequest,
+    BatchMarkMessageReadResponse, DeleteMessageRequest as MessageDeleteMessageRequest,
     DeleteMessageResponse as MessageDeleteMessageResponse,
     EditMessageRequest as MessageEditMessageRequest,
-    EditMessageResponse as MessageEditMessageResponse,
+    EditMessageResponse as MessageEditMessageResponse, MarkAllConversationsReadRequest,
+    MarkAllConversationsReadResponse, MarkConversationReadRequest, MarkConversationReadResponse,
     MarkMessageReadRequest as MessageMarkMessageReadRequest,
     MarkMessageReadResponse as MessageMarkMessageReadResponse,
-    PinMessageRequest as MessagePinMessageRequest, PinMessageResponse as MessagePinMessageResponse,
+    MarkMessageRequest as MessageMarkMessageRequest,
+    MarkMessageResponse as MessageMarkMessageResponse, MarkMessagesReadUntilRequest,
+    MarkMessagesReadUntilResponse, PinMessageRequest as MessagePinMessageRequest,
+    PinMessageResponse as MessagePinMessageResponse,
     RecallMessageRequest as MessageRecallMessageRequest,
     RecallMessageResponse as MessageRecallMessageResponse,
     RemoveReactionRequest as MessageRemoveReactionRequest,
@@ -21,25 +25,19 @@ use flare_grpc_proto::message::{
     UnmarkMessageResponse as MessageUnmarkMessageResponse,
     UnpinMessageRequest as MessageUnpinMessageRequest,
     UnpinMessageResponse as MessageUnpinMessageResponse,
-    MarkMessageRequest as MessageMarkMessageRequest,
-    MarkMessageResponse as MessageMarkMessageResponse,
-    BatchMarkMessageReadRequest, BatchMarkMessageReadResponse,
-    MarkMessagesReadUntilRequest, MarkMessagesReadUntilResponse,
-    MarkConversationReadRequest, MarkConversationReadResponse,
-    MarkAllConversationsReadRequest, MarkAllConversationsReadResponse,
 };
 use prost_types;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 
 use crate::application::commands::{
-    RecallMessageCommand, EditMessageCommand, DeleteMessageCommand, ReadMessageCommand,
-    AddReactionCommand, RemoveReactionCommand, PinMessageCommand, UnpinMessageCommand,
-    MarkMessageCommand, UnmarkMessageCommand,
+    AddReactionCommand, DeleteMessageCommand, EditMessageCommand, MarkMessageCommand,
+    PinMessageCommand, ReadMessageCommand, RecallMessageCommand, RemoveReactionCommand,
+    UnmarkMessageCommand, UnpinMessageCommand,
 };
 use flare_grpc_proto::message::message_action_service_server::MessageActionService;
-use flare_server_core::utils::require_ctx_from_request;
 use flare_server_core::error::grpc::IntoGrpc;
+use flare_server_core::utils::require_ctx_from_request;
 
 /// 消息操作 gRPC：撤回、编辑、删除、已读、反应、置顶、标记等。
 #[derive(Clone)]
@@ -80,7 +78,6 @@ impl MessageActionService for MessageActionGrpcHandler {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
-
         }))
     }
 
@@ -111,7 +108,6 @@ impl MessageActionService for MessageActionGrpcHandler {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
-
         }))
     }
 
@@ -136,7 +132,6 @@ impl MessageActionService for MessageActionGrpcHandler {
         Ok(Response::new(MessageDeleteMessageResponse {
             success: true,
             deleted_count,
-
         }))
     }
 
@@ -166,7 +161,6 @@ impl MessageActionService for MessageActionGrpcHandler {
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
             burned_at: None,
-
         }))
     }
 
@@ -192,7 +186,6 @@ impl MessageActionService for MessageActionGrpcHandler {
             success: true,
             error_message: String::new(),
             new_count: count,
-
         }))
     }
 
@@ -218,7 +211,6 @@ impl MessageActionService for MessageActionGrpcHandler {
             success: true,
             error_message: String::new(),
             new_count: count,
-
         }))
     }
 
@@ -266,7 +258,6 @@ impl MessageActionService for MessageActionGrpcHandler {
         Ok(Response::new(MessageUnpinMessageResponse {
             success: true,
             error_message: String::new(),
-
         }))
     }
 
@@ -314,7 +305,6 @@ impl MessageActionService for MessageActionGrpcHandler {
         Ok(Response::new(MessageUnmarkMessageResponse {
             success: true,
             error_message: String::new(),
-
         }))
     }
 

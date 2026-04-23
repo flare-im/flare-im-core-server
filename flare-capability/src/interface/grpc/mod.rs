@@ -1,13 +1,13 @@
-//! gRPC 接口层：HookExtension / HookService / CapabilityService。
+//! gRPC 传输层：按 **控制面 / IM Hook / 媒体扩展 / 共享工具** 分包，避免单目录堆叠。
 
-mod capability_service;
-mod helpers;
-mod hook_extension;
-mod hook_service;
+pub mod capability;
+pub mod extensions;
+pub mod hooks;
+pub mod shared;
 
-pub use capability_service::{
+pub use capability::{
     CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot,
 };
+pub use extensions::StromSfuExtensionPluginServer;
 pub use flare_grpc_proto::capability::capability_service_server::CapabilityServiceServer;
-pub use hook_extension::HookExtensionServer;
-pub use hook_service::HookServiceServer;
+pub use hooks::{HookServiceServer, ImHookPluginServer};

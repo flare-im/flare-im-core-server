@@ -75,10 +75,8 @@ impl RecipientRepository for RecipientRepositoryImpl {
                 _ => {
                     // 其他类型：从会话服务获取成员列表，排除发送者
                     let members = self.get_conversation_members(ctx, conversation_id).await?;
-                    let recipients: Vec<String> = members
-                        .into_iter()
-                        .filter(|uid| uid != sender_id)
-                        .collect();
+                    let recipients: Vec<String> =
+                        members.into_iter().filter(|uid| uid != sender_id).collect();
                     debug!(
                         conversation_id = %conversation_id,
                         conversation_type = ?conversation_type,
@@ -141,7 +139,11 @@ impl RecipientRepository for RecipientRepositoryImpl {
         conversation_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
         Box::pin(async move {
-            match self.conversation_repo.get_conversation_members(ctx, conversation_id).await {
+            match self
+                .conversation_repo
+                .get_conversation_members(ctx, conversation_id)
+                .await
+            {
                 Ok(members) => {
                     debug!(
                         conversation_id = %conversation_id,

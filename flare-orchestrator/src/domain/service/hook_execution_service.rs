@@ -13,19 +13,19 @@
 use std::sync::Arc;
 
 use anyhow::Context as AnyhowContext;
-use flare_im_core::{Ctx, ErrorCode};
 use flare_im_core::hooks::HookDispatcher;
 use flare_im_core::tracing::create_span;
+use flare_im_core::{Ctx, ErrorCode};
 use flare_proto::common::Message;
 use flare_server_core::flare_err;
 use tracing::instrument;
 
-use crate::domain::model::MessageSubmission;
-use crate::error::Result;
 use crate::domain::builder::hook_builder::{
     apply_draft_to_request, build_draft_from_request, build_hook_context,
     build_hook_context_from_ctx, build_message_record, draft_from_submission, merge_context,
 };
+use crate::domain::model::MessageSubmission;
+use crate::error::Result;
 
 /// Hook 执行结果
 pub struct HookExecutionContext {
@@ -73,11 +73,11 @@ impl HookExecutionService {
     ) -> Result<HookExecutionContext> {
         // 构建原始 Hook 上下文
         let original_context = build_hook_context_from_ctx(ctx, &message);
-        
+
         // 构建 Draft
         let mut draft = build_draft_from_request(&message)
             .with_context(|| "Failed to build draft from request")?;
-        
+
         // 执行 PreSend Hook
         if execute_pre_send {
             let _hook_span = create_span("hook-execution", "pre_send");
@@ -85,15 +85,15 @@ impl HookExecutionService {
                 .pre_send(&original_context, &mut draft)
                 .await
                 .with_context(|| "PreSend hook failed")?;
-            
+
             // 应用 Draft 到消息
             apply_draft_to_request(&mut message, &draft);
         }
-        
+
         // 构建更新后的上下文
         let updated_context = build_hook_context(&message, self.default_tenant_id.as_ref());
         let hook_context = merge_context(&original_context, updated_context);
-        
+
         Ok(HookExecutionContext {
             message,
             hook_context,
@@ -119,18 +119,23 @@ impl HookExecutionService {
         submission: &MessageSubmission,
     ) -> Result<()> {
         let _hook_span = create_span("hook-execution", "post_send");
-        
+
         // 构建消息记录
         let record = build_message_record(submission, &submission.message);
-        
+
         // 构建 Draft
-        let post_draft = draft_from_submission(submission)
-            .context("Failed to build draft from submission")?;
-        
+        let post_draft =
+            draft_from_submission(submission).context("Failed to build draft from submission")?;
+
         // 执行 PostSend Hook
         self.hooks
             .post_send(hook_context, &record, &post_draft)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("PostSend hook failed: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("PostSend hook failed: {}", e)
+                )
+            })
     }
 }

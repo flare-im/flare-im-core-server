@@ -5,13 +5,16 @@ use chrono::{DateTime, Utc};
 use flare_core_base::context::Ctx;
 
 use super::context::{ConversationKind, PreSendEvaluateInput, ResolveTrigger};
-use super::error::{GuardDecision, Result as CapabilityResult};
+use super::error::{CapabilityError, GuardDecision, Result as CapabilityResult};
 use super::grant::UserCapabilityGrant;
 use super::recipient::{RecipientResolveRequest, RecipientResolveResult};
 use super::rtc::{
-    AcceptCallRequest, AcceptCallResponse, CreateCallRequest, CreateCallResponse,
-    GetJoinTokenRequest, GetJoinTokenResponse, HangupCallRequest, HangupCallResponse,
-    ListParticipantsRequest, ListParticipantsResponse, RejectCallRequest, RejectCallResponse,
+    AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
+    CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
+    HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
+    HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
+    RejectCallRequest, RejectCallResponse, SfuJoinRoomRequest, SfuJoinRoomResponse,
+    SfuLeaveRoomRequest, SfuLeaveRoomResponse,
 };
 
 // ----------------------------------------------------------------------------- Guard / Resolver / RTC
@@ -83,6 +86,61 @@ pub trait RtcCapability: Send + Sync {
         ctx: &Ctx,
         req: &ListParticipantsRequest,
     ) -> CapabilityResult<ListParticipantsResponse>;
+
+    /// `SfuControl.JoinRoom`：进入 SFU 房间（独立 strom 进程需实现该 RPC；未实现时返回上游错误）。
+    async fn sfu_join_room(
+        &self,
+        _ctx: &Ctx,
+        _req: &SfuJoinRoomRequest,
+    ) -> CapabilityResult<SfuJoinRoomResponse> {
+        Err(CapabilityError::NotSupported(
+            "sfu_join_room: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// `SfuControl.LeaveRoom`：离开房间。
+    async fn sfu_leave_room(
+        &self,
+        _ctx: &Ctx,
+        _req: &SfuLeaveRoomRequest,
+    ) -> CapabilityResult<SfuLeaveRoomResponse> {
+        Err(CapabilityError::NotSupported(
+            "sfu_leave_room: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// `SfuControl.HandleSdpOffer`：终端 offer → SFU answer。
+    async fn sfu_handle_sdp_offer(
+        &self,
+        _ctx: &Ctx,
+        _req: &HandleSdpOfferRequest,
+    ) -> CapabilityResult<HandleSdpOfferResponse> {
+        Err(CapabilityError::NotSupported(
+            "sfu_handle_sdp_offer: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// `SfuControl.HandleSdpAnswer`：应答型协商（strom 当前路径可能未实现）。
+    async fn sfu_handle_sdp_answer(
+        &self,
+        _ctx: &Ctx,
+        _req: &HandleSdpAnswerRequest,
+    ) -> CapabilityResult<HandleSdpAnswerResponse> {
+        Err(CapabilityError::NotSupported(
+            "sfu_handle_sdp_answer: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// `SfuControl.AddIceCandidate`：Trickle ICE。
+    async fn sfu_add_ice_candidate(
+        &self,
+        _ctx: &Ctx,
+        _req: &AddIceCandidateRequest,
+    ) -> CapabilityResult<AddIceCandidateResponse> {
+        Err(CapabilityError::NotSupported(
+            "sfu_add_ice_candidate: not supported for this RTC backend".into(),
+        ))
+    }
 }
 
 // ----------------------------------------------------------------------------- 策略（授权 / 租户开关）

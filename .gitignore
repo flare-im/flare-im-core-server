@@ -3,6 +3,7 @@
 .vscode
 .cursor
 .DS_Store
+.cargo
 
 .git
 target

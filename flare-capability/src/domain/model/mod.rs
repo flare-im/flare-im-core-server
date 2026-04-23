@@ -12,7 +12,9 @@ use flare_im_core::{
     DeliveryEvent, HookGroup, HookMetadata, MessageDraft, MessageRecord, PreSendDecision,
     PreSendHook, RecallEvent,
 };
+use flare_im_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use flare_server_core::context::{Context, Ctx};
+use tokio::time::timeout;
 
 /// Hook执行模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,19 +387,31 @@ impl HookExecutionPlan {
         &self,
         ctx: &Ctx,
         draft: &mut MessageDraft,
-    ) -> anyhow::Result<PreSendDecision> {
-        // 优先使用适配器（gRPC/WebHook）
-        if let Some(ref adapter) = self.adapter {
-            return adapter.pre_send(ctx, draft).await;
-        }
+    ) -> FlareResult<PreSendDecision> {
+        let fut = async {
+            if let Some(ref adapter) = self.adapter {
+                adapter.pre_send(ctx, draft).await
+            } else if let Some(ref handler) = self.pre_send_handler {
+                Ok(handler.handle(ctx, draft).await)
+            } else {
+                Ok(PreSendDecision::Continue)
+            }
+        };
 
-        // 回退到本地插件
-        if let Some(ref handler) = self.pre_send_handler {
-            return Ok(handler.handle(ctx, draft).await);
+        match timeout(self.metadata.timeout, fut).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
+                    .details(format!("hook={}", self.name()))
+                    .build_error();
+                if self.require_success() {
+                    Ok(PreSendDecision::Reject { error: err })
+                } else {
+                    tracing::warn!(hook = %self.name(), "pre-send hook timeout ignored");
+                    Ok(PreSendDecision::Continue)
+                }
+            }
         }
-
-        // 没有处理器，直接通过
-        Ok(PreSendDecision::Continue)
     }
 
     /// 执行PostSend Hook
@@ -406,25 +420,55 @@ impl HookExecutionPlan {
         ctx: &Ctx,
         record: &MessageRecord,
         draft: &MessageDraft,
-    ) -> anyhow::Result<()> {
-        // 优先使用适配器（gRPC/WebHook）
-        if let Some(ref adapter) = self.adapter {
-            return adapter.post_send(ctx, record, draft).await;
-        }
+    ) -> FlareResult<()> {
+        let fut = async {
+            if let Some(ref adapter) = self.adapter {
+                adapter.post_send(ctx, record, draft).await
+            } else {
+                Ok(())
+            }
+        };
 
-        // 本地插件不支持PostSend，直接成功
-        Ok(())
+        match timeout(self.metadata.timeout, fut).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "post-send hook timed out")
+                    .details(format!("hook={}", self.name()))
+                    .build_error();
+                if self.require_success() {
+                    Err(err)
+                } else {
+                    tracing::warn!(hook = %self.name(), "post-send hook timeout ignored");
+                    Ok(())
+                }
+            }
+        }
     }
 
     /// 执行Delivery Hook
-    pub async fn execute_delivery(&self, ctx: &Ctx, event: &DeliveryEvent) -> anyhow::Result<()> {
-        // 优先使用适配器（gRPC/WebHook）
-        if let Some(ref adapter) = self.adapter {
-            return adapter.delivery(ctx, event).await;
-        }
+    pub async fn execute_delivery(&self, ctx: &Ctx, event: &DeliveryEvent) -> FlareResult<()> {
+        let fut = async {
+            if let Some(ref adapter) = self.adapter {
+                adapter.delivery(ctx, event).await
+            } else {
+                Ok(())
+            }
+        };
 
-        // 本地插件不支持Delivery，直接成功
-        Ok(())
+        match timeout(self.metadata.timeout, fut).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "delivery hook timed out")
+                    .details(format!("hook={}", self.name()))
+                    .build_error();
+                if self.require_success() {
+                    Err(err)
+                } else {
+                    tracing::warn!(hook = %self.name(), "delivery hook timeout ignored");
+                    Ok(())
+                }
+            }
+        }
     }
 
     /// 执行Recall Hook
@@ -432,14 +476,29 @@ impl HookExecutionPlan {
         &self,
         ctx: &Context,
         event: &RecallEvent,
-    ) -> anyhow::Result<PreSendDecision> {
-        // 优先使用适配器（gRPC/WebHook）
-        if let Some(ref adapter) = self.adapter {
-            return adapter.recall(ctx, event).await;
-        }
+    ) -> FlareResult<PreSendDecision> {
+        let fut = async {
+            if let Some(ref adapter) = self.adapter {
+                adapter.recall(ctx, event).await
+            } else {
+                Ok(PreSendDecision::Continue)
+            }
+        };
 
-        // 本地插件不支持Recall，直接通过
-        Ok(PreSendDecision::Continue)
+        match timeout(self.metadata.timeout, fut).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "recall hook timed out")
+                    .details(format!("hook={}", self.name()))
+                    .build_error();
+                if self.require_success() {
+                    Ok(PreSendDecision::Reject { error: err })
+                } else {
+                    tracing::warn!(hook = %self.name(), "recall hook timeout ignored");
+                    Ok(PreSendDecision::Continue)
+                }
+            }
+        }
     }
 }
 

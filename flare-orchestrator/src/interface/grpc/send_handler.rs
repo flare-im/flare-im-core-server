@@ -3,18 +3,17 @@
 use std::sync::Arc;
 
 use crate::application::handlers::{EventHandler, MessageHandler};
+use flare_grpc_proto::message::message_send_service_server::MessageSendService;
 use flare_grpc_proto::message::{
-    BatchSendMessageRequest, BatchSendMessageResponse, ExecuteEventRequest, SendAckRequest,
-    SendAckResponse, SendCustomDataRequest, SendCustomDataResponse, SendMessageRequest,
-    SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
-    FailedMessage,
+    BatchSendMessageRequest, BatchSendMessageResponse, ExecuteEventRequest, FailedMessage,
+    SendAckRequest, SendAckResponse, SendCustomDataRequest, SendCustomDataResponse,
+    SendMessageRequest, SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
 };
+use flare_server_core::error::grpc::IntoGrpc;
+use flare_server_core::utils::require_ctx_from_request;
 use prost_types;
 use tonic::{Request, Response, Status};
 use tracing::{debug, instrument};
-use flare_grpc_proto::message::message_send_service_server::MessageSendService;
-use flare_server_core::utils::require_ctx_from_request;
-use flare_server_core::error::grpc::IntoGrpc;
 
 /// 上行发送 gRPC：`SendMessage` / `BatchSendMessage` / `SendSystemMessage` / `ExecuteEvent` 等。
 #[derive(Clone)]
@@ -100,16 +99,21 @@ impl MessageSendService for MessageSendGrpcHandler {
             .messages
             .into_iter()
             .filter_map(|m| {
-                m.message.map(|msg| crate::application::commands::SendMessageCommand {
-                    message: msg,
-                    conversation_id: m.conversation_id,
-                    sync: m.sync,
-                })
+                m.message
+                    .map(|msg| crate::application::commands::SendMessageCommand {
+                        message: msg,
+                        conversation_id: m.conversation_id,
+                        sync: m.sync,
+                    })
             })
             .collect();
 
         // 调用 application 层的批量发送方法
-        let results = self.message_handler.batch_send_message(&ctx, messages).await.into_grpc()?;
+        let results = self
+            .message_handler
+            .batch_send_message(&ctx, messages)
+            .await
+            .into_grpc()?;
 
         // 统计成功和失败数量，构建响应
         let mut message_ids = Vec::new();
@@ -152,12 +156,10 @@ impl MessageSendService for MessageSendGrpcHandler {
         };
 
         match self.message_handler.send_system_message(&ctx, cmd).await {
-            Ok(message_id) => {
-                Ok(Response::new(SendSystemMessageResponse {
-                    success: true,
-                    message_id,
-                }))
-            }
+            Ok(message_id) => Ok(Response::new(SendSystemMessageResponse {
+                success: true,
+                message_id,
+            })),
             Err(err) => {
                 // 使用 IntoGrpc trait 将 FlareError 转换为包含 ErrorDetail 的 Status
                 Err(Status::from(err))
@@ -197,11 +199,16 @@ impl MessageSendService for MessageSendGrpcHandler {
         let req = request.into_inner();
 
         // 从 Ack 中提取 ack_id (作为 message_id 使用)
-        let ack = req.ack.ok_or_else(|| Status::invalid_argument("ack required"))?;
+        let ack = req
+            .ack
+            .ok_or_else(|| Status::invalid_argument("ack required"))?;
         let message_id = ack.ack_id.clone().unwrap_or_default();
 
         // 调用 application 层的 ACK 方法
-        self.message_handler.send_ack(&ctx, &message_id).await.into_grpc()?;
+        self.message_handler
+            .send_ack(&ctx, &message_id)
+            .await
+            .into_grpc()?;
 
         Ok(Response::new(SendAckResponse {
             routed_endpoint: String::new(), // 可选字段，用于监控/调试
@@ -217,10 +224,15 @@ impl MessageSendService for MessageSendGrpcHandler {
         let req = request.into_inner();
 
         // 从 CustomData 中提取数据
-        let custom_data = req.data.ok_or_else(|| Status::invalid_argument("data required"))?;
+        let custom_data = req
+            .data
+            .ok_or_else(|| Status::invalid_argument("data required"))?;
 
         // 调用 application 层的自定义数据发送方法
-        self.message_handler.send_custom_data(&ctx, custom_data.payload).await.into_grpc()?;
+        self.message_handler
+            .send_custom_data(&ctx, custom_data.payload)
+            .await
+            .into_grpc()?;
 
         Ok(Response::new(SendCustomDataResponse {
             response_data: vec![], // 可选：下游返回的扩展载荷

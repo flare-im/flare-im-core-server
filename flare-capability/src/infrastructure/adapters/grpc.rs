@@ -10,14 +10,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-use anyhow::{Context as AnyhowContext, Result};
+use prost::Message;
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
-use flare_grpc_proto::hooks::hook_extension_client::HookExtensionClient;
-use flare_grpc_proto::hooks::{
-    DeliveryHookRequest, PostSendHookRequest, PreSendHookRequest, RecallHookRequest,
+use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+use flare_grpc_proto::capability::{
+    DeliveryHookRequest, DeliveryHookResponse, GenericRequest, PostSendHookRequest,
+    PostSendHookResponse, PreSendHookRequest, PreSendHookResponse, RecallHookRequest,
+    RecallHookResponse,
 };
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
@@ -31,11 +33,13 @@ use crate::infrastructure::adapters::conversion::{
 // 导入服务发现相关模块
 use flare_server_core::{ServiceClient, ServiceDiscover};
 
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+
 /// gRPC Hook适配器
 #[allow(dead_code)]
 pub struct GrpcHookAdapter {
     // 模式1: 直接地址模式（固定客户端）
-    client: Option<Arc<Mutex<HookExtensionClient<Channel>>>>,
+    client: Option<Arc<Mutex<HookPluginClient<Channel>>>>,
 
     // 模式2: 服务发现模式（动态选择实例）
     service_client: Option<Arc<Mutex<ServiceClient>>>,
@@ -56,13 +60,25 @@ impl GrpcHookAdapter {
         endpoint: String,
         metadata: HashMap<String, String>,
     ) -> Result<Self> {
-        let channel = Endpoint::from_shared(endpoint.clone())?
+        let channel = Endpoint::from_shared(endpoint.clone())
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InvalidParameter,
+                    "invalid gRPC hook endpoint URI",
+                )
+            })?
             .connect()
             .await
-            .context("Failed to connect to gRPC endpoint")
-            .map_err(|e| anyhow::anyhow!("Failed to connect to gRPC endpoint: {}", e))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to connect to gRPC hook endpoint",
+                )
+            })?;
 
-        let client = HookExtensionClient::new(channel);
+        let client = HookPluginClient::new(channel);
 
         tracing::info!(endpoint = %endpoint, "Created gRPC adapter from endpoint");
 
@@ -126,7 +142,7 @@ impl GrpcHookAdapter {
     }
 
     /// 获取客户端（自动选择模式）
-    async fn get_client(&self, _key: Option<&str>) -> Result<HookExtensionClient<Channel>> {
+    async fn get_client(&self, _key: Option<&str>) -> Result<HookPluginClient<Channel>> {
         // 模式1: 直接地址模式
         if let Some(ref client) = self.client {
             return Ok(client.lock().await.clone());
@@ -139,9 +155,15 @@ impl GrpcHookAdapter {
             let channel = client_guard
                 .get_channel()
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to get channel from service client: {}", e))?;
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::InternalError,
+                        "failed to get gRPC channel from service client",
+                    )
+                })?;
 
-            let client = HookExtensionClient::new(channel);
+            let client = HookPluginClient::new(channel);
             return Ok(client);
         }
 
@@ -150,9 +172,11 @@ impl GrpcHookAdapter {
         // 在这种模式下，我们需要在创建GrpcHookAdapter时就创建好ServiceClient
         // 这里的实现仅作说明，实际使用时应该在new_from_discovery中创建ServiceClient
 
-        Err(anyhow::anyhow!(
-            "No client available: neither endpoint nor service discovery configured"
-        ))
+        Err(ErrorBuilder::new(
+            ErrorCode::InternalError,
+            "no gRPC hook client: neither endpoint nor service discovery configured",
+        )
+        .build_error())
     }
 
     /// 设置请求元数据（包括静态 metadata 和从 Context 提取的 Context）
@@ -176,32 +200,82 @@ impl GrpcHookAdapter {
         request
     }
 
+    async fn call_hook<Mres: Message + Default>(
+        &self,
+        ctx: &Context,
+        operation: &'static str,
+        request_type_url: &str,
+        inner: &impl Message,
+        key: Option<&str>,
+    ) -> Result<Mres> {
+        let any = prost_types::Any {
+            type_url: request_type_url.to_string(),
+            value: inner.encode_to_vec(),
+        };
+        let mut req = Request::new(GenericRequest {
+            operation: operation.to_string(),
+            metadata: HashMap::new(),
+            payload: Some(any),
+            request_id: uuid::Uuid::new_v4().to_string(),
+        });
+        req = self.set_request_metadata(req, ctx);
+        let mut client = self.get_client(key).await?;
+        let envelope = client
+            .call(req)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "gRPC HookPlugin.Call failed",
+                )
+            })?
+            .into_inner();
+        if !envelope.ok {
+            return Err(
+                ErrorBuilder::new(ErrorCode::InternalError, envelope.error_message.clone())
+                    .details(envelope.error_code.clone())
+                    .build_error(),
+            );
+        }
+        let payload = envelope.payload.ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "HookPlugin.Call returned empty payload",
+            )
+            .build_error()
+        })?;
+        Mres::decode(payload.value.as_slice()).map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                "failed to decode HookPlugin.Call response",
+            )
+        })
+    }
+
     /// 执行PreSend Hook
     pub async fn pre_send(
         &self,
         ctx: &Context,
         draft: &mut MessageDraft,
     ) -> Result<PreSendDecision> {
-        let request = PreSendHookRequest {
+        let inner = PreSendHookRequest {
             context: Some(context_to_proto(ctx)),
             draft: Some(message_draft_to_proto(draft)),
         };
-
-        let mut request = Request::new(request);
-        request = self.set_request_metadata(request, ctx);
-
-        // 使用一致性哈希时，以 conversation_id 作为 key
         let key = ctx
             .session_id()
             .and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let mut client = self.get_client(key).await?;
-
-        let response = client
-            .invoke_pre_send(request)
-            .await
-            .context("gRPC PreSend hook call failed")
-            .map_err(|e| anyhow::anyhow!("gRPC PreSend hook call failed: {}", e))?
-            .into_inner();
+        let response: PreSendHookResponse = self
+            .call_hook(
+                ctx,
+                "flare.hook.v1.pre_send",
+                "type.googleapis.com/flare.capability.v1.PreSendHookRequest",
+                &inner,
+                key,
+            )
+            .await?;
 
         Ok(proto_to_pre_send_decision(&response, draft))
     }
@@ -213,90 +287,81 @@ impl GrpcHookAdapter {
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> Result<()> {
-        let request = PostSendHookRequest {
+        let inner = PostSendHookRequest {
             context: Some(context_to_proto(ctx)),
             record: Some(message_record_to_proto(record)),
             draft: Some(message_draft_to_proto(draft)),
         };
-
-        let mut request = Request::new(request);
-        request = self.set_request_metadata(request, ctx);
-
-        // 使用一致性哈希时，以 conversation_id 作为 key
         let key = ctx
             .session_id()
             .and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let mut client = self.get_client(key).await?;
-
-        let response = client
-            .invoke_post_send(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC PostSend hook call failed: {}", e))?
-            .into_inner();
+        let response: PostSendHookResponse = self
+            .call_hook(
+                ctx,
+                "flare.hook.v1.post_send",
+                "type.googleapis.com/flare.capability.v1.PostSendHookRequest",
+                &inner,
+                key,
+            )
+            .await?;
 
         if response.success {
             Ok(())
         } else {
-            use flare_im_core::error::ErrorCode;
-            Err(
-                flare_server_core::flare_err!(ErrorCode::InternalError, "PostSend hook failed")
-                    .into(),
+            Err(ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "remote PostSend hook reported failure",
             )
+            .build_error())
         }
     }
 
     /// 执行Delivery Hook
     pub async fn delivery(&self, ctx: &Context, event: &DeliveryEvent) -> Result<()> {
-        let request = DeliveryHookRequest {
+        let inner = DeliveryHookRequest {
             context: Some(context_to_proto(ctx)),
             event: Some(delivery_event_to_proto(event)),
         };
-
-        let mut request = Request::new(request);
-        request = self.set_request_metadata(request, ctx);
-
-        // 使用一致性哈希时，以 user_id 作为 key
         let key = Some(event.user_id.as_str());
-        let mut client = self.get_client(key).await?;
-
-        let response = client
-            .notify_delivery(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC Delivery hook call failed: {}", e))?
-            .into_inner();
+        let response: DeliveryHookResponse = self
+            .call_hook(
+                ctx,
+                "flare.hook.v1.delivery",
+                "type.googleapis.com/flare.capability.v1.DeliveryHookRequest",
+                &inner,
+                key,
+            )
+            .await?;
 
         if response.success {
             Ok(())
         } else {
-            use flare_im_core::error::ErrorCode;
-            Err(
-                flare_server_core::flare_err!(ErrorCode::InternalError, "Delivery hook failed")
-                    .into(),
+            Err(ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "remote Delivery hook reported failure",
             )
+            .build_error())
         }
     }
 
     /// 执行Recall Hook
     pub async fn recall(&self, ctx: &Context, event: &RecallEvent) -> Result<PreSendDecision> {
-        let request = RecallHookRequest {
+        let inner = RecallHookRequest {
             context: Some(context_to_proto(ctx)),
             event: Some(recall_event_to_proto(event)),
         };
-
-        let mut request = Request::new(request);
-        request = self.set_request_metadata(request, ctx);
-
-        // 使用一致性哈希时，以 conversation_id 作为 key
         let key = ctx
             .session_id()
             .and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let mut client = self.get_client(key).await?;
-
-        let response = client
-            .notify_recall(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC Recall hook call failed: {}", e))?
-            .into_inner();
+        let response: RecallHookResponse = self
+            .call_hook(
+                ctx,
+                "flare.hook.v1.recall",
+                "type.googleapis.com/flare.capability.v1.RecallHookRequest",
+                &inner,
+                key,
+            )
+            .await?;
 
         Ok(proto_to_recall_decision(&response))
     }

@@ -296,6 +296,9 @@ for service in "${CORE_SERVICES[@]}"; do
         "message-orchestrator")
             PACKAGE="flare-orchestrator"
             BIN_NAME="flare-orchestrator"
+            # 本地联调默认开启 RTC bridge（EVENT_CALL_SIGNAL -> CapabilityService.Dispatch）。
+            export MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE="${MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE:-1}"
+            export MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI="${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-http://127.0.0.1:50095}"
             ENV_VARS=""
             ;;
         "storage-writer")
@@ -353,6 +356,8 @@ for service in "${CORE_SERVICES[@]}"; do
         unset SIGNALING_ONLINE_SERVICE_HOST SIGNALING_ONLINE_SERVICE_PORT ONLINE_SERVICE_ENDPOINT
     elif [ "$service" = "signaling-route" ]; then
         unset SIGNALING_ROUTE_SERVICE_HOST SIGNALING_ROUTE_SERVICE_PORT ROUTE_SERVICE_ENDPOINT
+    elif [ "$service" = "message-orchestrator" ]; then
+        unset MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI
     elif [ "$service" = "sync-orchestrator" ]; then
         unset SYNC_ORCHESTRATOR_HOST SYNC_ORCHESTRATOR_PORT
     fi
@@ -424,27 +429,38 @@ if [ "$GATEWAY_MODE" == "single" ]; then
         fi
     fi
     
-    # 检查端口是否被占用，如果是则停止占用端口的进程
-    check_and_kill_port() {
+    # 仅清理「在本端口上 LISTEN」的旧 access-gateway（flare-signaling-gateway）。
+    # 注意：勿使用 `lsof -ti :port` 无状态过滤——它会把「作为客户端连到该端口」的进程也算进来，
+    # 曾误杀 flare-signaling-online（gRPC 在 50061），导致 access-gateway 启动后核心服务缺位。
+    check_and_kill_stale_access_gateway_listener() {
         local port=$1
-        local pid=$(lsof -ti :$port 2>/dev/null | head -1)
-        if [ -n "$pid" ]; then
-            local process_name=$(ps -p "$pid" -o comm= 2>/dev/null)
-            if [ -n "$process_name" ]; then
-                echo -e "${YELLOW}   检测到端口 $port 被进程 $process_name (PID: $pid) 占用，正在停止...${NC}"
+        local pid
+        pid=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+        [ -z "$pid" ] && return 0
+        local cmd
+        cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
+        case "$cmd" in
+            *flare-signaling-gateway*)
+                echo -e "${YELLOW}   检测到端口 $port 上旧 access-gateway (PID: $pid)，正在停止...${NC}"
                 kill "$pid" 2>/dev/null || true
                 sleep 1
                 if ps -p "$pid" > /dev/null 2>&1; then
                     kill -9 "$pid" 2>/dev/null || true
                 fi
-            fi
-        fi
+                ;;
+            *)
+                echo -e "${RED}   错误: 端口 $port 已被其他进程监听 (PID: $pid)，无法启动 access-gateway${NC}"
+                echo -e "${YELLOW}   命令行: $cmd${NC}"
+                echo -e "${YELLOW}   请结束占用进程或修改网关/服务端口配置后重试。${NC}"
+                exit 1
+                ;;
+        esac
     }
     
-    # 检查并清理端口占用
-    check_and_kill_port "$DEFAULT_WS_PORT"
-    check_and_kill_port "$((DEFAULT_WS_PORT + 1))"  # QUIC port
-    check_and_kill_port "$DEFAULT_GRPC_PORT"
+    # 检查并清理端口占用（仅旧网关监听）
+    check_and_kill_stale_access_gateway_listener "$DEFAULT_WS_PORT"
+    check_and_kill_stale_access_gateway_listener "$((DEFAULT_WS_PORT + 1))"  # QUIC port
+    check_and_kill_stale_access_gateway_listener "$DEFAULT_GRPC_PORT"
     
     echo -e "${YELLOW}   启动 access-gateway (默认端口)...${NC}"
     echo -e "${BLUE}      WebSocket: $DEFAULT_WS_PORT, QUIC: $((DEFAULT_WS_PORT + 1)), gRPC: $DEFAULT_GRPC_PORT${NC}"
@@ -595,4 +611,3 @@ echo ""
 if [ $CHECK_RESULT -ne 0 ]; then
     exit 1
 fi
-

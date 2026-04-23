@@ -1,7 +1,7 @@
 use flare_im_core::Ctx;
 // 假设 Message 和 Event 类型由 flare_common_v1 proto 生成
-use flare_proto::common::{Message, Event, PushEnvelope};
 use crate::error::Result;
+use flare_proto::common::{Event, Message, PushEnvelope};
 
 /// 推送仓储接口
 ///
@@ -137,9 +137,5 @@ pub trait PushRepository: Send + Sync {
     /// 1. 将 PushEnvelope 序列化
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers（如果未设置）
     /// 3. 发布到 Kafka Push Topic（由 Push Server 消费并执行推送）
-    async fn publish_push_envelope(
-        &self,
-        ctx: &Ctx,
-        envelope: PushEnvelope,
-    ) -> Result<()>;
+    async fn publish_push_envelope(&self, ctx: &Ctx, envelope: PushEnvelope) -> Result<()>;
 }

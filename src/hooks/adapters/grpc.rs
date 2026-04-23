@@ -5,16 +5,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::Ctx;
 use crate::error::{ErrorBuilder, ErrorCode, Result};
 use async_trait::async_trait;
+use prost::Message;
 use prost_types::Timestamp;
-use tonic::IntoRequest;
 use tonic::transport::{Channel, Endpoint};
-use flare_grpc_proto::hooks::hook_extension_client::HookExtensionClient;
+use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
 use flare_proto::common::Message as ProtoStorageMessage;
 use flare_grpc_proto::{
-    ProtoDeliveryHookRequest, ProtoDeliveryHookResponse, ProtoHookDeliveryEvent,
-    ProtoHookInvocationContext, ProtoHookMessageDraft, ProtoHookMessageRecord,
-    ProtoHookRecallEvent, ProtoPostSendHookRequest, ProtoPreSendHookRequest,
-    ProtoRecallHookRequest, ProtoRecallHookResponse,
+    GenericRequest, ProtoDeliveryHookRequest, ProtoDeliveryHookResponse, ProtoHookDeliveryEvent,
+    ProtoHookInvocationContext, ProtoHookMessageDraft, ProtoHookMessageRecord, ProtoHookRecallEvent,
+    ProtoPostSendHookRequest, ProtoPostSendHookResponse, ProtoPreSendHookRequest,
+    ProtoPreSendHookResponse, ProtoRecallHookRequest, ProtoRecallHookResponse,
 };
 
 use super::super::config::HookDefinition;
@@ -25,6 +25,37 @@ use super::super::types::{
 
 #[derive(Clone)]
 pub struct GrpcHookFactory;
+
+async fn hook_plugin_call<Mres: Message + Default>(
+    client: &mut HookPluginClient<Channel>,
+    operation: &'static str,
+    request_type_url: &str,
+    inner: &impl Message,
+    static_metadata: &HashMap<String, String>,
+) -> std::result::Result<Mres, tonic::Status> {
+    let any = prost_types::Any {
+        type_url: request_type_url.to_string(),
+        value: inner.encode_to_vec(),
+    };
+    let req = tonic::Request::new(GenericRequest {
+        operation: operation.to_string(),
+        metadata: static_metadata.clone(),
+        payload: Some(any),
+        request_id: uuid::Uuid::new_v4().to_string(),
+    });
+    let envelope = client.call(req).await?.into_inner();
+    if !envelope.ok {
+        return Err(tonic::Status::internal(format!(
+            "{}: {}",
+            envelope.error_code, envelope.error_message
+        )));
+    }
+    let p = envelope
+        .payload
+        .ok_or_else(|| tonic::Status::internal("empty HookPlugin response payload"))?;
+    Mres::decode(p.value.as_slice())
+        .map_err(|e| tonic::Status::internal(format!("decode HookPlugin response: {e}")))
+}
 
 impl GrpcHookFactory {
     pub fn new() -> Self {
@@ -107,15 +138,21 @@ struct GrpcPreSendHook {
 #[async_trait]
 impl PreSendHook for GrpcPreSendHook {
     async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
-        let mut client = HookExtensionClient::new(self.channel.clone());
+        let mut client = HookPluginClient::new(self.channel.clone());
         let mut request = ProtoPreSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.draft = Some(build_draft(draft));
 
-        let response = client.invoke_pre_send(request.into_request()).await;
+        let response = hook_plugin_call::<ProtoPreSendHookResponse>(
+            &mut client,
+            "flare.hook.v1.pre_send",
+            "type.googleapis.com/flare.capability.v1.PreSendHookRequest",
+            &request,
+            &self.static_metadata,
+        )
+        .await;
         match response {
-            Ok(resp) => {
-                let inner = resp.into_inner();
+            Ok(inner) => {
                 if !inner.allow {
                     let err = ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
                         .details("allow=false")
@@ -146,15 +183,22 @@ struct GrpcPostSendHook {
 #[async_trait]
 impl PostSendHook for GrpcPostSendHook {
     async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome {
-        let mut client = HookExtensionClient::new(self.channel.clone());
+        let mut client = HookPluginClient::new(self.channel.clone());
         let mut request = ProtoPostSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.record = Some(build_record(record));
         request.draft = Some(build_draft(draft));
 
-        match client.invoke_post_send(request).await {
-            Ok(resp) => {
-                let inner = resp.into_inner();
+        match hook_plugin_call::<ProtoPostSendHookResponse>(
+            &mut client,
+            "flare.hook.v1.post_send",
+            "type.googleapis.com/flare.capability.v1.PostSendHookRequest",
+            &request,
+            &self.static_metadata,
+        )
+        .await
+        {
+            Ok(inner) => {
                 if inner.success {
                     HookOutcome::Completed
                 } else {
@@ -183,14 +227,21 @@ struct GrpcDeliveryHook {
 #[async_trait]
 impl DeliveryHook for GrpcDeliveryHook {
     async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome {
-        let mut client = HookExtensionClient::new(self.channel.clone());
+        let mut client = HookPluginClient::new(self.channel.clone());
         let mut request = ProtoDeliveryHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.event = Some(build_delivery_event(event));
 
-        match client.notify_delivery(request).await {
-            Ok(resp) => {
-                let inner: ProtoDeliveryHookResponse = resp.into_inner();
+        match hook_plugin_call::<ProtoDeliveryHookResponse>(
+            &mut client,
+            "flare.hook.v1.delivery",
+            "type.googleapis.com/flare.capability.v1.DeliveryHookRequest",
+            &request,
+            &self.static_metadata,
+        )
+        .await
+        {
+            Ok(inner) => {
                 if inner.success {
                     HookOutcome::Completed
                 } else {
@@ -219,14 +270,21 @@ struct GrpcRecallHook {
 #[async_trait]
 impl RecallHook for GrpcRecallHook {
     async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
-        let mut client = HookExtensionClient::new(self.channel.clone());
+        let mut client = HookPluginClient::new(self.channel.clone());
         let mut request = ProtoRecallHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.event = Some(build_recall_event(event));
 
-        match client.notify_recall(request).await {
-            Ok(resp) => {
-                let inner: ProtoRecallHookResponse = resp.into_inner();
+        match hook_plugin_call::<ProtoRecallHookResponse>(
+            &mut client,
+            "flare.hook.v1.recall",
+            "type.googleapis.com/flare.capability.v1.RecallHookRequest",
+            &request,
+            &self.static_metadata,
+        )
+        .await
+        {
+            Ok(inner) => {
                 if inner.allow {
                     HookOutcome::Completed
                 } else {
@@ -275,12 +333,24 @@ fn build_context(
             .or_insert_with(|| value.clone());
     }
 
+    let operator_user_id = ctx
+        .actor()
+        .map(|a| a.actor_id().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| ctx.user_id().map(|s| s.to_string()))
+        .unwrap_or_default();
+
     ProtoHookInvocationContext {
         conversation_id: hook_data.conversation_id.clone().unwrap_or_default(),
         conversation_type: hook_data.conversation_type.clone().unwrap_or_default(),
         corridor,
         tags: hook_data.tags.clone(),
         attributes,
+        tenant_id: ctx.tenant_id().unwrap_or("").to_string(),
+        app_id: String::new(),
+        operator_user_id,
+        request_id: ctx.request_id().to_string(),
+        extension_bag: None,
     }
 }
 
@@ -292,6 +362,10 @@ fn build_draft(draft: &MessageDraft) -> ProtoHookMessageDraft {
         payload: draft.payload.clone(),
         headers: draft.headers.clone(),
         metadata: draft.metadata.clone(),
+        message_type: String::new(),
+        parent_message_id: String::new(),
+        is_silent: false,
+        extension_bag: None,
     }
 }
 
@@ -385,6 +459,8 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
         message: Some(message),
         persisted_at: Some(persisted_ts),
         metadata: record.metadata.clone(),
+        server_seq: 0,
+        extension_bag: None,
     }
 }
 
@@ -395,6 +471,8 @@ fn build_delivery_event(event: &DeliveryEvent) -> ProtoHookDeliveryEvent {
         channel: event.channel.clone(),
         delivered_at: Some(system_time_to_timestamp(event.delivered_at)),
         metadata: event.metadata.clone(),
+        device_id: String::new(),
+        extension_bag: None,
     }
 }
 
@@ -404,6 +482,8 @@ fn build_recall_event(event: &RecallEvent) -> ProtoHookRecallEvent {
         operator_id: event.operator_id.clone(),
         recalled_at: Some(system_time_to_timestamp(event.recalled_at)),
         metadata: event.metadata.clone(),
+        recall_scope: String::new(),
+        extension_bag: None,
     }
 }
 

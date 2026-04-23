@@ -269,7 +269,12 @@ impl SequenceAllocator {
         // 获取当前时间戳（毫秒）
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("System time went backwards: {}", e)))?
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("System time went backwards: {}", e)
+                )
+            })?
             .as_millis() as u64;
 
         // 生成 16 位随机数

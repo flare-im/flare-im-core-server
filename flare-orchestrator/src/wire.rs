@@ -3,9 +3,11 @@
 //! 类似 Go 的 Wire 框架，提供简单的依赖构建方法
 //!
 //! **与 `flare-capability` 的集成**：不依赖 `flare-capability` crate。
-//! - [`flare_im_core::hooks`] gRPC → `HookExtension`（PreSend/PostSend）。
-//! - 可选：`EVENT_CALL_SIGNAL` → `CapabilityService.Dispatch`（`rtc.call.*`）；`Dispatch` 失败时**降级**
-//!   仍推送事件（仅打 warn）。能力服务 URI 与 Hook auto 共用 [`MessageOrchestratorConfig::resolve_capability_grpc_uri`]。
+//! - [`flare_im_core::hooks`] gRPC → `HookPlugin`（PreSend/PostSend）。
+//! - 可选：`EVENT_CALL_SIGNAL` → `CapabilityService.Dispatch`（`rtc.call.video|audio` / `accept` /
+//!   `rtc.call.join_token` / `rtc.call.reject` / `rtc.call.end`）；与 **flare-strom-sfu** 对齐时由
+//!   `flare-capability` 转发 `SfuControl`。`Dispatch` 失败时**降级**仍推送事件（仅打 warn）。
+//!   能力服务 URI 与 Hook auto 共用 [`MessageOrchestratorConfig::resolve_capability_grpc_uri`]。
 //!
 //! ## 依赖注入顺序
 //! 1. 基础设施层（Infrastructure）：Redis、Kafka
@@ -21,27 +23,34 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use flare_im_core::constants::topics::TOPIC_MESSAGE_MAIN;
 use flare_im_core::hooks::adapters::DefaultHookFactory;
-use flare_im_core::hooks::{HookConfig, HookConfigLoader, HookDefinition, HookDispatcher, HookRegistry, HookTransportConfig};
+use flare_im_core::hooks::{
+    HookConfig, HookConfigLoader, HookDefinition, HookDispatcher, HookRegistry, HookTransportConfig,
+};
 use flare_im_core::service_names::{CAPABILITY, CONVERSATION};
 use flare_server_core::mq::consumer::dispatcher::{Dispatcher, TopicDispatcher};
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler as MqMessageHandler};
 use flare_server_core::mq::kafka::producer::KafkaProducer;
 
+use crate::application::extension::{
+    ExtensionOrchestrator, ExtensionPolicy, ExtensionRouting, ExtensionRuntimePolicy,
+};
 use crate::application::handlers::{
     EventHandler, MessageActionHandler, MessageHandler as AppMessageHandler, StorageHandler,
+    plugin::CallCapabilityBridge,
 };
-use crate::application::CallCapabilityBridge;
 use crate::config::MessageOrchestratorConfig;
 use crate::domain::service::{
     ConversationEnsureService, EventDomainService, HookExecutionService, MessageDomainService,
     SequenceAllocator,
 };
-use crate::infrastructure::rpc::{CapabilityDispatchClient, ConversationClient};
 use crate::infrastructure::messaging::conversation_ensure_publisher::MqConversationEnsurePublisher;
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
-use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
 use crate::infrastructure::persistence::recipient_repository::RecipientRepositoryImpl;
+use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
 use crate::infrastructure::persistence::wal_repository_impl::WalRepositoryItem;
+use crate::infrastructure::rpc::{
+    CapabilityDispatchClient, CapabilityDispatchGatewayImpl, ConversationClient,
+};
 use crate::interface::grpc::{MessageActionGrpcHandler, MessageSendGrpcHandler};
 use crate::interface::mq::StorageConsumerHandler;
 
@@ -80,15 +89,18 @@ pub async fn initialize(
         "http://127.0.0.1:50090",
     )
     .await
-    .map_err(|e| anyhow::anyhow!("connect conversation service ({conversation_service_type}) failed: {e}"))?;
+    .map_err(|e| {
+        anyhow::anyhow!("connect conversation service ({conversation_service_type}) failed: {e}")
+    })?;
     let conversation_repository = Arc::new(ConversationClient::new(conversation_channel));
 
-    let recipient_repository: Arc<dyn crate::domain::repository::RecipientRepository> =
-        Arc::new(RecipientRepositoryImpl::new(conversation_repository.clone()));
+    let recipient_repository: Arc<dyn crate::domain::repository::RecipientRepository> = Arc::new(
+        RecipientRepositoryImpl::new(conversation_repository.clone()),
+    );
 
-    let wal_repository: Arc<WalRepositoryItem> = Arc::new(WalRepositoryItem::Redis(
-        Arc::new(RedisWalRepository::new(redis_client.clone(), config.clone())),
-    ));
+    let wal_repository: Arc<WalRepositoryItem> = Arc::new(WalRepositoryItem::Redis(Arc::new(
+        RedisWalRepository::new(redis_client.clone(), config.clone()),
+    )));
 
     let sequence_allocator = SequenceAllocator::new(redis_client.clone(), 100)
         .await
@@ -122,41 +134,70 @@ pub async fn initialize(
         Some(MqConversationEnsurePublisher::new(kafka_producer)),
     ));
 
+    let call_capability_bridge: Option<Arc<CallCapabilityBridge>> = if config
+        .capability_rtc_bridge_enabled
+    {
+        let cap_fallback = config.resolve_capability_grpc_uri();
+        let cap_channel = flare_im_core::discovery::connect_grpc_channel_from_app_config(
+            app_config,
+            CAPABILITY,
+            &cap_fallback,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("connect flare-capability for RTC bridge ({CAPABILITY}): {e}")
+        })?;
+        let cap_client = Arc::new(CapabilityDispatchClient::new(cap_channel));
+        tracing::info!(
+            endpoint = %cap_fallback,
+            "Orchestrator RTC bridge: EVENT_CALL_SIGNAL → CapabilityService.Dispatch (Dispatch errors degrade to push-only)"
+        );
+        let gateway = Arc::new(CapabilityDispatchGatewayImpl::new(cap_client));
+        Some(Arc::new(CallCapabilityBridge::new(gateway)))
+    } else {
+        None
+    };
+
+    let extension_orchestrator = Arc::new(ExtensionOrchestrator::new(
+        hook_execution_service,
+        call_capability_bridge.clone(),
+        ExtensionPolicy::new(
+            config.extension_call_signal_fail_open,
+            config.extension_post_send_fail_open,
+        )
+        .with_runtime(
+            ExtensionRuntimePolicy::new(
+                config.extension_pre_send_timeout_ms,
+                config.extension_pre_send_retry,
+            ),
+            ExtensionRuntimePolicy::new(
+                config.extension_post_send_timeout_ms,
+                config.extension_post_send_retry,
+            ),
+            ExtensionRuntimePolicy::new(
+                config.extension_event_enrich_timeout_ms,
+                config.extension_event_enrich_retry,
+            ),
+        ),
+        ExtensionRouting::new(
+            config.extension_tenant_allowlist.clone(),
+            config.extension_hook_message_type_allowlist.clone(),
+            config.extension_plugin_event_type_allowlist.clone(),
+        ),
+    ));
+
     let message_handler = Arc::new(AppMessageHandler::new(
         message_domain_service.clone(),
-        hook_execution_service,
+        extension_orchestrator.clone(),
         conversation_ensure_service,
     ));
 
-    let call_capability_bridge: Option<Arc<CallCapabilityBridge>> =
-        if config.capability_rtc_bridge_enabled {
-            let cap_fallback = config.resolve_capability_grpc_uri();
-            let cap_channel = flare_im_core::discovery::connect_grpc_channel_from_app_config(
-                app_config,
-                CAPABILITY,
-                &cap_fallback,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("connect flare-capability for RTC bridge ({CAPABILITY}): {e}")
-            })?;
-            let cap_client = Arc::new(CapabilityDispatchClient::new(cap_channel));
-            tracing::info!(
-                endpoint = %cap_fallback,
-                "Orchestrator RTC bridge: EVENT_CALL_SIGNAL → CapabilityService.Dispatch (Dispatch errors degrade to push-only)"
-            );
-            Some(Arc::new(CallCapabilityBridge::new(cap_client)))
-        } else {
-            None
-        };
-
     let event_handler = Arc::new(EventHandler::new(
         event_domain_service.clone(),
-        call_capability_bridge,
+        extension_orchestrator,
     ));
 
-    let message_send_grpc =
-        MessageSendGrpcHandler::new(message_handler, event_handler.clone());
+    let message_send_grpc = MessageSendGrpcHandler::new(message_handler, event_handler.clone());
 
     let message_action_handler = Arc::new(MessageActionHandler::new(event_handler));
 
@@ -187,9 +228,7 @@ pub async fn initialize(
     })
 }
 
-async fn build_redis_client(
-    config: &MessageOrchestratorConfig,
-) -> Result<Arc<redis::Client>> {
+async fn build_redis_client(config: &MessageOrchestratorConfig) -> Result<Arc<redis::Client>> {
     let redis_url = config
         .redis_url
         .as_ref()
@@ -210,10 +249,10 @@ async fn build_kafka_producer(
     Ok(Arc::new(producer))
 }
 
-fn inject_flare_capability_hook_extension_targets(cfg: &mut HookConfig, endpoint: String) {
+fn inject_flare_capability_hook_plugin_targets(cfg: &mut HookConfig, endpoint: String) {
     cfg.pre_send.push(HookDefinition {
-        name: "flare_capability_hook_extension_pre_send".into(),
-        description: Some("Remote HookExtension.invoke_pre_send (flare-capability gRPC)".into()),
+        name: "flare_capability_hook_plugin_pre_send".into(),
+        description: Some("Remote HookPlugin.Call pre_send (flare-capability gRPC)".into()),
         enabled: true,
         priority: 100,
         transport: HookTransportConfig::Grpc {
@@ -223,8 +262,8 @@ fn inject_flare_capability_hook_extension_targets(cfg: &mut HookConfig, endpoint
         ..Default::default()
     });
     cfg.post_send.push(HookDefinition {
-        name: "flare_capability_hook_extension_post_send".into(),
-        description: Some("Remote HookExtension.invoke_post_send (flare-capability gRPC)".into()),
+        name: "flare_capability_hook_plugin_post_send".into(),
+        description: Some("Remote HookPlugin.Call post_send (flare-capability gRPC)".into()),
         enabled: true,
         priority: 100,
         transport: HookTransportConfig::Grpc {
@@ -254,11 +293,11 @@ async fn build_hook_dispatcher(
 
     if orchestrator_cfg.capability_hooks_auto {
         let ep = orchestrator_cfg.resolve_capability_grpc_uri();
-        inject_flare_capability_hook_extension_targets(&mut hook_cfg, ep);
+        inject_flare_capability_hook_plugin_targets(&mut hook_cfg, ep);
     }
 
-    let factory = DefaultHookFactory::new()
-        .map_err(|e| anyhow::anyhow!("hook DefaultHookFactory: {e}"))?;
+    let factory =
+        DefaultHookFactory::new().map_err(|e| anyhow::anyhow!("hook DefaultHookFactory: {e}"))?;
 
     let pre_n = hook_cfg.pre_send.len();
     let post_n = hook_cfg.post_send.len();

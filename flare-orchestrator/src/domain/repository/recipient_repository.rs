@@ -28,7 +28,7 @@ use crate::domain::model::ConversationType;
 /// ## 实现
 /// - Infrastructure 层提供具体实现（如 Redis、Database）
 /// - 支持缓存和降级
-/// 
+///
 /// ## Rust 2024 兼容性
 /// 使用 `Pin<Box<dyn Future>>` 返回类型以支持 `dyn Trait`
 pub trait RecipientRepository: Send + Sync {
@@ -59,11 +59,13 @@ pub trait RecipientRepository: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>>;
 }
 
-
 /// 辅助函数：判断会话类型是否需要查询成员列表
 pub fn needs_member_lookup(conversation_type: ConversationType) -> bool {
     matches!(
         conversation_type,
-        ConversationType::Group | ConversationType::Ai | ConversationType::Customer | ConversationType::System
+        ConversationType::Group
+            | ConversationType::Ai
+            | ConversationType::Customer
+            | ConversationType::System
     )
 }

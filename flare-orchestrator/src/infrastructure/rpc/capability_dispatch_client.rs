@@ -40,27 +40,22 @@ impl CapabilityDispatchClient {
         let resp: DispatchCapabilityResponse = client
             .dispatch(grpc)
             .await
-            .map_err(|e| {
-                FlareError::system(format!("capability Dispatch gRPC failed: {e}"))
-            })?
+            .map_err(|e| FlareError::system(format!("capability Dispatch gRPC failed: {e}")))?
             .into_inner();
 
-        let result = resp.result.ok_or_else(|| {
-            FlareError::system("capability Dispatch: empty result")
-        })?;
+        let result = resp
+            .result
+            .ok_or_else(|| FlareError::system("capability Dispatch: empty result"))?;
 
         if !result.success {
-            return Err(
-                ErrorBuilder::new(
-                    ErrorCode::OperationFailed,
-                    "capability Dispatch rejected",
-                )
-                .details(result.error_message.clone())
-                .build_error(),
-            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::OperationFailed,
+                "capability Dispatch rejected",
+            )
+            .details(result.error_message.clone())
+            .build_error());
         }
 
         Ok(result)
     }
 }
-

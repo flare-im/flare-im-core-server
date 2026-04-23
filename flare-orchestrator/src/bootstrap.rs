@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use anyhow::{Context, Result};
 use tracing::info;
 
+use flare_core_runtime::ServiceRuntime;
 use flare_im_core::service_names::ORCHESTRATOR;
 use flare_server_core::mq::KafkaConsumerConfig;
-use flare_core_runtime::ServiceRuntime;
 
 use super::wire;
 
@@ -37,12 +37,9 @@ impl ApplicationBootstrap {
         let service_config = app_config.orchestrator_service();
 
         info!("Parsing server address...");
-        let address: SocketAddr = ServiceHelper::parse_server_addr(
-            app_config,
-            &service_config.runtime,
-            ORCHESTRATOR,
-        )
-        .map_err(|e| anyhow::anyhow!("invalid orchestrator server address: {}", e))?;
+        let address: SocketAddr =
+            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, ORCHESTRATOR)
+                .map_err(|e| anyhow::anyhow!("invalid orchestrator server address: {}", e))?;
         info!(address = %address, "Server address parsed successfully");
 
         let context = wire::initialize(app_config)
@@ -91,13 +88,13 @@ impl ApplicationBootstrap {
         )
         .map_err(|e| anyhow::anyhow!("create orchestrator kafka fetcher: {}", e))?;
 
-        let main_queue_consumer = ConsumerRuntimeTask::from_parts(
-            consumer_config,
-            main_queue_dispatcher,
-            fetcher,
-        );
+        let main_queue_consumer =
+            ConsumerRuntimeTask::from_parts(consumer_config, main_queue_dispatcher, fetcher);
 
-        let mq_task = MqConsumerTask::new("orchestrator-main-queue-consumer", Box::new(main_queue_consumer));
+        let mq_task = MqConsumerTask::new(
+            "orchestrator-main-queue-consumer",
+            Box::new(main_queue_consumer),
+        );
 
         info!(
             address = %address,
@@ -109,7 +106,9 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(ORCHESTRATOR)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
                 .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
                     use flare_server_core::middleware::ContextLayer;
 

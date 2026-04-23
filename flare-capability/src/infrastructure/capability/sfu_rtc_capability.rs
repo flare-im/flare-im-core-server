@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use flare_sfu::domain::signaling::SignalingHandler;
 use flare_sfu::interface::plugin::SfuPlugin;
-use flare_sfu::{ParticipantId, RoomId, TrackId, UserId};
+use flare_sfu::{CallId, CallRoomBinding, ConversationId, ParticipantId, RoomId, TrackId, UserId};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -31,6 +31,8 @@ struct CallSession {
 
 #[derive(Debug, Deserialize)]
 struct StartCallPayload {
+    /// 编排器历史上曾写 `client_call_id`，与 `call_id` 等价。
+    #[serde(default, alias = "client_call_id")]
     call_id: Option<String>,
     codec: Option<String>,
 }
@@ -88,17 +90,43 @@ impl RtcCapability for SfuRtcCapability {
             .call_id
             .clone()
             .unwrap_or_else(|| format!("call-{}", Uuid::new_v4()));
+
+        if let Some(entry) = self.calls.get(&call_id) {
+            let s = entry.value();
+            return Ok(CreateCallResponse {
+                call_id: call_id.clone(),
+                room_id: s.room_id.to_string(),
+                ext: json!({
+                    "owner_participant_id": s.owner_participant_id.to_string(),
+                    "owner_track_id": s.owner_track_id.as_ref().map(|t| t.to_string()).unwrap_or_default(),
+                    "media": s.media,
+                    "idempotent_replay": true,
+                }),
+            });
+        }
+
         let video = !matches!(
             req.media.as_deref().map(str::to_ascii_lowercase).as_deref(),
             Some("audio")
         );
         let media_type = Self::media_type_from_request(req.media.as_deref(), video);
+        let im_binding = if req.conversation_id.trim().is_empty() {
+            None
+        } else {
+            Some(CallRoomBinding {
+                conversation_id: ConversationId::new(req.conversation_id.trim().to_string())
+                    .map_err(|e| CapabilityError::System(e.to_string()))?,
+                call_id: CallId::new(call_id.clone())
+                    .map_err(|e| CapabilityError::System(e.to_string()))?,
+                operator_id: None,
+            })
+        };
         let create = signaling
             .handle_create_room(
                 ctx,
                 flare_sfu::domain::signaling::CreateRoomReq {
                     config: flare_sfu::domain::RoomConfig::default(),
-                    im_binding: None,
+                    im_binding,
                 },
             )
             .await
@@ -237,10 +265,17 @@ impl RtcCapability for SfuRtcCapability {
         _ctx: &Ctx,
         req: &GetJoinTokenRequest,
     ) -> Result<GetJoinTokenResponse> {
+        let room_id = self
+            .calls
+            .get(&req.call_id)
+            .map(|c| c.room_id.to_string())
+            .unwrap_or_default();
         Ok(GetJoinTokenResponse {
             token: format!("stub-token-{}", req.call_id),
             ttl_seconds: 3600,
-            ext: json!({}),
+            ext: json!({
+                "room_id": room_id,
+            }),
         })
     }
 

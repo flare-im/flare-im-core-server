@@ -8,5 +8,5 @@ pub use flare_im_core::event::{
     MqEnvelopeDecodeError, decode_mq_envelope, mq_envelope_for_main_queue_event,
     mq_envelope_for_main_queue_message,
 };
-pub use flare_proto::common::{MqEnvelope, MqPayloadKind};
 pub use flare_proto::common::mq_envelope::Payload as MqPayload;
+pub use flare_proto::common::{MqEnvelope, MqPayloadKind};

@@ -11,6 +11,7 @@
 //! - 操作事件：`MessageOperationDomainService` → `ArchiveStoreRepository`（messages/operation_history/edit_history/visibility/read_records/reactions/pinned_messages/marked_messages）
 
 pub mod application;
+pub mod call;
 pub mod config;
 pub mod convert;
 pub mod domain;

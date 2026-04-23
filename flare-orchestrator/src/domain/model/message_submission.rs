@@ -1,10 +1,13 @@
 use crate::domain::model::ConversationType;
 use crate::error::Result;
 use chrono::Utc;
-use flare_im_core::{ErrorCode, utils::{
-    TimelineMetadata, current_millis, datetime_to_timestamp, embed_timeline_in_extra,
-    timestamp_to_millis,
-}};
+use flare_im_core::{
+    ErrorCode,
+    utils::{
+        TimelineMetadata, current_millis, datetime_to_timestamp, embed_timeline_in_extra,
+        timestamp_to_millis,
+    },
+};
 use flare_proto::common::Message;
 use flare_server_core::flare_err;
 use uuid::Uuid;
@@ -37,7 +40,10 @@ impl MessageSubmission {
     pub fn prepare(mut request: Message, defaults: &MessageDefaults) -> Result<Self> {
         // 1. 校验必填字段
         if request.conversation_id.is_empty() {
-            return Err(flare_err!(ErrorCode::BadRequest, "conversation_id is required"));
+            return Err(flare_err!(
+                ErrorCode::BadRequest,
+                "conversation_id is required"
+            ));
         }
         if request.sender_id.is_empty() {
             return Err(flare_err!(ErrorCode::BadRequest, "sender_id is required"));
@@ -50,10 +56,12 @@ impl MessageSubmission {
             None
         };
         request.server_id = Uuid::new_v4().to_string();
-        
+
         // 保存原始 server_id（如果有）
         if let Some(old_server_id) = client_provided_server_id {
-            request.extra.insert("original_server_id".to_string(), old_server_id);
+            request
+                .extra
+                .insert("original_server_id".to_string(), old_server_id);
         }
 
         // 3. 填充 client_msg_id
@@ -104,7 +112,10 @@ impl MessageSubmission {
             .cloned()
             .or_else(|| defaults.default_tenant_id.clone())
             .unwrap_or_else(|| "default".to_string());
-        request.extra.entry("tenant_id".to_string()).or_insert(tenant_id);
+        request
+            .extra
+            .entry("tenant_id".to_string())
+            .or_insert(tenant_id);
 
         // 9. 设置 shard_key（默认为 conversation_id）
         let shard_key = request
@@ -112,10 +123,17 @@ impl MessageSubmission {
             .get("shard_key")
             .cloned()
             .unwrap_or_else(|| request.conversation_id.clone());
-        request.extra.entry("shard_key".to_string()).or_insert(shard_key);
+        request
+            .extra
+            .entry("shard_key".to_string())
+            .or_insert(shard_key);
 
         // 10. 设置 business_type（如果 extra 中没有）
-        if request.extra.get("business_type").map_or(true, |v| v.is_empty()) {
+        if request
+            .extra
+            .get("business_type")
+            .map_or(true, |v| v.is_empty())
+        {
             request.extra.insert(
                 "business_type".to_string(),
                 defaults.default_business_type.clone(),

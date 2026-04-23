@@ -11,11 +11,11 @@ pub enum PersistenceMode {
     /// - 临时消息/事件（TYPING、SYSTEM_EVENT、PRESENCE 等）：仅推送
     /// - 普通消息/事件：持久化 + 推送
     Auto,
-    
+
     /// 强制持久化：无论消息/事件类型如何，都进行持久化 + 推送
     /// 用于特殊场景，如重要通知、系统公告等
     ForcePersistence,
-    
+
     /// 强制仅推送：无论消息/事件类型如何，都仅推送不持久化
     /// 用于临时消息、实时状态等
     ForcePushOnly,

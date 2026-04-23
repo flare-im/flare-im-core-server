@@ -132,7 +132,7 @@ impl MessageProfile {
             category,
         }
     }
-    
+
     /// 判断消息类别
     ///
     /// 规则：

@@ -60,19 +60,59 @@ pub struct MessageOrchestratorConfig {
     /// 例如："svid.im"、"svid.customer" 等
     pub svid: Option<String>,
     /// 是否在加载 `hooks.toml` 后 **自动追加** 指向独立进程 `flare-capability` 的
-    /// `HookExtension`（PreSend/PostSend）gRPC Hook。关闭时仅使用配置文件中的 Hook。
+    /// `HookPlugin.Call`（PreSend/PostSend）gRPC Hook。关闭时仅使用配置文件中的 Hook。
     /// 环境变量：`MESSAGE_ORCHESTRATOR_CAPABILITY_HOOKS_AUTO=1|true`。
     pub capability_hooks_auto: bool,
-    /// `flare-capability` gRPC 地址（与 HookExtension / CapabilityService 同端口），例如 `http://flare-capability:50051`。
+    /// `flare-capability` gRPC 地址（HookPlugin / ExtensionPlugin / CapabilityService 同端口），例如 `http://flare-capability:50051`。
     /// 环境变量：`MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI`（未设且开启 auto 时使用本机默认端口，见 wire 常量）。
     pub capability_grpc_uri: Option<String>,
     /// `EVENT_CALL_SIGNAL` 是否经 `CapabilityService.Dispatch` 联动 RTC（invite/accept/hangup）。
     /// `MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE=1|true` 开启。
     pub capability_rtc_bridge_enabled: bool,
+    /// CallSignal enrich 扩展失败是否 fail-open（默认 true：降级继续推送）。
+    pub extension_call_signal_fail_open: bool,
+    /// PostSend Hook 扩展失败是否 fail-open（默认 false：保持现有 fail-closed 语义）。
+    pub extension_post_send_fail_open: bool,
+    /// PreSend Hook 扩展单次执行超时（毫秒）。
+    pub extension_pre_send_timeout_ms: u64,
+    /// PreSend Hook 扩展失败重试次数。
+    pub extension_pre_send_retry: u32,
+    /// PostSend Hook 扩展单次执行超时（毫秒）。
+    pub extension_post_send_timeout_ms: u64,
+    /// PostSend Hook 扩展失败重试次数。
+    pub extension_post_send_retry: u32,
+    /// Event enrich 插件扩展单次执行超时（毫秒）。
+    pub extension_event_enrich_timeout_ms: u64,
+    /// Event enrich 插件扩展失败重试次数。
+    pub extension_event_enrich_retry: u32,
+    /// 扩展执行租户白名单（逗号分隔，空表示全量）。
+    pub extension_tenant_allowlist: Vec<String>,
+    /// Hook 扩展允许的消息类型（逗号分隔 i32，空表示全量）。
+    pub extension_hook_message_type_allowlist: Vec<i32>,
+    /// Plugin 扩展允许的事件类型（逗号分隔 i32，空表示全量）。
+    pub extension_plugin_event_type_allowlist: Vec<i32>,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
     env::var(primary).ok().or_else(|| env::var(fallback).ok())
+}
+
+fn parse_csv_strings(raw: Option<String>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn parse_csv_i32(raw: Option<String>) -> Vec<i32> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<i32>().ok())
+        .collect()
 }
 
 impl MessageOrchestratorConfig {
@@ -259,6 +299,82 @@ impl MessageOrchestratorConfig {
         })
         .unwrap_or(false);
 
+        let extension_call_signal_fail_open = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_CALL_SIGNAL_FAIL_OPEN",
+            "ORCHESTRATOR_EXTENSION_CALL_SIGNAL_FAIL_OPEN",
+        )
+        .map(|v| {
+            let t = v.trim();
+            matches!(t, "1" | "true" | "on" | "yes")
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(true);
+
+        let extension_post_send_fail_open = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_POST_SEND_FAIL_OPEN",
+            "ORCHESTRATOR_EXTENSION_POST_SEND_FAIL_OPEN",
+        )
+        .map(|v| {
+            let t = v.trim();
+            matches!(t, "1" | "true" | "on" | "yes")
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false);
+
+        let extension_pre_send_timeout_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_PRE_SEND_TIMEOUT_MS",
+            "ORCHESTRATOR_EXTENSION_PRE_SEND_TIMEOUT_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1500);
+        let extension_pre_send_retry = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_PRE_SEND_RETRY",
+            "ORCHESTRATOR_EXTENSION_PRE_SEND_RETRY",
+        )
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+        let extension_post_send_timeout_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_POST_SEND_TIMEOUT_MS",
+            "ORCHESTRATOR_EXTENSION_POST_SEND_TIMEOUT_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1200);
+        let extension_post_send_retry = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_POST_SEND_RETRY",
+            "ORCHESTRATOR_EXTENSION_POST_SEND_RETRY",
+        )
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+        let extension_event_enrich_timeout_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_EVENT_ENRICH_TIMEOUT_MS",
+            "ORCHESTRATOR_EXTENSION_EVENT_ENRICH_TIMEOUT_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1800);
+        let extension_event_enrich_retry = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_EVENT_ENRICH_RETRY",
+            "ORCHESTRATOR_EXTENSION_EVENT_ENRICH_RETRY",
+        )
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1);
+
+        let extension_tenant_allowlist = parse_csv_strings(env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_TENANT_ALLOWLIST",
+            "ORCHESTRATOR_EXTENSION_TENANT_ALLOWLIST",
+        ));
+        let extension_hook_message_type_allowlist = parse_csv_i32(env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_HOOK_MESSAGE_TYPE_ALLOWLIST",
+            "ORCHESTRATOR_EXTENSION_HOOK_MESSAGE_TYPE_ALLOWLIST",
+        ));
+        let extension_plugin_event_type_allowlist = parse_csv_i32(env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_EXTENSION_PLUGIN_EVENT_TYPE_ALLOWLIST",
+            "ORCHESTRATOR_EXTENSION_PLUGIN_EVENT_TYPE_ALLOWLIST",
+        ));
+
         Self {
             kafka_bootstrap,
             kafka_timeout_ms,
@@ -281,6 +397,17 @@ impl MessageOrchestratorConfig {
             capability_hooks_auto,
             capability_grpc_uri,
             capability_rtc_bridge_enabled,
+            extension_call_signal_fail_open,
+            extension_post_send_fail_open,
+            extension_pre_send_timeout_ms,
+            extension_pre_send_retry,
+            extension_post_send_timeout_ms,
+            extension_post_send_retry,
+            extension_event_enrich_timeout_ms,
+            extension_event_enrich_retry,
+            extension_tenant_allowlist,
+            extension_hook_message_type_allowlist,
+            extension_plugin_event_type_allowlist,
         }
     }
 
@@ -313,7 +440,8 @@ impl MessageOrchestratorConfig {
     }
 
     pub fn defaults(&self) -> MessageDefaults {
-        let default_conversation_type = ConversationType::from_proto(self.default_conversation_type);
+        let default_conversation_type =
+            ConversationType::from_proto(self.default_conversation_type);
 
         MessageDefaults {
             default_business_type: self.default_business_type.clone(),

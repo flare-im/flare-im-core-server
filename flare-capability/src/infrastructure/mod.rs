@@ -5,3 +5,5 @@ pub mod capability;
 pub mod config;
 pub mod monitoring;
 pub mod persistence;
+/// RTC 插件编排（进程级）：与 [`crate::domain::capability::ports::RtcCapability`] 协同的元数据与选路。
+pub mod rtc;

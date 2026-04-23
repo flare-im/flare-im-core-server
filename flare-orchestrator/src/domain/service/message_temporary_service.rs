@@ -47,7 +47,7 @@ impl MessageTemporaryService {
     pub async fn handle_temporary_message(&self, ctx: &Ctx, message: &Message) -> Result<()> {
         // TODO: 实现临时消息推送逻辑
         // 当前为占位符实现，等待后续完善
-        
+
         tracing::debug!(
             message_id = %message.server_id,
             conversation_id = %message.conversation_id,
@@ -61,7 +61,7 @@ impl MessageTemporaryService {
         // TODO: 使用 PushRepository 推送消息
         // 当前 PushRepository 的 publish_message 方法需要完整的 Message
         // 临时消息可能需要特殊处理（如不分配 seq）
-        
+
         // 暂时返回成功，等待后续实现
         Ok(())
     }
@@ -105,7 +105,7 @@ impl TemporaryMessageType {
     /// 从消息类型判断是否为临时消息
     pub fn from_message_type(message_type: i32) -> Option<Self> {
         use flare_proto::common::MessageType;
-        
+
         match MessageType::try_from(message_type) {
             // 目前没有定义 Typing 和 SystemEvent 类型
             // 如果需要支持，需要在 proto 中添加

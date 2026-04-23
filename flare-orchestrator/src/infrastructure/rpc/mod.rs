@@ -4,9 +4,11 @@
 //! 实现框架无关设计，支持未来切换不同的 RPC 框架（如从 tonic 切换到 volo）。
 
 mod capability_dispatch_client;
+mod capability_dispatch_gateway_impl;
 mod impl_;
 
 pub use capability_dispatch_client::CapabilityDispatchClient;
+pub use capability_dispatch_gateway_impl::CapabilityDispatchGatewayImpl;
 pub use impl_::ConversationClient;
 
 use crate::domain::model::ConversationType;

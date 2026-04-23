@@ -13,7 +13,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
-use flare_proto::common::{Event, Message};
+use flare_proto::common::call_signal_event::Signal;
+use flare_proto::common::event::Payload;
+use flare_proto::common::{Event, EventType, Message};
 
 use crate::error::Result;
 
@@ -63,7 +65,7 @@ impl ValidationResult {
 }
 
 /// 消息校验策略
-/// 
+///
 /// ## Rust 2024 兼容性
 /// 使用 `Pin<Box<dyn Future>>` 返回类型以支持 `dyn Trait`
 pub trait MessageValidationStrategy: Send + Sync {
@@ -76,7 +78,7 @@ pub trait MessageValidationStrategy: Send + Sync {
 }
 
 /// 事件校验策略
-/// 
+///
 /// ## Rust 2024 兼容性
 /// 使用 `Pin<Box<dyn Future>>` 返回类型以支持 `dyn Trait`
 pub trait EventValidationStrategy: Send + Sync {
@@ -117,7 +119,7 @@ impl MessageValidationStrategy for MessageSizeValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             use prost::Message as _;
-            
+
             let message_bytes = message.encode_to_vec();
             if message_bytes.len() > self.max_message_size {
                 return Ok(ValidationResult::invalid(format!(
@@ -126,7 +128,7 @@ impl MessageValidationStrategy for MessageSizeValidationStrategy {
                     self.max_message_size
                 )));
             }
-            
+
             Ok(ValidationResult::valid())
         })
     }
@@ -143,21 +145,17 @@ impl MessageValidationStrategy for MessageRequiredFieldsValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = ValidationResult::valid();
-            
+
             // 校验 conversation_id
             if message.conversation_id.is_empty() {
-                result = result.merge(ValidationResult::invalid(
-                    "conversation_id is required",
-                ));
+                result = result.merge(ValidationResult::invalid("conversation_id is required"));
             }
-            
+
             // 校验 sender_id
             if message.sender_id.is_empty() {
-                result = result.merge(ValidationResult::invalid(
-                    "sender_id is required",
-                ));
+                result = result.merge(ValidationResult::invalid("sender_id is required"));
             }
-            
+
             // 校验单聊时的 channel_id
             if message.conversation_type == flare_proto::common::ConversationType::Single as i32
                 && message.channel_id.is_empty()
@@ -166,7 +164,7 @@ impl MessageValidationStrategy for MessageRequiredFieldsValidationStrategy {
                     "channel_id (receiver_id) is required for single chat",
                 ));
             }
-            
+
             Ok(result)
         })
     }
@@ -181,7 +179,7 @@ impl EventTypeValidationStrategy {
     pub fn new(allowed_types: Vec<flare_proto::common::EventType>) -> Self {
         Self { allowed_types }
     }
-    
+
     pub fn all_supported() -> Self {
         use flare_proto::common::EventType;
         Self::new(vec![
@@ -213,23 +211,17 @@ impl EventValidationStrategy for EventTypeValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             let event_type = flare_proto::common::EventType::try_from(event.r#type);
-            
+
             match event_type {
-                Ok(et) if self.allowed_types.contains(&et) => {
-                    Ok(ValidationResult::valid())
-                }
-                Ok(et) => {
-                    Ok(ValidationResult::invalid(format!(
-                        "Event type {:?} is not allowed",
-                        et
-                    )))
-                }
-                Err(_) => {
-                    Ok(ValidationResult::invalid(format!(
-                        "Invalid event type: {}",
-                        event.r#type
-                    )))
-                }
+                Ok(et) if self.allowed_types.contains(&et) => Ok(ValidationResult::valid()),
+                Ok(et) => Ok(ValidationResult::invalid(format!(
+                    "Event type {:?} is not allowed",
+                    et
+                ))),
+                Err(_) => Ok(ValidationResult::invalid(format!(
+                    "Invalid event type: {}",
+                    event.r#type
+                ))),
             }
         })
     }
@@ -246,22 +238,66 @@ impl EventValidationStrategy for EventRequiredFieldsValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = ValidationResult::valid();
-            
+
             // 校验 conversation_id
             if event.conversation_id.is_empty() {
                 result = result.merge(ValidationResult::invalid(
                     "conversation_id is required for event",
                 ));
             }
-            
+
             // 校验 event_id
             if event.event_id.is_empty() {
-                result = result.merge(ValidationResult::invalid(
-                    "event_id is required for event",
+                result = result.merge(ValidationResult::invalid("event_id is required for event"));
+            }
+
+            Ok(result)
+        })
+    }
+}
+
+/// `EVENT_CALL_SIGNAL` 与 **RTC / SFU 编排** 对齐的基础校验（在调用 `flare-capability` 之前执行）。
+///
+/// - 必须带 `CallSignal` 载荷且 `from_user_id` 非空（用于 `Dispatch.user_id` 与审计）。
+/// - `accept` / `reject` / `hangup` 必须已有 `call_id`（`invite` 可由服务端回填）。
+pub struct EventCallSignalRtcValidationStrategy;
+
+impl EventValidationStrategy for EventCallSignalRtcValidationStrategy {
+    fn validate<'a>(
+        &'a self,
+        _context: &'a ValidationContext<'a>,
+        event: &'a Event,
+    ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
+        Box::pin(async move {
+            if EventType::try_from(event.r#type).ok() != Some(EventType::EventCallSignal) {
+                return Ok(ValidationResult::valid());
+            }
+            let Some(ref payload) = event.payload else {
+                return Ok(ValidationResult::invalid(
+                    "EVENT_CALL_SIGNAL requires payload",
+                ));
+            };
+            let Payload::CallSignal(cs) = payload else {
+                return Ok(ValidationResult::invalid(
+                    "EVENT_CALL_SIGNAL payload must be CallSignal",
+                ));
+            };
+            if cs.from_user_id.trim().is_empty() {
+                return Ok(ValidationResult::invalid(
+                    "call_signal.from_user_id is required for RTC / capability correlation",
                 ));
             }
-            
-            Ok(result)
+            match cs.signal.as_ref() {
+                Some(Signal::Accept(_) | Signal::Reject(_) | Signal::Hangup(_))
+                    if cs.call_id.trim().is_empty() =>
+                {
+                    return Ok(ValidationResult::invalid(
+                        "call_signal.call_id is required for accept/reject/hangup",
+                    ));
+                }
+                _ => {}
+            }
+            Ok(ValidationResult::valid())
         })
     }
 }
@@ -279,7 +315,7 @@ impl CompositeMessageValidationStrategy {
     pub fn new(strategies: Vec<Arc<dyn MessageValidationStrategy>>) -> Self {
         Self { strategies }
     }
-    
+
     /// 创建默认组合策略
     pub fn default_composite() -> Self {
         Self::new(vec![
@@ -297,17 +333,17 @@ impl MessageValidationStrategy for CompositeMessageValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = ValidationResult::valid();
-            
+
             for strategy in &self.strategies {
                 let r = strategy.validate(context, message).await?;
                 result = result.merge(r);
-                
+
                 // 短路：如果已经无效，可以提前返回
                 if !result.is_valid {
                     break;
                 }
             }
-            
+
             Ok(result)
         })
     }
@@ -322,12 +358,13 @@ impl CompositeEventValidationStrategy {
     pub fn new(strategies: Vec<Arc<dyn EventValidationStrategy>>) -> Self {
         Self { strategies }
     }
-    
+
     /// 创建默认组合策略
     pub fn default_composite() -> Self {
         Self::new(vec![
             Arc::new(EventTypeValidationStrategy::all_supported()),
             Arc::new(EventRequiredFieldsValidationStrategy),
+            Arc::new(EventCallSignalRtcValidationStrategy),
         ])
     }
 }
@@ -340,17 +377,17 @@ impl EventValidationStrategy for CompositeEventValidationStrategy {
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = ValidationResult::valid();
-            
+
             for strategy in &self.strategies {
                 let r = strategy.validate(context, event).await?;
                 result = result.merge(r);
-                
+
                 // 短路：如果已经无效，可以提前返回
                 if !result.is_valid {
                     break;
                 }
             }
-            
+
             Ok(result)
         })
     }

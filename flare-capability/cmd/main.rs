@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use flare_capability::domain::model::ExecutionMode;
-use flare_capability::service::bootstrap::{ApplicationBootstrap, CapabilityServiceConfig};
+use flare_capability::composition::{ApplicationBootstrap, CapabilityServiceConfig};
 use flare_im_core::{load_config, tracing::init_tracing_from_config};
 
 #[tokio::main]

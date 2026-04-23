@@ -14,9 +14,9 @@ use std::sync::Arc;
 use flare_im_core::Ctx;
 use flare_server_core::context::Context;
 
-use crate::error::Result;
 use crate::config::SessionCreationMode;
 use crate::domain::repository::ConversationClient;
+use crate::error::Result;
 use crate::infrastructure::rpc::ConversationRpcClient;
 
 /// 会话生成服务
@@ -35,7 +35,7 @@ pub struct ConversationEnsureService {
 }
 
 /// 会话事件发布器（用于异步模式）
-/// 
+///
 /// ## Rust 2024 兼容性
 /// 使用 `Pin<Box<dyn Future>>` 返回类型以支持 `dyn Trait`
 pub trait ConversationEventPublisher: Send + Sync {
@@ -89,12 +89,8 @@ impl ConversationEnsureService {
         request: &ConversationEnsureRequest,
     ) -> Result<()> {
         match self.session_creation_mode {
-            SessionCreationMode::Sync => {
-                self.ensure_conversation_sync(ctx, request).await
-            }
-            SessionCreationMode::Async => {
-                self.ensure_conversation_async(ctx, request).await
-            }
+            SessionCreationMode::Sync => self.ensure_conversation_sync(ctx, request).await,
+            SessionCreationMode::Async => self.ensure_conversation_async(ctx, request).await,
         }
     }
 
@@ -133,22 +129,19 @@ impl ConversationEnsureService {
         }
 
         // 调用会话服务（带超时）
-        let ensure_result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            {
-                use crate::domain::model::ConversationType;
-                let conversation_type = ConversationType::from_proto(request.conversation_type);
-                
-                conversation_repo.ensure_conversation(
-                    &ensure_ctx,
-                    &request.conversation_id,
-                    conversation_type,
-                    &request.business_type,
-                    request.participants.clone(),
-                    request.stored_channel_id.clone(),
-                )
-            },
-        )
+        let ensure_result = tokio::time::timeout(std::time::Duration::from_secs(2), {
+            use crate::domain::model::ConversationType;
+            let conversation_type = ConversationType::from_proto(request.conversation_type);
+
+            conversation_repo.ensure_conversation(
+                &ensure_ctx,
+                &request.conversation_id,
+                conversation_type,
+                &request.business_type,
+                request.participants.clone(),
+                request.stored_channel_id.clone(),
+            )
+        })
         .await;
 
         match ensure_result {
@@ -226,7 +219,7 @@ pub fn build_conversation_ensure_request_from_message(
     tenant_id: &str,
 ) -> ConversationEnsureRequest {
     let mut participants = vec![message.sender_id.clone()];
-    
+
     // 单聊时，channel_id 是对方 user_id
     if message.conversation_type == flare_proto::common::ConversationType::Single as i32
         && !message.channel_id.is_empty()
@@ -239,10 +232,8 @@ pub fn build_conversation_ensure_request_from_message(
         .get("business_type")
         .cloned()
         .unwrap_or_default();
-    let stored_channel_id = persisted_conversation_channel_id(
-        message.conversation_type,
-        message.channel_id.as_str(),
-    );
+    let stored_channel_id =
+        persisted_conversation_channel_id(message.conversation_type, message.channel_id.as_str());
 
     ConversationEnsureRequest {
         conversation_id: message.conversation_id.clone(),
@@ -278,5 +269,3 @@ fn persisted_conversation_channel_id(conversation_type: i32, message_channel_id:
         _ => message_channel_id.to_string(),
     }
 }
-
-

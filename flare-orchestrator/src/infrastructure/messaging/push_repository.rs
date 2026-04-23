@@ -10,20 +10,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use flare_im_core::constants::topics::{
-    TOPIC_MESSAGE_MAIN, TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS,
-    TOPIC_PUSH_MESSAGES, TOPIC_PUSH_EVENTS,TOPIC_PUSH_ENVELOPE,
-};
-use flare_im_core::event::{
-    mq_envelope_for_main_queue_event, mq_envelope_for_main_queue_message,
-};
 use flare_im_core::Ctx;
+use flare_im_core::constants::topics::{
+    TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS, TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ENVELOPE,
+    TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
+};
+use flare_im_core::event::{mq_envelope_for_main_queue_event, mq_envelope_for_main_queue_message};
 use flare_proto::common::{Event, Message, PushEnvelope};
 use flare_server_core::mq::producer::{Producer, ProducerError};
 use prost::Message as _;
 
 use crate::domain::repository::PushRepository;
-use crate::error::{Result, to_system_err_with, ErrorCode, ErrorBuilder};
+use crate::error::{ErrorBuilder, ErrorCode, Result, to_system_err_with};
 
 /// 推送仓储实现：基于 Producer trait 发布消息和事件
 ///
@@ -72,7 +70,8 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope
-        let mq: flare_proto::MqEnvelope = mq_envelope_for_main_queue_message(&message, recipient_user_ids);
+        let mq: flare_proto::MqEnvelope =
+            mq_envelope_for_main_queue_message(&message, recipient_user_ids);
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -82,10 +81,13 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject publish"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "message payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "message payload too large",
+            )
+            .param("size", payload.len().to_string())
+            .param("max_size", MAX_MESSAGE_SIZE.to_string())
+            .build_error());
         }
 
         // 从 Ctx 构造 headers
@@ -131,10 +133,12 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject publish"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
+                    .param("size", payload.len().to_string())
+                    .param("max_size", MAX_MESSAGE_SIZE.to_string())
+                    .build_error(),
+            );
         }
 
         // 从 Ctx 构造 headers
@@ -178,10 +182,10 @@ impl PushRepository for MqPushRepository {
 
         // 构造 MqEnvelope
         let mut mq = mq_envelope_for_main_queue_message(&message, recipient_user_ids);
-        
+
         // 标记为仅推送（不持久化）
         mq.push_only = true;
-        
+
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -191,10 +195,13 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject push-only"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "message payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "message payload too large",
+            )
+            .param("size", payload.len().to_string())
+            .param("max_size", MAX_MESSAGE_SIZE.to_string())
+            .build_error());
         }
 
         // 从 Ctx 构造 headers
@@ -213,7 +220,7 @@ impl PushRepository for MqPushRepository {
             .await
             .map_err(Self::map_producer_error)
     }
- /// 仅推送事件（不持久化）
+    /// 仅推送事件（不持久化）
     ///
     /// 用于临时事件（如正在输入、在线状态等）：
     /// - 只推送给在线用户
@@ -238,10 +245,10 @@ impl PushRepository for MqPushRepository {
 
         // 构造 MqEnvelope
         let mut mq = mq_envelope_for_main_queue_event(&event, recipient_user_ids);
-        
+
         // 标记为仅推送（不持久化）
         mq.push_only = true;
-        
+
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -251,10 +258,12 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject push-only"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
+                    .param("size", payload.len().to_string())
+                    .param("max_size", MAX_MESSAGE_SIZE.to_string())
+                    .build_error(),
+            );
         }
 
         // 从 Ctx 构造 headers
@@ -296,10 +305,10 @@ impl PushRepository for MqPushRepository {
 
         // 构造 MqEnvelope（不需要接收者列表）
         let mut mq = mq_envelope_for_main_queue_message(&message, Vec::new());
-        
+
         // 标记为仅持久化（不推送）
         mq.persistence_only = true;
-        
+
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -309,10 +318,13 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject persistence-only"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "message payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "message payload too large",
+            )
+            .param("size", payload.len().to_string())
+            .param("max_size", MAX_MESSAGE_SIZE.to_string())
+            .build_error());
         }
 
         // 从 Ctx 构造 headers
@@ -355,10 +367,10 @@ impl PushRepository for MqPushRepository {
 
         // 构造 MqEnvelope（不需要接收者列表）
         let mut mq = mq_envelope_for_main_queue_event(&event, Vec::new());
-        
+
         // 标记为仅持久化（不推送）
         mq.persistence_only = true;
-        
+
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -368,10 +380,12 @@ impl PushRepository for MqPushRepository {
                 conversation_id = %conversation_id,
                 "MqEnvelope too large, reject persistence-only"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "event payload too large")
+                    .param("size", payload.len().to_string())
+                    .param("max_size", MAX_MESSAGE_SIZE.to_string())
+                    .build_error(),
+            );
         }
 
         // 从 Ctx 构造 headers
@@ -403,11 +417,7 @@ impl PushRepository for MqPushRepository {
     /// 1. 将 PushEnvelope 序列化
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers（如果未设置）
     /// 3. 发布到 TOPIC_PUSH_ENVELOPE（由 Push Server 消费并执行推送）
-    async fn publish_push_envelope(
-        &self,
-        ctx: &Ctx,
-        envelope: PushEnvelope,
-    ) -> Result<()> {
+    async fn publish_push_envelope(&self, ctx: &Ctx, envelope: PushEnvelope) -> Result<()> {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 序列化 PushEnvelope
@@ -420,10 +430,12 @@ impl PushRepository for MqPushRepository {
                 envelope_id = %envelope.envelope_id,
                 "PushEnvelope too large, reject publish"
             );
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "push envelope too large")
-                .param("size", payload.len().to_string())
-                .param("max_size", MAX_MESSAGE_SIZE.to_string())
-                .build_error());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "push envelope too large")
+                    .param("size", payload.len().to_string())
+                    .param("max_size", MAX_MESSAGE_SIZE.to_string())
+                    .build_error(),
+            );
         }
 
         // 从 Ctx 构造 headers，并添加 envelope 中的 headers
@@ -444,5 +456,4 @@ impl PushRepository for MqPushRepository {
             .await
             .map_err(Self::map_producer_error)
     }
-
 }

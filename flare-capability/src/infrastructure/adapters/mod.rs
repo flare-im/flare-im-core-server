@@ -5,9 +5,8 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use anyhow::{Context, Result};
-
 use crate::domain::model::{HookTransportConfig, LoadBalanceStrategy};
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use crate::infrastructure::adapters::grpc::GrpcHookAdapter;
 use crate::infrastructure::adapters::local::LocalHookAdapter;
 use crate::infrastructure::adapters::webhook::WebhookHookAdapter;
@@ -68,7 +67,13 @@ impl HookAdapterFactory {
                             metadata.clone(),
                         )
                         .await
-                        .context("Failed to create gRPC adapter from service discovery")?;
+                        .map_err(|e| {
+                            map_infra_error(
+                                e,
+                                ErrorCode::InternalError,
+                                "failed to create gRPC hook adapter from service discovery",
+                            )
+                        })?;
                         return Ok(Arc::new(adapter));
                     } else {
                         // 如果没有注册中心但配置了 service_name，给出警告并使用 endpoint fallback
@@ -84,13 +89,21 @@ impl HookAdapterFactory {
                     let adapter =
                         GrpcHookAdapter::new_from_endpoint(endpoint.clone(), metadata.clone())
                             .await
-                            .context("Failed to create gRPC adapter from endpoint")?;
+                            .map_err(|e| {
+                                map_infra_error(
+                                    e,
+                                    ErrorCode::InternalError,
+                                    "failed to create gRPC hook adapter from endpoint",
+                                )
+                            })?;
                     return Ok(Arc::new(adapter));
                 }
 
-                Err(anyhow::anyhow!(
-                    "Either service_name (with registry) or endpoint must be provided for gRPC transport"
-                ))
+                Err(ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "gRPC hook transport requires `service_name` with registry or non-empty `endpoint`",
+                )
+                .build_error())
             }
             HookTransportConfig::Webhook {
                 endpoint,
@@ -101,12 +114,23 @@ impl HookAdapterFactory {
                 let adapter =
                     WebhookHookAdapter::new(endpoint.clone(), secret.clone(), headers.clone())
                         .await
-                        .context("Failed to create WebHook adapter")?;
+                        .map_err(|e| {
+                            map_infra_error(
+                                e,
+                                ErrorCode::InternalError,
+                                "failed to create WebHook hook adapter",
+                            )
+                        })?;
                 Ok(Arc::new(adapter))
             }
             HookTransportConfig::Local { target } => {
-                let adapter = LocalHookAdapter::new(target.clone())
-                    .context("Failed to create Local Plugin adapter")?;
+                let adapter = LocalHookAdapter::new(target.clone()).map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::InternalError,
+                        "failed to create local plugin hook adapter",
+                    )
+                })?;
                 Ok(Arc::new(adapter))
             }
         }
@@ -187,35 +211,35 @@ impl HookAdapter for GrpcHookAdapter {
 impl HookAdapter for WebhookHookAdapter {
     async fn pre_send(
         &self,
-        _ctx: &flare_server_core::context::Context,
-        _draft: &mut flare_im_core::MessageDraft,
+        ctx: &flare_server_core::context::Context,
+        draft: &mut flare_im_core::MessageDraft,
     ) -> Result<flare_im_core::PreSendDecision> {
-        Ok(flare_im_core::PreSendDecision::Continue)
+        WebhookHookAdapter::pre_send(self, ctx, draft).await
     }
 
     async fn post_send(
         &self,
-        _ctx: &flare_server_core::context::Context,
-        _record: &flare_im_core::MessageRecord,
-        _draft: &flare_im_core::MessageDraft,
+        ctx: &flare_server_core::context::Context,
+        record: &flare_im_core::MessageRecord,
+        draft: &flare_im_core::MessageDraft,
     ) -> Result<()> {
-        Ok(())
+        WebhookHookAdapter::post_send(self, ctx, record, draft).await
     }
 
     async fn delivery(
         &self,
-        _ctx: &flare_server_core::context::Context,
-        _event: &flare_im_core::DeliveryEvent,
+        ctx: &flare_server_core::context::Context,
+        event: &flare_im_core::DeliveryEvent,
     ) -> Result<()> {
-        Ok(())
+        WebhookHookAdapter::delivery(self, ctx, event).await
     }
 
     async fn recall(
         &self,
-        _ctx: &flare_server_core::context::Context,
-        _event: &flare_im_core::RecallEvent,
+        ctx: &flare_server_core::context::Context,
+        event: &flare_im_core::RecallEvent,
     ) -> Result<flare_im_core::PreSendDecision> {
-        Ok(flare_im_core::PreSendDecision::Continue)
+        WebhookHookAdapter::recall(self, ctx, event).await
     }
 }
 #[async_trait::async_trait]

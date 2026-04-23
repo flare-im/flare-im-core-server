@@ -645,7 +645,6 @@ impl MarkAllConversationsReadCommand {
     }
 }
 
-
 // 定义独立的应用层命令结构，完全与protobuf解耦
 // 这些是真正的应用层命令，不依赖protobuf结构
 
@@ -981,7 +980,9 @@ pub struct AppBatchMarkMessageReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_grpc_proto::message::BatchMarkMessageReadRequest> for AppBatchMarkMessageReadCommand {
+impl From<&flare_grpc_proto::message::BatchMarkMessageReadRequest>
+    for AppBatchMarkMessageReadCommand
+{
     fn from(request: &flare_grpc_proto::message::BatchMarkMessageReadRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),
@@ -1009,7 +1010,9 @@ pub struct AppMarkConversationReadCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_grpc_proto::message::MarkConversationReadRequest> for AppMarkConversationReadCommand {
+impl From<&flare_grpc_proto::message::MarkConversationReadRequest>
+    for AppMarkConversationReadCommand
+{
     fn from(request: &flare_grpc_proto::message::MarkConversationReadRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),
@@ -1067,7 +1070,9 @@ pub struct AppMarkMessagesReadUntilCommand {
     pub tenant_id: String,
 }
 
-impl From<&flare_grpc_proto::message::MarkMessagesReadUntilRequest> for AppMarkMessagesReadUntilCommand {
+impl From<&flare_grpc_proto::message::MarkMessagesReadUntilRequest>
+    for AppMarkMessagesReadUntilCommand
+{
     fn from(request: &flare_grpc_proto::message::MarkMessagesReadUntilRequest) -> Self {
         Self {
             conversation_id: request.conversation_id.clone(),

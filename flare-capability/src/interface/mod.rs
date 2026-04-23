@@ -1,3 +1,3 @@
-//! 传输接口层：gRPC（HookExtension、HookService、CapabilityService）。
+//! 传输接口层：gRPC（`CapabilityService`、`HookPlugin`、`ExtensionPlugin`）。
 
 pub mod grpc;

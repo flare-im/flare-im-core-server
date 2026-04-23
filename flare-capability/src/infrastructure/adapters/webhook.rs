@@ -4,13 +4,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context as AnyhowContext, Result};
 use base64::Engine;
 use reqwest::Client;
 
 use flare_im_core::hooks::hook_context_data::get_hook_context_data;
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
+
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 
 /// WebHook适配器
 pub struct WebhookHookAdapter {
@@ -29,7 +30,14 @@ impl WebhookHookAdapter {
     ) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+            .build()
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "failed to build HTTP client for webhook hook",
+                )
+            })?;
 
         Ok(Self {
             client,
@@ -66,7 +74,10 @@ impl WebhookHookAdapter {
                 "headers": draft.headers,
                 "metadata": draft.metadata,
             },
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            "timestamp": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         });
 
         let mut request = self
@@ -86,16 +97,22 @@ impl WebhookHookAdapter {
             request = request.header("X-Hook-Signature", signature);
         }
 
-        let response = request
-            .send()
-            .await
-            .with_context(|| "WebHook PreSend request failed")?;
+        let response = request.send().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "WebHook PreSend request failed",
+            )
+        })?;
 
         if response.status().is_success() {
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .with_context(|| "Failed to parse WebHook response")?;
+            let result: serde_json::Value = response.json().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "failed to parse WebHook PreSend JSON response",
+                )
+            })?;
 
             // 检查是否允许发送
             let allow = result
@@ -135,20 +152,18 @@ impl WebhookHookAdapter {
                 }
                 Ok(PreSendDecision::Continue)
             } else {
-                use flare_im_core::error::{ErrorBuilder, ErrorCode};
                 let error =
                     ErrorBuilder::new(ErrorCode::PermissionDenied, "WebHook rejected the request")
                         .build_error();
                 Ok(PreSendDecision::Reject { error })
             }
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
             let error = ErrorBuilder::new(
                 ErrorCode::InternalError,
-                &format!("WebHook returned error status: {}", response.status()),
+                format!("WebHook returned error status: {}", response.status()),
             )
             .build_error();
-            Err(error.into())
+            Err(error)
         }
     }
 
@@ -176,7 +191,10 @@ impl WebhookHookAdapter {
                 "conversation_id": record.conversation_id,
                 "sender_id": record.sender_id,
             },
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            "timestamp": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         });
 
         let mut request = self
@@ -194,21 +212,23 @@ impl WebhookHookAdapter {
             request = request.header("X-Hook-Signature", signature);
         }
 
-        let response = request
-            .send()
-            .await
-            .with_context(|| "WebHook PostSend request failed")?;
+        let response = request.send().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "WebHook PostSend request failed",
+            )
+        })?;
 
         if response.status().is_success() {
             Ok(())
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
             let error = ErrorBuilder::new(
                 ErrorCode::InternalError,
-                &format!("WebHook returned error status: {}", response.status()),
+                format!("WebHook returned error status: {}", response.status()),
             )
             .build_error();
-            Err(error.into())
+            Err(error)
         }
     }
 
@@ -245,10 +265,13 @@ impl WebhookHookAdapter {
             request = request.header("X-Hook-Signature", signature);
         }
 
-        let _response = request
-            .send()
-            .await
-            .with_context(|| "WebHook Delivery request failed")?;
+        request.send().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "WebHook Delivery request failed",
+            )
+        })?;
 
         Ok(())
     }
@@ -285,16 +308,22 @@ impl WebhookHookAdapter {
             request = request.header("X-Hook-Signature", signature);
         }
 
-        let response = request
-            .send()
-            .await
-            .with_context(|| "WebHook Recall request failed")?;
+        let response = request.send().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "WebHook Recall request failed",
+            )
+        })?;
 
         if response.status().is_success() {
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .with_context(|| "Failed to parse WebHook response")?;
+            let result: serde_json::Value = response.json().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "failed to parse WebHook Recall JSON response",
+                )
+            })?;
 
             let allow = result
                 .get("allow")
@@ -304,7 +333,6 @@ impl WebhookHookAdapter {
             if allow {
                 Ok(PreSendDecision::Continue)
             } else {
-                use flare_im_core::error::{ErrorBuilder, ErrorCode};
                 let error = ErrorBuilder::new(
                     ErrorCode::PermissionDenied,
                     "WebHook rejected the recall request",
@@ -313,13 +341,12 @@ impl WebhookHookAdapter {
                 Ok(PreSendDecision::Reject { error })
             }
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
             let error = ErrorBuilder::new(
                 ErrorCode::InternalError,
-                &format!("WebHook returned error status: {}", response.status()),
+                format!("WebHook returned error status: {}", response.status()),
             )
             .build_error();
-            Err(error.into())
+            Err(error)
         }
     }
 
@@ -330,8 +357,13 @@ impl WebhookHookAdapter {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac =
-            HmacSha256::new_from_slice(secret.as_bytes()).with_context(|| "Invalid secret key")?;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InvalidParameter,
+                "invalid webhook HMAC secret key length",
+            )
+        })?;
         mac.update(payload.as_bytes());
         let result = mac.finalize();
         let signature = hex::encode(result.into_bytes());

@@ -29,8 +29,8 @@
 //! ```
 
 use flare_proto::common::{
-    AckPayload, CustomPayload, NotificationPayload, PushEnvelope, PushOptions,
-    PushPayloadKind, PushTargetType, SystemPayload,
+    AckPayload, CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind,
+    PushTargetType, SystemPayload,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -270,27 +270,23 @@ impl PushEnvelopeBuilder {
 
         // 构建 payload oneof
         let payload = match self.payload_kind {
-            PushPayloadKind::Ack => {
-                Some(flare_proto::common::push_envelope::Payload::Ack(
-                    self.ack.expect("ack payload is required for ACK kind"),
-                ))
-            }
+            PushPayloadKind::Ack => Some(flare_proto::common::push_envelope::Payload::Ack(
+                self.ack.expect("ack payload is required for ACK kind"),
+            )),
             PushPayloadKind::Notification => {
                 Some(flare_proto::common::push_envelope::Payload::Notification(
                     self.notification
                         .expect("notification payload is required for Notification kind"),
                 ))
             }
-            PushPayloadKind::Custom => {
-                Some(flare_proto::common::push_envelope::Payload::Custom(
-                    self.custom.expect("custom payload is required for Custom kind"),
-                ))
-            }
-            PushPayloadKind::System => {
-                Some(flare_proto::common::push_envelope::Payload::System(
-                    self.system.expect("system payload is required for System kind"),
-                ))
-            }
+            PushPayloadKind::Custom => Some(flare_proto::common::push_envelope::Payload::Custom(
+                self.custom
+                    .expect("custom payload is required for Custom kind"),
+            )),
+            PushPayloadKind::System => Some(flare_proto::common::push_envelope::Payload::System(
+                self.system
+                    .expect("system payload is required for System kind"),
+            )),
             PushPayloadKind::Unspecified => {
                 panic!("payload kind must be specified");
             }

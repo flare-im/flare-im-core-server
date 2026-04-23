@@ -1,6 +1,11 @@
-//! 应用层：Hook 命令/查询处理器 + 能力扩展（目录、分发、示例用例）。
+//! 应用层：仅 **`commands`** / **`handler`** / **`queries`** 三包。
+//!
+//! - **commands**：写模型入口（如 Hook 物化）。
+//! - **queries**：读模型与静态目录。
+//! - **handler**：跨端口编排，**业务规则在 [`crate::domain`]**（如 [`crate::domain::service::HookOrchestrationService`]、[`crate::domain::capability::execute_capability_dispatch`]）。
 
-pub mod capability;
-pub mod handlers;
+pub mod commands;
+pub mod handler;
+pub mod queries;
 
-pub use handlers::{HookCommandHandler, HookQueryHandler};
+pub use handler::{dispatch_capability_command, HookCommandHandler, HookQueryHandler};

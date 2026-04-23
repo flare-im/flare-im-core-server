@@ -16,7 +16,7 @@ use flare_im_core::Ctx;
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use tracing::instrument;
 
-use crate::domain::service::{MessageDomainService, EventDomainService};
+use crate::domain::service::{EventDomainService, MessageDomainService};
 use crate::error::Result;
 
 /// 存储处理器（编排层）
@@ -64,7 +64,11 @@ impl StorageHandler {
                 // 提取 Message 载荷
                 let message = match &envelope.payload {
                     Some(mq_envelope::Payload::Message(msg)) => msg.clone(),
-                    _ => return Err(anyhow::anyhow!("Message payload is missing in MqEnvelope").into()),
+                    _ => {
+                        return Err(
+                            anyhow::anyhow!("Message payload is missing in MqEnvelope").into()
+                        );
+                    }
                 };
 
                 tracing::debug!(
@@ -84,7 +88,11 @@ impl StorageHandler {
                 // 提取 Event 载荷
                 let event = match &envelope.payload {
                     Some(mq_envelope::Payload::Event(evt)) => evt.clone(),
-                    _ => return Err(anyhow::anyhow!("Event payload is missing in MqEnvelope").into()),
+                    _ => {
+                        return Err(
+                            anyhow::anyhow!("Event payload is missing in MqEnvelope").into()
+                        );
+                    }
                 };
 
                 tracing::debug!(

@@ -16,8 +16,8 @@ use flare_im_core::Ctx;
 use flare_proto::common::{Event, EventType};
 use tracing::instrument;
 
-use crate::application::CallCapabilityBridge;
-use crate::domain::{service::EventDomainService, PersistenceMode};
+use crate::application::extension::ExtensionOrchestrator;
+use crate::domain::{PersistenceMode, service::EventDomainService};
 use crate::error::Result;
 
 /// 事件处理器（编排层）
@@ -25,18 +25,18 @@ use crate::error::Result;
 pub struct EventHandler {
     /// 事件领域服务
     event_domain_service: Arc<EventDomainService>,
-    /// 可选：`EVENT_CALL_SIGNAL` → `flare-capability` `Dispatch`（RTC）
-    call_capability_bridge: Option<Arc<CallCapabilityBridge>>,
+    /// 扩展编排器（统一 Hook / Plugin 扩展策略）
+    extension_orchestrator: Arc<ExtensionOrchestrator>,
 }
 
 impl EventHandler {
     pub fn new(
         event_domain_service: Arc<EventDomainService>,
-        call_capability_bridge: Option<Arc<CallCapabilityBridge>>,
+        extension_orchestrator: Arc<ExtensionOrchestrator>,
     ) -> Self {
         Self {
             event_domain_service,
-            call_capability_bridge,
+            extension_orchestrator,
         }
     }
 
@@ -100,36 +100,37 @@ impl EventHandler {
     ))]
     async fn handle_conversation_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-        
+
         // 1. 校验事件
         self.event_domain_service
             .validate_event(ctx, &tenant_id, &event)
             .await?;
-        
+
         // 2. 分配序列号
-        let event_with_seq = self.event_domain_service
+        let event_with_seq = self
+            .event_domain_service
             .allocate_seq(ctx, &tenant_id, event)
             .await?;
-        
+
         // 3. 推送事件
         self.event_domain_service
             .push_event(ctx, event_with_seq, PersistenceMode::Auto)
             .await?;
-        
+
         // TODO: 4. 更新会话读模型
         // - EVENT_CONVERSATION_UPDATE: 更新会话的标题、头像等信息
         // - EVENT_CONVERSATION_DELETE: 标记会话为已删除或移除会话数据
 
-        
         Ok(())
     }
 
     /// 处理通用事件
     ///
     /// # 编排流程
-    /// 1. 校验事件
-    /// 2. 分配序列号
-    /// 3. 推送事件
+    /// 1. 校验事件（含 `EVENT_CALL_SIGNAL` RTC 前置条件）
+    /// 2. 通话信令：`flare-capability` `Dispatch` 对齐 SFU（失败则降级推送，并在 `ext` 写入 `flare_rtc_enrich`）
+    /// 3. 分配序列号
+    /// 4. 推送事件
     ///
     /// # 参数
     /// - `ctx`: 上下文
@@ -151,35 +152,27 @@ impl EventHandler {
         tenant_id: &str,
         mut event: Event,
     ) -> Result<()> {
-        if let Some(ref bridge) = self.call_capability_bridge {
-            if let Err(e) = bridge
-                .enrich_call_signal_event(ctx, tenant_id, &mut event)
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    event_id = %event.event_id,
-                    conversation_id = %event.conversation_id,
-                    "call_capability_bridge: CapabilityService.Dispatch failed, degrade — push event without SFU enrichment"
-                );
-            }
-        }
-
-        // 1. 校验事件
+        // 1. 校验事件（避免无效信令仍命中 SFU / capability）
         self.event_domain_service
             .validate_event(ctx, tenant_id, &event)
             .await?;
-        
-        // 2. 分配序列号
-        let event_with_seq = self.event_domain_service
+
+        // 2. 通话信令：经 `flare-capability` 与 strom-sfu 对齐后再落库/推送
+        self.extension_orchestrator
+            .enrich_event_before_persist(ctx, tenant_id, &mut event)
+            .await?;
+
+        // 3. 分配序列号
+        let event_with_seq = self
+            .event_domain_service
             .allocate_seq(ctx, tenant_id, event)
             .await?;
-        
-        // 3. 推送事件
+
+        // 4. 推送事件
         self.event_domain_service
             .push_event(ctx, event_with_seq, PersistenceMode::Auto)
             .await?;
-        
+
         Ok(())
     }
 }

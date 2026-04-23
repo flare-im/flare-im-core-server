@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use flare_proto::common::MqEnvelope;
-use flare_server_core::mq::consumer::{MessageHandler, Message, MessageResult, ConsumerError};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::handlers::StorageHandler;
@@ -56,15 +56,14 @@ impl MessageHandler for StorageConsumerHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope（直接解码，不需要 content-type 校验）
-        let envelope = message.decode_protobuf::<MqEnvelope>()
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    topic = %message.context.topic,
-                    "Failed to deserialize MqEnvelope"
-                );
-                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-            })?;
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
 
         tracing::debug!(
             envelope_id = %envelope.envelope_id,
@@ -98,7 +97,10 @@ impl MessageHandler for StorageConsumerHandler {
                     "Failed to process MqEnvelope"
                 );
                 // 根据错误类型决定是否重试
-                Err(ConsumerError::Handler(format!("StorageHandler error: {}", e)))
+                Err(ConsumerError::Handler(format!(
+                    "StorageHandler error: {}",
+                    e
+                )))
             }
         }
     }

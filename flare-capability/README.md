@@ -1,13 +1,13 @@
 # Flare Capability
 
-Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型与端口；CQRS：`application/capability` 查询与分发命令；基础设施：`infrastructure/capability` 含进程内 `flare-sfu` 的 `SfuRtcCapability`）。
+Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型、端口与 **Dispatch 领域服务**；CQRS：`application` 仅 **`commands` / `handler` / `queries`**；基础设施：`infrastructure/capability` 下按 **`registration` / `dispatch` / `routing` / `strom`** 分包，含进程内 `flare-sfu` 的 `SfuRtcCapability` 与可选 **`use_case_samples`**）。进程装配入口为 **`composition`**（`process_config` / `runtime_context` / **`wiring`** / `bootstrap` / `hook_registry`；原 `service`）。
 
 ## 核心职责
 
 - **配置管理**：支持配置文件、动态API（数据库）、配置中心三种配置方式
 - **执行调度**：按优先级执行Hook，支持并发执行和超时控制
 - **监控统计**：收集Hook执行指标，提供监控和告警能力
-- **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式
+- **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式；Hook 的 gRPC 面（`HookExtension` / `HookService`）与 `CapabilityService` 同文件 **`capability_service.proto`**、同包 **`flare.capability.v1`**，Rust 侧统一 `flare_grpc_proto::capability`
 - **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver / `RtcCapability`；默认在开启 AV 时注册 `SfuRtcCapability` 作为 RTC 后端。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
 
 ### 环境变量（能力扩展）
@@ -76,7 +76,7 @@ CREATE TABLE hook_configs (
 ```rust
 use anyhow::Result;
 use flare_capability::domain::model::ExecutionMode;
-use flare_capability::service::{ApplicationBootstrap, CapabilityServiceConfig};
+use flare_capability::composition::{ApplicationBootstrap, CapabilityServiceConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -126,7 +126,7 @@ repository.delete(
 **使用方式**：
 ```rust
 use flare_capability::domain::model::ExecutionMode;
-use flare_capability::service::CapabilityServiceConfig;
+use flare_capability::composition::CapabilityServiceConfig;
 
 let config = CapabilityServiceConfig {
     config_center_endpoint: Some("etcd://localhost:2379".to_string()),
@@ -234,7 +234,7 @@ ORDER BY hook_type, priority ASC
 ```rust
 use anyhow::Result;
 use flare_capability::domain::model::ExecutionMode;
-use flare_capability::service::{ApplicationBootstrap, CapabilityServiceConfig};
+use flare_capability::composition::{ApplicationBootstrap, CapabilityServiceConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {

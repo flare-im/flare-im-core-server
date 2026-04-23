@@ -22,13 +22,13 @@ use flare_proto::common::{Event, EventType};
 use flare_server_core::{flare_err, flare_err_details};
 use tracing::instrument;
 
-use crate::error::{ErrorCode, Result};
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{PushRepository, RecipientRepository};
 use crate::domain::service::sequence_allocator::SequenceAllocator;
 use crate::domain::service::validation_strategy::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
 };
+use crate::error::{ErrorCode, Result};
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
 
 /// 事件领域服务
@@ -73,23 +73,24 @@ impl EventDomainService {
         event_id = %event.event_id,
         conversation_id = %event.conversation_id,
     ))]
-    pub async fn validate_event(
-        &self,
-        ctx: &Ctx,
-        tenant_id: &str,
-        event: &Event,
-    ) -> Result<()> {
+    pub async fn validate_event(&self, ctx: &Ctx, tenant_id: &str, event: &Event) -> Result<()> {
         let validation_context = ValidationContext {
             ctx,
             tenant_id,
             conversation_id: &event.conversation_id,
         };
-        
-        let validation_result = self.validation_strategy
+
+        let validation_result = self
+            .validation_strategy
             .validate(&validation_context, event)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, &format!("Event validation failed: {}", e)))?;
-        
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InvalidParameter,
+                    &format!("Event validation failed: {}", e)
+                )
+            })?;
+
         if !validation_result.is_valid {
             return Err(flare_err_details!(
                 ErrorCode::InvalidParameter,
@@ -97,7 +98,7 @@ impl EventDomainService {
                 format!("{:?}", validation_result.errors)
             ));
         }
-        
+
         Ok(())
     }
 
@@ -134,13 +135,13 @@ impl EventDomainService {
                     )
                 )
             })?;
-        
+
         tracing::debug!(
             conversation_id = %event.conversation_id,
             seq = session_seq,
             "Allocated session sequence for event"
         );
-        
+
         event.seq = session_seq;
         Ok(event)
     }
@@ -161,7 +162,12 @@ impl EventDomainService {
         self.recipient_repository
             .get_conversation_members(ctx, &event.conversation_id)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to get conversation members for event: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to get conversation members for event: {}", e)
+                )
+            })
     }
 
     /// 仅推送事件（不持久化），由服务内部自动解析接收者
@@ -172,13 +178,10 @@ impl EventDomainService {
         conversation_id = %event.conversation_id,
         event_type = ?EventType::try_from(event.r#type),
     ))]
-    pub async fn push_only(
-        &self,
-        ctx: &Ctx,
-        event: Event,
-    ) -> Result<()> {
+    pub async fn push_only(&self, ctx: &Ctx, event: Event) -> Result<()> {
         let recipient_user_ids = self.get_recipient_user_ids(ctx, &event).await?;
-        self.push_only_with_recipients(ctx, event, recipient_user_ids).await
+        self.push_only_with_recipients(ctx, event, recipient_user_ids)
+            .await
     }
 
     /// 仅推送事件（不持久化），接收者由调用方显式提供
@@ -207,14 +210,14 @@ impl EventDomainService {
 
         let conversation_id = event.conversation_id.clone();
         self.push_repository
-            .push_only_event(
-                ctx,
-                event,
-                recipient_user_ids,
-                conversation_id,
-            )
+            .push_only_event(ctx, event, recipient_user_ids, conversation_id)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish push-only event to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish push-only event to MQ: {}", e)
+                )
+            })
     }
 
     /// 判断是否为临时事件（仅推送，不持久化）
@@ -225,10 +228,10 @@ impl EventDomainService {
     /// - EVENT_CALL_SIGNAL：通话信令（实时性，无需持久化）
     fn is_temporary_event(event_type: EventType) -> bool {
         match event_type {
-            EventType::EventTyping => true,        // 正在输入：高频，仅推送
-            EventType::EventPresence => true,      // 在线状态：实时性，仅推送
-            EventType::EventCallSignal => true,    // 通话信令：实时性，仅推送
-            _ => false,                           // 其他事件：需要持久化
+            EventType::EventTyping => true,     // 正在输入：高频，仅推送
+            EventType::EventPresence => true,   // 在线状态：实时性，仅推送
+            EventType::EventCallSignal => true, // 通话信令：实时性，仅推送
+            _ => false,                         // 其他事件：需要持久化
         }
     }
 
@@ -251,11 +254,7 @@ impl EventDomainService {
         conversation_id = %event.conversation_id,
         event_type = ?EventType::try_from(event.r#type),
     ))]
-    pub async fn persistence_only(
-        &self,
-        ctx: &Ctx,
-        event: Event,
-    ) -> Result<()> {
+    pub async fn persistence_only(&self, ctx: &Ctx, event: Event) -> Result<()> {
         tracing::debug!(
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
@@ -263,16 +262,17 @@ impl EventDomainService {
             seq = event.seq,
             "Persisting event only (no push)"
         );
-        
+
         let conversation_id = event.conversation_id.clone();
         self.push_repository
-            .persistence_only_event(
-                ctx,
-                event,
-                conversation_id,
-            )
+            .persistence_only_event(ctx, event, conversation_id)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish persistence-only event to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish persistence-only event to MQ: {}", e)
+                )
+            })
     }
 
     /// 推送事件
@@ -321,6 +321,11 @@ impl EventDomainService {
                 event.conversation_id.clone(),
             )
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish event to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish event to MQ: {}", e)
+                )
+            })
     }
 }

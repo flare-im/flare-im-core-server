@@ -21,14 +21,16 @@ use flare_proto::common::Message;
 use flare_server_core::{flare_err, flare_err_details};
 use tracing::instrument;
 
-use crate::error::{ErrorCode, Result};
-use crate::domain::{MessageProfile, PersistenceMode};
 use crate::domain::model::{MessageDefaults, MessageSubmission};
-use crate::domain::repository::{PushRepository, RecipientRepository, WalRepositoryItem, WalRepository};
+use crate::domain::repository::{
+    PushRepository, RecipientRepository, WalRepository, WalRepositoryItem,
+};
 use crate::domain::service::sequence_allocator::SequenceAllocator;
 use crate::domain::service::validation_strategy::{
     CompositeMessageValidationStrategy, MessageValidationStrategy, ValidationContext,
 };
+use crate::domain::{MessageProfile, PersistenceMode};
+use crate::error::{ErrorCode, Result};
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
 
 /// 消息领域服务
@@ -66,8 +68,9 @@ impl MessageDomainService {
             sequence_allocator,
             defaults,
             message_decorator: message_decorator.unwrap_or_else(|| Arc::new(NoopMessageDecorator)),
-            validation_strategy: validation_strategy
-                .unwrap_or_else(|| Arc::new(CompositeMessageValidationStrategy::default_composite())),
+            validation_strategy: validation_strategy.unwrap_or_else(|| {
+                Arc::new(CompositeMessageValidationStrategy::default_composite())
+            }),
         }
     }
 
@@ -96,12 +99,18 @@ impl MessageDomainService {
             tenant_id,
             conversation_id: &message.conversation_id,
         };
-        
-        let validation_result = self.validation_strategy
+
+        let validation_result = self
+            .validation_strategy
             .validate(&validation_context, message)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, &format!("Message validation failed: {}", e)))?;
-        
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InvalidParameter,
+                    &format!("Message validation failed: {}", e)
+                )
+            })?;
+
         if !validation_result.is_valid {
             return Err(flare_err_details!(
                 ErrorCode::InvalidParameter,
@@ -109,7 +118,7 @@ impl MessageDomainService {
                 format!("{:?}", validation_result.errors)
             ));
         }
-        
+
         Ok(())
     }
 
@@ -134,18 +143,27 @@ impl MessageDomainService {
         message: Message,
     ) -> Result<(MessageSubmission, MessageProfile)> {
         // 准备消息提交
-        let submission = MessageSubmission::prepare(message, &self.defaults)
-            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, &format!("Failed to prepare message: {}", e)))?;
+        let submission = MessageSubmission::prepare(message, &self.defaults).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                &format!("Failed to prepare message: {}", e)
+            )
+        })?;
 
         // 分配序列号
         let session_seq = self
             .sequence_allocator
             .allocate_seq(&submission.message.conversation_id, tenant_id)
             .await
-            .map_err(|e| flare_err!(
-                ErrorCode::InternalError,
-                &format!("allocate seq failed for conversation_id={}: {}", submission.message.conversation_id, e)
-            ))?;
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!(
+                        "allocate seq failed for conversation_id={}: {}",
+                        submission.message.conversation_id, e
+                    )
+                )
+            })?;
 
         tracing::debug!(
             conversation_id = %submission.message.conversation_id,
@@ -155,11 +173,11 @@ impl MessageDomainService {
 
         let mut submission = submission;
         submission.message.seq = session_seq;
-        
+
         // 获取消息类型信息
         let mut message_for_profile = submission.message.clone();
         let profile = MessageProfile::ensure(&mut message_for_profile);
-        
+
         Ok((submission, profile))
     }
 
@@ -183,10 +201,12 @@ impl MessageDomainService {
     ) -> Result<()> {
         if profile.needs_wal() {
             let _wal_span = create_span("message-domain", "wal_write");
-            self.wal_repository
-                .append(submission)
-                .await
-                .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to append WAL entry: {}", e)))?;
+            self.wal_repository.append(submission).await.map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to append WAL entry: {}", e)
+                )
+            })?;
         }
         Ok(())
     }
@@ -204,10 +224,12 @@ impl MessageDomainService {
         message_id = %message.server_id,
     ))]
     pub async fn decorate_message(&self, message: Message) -> Result<Message> {
-        self.message_decorator
-            .decorate(message)
-            .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Message decorator failed: {}", e)))
+        self.message_decorator.decorate(message).await.map_err(|e| {
+            flare_err!(
+                ErrorCode::InternalError,
+                &format!("Message decorator failed: {}", e)
+            )
+        })
     }
 
     /// 获取接收者用户 ID 列表
@@ -222,20 +244,33 @@ impl MessageDomainService {
     #[instrument(skip(self), fields(
         conversation_id = %message.conversation_id,
     ))]
-    pub async fn get_recipient_user_ids(&self, ctx: &Ctx, message: &Message) -> Result<Vec<String>> {
+    pub async fn get_recipient_user_ids(
+        &self,
+        ctx: &Ctx,
+        message: &Message,
+    ) -> Result<Vec<String>> {
         use crate::domain::model::ConversationType;
         let conversation_type = ConversationType::from_proto(message.conversation_type);
-        
+
         self.recipient_repository
             .get_message_recipients(
                 ctx,
                 &message.conversation_id,
                 conversation_type,
-                if message.channel_id.is_empty() { None } else { Some(&message.channel_id) },
+                if message.channel_id.is_empty() {
+                    None
+                } else {
+                    Some(&message.channel_id)
+                },
                 &message.sender_id,
             )
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to get message recipients: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to get message recipients: {}", e)
+                )
+            })
     }
 
     /// 仅推送消息（不持久化），接收者由调用方显式提供
@@ -261,14 +296,14 @@ impl MessageDomainService {
 
         let conversation_id = message.conversation_id.clone();
         self.push_repository
-            .push_only_message(
-                ctx,
-                message,
-                recipient_user_ids,
-                conversation_id,
-            )
+            .push_only_message(ctx, message, recipient_user_ids, conversation_id)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish push-only message to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish push-only message to MQ: {}", e)
+                )
+            })
     }
 
     /// 仅推送消息（不持久化），由服务内部自动解析接收者
@@ -276,11 +311,7 @@ impl MessageDomainService {
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
     ))]
-    pub async fn push_only(
-        &self,
-        ctx: &Ctx,
-        message: Message,
-    ) -> Result<()> {
+    pub async fn push_only(&self, ctx: &Ctx, message: Message) -> Result<()> {
         let recipient_user_ids = self.get_recipient_user_ids(ctx, &message).await?;
         self.push_only_with_recipients(ctx, message, recipient_user_ids)
             .await
@@ -319,13 +350,14 @@ impl MessageDomainService {
 
         let conversation_id = message.conversation_id.clone();
         self.push_repository
-            .persistence_only_message(
-                ctx,
-                message,
-                conversation_id,
-            )
+            .persistence_only_message(ctx, message, conversation_id)
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish persistence-only message to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish persistence-only message to MQ: {}", e)
+                )
+            })
     }
 
     /// 推送消息
@@ -356,7 +388,9 @@ impl MessageDomainService {
             return self.push_only(ctx, submission.message.clone()).await;
         }
 
-        let recipient_user_ids = self.get_recipient_user_ids(ctx, &submission.message).await?;
+        let recipient_user_ids = self
+            .get_recipient_user_ids(ctx, &submission.message)
+            .await?;
         tracing::debug!(
             conversation_id = %submission.message.conversation_id,
             message_id = %submission.message_id,
@@ -373,6 +407,11 @@ impl MessageDomainService {
                 submission.message.conversation_id.clone(),
             )
             .await
-            .map_err(|e| flare_err!(ErrorCode::InternalError, &format!("Failed to publish message to MQ: {}", e)))
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to publish message to MQ: {}", e)
+                )
+            })
     }
 }

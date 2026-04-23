@@ -40,9 +40,9 @@ impl ConversationClient {
             manage_client: Arc::new(tokio::sync::Mutex::new(
                 ConversationManageServiceClient::new(channel.clone()),
             )),
-            read_client: Arc::new(tokio::sync::Mutex::new(
-                ConversationReadServiceClient::new(channel),
-            )),
+            read_client: Arc::new(tokio::sync::Mutex::new(ConversationReadServiceClient::new(
+                channel,
+            ))),
         }
     }
 }
@@ -171,9 +171,7 @@ impl ConversationRpcClient for ConversationClient {
             let response = client
                 .get_conversation_members(grpc_request)
                 .await
-                .map_err(|e| {
-                    FlareError::system(format!("GetConversationMembers failed: {}", e))
-                })?;
+                .map_err(|e| FlareError::system(format!("GetConversationMembers failed: {}", e)))?;
 
             let members = response.into_inner().member_ids;
             debug!(

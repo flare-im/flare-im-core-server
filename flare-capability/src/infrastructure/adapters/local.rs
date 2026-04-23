@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-
 use flare_im_core::{
     DeliveryEvent, DeliveryHook, MessageDraft, MessageRecord, PostSendHook, PreSendDecision,
     PreSendHook, RecallEvent, RecallHook,
 };
 use flare_server_core::context::{Context, Ctx};
+
+use crate::error::{ErrorBuilder, ErrorCode, Result};
 
 /// Local Plugin适配器
 pub struct LocalHookAdapter {
@@ -23,7 +23,7 @@ pub struct LocalHookAdapter {
 
 impl LocalHookAdapter {
     /// 创建Local Plugin适配器
-    pub fn new(_target: String) -> anyhow::Result<Self> {
+    pub fn new(_target: String) -> Result<Self> {
         Ok(Self {
             pre_send_hooks: HashMap::new(),
             post_send_hooks: HashMap::new(),
@@ -59,10 +59,13 @@ impl LocalHookAdapter {
         ctx: &Context,
         draft: &mut MessageDraft,
     ) -> Result<PreSendDecision> {
-        let hook = self
-            .pre_send_hooks
-            .get(target)
-            .ok_or_else(|| anyhow::anyhow!("Local PreSend hook not found: {}", target))?;
+        let hook = self.pre_send_hooks.get(target).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                format!("local PreSend hook not registered for target `{target}`"),
+            )
+            .build_error()
+        })?;
 
         // 将 &Context 包装为 &Ctx (&Arc<Context>)
         let ctx_arc: Ctx = Arc::new(ctx.clone());
@@ -77,33 +80,47 @@ impl LocalHookAdapter {
         record: &MessageRecord,
         draft: &MessageDraft,
     ) -> Result<()> {
-        let hook = self
-            .post_send_hooks
-            .get(target)
-            .ok_or_else(|| anyhow::anyhow!("Local PostSend hook not found: {}", target))?;
+        let hook = self.post_send_hooks.get(target).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                format!("local PostSend hook not registered for target `{target}`"),
+            )
+            .build_error()
+        })?;
 
         let ctx_arc: Ctx = Arc::new(ctx.clone());
         let outcome = hook.handle(&ctx_arc, record, draft).await;
         if outcome.is_completed() {
             Ok(())
         } else {
-            anyhow::bail!("PostSend hook failed")
+            Err(ErrorBuilder::new(
+                ErrorCode::OperationFailed,
+                "local PostSend hook did not complete successfully",
+            )
+            .build_error())
         }
     }
 
     /// 执行Delivery Hook
     pub async fn delivery(&self, target: &str, ctx: &Context, event: &DeliveryEvent) -> Result<()> {
-        let hook = self
-            .delivery_hooks
-            .get(target)
-            .ok_or_else(|| anyhow::anyhow!("Local Delivery hook not found: {}", target))?;
+        let hook = self.delivery_hooks.get(target).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                format!("local Delivery hook not registered for target `{target}`"),
+            )
+            .build_error()
+        })?;
 
         let ctx_arc: Ctx = Arc::new(ctx.clone());
         let outcome = hook.handle(&ctx_arc, event).await;
         if outcome.is_completed() {
             Ok(())
         } else {
-            anyhow::bail!("Delivery hook failed")
+            Err(ErrorBuilder::new(
+                ErrorCode::OperationFailed,
+                "local Delivery hook did not complete successfully",
+            )
+            .build_error())
         }
     }
 
@@ -114,19 +131,24 @@ impl LocalHookAdapter {
         ctx: &Context,
         event: &RecallEvent,
     ) -> Result<PreSendDecision> {
-        let hook = self
-            .recall_hooks
-            .get(target)
-            .ok_or_else(|| anyhow::anyhow!("Local Recall hook not found: {}", target))?;
+        let hook = self.recall_hooks.get(target).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                format!("local Recall hook not registered for target `{target}`"),
+            )
+            .build_error()
+        })?;
 
         let ctx_arc: Ctx = Arc::new(ctx.clone());
         let outcome = hook.handle(&ctx_arc, event).await;
         if outcome.is_completed() {
             Ok(PreSendDecision::Continue)
         } else {
-            use flare_im_core::error::{ErrorBuilder, ErrorCode};
-            let error =
-                ErrorBuilder::new(ErrorCode::OperationFailed, "Recall hook failed").build_error();
+            let error = ErrorBuilder::new(
+                ErrorCode::OperationFailed,
+                "local Recall hook did not complete successfully",
+            )
+            .build_error();
             Ok(PreSendDecision::Reject { error })
         }
     }

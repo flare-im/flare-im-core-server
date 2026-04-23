@@ -1,7 +1,7 @@
 //! 消息发送相关命令：`SendMessage`、批量发送、系统消息、临时消息等。
 
-use flare_proto::common::Message;
 use flare_grpc_proto::message::SendMessageRequest;
+use flare_proto::common::Message;
 
 /// 发送消息命令（包含消息类别判断和路由逻辑）
 /// 请求/租户信息通过调用链的 Context 传递，不在此结构体中承载。

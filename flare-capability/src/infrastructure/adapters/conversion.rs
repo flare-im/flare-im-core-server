@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::infrastructure::adapters::hook_context_data::{HookContextData, set_hook_context_data};
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
-use flare_grpc_proto::hooks::{
+use flare_grpc_proto::capability::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
 };
@@ -19,6 +19,13 @@ pub fn context_to_proto(ctx: &Context) -> HookInvocationContext {
 
     let hook_data = get_hook_context_data(ctx).cloned().unwrap_or_default();
 
+    let operator_user_id = ctx
+        .actor()
+        .map(|a| a.actor_id().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| ctx.user_id().map(|s| s.to_string()))
+        .unwrap_or_default();
+
     HookInvocationContext {
         conversation_id: hook_data.conversation_id.clone().unwrap_or_default(),
         conversation_type: hook_data.conversation_type.clone().unwrap_or_default(),
@@ -29,6 +36,11 @@ pub fn context_to_proto(ctx: &Context) -> HookInvocationContext {
             .unwrap_or_else(|| "messaging".to_string()),
         tags: hook_data.tags.clone(),
         attributes: hook_data.attributes.clone(),
+        tenant_id: ctx.tenant_id().unwrap_or("").to_string(),
+        app_id: String::new(),
+        operator_user_id,
+        request_id: ctx.request_id().to_string(),
+        extension_bag: None,
     }
 }
 
@@ -43,6 +55,10 @@ pub fn message_draft_to_proto(draft: &MessageDraft) -> HookMessageDraft {
         payload: draft.payload.clone(),
         headers: draft.headers.clone(),
         metadata: draft.metadata.clone(),
+        message_type: String::new(),
+        parent_message_id: String::new(),
+        is_silent: false,
+        extension_bag: None,
     }
 }
 
@@ -100,6 +116,8 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         message: Some(proto_message),
         persisted_at: Some(system_time_to_timestamp(record.persisted_at)),
         metadata: record.metadata.clone(),
+        server_seq: 0,
+        extension_bag: None,
     }
 }
 
@@ -111,6 +129,8 @@ pub fn delivery_event_to_proto(event: &DeliveryEvent) -> HookDeliveryEvent {
         channel: event.channel.clone(),
         delivered_at: Some(system_time_to_timestamp(event.delivered_at)),
         metadata: event.metadata.clone(),
+        device_id: String::new(),
+        extension_bag: None,
     }
 }
 
@@ -121,6 +141,8 @@ pub fn recall_event_to_proto(event: &RecallEvent) -> HookRecallEvent {
         operator_id: event.operator_id.clone(),
         recalled_at: Some(system_time_to_timestamp(event.recalled_at)),
         metadata: event.metadata.clone(),
+        recall_scope: String::new(),
+        extension_bag: None,
     }
 }
 

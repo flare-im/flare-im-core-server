@@ -11,20 +11,19 @@
 
 use std::sync::Arc;
 
-use flare_proto::common::{DeleteType as ProtoDeleteType, MarkType, ReactionAction};
 use flare_im_core::Ctx;
+use flare_proto::common::{DeleteType as ProtoDeleteType, MarkType, ReactionAction};
 use tracing::instrument;
 
 use crate::application::commands::{
-    AddReactionCommand, DeleteMessageCommand, EditMessageCommand, PinMessageCommand,
-    ReadMessageCommand, RecallMessageCommand, RemoveReactionCommand, UnmarkMessageCommand,
-    UnpinMessageCommand, MarkMessageCommand,
+    AddReactionCommand, DeleteMessageCommand, EditMessageCommand, MarkMessageCommand,
+    PinMessageCommand, ReadMessageCommand, RecallMessageCommand, RemoveReactionCommand,
+    UnmarkMessageCommand, UnpinMessageCommand,
 };
 use crate::application::handlers::EventHandler;
 use crate::domain::builder::{
-    build_recall_event, build_edit_event, build_delete_event,
-    build_read_receipt_event, build_reaction_event,
-    build_pin_event, build_unpin_event, build_mark_event, build_unmark_event,
+    build_delete_event, build_edit_event, build_mark_event, build_pin_event, build_reaction_event,
+    build_read_receipt_event, build_recall_event, build_unmark_event, build_unpin_event,
 };
 use crate::error::Result;
 
@@ -64,7 +63,7 @@ impl MessageActionHandler {
             &cmd.base.message_id,
             cmd.reason.as_deref(),
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -95,7 +94,7 @@ impl MessageActionHandler {
             cmd.new_content,
             1, // TODO: 从存储获取当前编辑版本并递增
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -120,7 +119,7 @@ impl MessageActionHandler {
     ))]
     pub async fn delete_message(&self, ctx: &Ctx, cmd: DeleteMessageCommand) -> Result<i32> {
         let mut deleted_count = 0;
-        
+
         // 批量删除：为每个消息构建删除事件
         for message_id in &cmd.message_ids {
             // 1. 构建删除事件
@@ -128,18 +127,15 @@ impl MessageActionHandler {
                 crate::application::commands::DeleteType::Soft => ProtoDeleteType::Soft,
                 crate::application::commands::DeleteType::Hard => ProtoDeleteType::Hard,
             };
-            
-            let event = build_delete_event(
-                &cmd.base.conversation_id,
-                message_id,
-                proto_delete_type,
-            );
-            
+
+            let event =
+                build_delete_event(&cmd.base.conversation_id, message_id, proto_delete_type);
+
             // 2. 调用 EventHandler 处理事件
             self.event_handler.handle_event(ctx, event).await?;
             deleted_count += 1;
         }
-        
+
         Ok(deleted_count)
     }
 
@@ -169,7 +165,7 @@ impl MessageActionHandler {
             &cmd.base.operator_id,
             0, // TODO: 从消息存储获取 seq
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -202,10 +198,10 @@ impl MessageActionHandler {
             &cmd.emoji,
             ReactionAction::Add,
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await?;
-        
+
         // TODO: 从存储获取当前反应数量
         Ok(1)
     }
@@ -238,10 +234,10 @@ impl MessageActionHandler {
             &cmd.emoji,
             ReactionAction::Remove,
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await?;
-        
+
         // TODO: 从存储获取当前反应数量
         Ok(0)
     }
@@ -271,7 +267,7 @@ impl MessageActionHandler {
             &cmd.base.message_id,
             &cmd.base.operator_id,
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -296,11 +292,8 @@ impl MessageActionHandler {
     ))]
     pub async fn unpin_message(&self, ctx: &Ctx, cmd: UnpinMessageCommand) -> Result<()> {
         // 1. 构建取消置顶事件
-        let event = build_unpin_event(
-            &cmd.base.conversation_id,
-            &cmd.base.message_id,
-        );
-        
+        let event = build_unpin_event(&cmd.base.conversation_id, &cmd.base.message_id);
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -332,14 +325,14 @@ impl MessageActionHandler {
             2 => MarkType::Done,
             _ => MarkType::Custom,
         };
-        
+
         let event = build_mark_event(
             &cmd.base.conversation_id,
             &cmd.base.message_id,
             &cmd.base.operator_id,
             mark_type,
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }
@@ -370,14 +363,14 @@ impl MessageActionHandler {
             Some(2) => MarkType::Done,
             _ => MarkType::Custom,
         };
-        
+
         let event = build_unmark_event(
             &cmd.base.conversation_id,
             &cmd.base.message_id,
             &cmd.user_id,
             mark_type,
         );
-        
+
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
     }

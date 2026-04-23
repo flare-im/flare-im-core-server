@@ -10,11 +10,9 @@
 
 use chrono::Utc;
 use flare_proto::common::{
-    Event, EventType, event,
-    MessageRecallEvent, MessageEditEvent, MessageDeleteEvent,
-    ReadReceiptEvent, TypingEvent, ReactionEvent,
-    PinEvent, UnpinEvent, MarkEvent, UnmarkEvent,
-    CustomEvent,
+    CustomEvent, Event, EventType, MarkEvent, MessageDeleteEvent, MessageEditEvent,
+    MessageRecallEvent, PinEvent, ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent,
+    UnpinEvent, event,
 };
 use prost_types::Timestamp;
 use uuid::Uuid;
@@ -156,11 +154,7 @@ pub fn build_delete_event(
 /// ```rust
 /// let event = build_read_receipt_event("conv-123", "user-456", 100);
 /// ```
-pub fn build_read_receipt_event(
-    conversation_id: &str,
-    user_id: &str,
-    read_seq: u64,
-) -> Event {
+pub fn build_read_receipt_event(conversation_id: &str, user_id: &str, read_seq: u64) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         seq: 0,
@@ -228,11 +222,7 @@ pub fn build_reaction_event(
 /// ```rust
 /// let event = build_pin_event("conv-123", "msg-456", "user-789");
 /// ```
-pub fn build_pin_event(
-    conversation_id: &str,
-    server_msg_id: &str,
-    pinned_by: &str,
-) -> Event {
+pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &str) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         seq: 0,
@@ -260,10 +250,7 @@ pub fn build_pin_event(
 /// ```rust
 /// let event = build_unpin_event("conv-123", "msg-456");
 /// ```
-pub fn build_unpin_event(
-    conversation_id: &str,
-    server_msg_id: &str,
-) -> Event {
+pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         seq: 0,
@@ -358,11 +345,7 @@ pub fn build_unmark_event(
 /// ```rust
 /// let event = build_typing_event("conv-123", "user-456", true);
 /// ```
-pub fn build_typing_event(
-    conversation_id: &str,
-    user_id: &str,
-    typing: bool,
-) -> Event {
+pub fn build_typing_event(conversation_id: &str, user_id: &str, typing: bool) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         seq: 0,
@@ -480,7 +463,12 @@ impl EventBuilder {
     }
 
     /// 设置编辑事件载荷
-    pub fn with_edit_payload(mut self, server_msg_id: &str, new_content: Vec<u8>, edit_version: i32) -> Self {
+    pub fn with_edit_payload(
+        mut self,
+        server_msg_id: &str,
+        new_content: Vec<u8>,
+        edit_version: i32,
+    ) -> Self {
         self.payload = Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
             new_content,
@@ -492,7 +480,11 @@ impl EventBuilder {
     }
 
     /// 设置删除事件载荷
-    pub fn with_delete_payload(mut self, server_msg_id: &str, delete_type: flare_proto::common::DeleteType) -> Self {
+    pub fn with_delete_payload(
+        mut self,
+        server_msg_id: &str,
+        delete_type: flare_proto::common::DeleteType,
+    ) -> Self {
         self.payload = Some(event::Payload::Delete(MessageDeleteEvent {
             server_msg_id: server_msg_id.to_string(),
             delete_type: Some(delete_type as i32),
@@ -770,7 +762,7 @@ mod tests {
             .conversation_id("conv-123")
             .with_recall_payload("msg-456", Some("发错了"))
             .build();
-        
+
         assert_eq!(event.conversation_id, "conv-123");
         assert_eq!(event.r#type, EventType::EventMessageRecall as i32);
     }
