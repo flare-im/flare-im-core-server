@@ -160,7 +160,7 @@ SELECT add_compression_policy('messages', INTERVAL '7 days');
 ### 2. 写入优化
 
 - ✅ 批量插入（减少事务开销）
-- ✅ 异步写入（通过 Kafka 削峰）
+- ✅ 异步写入（通过 JetStream 削峰）
 - ✅ 连接池（复用数据库连接）
 
 ### 3. 存储优化

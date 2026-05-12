@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use flare_grpc_proto::signaling::router::{RouteEventRequest, RouteOptions};
 use flare_im_core::Ctx;
 use flare_proto::common::Event;
-use flare_grpc_proto::signaling::router::{RouteEventRequest, RouteOptions};
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode as ServerErrorCode, Result};
 
@@ -43,14 +43,11 @@ impl IEventCommandPort for RouterEventCommandPort {
         };
 
         let request = request_with_context(req, tx);
-        client
-            .route_event(request)
-            .await
-            .map_err(|status| {
-                ErrorBuilder::new(ServerErrorCode::ServiceUnavailable, "RouteEvent RPC failed")
-                    .details(status.to_string())
-                    .build_error()
-            })?;
+        client.route_event(request).await.map_err(|status| {
+            ErrorBuilder::new(ServerErrorCode::ServiceUnavailable, "RouteEvent RPC failed")
+                .details(status.to_string())
+                .build_error()
+        })?;
         Ok(())
     }
 }

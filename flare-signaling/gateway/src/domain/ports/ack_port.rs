@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::{AckBatch, ConversationAck, PushAck};
 use flare_im_core::error::Result;
+use flare_proto::common::{AckBatch, ConversationAck, PushAck};
 
 #[async_trait]
 pub trait IAckReportPort: Send + Sync {

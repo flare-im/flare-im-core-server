@@ -12,7 +12,7 @@ use crate::application::handlers::{
 use crate::config::OnlineConfig;
 use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
 use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
-use crate::error::{map_infra_error, ErrorCode, Result};
+use crate::error::{ErrorCode, Result, map_infra_error};
 use crate::infrastructure::persistence::redis::{
     RedisConversationRepository, RedisPresencePublisher, RedisPresenceWatcher,
     RedisSubscriptionRepository,
@@ -45,16 +45,18 @@ pub async fn initialize(
     app_config: &flare_im_core::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载在线服务配置
-    let online_config = Arc::new(
-        OnlineConfig::from_app_config(app_config)
-            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to load online service configuration"))?,
-    );
+    let online_config = Arc::new(OnlineConfig::from_app_config(app_config).map_err(|e| {
+        map_infra_error(
+            e,
+            ErrorCode::InternalError,
+            "Failed to load online service configuration",
+        )
+    })?);
 
     // 2. 创建 Redis 客户端
-    let redis_client = Arc::new(
-        Client::open(online_config.redis_url.as_str())
-            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "Failed to create Redis client"))?,
-    );
+    let redis_client = Arc::new(Client::open(online_config.redis_url.as_str()).map_err(|e| {
+        map_infra_error(e, ErrorCode::NetworkError, "Failed to create Redis client")
+    })?);
 
     // 3. 构建仓储（具体类型，禁止 `Arc<dyn>` + 异步 trait）
     let conversation_repository: Arc<RedisConversationRepository> = Arc::new(

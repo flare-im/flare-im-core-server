@@ -225,7 +225,9 @@ impl ConversationRepository for RedisConversationRepository {
             let _: () = conn
                 .hset(&cursor_key, conversation_id, *ts)
                 .await
-                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset batch ack"))?;
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "redis hset batch ack")
+                })?;
         }
         Ok(())
     }

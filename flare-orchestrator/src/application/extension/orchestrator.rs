@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use flare_im_core::Ctx;
 use flare_proto::common::event::Payload;
-use flare_proto::common::{Event, Message};
+use flare_proto::common::{Event, EventType, Message};
 
 use crate::application::extension::{ExtensionFailureMode, ExtensionPolicy, ExtensionRouting};
 use crate::application::handlers::plugin::CallCapabilityBridge;
@@ -236,6 +236,10 @@ impl ExtensionOrchestrator {
         tenant_id: &str,
         event: &mut Event,
     ) -> Result<()> {
+        if EventType::try_from(event.r#type).ok() != Some(EventType::EventCallSignal) {
+            return Ok(());
+        }
+
         let Some(ref bridge) = self.call_capability_bridge else {
             self.trace_extension_skip(
                 ctx,
@@ -361,7 +365,7 @@ impl ExtensionOrchestrator {
         message_type: Option<i32>,
         event_type: Option<i32>,
     ) {
-        tracing::debug!(
+        tracing::trace!(
             event = "extension_exec",
             schema = EXTENSION_LOG_SCHEMA,
             component = "extension_orchestrator",
@@ -387,7 +391,7 @@ impl ExtensionOrchestrator {
         message_type: Option<i32>,
         event_type: Option<i32>,
     ) {
-        tracing::debug!(
+        tracing::trace!(
             event = "extension_skip",
             schema = EXTENSION_LOG_SCHEMA,
             component = "extension_orchestrator",
@@ -412,7 +416,7 @@ impl ExtensionOrchestrator {
         max_attempts: u32,
         reason: &str,
     ) {
-        tracing::debug!(
+        tracing::trace!(
             event = "extension_retry",
             schema = EXTENSION_LOG_SCHEMA,
             component = "extension_orchestrator",

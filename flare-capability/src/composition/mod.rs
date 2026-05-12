@@ -8,13 +8,15 @@
 //!
 //! 与 [`crate::domain::service`]（Hook 执行领域编排）区分：此处 **不实现** 业务规则，只做接线。
 
+pub mod adapter_wiring;
 pub mod bootstrap;
 pub mod hook_registry;
 pub mod process_config;
 pub mod runtime_context;
 pub mod wiring;
 
-pub use bootstrap::ApplicationBootstrap;
+pub use adapter_wiring::wire_runtime_adapters;
+pub use bootstrap::{ApplicationBootstrap, PluginContext};
 pub use hook_registry::CoreHookRegistry;
 pub use process_config::CapabilityServiceConfig;
 pub use runtime_context::ApplicationContext;

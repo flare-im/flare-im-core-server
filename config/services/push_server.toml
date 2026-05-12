@@ -5,8 +5,8 @@
 # 基础配置
 # ============================================
 
-# Kafka 配置 profile 名称（引用 base.toml 中的 [kafka.push]）
-kafka = "push"
+# JetStream 配置 profile 名称（引用 base.toml 中的 [jetstream.push]）
+jetstream = "push"
 
 # Redis 配置 profile 名称（引用 base.toml 中的 [redis.conversation_store]）
 redis = "conversation_store"
@@ -14,13 +14,13 @@ redis = "conversation_store"
 # Consumer Group 名称
 consumer_group = "push-server"
 
-# 消息 Topic 配置
+# 消息 Subject 配置
 message_topic = "push-messages"
 notification_topic = "push-notifications"
 task_topic = "flare.im.push.tasks"
 
-# Kafka 超时配置（毫秒）
-kafka_timeout_ms = 5000
+# JetStream 超时配置（毫秒）
+jetstream_timeout_ms = 5000
 
 # Redis 在线状态 TTL（秒）
 online_ttl_seconds = 3600
@@ -91,13 +91,13 @@ push_retry_max_delay_ms = 5000
 push_retry_backoff_multiplier = 2.0
 
 # ============================================
-# ACK 超时重试配置（区别于推送重试，避免 Kafka 阻塞）
+# ACK 超时重试配置（区别于推送重试，避免 JetStream 阻塞）
 # ============================================
 
-# ACK 超时重试初始延迟（毫秒，较短，避免阻塞 Kafka）
+# ACK 超时重试初始延迟（毫秒，较短，避免阻塞 JetStream）
 ack_retry_initial_delay_ms = 50
 
-# ACK 超时重试最大延迟（毫秒，较短，避免阻塞 Kafka）
+# ACK 超时重试最大延迟（毫秒，较短，避免阻塞 JetStream）
 ack_retry_max_delay_ms = 1000
 
 # ============================================
@@ -127,13 +127,13 @@ ack_timeout_concurrent_limit = 50
 # 离线推送队列配置
 # ============================================
 
-# 离线推送 Topic
+# 离线推送 Subject
 offline_topic = "flare.im.push.offline"
 
-# 死信队列 Topic
+# 死信队列 Subject
 dlq_topic = "flare.im.push.dlq"
 
-# ACK Topic（从 Push Proxy 消费客户端 ACK）
+# ACK Subject（从 Push Proxy 消费客户端 ACK）
 ack_topic = "flare.im.push.acks"
 
 # ============================================

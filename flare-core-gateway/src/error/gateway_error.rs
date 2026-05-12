@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_server_core::http::ApiResponse;

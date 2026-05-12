@@ -18,6 +18,7 @@ config/overrides/local.toml
 
 dev/
 doc/
+docs/
 tests/
 
 # 临时文件

@@ -6,11 +6,11 @@ use prost_types::Timestamp;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::infrastructure::adapters::hook_context_data::{HookContextData, set_hook_context_data};
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_grpc_proto::capability::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
 };
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 /// 将 flare_server_core::Context 转换为 HookInvocationContext
@@ -161,10 +161,8 @@ pub fn proto_to_pre_send_decision(
         // 如果不允许发送：proto 中不再携带 status，统一用 PermissionDenied。
         // 额外信息可由 annotations 承载（若上游需要，可在此解析）。
         use flare_im_core::error::ErrorCode;
-        let error = flare_server_core::flare_err!(
-            ErrorCode::PermissionDenied,
-            "Hook rejected the request"
-        );
+        let error =
+            flare_server_core::flare_err!(ErrorCode::PermissionDenied, "Hook rejected the request");
         PreSendDecision::Reject { error }
     }
 }

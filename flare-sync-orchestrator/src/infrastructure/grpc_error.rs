@@ -13,18 +13,15 @@ use tonic::Status;
 /// 当 Status 包含结构化 ErrorDetail 时，优先解析；否则根据 gRPC Code 映射到 ErrorCode。
 pub fn flare_from_tonic_status(status: &Status) -> FlareError {
     use tonic::Code;
-    
+
     // 尝试从 Status details 解析结构化错误（如果启用 proto feature）
     #[cfg(feature = "proto")]
     if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(status) {
         // 从结构化错误构建 FlareError
-        return FlareError::localized(
-            ErrorCode::from(detail.code),
-            detail.reason,
-        )
-        .with_details(detail.message);
+        return FlareError::localized(ErrorCode::from(detail.code), detail.reason)
+            .with_details(detail.message);
     }
-    
+
     // 降级：根据 gRPC Code 映射到 ErrorCode
     let msg = status.message().to_string();
     match status.code() {

@@ -9,7 +9,7 @@
 ///
 /// 1. **每会话独立序列**：每个 conversation_id 维护独立的递增序列号
 /// 2. **Redis INCR 原子性**：使用 Redis INCR 命令保证原子递增（单机 10w+ QPS）
-/// 3. **分区保证顺序**：Kafka 按 conversation_id key 分区，确保同会话消息进入同一 partition
+/// 3. **分区保证顺序**：JetStream 按 conversation_id key 分区，确保同会话消息进入同一 partition
 /// 4. **消费端顺序写入**：StorageWriter 按 partition 顺序消费，保证数据库写入顺序
 ///
 /// # 对比传统方案
@@ -196,7 +196,7 @@ impl SequenceAllocator {
     ///
     /// for seq in seqs {
     ///     message.seq = seq;
-    ///     send_to_kafka(message);
+    ///     send_to_jetstream(message);
     /// }
     /// ```
     pub async fn allocate_batch(&self, conversation_id: &str, tenant_id: &str) -> Result<Vec<u64>> {

@@ -253,7 +253,7 @@ impl HookConfig {
     ) -> Result<()> {
         for def in &self.pre_send {
             if !def.enabled {
-                tracing::info!(hook = %def.name, "pre-send hook disabled, skip");
+                tracing::trace!(hook = %def.name, "pre-send hook disabled, skip");
                 continue;
             }
             let selector = def.selector();
@@ -266,7 +266,7 @@ impl HookConfig {
 
         for def in &self.post_send {
             if !def.enabled {
-                tracing::info!(hook = %def.name, "post-send hook disabled, skip");
+                tracing::trace!(hook = %def.name, "post-send hook disabled, skip");
                 continue;
             }
             let selector = def.selector();
@@ -279,7 +279,7 @@ impl HookConfig {
 
         for def in &self.delivery {
             if !def.enabled {
-                tracing::info!(hook = %def.name, "delivery hook disabled, skip");
+                tracing::trace!(hook = %def.name, "delivery hook disabled, skip");
                 continue;
             }
             let selector = def.selector();
@@ -292,7 +292,7 @@ impl HookConfig {
 
         for def in &self.recall {
             if !def.enabled {
-                tracing::info!(hook = %def.name, "recall hook disabled, skip");
+                tracing::trace!(hook = %def.name, "recall hook disabled, skip");
                 continue;
             }
             let selector = def.selector();

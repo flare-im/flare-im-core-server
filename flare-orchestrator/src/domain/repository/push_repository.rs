@@ -17,7 +17,7 @@ pub trait PushRepository: Send + Sync {
     /// 1. 构造 MqEnvelope (MQ_PAYLOAD_KIND_MESSAGE)
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 3. 生成 envelope_id 和 produced_at_ms
-    /// 4. 发布到 Kafka（由 Storage Writer 消费并持久化）
+    /// 4. 发布到 JetStream（由 Storage Writer 消费并持久化）
     async fn publish_message(
         &self,
         ctx: &Ctx,
@@ -32,7 +32,7 @@ pub trait PushRepository: Send + Sync {
     /// 1. 构造 MqEnvelope (MQ_PAYLOAD_KIND_EVENT)
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 3. 生成 envelope_id 和 produced_at_ms
-    /// 4. 发布到 Kafka（由 Storage Writer 消费并持久化，然后推送给用户）
+    /// 4. 发布到 JetStream（由 Storage Writer 消费并持久化，然后推送给用户）
     async fn publish_event(
         &self,
         ctx: &Ctx,
@@ -53,7 +53,7 @@ pub trait PushRepository: Send + Sync {
     /// 2. 设置 envelope.persistence_only = true（标记为仅持久化）
     /// 3. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 4. 生成 envelope_id 和 produced_at_ms
-    /// 5. 发布到 Kafka（由 Storage Writer 消费并持久化，不推送给用户）
+    /// 5. 发布到 JetStream（由 Storage Writer 消费并持久化，不推送给用户）
     async fn persistence_only_message(
         &self,
         ctx: &Ctx,
@@ -73,7 +73,7 @@ pub trait PushRepository: Send + Sync {
     /// 2. 设置 envelope.persistence_only = true（标记为仅持久化）
     /// 3. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 4. 生成 envelope_id 和 produced_at_ms
-    /// 5. 发布到 Kafka（由 Storage Writer 消费并持久化，不推送给用户）
+    /// 5. 发布到 JetStream（由 Storage Writer 消费并持久化，不推送给用户）
     async fn persistence_only_event(
         &self,
         ctx: &Ctx,
@@ -94,7 +94,7 @@ pub trait PushRepository: Send + Sync {
     /// 2. 设置 envelope.push_only = true（标记为仅推送）
     /// 3. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 4. 生成 envelope_id 和 produced_at_ms
-    /// 5. 发布到 Kafka（由 Push Service 直接消费并推送，不经过 Storage Writer）
+    /// 5. 发布到 JetStream（由 Push Service 直接消费并推送，不经过 Storage Writer）
     async fn push_only_message(
         &self,
         ctx: &Ctx,
@@ -116,7 +116,7 @@ pub trait PushRepository: Send + Sync {
     /// 2. 设置 envelope.push_only = true（标记为仅推送）
     /// 3. 从 Ctx 提取 trace_id/tenant_id 填充 headers
     /// 4. 生成 envelope_id 和 produced_at_ms
-    /// 5. 发布到 Kafka（由 Push Service 直接消费并推送，不经过 Storage Writer）
+    /// 5. 发布到 JetStream（由 Push Service 直接消费并推送，不经过 Storage Writer）
     async fn push_only_event(
         &self,
         ctx: &Ctx,
@@ -136,6 +136,6 @@ pub trait PushRepository: Send + Sync {
     /// Infrastructure 实现层需负责：
     /// 1. 将 PushEnvelope 序列化
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers（如果未设置）
-    /// 3. 发布到 Kafka Push Topic（由 Push Server 消费并执行推送）
+    /// 3. 发布到 JetStream Push Topic（由 Push Server 消费并执行推送）
     async fn publish_push_envelope(&self, ctx: &Ctx, envelope: PushEnvelope) -> Result<()>;
 }

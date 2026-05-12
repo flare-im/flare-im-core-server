@@ -7,9 +7,11 @@ use serde_json::{Map, Value};
 
 use super::{
     AcceptCallRequest, AddIceCandidateRequest, CapabilityDispatchCommand, CapabilityDispatchResult,
-    CapabilityError, CapabilityPolicyBackend, CreateCallRequest, GetJoinTokenRequest,
-    HandleSdpAnswerRequest, HandleSdpOfferRequest, HangupCallRequest, RejectCallRequest, Result,
-    RtcCapability, SfuJoinRoomRequest, SfuLeaveRoomRequest,
+    CapabilityError, CapabilityPolicyBackend, CreateCallRequest, HandleSdpAnswerRequest,
+    HandleSdpOfferRequest, HangupCallRequest, MediaGetNetworkQualityRequest,
+    MediaJoinTransportRequest, MediaLeaveTransportRequest, MediaSetPublisherMuteRequest,
+    MediaSetSimulcastLayerRequest, MediaSetSubscriptionRequest, RejectCallRequest, Result,
+    RtcCapability,
 };
 
 fn payload_str(payload: &Value, key: &str) -> Result<String> {
@@ -32,6 +34,21 @@ fn payload_opt_str(payload: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn payload_bool_required(payload: &Value, key: &str) -> Result<bool> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| CapabilityError::System(format!("payload.{key} required (bool)")))
+}
+
+fn payload_u32(payload: &Value, key: &str, default: u32) -> u32 {
+    payload
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(default)
 }
 
 fn merge_object(mut base: Map<String, Value>, ext: Value) -> Value {
@@ -66,11 +83,12 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
 
     match req.capability_id.as_str() {
         "rtc.call.video" | "rtc.call.audio" => {
-            let media = if req.capability_id.ends_with("audio") {
-                "audio"
-            } else {
-                "video"
-            };
+            let media =
+                if req.capability_id.ends_with("audio") || req.capability_id.ends_with(".audio") {
+                    "audio"
+                } else {
+                    "video"
+                };
             let create = CreateCallRequest {
                 tenant_id: tenant.clone(),
                 request_id: rid.clone(),
@@ -156,33 +174,9 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 data,
             ))
         }
-        "rtc.call.join_token" => {
-            let call_id = extract_call_id(&payload)?;
-            let jt = GetJoinTokenRequest {
-                tenant_id: tenant.clone(),
-                request_id: rid.clone(),
-                call_id: call_id.clone(),
-                user_id: user,
-                ext: payload,
-            };
-            let r = rtc.get_join_token(ctx, &jt).await?;
-            let mut m = Map::new();
-            m.insert("token".into(), Value::String(r.token));
-            m.insert(
-                "ttl_seconds".into(),
-                Value::Number(serde_json::Number::from(r.ttl_seconds)),
-            );
-            let data = merge_object(m, r.ext);
-            Ok(CapabilityDispatchResult::ok(
-                rid,
-                "plugin.rtc",
-                req.capability_id.clone(),
-                data,
-            ))
-        }
-        "rtc.sfu.join_room" => {
+        "rtc.media.join" => {
             let room_id = payload_str(&payload, "room_id")?;
-            let jr = SfuJoinRoomRequest {
+            let jr = MediaJoinTransportRequest {
                 tenant_id: tenant.clone(),
                 request_id: rid.clone(),
                 room_id,
@@ -191,7 +185,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 role: payload_opt_str(&payload, "role").unwrap_or_default(),
                 peer_id: payload_opt_str(&payload, "peer_id"),
             };
-            let r = rtc.sfu_join_room(ctx, &jr).await?;
+            let r = rtc.media_join_transport(ctx, &jr).await?;
             let mut m = Map::new();
             m.insert("room_id".into(), r.room_id.into());
             m.insert("peer_id".into(), r.peer_id.into());
@@ -205,10 +199,10 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 data,
             ))
         }
-        "rtc.sfu.leave_room" => {
+        "rtc.media.leave" => {
             let room_id = payload_str(&payload, "room_id")?;
             let peer_id = payload_str(&payload, "peer_id")?;
-            let lr = SfuLeaveRoomRequest {
+            let lr = MediaLeaveTransportRequest {
                 tenant_id: tenant.clone(),
                 request_id: rid.clone(),
                 room_id,
@@ -216,7 +210,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 session_id: payload_opt_str(&payload, "session_id").unwrap_or_default(),
                 user_id: user.clone(),
             };
-            let r = rtc.sfu_leave_room(ctx, &lr).await?;
+            let r = rtc.media_leave_transport(ctx, &lr).await?;
             let mut m = Map::new();
             m.insert("left".into(), Value::Bool(r.left));
             let data = merge_object(m, r.ext);
@@ -227,7 +221,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 data,
             ))
         }
-        "rtc.sfu.handle_sdp_offer" => {
+        "rtc.media.sdp.offer" => {
             let room_id = payload_str(&payload, "room_id")?;
             let peer_id = payload_str(&payload, "peer_id")?;
             let sdp_offer = payload_str(&payload, "sdp_offer")?;
@@ -238,7 +232,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 peer_id,
                 sdp_offer,
             };
-            let r = rtc.sfu_handle_sdp_offer(ctx, &ho).await?;
+            let r = rtc.media_handle_sdp_offer(ctx, &ho).await?;
             let mut m = Map::new();
             m.insert("sdp_answer".into(), r.sdp_answer.into());
             let data = merge_object(m, r.ext);
@@ -249,7 +243,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 data,
             ))
         }
-        "rtc.sfu.handle_sdp_answer" => {
+        "rtc.media.sdp.answer" => {
             let room_id = payload_str(&payload, "room_id")?;
             let peer_id = payload_str(&payload, "peer_id")?;
             let sdp_answer = payload_str(&payload, "sdp_answer")?;
@@ -260,7 +254,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 peer_id,
                 sdp_answer,
             };
-            let r = rtc.sfu_handle_sdp_answer(ctx, &ha).await?;
+            let r = rtc.media_handle_sdp_answer(ctx, &ha).await?;
             let mut m = Map::new();
             m.insert("accepted".into(), Value::Bool(r.accepted));
             let data = merge_object(m, r.ext);
@@ -271,7 +265,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 data,
             ))
         }
-        "rtc.sfu.add_ice_candidate" => {
+        "rtc.media.ice.candidate" => {
             let room_id = payload_str(&payload, "room_id")?;
             let peer_id = payload_str(&payload, "peer_id")?;
             let candidate_json = payload_str(&payload, "candidate_json")?;
@@ -282,9 +276,106 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
                 peer_id,
                 candidate_json,
             };
-            let r = rtc.sfu_add_ice_candidate(ctx, &ice).await?;
+            let r = rtc.media_add_ice_candidate(ctx, &ice).await?;
             let mut m = Map::new();
             m.insert("accepted".into(), Value::Bool(r.accepted));
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.media.publisher.mute" => {
+            let room_id = payload_str(&payload, "room_id")?;
+            let publisher_peer_id = payload_str(&payload, "publisher_peer_id")?;
+            let mute_audio = payload_bool_required(&payload, "mute_audio")?;
+            let mute_video = payload_bool_required(&payload, "mute_video")?;
+            let mute = MediaSetPublisherMuteRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                room_id,
+                publisher_peer_id,
+                mute_audio,
+                mute_video,
+            };
+            let r = rtc.media_set_publisher_mute(ctx, &mute).await?;
+            let mut m = Map::new();
+            m.insert("applied".into(), Value::Bool(r.applied));
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.media.subscription.set" => {
+            let room_id = payload_str(&payload, "room_id")?;
+            let subscriber_peer_id = payload_str(&payload, "subscriber_peer_id")?;
+            let track_id = payload_str(&payload, "track_id")?;
+            let sub = MediaSetSubscriptionRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                room_id,
+                subscriber_peer_id,
+                track_id,
+                enable: payload_bool_required(&payload, "enable")?,
+                media: payload_opt_str(&payload, "media"),
+                preferred_layer: payload_opt_str(&payload, "preferred_layer"),
+                priority: payload_u32(&payload, "priority", 0),
+            };
+            let r = rtc.media_set_subscription(ctx, &sub).await?;
+            let mut m = Map::new();
+            m.insert("applied".into(), Value::Bool(r.applied));
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.media.simulcast.layer.set" => {
+            let room_id = payload_str(&payload, "room_id")?;
+            let subscriber_peer_id = payload_str(&payload, "subscriber_peer_id")?;
+            let track_id = payload_str(&payload, "track_id")?;
+            let req_sim = MediaSetSimulcastLayerRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                room_id,
+                subscriber_peer_id,
+                track_id,
+                layer: payload_str(&payload, "layer")?,
+            };
+            let r = rtc.media_set_simulcast_layer(ctx, &req_sim).await?;
+            let mut m = Map::new();
+            m.insert("applied".into(), Value::Bool(r.applied));
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.media.network.quality.get" => {
+            let room_id = payload_str(&payload, "room_id")?;
+            let peer_id = payload_str(&payload, "peer_id")?;
+            let query = MediaGetNetworkQualityRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                room_id,
+                peer_id,
+            };
+            let r = rtc.media_get_network_quality(ctx, &query).await?;
+            let mut m = Map::new();
+            m.insert("has_data".into(), Value::Bool(r.has_data));
+            m.insert("upstream_score".into(), Value::from(r.upstream_score));
+            m.insert("downstream_score".into(), Value::from(r.downstream_score));
+            m.insert("rtt_ms".into(), Value::from(r.rtt_ms));
+            m.insert("packet_loss_ratio".into(), Value::from(r.packet_loss_ratio));
             let data = merge_object(m, r.ext);
             Ok(CapabilityDispatchResult::ok(
                 rid,

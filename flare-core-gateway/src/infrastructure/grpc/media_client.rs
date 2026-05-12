@@ -227,10 +227,7 @@ impl MediaServiceClientWrapper {
     }
 
     /// 获取文件 URL
-    pub async fn get_file_url(
-        &mut self,
-        request: GetFileUrlRequest,
-    ) -> Result<GetFileUrlResponse> {
+    pub async fn get_file_url(&mut self, request: GetFileUrlRequest) -> Result<GetFileUrlResponse> {
         let response = self.client.get_file_url(request).await?;
         Ok(response.into_inner())
     }
@@ -281,10 +278,7 @@ impl MediaServiceClientWrapper {
     }
 
     /// 删除文件
-    pub async fn delete_file(
-        &mut self,
-        request: DeleteFileRequest,
-    ) -> Result<DeleteFileResponse> {
+    pub async fn delete_file(&mut self, request: DeleteFileRequest) -> Result<DeleteFileResponse> {
         let response = self.client.delete_file(request).await?;
         Ok(response.into_inner())
     }
@@ -353,10 +347,7 @@ impl MediaServiceClientWrapper {
     }
 
     /// 设置对象 ACL
-    pub async fn set_object_acl(
-        &mut self,
-        request: SetObjectAclRequest,
-    ) -> Result<()> {
+    pub async fn set_object_acl(&mut self, request: SetObjectAclRequest) -> Result<()> {
         self.client.set_object_acl(request).await?;
         Ok(())
     }
@@ -378,9 +369,7 @@ pub struct GrpcClients {
 
 impl GrpcClients {
     /// 初始化所有 gRPC 客户端
-    pub async fn new(
-        media_service_url: &str,
-    ) -> Result<Self> {
+    pub async fn new(media_service_url: &str) -> Result<Self> {
         let media = MediaServiceClientWrapper::new(media_service_url).await?;
 
         Ok(Self {

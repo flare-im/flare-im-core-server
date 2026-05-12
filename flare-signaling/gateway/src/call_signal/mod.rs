@@ -9,5 +9,5 @@ pub mod event;
 pub mod router;
 
 pub use bridge::CallSignalBridge;
-pub use event::{try_unwrap_call_signal, CallSignalType, EVENT_CALL_SIGNAL};
+pub use event::{CallSignalType, EVENT_CALL_SIGNAL, try_unwrap_call_signal};
 pub use router::{CallBindingLookup, CallSignalRouter, CapabilityRouteHint};

@@ -273,14 +273,13 @@ impl MediaProcessor {
         }
 
         // 创建一个空的输出文件作为示例
-        std::fs::write(&op_output_path, "")
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::InternalError,
-                    format!("Failed to create output file: {}", op_output_path),
-                )
-            })?;
+        std::fs::write(&op_output_path, "").map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("Failed to create output file: {}", op_output_path),
+            )
+        })?;
 
         Ok(op_output_path)
     }

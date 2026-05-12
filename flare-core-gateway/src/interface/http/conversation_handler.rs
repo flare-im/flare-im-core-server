@@ -3,7 +3,7 @@ use axum::{
     http::HeaderMap,
 };
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::context::Ctx;
 use crate::error::Result;
@@ -23,8 +23,12 @@ pub struct ListConversationsHttpRequest {
     pub page_size: u32,
 }
 
-fn default_page() -> u32 { 1 }
-fn default_page_size() -> u32 { 20 }
+fn default_page() -> u32 {
+    1
+}
+fn default_page_size() -> u32 {
+    20
+}
 
 /// 会话信息
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -68,7 +72,7 @@ pub async fn list_conversations(
     axum::extract::Query(req): axum::extract::Query<ListConversationsHttpRequest>,
 ) -> Result<Json<ApiResponse<ListConversationsHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    info!(
+    debug!(
         trace_id = %ctx.trace_id,
         user_id = %req.user_id,
         page = req.page,

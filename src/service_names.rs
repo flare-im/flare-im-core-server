@@ -71,7 +71,7 @@ pub mod service_names {
 
     /// Push Proxy 服务名
     ///
-    /// 暴露 PushService gRPC，将推送/ACK 请求写入 Kafka，由 Push Server 消费
+    /// 暴露 PushService gRPC，将推送/ACK 请求写入 JetStream，由 Push Server 消费
     /// 注册路径: `flare/flare-push-proxy`
     pub const PUSH_PROXY: &str = "flare-push-proxy";
 

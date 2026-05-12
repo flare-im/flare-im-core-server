@@ -8,10 +8,11 @@ use crate::domain::capability::{
     CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse, GuardDecision,
     HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
     PreSendEvaluateInput, PreSendGuard, RecipientResolveRequest, RecipientResolveResult,
-    RejectCallRequest, RejectCallResponse, ResolveTrigger, Result, RtcCapability, RecipientResolver,
+    RecipientResolver, RejectCallRequest, RejectCallResponse, ResolveTrigger, Result,
+    RtcCapability,
 };
 
-/// RTC：未注入 SFU / 远端时返回 `NotSupported`
+/// RTC：未注入媒体后端（本地或远端）时返回 `NotSupported`
 pub struct UnwiredRtcCapability;
 
 impl UnwiredRtcCapability {
@@ -26,19 +27,35 @@ impl RtcCapability for UnwiredRtcCapability {
         "unwired.rtc"
     }
 
-    async fn create_call(&self, _ctx: &Ctx, _req: &CreateCallRequest) -> Result<CreateCallResponse> {
+    async fn create_call(
+        &self,
+        _ctx: &Ctx,
+        _req: &CreateCallRequest,
+    ) -> Result<CreateCallResponse> {
         Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
     }
 
-    async fn accept_call(&self, _ctx: &Ctx, _req: &AcceptCallRequest) -> Result<AcceptCallResponse> {
+    async fn accept_call(
+        &self,
+        _ctx: &Ctx,
+        _req: &AcceptCallRequest,
+    ) -> Result<AcceptCallResponse> {
         Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
     }
 
-    async fn reject_call(&self, _ctx: &Ctx, _req: &RejectCallRequest) -> Result<RejectCallResponse> {
+    async fn reject_call(
+        &self,
+        _ctx: &Ctx,
+        _req: &RejectCallRequest,
+    ) -> Result<RejectCallResponse> {
         Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
     }
 
-    async fn hangup_call(&self, _ctx: &Ctx, _req: &HangupCallRequest) -> Result<HangupCallResponse> {
+    async fn hangup_call(
+        &self,
+        _ctx: &Ctx,
+        _req: &HangupCallRequest,
+    ) -> Result<HangupCallResponse> {
         Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
     }
 
@@ -83,7 +100,9 @@ impl RecipientResolver for UnwiredRecipientResolver {
         _ctx: &Ctx,
         _req: &RecipientResolveRequest,
     ) -> Result<RecipientResolveResult> {
-        Err(CapabilityError::NotSupported("UnwiredRecipientResolver".into()))
+        Err(CapabilityError::NotSupported(
+            "UnwiredRecipientResolver".into(),
+        ))
     }
 }
 

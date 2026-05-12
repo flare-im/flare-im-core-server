@@ -264,14 +264,10 @@ where
             .handle_list_message_tags(&ctx, query)
             .await
         {
-            Ok(tags) => Ok(Response::new(ListMessageTagsResponse {
-                tags,
-            })),
+            Ok(tags) => Ok(Response::new(ListMessageTagsResponse { tags })),
             Err(err) => {
                 error!(error = ?err, "Failed to list message tags");
-                Ok(Response::new(ListMessageTagsResponse {
-                    tags: vec![],
-                }))
+                Ok(Response::new(ListMessageTagsResponse { tags: vec![] }))
             }
         }
     }

@@ -10,9 +10,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use flare_server_core::middleware::extract_context;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::flare_err;
+use flare_server_core::middleware::extract_context;
 
 use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
 use crate::application::queries::GetOnlineStatusQuery;
@@ -194,7 +194,15 @@ where
                             break;
                         }
                     }
-                    Some(Err(_)) | None => break,
+                    Some(Err(err)) => {
+                        let _ = stream_tx
+                            .send(Err(Status::internal(format!(
+                                "presence watcher failed: {err}"
+                            ))))
+                            .await;
+                        break;
+                    }
+                    None => break,
                 }
             }
         });
@@ -267,7 +275,15 @@ where
                             break;
                         }
                     }
-                    Some(Err(_)) | None => break,
+                    Some(Err(err)) => {
+                        let _ = stream_tx
+                            .send(Err(Status::internal(format!(
+                                "presence watcher failed: {err}"
+                            ))))
+                            .await;
+                        break;
+                    }
+                    None => break,
                 }
             }
         });

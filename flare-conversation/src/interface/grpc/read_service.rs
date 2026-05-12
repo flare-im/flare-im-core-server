@@ -133,11 +133,7 @@ impl ConversationReadService for ConversationGrpcHandler {
             .await
             .into_grpc()?;
 
-        let member_ids = conv
-            .participants
-            .into_iter()
-            .map(|p| p.user_id)
-            .collect();
+        let member_ids = conv.participants.into_iter().map(|p| p.user_id).collect();
 
         Ok(Response::new(GetConversationMembersResponse { member_ids }))
     }

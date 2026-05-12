@@ -10,9 +10,9 @@ use flare_grpc_proto::signaling::router::{
     RouteEventResponse, RouteMessageRequest, RouteMessageResponse,
     router_upstream_service_server::RouterUpstreamService,
 };
-use flare_server_core::utils::require_ctx_from_request;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::flare_err;
+use flare_server_core::utils::require_ctx_from_request;
 
 use crate::application::handlers::{
     AckRoutingHandler, DataRoutingHandler, EventRoutingHandler, MessageRoutingHandler,
@@ -57,7 +57,10 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         let req = request.into_inner();
         let svid = req.svid;
         let message = req.message.ok_or_else(|| {
-            flare_err!(flare_server_core::error::ErrorCode::InvalidParameter, "Message is required")
+            flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "Message is required"
+            )
         })?;
         let options = req.options.unwrap_or_default();
 
@@ -89,7 +92,10 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         let req = request.into_inner();
         let svid = req.svid;
         let event = req.event.ok_or_else(|| {
-            flare_err!(flare_server_core::error::ErrorCode::InvalidParameter, "Event is required")
+            flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "Event is required"
+            )
         })?;
         let options = req.options.unwrap_or_default();
 
@@ -121,7 +127,10 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         let req = request.into_inner();
         let svid = req.svid;
         let ack = req.ack.ok_or_else(|| {
-            flare_err!(flare_server_core::error::ErrorCode::InvalidParameter, "Ack is required")
+            flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "Ack is required"
+            )
         })?;
         let options = req.options.unwrap_or_default();
 
@@ -152,7 +161,10 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         let req = request.into_inner();
         let svid = req.svid;
         let data = req.data.ok_or_else(|| {
-            flare_err!(flare_server_core::error::ErrorCode::InvalidParameter, "Data is required")
+            flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "Data is required"
+            )
         })?;
         let options = req.options.unwrap_or_default();
 

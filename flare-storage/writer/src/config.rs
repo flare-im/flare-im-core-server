@@ -6,15 +6,25 @@
 use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT;
-use flare_server_core::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
-use std::env;
+use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
+use flare_server_core::mq::nats::{
+    NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
+};
+use std::{collections::HashMap, env};
 
 #[derive(Clone, Debug)]
 pub struct StorageWriterConfig {
-    pub kafka_bootstrap: String,
-    pub kafka_group: String,
-    pub kafka_ack_topic: Option<String>,
-    pub kafka_timeout_ms: u64,
+    pub mq_backend: String,
+    pub jetstream_url: String,
+    pub jetstream_group: String,
+    pub jetstream_ack_topic: Option<String>,
+    pub jetstream_timeout_ms: u64,
+    pub jetstream_retries: u32,
+    pub jetstream_retry_backoff_ms: u64,
+    pub jetstream_stream_specs: Vec<NatsStreamSpec>,
+    pub kafka_brokers: Vec<String>,
+    pub kafka_client_id: String,
+    pub kafka_options: HashMap<String, String>,
 
     // 批量消费配置
     pub max_poll_records: usize,
@@ -38,38 +48,84 @@ impl StorageWriterConfig {
     /// 从应用配置加载（新方式，推荐）
     pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service_config = app.storage_writer_service();
+        let mq_backend = app.mq_default_backend().to_string();
+        let kafka_profile = app.kafka_profile("message");
+        let jetstream_stream_specs = {
+            let specs = app
+                .jetstream_topology()
+                .into_iter()
+                .map(|spec| NatsStreamSpec::new(spec.stream_name, spec.subjects))
+                .collect::<Vec<_>>();
+            if specs.is_empty() {
+                default_stream_specs()
+            } else {
+                specs
+            }
+        };
 
-        // 解析 Kafka 配置引用
-        let kafka_bootstrap = env::var("STORAGE_KAFKA_BOOTSTRAP_SERVERS")
+        // 解析 JetStream 配置引用
+        let jetstream_url = env::var("STORAGE_JETSTREAM_URL")
             .ok()
             .or_else(|| {
-                if let Some(kafka_name) = &service_config.kafka {
-                    app.kafka_profile(kafka_name)
-                        .map(|profile| profile.bootstrap_servers.clone())
+                if let Some(jetstream_name) = &service_config.jetstream {
+                    app.jetstream_profile(jetstream_name)
+                        .map(|profile| profile.url.clone())
                 } else {
                     None
                 }
             })
-            .unwrap_or_else(|| "127.0.0.1:29092".to_string());
+            .unwrap_or_else(|| "nats://127.0.0.1:24222".to_string());
 
-        let kafka_group = env::var("STORAGE_KAFKA_STORAGE_GROUP")
+        let jetstream_group = env::var("STORAGE_JETSTREAM_GROUP")
             .ok()
             .or_else(|| service_config.consumer_group.clone())
             .unwrap_or_else(|| STORAGE_GROUP_DEFAULT.to_string());
 
-        let kafka_ack_topic = env::var("STORAGE_KAFKA_ACK_TOPIC").ok();
+        let jetstream_ack_topic = env::var("STORAGE_JETSTREAM_ACK_SUBJECT").ok();
 
-        let kafka_timeout_ms = env::var("STORAGE_KAFKA_TIMEOUT_MS")
+        let jetstream_timeout_ms = env::var("STORAGE_JETSTREAM_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
                 service_config
-                    .kafka
+                    .jetstream
                     .as_ref()
-                    .and_then(|kafka_name| app.kafka_profile(kafka_name))
+                    .and_then(|jetstream_name| app.jetstream_profile(jetstream_name))
                     .and_then(|profile| profile.timeout_ms)
             })
             .unwrap_or(5000);
+        let jetstream_profile = service_config
+            .jetstream
+            .as_ref()
+            .and_then(|jetstream_name| app.jetstream_profile(jetstream_name));
+        let jetstream_retries = env::var("STORAGE_JETSTREAM_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| jetstream_profile.and_then(|profile| profile.retries))
+            .unwrap_or(8);
+        let jetstream_retry_backoff_ms = env::var("STORAGE_JETSTREAM_RETRY_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| jetstream_profile.and_then(|profile| profile.retry_backoff_ms))
+            .unwrap_or(25);
+
+        let kafka_brokers = env::var("STORAGE_KAFKA_BROKERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .or_else(|| kafka_profile.map(|p| p.brokers.clone()))
+            .unwrap_or_else(|| vec!["127.0.0.1:29092".to_string()]);
+        let kafka_client_id = env::var("STORAGE_KAFKA_CLIENT_ID")
+            .ok()
+            .or_else(|| kafka_profile.and_then(|p| p.client_id.clone()))
+            .unwrap_or_else(|| "flare-im-storage-writer".to_string());
+        let kafka_options = kafka_profile.map(|p| p.options.clone()).unwrap_or_default();
 
         // 批量消费配置
         let max_poll_records = env::var("STORAGE_MAX_POLL_RECORDS")
@@ -151,10 +207,17 @@ impl StorageWriterConfig {
         let media_service_endpoint = env::var("MEDIA_SERVICE_ENDPOINT").ok();
 
         Ok(Self {
-            kafka_bootstrap,
-            kafka_group,
-            kafka_ack_topic,
-            kafka_timeout_ms,
+            mq_backend,
+            jetstream_url,
+            jetstream_group,
+            jetstream_ack_topic,
+            jetstream_timeout_ms,
+            jetstream_retries,
+            jetstream_retry_backoff_ms,
+            jetstream_stream_specs,
+            kafka_brokers,
+            kafka_client_id,
+            kafka_options,
             max_poll_records,
             fetch_min_bytes,
             fetch_max_wait_ms,
@@ -173,88 +236,76 @@ impl StorageWriterConfig {
     }
 }
 
-// 实现 KafkaConsumerConfig trait，使 StorageWriterConfig 可以使用通用的 Kafka 消费者构建器
-impl KafkaConsumerConfig for StorageWriterConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
+// 实现 NatsConsumerConfig trait，使 StorageWriterConfig 可以使用通用的 JetStream 消费者构建器
+impl NatsConsumerConfig for StorageWriterConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
     }
 
     fn consumer_group(&self) -> &str {
-        &self.kafka_group
+        &self.jetstream_group
     }
 
-    fn fetch_min_bytes(&self) -> usize {
-        self.fetch_min_bytes
-    }
-
-    fn fetch_max_wait_ms(&self) -> u64 {
-        self.fetch_max_wait_ms
-    }
-
-    fn fetch_message_max_bytes(&self) -> usize {
-        self.max_poll_records * 1024 // 假设平均每条消息 1KB
-    }
-
-    fn max_partition_fetch_bytes(&self) -> usize {
-        self.max_poll_records * 1024 * 10 // 假设每条消息 10KB
-    }
-
-    fn metadata_max_age_ms(&self) -> u64 {
-        300000 // 5分钟
-    }
-
-    // 使用默认值，或根据需要覆盖
-    fn session_timeout_ms(&self) -> u64 {
-        6000 // storage-writer 使用较短的超时
-    }
-
-    fn enable_auto_commit(&self) -> bool {
-        false
-    }
-
-    fn auto_offset_reset(&self) -> &str {
-        // 从最早位置开始消费，确保不丢失消息
-        // 如果 consumer group 已经存在，会从上次提交的 offset 继续消费
-        "earliest"
-    }
-}
-
-// 实现 KafkaProducerConfig trait，使 StorageWriterConfig 可以使用通用的 Kafka 生产者构建器
-impl KafkaProducerConfig for StorageWriterConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
-    }
-
-    fn message_timeout_ms(&self) -> u64 {
-        self.kafka_timeout_ms
+    fn enable_manual_ack(&self) -> bool {
+        true
     }
 
     fn batch_size(&self) -> usize {
-        16384 // 16KB
+        self.max_poll_records
     }
 
-    fn linger_ms(&self) -> u64 {
-        5 // 5毫秒
+    fn batch_timeout_ms(&self) -> u64 {
+        self.fetch_max_wait_ms
+    }
+
+    fn enable_durable(&self) -> bool {
+        true
+    }
+
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
+    }
+}
+
+// 实现 NatsProducerConfig trait，使 StorageWriterConfig 可以使用通用的 JetStream 生产者构建器
+impl NatsProducerConfig for StorageWriterConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.jetstream_timeout_ms
     }
 
     fn retries(&self) -> u32 {
-        3
+        self.jetstream_retries
     }
 
     fn retry_backoff_ms(&self) -> u64 {
-        100 // 100毫秒
+        self.jetstream_retry_backoff_ms
     }
 
-    fn metadata_max_age_ms(&self) -> u64 {
-        300000 // 5分钟
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
+    }
+}
+
+impl KafkaProducerConfig for StorageWriterConfig {
+    fn kafka_brokers(&self) -> Vec<String> {
+        self.kafka_brokers.clone()
     }
 
-    // 使用默认值，或根据需要覆盖
-    fn enable_idempotence(&self) -> bool {
-        true // ACK 消息需要保证不丢失
+    fn kafka_client_id(&self) -> &str {
+        &self.kafka_client_id
     }
 
-    fn compression_type(&self) -> &str {
-        "snappy" // ACK 消息使用 snappy 压缩
+    fn kafka_options(&self) -> HashMap<String, String> {
+        self.kafka_options.clone()
+    }
+}
+
+impl KafkaConsumerConfig for StorageWriterConfig {
+    fn kafka_consumer_group(&self) -> &str {
+        &self.jetstream_group
     }
 }

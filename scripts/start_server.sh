@@ -2,10 +2,11 @@
 # 启动 Flare IM Core 所有服务模块
 #
 # 使用方法:
-#   ./scripts/start_server.sh [single|multi] [debug]
+#   ./scripts/start_server.sh [single|multi] [trace|debug]
 #   - single: 启动单网关模式（默认，仅启动一个 access-gateway 实例）
 #   - multi:  启动多网关模式（启动多个 access-gateway 实例）
-#   - debug:  第二参数，开启调试模式（RUST_LOG=trace，各服务日志与 sqlx SQL 等全部输出到对应 log 文件）
+#   - trace|debug: 第二参数，全量跟踪（RUST_LOG=trace；debug 为历史别名，仅排障）
+#   - 默认: 未设置环境变量 RUST_LOG 时使用「业务 debug + 第三方降噪」，避免 logs/ 暴涨
 
 set -e
 
@@ -22,6 +23,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
 
+# 解析 Cargo 实际产物目录：上层仓库 `.cargo/config.toml` 可能将 `target-dir` 指到仓库根的 `target/`，
+# 与 `flare-im-core/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 debug 目录。
+resolve_cargo_target_debug() {
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        printf '%s/debug\n' "${CARGO_TARGET_DIR%/}"
+        return 0
+    fi
+    local meta td
+    td=""
+    meta=$(cd "$PROJECT_ROOT" && cargo metadata --format-version=1 --no-deps 2>/dev/null) || true
+    if [ -n "$meta" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            td=$(printf '%s' "$meta" | jq -r '.target_directory // empty' 2>/dev/null) || true
+        fi
+        if [ -z "$td" ] || [ "$td" = "null" ]; then
+            td=$(printf '%s' "$meta" | grep -o '"target_directory":"[^"]*"' | head -1 | sed 's/"target_directory":"//;s/"$//')
+        fi
+        if [ -n "$td" ]; then
+            printf '%s/debug\n' "$td"
+            return 0
+        fi
+    fi
+    printf '%s/target/debug\n' "$PROJECT_ROOT"
+}
+CARGO_TARGET_DEBUG="$(resolve_cargo_target_debug)"
 
 echo -e "${YELLOW}🧹 清除之前的日志...${NC}"
 # 清除之前的日志
@@ -31,24 +57,29 @@ echo ""
 
 # 解析参数
 GATEWAY_MODE="${1:-single}"  # 默认单网关模式
-DEBUG_MODE=""                 # 第二参数为 debug 时开启调试日志
+VERBOSE_LOG_MODE=""           # 第二参数 trace|debug 时启用全量 RUST_LOG=trace（仅排障）
 
-# 默认使用 trace 级别日志（可被外部环境变量覆盖）
-export RUST_LOG="${RUST_LOG:-trace}"
+# 与 flare-server-core `default_env_filter` 同类项对齐：默认业务 debug，ORM/MQ/gRPC 栈降噪。
+# 勿默认 trace：会覆盖 TOML 降噪并让 sqlx 等把 logs/ 撑到数 GB。
+IM_CORE_DEFAULT_RUST_LOG='debug,hyper=warn,reqwest=warn,h2=warn,rdkafka=warn,tower=warn,tokio=warn,sqlx=warn,tantivy=warn,async_nats=warn,tonic=warn,redis=warn'
 
 if [ "$GATEWAY_MODE" != "single" ] && [ "$GATEWAY_MODE" != "multi" ]; then
     echo -e "${RED}错误: 无效的参数 '$GATEWAY_MODE'${NC}"
-    echo "使用方法: $0 [single|multi] [debug]"
+    echo "使用方法: $0 [single|multi] [trace|debug]"
     echo "  - single: 启动单网关模式（默认）"
     echo "  - multi:  启动多网关模式"
-    echo "  - debug:  第二参数，开启调试模式（RUST_LOG=trace，含 sqlx SQL 等全部日志）"
+    echo "  - trace|debug: 第二参数，全量跟踪（RUST_LOG=trace；debug 为历史别名）"
+    echo "  - 默认: 未设置环境变量 RUST_LOG 时使用业务 debug + 第三方降噪"
     exit 1
 fi
 
-if [ "${2:-}" = "debug" ]; then
-    DEBUG_MODE=1
-    echo -e "${GREEN}🔧 调试模式已开启: RUST_LOG=$RUST_LOG${NC}"
+if [ "${2:-}" = "trace" ] || [ "${2:-}" = "debug" ]; then
+    VERBOSE_LOG_MODE=1
+    export RUST_LOG="${RUST_LOG:-trace}"
+    echo -e "${GREEN}🔧 全量跟踪日志: RUST_LOG=$RUST_LOG（logs 体积会显著增大）${NC}"
     echo ""
+else
+    export RUST_LOG="${RUST_LOG:-$IM_CORE_DEFAULT_RUST_LOG}"
 fi
 
 # 创建日志目录
@@ -59,7 +90,11 @@ echo -e "${BLUE}  Flare IM Core 完整服务启动脚本${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}📁 日志目录: $LOGS_DIR${NC}"
 echo -e "${YELLOW}🚪 网关模式: $GATEWAY_MODE${NC}"
-[ -n "$DEBUG_MODE" ] && echo -e "${GREEN}🔧 调试模式: RUST_LOG=$RUST_LOG${NC}"
+if [ -n "$VERBOSE_LOG_MODE" ]; then
+    echo -e "${GREEN}🔧 日志: RUST_LOG=$RUST_LOG${NC}"
+else
+    echo -e "${BLUE}   日志: RUST_LOG=$RUST_LOG${NC}"
+fi
 echo ""
 
 # 检查基础设施服务
@@ -77,9 +112,39 @@ check_service() {
     fi
 }
 
+resolve_mq_backend() {
+    if [ -n "${FLARE_MQ_DEFAULT_BACKEND:-}" ]; then
+        printf '%s\n' "$(printf '%s' "$FLARE_MQ_DEFAULT_BACKEND" | tr '[:upper:]' '[:lower:]')"
+        return 0
+    fi
+
+    awk '
+        /^\[mq\]/ { in_mq=1; next }
+        /^\[/ && in_mq { exit }
+        in_mq && $1 == "default_backend" {
+            gsub(/"/, "", $3);
+            print tolower($3);
+            exit
+        }
+    ' "$PROJECT_ROOT/config/base.toml"
+}
+
+MQ_BACKEND="$(resolve_mq_backend)"
+[ -n "$MQ_BACKEND" ] || MQ_BACKEND="nats"
+
 check_service "Redis" "26379"
 check_service "PostgreSQL" "25432"
-check_service "Kafka" "29092"
+case "$MQ_BACKEND" in
+    kafka)
+        echo -e "${YELLOW}   ↷ Kafka 端口检查已跳过（由服务启动时按配置连接）${NC}"
+        ;;
+    nats|jetstream)
+        check_service "NATS JetStream" "24222"
+        ;;
+    *)
+        echo -e "${RED}   ✗ 未支持的 MQ 后端: $MQ_BACKEND (期望 nats|jetstream|kafka)${NC}"
+        ;;
+esac
 check_service "Consul" "28500"
 
 echo ""
@@ -87,24 +152,14 @@ echo -e "${YELLOW}💡 提示: 如需启动基础设施服务，请运行:${NC}"
 echo "   ${BLUE}cd deploy && docker-compose up -d${NC}"
 echo ""
 
-# 预创建 Kafka Topic（避免 UnknownTopicOrPartition，确保消息能落库）
-# 与 abstractions/topics 与 config 中 topic 名一致；仅当 Kafka 在 Docker 中运行时执行
-echo -e "${YELLOW}📬 确保 Kafka 事件总线 Topic 存在...${NC}"
-if docker ps -q -f name=flare-kafka 2>/dev/null | grep -q .; then
-    create_kafka_topic() {
-        local topic=$1
-        if docker exec flare-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$topic" --partitions 4 --replication-factor 1 2>/dev/null; then
-            echo -e "${GREEN}   ✓ Topic $topic 已就绪${NC}"
-        else
-            echo -e "${YELLOW}   ⚠ 创建 topic $topic 失败（可忽略若已存在）${NC}"
-        fi
-    }
-    create_kafka_topic "flare.im.message.created"
-    create_kafka_topic "flare.im.message.events"
-    create_kafka_topic "flare.im.push.tasks"
-else
-    echo -e "${YELLOW}   ⚠ Kafka 未在 Docker 中运行，请确保已创建 topic: flare.im.message.created, flare.im.message.events, flare.im.push.tasks${NC}"
-fi
+case "$MQ_BACKEND" in
+    kafka)
+        echo -e "${YELLOW}📬 当前 MQ: Kafka (bootstrap: 127.0.0.1:29092)，NATS 不参与业务链路${NC}"
+        ;;
+    nats|jetstream)
+        echo -e "${YELLOW}📬 当前 MQ: NATS JetStream，Stream 将由服务启动时按配置自动创建/更新${NC}"
+        ;;
+esac
 echo ""
 
 # 检查并停止旧进程
@@ -237,7 +292,7 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 
 # 定义服务启动顺序（按照依赖关系排序）
 # 1. 基础服务：signaling-online（在线状态服务）、signaling-route（路由目录服务）
-# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_core::service_names::CAPABILITY；二进制 flare-capability）
+# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_core::service_names::CAPABILITY；包与二进制名均为 flare-capability）
 # 3. 会话服务：conversation（会话管理服务）
 # 4. 消息编排：message-orchestrator（消息编排服务）
 # 5. 存储服务：storage-writer（消息持久化）、storage-reader（消息查询）
@@ -348,8 +403,8 @@ for service in "${CORE_SERVICES[@]}"; do
     pid_file="$LOGS_DIR/flare-$service.pid"
     
     # 启动服务（使用编译好的二进制，避免并发编译问题）
-    # 调试模式下已 export RUST_LOG，子进程会继承，输出完整日志
-    "$PROJECT_ROOT/target/debug/$BIN_NAME" > "$LOGS_DIR/flare-$service.log" 2>&1 &
+    # 子进程继承当前 shell 的 RUST_LOG（默认经上方设为 debug+ 降噪，或 trace 排障模式）
+    "$CARGO_TARGET_DEBUG/$BIN_NAME" > "$LOGS_DIR/flare-$service.log" 2>&1 &
     
     # 清理环境变量
     if [ "$service" = "signaling-online" ]; then
@@ -468,7 +523,7 @@ if [ "$GATEWAY_MODE" == "single" ]; then
     # 启动 Access Gateway（使用编译好的二进制，已在前面统一编译）
     PORT="$DEFAULT_WS_PORT" \
     GRPC_PORT="$DEFAULT_GRPC_PORT" \
-    "$PROJECT_ROOT/target/debug/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway.log" 2>&1 &
+    "$CARGO_TARGET_DEBUG/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway.log" 2>&1 &
     
     gateway_pid=$!
     echo $gateway_pid > "$pid_file"
@@ -537,7 +592,7 @@ else
         GATEWAY_REGION="$region" \
         PORT="$ws_port" \
         GRPC_PORT="$grpc_port" \
-        "$PROJECT_ROOT/target/debug/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway-$gateway_key.log" 2>&1 &
+        "$CARGO_TARGET_DEBUG/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway-$gateway_key.log" 2>&1 &
         
         gateway_pid=$!
         echo $gateway_pid > "$pid_file"

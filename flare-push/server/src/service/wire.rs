@@ -27,7 +27,7 @@ pub async fn initialize(
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushServerConfig::from_app_config(app_config));
 
-    let publisher = Arc::new(PushServerMqPublisher::new(config.clone())?);
+    let publisher = Arc::new(PushServerMqPublisher::new(config.clone()).await?);
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
     let route_handler = Arc::new(PushRouterHandler::new(online_status, publisher.clone()));
     let message_handler = PushMessageHandler::new(route_handler.clone(), publisher.clone());
@@ -37,7 +37,9 @@ pub async fn initialize(
     let ack_handler = PushHandler::new(route_handler.clone());
     let custom_handler = PushHandler::new(route_handler);
 
-    let consumer_cfg = ConsumerConfig::default().with_concurrency(64);
+    let consumer_cfg = ConsumerConfig::default()
+        .with_concurrency(64)
+        .with_ordered(true);
 
     let mut dispatcher = TopicDispatcher::new();
     let message_adapter: Arc<dyn MessageHandler> = Arc::new(message_handler);

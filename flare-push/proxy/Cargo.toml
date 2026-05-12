@@ -11,7 +11,7 @@ name = "flare-push-proxy"
 path = "cmd/main.rs"
 
 [dependencies]
-flare-server-core = { workspace = true, features = ["kafka", "grpc", "discovery"] }
+flare-server-core = { workspace = true, features = ["nats", "kafka", "grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
@@ -23,7 +23,6 @@ tracing-subscriber = { workspace = true }
 prost = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-rdkafka = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }

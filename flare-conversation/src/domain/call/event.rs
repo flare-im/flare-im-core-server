@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 通话侧领域事件（CQRS：由聚合根产生，基础设施落 Kafka/DB）。
+/// 通话侧领域事件（CQRS：由聚合根产生，基础设施落 JetStream/DB）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CallSessionEvent {
     Started {

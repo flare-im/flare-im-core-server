@@ -1,8 +1,8 @@
 use anyhow::Result;
 use tonic::transport::{Channel, Uri};
 
-use flare_grpc_proto::message::message_send_service_client::MessageSendServiceClient;
 use flare_grpc_proto::message::message_action_service_client::MessageActionServiceClient;
+use flare_grpc_proto::message::message_send_service_client::MessageSendServiceClient;
 use flare_grpc_proto::message::*;
 
 /// MessageSendService gRPC 客户端封装

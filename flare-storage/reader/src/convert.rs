@@ -96,7 +96,9 @@ pub fn edit_history_entry_to_proto(
 }
 
 /// 领域已读条目 -> proto MessageReadListEntry
-pub fn read_list_entry_to_proto(e: &ReadListEntry) -> flare_grpc_proto::storage::MessageReadListEntry {
+pub fn read_list_entry_to_proto(
+    e: &ReadListEntry,
+) -> flare_grpc_proto::storage::MessageReadListEntry {
     flare_grpc_proto::storage::MessageReadListEntry {
         user_id: e.user_id.clone(),
         read_at: datetime_to_timestamp(e.read_at),

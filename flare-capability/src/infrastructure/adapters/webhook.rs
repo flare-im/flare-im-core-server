@@ -98,11 +98,7 @@ impl WebhookHookAdapter {
         }
 
         let response = request.send().await.map_err(|e| {
-            map_infra_error(
-                e,
-                ErrorCode::NetworkError,
-                "WebHook PreSend request failed",
-            )
+            map_infra_error(e, ErrorCode::NetworkError, "WebHook PreSend request failed")
         })?;
 
         if response.status().is_success() {
@@ -309,11 +305,7 @@ impl WebhookHookAdapter {
         }
 
         let response = request.send().await.map_err(|e| {
-            map_infra_error(
-                e,
-                ErrorCode::NetworkError,
-                "WebHook Recall request failed",
-            )
+            map_infra_error(e, ErrorCode::NetworkError, "WebHook Recall request failed")
         })?;
 
         if response.status().is_success() {

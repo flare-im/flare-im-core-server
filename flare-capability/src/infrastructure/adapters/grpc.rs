@@ -14,13 +14,13 @@ use prost::Message;
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
 use flare_grpc_proto::capability::{
     DeliveryHookRequest, DeliveryHookResponse, GenericRequest, PostSendHookRequest,
     PostSendHookResponse, PreSendHookRequest, PreSendHookResponse, RecallHookRequest,
     RecallHookResponse,
 };
+use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
 
@@ -80,7 +80,7 @@ impl GrpcHookAdapter {
 
         let client = HookPluginClient::new(channel);
 
-        tracing::info!(endpoint = %endpoint, "Created gRPC adapter from endpoint");
+        tracing::trace!(endpoint = %endpoint, "Created gRPC adapter from endpoint");
 
         Ok(Self {
             client: Some(Arc::new(Mutex::new(client))),
@@ -100,7 +100,7 @@ impl GrpcHookAdapter {
         load_balance_strategy: LoadBalanceStrategy,
         metadata: HashMap<String, String>,
     ) -> Result<Self> {
-        tracing::info!(
+        tracing::trace!(
             service_name = %service_name,
             strategy = ?load_balance_strategy,
             "Created gRPC adapter from service client"
@@ -124,7 +124,7 @@ impl GrpcHookAdapter {
         load_balance_strategy: LoadBalanceStrategy,
         metadata: HashMap<String, String>,
     ) -> Result<Self> {
-        tracing::info!(
+        tracing::trace!(
             service_name = %service_name,
             strategy = ?load_balance_strategy,
             "Created gRPC adapter from discovery client"
@@ -152,16 +152,13 @@ impl GrpcHookAdapter {
         if let Some(service_client) = &self.service_client {
             // 使用 ServiceClient 获取 Channel（已包含负载均衡）
             let mut client_guard = service_client.lock().await;
-            let channel = client_guard
-                .get_channel()
-                .await
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::InternalError,
-                        "failed to get gRPC channel from service client",
-                    )
-                })?;
+            let channel = client_guard.get_channel().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "failed to get gRPC channel from service client",
+                )
+            })?;
 
             let client = HookPluginClient::new(channel);
             return Ok(client);
@@ -224,19 +221,16 @@ impl GrpcHookAdapter {
             .call(req)
             .await
             .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::InternalError,
-                    "gRPC HookPlugin.Call failed",
-                )
+                map_infra_error(e, ErrorCode::InternalError, "gRPC HookPlugin.Call failed")
             })?
             .into_inner();
         if !envelope.ok {
-            return Err(
-                ErrorBuilder::new(ErrorCode::InternalError, envelope.error_message.clone())
-                    .details(envelope.error_code.clone())
-                    .build_error(),
-            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InternalError,
+                envelope.error_message.clone(),
+            )
+            .details(envelope.error_code.clone())
+            .build_error());
         }
         let payload = envelope.payload.ok_or_else(|| {
             ErrorBuilder::new(

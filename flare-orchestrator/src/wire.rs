@@ -4,13 +4,12 @@
 //!
 //! **与 `flare-capability` 的集成**：不依赖 `flare-capability` crate。
 //! - [`flare_im_core::hooks`] gRPC → `HookPlugin`（PreSend/PostSend）。
-//! - 可选：`EVENT_CALL_SIGNAL` → `CapabilityService.Dispatch`（`rtc.call.video|audio` / `accept` /
-//!   `rtc.call.join_token` / `rtc.call.reject` / `rtc.call.end`）；与 **flare-strom-sfu** 对齐时由
-//!   `flare-capability` 转发 `SfuControl`。`Dispatch` 失败时**降级**仍推送事件（仅打 warn）。
+//! - 可选：`EVENT_CALL_SIGNAL` → `CapabilityService.Dispatch`（`rtc.call.*` / `rtc.media.*`）；
+//!   具体媒体后端由 `flare-capability` 在扩展层路由。`Dispatch` 失败时**降级**仍推送事件（仅打 warn）。
 //!   能力服务 URI 与 Hook auto 共用 [`MessageOrchestratorConfig::resolve_capability_grpc_uri`]。
 //!
 //! ## 依赖注入顺序
-//! 1. 基础设施层（Infrastructure）：Redis、Kafka
+//! 1. 基础设施层（Infrastructure）：Redis、JetStream
 //! 2. Repository 层：数据访问抽象
 //! 3. Domain Service 层：业务逻辑
 //! 4. Application Handler 层：用例编排
@@ -29,7 +28,8 @@ use flare_im_core::hooks::{
 use flare_im_core::service_names::{CAPABILITY, CONVERSATION};
 use flare_server_core::mq::consumer::dispatcher::{Dispatcher, TopicDispatcher};
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler as MqMessageHandler};
-use flare_server_core::mq::kafka::producer::KafkaProducer;
+use flare_server_core::mq::kafka::KafkaProducer;
+use flare_server_core::mq::nats::NatsProducer;
 
 use crate::application::extension::{
     ExtensionOrchestrator, ExtensionPolicy, ExtensionRouting, ExtensionRuntimePolicy,
@@ -75,9 +75,9 @@ pub async fn initialize(
 
     let redis_client = build_redis_client(&config).await?;
 
-    let kafka_producer = build_kafka_producer(&config).await?;
+    let jetstream_producer = build_mq_producer(&config).await?;
 
-    let push_repository = MqPushRepository::new(kafka_producer.clone());
+    let push_repository = MqPushRepository::new(jetstream_producer.clone());
 
     let conversation_service_type = config
         .conversation_service_type
@@ -131,7 +131,7 @@ pub async fn initialize(
     let conversation_ensure_service = Arc::new(ConversationEnsureService::new(
         Some(conversation_repository.clone()),
         config.session_creation_mode,
-        Some(MqConversationEnsurePublisher::new(kafka_producer)),
+        Some(MqConversationEnsurePublisher::new(jetstream_producer)),
     ));
 
     let call_capability_bridge: Option<Arc<CallCapabilityBridge>> = if config
@@ -216,7 +216,9 @@ pub async fn initialize(
         .map_err(|e| anyhow::anyhow!("register main queue dispatcher: {}", e))?;
     let main_queue_dispatcher: Arc<dyn Dispatcher> = Arc::new(topic_dispatcher);
 
-    let consumer_config = ConsumerConfig::default().with_concurrency(32);
+    let consumer_config = ConsumerConfig::default()
+        .with_concurrency(32)
+        .with_ordered(true);
 
     Ok(ApplicationContext {
         message_send_grpc,
@@ -240,13 +242,23 @@ async fn build_redis_client(config: &MessageOrchestratorConfig) -> Result<Arc<re
     Ok(Arc::new(client))
 }
 
-async fn build_kafka_producer(
+async fn build_mq_producer(
     config: &MessageOrchestratorConfig,
 ) -> Result<Arc<dyn flare_server_core::mq::producer::Producer>> {
-    let producer = KafkaProducer::new(config)
-        .map_err(|e| anyhow::anyhow!("failed to create Kafka producer: {}", e))?;
-
-    Ok(Arc::new(producer))
+    match config.mq_backend.as_str() {
+        "kafka" => {
+            let producer = KafkaProducer::new(config)
+                .map_err(|e| anyhow::anyhow!("failed to create Kafka producer: {}", e))?;
+            Ok(Arc::new(producer))
+        }
+        "nats" | "jetstream" => {
+            let producer = NatsProducer::new(config)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to create JetStream producer: {}", e))?;
+            Ok(Arc::new(producer))
+        }
+        other => Err(anyhow::anyhow!("unsupported mq backend: {}", other)),
+    }
 }
 
 fn inject_flare_capability_hook_plugin_targets(cfg: &mut HookConfig, endpoint: String) {

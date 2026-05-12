@@ -37,11 +37,12 @@ pub use ack::{
 
 pub use config::{
     AccessGatewayServiceConfig, CapabilityServiceConfig, ConfigManager, ConversationServiceConfig,
-    FlareAppConfig, KafkaClusterConfig, MediaServiceConfig, MessageOrchestratorServiceConfig,
-    MongoInstanceConfig, ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig,
-    ServiceEndpointConfig, ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
-    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig, app_config,
-    load_config, load_config_with_validation,
+    FlareAppConfig, JetStreamClusterConfig, KafkaClusterConfig, MediaServiceConfig,
+    MessageOrchestratorServiceConfig, MongoInstanceConfig, MqBackendConfig, ObjectStoreConfig,
+    PostgresInstanceConfig, RedisPoolConfig, ServiceEndpointConfig, ServiceRuntimeConfig,
+    SessionPolicyConfig, SignalingOnlineServiceConfig, SignalingRouteServiceConfig,
+    StorageReaderServiceConfig, StorageWriterServiceConfig, app_config, load_config,
+    load_config_with_validation,
 };
 pub use discovery::{
     BackendType,
@@ -76,9 +77,9 @@ pub use discovery::{
 };
 pub use gateway::{GatewayRouter, GatewayRouterConfig, GatewayRouterError, GatewayRouterTrait};
 pub use hooks::{
-    DeliveryEvent, DeliveryHook, GetConversationParticipantsHook, GlobalHookRegistry,
-    HookConfig, HookConfigLoader, HookDefinition, HookDispatcher, HookErrorPolicy, HookGroup,
-    HookKind, HookMetadata, HookRegistry, HookRegistryBuilder, HookSelector, HookSelectorConfig,
+    DeliveryEvent, DeliveryHook, GetConversationParticipantsHook, GlobalHookRegistry, HookConfig,
+    HookConfigLoader, HookDefinition, HookDispatcher, HookErrorPolicy, HookGroup, HookKind,
+    HookMetadata, HookRegistry, HookRegistryBuilder, HookSelector, HookSelectorConfig,
     HookTransportConfig, MatchRule, MessageDraft, MessageRecord, PostSendHook, PreSendDecision,
     PreSendHook, PreSendPlan, RecallEvent, RecallHook,
 };
@@ -86,11 +87,11 @@ pub use message::{Attachment, Message as MessageDomain, message_from_proto, mess
 pub use service_names::{get_service_name, service_name_env_var, validate_service_name};
 pub use tracing::init_tracing_from_config;
 pub use utils::ServiceHelper;
+pub use utils::error::{self};
 pub use utils::error::{
     ErrorBuilder, ErrorCategory, ErrorCode, FlareError, FlareServerError, InfraResult,
     InfraResultExt, LocalizedError, Result, map_infra_error,
 };
-pub use utils::error::{self};
 
 // IM 跨服务领域类型（Gateway / Orchestrator / Signaling / Hook 等共用）
 pub use domain::{

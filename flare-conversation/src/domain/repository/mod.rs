@@ -170,13 +170,11 @@ pub trait MessageProvider: Send + Sync {
         _limit: i32,
     ) -> Result<MessageSyncResult> {
         // 默认实现：返回错误，提示使用基于时间戳的同步
-        Err(
-            ErrorBuilder::new(
-                ErrorCode::OperationNotSupported,
-                "sync_messages_by_seq not implemented, use sync_messages instead",
-            )
-            .build_error(),
+        Err(ErrorBuilder::new(
+            ErrorCode::OperationNotSupported,
+            "sync_messages_by_seq not implemented, use sync_messages instead",
         )
+        .build_error())
     }
 }
 

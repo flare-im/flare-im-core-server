@@ -3,10 +3,10 @@
 
 use flare_server_core::context::ContextError;
 
+pub use flare_server_core::error::grpc::IntoGrpc;
 pub use flare_server_core::error::{
     ErrorCode, FlareError, InfraResultExt, Result, map_infra_error,
 };
-pub use flare_server_core::error::grpc::IntoGrpc;
 
 /// 上下文取消 / deadline 与领域 `FlareError` 的桥接。
 #[inline]

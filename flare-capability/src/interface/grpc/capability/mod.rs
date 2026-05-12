@@ -3,6 +3,4 @@
 mod administer;
 mod service;
 
-pub use service::{
-    CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot,
-};
+pub use service::{CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot};

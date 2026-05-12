@@ -15,12 +15,40 @@ use crate::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::flare_err;
 
 const EXT_SDP_TYPE: &str = "flare_sdp_type";
-const EXT_SDP_TYPE_CAMEL: &str = "flareSdpType";
 const EXT_SDP: &str = "flare_sdp";
-const EXT_SDP_CAMEL: &str = "flareSdp";
+const EXT_CAMERA_ENABLED: &str = "flare_camera_enabled";
+const EXT_MICROPHONE_ENABLED: &str = "flare_microphone_enabled";
+const EXT_SUB_TRACK_ID: &str = "flare_subscription_track_id";
+const EXT_SUB_ENABLE: &str = "flare_subscription_enable";
+const EXT_SUB_MEDIA: &str = "flare_subscription_media";
+const EXT_SUB_PREFERRED_LAYER: &str = "flare_subscription_preferred_layer";
+const EXT_SUB_PRIORITY: &str = "flare_subscription_priority";
+const EXT_SUB_SUBSCRIBER_PEER_ID: &str = "flare_subscription_subscriber_peer_id";
+const EXT_SIMULCAST_TRACK_ID: &str = "flare_simulcast_track_id";
+const EXT_SIMULCAST_LAYER: &str = "flare_simulcast_layer";
+const EXT_SIMULCAST_SUBSCRIBER_PEER_ID: &str = "flare_simulcast_subscriber_peer_id";
+const EXT_NQ_QUERY_PEER_ID: &str = "flare_network_quality_peer_id";
+const EXT_NQ_HAS_DATA: &str = "flare_network_quality_has_data";
+const EXT_NQ_UPSTREAM_SCORE: &str = "flare_network_quality_upstream_score";
+const EXT_NQ_DOWNSTREAM_SCORE: &str = "flare_network_quality_downstream_score";
+const EXT_NQ_RTT_MS: &str = "flare_network_quality_rtt_ms";
+const EXT_NQ_PACKET_LOSS_RATIO: &str = "flare_network_quality_packet_loss_ratio";
+
+const CAP_CALL_AUDIO_START: &str = "rtc.call.audio";
+const CAP_CALL_VIDEO_START: &str = "rtc.call.video";
+const CAP_CALL_ACCEPT: &str = "rtc.call.accept";
+const CAP_CALL_REJECT: &str = "rtc.call.reject";
+const CAP_CALL_END: &str = "rtc.call.end";
+const CAP_CALL_SIGNAL_SDP_OFFER: &str = "rtc.media.sdp.offer";
+const CAP_CALL_SIGNAL_SDP_ANSWER: &str = "rtc.media.sdp.answer";
+const CAP_CALL_SIGNAL_ICE: &str = "rtc.media.ice.candidate";
+const CAP_CALL_MEDIA_PUBLISHER_STATE: &str = "rtc.media.publisher.mute";
+const CAP_CALL_MEDIA_SUBSCRIPTION_SET: &str = "rtc.media.subscription.set";
+const CAP_CALL_MEDIA_SIMULCAST_LAYER_SET: &str = "rtc.media.simulcast.layer.set";
+const CAP_CALL_MEDIA_NETWORK_QUALITY_GET: &str = "rtc.media.network.quality.get";
 
 /// `EVENT_CALL_SIGNAL` enrich 领域服务：
-/// 负责把业务信令映射到 capability `rtc.*` 调度（含 `rtc.sfu.*`）。
+/// 负责把业务信令映射到 capability 调度（核心不暴露具体媒体后端实现命名）。
 pub struct CallSignalEnrichmentService {
     gateway: Arc<dyn CapabilityDispatchGateway>,
 }
@@ -55,11 +83,11 @@ impl CallSignalEnrichmentService {
 
     /// 对 `EVENT_CALL_SIGNAL` 在入库/推送前调用能力服务：
     /// - Invite：`rtc.call.video` / `rtc.call.audio`
-    /// - Accept：`rtc.call.accept` + 可选 `rtc.call.join_token`
+    /// - Accept：`rtc.call.accept`
     /// - Reject：`rtc.call.reject`
     /// - Hangup：`rtc.call.end`
-    /// - Renegotiate：`rtc.sfu.handle_sdp_offer/answer`
-    /// - IceCandidate：`rtc.sfu.add_ice_candidate`
+    /// - Renegotiate：`rtc.media.sdp.offer/answer`
+    /// - IceCandidate：`rtc.media.ice.candidate`
     #[instrument(skip(self, ctx, event), fields(conversation_id = %event.conversation_id))]
     pub async fn enrich_call_signal_event(
         &self,
@@ -123,7 +151,7 @@ impl CallSignalEnrichmentService {
                 let result = self
                     .dispatch_capability_json(
                         ctx,
-                        "rtc.call.accept",
+                        CAP_CALL_ACCEPT,
                         tenant_id,
                         &cs.from_user_id,
                         &conversation_for_dispatch,
@@ -132,38 +160,13 @@ impl CallSignalEnrichmentService {
                     )
                     .await?;
                 apply_accept_result_to_call_signal(cs, &result)?;
-
-                let join_token_result = self
-                    .dispatch_capability_json(
-                        ctx,
-                        "rtc.call.join_token",
-                        tenant_id,
-                        &cs.from_user_id,
-                        &conversation_for_dispatch,
-                        format!("{rid}-join-token"),
-                        json!({ "call_id": cs.call_id }),
-                    )
-                    .await;
-                match join_token_result {
-                    Ok(v) => {
-                        if let Err(e) = apply_join_token_to_call_signal(cs, &v) {
-                            warn!(error = %e, "call_signal_enrichment: join_token result parse failed");
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "call_signal_enrichment: join_token dispatch failed (accept still applied)"
-                        );
-                    }
-                }
             }
             Some(Signal::Reject(r)) => {
                 let payload = reject_payload(cs, &r)?;
                 let _ = self
                     .dispatch_capability_json(
                         ctx,
-                        "rtc.call.reject",
+                        CAP_CALL_REJECT,
                         tenant_id,
                         &cs.from_user_id,
                         &conversation_for_dispatch,
@@ -177,7 +180,7 @@ impl CallSignalEnrichmentService {
                 let _ = self
                     .dispatch_capability_json(
                         ctx,
-                        "rtc.call.end",
+                        CAP_CALL_END,
                         tenant_id,
                         &cs.from_user_id,
                         &conversation_for_dispatch,
@@ -210,15 +213,13 @@ impl CallSignalEnrichmentService {
         rid: String,
         cs: &mut CallSignalEvent,
     ) -> Result<()> {
-        // P2P 模式（无 SFU transport 上下文）下，renegotiate 应原样透传给对端，
-        // 不能在服务端改写为 SFU answer，否则会破坏主/被叫协商状态机。
-        let has_sfu_transport = cs
+        let has_media_transport = cs
             .transport
             .as_ref()
             .map(|t| !t.room_id.trim().is_empty() && !t.peer_id.trim().is_empty())
             .unwrap_or(false);
-        if !has_sfu_transport {
-            debug!("call_signal_enrichment: renegotiate passthrough (no sfu transport context)");
+        if !has_media_transport {
+            debug!("call_signal_enrichment: renegotiate passthrough (no media transport context)");
             return Ok(());
         }
 
@@ -228,94 +229,111 @@ impl CallSignalEnrichmentService {
             return Ok(());
         }
 
-        let mut room_id = cs
+        let room_id = cs
             .transport
             .as_ref()
             .map(|t| t.room_id.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_default();
-        let mut peer_id = cs
+        let peer_id = cs
             .transport
             .as_ref()
             .map(|t| t.peer_id.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_default();
-        let mut media_session_id = cs
+        let media_session_id = cs
             .transport
             .as_ref()
             .and_then(|t| t.media_session_id.clone())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-
-        if room_id.is_empty() {
-            let join_token_json = self
-                .dispatch_capability_json(
-                    ctx,
-                    "rtc.call.join_token",
-                    tenant_id,
-                    user_id,
-                    conversation_id,
-                    format!("{rid}-sfu-join-token"),
-                    json!({ "call_id": cs.call_id }),
-                )
-                .await?;
-            if let Some(r) = join_token_json.get("room_id").and_then(|v| v.as_str()) {
-                room_id = r.to_string();
-            }
-        }
-
-        if room_id.is_empty() {
-            warn!("call_signal_enrichment: renegotiate skip — room_id still empty");
-            return Ok(());
-        }
-
-        if peer_id.is_empty() {
-            let join_room_json = self
-                .dispatch_capability_json(
-                    ctx,
-                    "rtc.sfu.join_room",
-                    tenant_id,
-                    user_id,
-                    conversation_id,
-                    format!("{rid}-sfu-join-room"),
-                    json!({
-                        "call_id": cs.call_id,
-                        "room_id": room_id,
-                        "role": "participant"
-                    }),
-                )
-                .await?;
-            if let Some(p) = join_room_json.get("peer_id").and_then(|v| v.as_str()) {
-                peer_id = p.to_string();
-            }
-            if media_session_id.is_none() {
-                media_session_id = join_room_json
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-            }
-        }
-
-        if peer_id.is_empty() {
-            warn!("call_signal_enrichment: renegotiate skip — peer_id still empty");
+        if room_id.is_empty() || peer_id.is_empty() {
+            debug!(
+                "call_signal_enrichment: renegotiate passthrough (missing room_id/peer_id in transport)"
+            );
             return Ok(());
         }
 
         let sdp_type = cs
             .ext
             .get(EXT_SDP_TYPE)
-            .or_else(|| cs.ext.get(EXT_SDP_TYPE_CAMEL))
             .map(|s| s.trim().to_ascii_lowercase())
             .unwrap_or_default();
         let sdp = cs
             .ext
             .get(EXT_SDP)
-            .or_else(|| cs.ext.get(EXT_SDP_CAMEL))
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
+        // 常用设备开关（摄像头/麦克风）统一经 `rtc.media.publisher.mute` 下发。
+        // 该控制是“软开关”：关闭会触发轨道下线；重新开启由终端重发 publish。
+        if let Some((mute_audio, mute_video)) = parse_media_toggle_from_ext(&cs.ext) {
+            let _ = self
+                .dispatch_capability_json(
+                    ctx,
+                    CAP_CALL_MEDIA_PUBLISHER_STATE,
+                    tenant_id,
+                    user_id,
+                    conversation_id,
+                    format!("{rid}-media-mute"),
+                    json!({
+                        "room_id": room_id.clone(),
+                        "publisher_peer_id": peer_id.clone(),
+                        "mute_audio": mute_audio,
+                        "mute_video": mute_video
+                    }),
+                )
+                .await?;
+        }
+
+        if let Some(payload) = parse_subscription_payload_from_ext(&cs.ext, &room_id, &peer_id) {
+            let _ = self
+                .dispatch_capability_json(
+                    ctx,
+                    CAP_CALL_MEDIA_SUBSCRIPTION_SET,
+                    tenant_id,
+                    user_id,
+                    conversation_id,
+                    format!("{rid}-media-subscription"),
+                    payload,
+                )
+                .await?;
+        }
+
+        if let Some(payload) = parse_simulcast_payload_from_ext(&cs.ext, &room_id, &peer_id) {
+            let _ = self
+                .dispatch_capability_json(
+                    ctx,
+                    CAP_CALL_MEDIA_SIMULCAST_LAYER_SET,
+                    tenant_id,
+                    user_id,
+                    conversation_id,
+                    format!("{rid}-media-simulcast"),
+                    payload,
+                )
+                .await?;
+        }
+
+        if let Some(query_peer_id) = non_empty_ext_str(&cs.ext, EXT_NQ_QUERY_PEER_ID) {
+            let quality = self
+                .dispatch_capability_json(
+                    ctx,
+                    CAP_CALL_MEDIA_NETWORK_QUALITY_GET,
+                    tenant_id,
+                    user_id,
+                    conversation_id,
+                    format!("{rid}-media-network-quality"),
+                    json!({
+                        "room_id": room_id.clone(),
+                        "peer_id": query_peer_id
+                    }),
+                )
+                .await?;
+            write_network_quality_to_ext(&mut cs.ext, &quality);
+        }
+
         if sdp.is_empty() {
-            warn!("call_signal_enrichment: renegotiate skip — SDP body missing in ext");
+            debug!("call_signal_enrichment: renegotiate skip SDP flow — no SDP in ext");
             return Ok(());
         }
 
@@ -323,11 +341,11 @@ impl CallSignalEnrichmentService {
             let offer_json = self
                 .dispatch_capability_json(
                     ctx,
-                    "rtc.sfu.handle_sdp_offer",
+                    CAP_CALL_SIGNAL_SDP_OFFER,
                     tenant_id,
                     user_id,
                     conversation_id,
-                    format!("{rid}-sfu-offer"),
+                    format!("{rid}-media-offer"),
                     json!({
                         "room_id": room_id,
                         "peer_id": peer_id,
@@ -337,19 +355,17 @@ impl CallSignalEnrichmentService {
                 .await?;
             if let Some(answer) = offer_json.get("sdp_answer").and_then(|v| v.as_str()) {
                 cs.ext.insert(EXT_SDP_TYPE.into(), "answer".into());
-                cs.ext.insert(EXT_SDP_TYPE_CAMEL.into(), "answer".into());
                 cs.ext.insert(EXT_SDP.into(), answer.to_string());
-                cs.ext.insert(EXT_SDP_CAMEL.into(), answer.to_string());
             }
         } else if sdp_type == "answer" {
             let _ = self
                 .dispatch_capability_json(
                     ctx,
-                    "rtc.sfu.handle_sdp_answer",
+                    CAP_CALL_SIGNAL_SDP_ANSWER,
                     tenant_id,
                     user_id,
                     conversation_id,
-                    format!("{rid}-sfu-answer"),
+                    format!("{rid}-media-answer"),
                     json!({
                         "room_id": room_id,
                         "peer_id": peer_id,
@@ -383,15 +399,15 @@ impl CallSignalEnrichmentService {
         cs: &mut CallSignalEvent,
         ic: &flare_proto::common::CallIceCandidatePayload,
     ) -> Result<()> {
-        // P2P 模式（无 SFU transport 上下文）下，ICE 必须在客户端间透传。
-        // 若服务端在此劫持并转发到 SFU，会与 P2P 协商冲突并导致远端黑屏/无声。
-        let has_sfu_transport = cs
+        // P2P 模式（无媒体传输上下文）下，ICE 必须在客户端间透传。
+        // 若服务端在此劫持并转发到媒体后端，会与 P2P 协商冲突并导致远端黑屏/无声。
+        let has_media_transport = cs
             .transport
             .as_ref()
             .map(|t| !t.room_id.trim().is_empty() && !t.peer_id.trim().is_empty())
             .unwrap_or(false);
-        if !has_sfu_transport {
-            debug!("call_signal_enrichment: ice passthrough (no sfu transport context)");
+        if !has_media_transport {
+            debug!("call_signal_enrichment: ice passthrough (no media transport context)");
             return Ok(());
         }
 
@@ -401,85 +417,43 @@ impl CallSignalEnrichmentService {
             return Ok(());
         }
 
-        let mut room_id = cs
+        let room_id = cs
             .transport
             .as_ref()
             .map(|t| t.room_id.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_default();
-        if room_id.is_empty() {
-            let join_token_json = self
-                .dispatch_capability_json(
-                    ctx,
-                    "rtc.call.join_token",
-                    tenant_id,
-                    user_id,
-                    conversation_id,
-                    format!("{rid}-ice-join-token"),
-                    json!({ "call_id": cs.call_id }),
-                )
-                .await?;
-            if let Some(r) = join_token_json.get("room_id").and_then(|v| v.as_str()) {
-                room_id = r.to_string();
-            }
-        }
-        if room_id.is_empty() {
-            warn!("call_signal_enrichment: ice skip — room_id still empty");
-            return Ok(());
-        }
 
-        let mut peer_id = cs
+        let peer_id = cs
             .transport
             .as_ref()
             .map(|t| t.peer_id.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_default();
-        if peer_id.is_empty() {
-            let join_room_json = self
-                .dispatch_capability_json(
-                    ctx,
-                    "rtc.sfu.join_room",
-                    tenant_id,
-                    user_id,
-                    conversation_id,
-                    format!("{rid}-ice-join-room"),
-                    json!({
-                        "call_id": cs.call_id,
-                        "room_id": room_id,
-                        "role": "participant"
-                    }),
-                )
-                .await?;
-            if let Some(p) = join_room_json.get("peer_id").and_then(|v| v.as_str()) {
-                peer_id = p.to_string();
-            }
-        }
-        if peer_id.is_empty() {
-            warn!("call_signal_enrichment: ice skip — peer_id still empty");
+        if room_id.is_empty() || peer_id.is_empty() {
+            debug!(
+                "call_signal_enrichment: ice passthrough (missing room_id/peer_id in transport)"
+            );
             return Ok(());
         }
 
-        let candidate_json = ic
+        let Some(candidate_json) = ic
             .candidate_json
             .as_ref()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                json!({
-                    "candidate": ic.candidate,
-                    "sdpMid": ic.sdp_mid,
-                    "sdpMLineIndex": ic.sdp_mline_index
-                })
-                .to_string()
-            });
+        else {
+            warn!("call_signal_enrichment: ice skip — candidate_json required");
+            return Ok(());
+        };
         let _ = self
             .dispatch_capability_json(
                 ctx,
-                "rtc.sfu.add_ice_candidate",
+                CAP_CALL_SIGNAL_ICE,
                 tenant_id,
                 user_id,
                 conversation_id,
-                format!("{rid}-sfu-ice"),
+                format!("{rid}-media-ice"),
                 json!({
                     "room_id": room_id.clone(),
                     "peer_id": peer_id.clone(),
@@ -502,9 +476,9 @@ fn invite_capability_id(inv: &flare_proto::common::CallInvite) -> &'static str {
         .unwrap_or_default();
     let has_video = types.iter().any(|t| *t == CallMediaType::Video as i32);
     if has_video {
-        "rtc.call.video"
+        CAP_CALL_VIDEO_START
     } else {
-        "rtc.call.audio"
+        CAP_CALL_AUDIO_START
     }
 }
 
@@ -559,11 +533,95 @@ fn hangup_payload(cs: &CallSignalEvent, h: &CallHangup) -> Result<Value> {
     Ok(p)
 }
 
-fn json_u64(v: &Value, key: &str) -> Option<u64> {
-    v.get(key).and_then(|x| {
-        x.as_u64()
-            .or_else(|| x.as_i64().filter(|&i| i >= 0).map(|i| i as u64))
-    })
+fn ext_bool(ext: &HashMap<String, String>, key: &str) -> Option<bool> {
+    ext.get(key)
+        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+}
+
+fn parse_media_toggle_from_ext(ext: &HashMap<String, String>) -> Option<(bool, bool)> {
+    let camera_enabled = ext_bool(ext, EXT_CAMERA_ENABLED);
+    let microphone_enabled = ext_bool(ext, EXT_MICROPHONE_ENABLED);
+    if camera_enabled.is_none() && microphone_enabled.is_none() {
+        return None;
+    }
+    let mute_audio = microphone_enabled.map(|v| !v).unwrap_or(false);
+    let mute_video = camera_enabled.map(|v| !v).unwrap_or(false);
+    Some((mute_audio, mute_video))
+}
+
+fn non_empty_ext_str(ext: &HashMap<String, String>, key: &str) -> Option<String> {
+    ext.get(key)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn ext_u32(ext: &HashMap<String, String>, key: &str) -> Option<u32> {
+    ext.get(key).and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+fn parse_subscription_payload_from_ext(
+    ext: &HashMap<String, String>,
+    room_id: &str,
+    default_subscriber_peer_id: &str,
+) -> Option<Value> {
+    let track_id = non_empty_ext_str(ext, EXT_SUB_TRACK_ID)?;
+    let enable = ext_bool(ext, EXT_SUB_ENABLE).unwrap_or(true);
+    let subscriber_peer_id = non_empty_ext_str(ext, EXT_SUB_SUBSCRIBER_PEER_ID)
+        .unwrap_or_else(|| default_subscriber_peer_id.to_string());
+    let media = non_empty_ext_str(ext, EXT_SUB_MEDIA);
+    let preferred_layer = non_empty_ext_str(ext, EXT_SUB_PREFERRED_LAYER);
+    let priority = ext_u32(ext, EXT_SUB_PRIORITY).unwrap_or(0);
+    Some(json!({
+        "room_id": room_id,
+        "subscriber_peer_id": subscriber_peer_id,
+        "track_id": track_id,
+        "enable": enable,
+        "media": media,
+        "preferred_layer": preferred_layer,
+        "priority": priority
+    }))
+}
+
+fn parse_simulcast_payload_from_ext(
+    ext: &HashMap<String, String>,
+    room_id: &str,
+    default_subscriber_peer_id: &str,
+) -> Option<Value> {
+    let track_id = non_empty_ext_str(ext, EXT_SIMULCAST_TRACK_ID)?;
+    let layer = non_empty_ext_str(ext, EXT_SIMULCAST_LAYER)?;
+    let subscriber_peer_id = non_empty_ext_str(ext, EXT_SIMULCAST_SUBSCRIBER_PEER_ID)
+        .unwrap_or_else(|| default_subscriber_peer_id.to_string());
+    Some(json!({
+        "room_id": room_id,
+        "subscriber_peer_id": subscriber_peer_id,
+        "track_id": track_id,
+        "layer": layer
+    }))
+}
+
+fn write_network_quality_to_ext(ext: &mut HashMap<String, String>, quality: &Value) {
+    if let Some(has_data) = quality.get("has_data").and_then(|v| v.as_bool()) {
+        ext.insert(EXT_NQ_HAS_DATA.into(), has_data.to_string());
+    }
+    if let Some(upstream_score) = quality.get("upstream_score").and_then(|v| v.as_u64()) {
+        ext.insert(EXT_NQ_UPSTREAM_SCORE.into(), upstream_score.to_string());
+    }
+    if let Some(downstream_score) = quality.get("downstream_score").and_then(|v| v.as_u64()) {
+        ext.insert(EXT_NQ_DOWNSTREAM_SCORE.into(), downstream_score.to_string());
+    }
+    if let Some(rtt_ms) = quality.get("rtt_ms").and_then(|v| v.as_u64()) {
+        ext.insert(EXT_NQ_RTT_MS.into(), rtt_ms.to_string());
+    }
+    if let Some(packet_loss_ratio) = quality.get("packet_loss_ratio").and_then(|v| v.as_f64()) {
+        ext.insert(
+            EXT_NQ_PACKET_LOSS_RATIO.into(),
+            packet_loss_ratio.to_string(),
+        );
+    }
 }
 
 fn merge_transport_from_capability_json(cs: &mut CallSignalEvent, v: &Value) {
@@ -582,6 +640,11 @@ fn merge_transport_from_capability_json(cs: &mut CallSignalEvent, v: &Value) {
         && !ms.is_empty()
     {
         t.media_session_id = Some(ms.to_string());
+    }
+    if let Some(ws) = v.get("signaling_ws_base").and_then(|x| x.as_str())
+        && !ws.is_empty()
+    {
+        t.signaling_ws_base = Some(ws.to_string());
     }
 }
 
@@ -610,26 +673,6 @@ fn apply_accept_result_to_call_signal(cs: &mut CallSignalEvent, v: &Value) -> Re
         && !cid.is_empty()
     {
         cs.call_id = cid.to_string();
-    }
-    merge_transport_from_capability_json(cs, v);
-    Ok(())
-}
-
-fn apply_join_token_to_call_signal(cs: &mut CallSignalEvent, v: &Value) -> Result<()> {
-    if v.is_null() {
-        return Err(flare_err!(
-            ErrorCode::InternalError,
-            "capability join_token result empty"
-        ));
-    }
-    if let Some(tok) = v.get("token").and_then(|x| x.as_str())
-        && !tok.is_empty()
-    {
-        cs.ext.insert("sfu_join_token".into(), tok.to_string());
-    }
-    if let Some(ttl) = json_u64(v, "ttl_seconds") {
-        cs.ext
-            .insert("sfu_join_token_ttl_seconds".into(), ttl.to_string());
     }
     merge_transport_from_capability_json(cs, v);
     Ok(())

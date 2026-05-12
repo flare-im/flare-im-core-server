@@ -60,7 +60,7 @@ impl RedisWalRepository {
         let message = flare_proto::common::Message::decode(&payload_bytes[..]).map_err(|e| {
             crate::error::FlareError::system(format!("Failed to decode Message from WAL: {}", e))
         })?;
-        tracing::debug!(
+        tracing::trace!(
             message_id = %message_id,
             sender_id = %message.sender_id,
             "Decoded message from WAL entry"
@@ -80,7 +80,7 @@ impl WalRepository for RedisWalRepository {
             let wal_key = match &_self.config.wal_hash_key {
                 Some(key) => key.as_str(),
                 None => {
-                    tracing::debug!(
+                    tracing::trace!(
                         message_id = %_submission.message_id,
                         "WAL not configured (wal_hash_key is None), skipping WAL write"
                     );
@@ -117,7 +117,7 @@ impl WalRepository for RedisWalRepository {
                     })?;
             }
 
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %wal_message_id,
                 submission_message_id = %_submission.message_id,
                 wal_key = %wal_key,
@@ -140,7 +140,7 @@ impl WalRepository for RedisWalRepository {
             let wal_key = match &_self.config.wal_hash_key {
                 Some(key) => key.as_str(),
                 None => {
-                    tracing::debug!(
+                    tracing::trace!(
                         message_id = %_message_id,
                         "WAL not configured (wal_hash_key is None), cannot query WAL"
                     );
@@ -148,7 +148,7 @@ impl WalRepository for RedisWalRepository {
                 }
             };
 
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %_message_id,
                 wal_key = %wal_key,
                 "🔍 Querying WAL for message"
@@ -170,7 +170,7 @@ impl WalRepository for RedisWalRepository {
             };
 
             if let Some(json_str) = entry_json {
-                tracing::debug!(
+                tracing::trace!(
                     message_id = %_message_id,
                     "Found WAL entry by server_id, decoding..."
                 );
@@ -179,7 +179,7 @@ impl WalRepository for RedisWalRepository {
 
             // 如果直接查询不到，遍历 WAL 中的所有条目，查找 extra.original_server_id 等于 message_id 的条目
             // 注意：这可能会影响性能，但可以确保找到消息（即使使用的是客户端生成的 server_id）
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %_message_id,
                 "WAL entry not found by server_id, searching by original_server_id..."
             );
@@ -194,7 +194,7 @@ impl WalRepository for RedisWalRepository {
                     // 检查 extra.original_server_id 是否等于查询的 message_id
                     if let Some(original_server_id) = message.extra.get("original_server_id") {
                         if original_server_id == &_message_id {
-                            tracing::info!(
+                            tracing::trace!(
                                 query_message_id = %_message_id,
                                 wal_server_id = %wal_server_id,
                                 "Found WAL entry by original_server_id"
@@ -205,7 +205,7 @@ impl WalRepository for RedisWalRepository {
                 }
             }
 
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %_message_id,
                 wal_key = %wal_key,
                 "WAL entry not found in Redis (searched by both server_id and original_server_id)"

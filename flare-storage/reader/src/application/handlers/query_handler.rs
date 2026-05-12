@@ -3,8 +3,8 @@
 //! 在 CQRS 架构中，查询侧通常直接调用基础设施层（仓储实现），
 //! 因为查询是只读操作，不涉及业务逻辑，不需要经过领域层。
 
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use chrono::{DateTime, Utc};
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::message::{Message, message_to_proto};
 use flare_im_core::utils::extract_seq_from_message;
 use std::sync::Arc;
@@ -114,7 +114,8 @@ where
                 end_time,
                 query.limit,
             )
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
 
         // 构建简化的 QueryMessagesResult
         let message_count = messages.len() as i32;
@@ -163,7 +164,13 @@ where
         self.storage
             .get_message_timestamp(ctx, message_id)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get message timestamp"))
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to get message timestamp",
+                )
+            })
     }
 
     /// 搜索消息
@@ -226,7 +233,8 @@ where
                 query.before_seq,
                 query.limit,
             )
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
 
         // 提取最后一条消息的 seq（使用工具函数）
         let last_seq = messages
@@ -247,7 +255,13 @@ where
         self.storage
             .query_message_operations(ctx, &query.message_id)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to query message operations"))
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to query message operations",
+                )
+            })
     }
 
     /// 获取同步快照
@@ -262,7 +276,9 @@ where
         self.storage
             .get_sync_snapshot(ctx, "", "", conversation_ids, messages_per_conversation)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync snapshot"))
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync snapshot")
+            })
     }
 
     /// 查询事件
@@ -313,7 +329,8 @@ where
                 want + 1,
                 event_type_filter,
             )
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
         let has_more = rows.len() as i32 > want;
         if has_more {
             rows.truncate(want as usize);
@@ -338,7 +355,8 @@ where
         let head = self
             .storage
             .get_conversation_message_head(ctx, conversation_id)
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
         Ok(head.map(|h| {
             let ts = datetime_to_timestamp(h.last_at);
             (h.max_seq, h.last_message_id, ts)
@@ -356,7 +374,13 @@ where
         self.storage
             .get_conversation_max_seq(ctx, "", conversation_id)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get conversation max seq"))
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to get conversation max seq",
+                )
+            })
     }
 
     /// 获取同步游标
@@ -396,6 +420,8 @@ where
                 None,
             )
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update sync cursor"))
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to update sync cursor")
+            })
     }
 }

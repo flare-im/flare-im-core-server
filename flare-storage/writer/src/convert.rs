@@ -7,9 +7,9 @@ use crate::domain::model::{
     ReactionPayload, ReadPayload, RecallPayload, RequestContext, TenantContext, UnmarkPayload,
     UnpinPayload,
 };
+use flare_im_core::Ctx;
 use flare_proto::common;
 use flare_proto::common::message_content::Content;
-use flare_im_core::Ctx;
 
 /// 统一从 flare-im-core 重导出，供本 crate 其他处使用
 pub use flare_im_core::message::{message_from_proto, message_to_proto};
@@ -34,7 +34,7 @@ pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
     }
 }
 
-/// 为 Kafka 消费到的操作事件补全 `tenant_id` / `operator_id`（common::Event 无此字段；信封亦无 tenant）。
+/// 为 JetStream 消费到的操作事件补全 `tenant_id` / `operator_id`（common::Event 无此字段；信封亦无 tenant）。
 pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) {
     if event.tenant_id.is_empty() {
         event.tenant_id = ctx

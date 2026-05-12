@@ -39,7 +39,7 @@ check_infra_service() {
 
 check_infra_service "Redis" "26379"
 check_infra_service "PostgreSQL" "25432"
-check_infra_service "Kafka" "29092"
+check_infra_service "NATS JetStream" "24222"
 check_infra_service "Consul" "28500"
 
 echo ""
@@ -52,11 +52,11 @@ SERVICES=(
     "capability:"  # gRPC 端口见应用配置；此处仅检查 pid 进程
     "conversation:50090"
     "message-orchestrator:50181"
-    "storage-writer:"  # 无端口（Kafka 消费者）
+    "storage-writer:"  # 无端口（JetStream 消费者）
     "storage-reader:60083"
     "sync-orchestrator:60084"
-    "push-server:"  # 无端口（Kafka 消费者）
-    "push-worker:"  # 无端口（Kafka 消费者）
+    "push-server:"  # 无端口（JetStream 消费者）
+    "push-worker:"  # 无端口（JetStream 消费者）
     "media:60081"
     "core-gateway:50050"
 )

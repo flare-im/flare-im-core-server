@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::error::{map_infra_error, ErrorCode, Result};
+use crate::error::{ErrorCode, Result, map_infra_error};
 use chrono::{TimeZone, Utc};
 use redis::{AsyncCommands, aio::ConnectionManager};
 

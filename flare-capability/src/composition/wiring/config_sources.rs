@@ -6,10 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::infrastructure::config::ConfigWatcher;
 use crate::infrastructure::config::loader::{
     ConfigCenterLoader, ConfigLoaderItem, DatabaseConfigLoader, FileConfigLoader,
 };
-use crate::infrastructure::config::ConfigWatcher;
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 
 use crate::composition::process_config::CapabilityServiceConfig;
@@ -61,8 +61,7 @@ pub(crate) async fn prepare_config_sources(
     }
 
     if let Some(ref endpoint) = config.config_center_endpoint {
-        let mut config_loader =
-            ConfigCenterLoader::new(endpoint.clone(), config.tenant_id.clone());
+        let mut config_loader = ConfigCenterLoader::new(endpoint.clone(), config.tenant_id.clone());
 
         if endpoint.starts_with("consul://") {
             if let Some(addr) = endpoint.strip_prefix("consul://") {

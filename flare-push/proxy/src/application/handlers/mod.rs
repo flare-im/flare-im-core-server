@@ -1,4 +1,4 @@
-//! 应用层编排：Push gRPC → 入队 Kafka。
+//! 应用层编排：Push gRPC → 入队 JetStream。
 
 mod push_proxy_command_handler;
 

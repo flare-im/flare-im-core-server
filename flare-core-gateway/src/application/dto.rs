@@ -100,7 +100,11 @@ impl From<flare_grpc_proto::media::FileInfo> for FileInfoHttpResponse {
             file_name: value.file_name,
             mime_type: value.mime_type,
             size: value.size,
-            url: if value.url.is_empty() { None } else { Some(value.url) },
+            url: if value.url.is_empty() {
+                None
+            } else {
+                Some(value.url)
+            },
             cdn_url: if value.cdn_url.is_empty() {
                 None
             } else {
@@ -289,7 +293,11 @@ impl From<flare_grpc_proto::media::UploadFileResponse> for UploadFileHttpRespons
     fn from(value: flare_grpc_proto::media::UploadFileResponse) -> Self {
         Self {
             file_id: value.file_id,
-            url: if value.url.is_empty() { None } else { Some(value.url) },
+            url: if value.url.is_empty() {
+                None
+            } else {
+                Some(value.url)
+            },
             cdn_url: if value.cdn_url.is_empty() {
                 None
             } else {
@@ -391,7 +399,9 @@ pub struct AbortMultipartUploadHttpResponse {
     pub error_message: Option<String>,
 }
 
-impl From<flare_grpc_proto::media::AbortMultipartUploadResponse> for AbortMultipartUploadHttpResponse {
+impl From<flare_grpc_proto::media::AbortMultipartUploadResponse>
+    for AbortMultipartUploadHttpResponse
+{
     fn from(value: flare_grpc_proto::media::AbortMultipartUploadResponse) -> Self {
         Self {
             success: value.success,
@@ -442,7 +452,9 @@ pub struct InitiateDirectUploadHttpResponse {
     pub error_message: Option<String>,
 }
 
-impl From<flare_grpc_proto::media::InitiateDirectUploadResponse> for InitiateDirectUploadHttpResponse {
+impl From<flare_grpc_proto::media::InitiateDirectUploadResponse>
+    for InitiateDirectUploadHttpResponse
+{
     fn from(value: flare_grpc_proto::media::InitiateDirectUploadResponse) -> Self {
         Self {
             upload_id: value.upload_id,
@@ -531,7 +543,9 @@ pub struct GetDirectUploadStatusHttpResponse {
     pub error_message: Option<String>,
 }
 
-impl From<flare_grpc_proto::media::GetDirectUploadStatusResponse> for GetDirectUploadStatusHttpResponse {
+impl From<flare_grpc_proto::media::GetDirectUploadStatusResponse>
+    for GetDirectUploadStatusHttpResponse
+{
     fn from(value: flare_grpc_proto::media::GetDirectUploadStatusResponse) -> Self {
         Self {
             upload_id: value.upload_id,
@@ -666,10 +680,21 @@ pub struct AbortDirectUploadHttpRequest {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageOperationHttp {
-    Resize { width: i32, height: i32, keep_aspect_ratio: bool },
-    Compress { quality: i32 },
-    Thumbnail { size: i32 },
-    Watermark { text: String, position: i32 },
+    Resize {
+        width: i32,
+        height: i32,
+        keep_aspect_ratio: bool,
+    },
+    Compress {
+        quality: i32,
+    },
+    Thumbnail {
+        size: i32,
+    },
+    Watermark {
+        text: String,
+        position: i32,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -699,7 +724,11 @@ impl From<flare_grpc_proto::media::ProcessImageResponse> for ProcessImageHttpRes
     fn from(value: flare_grpc_proto::media::ProcessImageResponse) -> Self {
         Self {
             processed_file_id: value.processed_file_id,
-            url: if value.url.is_empty() { None } else { Some(value.url) },
+            url: if value.url.is_empty() {
+                None
+            } else {
+                Some(value.url)
+            },
             cdn_url: if value.cdn_url.is_empty() {
                 None
             } else {
@@ -724,9 +753,17 @@ pub enum VideoOperationHttp {
         target_bitrate_kbps: i32,
         max_width: i32,
     },
-    ExtractThumbnail { time: f64 },
-    Compress { bitrate: i32, preset: String },
-    SubtitleBurn { subtitle_file_id: String, language: String },
+    ExtractThumbnail {
+        time: f64,
+    },
+    Compress {
+        bitrate: i32,
+        preset: String,
+    },
+    SubtitleBurn {
+        subtitle_file_id: String,
+        language: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -756,7 +793,11 @@ impl From<flare_grpc_proto::media::ProcessVideoResponse> for ProcessVideoHttpRes
     fn from(value: flare_grpc_proto::media::ProcessVideoResponse) -> Self {
         Self {
             processed_file_id: value.processed_file_id,
-            url: if value.url.is_empty() { None } else { Some(value.url) },
+            url: if value.url.is_empty() {
+                None
+            } else {
+                Some(value.url)
+            },
             cdn_url: if value.cdn_url.is_empty() {
                 None
             } else {

@@ -71,7 +71,7 @@ impl<C: ConfigClient + Send + Sync> AzSelector<C> {
         // 1. 优先根据地理位置选择
         if let Some(geo) = client_geo {
             if let Some(az) = self.geo_az_map.get(geo) {
-                tracing::debug!(geo = %geo, az = %az, "Selected AZ by client geo");
+                tracing::trace!(geo = %geo, az = %az, "Selected AZ by client geo");
                 return Some(az.clone());
             }
         }
@@ -79,7 +79,7 @@ impl<C: ConfigClient + Send + Sync> AzSelector<C> {
         // 2. 根据登录网关提取机房（例如 gateway-sh-1 -> shanghai）
         if let Some(gateway) = login_gateway {
             if let Some(az) = self.extract_az_from_gateway(gateway) {
-                tracing::debug!(gateway = %gateway, az = %az, "Selected AZ by login gateway");
+                tracing::trace!(gateway = %gateway, az = %az, "Selected AZ by login gateway");
                 return Some(az);
             }
         }
@@ -89,7 +89,7 @@ impl<C: ConfigClient + Send + Sync> AzSelector<C> {
         // 这里简化处理，因为 pick 方法是同步的
 
         // 4. 兜底：使用默认机房
-        tracing::debug!(az = %self.default_az, "Using default AZ");
+        tracing::trace!(az = %self.default_az, "Using default AZ");
         Some(self.default_az.clone())
     }
 

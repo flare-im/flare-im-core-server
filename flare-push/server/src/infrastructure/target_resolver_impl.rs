@@ -2,15 +2,15 @@
 //!
 //! Infrastructure 层实现，依赖在线状态仓储。
 
-use std::sync::Arc;
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::{PushTargetType, PushEnvelope};
+use flare_proto::common::{PushEnvelope, PushTargetType};
+use std::sync::Arc;
 
 use crate::domain::model::DeviceInfo;
-use crate::domain::service::TargetResolver;
 use crate::domain::repository::OnlineStatusRepository;
+use crate::domain::service::TargetResolver;
 
 /// 推送目标解析器实现
 pub struct TargetResolverImpl {
@@ -26,8 +26,8 @@ impl TargetResolverImpl {
 #[async_trait]
 impl TargetResolver for TargetResolverImpl {
     async fn resolve(&self, ctx: &Ctx, envelope: &PushEnvelope) -> Result<Vec<DeviceInfo>> {
-        let target_type = PushTargetType::try_from(envelope.target_type)
-            .unwrap_or(PushTargetType::Unspecified);
+        let target_type =
+            PushTargetType::try_from(envelope.target_type).unwrap_or(PushTargetType::Unspecified);
 
         match target_type {
             PushTargetType::All => {
@@ -64,37 +64,47 @@ mod tests {
     #[async_trait]
     impl OnlineStatusRepository for MockOnlineRepo {
         async fn get_all_online_devices(&self, _ctx: &Ctx) -> Result<Vec<DeviceInfo>> {
-            Ok(vec![
-                DeviceInfo::new(
-                    "device-1".to_string(),
-                    "user-1".to_string(),
-                    "ios".to_string(),
-                    Some("token-1".to_string()),
-                ),
-            ])
+            Ok(vec![DeviceInfo::new(
+                "device-1".to_string(),
+                "user-1".to_string(),
+                "ios".to_string(),
+                Some("token-1".to_string()),
+            )])
         }
 
-        async fn get_devices_by_users(&self, _ctx: &Ctx, user_ids: &[String]) -> Result<Vec<DeviceInfo>> {
+        async fn get_devices_by_users(
+            &self,
+            _ctx: &Ctx,
+            user_ids: &[String],
+        ) -> Result<Vec<DeviceInfo>> {
             Ok(user_ids
                 .iter()
-                .map(|user_id| DeviceInfo::new(
-                    format!("device-{}", user_id),
-                    user_id.clone(),
-                    "ios".to_string(),
-                    Some(format!("token-{}", user_id)),
-                ))
+                .map(|user_id| {
+                    DeviceInfo::new(
+                        format!("device-{}", user_id),
+                        user_id.clone(),
+                        "ios".to_string(),
+                        Some(format!("token-{}", user_id)),
+                    )
+                })
                 .collect())
         }
 
-        async fn get_devices_by_ids(&self, _ctx: &Ctx, device_ids: &[String]) -> Result<Vec<DeviceInfo>> {
+        async fn get_devices_by_ids(
+            &self,
+            _ctx: &Ctx,
+            device_ids: &[String],
+        ) -> Result<Vec<DeviceInfo>> {
             Ok(device_ids
                 .iter()
-                .map(|device_id| DeviceInfo::new(
-                    device_id.clone(),
-                    "user-unknown".to_string(),
-                    "ios".to_string(),
-                    Some(format!("token-{}", device_id)),
-                ))
+                .map(|device_id| {
+                    DeviceInfo::new(
+                        device_id.clone(),
+                        "user-unknown".to_string(),
+                        "ios".to_string(),
+                        Some(format!("token-{}", device_id)),
+                    )
+                })
                 .collect())
         }
     }
@@ -103,7 +113,7 @@ mod tests {
     async fn test_resolve_users() {
         let online_repo = Arc::new(MockOnlineRepo);
         let resolver = TargetResolverImpl::new(online_repo);
-        
+
         let envelope = PushEnvelope {
             envelope_id: "test-123".to_string(),
             tenant_id: "tenant-1".to_string(),
@@ -119,7 +129,7 @@ mod tests {
         };
 
         let ctx = flare_server_core::context::Context::with_request_id("trace-123");
-        
+
         assert_eq!(devices.len(), 2);
     }
 }

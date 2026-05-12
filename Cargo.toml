@@ -69,7 +69,6 @@ redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 deadpool-redis = "0.18"
 
 # 消息队列
-rdkafka = "0.38"
 
 # 认证
 jsonwebtoken = { version = "10.2", default-features = false, features = ["rust_crypto"] }
@@ -162,7 +161,6 @@ anyhow = { workspace = true }
 once_cell = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
-rdkafka = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 serde_json = { workspace = true }

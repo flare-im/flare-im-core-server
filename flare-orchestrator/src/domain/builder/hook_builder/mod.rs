@@ -7,7 +7,7 @@ use flare_im_core::hooks::hook_context_data::{HookContextData, set_hook_context_
 use flare_im_core::hooks::{MessageDraft, MessageRecord};
 use flare_proto::common::Message;
 use flare_server_core::context::{Context, Ctx};
-use flare_server_core::mq::kafka::consumer::context_from_kafka_headers;
+use flare_server_core::mq::nats::consumer::context_from_nats_headers;
 use prost::Message as _;
 use serde_json::json;
 
@@ -104,7 +104,7 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
 
 /// 从 Message.extra 还原 Ctx（MQ 编解码）
 pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) -> Ctx {
-    let mut ctx = context_from_kafka_headers(&request.extra);
+    let mut ctx = context_from_nats_headers(&request.extra);
     if ctx.tenant_id().is_none() || ctx.tenant_id().map(|s| s.is_empty()).unwrap_or(true) {
         let mut c = (*ctx).clone();
         if let Some(t) = default_tenant {

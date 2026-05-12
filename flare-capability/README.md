@@ -1,6 +1,6 @@
 # Flare Capability
 
-Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型、端口与 **Dispatch 领域服务**；CQRS：`application` 仅 **`commands` / `handler` / `queries`**；基础设施：`infrastructure/capability` 下按 **`registration` / `dispatch` / `routing` / `strom`** 分包，含进程内 `flare-sfu` 的 `SfuRtcCapability` 与可选 **`use_case_samples`**）。进程装配入口为 **`composition`**（`process_config` / `runtime_context` / **`wiring`** / `bootstrap` / `hook_registry`；原 `service`）。
+Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型、端口与 **Dispatch 领域服务**；CQRS：`application` 仅 **`commands` / `handler` / `queries`**；基础设施：`infrastructure/capability` 下按 **`registration` / `dispatch` / `routing` / `internal`** 分包，当前 RTC 通过远端媒体控制 gRPC 适配与自动注册装配）。进程装配入口为 **`composition`**（`process_config` / `runtime_context` / **`wiring`** / `bootstrap` / `hook_registry`；原 `service`）。
 
 ## 核心职责
 
@@ -8,13 +8,13 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 - **执行调度**：按优先级执行Hook，支持并发执行和超时控制
 - **监控统计**：收集Hook执行指标，提供监控和告警能力
 - **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式；Hook 的 gRPC 面（`HookExtension` / `HookService`）与 `CapabilityService` 同文件 **`capability_service.proto`**、同包 **`flare.capability.v1`**，Rust 侧统一 `flare_grpc_proto::capability`
-- **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver / `RtcCapability`；默认在开启 AV 时注册 `SfuRtcCapability` 作为 RTC 后端。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
+- **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver / `RtcCapability`；RTC 后端通过 `capability_runtime.plugin_discovery_endpoints`（`capability_id = rtc.media.control`）或环境变量 `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT` 装配。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
 
 ### 环境变量（能力扩展）
 
 | 变量 | 说明 |
 |------|------|
-| `FLARE_CAPABILITY_AV_PLUGINS` | 设为 `0` / `false` / `off` 时关闭 SFU 与 `RtcCapability` 注册（不启动 SFU；`CapabilityService` 仍可列出非 RTC 能力，但 RTC 类 `Dispatch` 将失败） |
+| `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT` | 覆盖媒体控制 gRPC 地址（未配置时走 `capability_runtime.plugin_discovery_endpoints` 自动发现） |
 
 ### 能力 gRPC（`CapabilityService`）
 

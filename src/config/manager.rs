@@ -3,7 +3,7 @@
 //! 该模块提供了配置管理功能，包括：
 //! - 根据环境变量选择对象存储配置
 //! - 加载环境特定配置
-//! - 合并配置值
+//! - 合并配置值（对象存储、`[mq]` 消息队列后端等）
 
 use std::collections::HashMap;
 use std::env;
@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::{Context as AnyhowContext, Result};
 use toml::Value;
 
-use super::{FlareAppConfig, ObjectStoreConfig};
+use super::{FlareAppConfig, MqBackendConfig, ObjectStoreConfig};
 
 /// 配置管理器
 pub struct ConfigManager;
@@ -78,6 +78,7 @@ impl ConfigManager {
 
             // 合并环境配置到基础配置中
             Self::merge_config_values(&mut base_config.object_storage, &env_config);
+            Self::merge_mq_from_environment(&mut base_config.mq, &env_config);
         }
 
         Ok(())
@@ -139,6 +140,27 @@ impl ConfigManager {
                         object_storage.insert(key.clone(), config);
                     }
                 }
+            }
+        }
+    }
+
+    /// 从 `config/environments/*.toml` 根表合并 `[mq]`（与 `FLARE_MQ_*` 环境变量相比优先级更低，见 `apply_mq_env_overrides`）
+    fn merge_mq_from_environment(mq: &mut MqBackendConfig, env_config: &Value) {
+        let Some(tbl) = env_config.get("mq").and_then(|v| v.as_table()) else {
+            return;
+        };
+        if let Some(raw) = tbl.get("default_backend").and_then(|v| v.as_str()) {
+            let t = raw.trim();
+            if !t.is_empty() {
+                mq.default_backend = t.to_ascii_lowercase();
+            }
+        }
+        if let Some(v) = tbl.get("allow_kafka_fallback") {
+            if let Some(b) = v.as_bool() {
+                mq.allow_kafka_fallback = b;
+            } else if let Some(s) = v.as_str() {
+                let u = s.trim();
+                mq.allow_kafka_fallback = matches!(u, "1" | "true" | "yes");
             }
         }
     }

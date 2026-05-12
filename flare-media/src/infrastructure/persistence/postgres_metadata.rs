@@ -39,9 +39,15 @@ impl TryFrom<MediaAssetRow> for MediaFileMetadata {
 
     fn try_from(row: MediaAssetRow) -> std::result::Result<Self, Self::Error> {
         let metadata_map = match row.metadata {
-            Some(value) => serde_json::from_value::<HashMap<String, String>>(value).map_err(|e| {
-                map_infra_error(e, ErrorCode::DeserializationError, "failed to deserialize metadata")
-            })?,
+            Some(value) => {
+                serde_json::from_value::<HashMap<String, String>>(value).map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::DeserializationError,
+                        "failed to deserialize metadata",
+                    )
+                })?
+            }
             None => HashMap::new(),
         };
 
@@ -117,13 +123,15 @@ impl TryFrom<MediaReferenceRow> for MediaReference {
 
     fn try_from(row: MediaReferenceRow) -> std::result::Result<Self, Self::Error> {
         let metadata_map = match row.metadata {
-            Some(value) => serde_json::from_value::<HashMap<String, String>>(value).map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DeserializationError,
-                    "failed to deserialize reference metadata",
-                )
-            })?,
+            Some(value) => {
+                serde_json::from_value::<HashMap<String, String>>(value).map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::DeserializationError,
+                        "failed to deserialize reference metadata",
+                    )
+                })?
+            }
             None => HashMap::new(),
         };
 
@@ -151,7 +159,9 @@ impl PostgresMetadataStore {
             .max_connections(DEFAULT_MAX_CONNECTIONS)
             .connect(config)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to connect to postgres"))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "failed to connect to postgres")
+            })?;
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -234,7 +244,13 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .bind(MediaAssetRow::access_type_to_str(metadata.access_type))
         .execute(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to persist media metadata"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to persist media metadata",
+            )
+        })?;
 
         Ok(())
     }
@@ -270,7 +286,9 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .bind(file_id)
         .fetch_optional(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to load media metadata"))?;
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "failed to load media metadata")
+        })?;
 
         match row {
             Some(row) => Ok(Some(row.try_into()?)),
@@ -306,7 +324,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .fetch_optional(self.pool())
         .await
         .map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "failed to load media metadata by hash")
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to load media metadata by hash",
+            )
         })?;
 
         match row {
@@ -324,14 +346,20 @@ impl MediaMetadataStore for PostgresMetadataStore {
             .execute(self.pool())
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "failed to delete media references")
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "failed to delete media references",
+                )
             })?;
 
         sqlx::query("DELETE FROM media_assets WHERE file_id = $1")
             .bind(file_id)
             .execute(self.pool())
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to delete media asset"))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "failed to delete media asset")
+            })?;
 
         Ok(())
     }
@@ -364,7 +392,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .fetch_all(self.pool())
         .await
         .map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "failed to list orphaned media assets")
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to list orphaned media assets",
+            )
         })?;
 
         rows.into_iter().map(MediaFileMetadata::try_from).collect()
@@ -389,7 +421,13 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .bind(grace_expires_at)
         .execute(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to update media asset status"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to update media asset status",
+            )
+        })?;
 
         Ok(())
     }
@@ -411,7 +449,11 @@ impl MediaReferenceStore for PostgresMetadataStore {
                 .fetch_optional(self.pool())
                 .await
                 .map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "failed to get tenant_id from media_assets")
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        "failed to get tenant_id from media_assets",
+                    )
                 })?;
 
             if let Some(row) = row {
@@ -450,7 +492,13 @@ impl MediaReferenceStore for PostgresMetadataStore {
         .bind(reference.expires_at)
         .execute(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to create media reference"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to create media reference",
+            )
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -460,7 +508,13 @@ impl MediaReferenceStore for PostgresMetadataStore {
             .bind(reference_id)
             .execute(self.pool())
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to delete media reference"))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "failed to delete media reference",
+                )
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -484,7 +538,11 @@ impl MediaReferenceStore for PostgresMetadataStore {
         match row {
             Some(row) => {
                 let reference_id: String = row.try_get("reference_id").map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "failed to get reference_id from row")
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        "failed to get reference_id from row",
+                    )
                 })?;
                 Ok(Some(reference_id))
             }
@@ -505,7 +563,11 @@ impl MediaReferenceStore for PostgresMetadataStore {
                 .execute(self.pool())
                 .await
                 .map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "failed to delete all media references")
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        "failed to delete all media references",
+                    )
                 })?;
 
         Ok(result.rows_affected())
@@ -537,7 +599,13 @@ impl MediaReferenceStore for PostgresMetadataStore {
         .bind(file_id)
         .fetch_all(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to list media references"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to list media references",
+            )
+        })?;
 
         rows.into_iter().map(MediaReference::try_from).collect()
     }
@@ -555,7 +623,13 @@ impl MediaReferenceStore for PostgresMetadataStore {
         .bind(file_id)
         .fetch_one(self.pool())
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "failed to count media references"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to count media references",
+            )
+        })?;
 
         let count: i64 = row.try_get("count").map_err(|e| {
             map_infra_error(e, ErrorCode::DatabaseError, "failed to get count from row")

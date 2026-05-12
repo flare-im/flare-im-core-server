@@ -27,7 +27,7 @@ docker-compose up -d
 这将启动以下基础设施服务：
 - Redis (端口 26379)
 - PostgreSQL (端口 25432)
-- Kafka (端口 29092)
+- JetStream (端口 29092)
 - etcd (端口 22379)
 
 ### 2. 启动所有核心服务
@@ -89,7 +89,7 @@ cargo run --example chatroom_client -- user2
 ```
 
 **功能**：
-- 检查基础设施服务状态（Redis、PostgreSQL、Kafka、Consul）
+- 检查基础设施服务状态（Redis、PostgreSQL、JetStream、Consul）
 - 清理旧进程（防止端口冲突）
 - 按依赖顺序启动所有核心服务
 - 启动多地区 Access Gateway 实例（北京、上海）
@@ -101,8 +101,8 @@ cargo run --example chatroom_client -- user2
 3. `capability`（`flare-capability`）- Hook 与能力插件（gRPC 端口见应用 `config`）
 4. `conversation` - 会话管理服务（端口 50090）
 5. `message-orchestrator` - 消息编排服务（端口 50181）
-6. `storage-writer` - 消息持久化服务（Kafka 消费者，不注册到服务注册中心）
-7. `push-server` - 消息推送服务（端口 50091，Kafka 消费者，不注册到服务注册中心）
+6. `storage-writer` - 消息持久化服务（JetStream 消费者，不注册到服务注册中心）
+7. `push-server` - 消息推送服务（端口 50091，JetStream 消费者，不注册到服务注册中心）
 8. `access-gateway` - 客户端接入网关（默认实例，端口 60051）
 9. `core-gateway` - 业务系统统一入口（端口 50050）
 10. `access-gateway-beijing-1` - 北京网关实例（端口 60051）
@@ -234,7 +234,7 @@ cargo run --example business_push_client
 ```
 
 **功能**：
-- 检查基础设施服务（Redis、PostgreSQL、Kafka）
+- 检查基础设施服务（Redis、PostgreSQL、JetStream）
 - 检查核心服务进程状态
 - 显示服务日志位置
 
@@ -260,8 +260,8 @@ redis-cli -h localhost -p 26379 ping
 # 检查 PostgreSQL 连接
 psql -h localhost -p 25432 -U flare -d flare -c "SELECT 1;"
 
-# 检查 Kafka
-kafka-broker-api-versions --bootstrap-server localhost:29092
+# 检查 JetStream
+jetstream-broker-api-versions --bootstrap-server localhost:29092
 ```
 
 ---
@@ -307,7 +307,7 @@ pkill -f "flare-<service-name>"
 
 ### 2. 基础设施服务未启动
 
-**问题**：核心服务无法连接 Redis、PostgreSQL 或 Kafka
+**问题**：核心服务无法连接 Redis、PostgreSQL 或 JetStream
 
 **解决方案**：
 ```bash
@@ -390,7 +390,7 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare"
 | core-gateway | 50050 | 业务系统统一入口 gRPC |
 | Redis | 26379 | Redis 服务 |
 | PostgreSQL | 25432 | PostgreSQL 服务 |
-| Kafka | 29092 | Kafka 服务（外部端口） |
+| JetStream | 29092 | JetStream 服务（外部端口） |
 | etcd | 22379 | etcd 服务 |
 
 ---
@@ -418,7 +418,7 @@ tail -f /tmp/flare-core-gateway.log
 tail -f /tmp/flare-push-server.log | grep -E "(gateway|routing|Found.*online)"
 
 # 查看 Message Orchestrator 的消息处理日志
-tail -f /tmp/flare-message-orchestrator.log | grep -E "(message|kafka|hook)"
+tail -f /tmp/flare-message-orchestrator.log | grep -E "(message|jetstream|hook)"
 
 # 查看 Access Gateway 的连接日志
 tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
@@ -437,7 +437,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 | `PORT` | Access Gateway 监听端口 | 60051 |
 | `DATABASE_URL` | PostgreSQL 连接URL | 从配置文件读取 |
 | `REDIS_URL` | Redis 连接URL | 从配置文件读取 |
-| `KAFKA_BOOTSTRAP_SERVERS` | Kafka 连接地址 | 从配置文件读取 |
+| `JETSTREAM_BOOTSTRAP_SERVERS` | JetStream 连接地址 | 从配置文件读取 |
 
 ### 客户端环境变量
 

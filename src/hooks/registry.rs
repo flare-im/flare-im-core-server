@@ -78,7 +78,7 @@ fn annotate(err: FlareError, metadata: &HookMetadata) -> FlareError {
     if let Some(localized) = err.as_localized()
         && localized.details.is_none()
     {
-        tracing::debug!(
+        tracing::trace!(
             hook = %metadata.name,
             "hook error returned without details"
         );

@@ -10,13 +10,13 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use flare_im_core::Ctx;
 use flare_proto::common::{PushEnvelope, PushResult};
 use prost::Message as _;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, instrument};
 
 /// Flare-Core gRPC 客户端
 ///
@@ -44,15 +44,11 @@ impl FlareCoreClient {
     /// - `Ok(())`: 推送成功
     /// - `Err`: 推送失败
     #[instrument(skip(self, payload), fields(device_id = %device_id))]
-    pub async fn push_to_device(
-        &self,
-        device_id: &str,
-        payload: &[u8],
-    ) -> Result<()> {
+    pub async fn push_to_device(&self, device_id: &str, payload: &[u8]) -> Result<()> {
         // 这里需要调用 Flare-Core 的 gRPC 接口
         // 假设 Flare-Core 提供了 PushService gRPC 接口
         // 实际实现需要根据 Flare-Core 的 proto 定义调整
-        
+
         debug!(
             device_id = %device_id,
             payload_size = payload.len(),
@@ -68,7 +64,7 @@ impl FlareCoreClient {
         // });
         // let response = client.push(request).await
         //     .map_err(|e| Error::internal(format!("gRPC push failed: {}", e)))?;
-        
+
         // 模拟推送成功
         Ok(())
     }
@@ -116,12 +112,7 @@ impl PushExecutor for PushExecutorImpl {
         envelope_id = %envelope.envelope_id,
         device_id = %device.device_id
     ))]
-    async fn execute(
-        &self,
-        ctx: &Ctx,
-        envelope: &PushEnvelope,
-        device: &DeviceInfo,
-    ) -> PushResult {
+    async fn execute(&self, ctx: &Ctx, envelope: &PushEnvelope, device: &DeviceInfo) -> PushResult {
         let envelope_id = envelope.envelope_id.clone();
         let device_id = device.device_id.clone();
         let user_id = device.user_id.clone();
@@ -130,9 +121,13 @@ impl PushExecutor for PushExecutorImpl {
         let payload = Self::serialize_envelope(envelope);
 
         // 2. 调用 Flare-Core 推送接口
-        match self.flare_core_client.push_to_device(&device_id, &payload).await {
+        match self
+            .flare_core_client
+            .push_to_device(&device_id, &payload)
+            .await
+        {
             Ok(()) => {
-                info!(
+                debug!(
                     envelope_id = %envelope_id,
                     device_id = %device_id,
                     user_id = %user_id,
@@ -180,12 +175,7 @@ impl PushExecutor for PushExecutorImpl {
 #[async_trait]
 pub trait PushExecutor: Send + Sync {
     /// 执行单次推送
-    async fn execute(
-        &self,
-        ctx: &Ctx,
-        envelope: &PushEnvelope,
-        device: &DeviceInfo,
-    ) -> PushResult;
+    async fn execute(&self, ctx: &Ctx, envelope: &PushEnvelope, device: &DeviceInfo) -> PushResult;
 }
 
 /// 设备信息（从 server 层导入）
@@ -217,13 +207,15 @@ mod tests {
             target_device_ids: Vec::new(),
             payload_kind: PushPayloadKind::Ack as i32,
             options: None,
-            payload: Some(flare_proto::common::push_envelope::Payload::Ack(AckPayload {
-                message_id: "msg-123".to_string(),
-                conversation_id: "conv-123".to_string(),
-                seq: 100,
-                ack_type: "received".to_string(),
-                ack_at_ms: 1234567890,
-            })),
+            payload: Some(flare_proto::common::push_envelope::Payload::Ack(
+                AckPayload {
+                    message_id: "msg-123".to_string(),
+                    conversation_id: "conv-123".to_string(),
+                    seq: 100,
+                    ack_type: "received".to_string(),
+                    ack_at_ms: 1234567890,
+                },
+            )),
             headers: std::collections::HashMap::new(),
         };
 

@@ -1,8 +1,8 @@
 //! 事件流写入（init_v2：event_type INT，payload BYTEA 单列）
 
 use anyhow::Result;
-use flare_proto::common::event::Payload;
 use flare_im_core::Ctx;
+use flare_proto::common::event::Payload;
 use prost::Message as _;
 use sqlx::Pool;
 use tracing::instrument;

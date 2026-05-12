@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_grpc_proto::access_gateway;
-use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind, PushEnvelope, PushPayloadKind};
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_proto::common::{PushEnvelope, PushPayloadKind, PushTaskEnvelope, PushTaskPayloadKind};
 use prost::Message as _;
 
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
@@ -48,7 +48,13 @@ impl PushRouterHandler {
                 .online_status
                 .is_online(ctx, user_id)
                 .await
-                .unwrap_or(false);
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::ServiceUnavailable,
+                        "Failed to query online status",
+                    )
+                })?;
 
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -67,12 +73,24 @@ impl PushRouterHandler {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish online push task",
+                        )
+                    })?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish offline push task",
+                        )
+                    })?;
             }
         }
 
@@ -114,7 +132,13 @@ impl PushRouterHandler {
                 .online_status
                 .is_online(ctx, user_id)
                 .await
-                .unwrap_or(false);
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::ServiceUnavailable,
+                        "Failed to query online status",
+                    )
+                })?;
 
             let env = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -133,12 +157,24 @@ impl PushRouterHandler {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish online push task",
+                        )
+                    })?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish offline push task",
+                        )
+                    })?;
             }
         }
 
@@ -157,29 +193,30 @@ impl PushRouterHandler {
     ) -> Result<()> {
         // 提取推送选项
         let priority = envelope.options.as_ref().map(|o| o.priority).unwrap_or(5);
-        let expire_at_ms = envelope.options.as_ref().map(|o| o.expire_at_ms).unwrap_or(0);
+        let expire_at_ms = envelope
+            .options
+            .as_ref()
+            .map(|o| o.expire_at_ms)
+            .unwrap_or(0);
 
         // 根据目标类型处理
-        let target_user_ids = match flare_proto::common::PushTargetType::try_from(envelope.target_type) {
-            Ok(flare_proto::common::PushTargetType::All) => {
-                // 全量推送：需要查询所有在线用户
-                // TODO: 实现全量推送逻辑
-                tracing::warn!("Full broadcast push not yet implemented");
-                return Ok(());
-            }
-            Ok(flare_proto::common::PushTargetType::Users) => {
-                envelope.target_user_ids.clone()
-            }
-            Ok(flare_proto::common::PushTargetType::Devices) => {
-                // 设备级推送：需要从设备ID反查用户ID
-                // TODO: 实现设备级推送逻辑
-                tracing::warn!("Device-level push not yet implemented");
-                return Ok(());
-            }
-            _ => {
-                envelope.target_user_ids.clone()
-            }
-        };
+        let target_user_ids =
+            match flare_proto::common::PushTargetType::try_from(envelope.target_type) {
+                Ok(flare_proto::common::PushTargetType::All) => {
+                    // 全量推送：需要查询所有在线用户
+                    // TODO: 实现全量推送逻辑
+                    tracing::warn!("Full broadcast push not yet implemented");
+                    return Ok(());
+                }
+                Ok(flare_proto::common::PushTargetType::Users) => envelope.target_user_ids.clone(),
+                Ok(flare_proto::common::PushTargetType::Devices) => {
+                    // 设备级推送：需要从设备ID反查用户ID
+                    // TODO: 实现设备级推送逻辑
+                    tracing::warn!("Device-level push not yet implemented");
+                    return Ok(());
+                }
+                _ => envelope.target_user_ids.clone(),
+            };
 
         if target_user_ids.is_empty() {
             return Ok(());
@@ -205,7 +242,13 @@ impl PushRouterHandler {
                 .online_status
                 .is_online(ctx, user_id)
                 .await
-                .unwrap_or(false);
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::ServiceUnavailable,
+                        "Failed to query online status",
+                    )
+                })?;
 
             let task = PushTaskEnvelope {
                 user_id: user_id.clone(),
@@ -220,17 +263,29 @@ impl PushRouterHandler {
             };
 
             let payload = task.encode_to_vec();
-            
+
             if online {
                 self.publisher
                     .publish_online_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish online push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish online push task",
+                        )
+                    })?;
             } else {
                 self.publisher
                     .publish_offline_task(ctx, Some(user_id.as_str()), payload)
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::MessageSendFailed, "Failed to publish offline push task"))?;
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::MessageSendFailed,
+                            "Failed to publish offline push task",
+                        )
+                    })?;
             }
         }
 

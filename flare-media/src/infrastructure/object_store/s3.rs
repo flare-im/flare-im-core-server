@@ -8,8 +8,7 @@ use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{
-    BucketLocationConstraint, CompletedMultipartUpload, CompletedPart,
-    CreateBucketConfiguration,
+    BucketLocationConstraint, CompletedMultipartUpload, CompletedPart, CreateBucketConfiguration,
 };
 use chrono::{Datelike, Utc};
 
@@ -33,15 +32,12 @@ pub struct S3ObjectStore {
 
 impl S3ObjectStore {
     pub async fn from_config(cfg: &ObjectStoreConfig) -> Result<Self> {
-        let bucket = cfg
-            .bucket
-            .clone()
-            .ok_or_else(|| {
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "object storage bucket is required"
-                )
-            })?;
+        let bucket = cfg.bucket.clone().ok_or_else(|| {
+            flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "object storage bucket is required"
+            )
+        })?;
 
         let region_name = cfg
             .region
@@ -119,7 +115,11 @@ impl S3ObjectStore {
         })
     }
 
-    async fn ensure_bucket_exists(client: &S3Client, bucket: &str, region_name: &str) -> Result<()> {
+    async fn ensure_bucket_exists(
+        client: &S3Client,
+        bucket: &str,
+        region_name: &str,
+    ) -> Result<()> {
         match client.head_bucket().bucket(bucket).send().await {
             Ok(_) => {
                 tracing::info!(bucket = bucket, "object storage bucket already exists");
@@ -153,7 +153,11 @@ impl S3ObjectStore {
             .await
         {
             Ok(_) => {
-                tracing::info!(bucket = bucket, region = region_name, "object storage bucket created");
+                tracing::info!(
+                    bucket = bucket,
+                    region = region_name,
+                    "object storage bucket created"
+                );
                 Ok(())
             }
             Err(create_err) => {
@@ -162,13 +166,21 @@ impl S3ObjectStore {
                     error = %create_err,
                     "create bucket failed, re-checking if bucket became available"
                 );
-                client.head_bucket().bucket(bucket).send().await.map(|_| ()).map_err(|_| {
-                    map_infra_error(
-                        create_err,
-                        ErrorCode::ConfigurationError,
-                        format!("failed to ensure object storage bucket exists, bucket={bucket}"),
-                    )
-                })
+                client
+                    .head_bucket()
+                    .bucket(bucket)
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| {
+                        map_infra_error(
+                            create_err,
+                            ErrorCode::ConfigurationError,
+                            format!(
+                                "failed to ensure object storage bucket exists, bucket={bucket}"
+                            ),
+                        )
+                    })
             }
         }
     }
@@ -217,7 +229,7 @@ impl S3ObjectStore {
         let key = object_path.to_string();
         let expires_in = expires_in.unwrap_or(self.presign_url_ttl_seconds);
 
-        tracing::debug!(
+        tracing::trace!(
             key = &key,
             bucket = &self.bucket,
             expires_in = expires_in,
@@ -248,11 +260,16 @@ impl S3ObjectStore {
             })?;
 
         let url = presigned.uri().to_string();
-        tracing::debug!(key = &key, presigned_url = &url, "已生成预签名GET URL");
+        tracing::trace!(key = &key, presigned_url = &url, "已生成预签名GET URL");
         Ok(url)
     }
 
-    fn build_object_key_from_parts(&self, file_id: &str, file_name: &str, file_category: &str) -> String {
+    fn build_object_key_from_parts(
+        &self,
+        file_id: &str,
+        file_name: &str,
+        file_category: &str,
+    ) -> String {
         let empty = [];
         let context = UploadContext {
             file_id,
@@ -333,7 +350,7 @@ fn extract_extension(file_name: &str) -> Option<String> {
 impl MediaObjectRepository for S3ObjectStore {
     async fn put_object(&self, context: &UploadContext<'_>) -> Result<String> {
         let key = self.build_object_key(context);
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             key = &key,
             bucket = &self.bucket,
@@ -358,7 +375,7 @@ impl MediaObjectRepository for S3ObjectStore {
                 )
             })?;
 
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             key = &key,
             bucket = &self.bucket,
@@ -368,7 +385,7 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 
     async fn delete_object(&self, object_path: &str) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             key = object_path,
             bucket = &self.bucket,
             "开始从S3存储删除对象"
@@ -388,7 +405,7 @@ impl MediaObjectRepository for S3ObjectStore {
                 )
             })?;
 
-        tracing::debug!(
+        tracing::trace!(
             key = object_path,
             bucket = &self.bucket,
             "对象已成功从S3存储删除"
@@ -397,7 +414,7 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 
     async fn presign_object(&self, object_path: &str, expires_in: i64) -> Result<String> {
-        tracing::debug!(
+        tracing::trace!(
             key = object_path,
             bucket = &self.bucket,
             expires_in = expires_in,
@@ -427,7 +444,7 @@ impl MediaObjectRepository for S3ObjectStore {
             })?;
 
         let url = presigned.uri().to_string();
-        tracing::debug!(key = object_path, presigned_url = &url, "已生成预签名URL");
+        tracing::trace!(key = object_path, presigned_url = &url, "已生成预签名URL");
         Ok(url)
     }
 

@@ -8,4 +8,4 @@ pub mod commands;
 pub mod handler;
 pub mod queries;
 
-pub use handler::{dispatch_capability_command, HookCommandHandler, HookQueryHandler};
+pub use handler::{HookCommandHandler, HookQueryHandler, dispatch_capability_command};

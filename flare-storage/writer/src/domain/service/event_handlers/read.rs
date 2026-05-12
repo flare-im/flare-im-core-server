@@ -23,10 +23,16 @@ where
                 msg_id.as_str(),
                 read.user_id.as_str(),
             )
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+            })?;
         ctx.repo
             .append_event(ctx.ctx, ctx.tenant_id, msg_id.as_str(), event)
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+            })?;
     }
     if let Some(stream) = ctx.stream {
         let _ = stream.append_event_to_stream(ctx.ctx, event).await;

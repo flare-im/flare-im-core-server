@@ -18,7 +18,7 @@ pub struct AccessGatewayConfig {
     pub token_issuer: String,
     pub token_ttl_seconds: u64,
     pub token_store_redis_url: Option<String>,
-    // ACK上报配置（使用 gRPC，无需 Kafka）
+    // ACK上报配置（使用 gRPC，无需 JetStream）
     pub use_ack_report: bool,
     // 跨地区网关路由配置
     pub gateway_id: Option<String>,

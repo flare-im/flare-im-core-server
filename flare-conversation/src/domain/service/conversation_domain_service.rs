@@ -13,7 +13,7 @@ use flare_proto::common::Message;
 use flare_proto::common::message_content::Content;
 use flare_proto::message_content_ext::decode_message_content;
 use flare_server_core::context::Context;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::domain::model::{
@@ -284,8 +284,11 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         limit: i32,
     ) -> Result<MessageSyncResult> {
         let provider = self.message_provider.as_ref().ok_or_else(|| {
-            ErrorBuilder::new(ErrorCode::ConfigurationError, "message provider not configured")
-                .build_error()
+            ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "message provider not configured",
+            )
+            .build_error()
         })?;
         provider
             .sync_messages(ctx, conversation_id, since_ts, cursor, limit)
@@ -358,7 +361,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
 
         let user_id = require_user_id(ctx)?;
         if missing.is_empty() {
-            info!(
+            debug!(
                 user_id = %user_id,
                 conversations = ?conversation_ids,
                 reason = reason.unwrap_or(""),
@@ -477,7 +480,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 self.conversation_repo
                     .create_conversation(ctx, &session)
                     .await?;
-                info!(conversation_id = %requested_conversation_id, "Conversation created with provided conversation_id");
+                debug!(conversation_id = %requested_conversation_id, "Conversation created with provided conversation_id");
                 Ok(session)
             }
         } else {
@@ -486,16 +489,14 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 ConversationType::Single => {
                     // 单聊：从参与者中提取两个用户ID，使用 generate_single_chat_conversation_id
                     if participants.len() != 2 {
-                        return Err(
-                            ErrorBuilder::new(
-                                ErrorCode::InvalidParameter,
-                                format!(
-                                    "single chat must have exactly 2 participants, got {}",
-                                    participants.len()
-                                ),
-                            )
-                            .build_error(),
-                        );
+                        return Err(ErrorBuilder::new(
+                            ErrorCode::InvalidParameter,
+                            format!(
+                                "single chat must have exactly 2 participants, got {}",
+                                participants.len()
+                            ),
+                        )
+                        .build_error());
                     }
                     let user1 = &participants[0].user_id;
                     let user2 = &participants[1].user_id;
@@ -573,7 +574,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             self.conversation_repo
                 .create_conversation(ctx, &session)
                 .await?;
-            info!(
+            debug!(
                 conversation_id = %conversation_id,
                 "Conversation created with generated conversation_id"
             );
@@ -629,7 +630,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         self.conversation_repo
             .update_conversation(ctx, &conversation)
             .await?;
-        info!(conversation_id = %conversation_id, "Conversation updated");
+        debug!(conversation_id = %conversation_id, "Conversation updated");
         Ok(conversation)
     }
 
@@ -643,7 +644,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         self.conversation_repo
             .delete_conversation(ctx, conversation_id, hard_delete)
             .await?;
-        info!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
+        debug!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
         Ok(())
     }
 
@@ -660,7 +661,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .conversation_repo
             .manage_participants(ctx, conversation_id, &to_add, &to_remove, &role_updates)
             .await?;
-        info!(
+        debug!(
             conversation_id = %conversation_id,
             added = to_add.len(),
             removed = to_remove.len(),
@@ -680,7 +681,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         self.conversation_repo
             .batch_acknowledge(ctx, &cursors)
             .await?;
-        info!(user_id = %user_id, count = cursors.len(), "Batch acknowledge completed");
+        debug!(user_id = %user_id, count = cursors.len(), "Batch acknowledge completed");
         Ok(())
     }
 
@@ -692,7 +693,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         self.conversation_repo
             .mark_as_read(ctx, conversation_id, seq)
             .await?;
-        info!(
+        debug!(
             user_id = %user_id,
             conversation_id = %conversation_id,
             seq,

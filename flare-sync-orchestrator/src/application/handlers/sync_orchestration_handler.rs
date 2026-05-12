@@ -5,6 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use flare_grpc_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
+use flare_im_core::Ctx;
+use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_proto::Message;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::sync_res::Payload as SyncResPayload;
@@ -15,13 +18,10 @@ use flare_proto::common::{
     ConversationsIncrementalSync, ConversationsIncrementalSyncRes, EventEnvelope,
     EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview,
     MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync,
-    QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes,
-    SnapshotConversationRow, SyncKind, SyncRes, SyncSliceItem, SyncSnapshotSync,
-    SyncSnapshotSyncRes, UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
+    QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow,
+    SyncKind, SyncRes, SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync,
+    UpdateSyncCursorSyncRes,
 };
-use flare_grpc_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
-use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
-use flare_im_core::Ctx;
 use prost::Message as ProstMessage;
 use tracing::{debug, trace};
 
@@ -85,13 +85,11 @@ where
     ) -> Result<SyncRes, FlareError> {
         let kind = decode_sync_kind(sync.kind);
         if kind == SyncKind::Unspecified {
-            return Err(
-                ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    "sync kind must not be SYNC_KIND_UNSPECIFIED",
-                )
-                .build_error(),
-            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "sync kind must not be SYNC_KIND_UNSPECIFIED",
+            )
+            .build_error());
         }
         let Some(payload) = sync.payload.take() else {
             return Err(
@@ -114,7 +112,9 @@ where
                 })
             }
             (SyncKind::ConversationsIncremental, SyncPayload::ConversationsIncremental(req)) => {
-                let v = self.conversations_incremental_sync(ctx, user_id, req).await?;
+                let v = self
+                    .conversations_incremental_sync(ctx, user_id, req)
+                    .await?;
                 Ok(SyncRes {
                     payload: Some(SyncResPayload::ConversationsIncremental(v)),
                 })
@@ -164,13 +164,11 @@ where
                     payload: Some(SyncResPayload::ConversationMaxSeqRes(v)),
                 })
             }
-            _ => Err(
-                ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    "sync kind does not match payload oneof",
-                )
-                .build_error(),
-            ),
+            _ => Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "sync kind does not match payload oneof",
+            )
+            .build_error()),
         }
     }
 
@@ -632,7 +630,10 @@ where
                     .or(max.last_timestamp.clone()),
                 member_count: summary.as_ref().map(|s| s.member_count).unwrap_or(0),
                 attributes: HashMap::new(),
-                channel_id: summary.as_ref().map(|s| s.channel_id.clone()).unwrap_or_default(),
+                channel_id: summary
+                    .as_ref()
+                    .map(|s| s.channel_id.clone())
+                    .unwrap_or_default(),
                 ext,
             }),
             metadata: HashMap::new(),

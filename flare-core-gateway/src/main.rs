@@ -8,12 +8,10 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 use flare_core_gateway::{
-    config::Settings,
-    infrastructure::grpc::GrpcClients,
-    interface::http::create_router,
+    config::Settings, infrastructure::grpc::GrpcClients, interface::http::create_router,
 };
-use flare_im_core::service_names::CORE_GATEWAY;
 use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::CORE_GATEWAY;
 use flare_server_core::TokenService;
 
 #[tokio::main]
@@ -39,9 +37,7 @@ async fn main() -> Result<()> {
         media_service_url = %settings.grpc.media_service_url,
         "Using media grpc endpoint"
     );
-    let clients = Arc::new(
-        GrpcClients::new(&settings.grpc.media_service_url).await?,
-    );
+    let clients = Arc::new(GrpcClients::new(&settings.grpc.media_service_url).await?);
     info!("gRPC clients initialized");
 
     let token_service = Arc::new(TokenService::new(
@@ -65,7 +61,7 @@ async fn main() -> Result<()> {
                 // 追踪
                 .layer(TraceLayer::new_for_http())
                 // CORS
-                .layer(CorsLayer::permissive())
+                .layer(CorsLayer::permissive()),
         );
 
     // 使用 ServiceRuntime 管理 HTTP 服务

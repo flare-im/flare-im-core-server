@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::domain::repository::{PresenceChangeEvent, PresenceWatcher};
-use crate::error::{Result, map_infra_error, ErrorCode};
+use crate::error::{ErrorCode, Result, map_infra_error};
 
 #[derive(Clone)]
 pub struct OnlinePresenceWatcherHandler<PW: PresenceWatcher + Send + Sync> {

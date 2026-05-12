@@ -3,3 +3,13 @@
 
 [services.capability]
 postgres = "media"
+
+[capability_runtime]
+plugin_call_timeout_ms = 5000
+plugin_health_check_interval_secs = 15
+
+[[capability_runtime.plugin_discovery_endpoints]]
+tenant_id = "0"
+plugin_id = "flare-strom-sfu"
+capability_id = "rtc.media.control"
+grpc_authority = "http://127.0.0.1:50060"

@@ -29,25 +29,21 @@ pub fn validate_hook_item_for_materialization(item: &HookConfigItem) -> FlareRes
         }
         HookTransportConfig::Webhook { endpoint, .. } => {
             if endpoint.is_empty() {
-                return Err(
-                    ErrorBuilder::new(
-                        ErrorCode::InvalidParameter,
-                        "webhook hook transport requires non-empty `endpoint` URL",
-                    )
-                    .build_error(),
-                );
+                return Err(ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "webhook hook transport requires non-empty `endpoint` URL",
+                )
+                .build_error());
             }
             Ok(())
         }
         HookTransportConfig::Local { target } => {
             if target.trim().is_empty() {
-                return Err(
-                    ErrorBuilder::new(
-                        ErrorCode::InvalidParameter,
-                        "local plugin hook transport requires non-empty `target`",
-                    )
-                    .build_error(),
-                );
+                return Err(ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "local plugin hook transport requires non-empty `target`",
+                )
+                .build_error());
             }
             Ok(())
         }

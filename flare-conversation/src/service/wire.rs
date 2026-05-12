@@ -20,7 +20,7 @@ use crate::interface::grpc::ConversationGrpcHandler;
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub handler: ConversationGrpcHandler,
-    /// 配置了 Kafka 且初始化成功时存在，由 bootstrap 后台 `run`（`ctx` 在 MQ 侧重建）
+    /// 配置了 JetStream 且初始化成功时存在，由 bootstrap 后台 `run`（`ctx` 在 MQ 侧重建）
     pub read_receipt_consumer: Option<ReadReceiptEventConsumer>,
     pub conversation_ensure_consumer: Option<ConversationEnsureEventConsumer>,
 }
@@ -35,28 +35,33 @@ pub async fn initialize(
     app_config: &flare_im_core::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载会话配置
-    let conversation_config = Arc::new(
-        ConversationConfig::from_app_config(app_config)
-            .map_err(|e| ErrorBuilder::new(ErrorCode::InternalError, "Failed to load conversation service configuration")
-                .details(e.to_string())
-                .build_error())?,
-    );
+    let conversation_config = Arc::new(ConversationConfig::from_app_config(app_config).map_err(
+        |e| {
+            ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "Failed to load conversation service configuration",
+            )
+            .details(e.to_string())
+            .build_error()
+        },
+    )?);
 
     // 2. 创建 Redis 客户端
-    let redis_client = Arc::new(redis::Client::open(conversation_config.redis_url.clone())
-        .map_err(|e| ErrorBuilder::new(ErrorCode::NetworkError, "Failed to create Redis client")
-            .details(e.to_string())
-            .build_error())?);
+    let redis_client = Arc::new(
+        redis::Client::open(conversation_config.redis_url.clone()).map_err(|e| {
+            ErrorBuilder::new(ErrorCode::NetworkError, "Failed to create Redis client")
+                .details(e.to_string())
+                .build_error()
+        })?,
+    );
 
     // 3. 创建 PostgreSQL 连接池（可选）
     let postgres_pool = if let Some(ref postgres_url) = conversation_config.postgres_url {
-        Arc::new(
-            sqlx::PgPool::connect(postgres_url)
-                .await
-                .map_err(|e| ErrorBuilder::new(ErrorCode::DatabaseError, "Failed to connect to PostgreSQL")
-                    .details(e.to_string())
-                    .build_error())?,
-        )
+        Arc::new(sqlx::PgPool::connect(postgres_url).await.map_err(|e| {
+            ErrorBuilder::new(ErrorCode::DatabaseError, "Failed to connect to PostgreSQL")
+                .details(e.to_string())
+                .build_error()
+        })?)
     } else {
         return Err(ErrorBuilder::new(
             ErrorCode::InvalidParameter,
@@ -90,8 +95,12 @@ pub async fn initialize(
             .map_err(|e| {
                 ErrorBuilder::new(
                     ErrorCode::NetworkError,
-                    &format!("Failed to create storage reader service discover for {}: {}", storage_reader_service, e)
-                ).build_error()
+                    &format!(
+                        "Failed to create storage reader service discover for {}: {}",
+                        storage_reader_service, e
+                    ),
+                )
+                .build_error()
             })?;
 
         let provider = if let Some(discover) = storage_discover {
@@ -131,13 +140,15 @@ pub async fn initialize(
     // 10. 构建 gRPC 处理器
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler);
 
-    let read_receipt_consumer = if conversation_config.kafka_bootstrap.is_some() {
+    let mq_consumers_enabled =
+        conversation_config.mq_backend == "kafka" || conversation_config.jetstream_url.is_some();
+    let read_receipt_consumer = if mq_consumers_enabled {
         match ReadReceiptEventConsumer::new(conversation_config.as_ref(), domain_service.clone())
             .await
         {
             Ok(c) => Some(c),
             Err(e) => {
-                tracing::warn!(error = %e, "ReadReceipt Kafka consumer init failed, skipping");
+                tracing::warn!(error = %e, "ReadReceipt JetStream consumer init failed, skipping");
                 None
             }
         }
@@ -145,7 +156,7 @@ pub async fn initialize(
         None
     };
 
-    let conversation_ensure_consumer = if conversation_config.kafka_bootstrap.is_some() {
+    let conversation_ensure_consumer = if mq_consumers_enabled {
         match ConversationEnsureEventConsumer::new(
             conversation_config.as_ref(),
             domain_service.clone(),
@@ -154,7 +165,7 @@ pub async fn initialize(
         {
             Ok(c) => Some(c),
             Err(e) => {
-                tracing::warn!(error = %e, "ConversationEnsure Kafka consumer init failed, skipping");
+                tracing::warn!(error = %e, "ConversationEnsure JetStream consumer init failed, skipping");
                 None
             }
         }

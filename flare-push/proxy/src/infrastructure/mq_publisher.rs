@@ -3,14 +3,16 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_im_core::event::types::types;
-use flare_proto::common::PushTaskEnvelope;
 use flare_grpc_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
 use flare_im_core::Ctx;
+use flare_im_core::event::types::types;
+use flare_proto::common::PushTaskEnvelope;
 use flare_server_core::eventbus::EventEnvelope;
 use flare_server_core::eventbus::EventPublisher;
 use flare_server_core::eventbus::MqEventBus;
 use flare_server_core::mq::kafka::KafkaProducerBuilder;
+use flare_server_core::mq::nats::NatsProducerBuilder;
+use flare_server_core::mq::producer::Producer;
 use prost::Message as _;
 use tracing::instrument;
 
@@ -23,13 +25,24 @@ pub struct PushProxyMqPublisher {
 }
 
 impl PushProxyMqPublisher {
-    pub fn new(config: Arc<PushProxyConfig>) -> Result<Self> {
-        let producer = KafkaProducerBuilder::new()
-            .build(config.as_ref())
-            .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?;
+    pub async fn new(config: Arc<PushProxyConfig>) -> Result<Self> {
+        let producer: Arc<dyn Producer> = match config.mq_backend.as_str() {
+            "kafka" => Arc::new(
+                KafkaProducerBuilder::new()
+                    .build(config.as_ref())
+                    .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?,
+            ),
+            "nats" | "jetstream" => Arc::new(
+                NatsProducerBuilder::new()
+                    .build(config.as_ref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to build jetstream producer: {}", e))?,
+            ),
+            other => anyhow::bail!("unsupported mq backend: {}", other),
+        };
         Ok(Self {
             config,
-            event_publisher: MqEventBus::new(Arc::new(producer)),
+            event_publisher: MqEventBus::new(producer),
         })
     }
 

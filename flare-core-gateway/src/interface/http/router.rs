@@ -1,17 +1,16 @@
 use axum::{
-    middleware,
+    Json, Router, middleware,
     response::Html,
-    routing::{get, post, delete},
-    Json, Router,
+    routing::{delete, get, post},
 };
 use std::sync::Arc;
 use utoipa::OpenApi;
 
-use crate::infrastructure::grpc::GrpcClients;
-use flare_server_core::http::middleware::auth_middleware;
+use super::conversation_handler;
 use super::media_handler;
 use super::message_handler;
-use super::conversation_handler;
+use crate::infrastructure::grpc::GrpcClients;
+use flare_server_core::http::middleware::auth_middleware;
 
 /// OpenAPI 文档定义（由 utoipa 过程宏消费，编译器视为未构造）
 #[allow(dead_code)]
@@ -142,15 +141,42 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
     let media_router = Router::new()
         .route("/upload-url", post(media_handler::generate_upload_url))
         .route("/upload-file", post(media_handler::upload_file))
-        .route("/multipart/initiate", post(media_handler::initiate_multipart_upload))
-        .route("/multipart/chunk", post(media_handler::upload_multipart_chunk))
-        .route("/multipart/complete", post(media_handler::complete_multipart_upload))
-        .route("/multipart/abort", post(media_handler::abort_multipart_upload))
-        .route("/uploads/initiate", post(media_handler::initiate_direct_upload))
-        .route("/uploads/status", get(media_handler::get_direct_upload_status))
-        .route("/uploads/presign-parts", post(media_handler::presign_direct_upload_parts))
-        .route("/uploads/commit-parts", post(media_handler::commit_direct_upload_parts))
-        .route("/uploads/complete", post(media_handler::complete_direct_upload))
+        .route(
+            "/multipart/initiate",
+            post(media_handler::initiate_multipart_upload),
+        )
+        .route(
+            "/multipart/chunk",
+            post(media_handler::upload_multipart_chunk),
+        )
+        .route(
+            "/multipart/complete",
+            post(media_handler::complete_multipart_upload),
+        )
+        .route(
+            "/multipart/abort",
+            post(media_handler::abort_multipart_upload),
+        )
+        .route(
+            "/uploads/initiate",
+            post(media_handler::initiate_direct_upload),
+        )
+        .route(
+            "/uploads/status",
+            get(media_handler::get_direct_upload_status),
+        )
+        .route(
+            "/uploads/presign-parts",
+            post(media_handler::presign_direct_upload_parts),
+        )
+        .route(
+            "/uploads/commit-parts",
+            post(media_handler::commit_direct_upload_parts),
+        )
+        .route(
+            "/uploads/complete",
+            post(media_handler::complete_direct_upload),
+        )
         .route("/uploads/abort", post(media_handler::abort_direct_upload))
         .route("/file-url", post(media_handler::get_file_url))
         .route("/file-info", get(media_handler::get_file_info))
@@ -158,7 +184,10 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
         .route("/references", post(media_handler::create_reference))
         .route("/references", delete(media_handler::delete_reference))
         .route("/references", get(media_handler::list_references))
-        .route("/cleanup-orphaned-assets", post(media_handler::cleanup_orphaned_assets))
+        .route(
+            "/cleanup-orphaned-assets",
+            post(media_handler::cleanup_orphaned_assets),
+        )
         .route("/process-image", post(media_handler::process_image))
         .route("/process-video", post(media_handler::process_video))
         .route("/object-acl", post(media_handler::set_object_acl))

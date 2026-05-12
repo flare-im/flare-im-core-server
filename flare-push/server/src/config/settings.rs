@@ -1,6 +1,6 @@
 //! Push Server 配置（以设计文档为准）
 
-use std::env;
+use std::{collections::HashMap, env};
 
 use flare_im_core::config::{FlareAppConfig, ServiceEndpointConfig};
 use flare_im_core::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
@@ -9,10 +9,21 @@ use flare_im_core::constants::topics::{
     TOPIC_PUSH_MESSAGES, TOPIC_PUSH_NOTIFICATIONS, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
+use flare_server_core::mq::nats::{
+    NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
+};
 
 #[derive(Debug, Clone)]
 pub struct PushServerConfig {
-    pub kafka_bootstrap: String,
+    pub mq_backend: String,
+    pub jetstream_url: String,
+    pub jetstream_timeout_ms: u64,
+    pub jetstream_retries: u32,
+    pub jetstream_retry_backoff_ms: u64,
+    pub jetstream_stream_specs: Vec<NatsStreamSpec>,
+    pub kafka_brokers: Vec<String>,
+    pub kafka_client_id: String,
+    pub kafka_options: HashMap<String, String>,
     pub consumer_group: String,
 
     pub push_message_topic: String,
@@ -54,18 +65,64 @@ fn endpoint_from_service_server(server: &ServiceEndpointConfig) -> String {
 
 impl PushServerConfig {
     pub fn from_app_config(app: &FlareAppConfig) -> Self {
-        // 复用现有 app config 的 kafka profile（不改变外部依赖边界）
+        // 复用现有 app config 的 jetstream profile（不改变外部依赖边界）
         let service = app.push_server_service();
-        let kafka_name = service.kafka.as_deref().unwrap_or("push");
-        let kafka_profile = app.kafka_profile(kafka_name);
+        let jetstream_name = service.jetstream.as_deref().unwrap_or("push");
+        let jetstream_profile = app.jetstream_profile(jetstream_name);
+        let mq_backend = app.mq_default_backend().to_string();
+        let kafka_profile = app.kafka_profile("push");
+        let jetstream_stream_specs = {
+            let specs = app
+                .jetstream_topology()
+                .into_iter()
+                .map(|spec| NatsStreamSpec::new(spec.stream_name, spec.subjects))
+                .collect::<Vec<_>>();
+            if specs.is_empty() {
+                default_stream_specs()
+            } else {
+                specs
+            }
+        };
 
-        let kafka_bootstrap = env::var("PUSH_SERVER_KAFKA_BOOTSTRAP")
+        let jetstream_url = env::var("PUSH_SERVER_JETSTREAM_URL")
             .ok()
-            .or_else(|| kafka_profile.map(|cfg| cfg.bootstrap_servers.clone()))
-            .unwrap_or_else(|| "127.0.0.1:29092".to_string());
+            .or_else(|| jetstream_profile.map(|cfg| cfg.url.clone()))
+            .unwrap_or_else(|| "nats://127.0.0.1:24222".to_string());
+        let jetstream_timeout_ms = env::var("PUSH_SERVER_JETSTREAM_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| jetstream_profile.and_then(|cfg| cfg.timeout_ms))
+            .unwrap_or(5_000);
+        let jetstream_retries = env::var("PUSH_SERVER_JETSTREAM_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| jetstream_profile.and_then(|cfg| cfg.retries))
+            .unwrap_or(8);
+        let jetstream_retry_backoff_ms = env::var("PUSH_SERVER_JETSTREAM_RETRY_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| jetstream_profile.and_then(|cfg| cfg.retry_backoff_ms))
+            .unwrap_or(25);
 
         let consumer_group = env::var("PUSH_SERVER_CONSUMER_GROUP")
             .unwrap_or_else(|_| PUSH_SERVER_CONSUMER_GROUP_DEFAULT.to_string());
+        let kafka_brokers = env::var("PUSH_SERVER_KAFKA_BROKERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .or_else(|| kafka_profile.map(|p| p.brokers.clone()))
+            .unwrap_or_else(|| vec!["127.0.0.1:29092".to_string()]);
+        let kafka_client_id = env::var("PUSH_SERVER_KAFKA_CLIENT_ID")
+            .ok()
+            .or_else(|| kafka_profile.and_then(|p| p.client_id.clone()))
+            .unwrap_or_else(|| "flare-im-push-server".to_string());
+        let kafka_options = kafka_profile.map(|p| p.options.clone()).unwrap_or_default();
 
         let push_message_topic = env::var("PUSH_SERVER_PUSH_MESSAGE_TOPIC")
             .ok()
@@ -105,7 +162,15 @@ impl PushServerConfig {
             .unwrap_or_else(|| "default".to_string());
 
         Self {
-            kafka_bootstrap,
+            mq_backend,
+            jetstream_url,
+            jetstream_timeout_ms,
+            jetstream_retries,
+            jetstream_retry_backoff_ms,
+            jetstream_stream_specs,
+            kafka_brokers,
+            kafka_client_id,
+            kafka_options,
             consumer_group,
             push_message_topic,
             message_main_topic,
@@ -122,65 +187,66 @@ impl PushServerConfig {
     }
 }
 
-impl KafkaConsumerConfig for PushServerConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
+impl NatsConsumerConfig for PushServerConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
     }
     fn consumer_group(&self) -> &str {
         &self.consumer_group
     }
-    fn enable_auto_commit(&self) -> bool {
-        false
+    fn enable_manual_ack(&self) -> bool {
+        true
     }
-    fn session_timeout_ms(&self) -> u64 {
-        30_000
+    fn batch_size(&self) -> usize {
+        64
     }
-    fn auto_offset_reset(&self) -> &str {
-        "earliest"
-    }
-    fn fetch_min_bytes(&self) -> usize {
-        1
-    }
-    fn fetch_max_wait_ms(&self) -> u64 {
+    fn batch_timeout_ms(&self) -> u64 {
         50
     }
-    fn fetch_message_max_bytes(&self) -> usize {
-        1_048_576
+    fn enable_durable(&self) -> bool {
+        true
     }
-    fn max_partition_fetch_bytes(&self) -> usize {
-        1_048_576
+
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
     }
-    fn metadata_max_age_ms(&self) -> u64 {
-        300_000
+}
+
+impl NatsProducerConfig for PushServerConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.jetstream_timeout_ms
+    }
+    fn retries(&self) -> u32 {
+        self.jetstream_retries
+    }
+    fn retry_backoff_ms(&self) -> u64 {
+        self.jetstream_retry_backoff_ms
+    }
+
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
     }
 }
 
 impl KafkaProducerConfig for PushServerConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
+    fn kafka_brokers(&self) -> Vec<String> {
+        self.kafka_brokers.clone()
     }
-    fn message_timeout_ms(&self) -> u64 {
-        5_000
+
+    fn kafka_client_id(&self) -> &str {
+        &self.kafka_client_id
     }
-    fn enable_idempotence(&self) -> bool {
-        true
+
+    fn kafka_options(&self) -> HashMap<String, String> {
+        self.kafka_options.clone()
     }
-    fn compression_type(&self) -> &str {
-        "snappy"
-    }
-    fn batch_size(&self) -> usize {
-        16 * 1024
-    }
-    fn linger_ms(&self) -> u64 {
-        5
-    }
-    fn retries(&self) -> u32 {
-        3
-    }
-    fn retry_backoff_ms(&self) -> u64 {
-        100
-    }
-    fn metadata_max_age_ms(&self) -> u64 {
-        300_000
+}
+
+impl KafkaConsumerConfig for PushServerConfig {
+    fn kafka_consumer_group(&self) -> &str {
+        &self.consumer_group
     }
 }

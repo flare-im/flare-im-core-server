@@ -12,16 +12,14 @@
 
 use std::sync::Arc;
 
-use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind};
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
-use flare_server_core::{FlareError, ErrorCode, flare_err};
 use flare_grpc_proto::access_gateway::{
-    PushMessageRequest, PushEventRequest, PushNotificationRequest,
-    PushAckRequest, PushCustomRequest,
+    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
+    PushNotificationRequest,
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
+use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
+use flare_server_core::{ErrorCode, FlareError, flare_err};
 use prost::Message as _;
 use tracing::instrument;
 
@@ -35,10 +33,7 @@ pub struct OnlinePushHandler {
 }
 
 impl OnlinePushHandler {
-    pub fn new(
-        gateway_push: Arc<GatewayPushExecutor>,
-        dlq: Arc<DlqPublisher>,
-    ) -> Self {
+    pub fn new(gateway_push: Arc<GatewayPushExecutor>, dlq: Arc<DlqPublisher>) -> Self {
         Self { gateway_push, dlq }
     }
 
@@ -59,33 +54,69 @@ impl OnlinePushHandler {
 
         match kind {
             PushTaskPayloadKind::Message => {
-                let req = PushMessageRequest::decode(envelope.push_payload.as_slice())
-                    .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("decode PushMessageRequest: {}", e)))?;
-                self.gateway_push.push_message(ctx, user_id, strategy, req).await
+                let req =
+                    PushMessageRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushMessageRequest: {}", e)
+                        )
+                    })?;
+                self.gateway_push
+                    .push_message(ctx, user_id, strategy, req)
+                    .await
             }
             PushTaskPayloadKind::Event => {
-                let req = PushEventRequest::decode(envelope.push_payload.as_slice())
-                    .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("decode PushEventRequest: {}", e)))?;
-                self.gateway_push.push_event(ctx, user_id, strategy, req).await
+                let req =
+                    PushEventRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushEventRequest: {}", e)
+                        )
+                    })?;
+                self.gateway_push
+                    .push_event(ctx, user_id, strategy, req)
+                    .await
             }
             PushTaskPayloadKind::Notification => {
                 let req = PushNotificationRequest::decode(envelope.push_payload.as_slice())
-                    .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("decode PushNotificationRequest: {}", e)))?;
-                self.gateway_push.push_notification(ctx, user_id, strategy, req).await
+                    .map_err(|e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushNotificationRequest: {}", e)
+                        )
+                    })?;
+                self.gateway_push
+                    .push_notification(ctx, user_id, strategy, req)
+                    .await
             }
             PushTaskPayloadKind::Ack => {
-                let req = PushAckRequest::decode(envelope.push_payload.as_slice())
-                    .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("decode PushAckRequest: {}", e)))?;
-                self.gateway_push.push_ack(ctx, user_id, strategy, req).await
+                let req =
+                    PushAckRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushAckRequest: {}", e)
+                        )
+                    })?;
+                self.gateway_push
+                    .push_ack(ctx, user_id, strategy, req)
+                    .await
             }
             PushTaskPayloadKind::Custom => {
-                let req = PushCustomRequest::decode(envelope.push_payload.as_slice())
-                    .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("decode PushCustomRequest: {}", e)))?;
-                self.gateway_push.push_custom(ctx, user_id, strategy, req).await
+                let req =
+                    PushCustomRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushCustomRequest: {}", e)
+                        )
+                    })?;
+                self.gateway_push
+                    .push_custom(ctx, user_id, strategy, req)
+                    .await
             }
-            PushTaskPayloadKind::Unspecified => {
-                Err(flare_err!(ErrorCode::InvalidParameter, "PushTaskPayloadKind unspecified"))
-            }
+            PushTaskPayloadKind::Unspecified => Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "PushTaskPayloadKind unspecified"
+            )),
         }
     }
 }
@@ -101,7 +132,7 @@ impl MessageHandler for OnlinePushHandler {
         // 1. 反序列化 PushTaskEnvelope
         let envelope = Self::decode_task_envelope(&message)?;
 
-        tracing::debug!(
+        tracing::trace!(
             user_id = %envelope.user_id,
             tenant_id = %envelope.tenant_id,
             message_id = %envelope.message_id,
@@ -116,15 +147,22 @@ impl MessageHandler for OnlinePushHandler {
         let strategy = PushStrategy::AllDevices;
 
         // 3. 根据 payload_kind 路由
-        let result = self.route_by_payload_kind(ctx, &envelope, user_id, strategy).await;
+        let result = self
+            .route_by_payload_kind(ctx, &envelope, user_id, strategy)
+            .await;
 
         // 4. 处理结果
         match result {
             Ok(()) => Ok(MessageResult::Ack),
             Err(e) => {
                 tracing::error!(error = %e, user_id = %envelope.user_id, "Push failed, sending to DLQ");
-                if let Err(dlq_err) = self.dlq
-                    .publish(ctx, Some(&envelope.conversation_id), message.payload.clone())
+                if let Err(dlq_err) = self
+                    .dlq
+                    .publish(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
                     .await
                 {
                     return Err(ConsumerError::DeadLetter(dlq_err.to_string()));

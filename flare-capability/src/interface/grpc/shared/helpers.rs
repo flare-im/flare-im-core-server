@@ -68,11 +68,12 @@ pub fn require_capability_policy_admin<T>(
     let Some(ref secret) = runtime.admin_secret else {
         return Ok(());
     };
-    let got = metadata_ascii(req.metadata(), "x-capability-admin-secret").ok_or_else(|| {
-        Status::permission_denied("missing metadata x-capability-admin-secret")
-    })?;
+    let got = metadata_ascii(req.metadata(), "x-capability-admin-secret")
+        .ok_or_else(|| Status::permission_denied("missing metadata x-capability-admin-secret"))?;
     if !secret_eq_ct(got, secret) {
-        return Err(Status::permission_denied("invalid x-capability-admin-secret"));
+        return Err(Status::permission_denied(
+            "invalid x-capability-admin-secret",
+        ));
     }
     Ok(())
 }

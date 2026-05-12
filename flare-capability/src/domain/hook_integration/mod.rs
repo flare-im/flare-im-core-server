@@ -15,4 +15,4 @@ mod policy;
 mod transport;
 
 pub use policy::validate_hook_item_for_materialization;
-pub use transport::{classify_transport, HookTransportSurface};
+pub use transport::{HookTransportSurface, classify_transport};

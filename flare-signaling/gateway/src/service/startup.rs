@@ -18,9 +18,9 @@ pub async fn start_services(
     gateway_id: String,
     region: Option<String>,
 ) -> Result<()> {
-    use flare_core_runtime::{ServiceRuntime, RuntimeConfig};
-    use flare_server_core::middleware::ContextLayer;
+    use flare_core_runtime::{RuntimeConfig, ServiceRuntime};
     use flare_grpc_proto::access_gateway::access_gateway_server::AccessGatewayServer;
+    use flare_server_core::middleware::ContextLayer;
     use tonic::transport::Server;
 
     // 创建并打印启动信息
@@ -35,21 +35,28 @@ pub async fn start_services(
     // 解析 gRPC 地址
     let grpc_addr: SocketAddr = format!("{}:{}", address, port_config.grpc_port)
         .parse()
-        .map_err(|err| ErrorBuilder::new(ErrorCode::InvalidParameter, &format!("Invalid gRPC address: {}", err)).build_error())?;
+        .map_err(|err| {
+            ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                &format!("Invalid gRPC address: {}", err),
+            )
+            .build_error()
+        })?;
 
     // 验证长连接服务器已启动
     {
         let server_guard = context.long_connection_server.lock().await;
         if server_guard.is_none() {
             error!("❌ 长连接服务器未启动");
-            return Err(ErrorBuilder::new(ErrorCode::InternalError, "长连接服务器未启动").build_error());
+            return Err(
+                ErrorBuilder::new(ErrorCode::InternalError, "长连接服务器未启动").build_error(),
+            );
         }
         info!("✅ 长连接服务器已在 wire.rs 中启动");
     }
 
     // 配置 Runtime
-    let config = RuntimeConfig::default()
-        .with_shutdown_timeout(std::time::Duration::from_secs(10));
+    let config = RuntimeConfig::default().with_shutdown_timeout(std::time::Duration::from_secs(10));
 
     // 创建 ServiceRuntime（使用简化模式 + 服务注册）
     let runtime = flare_im_core::health::attach_runtime_health_checks(

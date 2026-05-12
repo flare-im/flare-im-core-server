@@ -16,20 +16,17 @@ pub use helpers::ServiceHelper;
 
 // 重新导出 flare-server-core 的 context 工具函数
 pub use flare_server_core::utils::{
-    ctx_to_map as context_to_mq_metadata,
-    map_to_ctx as context_from_mq_metadata,
+    ctx_to_map as context_to_mq_metadata, map_to_ctx as context_from_mq_metadata,
 };
 
 // 从 flare_server_core 根导入 gRPC 相关函数
 pub use flare_server_core::{
-    require_ctx_from_request as require_context,
     extract_ctx_from_request_opt as extract_context_opt,
+    require_ctx_from_request as require_context,
 };
 
 // 从 flare_core_base 导入 context 相关函数
-pub use flare_core_base::context::{
-    Ctx, Context,
-};
+pub use flare_core_base::context::{Context, Ctx};
 
 // 提供便捷函数
 pub fn extract_session_id_from_context(ctx: &Ctx) -> Option<String> {

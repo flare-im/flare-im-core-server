@@ -28,7 +28,10 @@ where
         DELETE_TYPE_HARD => {
             ctx.repo
                 .update_message_fsm_state(ctx.ctx, ctx.tenant_id, message_id, "DELETED_HARD", None)
-                .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+                .await
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+                })?;
         }
         _ => {
             let scope = delete.scope.unwrap_or(DELETE_SCOPE_USER_PRIVATE);
@@ -50,7 +53,10 @@ where
                     scope,
                     "HIDDEN",
                 )
-                .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+                .await
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+                })?;
         }
     }
     append_event_and_stream(ctx, message_id, event).await

@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use flare_im_core::ConnectionEvent;
 use flare_grpc_proto::signaling::online::{
     DeviceConflictStrategy, GetOnlineStatusResponse, HeartbeatResponse, LoginRequest,
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
+use flare_im_core::ConnectionEvent;
 use flare_server_core::context::Context;
-use flare_server_core::error::{Result, ErrorCode,  map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use prost_types::Timestamp;
 use tokio::sync::RwLock;
@@ -59,8 +59,23 @@ where
         self
     }
 
+    async fn remove_memory_sessions_by_user(&self, user_id: &str, device_ids: Option<&[DeviceId]>) {
+        let mut map = self.sessions.write().await;
+        map.retain(|_, conn| {
+            if conn.session.user_id().as_str() != user_id {
+                return true;
+            }
+            match device_ids {
+                Some(ids) => !ids
+                    .iter()
+                    .any(|device_id| device_id.as_str() == conn.session.device_id().as_str()),
+                None => false,
+            }
+        });
+    }
+
     pub async fn login(&self, ctx: &Context, request: LoginRequest) -> Result<LoginResponse> {
-        tracing::debug!(
+        tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %request.user_id,
             device_id = %request.device_id,
@@ -69,22 +84,53 @@ where
 
         // 参数验证
         if request.user_id.is_empty() {
-            return Err(flare_err!(ErrorCode::InvalidParameter, "user_id is required"));
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "user_id is required"
+            ));
         }
         if request.device_id.is_empty() {
-            return Err(flare_err!(ErrorCode::InvalidParameter, "device_id is required"));
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "device_id is required"
+            ));
         }
 
         let user_id = &request.user_id;
         let device_id = &request.device_id;
         let device_platform = request.device_platform.as_str();
         let desired_strategy = request.desired_conflict_strategy();
+        if !matches!(
+            desired_strategy,
+            DeviceConflictStrategy::Exclusive
+                | DeviceConflictStrategy::PlatformExclusive
+                | DeviceConflictStrategy::Coexist
+        ) {
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "desired_conflict_strategy is required"
+            ));
+        }
         let applied_strategy = desired_strategy;
 
         // 检查现有会话
-        let user_vo = UserId::new(user_id.clone()).unwrap();
-        let existing_sessions = self.repository.get_user_connections(&user_vo).await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
+        let user_vo = UserId::new(user_id.clone()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
+        let existing_sessions = self
+            .repository
+            .get_user_connections(&user_vo)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to get user connections",
+                )
+            })?;
 
         // 根据冲突策略处理现有会话
         if !existing_sessions.is_empty() {
@@ -99,6 +145,7 @@ where
                     self.repository
                         .remove_user_connections(&user_vo, None)
                         .await?;
+                    self.remove_memory_sessions_by_user(user_id, None).await;
                 }
                 DeviceConflictStrategy::PlatformExclusive => {
                     // 平台互斥：只踢出同平台的旧设备
@@ -117,6 +164,8 @@ where
                         self.repository
                             .remove_user_connections(&user_vo, Some(&same_platform_devices))
                             .await?;
+                        self.remove_memory_sessions_by_user(user_id, Some(&same_platform_devices))
+                            .await;
                     }
                 }
                 DeviceConflictStrategy::Coexist => {
@@ -127,15 +176,11 @@ where
                         "Coexist strategy: allowing multiple devices"
                     );
                 }
-                _ => {
-                    // 未指定策略，默认使用互斥
-                    warn!(
-                        user_id = %user_id,
-                        "No conflict strategy specified, using Exclusive"
-                    );
-                    self.repository
-                        .remove_user_connections(&user_vo, None)
-                        .await?;
+                DeviceConflictStrategy::Unspecified => {
+                    return Err(flare_err!(
+                        ErrorCode::InvalidParameter,
+                        "desired_conflict_strategy is required"
+                    ));
                 }
             }
         }
@@ -161,8 +206,12 @@ where
             .and_then(|q| ConnectionQuality::from_proto(q).ok());
 
         // 创建新会话
-        let user_vo = UserId::new(user_id.clone()).unwrap();
-        let device_vo = DeviceId::new(device_id.clone()).unwrap();
+        let device_vo = DeviceId::new(device_id.clone()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid device_id: {}", e)
+            )
+        })?;
         let priority_vo = DevicePriority::from_i32(device_priority);
         let token_vo = TokenVersion::from(token_version);
         let params = ConnectionCreateParams {
@@ -188,7 +237,12 @@ where
             );
         }
 
-        self.repository.save_connection(&session).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to save connection"))?;
+        self.repository
+            .save_connection(&session)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to save connection")
+            })?;
 
         if let (Some(publisher), Some(_connection_id)) = (
             &self.connection_event_publisher,
@@ -222,28 +276,51 @@ where
     }
 
     pub async fn logout(&self, ctx: &Context, request: LogoutRequest) -> Result<LogoutResponse> {
-        tracing::debug!(
+        tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %request.user_id,
             conversation_id = %request.conversation_id,
             "Handling logout request"
         );
 
-        let user_id = &request.user_id;
-        let conversation_id = &request.conversation_id;
+        let user_id = request.user_id.trim();
+        let conversation_id = request.conversation_id.trim();
+        if user_id.is_empty() {
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "user_id is required"
+            ));
+        }
+        let user_vo = UserId::new(user_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
 
-        // 从内存中移除会话
+        if conversation_id.is_empty() {
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required"
+            ));
+        }
+
+        let session_vo = ConnectionId::from_string(conversation_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid conversation_id: {}", e)
+            )
+        })?;
         {
             let mut map = self.sessions.write().await;
             map.remove(conversation_id);
         }
-
-        // 从Redis中移除会话
-        let user_vo = UserId::new(user_id.clone()).unwrap();
-        let session_vo = ConnectionId::from_string(conversation_id.clone()).unwrap();
         self.repository
             .remove_connection(&session_vo, &user_vo)
-            .await?;
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to remove connection")
+            })?;
 
         info!(
             user_id = %user_id,
@@ -251,9 +328,7 @@ where
             "User logged out successfully"
         );
 
-        Ok(LogoutResponse {
-            success: true,
-        })
+        Ok(LogoutResponse { success: true })
     }
 
     pub async fn heartbeat(
@@ -263,26 +338,16 @@ where
         user_id: &str,
         connection_quality: Option<&flare_proto::common::ConnectionQuality>,
     ) -> Result<HeartbeatResponse> {
-        tracing::debug!(
+        tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %user_id,
             conversation_id = %conversation_id,
             "Handling heartbeat request"
         );
 
-        // 检查会话是否存在
-        {
-            let map = self.sessions.read().await;
-            if !map.contains_key(conversation_id) {
-                return Err(flare_err!(ErrorCode::InvalidParameter, "Connection not found"));
-            }
-        }
-
-        // 更新内存中的last_seen和链接质量
         {
             let mut map = self.sessions.write().await;
             if let Some(session) = map.get_mut(conversation_id) {
-                // 刷新心跳（含质量）
                 let quality_opt =
                     connection_quality.and_then(|q| ConnectionQuality::from_proto(q).ok());
                 session
@@ -292,13 +357,26 @@ where
             }
         }
 
-        // 更新Redis中的会话TTL
-        let user_vo = UserId::new(user_id.to_string()).unwrap();
-        self.repository.touch_connection(&user_vo).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to touch connection"))?;
+        let user_vo = UserId::new(user_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
+        let session_vo = ConnectionId::from_string(conversation_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid conversation_id: {}", e)
+            )
+        })?;
+        self.repository
+            .touch_connection(&session_vo, &user_vo)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to touch connection")
+            })?;
 
-        Ok(HeartbeatResponse {
-            success: true,
-        })
+        Ok(HeartbeatResponse { success: true })
     }
 
     pub async fn get_online_status(
@@ -306,13 +384,19 @@ where
         ctx: &Context,
         user_ids: &[String],
     ) -> Result<GetOnlineStatusResponse> {
-        tracing::debug!(
+        tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_count = %user_ids.len(),
             "Handling get online status request"
         );
 
-        let statuses = self.repository.fetch_statuses(user_ids).await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to fetch statuses"))?;
+        let statuses = self
+            .repository
+            .fetch_statuses(user_ids)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to fetch statuses")
+            })?;
 
         let mut result = HashMap::new();
         for user_id in user_ids {
@@ -345,9 +429,7 @@ where
             );
         }
 
-        Ok(GetOnlineStatusResponse {
-            statuses: result,
-        })
+        Ok(GetOnlineStatusResponse { statuses: result })
     }
 }
 
@@ -365,7 +447,11 @@ impl ConversationRepository for NoopConversationRepository {
     ) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn touch_connection(&self, _user_id: &UserId) -> anyhow::Result<()> {
+    async fn touch_connection(
+        &self,
+        _conversation_id: &ConnectionId,
+        _user_id: &UserId,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
     async fn fetch_statuses(

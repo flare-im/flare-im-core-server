@@ -16,8 +16,16 @@ use flare_im_core::Ctx;
 use flare_proto::common::call_signal_event::Signal;
 use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, Message};
+use tracing::warn;
 
 use crate::error::Result;
+
+const LEGACY_EXT_KEYS: [&str; 4] = [
+    "flareSdpType",
+    "flareSdp",
+    "flareCameraEnabled",
+    "flareMicrophoneEnabled",
+];
 
 /// 校验上下文
 pub struct ValidationContext<'a> {
@@ -256,7 +264,7 @@ impl EventValidationStrategy for EventRequiredFieldsValidationStrategy {
     }
 }
 
-/// `EVENT_CALL_SIGNAL` 与 **RTC / SFU 编排** 对齐的基础校验（在调用 `flare-capability` 之前执行）。
+/// `EVENT_CALL_SIGNAL` 与 **RTC / 媒体扩展编排** 对齐的基础校验（在调用 `flare-capability` 之前执行）。
 ///
 /// - 必须带 `CallSignal` 载荷且 `from_user_id` 非空（用于 `Dispatch.user_id` 与审计）。
 /// - `accept` / `reject` / `hangup` 必须已有 `call_id`（`invite` 可由服务端回填）。
@@ -295,7 +303,36 @@ impl EventValidationStrategy for EventCallSignalRtcValidationStrategy {
                         "call_signal.call_id is required for accept/reject/hangup",
                     ));
                 }
+                Some(Signal::IceCandidate(ic))
+                    if ic
+                        .candidate_json
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true) =>
+                {
+                    warn!(
+                        call_id = %cs.call_id,
+                        from_user_id = %cs.from_user_id,
+                        "reject call_signal.ice_candidate: candidate_json is required"
+                    );
+                    return Ok(ValidationResult::invalid(
+                        "call_signal.ice_candidate.candidate_json is required",
+                    ));
+                }
                 _ => {}
+            }
+            for key in LEGACY_EXT_KEYS {
+                if cs.ext.contains_key(key) {
+                    warn!(
+                        call_id = %cs.call_id,
+                        from_user_id = %cs.from_user_id,
+                        legacy_key = %key,
+                        "reject call_signal.ext: unsupported legacy key"
+                    );
+                    return Ok(ValidationResult::invalid(format!(
+                        "call_signal.ext contains unsupported legacy key: {key}"
+                    )));
+                }
             }
             Ok(ValidationResult::valid())
         })

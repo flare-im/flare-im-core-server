@@ -9,7 +9,7 @@ Orchestrator 在编排存储流程中需要完成「如会话不存在则创建�
 
 ### 同步创建（当前默认）
 
-- **做法**：在 `orchestrate_message_storage` 内，在 WAL 写入之后、Kafka 发布之前，同步调用 Conversation 服务的 `CreateConversation`（ensure 语义：存在则返回，不存在则创建）。
+- **做法**：在 `orchestrate_message_storage` 内，在 WAL 写入之后、JetStream 发布之前，同步调用 Conversation 服务的 `CreateConversation`（ensure 语义：存在则返回，不存在则创建）。
 - **优点**
   - 强一致：消息发出时会话记录已存在，Storage Writer / 未读数等不依赖兜底。
   - 实现简单，无需新 Topic、消费者与幂等 DB。

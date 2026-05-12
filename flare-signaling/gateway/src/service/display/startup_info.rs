@@ -122,7 +122,13 @@ impl StartupInfo {
     pub fn grpc_addr(&self) -> Result<SocketAddr> {
         format!("{}:{}", self.address, self.port_config.grpc_port)
             .parse()
-            .map_err(|err| ErrorBuilder::new(ErrorCode::InvalidParameter, &format!("Invalid gRPC address: {}", err)).build_error())
+            .map_err(|err| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    &format!("Invalid gRPC address: {}", err),
+                )
+                .build_error()
+            })
     }
 
     /// 获取 WebSocket 地址

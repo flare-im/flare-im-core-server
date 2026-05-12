@@ -103,10 +103,10 @@ pub struct ListParticipantsResponse {
     pub ext: Value,
 }
 
-// --- flare-strom-sfu `SfuControl` 信令（经 CapabilityService.Dispatch 透传）---
+// --- 媒体传输控制信令（经 CapabilityService.Dispatch 透传）---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SfuJoinRoomRequest {
+pub struct MediaJoinTransportRequest {
     pub tenant_id: String,
     pub request_id: String,
     pub room_id: String,
@@ -117,7 +117,7 @@ pub struct SfuJoinRoomRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SfuJoinRoomResponse {
+pub struct MediaJoinTransportResponse {
     pub room_id: String,
     pub peer_id: String,
     pub session_id: String,
@@ -126,7 +126,7 @@ pub struct SfuJoinRoomResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SfuLeaveRoomRequest {
+pub struct MediaLeaveTransportRequest {
     pub tenant_id: String,
     pub request_id: String,
     pub room_id: String,
@@ -136,7 +136,7 @@ pub struct SfuLeaveRoomRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SfuLeaveRoomResponse {
+pub struct MediaLeaveTransportResponse {
     pub left: bool,
     pub ext: Value,
 }
@@ -183,5 +183,74 @@ pub struct AddIceCandidateRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddIceCandidateResponse {
     pub accepted: bool,
+    pub ext: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetPublisherMuteRequest {
+    pub tenant_id: String,
+    pub request_id: String,
+    pub room_id: String,
+    pub publisher_peer_id: String,
+    pub mute_audio: bool,
+    pub mute_video: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetPublisherMuteResponse {
+    pub applied: bool,
+    pub ext: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetSubscriptionRequest {
+    pub tenant_id: String,
+    pub request_id: String,
+    pub room_id: String,
+    pub subscriber_peer_id: String,
+    pub track_id: String,
+    pub enable: bool,
+    pub media: Option<String>,
+    pub preferred_layer: Option<String>,
+    pub priority: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetSubscriptionResponse {
+    pub applied: bool,
+    pub ext: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetSimulcastLayerRequest {
+    pub tenant_id: String,
+    pub request_id: String,
+    pub room_id: String,
+    pub subscriber_peer_id: String,
+    pub track_id: String,
+    pub layer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSetSimulcastLayerResponse {
+    pub applied: bool,
+    pub ext: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGetNetworkQualityRequest {
+    pub tenant_id: String,
+    pub request_id: String,
+    pub room_id: String,
+    pub peer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGetNetworkQualityResponse {
+    pub has_data: bool,
+    pub upstream_score: u32,
+    pub downstream_score: u32,
+    pub rtt_ms: u32,
+    pub packet_loss_ratio: f32,
     pub ext: Value,
 }

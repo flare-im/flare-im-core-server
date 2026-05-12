@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::domain::capability::{PreSendGuard, RecipientResolver, RtcCapability};
+use crate::domain::capability::{
+    DynExtensionOperationHandler, PreSendGuard, RecipientResolver, RtcCapability,
+};
+use crate::interface::grpc::ExtensionPluginRouter;
 
 use crate::infrastructure::capability::dispatch::{PreSendGuardRuntime, RecipientResolverRuntime};
 use crate::infrastructure::capability::routing::RtcCapabilityRouter;
@@ -18,6 +21,7 @@ pub struct RegistryInner {
     pub pre_send: PreSendGuardRuntime,
     pub recipient: RecipientResolverRuntime,
     pub rtc: RtcCapabilityRouter,
+    pub extension_router: ExtensionPluginRouter,
 }
 
 impl CapabilityExtensionRegistry {
@@ -49,6 +53,34 @@ impl CapabilityExtensionRegistry {
 
     pub async fn set_rtc_backend(&self, rtc: Option<Arc<dyn RtcCapability>>) {
         self.inner.read().await.rtc.set_backend(rtc).await;
+    }
+
+    pub async fn set_rtc_backend_for_tenant(
+        &self,
+        tenant_id: &str,
+        rtc: Option<Arc<dyn RtcCapability>>,
+    ) {
+        self.inner
+            .read()
+            .await
+            .rtc
+            .set_backend_for_tenant(tenant_id, rtc)
+            .await;
+    }
+
+    /// 取通用 `ExtensionPlugin` 路由器（core 与 binary 装 tonic service 时共享同一实例）。
+    pub async fn extension_router(&self) -> ExtensionPluginRouter {
+        self.inner.read().await.extension_router.clone()
+    }
+
+    /// 由插件（媒体控制面 / LiveKit / Janus / …）在 `wire(..)` 时注册自己的 operation handler。
+    pub async fn register_extension_operations(&self, handler: DynExtensionOperationHandler) {
+        self.inner
+            .read()
+            .await
+            .extension_router
+            .register(handler)
+            .await;
     }
 }
 

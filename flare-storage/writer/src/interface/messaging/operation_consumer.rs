@@ -13,10 +13,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_proto::common::{mq_envelope, MqEnvelope, MqPayloadKind};
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
+use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::commands::ProcessEventCommand;
@@ -69,17 +67,16 @@ impl MessageHandler for MessageEventsHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>()
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    topic = %message.context.topic,
-                    "Failed to deserialize MqEnvelope"
-                );
-                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-            })?;
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
 
-        tracing::debug!(
+        tracing::trace!(
             envelope_id = %envelope.envelope_id,
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
@@ -119,9 +116,13 @@ impl MessageHandler for MessageEventsHandler {
         enrich_operation_event_from_ctx(&mut event, ctx);
 
         // 6. 调用 Application 层
-        match self.operation_handler.handle(ctx, ProcessEventCommand { event }).await {
+        match self
+            .operation_handler
+            .handle(ctx, ProcessEventCommand { event })
+            .await
+        {
             Ok(result) => {
-                tracing::debug!(
+                tracing::trace!(
                     topic = %message.context.topic,
                     partition = message.context.partition,
                     offset = message.context.offset,
@@ -140,7 +141,10 @@ impl MessageHandler for MessageEventsHandler {
                     offset = message.context.offset,
                     "Failed to process MqEnvelope"
                 );
-                Err(ConsumerError::Handler(format!("MessageOperationCommandHandler error: {}", e)))
+                Err(ConsumerError::Handler(format!(
+                    "MessageOperationCommandHandler error: {}",
+                    e
+                )))
             }
         }
     }

@@ -58,7 +58,9 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(MEDIA)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
                 .add_spawn_with_shutdown("media-grpc", move |shutdown_rx| async move {
                     // 使用 ContextLayer 包裹 Service
                     use flare_server_core::middleware::ContextLayer;

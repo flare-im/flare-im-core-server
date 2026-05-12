@@ -1,4 +1,4 @@
-//! 将 Push gRPC 语义编排为「入队 Kafka」：委托 `PushProxyMqPublisher`。
+//! 将 Push gRPC 语义编排为「入队 JetStream」：委托 `PushProxyMqPublisher`。
 
 use std::sync::Arc;
 

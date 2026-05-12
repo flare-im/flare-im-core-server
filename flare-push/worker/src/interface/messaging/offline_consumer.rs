@@ -11,9 +11,7 @@
 use std::sync::Arc;
 
 use flare_proto::common::PushTaskEnvelope;
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use prost::Message as _;
 use tracing::instrument;
 
@@ -48,7 +46,7 @@ impl MessageHandler for OfflinePushHandler {
 
         let ctx = &message.context.ctx;
 
-        tracing::info!(
+        tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %envelope.user_id,
             tenant_id = %envelope.tenant_id,

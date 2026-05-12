@@ -1,0 +1,229 @@
+version: '3.8'
+
+networks:
+  flare-network:
+    driver: bridge
+
+services:
+  # ===== Etcd - 服务注册发现 =====
+  # etcd:
+  #   image: quay.io/coreos/etcd:v3.5.9
+  #   container_name: flare-etcd
+  #   networks:
+  #     - flare-network
+  #   ports:
+  #     - "22379:2379"
+  #     - "22380:2380"
+  #   volumes:
+  #     - ./data/etcd:/etcd-data
+  #   command: 
+  #     /usr/local/bin/etcd
+  #     --name=etcd0
+  #     --data-dir=/etcd-data
+  #     --listen-client-urls=http://0.0.0.0:2379
+  #     --advertise-client-urls=http://etcd:2379
+  #     --listen-peer-urls=http://0.0.0.0:2380
+  #     --initial-advertise-peer-urls=http://etcd:2380
+  #     --initial-cluster=etcd0=http://etcd:2380
+  #     --initial-cluster-token=etcd-cluster-1
+  #     --initial-cluster-state=new
+
+  # ===== Consul - 服务注册 / 配置中心 =====
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: flare-consul
+    networks:
+      - flare-network
+    ports:
+      - "28500:8500"   # Consul Web UI / API
+      - "28600:8600/udp"  # DNS 解析
+    environment:
+      CONSUL_BIND_INTERFACE: eth0
+    volumes:
+      - ./data/consul:/consul/data
+    command: >
+      consul agent
+      -server
+      -ui
+      -bootstrap-expect=1
+      -client=0.0.0.0
+      -bind=0.0.0.0
+      -data-dir=/consul/data
+      -log-level=INFO
+
+  # ===== Redis - 缓存 / 路由 =====
+  redis:
+    image: redis:7-alpine
+    container_name: flare-redis
+    networks:
+      - flare-network
+    ports:
+      - "26379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== PostgreSQL + TimescaleDB - 主存储（消息/事件流/会话/媒体/Hook） =====
+  # 选型说明：不替换为 ScyllaDB。原因见 deploy/STORAGE_ANALYSIS.md
+  # - 当前架构深度依赖 SQL、事务、多表关系与 TimescaleDB 时序能力；
+  # - 若未来需超大规模消息体，可采用混合架构（仅消息体迁 ScyllaDB），见下方可选 ScyllaDB 注释块。
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: flare-postgres
+    networks:
+      - flare-network
+    environment:
+      POSTGRES_USER: flare
+      POSTGRES_PASSWORD: flare123
+      POSTGRES_DB: flare
+    ports:
+      - "25432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flare"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ===== NATS JetStream - 消息队列 =====
+  nats:
+    image: nats:2.10-alpine
+    container_name: flare-nats
+    restart: always
+    networks:
+      - flare-network
+    ports:
+      - "24222:4222"  # NATS client
+      - "28222:8222"  # NATS monitoring
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    volumes:
+      - ./data/nats:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== rusFS - 对象存储 =====
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: flare-rustfs
+    restart: always
+    networks:
+      - flare-network
+    ports:
+      - "29000:9000"
+      - "29001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes:
+      - ./data/rustfs:/data
+    command: [
+      "--address", ":9000",
+      "--console-address", ":9001",
+      "--console-enable",
+      "--access-key", "rustfsadmin",
+      "--secret-key", "rustfsadmin",
+      "/data"
+    ]
+
+  # ===== Loki - 日志聚合 =====
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: flare-loki
+    networks:
+      - flare-network
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - ./data/loki:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== Prometheus - 监控 =====
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: flare-prometheus
+    networks:
+      - flare-network
+    ports:
+      - "29090:9090"
+    volumes:
+      - ./data/prometheus:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== Tempo - 分布式追踪 =====
+  tempo:
+    image: grafana/tempo:latest
+    container_name: flare-tempo
+    networks:
+      - flare-network
+    ports:
+      - "3200:3200"   # Tempo API
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    volumes:
+      - ./tempo-config.yml:/etc/tempo/tempo.yaml:ro
+      - ./data/tempo:/var/tempo
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3200/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== Grafana - 可视化与告警 =====
+  grafana:
+    image: grafana/grafana:latest
+    container_name: flare-grafana
+    networks:
+      - flare-network
+    depends_on:
+      - loki
+      - prometheus
+      - tempo
+    ports:
+      - "23000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+

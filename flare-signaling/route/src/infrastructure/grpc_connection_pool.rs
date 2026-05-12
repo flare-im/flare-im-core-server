@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::error::{map_infra_error, ErrorCode, Result};
+use crate::error::{ErrorCode, Result, map_infra_error};
 
 /// gRPC 连接池配置
 #[derive(Debug, Clone)]
@@ -65,14 +65,29 @@ impl GrpcConnectionPool {
     /// - `Err`: 连接失败
     pub async fn add_connection(&self, service_name: &str, address: &str) -> Result<()> {
         let endpoint = Endpoint::from_shared(address.to_string())
-            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, &format!("Invalid gRPC endpoint: {}", address)))?
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    &format!("Invalid gRPC endpoint: {}", address),
+                )
+            })?
             .connect_timeout(Duration::from_secs(self.config.connect_timeout))
             .timeout(Duration::from_secs(self.config.request_timeout))
             .keep_alive_timeout(Duration::from_secs(self.config.keep_alive_timeout))
             .http2_keep_alive_interval(Duration::from_secs(self.config.keep_alive_interval))
             .connect()
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, &format!("Failed to connect to service {} at {}", service_name, address)))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    &format!(
+                        "Failed to connect to service {} at {}",
+                        service_name, address
+                    ),
+                )
+            })?;
 
         let mut connections = self.connections.write().await;
         connections.insert(service_name.to_string(), endpoint);

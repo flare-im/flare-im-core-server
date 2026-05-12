@@ -13,7 +13,11 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &ConnectionId,
         user_id: &UserId,
     ) -> Result<()>;
-    async fn touch_connection(&self, user_id: &UserId) -> Result<()>;
+    async fn touch_connection(
+        &self,
+        conversation_id: &ConnectionId,
+        user_id: &UserId,
+    ) -> Result<()>;
     async fn fetch_statuses(
         &self,
         user_ids: &[String],

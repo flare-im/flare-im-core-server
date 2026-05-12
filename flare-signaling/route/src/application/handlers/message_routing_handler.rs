@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use flare_proto::common::Message;
 use flare_grpc_proto::signaling::router::RouteOptions;
-use flare_server_core::context::{Context, ContextExt};
 use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_proto::common::Message;
+use flare_server_core::context::{Context, ContextExt};
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -66,11 +66,13 @@ impl MessageRoutingHandler {
         message: Message,
         route_options: RouteOptions,
     ) -> Result<MessageRouteResult> {
-        ctx.ensure_not_cancelled()
-            .map_err(|e| {
-                flare_err!(ErrorCode::InternalError, format!("Request cancelled: {}", e))
-            })?;
-        
+        ctx.ensure_not_cancelled().map_err(|e| {
+            flare_err!(
+                ErrorCode::InternalError,
+                format!("Request cancelled: {}", e)
+            )
+        })?;
+
         let start_time = Instant::now();
         let decision_start = Instant::now();
         let decision_duration = decision_start.elapsed();
@@ -125,7 +127,7 @@ impl MessageRoutingHandler {
             total_duration_ms = total_duration.as_millis(),
             "Message routed successfully"
         );
-        
+
         Ok(MessageRouteResult {
             response_data,
             routed_endpoint: endpoint,

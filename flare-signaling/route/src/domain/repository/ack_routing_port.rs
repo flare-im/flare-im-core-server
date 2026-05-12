@@ -9,7 +9,7 @@ use crate::domain::model::{RouteCommand, RoutedEndpoint};
 
 /// ACK 路由 Port（Trait）
 ///
-/// 负责将 ACK 路由到 Push Proxy 或 Kafka
+/// 负责将 ACK 路由到 Push Proxy 或 JetStream
 #[async_trait]
 pub trait AckRoutingPort: Send + Sync {
     /// 路由 ACK 到目标端点
@@ -23,7 +23,7 @@ pub trait AckRoutingPort: Send + Sync {
     /// - `Err`: 路由失败
     async fn route(&self, ctx: &crate::Ctx, command: &RouteCommand) -> Result<RoutedEndpoint>;
 
-    /// 发布 ACK 到 Kafka
+    /// 发布 ACK 到 JetStream
     ///
     /// # 参数
     /// - `ctx`: 上下文
@@ -32,5 +32,5 @@ pub trait AckRoutingPort: Send + Sync {
     /// # 返回
     /// - `Ok(())`: 发布成功
     /// - `Err`: 发布失败
-    async fn publish_to_kafka(&self, ctx: &crate::Ctx, payload: Vec<u8>) -> Result<()>;
+    async fn publish_to_jetstream(&self, ctx: &crate::Ctx, payload: Vec<u8>) -> Result<()>;
 }

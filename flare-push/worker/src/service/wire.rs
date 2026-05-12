@@ -9,8 +9,8 @@ use flare_im_core::discovery::{
 };
 use flare_im_core::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
 use flare_server_core::mq::consumer::ConsumerConfig;
-use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::TopicDispatcher;
+use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
 use crate::application::GatewayPushExecutor;
 use crate::config::PushWorkerConfig;
@@ -31,7 +31,7 @@ pub async fn initialize(
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config));
 
     // 1. 创建 DLQ 发布器
-    let dlq = Arc::new(DlqPublisher::new(config.clone())?);
+    let dlq = Arc::new(DlqPublisher::new(config.clone()).await?);
 
     // 2. 创建 Online 服务客户端
     let online_service = get_service_name(SIGNALING_ONLINE);
@@ -63,14 +63,13 @@ pub async fn initialize(
     let gateway_push = Arc::new(GatewayPushExecutor::new(online_client, gateway_router));
 
     // 5. 创建 MessageHandler（直接实现，无适配器）
-    let online_handler = OnlinePushConsumerFactory::create_handler(
-        gateway_push,
-        dlq.clone(),
-    );
+    let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
     let offline_handler = OfflinePushConsumerFactory::create_handler(dlq);
 
     // 6. 配置 ConsumerConfig
-    let consumer_cfg = ConsumerConfig::default().with_concurrency(128);
+    let consumer_cfg = ConsumerConfig::default()
+        .with_concurrency(128)
+        .with_ordered(true);
 
     // 7. 注册到 Dispatcher
     let mut dispatcher = TopicDispatcher::new();

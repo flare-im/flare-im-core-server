@@ -77,23 +77,24 @@ impl UploadSessionStore for RedisUploadSessionStore {
             )
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::NetworkError, "failed to create upload session in redis")
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to create upload session in redis",
+                )
             })?;
         Ok(())
     }
 
     async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>> {
         let mut conn = self.connection.lock().await;
-        let payload: Option<String> = conn
-            .get(self.key(upload_id))
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    "failed to fetch upload session from redis",
-                )
-            })?;
+        let payload: Option<String> = conn.get(self.key(upload_id)).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "failed to fetch upload session from redis",
+            )
+        })?;
         if let Some(payload) = payload {
             let session: UploadSession = serde_json::from_str(&payload).map_err(|e| {
                 map_infra_error(
@@ -128,23 +129,24 @@ impl UploadSessionStore for RedisUploadSessionStore {
             )
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::NetworkError, "failed to upsert upload session in redis")
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to upsert upload session in redis",
+                )
             })?;
         Ok(())
     }
 
     async fn delete_session(&self, upload_id: &str) -> Result<()> {
         let mut conn = self.connection.lock().await;
-        let _: () = conn
-            .del(self.key(upload_id))
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    "failed to delete upload session from redis",
-                )
-            })?;
+        let _: () = conn.del(self.key(upload_id)).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::NetworkError,
+                "failed to delete upload session from redis",
+            )
+        })?;
         Ok(())
     }
 }

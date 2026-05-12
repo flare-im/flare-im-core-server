@@ -166,16 +166,16 @@ impl LongConnectionHandler {
             conversation_id.as_deref(),
             result,
         )
-            .map_err(|e| {
-                error!(
-                    connection_id = %connection_id,
-                    message_id = %command.message_id,
-                    error = %e,
-                    "build_message_ack_frame failed"
-                );
-                e
-            })
-            .map(Some)
+        .map_err(|e| {
+            error!(
+                connection_id = %connection_id,
+                message_id = %command.message_id,
+                error = %e,
+                "build_message_ack_frame failed"
+            );
+            e
+        })
+        .map(Some)
     }
 
     /// 事件发送处理：解码 Event → SendEventCommand → SendHandler → **必须**返回下行 Frame。

@@ -5,16 +5,16 @@
 use crate::domain::model::MessageSyncResult;
 use crate::domain::repository::MessageProvider;
 use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
-use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::QueryMessagesRequest;
+use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
+use flare_im_core::ServiceClient;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
-use flare_im_core::ServiceClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
+use tonic::transport::{Channel, Endpoint};
 
 /// 存储服务客户端（基于 tonic）
 ///
@@ -55,13 +55,11 @@ impl StorageReaderClient {
         let mut service_client_guard = self.service_client.lock().await;
         if service_client_guard.is_none() {
             if self.service_name.is_empty() {
-                return Err(
-                    ErrorBuilder::new(
-                        ErrorCode::ConfigurationError,
-                        "storage_reader_service is not configured",
-                    )
-                    .build_error(),
-                );
+                return Err(ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "storage_reader_service is not configured",
+                )
+                .build_error());
             }
 
             let discover = flare_im_core::discovery::create_discover(&self.service_name)
@@ -76,10 +74,9 @@ impl StorageReaderClient {
                 let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
                     .ok()
                     .unwrap_or_else(|| "127.0.0.1:60083".to_string());
-                let endpoint = Endpoint::from_shared(format!("http://{}", addr))
-                    .map_err(|e| {
-                        map_infra_error(e, ErrorCode::ConfigurationError, "create endpoint")
-                    })?;
+                let endpoint = Endpoint::from_shared(format!("http://{}", addr)).map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "create endpoint")
+                })?;
                 let channel = endpoint.connect().await.map_err(|e| {
                     map_infra_error(e, ErrorCode::NetworkError, "connect storage reader")
                 })?;
@@ -89,21 +86,21 @@ impl StorageReaderClient {
         }
 
         let service_client = service_client_guard.as_mut().ok_or_else(|| {
-            ErrorBuilder::new(ErrorCode::ConfigurationError, "service client not initialized")
-                .build_error()
+            ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "service client not initialized",
+            )
+            .build_error()
         })?;
-        let channel = service_client
-            .get_channel()
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::ServiceUnavailable,
-                    "get channel from service discovery",
-                )
-            })?;
+        let channel = service_client.get_channel().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::ServiceUnavailable,
+                "get channel from service discovery",
+            )
+        })?;
 
-        tracing::debug!("Got channel for storage reader service from service discovery");
+        tracing::trace!("Got channel for storage reader service from service discovery");
 
         Ok(StorageReaderServiceClient::new(channel))
     }
@@ -240,13 +237,14 @@ impl MessageProvider for StorageReaderClient {
                     let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
                         .ok()
                         .unwrap_or_else(|| "127.0.0.1:50091".to_string());
-                    let endpoint = Endpoint::from_shared(format!("http://{}", addr))
-                        .map_err(|err| {
+                    let endpoint =
+                        Endpoint::from_shared(format!("http://{}", addr)).map_err(|err| {
                             map_infra_error(err, ErrorCode::ConfigurationError, "endpoint")
                         })?;
-                    endpoint.connect().await.map_err(|err| {
-                        map_infra_error(err, ErrorCode::NetworkError, "connect")
-                    })?
+                    endpoint
+                        .connect()
+                        .await
+                        .map_err(|err| map_infra_error(err, ErrorCode::NetworkError, "connect"))?
                 };
 
                 let mut client = StorageReaderServiceClient::new(channel);

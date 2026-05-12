@@ -26,10 +26,8 @@ pub(crate) fn build_hook_runtime(sources: &ConfigSourcesReady) -> HookRuntimeRea
 
     let hook_governance = sources.hook_config_repository.as_ref().map(|repository| {
         Arc::new(
-            HookServiceServer::new(repository.clone(), registry.clone()).with_monitoring(
-                metrics_collector.clone(),
-                execution_recorder.clone(),
-            ),
+            HookServiceServer::new(repository.clone(), registry.clone())
+                .with_monitoring(metrics_collector.clone(), execution_recorder.clone()),
         )
     });
 

@@ -128,7 +128,8 @@ impl EventHandler {
     ///
     /// # 编排流程
     /// 1. 校验事件（含 `EVENT_CALL_SIGNAL` RTC 前置条件）
-    /// 2. 通话信令：`flare-capability` `Dispatch` 对齐 SFU（失败则降级推送，并在 `ext` 写入 `flare_rtc_enrich`）
+    /// 2. 通话信令：`ExtensionOrchestrator::enrich_event_before_persist` → `CallCapabilityBridge` →
+    ///    `flare-capability` `Dispatch` 对齐媒体扩展后端（仅 `EVENT_CALL_SIGNAL`；失败则按策略降级并在 `ext` 写入 `flare_rtc_enrich`）
     /// 3. 分配序列号
     /// 4. 推送事件
     ///
@@ -152,12 +153,12 @@ impl EventHandler {
         tenant_id: &str,
         mut event: Event,
     ) -> Result<()> {
-        // 1. 校验事件（避免无效信令仍命中 SFU / capability）
+        // 1. 校验事件（避免无效信令仍命中媒体能力分发）
         self.event_domain_service
             .validate_event(ctx, tenant_id, &event)
             .await?;
 
-        // 2. 通话信令：经 `flare-capability` 与 strom-sfu 对齐后再落库/推送
+        // 2. 通话信令：经 `flare-capability` enrich 后再落库/推送
         self.extension_orchestrator
             .enrich_event_before_persist(ctx, tenant_id, &mut event)
             .await?;

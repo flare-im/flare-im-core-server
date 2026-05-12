@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::error::{map_infra_error, ErrorCode, Result};
+use crate::error::{ErrorCode, Result, map_infra_error};
 use chrono::Utc;
 use sqlx::{PgPool, Row};
 use tracing::instrument;
@@ -303,7 +303,13 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .execute(&*self.pool)
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to increment thread reply count"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to increment thread reply count",
+            )
+        })?;
 
         // 更新参与者信息
         self.add_participant(ctx, thread_id, reply_user_id).await?;
@@ -353,7 +359,13 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .execute(&*self.pool)
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update thread participant count"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to update thread participant count",
+            )
+        })?;
 
         Ok(())
     }
@@ -375,7 +387,13 @@ impl ThreadRepository for PostgresThreadRepository {
         .bind(thread_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get thread participants"))?;
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to get thread participants",
+            )
+        })?;
 
         Ok(rows.into_iter().map(|row| row.get("user_id")).collect())
     }

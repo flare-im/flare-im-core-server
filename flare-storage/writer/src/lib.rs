@@ -1,10 +1,10 @@
 //! # Flare Storage Writer
 //!
-//! 消息存储写侧服务（CQRS Command 侧）：消费 Kafka 并持久化，与项目 docs/message_event_flow.md 一致。
+//! 消息存储写侧服务（CQRS Command 侧）：消费 JetStream 并持久化，与项目 docs/message_event_flow.md 一致。
 //!
 //! ## 流程对应
-//! - **普通消息**：Kafka 普通消息 topic → `NormalMessageConsumer` → `MessagePersistenceCommandHandler` → DB（保存消息）
-//! - **操作事件**：Kafka 操作 topic → `OperationMessageConsumer` → `MessageOperationCommandHandler` → DB（更新撤回/编辑/删除/已读/反应/置顶/标记等）
+//! - **普通消息**：JetStream 普通消息 topic → `NormalMessageConsumer` → `MessagePersistenceCommandHandler` → DB（保存消息）
+//! - **操作事件**：JetStream 操作 topic → `OperationMessageConsumer` → `MessageOperationCommandHandler` → DB（更新撤回/编辑/删除/已读/反应/置顶/标记等）
 //!
 //! ## 模块
 //! - 普通消息：`MessagePersistenceDomainService` → PostgreSQL + 可选 Redis/WAL

@@ -29,29 +29,37 @@ impl FilesystemMediaStore {
 impl MediaLocalStore for FilesystemMediaStore {
     async fn write(&self, context: &UploadContext<'_>) -> Result<String> {
         let path = self.file_path(context.file_id);
-        fs::write(&path, context.payload)
-            .await
-            .map_err(|e| {
-                map_infra_error(e, ErrorCode::InternalError, format!("write file to {:?}", path))
-            })?;
+        fs::write(&path, context.payload).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("write file to {:?}", path),
+            )
+        })?;
         Ok(context.file_id.to_string())
     }
 
     async fn read(&self, file_id: &str) -> Result<Vec<u8>> {
         let path = self.file_path(file_id);
         fs::read(&path).await.map_err(|e| {
-            map_infra_error(e, ErrorCode::InternalError, format!("read file from {:?}", path))
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                format!("read file from {:?}", path),
+            )
         })
     }
 
     async fn delete(&self, file_id: &str) -> Result<()> {
         let path = self.file_path(file_id);
         if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::InternalError, format!("remove file {:?}", path))
-                })?;
+            fs::remove_file(&path).await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    format!("remove file {:?}", path),
+                )
+            })?;
         }
         Ok(())
     }

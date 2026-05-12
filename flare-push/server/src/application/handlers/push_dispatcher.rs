@@ -15,9 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use flare_im_core::Ctx;
 use flare_proto::common::{PushEnvelope, PushResult};
-use tracing::{debug,info, instrument};
+use tracing::{debug, instrument};
 
-use crate::domain::{TargetResolver, DeviceInfo};
+use crate::domain::{DeviceInfo, TargetResolver};
 
 /// 推送调度器
 ///
@@ -79,11 +79,7 @@ impl PushDispatcher {
     /// 4. 并行推送
     /// 5. 聚合结果
     #[instrument(skip(self, envelope), fields(envelope_id = %envelope.envelope_id))]
-    pub async fn dispatch(
-        &self,
-        ctx: &Ctx,
-        envelope: PushEnvelope,
-    ) -> Result<Vec<PushResult>> {
+    pub async fn dispatch(&self, ctx: &Ctx, envelope: PushEnvelope) -> Result<Vec<PushResult>> {
         // 1. 检查过期
         if self.is_expired(&envelope) {
             debug!(
@@ -95,7 +91,7 @@ impl PushDispatcher {
 
         // 2. 解析目标
         let devices = self.target_resolver.resolve(ctx, &envelope).await?;
-        
+
         debug!(
             envelope_id = %envelope.envelope_id,
             device_count = devices.len(),
@@ -106,7 +102,7 @@ impl PushDispatcher {
         let valid_devices = self.filter_devices(devices);
 
         if valid_devices.is_empty() {
-            info!(
+            debug!(
                 envelope_id = %envelope.envelope_id,
                 "No valid devices to push"
             );
@@ -143,9 +139,7 @@ impl PushDispatcher {
                 .map(|device| {
                     let executor = self.push_executor.clone();
                     let envelope = envelope.clone();
-                    async move {
-                        executor.execute(ctx, &envelope, &device).await
-                    }
+                    async move { executor.execute(ctx, &envelope, &device).await }
                 })
                 .collect();
 
@@ -165,12 +159,7 @@ impl PushDispatcher {
 #[async_trait::async_trait]
 pub trait PushExecutor: Send + Sync {
     /// 执行单次推送
-    async fn execute(
-        &self,
-        ctx: &Ctx,
-        envelope: &PushEnvelope,
-        device: &DeviceInfo,
-    ) -> PushResult;
+    async fn execute(&self, ctx: &Ctx, envelope: &PushEnvelope, device: &DeviceInfo) -> PushResult;
 }
 
 #[cfg(test)]
@@ -183,14 +172,12 @@ mod tests {
     #[async_trait::async_trait]
     impl TargetResolver for MockTargetResolver {
         async fn resolve(&self, _ctx: &Ctx, _envelope: &PushEnvelope) -> Result<Vec<DeviceInfo>> {
-            Ok(vec![
-                DeviceInfo {
-                    device_id: "device-1".to_string(),
-                    user_id: "user-1".to_string(),
-                    platform: "ios".to_string(),
-                    push_token: Some("token-1".to_string()),
-                },
-            ])
+            Ok(vec![DeviceInfo {
+                device_id: "device-1".to_string(),
+                user_id: "user-1".to_string(),
+                platform: "ios".to_string(),
+                push_token: Some("token-1".to_string()),
+            }])
         }
     }
 

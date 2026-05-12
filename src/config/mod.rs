@@ -8,12 +8,13 @@
 
 // 首先导入需要的模块和类型
 use std::collections::HashMap;
+use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as AnyhowContext, Result, anyhow};
 use crate::{Config, RegistryConfig, ServerConfig, ServiceConfig};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 use serde::Deserialize;
 use std::sync::OnceLock;
 use toml::Value;
@@ -42,27 +43,101 @@ pub struct RedisPoolConfig {
     pub ttl_seconds: Option<u64>,
 }
 
-/// Kafka 集群配置
+/// NATS JetStream 集群配置
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct KafkaClusterConfig {
-    /// Kafka 服务器地址列表
-    pub bootstrap_servers: String,
+pub struct JetStreamClusterConfig {
+    /// NATS server URL
+    pub url: String,
     /// 客户端标识
     #[serde(default)]
     pub client_id: Option<String>,
-    /// 安全协议
-    #[serde(default)]
-    pub security_protocol: Option<String>,
-    /// SASL 用户名
-    #[serde(default)]
-    pub sasl_username: Option<String>,
-    /// SASL 密码
-    #[serde(default)]
-    pub sasl_password: Option<String>,
     /// 超时时间（毫秒）
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// 重试次数
+    #[serde(default)]
+    pub retries: Option<u32>,
+    /// 重试退避（毫秒）
+    #[serde(default)]
+    pub retry_backoff_ms: Option<u64>,
+    /// JetStream stream 名称
+    #[serde(default)]
+    pub stream_name: Option<String>,
+    /// Stream 绑定的 subjects
+    #[serde(default)]
+    pub subjects: Vec<String>,
     /// 其他选项
+    #[serde(default)]
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JetStreamTopologySpec {
+    pub stream_name: String,
+    pub subjects: Vec<String>,
+}
+
+/// MQ 后端选择（`[mq]`）。
+///
+/// 手动指定方式（优先级从高到低）：
+/// 1. 环境变量 `FLARE_MQ_DEFAULT_BACKEND`（如 `nats`、`kafka`、`jetstream`）
+/// 2. `config/environments/{FLARE_ENV}.toml` 根级 `[mq]`（由 [`ConfigManager::load_environment_config`] 合并）
+/// 3. `config/base.toml` 中的 `[mq]`
+///
+/// `jetstream` 与 `nats` 等价（均表示 NATS JetStream）。各进程是否已按该字段切换实现，见对应 `wire`/启动逻辑。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MqBackendConfig {
+    /// 当前选择的 MQ 后端（已小写、去首尾空格，见 [`Self::ensure_defaults`]）。
+    #[serde(default = "default_mq_backend")]
+    pub default_backend: String,
+    /// 预留：Kafka 不可用时的降级策略等（由各服务消费端实现解释）。
+    #[serde(default)]
+    pub allow_kafka_fallback: bool,
+}
+
+impl Default for MqBackendConfig {
+    fn default() -> Self {
+        Self {
+            default_backend: default_mq_backend(),
+            allow_kafka_fallback: false,
+        }
+    }
+}
+
+fn default_mq_backend() -> String {
+    "nats".to_string()
+}
+
+/// Kafka 集群配置。当前业务默认走 NATS；Kafka 配置用于生产环境按需切换/双写/审计流。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct KafkaClusterConfig {
+    pub brokers: Vec<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub acks: Option<String>,
+    #[serde(default)]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub linger_ms: Option<u64>,
+    #[serde(default)]
+    pub batch_size_bytes: Option<usize>,
+    #[serde(default)]
+    pub message_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub request_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub enable_idempotence: Option<bool>,
+    #[serde(default)]
+    pub max_in_flight_requests_per_connection: Option<u32>,
+    #[serde(default)]
+    pub replication_factor: Option<i16>,
+    #[serde(default)]
+    pub min_insync_replicas: Option<i16>,
+    #[serde(default)]
+    pub partitions: Option<i32>,
+    #[serde(default)]
+    pub retention_ms: Option<i64>,
     #[serde(default)]
     pub options: HashMap<String, String>,
 }
@@ -335,9 +410,9 @@ pub struct PushServerServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置
+    /// JetStream 配置
     #[serde(default)]
-    pub kafka: Option<String>,
+    pub jetstream: Option<String>,
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
@@ -406,9 +481,9 @@ pub struct PushWorkerServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置
+    /// JetStream 配置
     #[serde(default)]
-    pub kafka: Option<String>,
+    pub jetstream: Option<String>,
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
@@ -435,18 +510,18 @@ pub struct MessageOrchestratorServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置
+    /// JetStream 配置
     #[serde(default)]
-    pub kafka: Option<String>,
-    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
-    #[serde(default, alias = "kafka_topic")]
-    pub storage_topic: Option<String>,
-    /// 操作事件流 Topic（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
+    pub jetstream: Option<String>,
+    /// 消息流 subject（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
     #[serde(default)]
-    pub operation_topic: Option<String>,
-    /// 推送流 Topic（与 constants::topics::TOPIC_PUSH_MESSAGES 对齐）
+    pub storage_subject: Option<String>,
+    /// 操作事件流 subject（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
     #[serde(default)]
-    pub push_topic: Option<String>,
+    pub operation_subject: Option<String>,
+    /// 推送流 subject（与 constants::topics::TOPIC_PUSH_MESSAGES 对齐）
+    #[serde(default)]
+    pub push_subject: Option<String>,
     /// WAL 存储
     #[serde(default)]
     pub wal_store: Option<String>,
@@ -535,18 +610,18 @@ pub struct StorageWriterServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置
+    /// JetStream 配置
     #[serde(default)]
-    pub kafka: Option<String>,
+    pub jetstream: Option<String>,
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
-    /// 消息流 Topic（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
+    /// 消息流 subject（新消息落库，与 constants::topics::TOPIC_MESSAGE_STORAGE 对齐）
     #[serde(default)]
-    pub kafka_topic: Option<String>,
-    /// 操作事件流 Topic（Recall/Edit/Read 等，与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
+    pub message_subject: Option<String>,
+    /// 操作事件流 subject（Recall/Edit/Read 等，与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
     #[serde(default)]
-    pub kafka_operation_topic: Option<String>,
+    pub operation_subject: Option<String>,
     /// MongoDB 配置
     #[serde(default)]
     pub mongo: Option<String>,
@@ -593,15 +668,15 @@ pub struct ConversationServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// Kafka 配置（配置则启用 ReadReceipt 消费者，未读数零成本）
+    /// JetStream 配置（配置则启用 ReadReceipt 消费者，未读数零成本）
     #[serde(default)]
-    pub kafka: Option<String>,
-    /// 操作事件流 Topic（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐，仅消费 ReadReceipt）
+    pub jetstream: Option<String>,
+    /// 操作事件流 subject（与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐，仅消费 ReadReceipt）
     #[serde(default)]
-    pub kafka_operation_topic: Option<String>,
+    pub operation_subject: Option<String>,
     /// ReadReceipt 消费者 group（与 constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT 对齐）
     #[serde(default)]
-    pub kafka_group: Option<String>,
+    pub consumer_group: Option<String>,
     /// Redis 配置
     #[serde(default)]
     pub redis: Option<String>,
@@ -684,7 +759,13 @@ pub struct FlareAppConfig {
     /// Redis 配置映射
     #[serde(default)]
     pub redis: HashMap<String, RedisPoolConfig>,
-    /// Kafka 配置映射
+    /// JetStream 配置映射
+    #[serde(default)]
+    pub jetstream: HashMap<String, JetStreamClusterConfig>,
+    /// MQ 后端选择，默认 NATS。
+    #[serde(default)]
+    pub mq: MqBackendConfig,
+    /// Kafka 配置映射。默认不启用，作为可切换后端/审计日志后端。
     #[serde(default)]
     pub kafka: HashMap<String, KafkaClusterConfig>,
     /// PostgreSQL 配置映射
@@ -702,6 +783,21 @@ pub struct FlareAppConfig {
 }
 
 impl FlareAppConfig {
+    /// 返回当前 MQ 后端标识（`nats` \| `jetstream` \| `kafka`）。
+    pub fn mq_default_backend(&self) -> &str {
+        self.mq.default_backend.as_str()
+    }
+
+    /// 是否配置为使用 Kafka 作为默认 MQ 后端。
+    pub fn mq_uses_kafka(&self) -> bool {
+        self.mq.default_backend == "kafka"
+    }
+
+    /// 是否配置为使用 NATS JetStream（含 `jetstream` 别名）。
+    pub fn mq_uses_nats(&self) -> bool {
+        matches!(self.mq.default_backend.as_str(), "nats" | "jetstream")
+    }
+
     /// 获取核心配置
     pub fn base(&self) -> &Config {
         &self.core
@@ -715,6 +811,36 @@ impl FlareAppConfig {
     /// 获取 Redis 配置
     pub fn redis_profile(&self, name: &str) -> Option<&RedisPoolConfig> {
         self.redis.get(name)
+    }
+
+    /// 获取 JetStream 配置
+    pub fn jetstream_profile(&self, name: &str) -> Option<&JetStreamClusterConfig> {
+        self.jetstream.get(name)
+    }
+
+    /// 获取 NATS JetStream 拓扑配置。stream/subject 由用户在 `[jetstream.*]` 中指定。
+    pub fn jetstream_topology(&self) -> Vec<JetStreamTopologySpec> {
+        let mut specs = self
+            .jetstream
+            .values()
+            .filter_map(|profile| {
+                let stream_name = profile
+                    .stream_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())?;
+                if profile.subjects.is_empty() {
+                    return None;
+                }
+                Some(JetStreamTopologySpec {
+                    stream_name: stream_name.to_string(),
+                    subjects: profile.subjects.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        specs.sort_by(|a, b| a.stream_name.cmp(&b.stream_name));
+        specs.dedup_by(|a, b| a.stream_name == b.stream_name);
+        specs
     }
 
     /// 获取 Kafka 配置
@@ -843,6 +969,10 @@ impl FlareAppConfig {
         if self.core.server.port == 0 {
             self.core.server.port = 50051;
         }
+        if self.mq.default_backend.trim().is_empty() {
+            self.mq.default_backend = default_mq_backend();
+        }
+        self.mq.default_backend = self.mq.default_backend.to_ascii_lowercase();
     }
 
     /// 验证配置引用
@@ -852,6 +982,23 @@ impl FlareAppConfig {
     /// # 返回
     /// 如果所有引用都有效，返回 Ok(())，否则返回错误信息
     pub fn validate_references(&self) -> Result<()> {
+        match self.mq.default_backend.as_str() {
+            "nats" | "jetstream" => {}
+            "kafka" => {
+                if self.kafka.is_empty() {
+                    return Err(anyhow!(
+                        "mq.default_backend is kafka but no [kafka.*] profile is configured"
+                    ));
+                }
+            }
+            other => {
+                return Err(anyhow!(
+                    "unsupported mq.default_backend '{}'; expected 'nats' or 'kafka'",
+                    other
+                ));
+            }
+        }
+
         // 验证接入网关配置
         if let Some(cfg) = &self.services.access_gateway {
             if let Some(token_store) = &cfg.token_store {
@@ -903,9 +1050,10 @@ impl FlareAppConfig {
         }
 
         if let Some(cfg) = &self.services.push_server {
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka)
-                    .ok_or_else(|| anyhow!("Kafka config '{}' not found (push_server)", kafka))?;
+            if let Some(jetstream) = &cfg.jetstream {
+                self.jetstream_profile(jetstream).ok_or_else(|| {
+                    anyhow!("JetStream config '{}' not found (push_server)", jetstream)
+                })?;
             }
             if let Some(redis) = &cfg.redis {
                 self.redis_profile(redis)
@@ -914,17 +1062,21 @@ impl FlareAppConfig {
         }
 
         if let Some(cfg) = &self.services.push_worker
-            && let Some(kafka) = &cfg.kafka
+            && let Some(jetstream) = &cfg.jetstream
         {
-            self.kafka_profile(kafka)
-                .ok_or_else(|| anyhow!("Kafka config '{}' not found (push_worker)", kafka))?;
+            self.jetstream_profile(jetstream).ok_or_else(|| {
+                anyhow!("JetStream config '{}' not found (push_worker)", jetstream)
+            })?;
         }
 
         // 验证消息编排服务配置
         if let Some(cfg) = &self.services.message_orchestrator {
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka).ok_or_else(|| {
-                    anyhow!("Kafka config '{}' not found (message_orchestrator)", kafka)
+            if let Some(jetstream) = &cfg.jetstream {
+                self.jetstream_profile(jetstream).ok_or_else(|| {
+                    anyhow!(
+                        "JetStream config '{}' not found (message_orchestrator)",
+                        jetstream
+                    )
                 })?;
             }
             if let Some(wal_store) = &cfg.wal_store {
@@ -972,9 +1124,12 @@ impl FlareAppConfig {
 
         // 验证存储写入服务配置
         if let Some(cfg) = &self.services.storage_writer {
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka).ok_or_else(|| {
-                    anyhow!("Kafka config '{}' not found (storage_writer)", kafka)
+            if let Some(jetstream) = &cfg.jetstream {
+                self.jetstream_profile(jetstream).ok_or_else(|| {
+                    anyhow!(
+                        "JetStream config '{}' not found (storage_writer)",
+                        jetstream
+                    )
                 })?;
             }
             if let Some(mongo) = &cfg.mongo {
@@ -1005,13 +1160,31 @@ impl FlareAppConfig {
                 self.redis_profile(redis)
                     .ok_or_else(|| anyhow!("Redis config '{}' not found (conversation)", redis))?;
             }
-            if let Some(kafka) = &cfg.kafka {
-                self.kafka_profile(kafka)
-                    .ok_or_else(|| anyhow!("Kafka config '{}' not found (conversation)", kafka))?;
+            if let Some(jetstream) = &cfg.jetstream {
+                self.jetstream_profile(jetstream).ok_or_else(|| {
+                    anyhow!("JetStream config '{}' not found (conversation)", jetstream)
+                })?;
             }
         }
 
         Ok(())
+    }
+}
+
+/// 环境变量覆盖 `[mq]`（优先级高于 `config/environments/{FLARE_ENV}.toml` 合并结果）。
+///
+/// - `FLARE_MQ_DEFAULT_BACKEND`：`nats` \| `jetstream` \| `kafka`
+/// - `FLARE_MQ_ALLOW_KAFKA_FALLBACK`：`true` / `1` / `yes` / `on` 开启
+fn apply_mq_env_overrides(cfg: &mut FlareAppConfig) {
+    if let Ok(v) = env::var("FLARE_MQ_DEFAULT_BACKEND") {
+        let t = v.trim().to_ascii_lowercase();
+        if !t.is_empty() {
+            cfg.mq.default_backend = t;
+        }
+    }
+    if let Ok(v) = env::var("FLARE_MQ_ALLOW_KAFKA_FALLBACK") {
+        let s = v.trim();
+        cfg.mq.allow_kafka_fallback = matches!(s, "1" | "true" | "yes" | "on");
     }
 }
 
@@ -1055,6 +1228,8 @@ pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
         if let Err(e) = manager::ConfigManager::load_environment_config(&mut cfg) {
             warn!("failed to load environment config: {}", e);
         }
+        apply_mq_env_overrides(&mut cfg);
+        cfg.ensure_defaults();
         // 验证配置引用（可选，生产环境建议启用）
         if let Err(e) = cfg.validate_references() {
             warn!("configuration reference validation failed: {}", e);
@@ -1285,6 +1460,8 @@ fn default_config() -> FlareAppConfig {
         },
         logging: LoggingConfig::default(),
         redis: HashMap::new(),
+        jetstream: HashMap::new(),
+        mq: MqBackendConfig::default(),
         kafka: HashMap::new(),
         postgres: HashMap::new(),
         mongodb: HashMap::new(),

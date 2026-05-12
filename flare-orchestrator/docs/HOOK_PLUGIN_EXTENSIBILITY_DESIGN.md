@@ -47,7 +47,7 @@
 - `interface`：仅协议转换、`Ctx` 提取与调用 application。
 - `application`：用例编排与扩展点调度（不写业务规则）。
 - `domain`：规则与策略模型（扩展点语义、失败策略、路由规则）。
-- `infrastructure`：gRPC/MQ/Redis/Kafka 等具体适配器。
+- `infrastructure`：gRPC/MQ/Redis/JetStream 等具体适配器。
 
 推荐目录（增量演进）：
 

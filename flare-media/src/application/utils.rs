@@ -37,7 +37,9 @@ pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_grpc_proto::med
 }
 
 /// 将领域模型转换为 protobuf MediaReferenceInfo
-pub fn to_proto_reference(reference: &MediaReference) -> flare_grpc_proto::media::MediaReferenceInfo {
+pub fn to_proto_reference(
+    reference: &MediaReference,
+) -> flare_grpc_proto::media::MediaReferenceInfo {
     flare_grpc_proto::media::MediaReferenceInfo {
         reference_id: reference.reference_id.clone(),
         file_id: reference.file_id.clone(),

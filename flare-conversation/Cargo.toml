@@ -16,11 +16,10 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-server-core = { workspace = true, features = ["kafka", "proto", "grpc", "discovery"] }
+flare-server-core = { workspace = true, features = ["nats", "kafka", "proto", "grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
 flare-im-core = { path = ".." }
 prost = "0.14"
-rdkafka = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
-use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_grpc_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
 };
 use flare_im_core::ServiceClient;
+use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, InfraResult, InfraResultExt, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -104,7 +104,7 @@ impl ConnectionRepository {
             .build_error()
         })?;
 
-        tracing::debug!(
+        tracing::trace!(
             service_name = %self.service_name,
             "ConnectionRepository: got channel from service discovery"
         );
@@ -261,7 +261,25 @@ pub(crate) fn core_info_to_domain(
     let platform = core_info
         .device_info
         .as_ref()
-        .map(|d| format!("{:?}", d.platform));
+        .map(|d| d.platform.as_str().to_string());
+    let mut metadata = core_info.metadata.clone();
+    if let Some(device_info) = core_info.device_info.as_ref() {
+        if let Some(app_version) = device_info.app_version.as_ref()
+            && !app_version.trim().is_empty()
+        {
+            metadata.insert("app_version".to_string(), app_version.clone());
+        }
+        if let Some(system_version) = device_info.system_version.as_ref()
+            && !system_version.trim().is_empty()
+        {
+            metadata.insert("system_version".to_string(), system_version.clone());
+        }
+        if let Some(model) = device_info.model.as_ref()
+            && !model.trim().is_empty()
+        {
+            metadata.insert("model".to_string(), model.clone());
+        }
+    }
     let tenant_id = core_info
         .metadata
         .get(METADATA_KEY_TENANT_ID)
@@ -271,5 +289,5 @@ pub(crate) fn core_info_to_domain(
     if let Some(p) = platform {
         info = info.with_platform(p);
     }
-    info.with_metadata(core_info.metadata.clone())
+    info.with_metadata(metadata)
 }

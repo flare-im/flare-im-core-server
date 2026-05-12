@@ -53,7 +53,11 @@ impl CallSession {
         (s, ev)
     }
 
-    pub fn bind_room(&mut self, sfu_room_id: String, capability_instance_id: String) -> CallSessionEvent {
+    pub fn bind_room(
+        &mut self,
+        sfu_room_id: String,
+        capability_instance_id: String,
+    ) -> CallSessionEvent {
         self.sfu_room_id = Some(sfu_room_id.clone());
         self.capability_instance_id = Some(capability_instance_id.clone());
         self.updated_at = Utc::now();
@@ -75,7 +79,11 @@ impl CallSession {
         })
     }
 
-    pub fn reject(&mut self, user_id: String, reason: Option<String>) -> anyhow::Result<CallSessionEvent> {
+    pub fn reject(
+        &mut self,
+        user_id: String,
+        reason: Option<String>,
+    ) -> anyhow::Result<CallSessionEvent> {
         self.state = CallSessionState::Ended;
         self.updated_at = Utc::now();
         Ok(CallSessionEvent::Rejected {

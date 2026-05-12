@@ -5,7 +5,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use redis::{AsyncCommands, aio::ConnectionManager};
 
-
 use crate::config::OnlineConfig;
 
 const SUBSCRIPTION_KEY_PREFIX: &str = "subscription";

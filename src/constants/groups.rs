@@ -1,4 +1,4 @@
-//! Kafka 消费者组等与 Topic 配套的固定名常量。
+//! JetStream 消费者组等与 Topic 配套的固定名常量。
 
 pub const STORAGE_GROUP_DEFAULT: &str = "storage-writer";
 pub const CONVERSATION_READ_RECEIPT_GROUP_DEFAULT: &str = "conversation-read-receipt";

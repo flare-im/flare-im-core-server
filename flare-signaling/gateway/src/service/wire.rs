@@ -11,14 +11,18 @@ use crate::application::handlers::{ConnectionHandler, ConnectionQueryHandler, Pu
 use crate::config::{AccessGatewayConfig, PortConfig};
 use crate::domain::model::ConnectionDomainServiceConfig;
 use crate::domain::ports::{ConnectionQuery, IConnectionPort};
-use crate::domain::service::{ConnectionDomainService, ConnectionQualityService, PushDomainService};
+use crate::domain::service::{
+    ConnectionDomainService, ConnectionQualityService, PushDomainService,
+};
 use crate::error::Result;
 use crate::infrastructure::ports::{
-    ConnectionRepository, ManagerConnectionQuery, PushRepository,
-    SignalingRouteGrpcPool, StorageSyncGrpcPool,
+    ConnectionRepository, ManagerConnectionQuery, PushRepository, SignalingRouteGrpcPool,
+    StorageSyncGrpcPool,
 };
 use crate::interface::grpc::handler::AccessGatewayHandler;
-use crate::service::builder::{build_authenticator, build_long_connection_handler, build_long_connection_server};
+use crate::service::builder::{
+    build_authenticator, build_long_connection_handler, build_long_connection_server,
+};
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use flare_im_core::metrics::AccessGatewayMetrics;
 use flare_server_core::Config;
@@ -32,7 +36,8 @@ pub struct GrpcServices {
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
-    pub long_connection_server: Arc<tokio::sync::Mutex<Option<flare_core::server::builder::flare::FlareServer>>>,
+    pub long_connection_server:
+        Arc<tokio::sync::Mutex<Option<flare_core::server::builder::flare::FlareServer>>>,
     pub grpc_services: GrpcServices,
     pub push_domain_service: Arc<PushDomainService>,
     pub gateway_id: String,
@@ -100,7 +105,8 @@ pub async fn initialize(
     ));
 
     // 7. Push 端口
-    let push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>> = Arc::new(Mutex::new(None));
+    let push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>> =
+        Arc::new(Mutex::new(None));
     let push_port: Arc<dyn crate::domain::ports::IPushPort> =
         Arc::new(PushRepository::new(push_handle_slot.clone()));
 

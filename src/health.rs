@@ -14,7 +14,7 @@ use flare_core_runtime::{HealthCheck, ServiceRuntime};
 ///
 /// 通过环境变量 `<SERVICE>_HEALTH_TARGETS` 配置检查目标：
 /// - `SERVICE` 由 service_name 规范化得到（去掉 `flare-` 前缀并转大写，下划线分隔）
-/// - 示例：`SIGNALING_ROUTE_HEALTH_TARGETS=redis=127.0.0.1:6379,kafka=127.0.0.1:9092`
+/// - 示例：`SIGNALING_ROUTE_HEALTH_TARGETS=redis=127.0.0.1:6379,jetstream=127.0.0.1:9092`
 pub fn attach_runtime_health_checks(
     mut runtime: ServiceRuntime,
     service_name: &str,

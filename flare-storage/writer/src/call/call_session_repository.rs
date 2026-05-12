@@ -29,7 +29,8 @@ pub trait CallSessionRepository: Send + Sync {
 
     async fn find_by_id(&self, id: &Uuid) -> anyhow::Result<Option<CallSessionRecord>>;
 
-    async fn find_by_room_id(&self, sfu_room_id: &str) -> anyhow::Result<Option<CallSessionRecord>>;
+    async fn find_by_room_id(&self, sfu_room_id: &str)
+    -> anyhow::Result<Option<CallSessionRecord>>;
 
     async fn update_status(&self, id: &Uuid, status: &str) -> anyhow::Result<()>;
 }
@@ -56,7 +57,10 @@ impl CallSessionRepository for PostgresCallSessionRepository {
         Ok(None)
     }
 
-    async fn find_by_room_id(&self, _sfu_room_id: &str) -> anyhow::Result<Option<CallSessionRecord>> {
+    async fn find_by_room_id(
+        &self,
+        _sfu_room_id: &str,
+    ) -> anyhow::Result<Option<CallSessionRecord>> {
         Ok(None)
     }
 

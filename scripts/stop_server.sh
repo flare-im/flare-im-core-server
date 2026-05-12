@@ -188,7 +188,7 @@ CHECK_RESULT=$?
 
 echo ""
 echo -e "${YELLOW}💡 提示:${NC}"
-echo "   - 基础设施服务（Redis、PostgreSQL、Kafka、Consul）仍在运行"
+echo "   - 基础设施服务（Redis、PostgreSQL、JetStream、Consul）仍在运行"
 echo "   - 如需停止基础设施服务，请运行:"
 echo "     ${BLUE}cd deploy && docker-compose down${NC}"
 echo ""

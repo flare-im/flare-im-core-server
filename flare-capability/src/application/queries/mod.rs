@@ -4,4 +4,4 @@ mod capability_catalog;
 mod hook_integration;
 
 pub use capability_catalog::list_registered_capabilities;
-pub use hook_integration::{list_hook_integration_channels, HookIntegrationChannelDoc};
+pub use hook_integration::{HookIntegrationChannelDoc, list_hook_integration_channels};

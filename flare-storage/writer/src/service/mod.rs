@@ -34,40 +34,35 @@ impl ApplicationBootstrap {
     ///
     /// 使用 ServiceRuntime 管理消费者生命周期，支持优雅停机
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        use flare_server_core::kafka::KafkaMessageFetcher;
-        use flare_server_core::mq::consumer::{ConsumerRuntimeTask, MqConsumerTask};
+        info!(backend = %context.config.mq_backend, "Starting Storage Writer (MQ consumer via ServiceRuntime)");
 
-        info!("Starting Storage Writer (Kafka consumer via ServiceRuntime)");
+        let mut runtime = ServiceRuntime::mq_consumer()
+            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
 
-        let topics = context.dispatcher.topics();
-        if topics.is_empty() {
-            anyhow::bail!("storage-writer: no Kafka topics registered on dispatcher");
+        let tasks = match context.config.mq_backend.as_str() {
+            "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
+                context.config.as_ref(),
+                context.consumer_config,
+                context.dispatcher.clone(),
+                "storage-kafka-consumer",
+            )
+            .map_err(|e| anyhow::anyhow!("create storage-writer kafka consumers: {}", e))?,
+            "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
+                context.config.as_ref(),
+                context.consumer_config,
+                context.dispatcher.clone(),
+                "storage-nats-consumer",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("create storage-writer nats consumers: {}", e))?,
+            other => anyhow::bail!("unsupported mq backend: {}", other),
+        };
+
+        for task in tasks {
+            runtime = runtime.add_task(Box::new(task));
         }
 
-        let fetcher = KafkaMessageFetcher::new_with_consumer_group(
-            context.config.as_ref(),
-            topics,
-            context
-                .consumer_config
-                .kafka_consumer_group_override
-                .as_deref(),
-        )
-        .map_err(|e| anyhow::anyhow!("create kafka fetcher: {}", e))?;
-
-        let consumer = ConsumerRuntimeTask::from_parts(
-            context.consumer_config,
-            context.dispatcher.clone(),
-            fetcher,
-        );
-
-        let task = MqConsumerTask::new("storage-kafka-consumer", Box::new(consumer));
-
-        flare_im_core::health::attach_runtime_health_checks(
-            ServiceRuntime::mq_consumer()
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
-                .add_task(Box::new(task)),
-            STORAGE_WRITER,
-        )
+        flare_im_core::health::attach_runtime_health_checks(runtime, STORAGE_WRITER)
             .run()
             .await
     }

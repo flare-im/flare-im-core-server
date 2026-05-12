@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use flare_im_core::service_names::SYNC_ORCHESTRATOR;
-use flare_grpc_proto::sync::sync_service_server::SyncServiceServer;
 use flare_core_runtime::ServiceRuntime;
+use flare_grpc_proto::sync::sync_service_server::SyncServiceServer;
+use flare_im_core::service_names::SYNC_ORCHESTRATOR;
 use std::net::SocketAddr;
 use tonic::transport::Server;
 
@@ -28,19 +28,18 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(SYNC_ORCHESTRATOR)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
-                .add_spawn_with_shutdown(
-                    "sync-orchestrator-grpc",
-                    move |shutdown_rx| async move {
-                        Server::builder()
-                            .add_service(SyncServiceServer::new(handler))
-                            .serve_with_shutdown(address, async {
-                                let _ = shutdown_rx.await;
-                            })
-                            .await
-                            .map_err(|e| format!("sync orchestrator grpc error: {}", e).into())
-                    },
-                ),
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
+                .add_spawn_with_shutdown("sync-orchestrator-grpc", move |shutdown_rx| async move {
+                    Server::builder()
+                        .add_service(SyncServiceServer::new(handler))
+                        .serve_with_shutdown(address, async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| format!("sync orchestrator grpc error: {}", e).into())
+                }),
             SYNC_ORCHESTRATOR,
         );
 

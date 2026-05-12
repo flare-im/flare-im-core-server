@@ -2,8 +2,6 @@
 //!
 //! 本模块实现 application 层定义的 Port trait，使用 tonic 框架。
 
-use flare_im_core::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
-use flare_proto::Message;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
@@ -13,8 +11,10 @@ use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServi
 use flare_grpc_proto::storage::{
     GetConversationMessageHeadRequest, QueryConversationEventsRequest, QueryMessagesBySeqRequest,
 };
-use flare_server_core::client::request_with_context;
+use flare_im_core::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
 use flare_im_core::{Ctx, ServiceClient};
+use flare_proto::Message;
+use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
 use tonic::transport::Channel;
 

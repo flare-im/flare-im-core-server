@@ -16,9 +16,17 @@ pub trait CapabilityRegistry: Send + Sync {
 
     async fn unregister(&self, ctx: &Ctx, plugin_id: &str) -> CapResult<()>;
 
-    async fn list_by_kind(&self, ctx: &Ctx, kind: CapabilityKind) -> CapResult<Vec<RtcBackendDescriptor>>;
+    async fn list_by_kind(
+        &self,
+        ctx: &Ctx,
+        kind: CapabilityKind,
+    ) -> CapResult<Vec<RtcBackendDescriptor>>;
 
-    async fn get_descriptor(&self, ctx: &Ctx, instance_id: &str) -> CapResult<Option<RtcBackendDescriptor>>;
+    async fn get_descriptor(
+        &self,
+        ctx: &Ctx,
+        instance_id: &str,
+    ) -> CapResult<Option<RtcBackendDescriptor>>;
 }
 
 pub type DynCapabilityRegistry = Arc<dyn CapabilityRegistry>;

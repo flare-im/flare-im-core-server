@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// 请求上下文
-/// 
+///
 /// 承载 TraceID、UserID、TenantID 等信息
 /// 必须在所有业务逻辑链路中显式传递
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,8 +118,7 @@ mod tests {
 
     #[test]
     fn test_ctx_inject_to_grpc() {
-        let ctx = Ctx::new("trace-abc", Some("user-def".to_string()))
-            .with_tenant("tenant-123");
+        let ctx = Ctx::new("trace-abc", Some("user-def".to_string())).with_tenant("tenant-123");
 
         let mut metadata = tonic::metadata::MetadataMap::new();
         ctx.inject_to_grpc_metadata(&mut metadata);

@@ -12,7 +12,7 @@ use flare_grpc_proto::media::{
     ProcessVideoRequest, SetObjectAclRequest, UploadFileMetadata, UploadMultipartChunkRequest,
 };
 use flare_server_core::context::Context;
-use tracing::info;
+use tracing::debug;
 
 use crate::domain::model::{
     DirectUploadSessionState, MediaFileMetadata, MediaReferenceScope, MultipartChunkPayload,
@@ -112,7 +112,9 @@ impl MediaCommandHandler {
         request: InitiateMultipartUploadRequest,
     ) -> Result<MultipartUploadSession> {
         // 使用领域服务准备分片上传初始化（业务逻辑下沉到领域层）
-        let init = self.domain_service.prepare_multipart_upload_init(&request)?;
+        let init = self
+            .domain_service
+            .prepare_multipart_upload_init(&request)?;
 
         self.domain_service
             .initiate_multipart_upload(ctx, init)
@@ -143,7 +145,9 @@ impl MediaCommandHandler {
             bytes: request.payload,
         };
 
-        self.domain_service.upload_multipart_chunk(ctx, payload).await
+        self.domain_service
+            .upload_multipart_chunk(ctx, payload)
+            .await
     }
 
     pub async fn handle_complete_multipart_upload(
@@ -172,7 +176,10 @@ impl MediaCommandHandler {
         request: InitiateDirectUploadRequest,
     ) -> Result<DirectUploadSessionState> {
         let metadata = request.metadata.ok_or_else(|| {
-            flare_server_core::flare_err!(ErrorCode::InvalidParameter, "direct upload metadata missing")
+            flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "direct upload metadata missing"
+            )
         })?;
         self.domain_service
             .initiate_direct_upload(
@@ -280,7 +287,9 @@ impl MediaCommandHandler {
                 "file_id is required"
             ));
         }
-        self.domain_service.set_object_acl(ctx, &request.file_id).await
+        self.domain_service
+            .set_object_acl(ctx, &request.file_id)
+            .await
     }
 
     pub async fn handle_process_image(
@@ -288,7 +297,7 @@ impl MediaCommandHandler {
         ctx: &Context,
         request: ProcessImageRequest,
     ) -> Result<ProcessedMediaResult> {
-        info!(
+        debug!(
             file_id = %request.file_id,
             operations = request.operations.len(),
             "Process image request received"
@@ -302,7 +311,7 @@ impl MediaCommandHandler {
         ctx: &Context,
         request: ProcessVideoRequest,
     ) -> Result<ProcessedMediaResult> {
-        info!(
+        debug!(
             file_id = %request.file_id,
             operations = request.operations.len(),
             "Process video request received"
@@ -311,7 +320,10 @@ impl MediaCommandHandler {
         self.process_video_pipeline(ctx, request).await
     }
 
-    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_grpc_proto::media::FileInfo {
+    pub fn to_proto_file_info(
+        &self,
+        metadata: &MediaFileMetadata,
+    ) -> flare_grpc_proto::media::FileInfo {
         crate::application::utils::to_proto_file_info(metadata)
     }
 
@@ -438,7 +450,7 @@ impl MediaCommandHandler {
         ctx: &Context,
         request: ProcessImageRequest,
     ) -> Result<ProcessedMediaResult> {
-        info!(
+        debug!(
             file_id = %request.file_id,
             operations_count = request.operations.len(),
             "Starting image processing pipeline"
@@ -449,7 +461,9 @@ impl MediaCommandHandler {
             .domain_service
             .get_metadata(ctx, &request.file_id)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to get original file"))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::InternalError, "Failed to get original file")
+            })?;
 
         // 2. 执行图片处理操作
         let mut processing_results = Vec::new();
@@ -501,7 +515,7 @@ impl MediaCommandHandler {
         // 5. 清理临时文件
         self.cleanup_temporary_files(&processing_results).await?;
 
-        info!(
+        debug!(
             file_id = %request.file_id,
             processed_url = %processed_url,
             "Image processing pipeline completed successfully"
@@ -529,7 +543,7 @@ impl MediaCommandHandler {
         ctx: &Context,
         request: ProcessVideoRequest,
     ) -> Result<ProcessedMediaResult> {
-        info!(
+        debug!(
             file_id = %request.file_id,
             "Starting video processing pipeline"
         );
@@ -540,7 +554,11 @@ impl MediaCommandHandler {
             .get_metadata(ctx, &request.file_id)
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::InternalError, "Failed to get original video file")
+                map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "Failed to get original video file",
+                )
             })?;
 
         // 2. 执行视频处理操作
@@ -593,7 +611,7 @@ impl MediaCommandHandler {
         // 5. 清理临时文件
         self.cleanup_temporary_files(&processing_results).await?;
 
-        info!(
+        debug!(
             file_id = %request.file_id,
             processed_url = %processed_url,
             "Video processing pipeline completed successfully"
@@ -1307,7 +1325,7 @@ impl MediaCommandHandler {
         results: &[crate::domain::model::MediaProcessingResult],
     ) -> Result<()> {
         // 更新文件元数据逻辑
-        tracing::info!(
+        tracing::trace!(
             file_id = %file_id,
             operations_count = results.len(),
             "Updated file metadata with processing results"
@@ -1326,7 +1344,7 @@ impl MediaCommandHandler {
         results: &[crate::domain::model::MediaProcessingResult],
     ) -> Result<()> {
         // 更新视频文件元数据逻辑
-        tracing::info!(
+        tracing::trace!(
             file_id = %file_id,
             operations_count = results.len(),
             "Updated video file metadata with processing results"
@@ -1354,7 +1372,7 @@ impl MediaCommandHandler {
                         "Failed to clean up temporary file"
                     );
                 } else {
-                    tracing::debug!(
+                    tracing::trace!(
                         output_url = %result.output_url,
                         "Cleaned up temporary file"
                     );

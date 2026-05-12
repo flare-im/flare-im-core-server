@@ -82,14 +82,22 @@ impl MediaMetadataCache for RedisMetadataCache {
         };
 
         let payload = serde_json::to_string(&cached).map_err(|e| {
-            map_infra_error(e, ErrorCode::SerializationError, "serialize cached metadata")
+            map_infra_error(
+                e,
+                ErrorCode::SerializationError,
+                "serialize cached metadata",
+            )
         })?;
         let mut conn = self.connection.lock().await;
         let _: () = conn
             .set(self.key(&metadata.file_id), payload)
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::NetworkError, "failed to cache media metadata in redis")
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to cache media metadata in redis",
+                )
             })?;
         Ok(())
     }
@@ -101,7 +109,11 @@ impl MediaMetadataCache for RedisMetadataCache {
         })?;
         if let Some(value) = value {
             let cached: CachedMetadata = serde_json::from_str(&value).map_err(|e| {
-                map_infra_error(e, ErrorCode::DeserializationError, "deserialize cached metadata")
+                map_infra_error(
+                    e,
+                    ErrorCode::DeserializationError,
+                    "deserialize cached metadata",
+                )
             })?;
             let status = MediaAssetStatus::from_str(&cached.status).map_err(|_| {
                 map_infra_error(
@@ -145,9 +157,10 @@ impl MediaMetadataCache for RedisMetadataCache {
 
     async fn invalidate(&self, file_id: &str) -> Result<()> {
         let mut conn = self.connection.lock().await;
-        let _: () = conn.del(self.key(file_id)).await.map_err(|e| {
-            map_infra_error(e, ErrorCode::NetworkError, "redis delete cache key")
-        })?;
+        let _: () = conn
+            .del(self.key(file_id))
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "redis delete cache key"))?;
         Ok(())
     }
 }

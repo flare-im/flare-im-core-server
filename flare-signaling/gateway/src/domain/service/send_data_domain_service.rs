@@ -39,7 +39,7 @@ impl SendDataDomainService {
                     ));
                 }
                 let sync = sync.clone();
-                tracing::debug!(
+                tracing::trace!(
                     connection_id = %cmd.connection_id,
                     sync_kind = sync.kind,
                     "DATA SYNC_REQUEST → forward"

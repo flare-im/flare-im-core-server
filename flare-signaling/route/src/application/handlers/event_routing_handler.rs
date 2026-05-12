@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use flare_grpc_proto::signaling::router::RouteOptions;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_proto::common::Event;
 use flare_proto::common::event::Payload as EventPayload;
-use flare_grpc_proto::signaling::router::RouteOptions;
 use flare_server_core::context::{ActorType, Context, ContextExt};
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -141,7 +141,10 @@ impl EventRoutingHandler {
                 total_duration_ms = total_duration.as_millis(),
                 "Route rejected hard delete event: operator is not admin/owner"
             );
-            return Err(flare_err!(ErrorCode::PermissionDenied, "Hard delete requires admin or owner role"));
+            return Err(flare_err!(
+                ErrorCode::PermissionDenied,
+                "Hard delete requires admin or owner role"
+            ));
         }
 
         if let Some(ref fc) = self.flow_controller {
@@ -191,7 +194,7 @@ impl EventRoutingHandler {
             total_duration_ms = total_duration.as_millis(),
             "Event routed successfully"
         );
-        
+
         Ok(EventRouteResult {
             response_data,
             routed_endpoint: endpoint,

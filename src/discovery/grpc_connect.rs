@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use tonic::transport::{Channel, Endpoint};
 
-use crate::config::FlareAppConfig;
 use crate::ServiceClient;
+use crate::config::FlareAppConfig;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 
 use super::init::create_discover_from_config;

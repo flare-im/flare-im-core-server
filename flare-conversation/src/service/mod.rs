@@ -43,7 +43,10 @@ impl ApplicationBootstrap {
     }
 
     /// 运行服务（带应用上下文）
-    async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> anyhow::Result<()> {
+    async fn run_with_context(
+        context: ApplicationContext,
+        address: SocketAddr,
+    ) -> anyhow::Result<()> {
         use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageServiceServer;
         use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
         use tonic::transport::Server;
@@ -61,39 +64,43 @@ impl ApplicationBootstrap {
         let mut runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(CONVERSATION)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
                 .add_spawn_with_shutdown("conversation-grpc", move |shutdown_rx| async move {
-                // 使用 ContextLayer 直接包裹 Service
-                use flare_server_core::middleware::ContextLayer;
+                    // 使用 ContextLayer 直接包裹 Service
+                    use flare_server_core::middleware::ContextLayer;
 
-                let read_svc = ContextLayer::new()
-                    .allow_missing()
-                    .layer(ConversationReadServiceServer::new(handler.clone()));
-                let manage_svc = ContextLayer::new()
-                    .allow_missing()
-                    .layer(ConversationManageServiceServer::new(handler));
+                    let read_svc = ContextLayer::new()
+                        .allow_missing()
+                        .layer(ConversationReadServiceServer::new(handler.clone()));
+                    let manage_svc = ContextLayer::new()
+                        .allow_missing()
+                        .layer(ConversationManageServiceServer::new(handler));
 
-                Server::builder()
-                    .add_service(read_svc)
-                    .add_service(manage_svc)
-                    .serve_with_shutdown(address_clone, async {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("gRPC server error: {}", e),
-                        ))
-                    })
-            }),
+                    Server::builder()
+                        .add_service(read_svc)
+                        .add_service(manage_svc)
+                        .serve_with_shutdown(address_clone, async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("gRPC server error: {}", e),
+                            ))
+                        })
+                }),
             CONVERSATION,
         );
 
-        // 将 ReadReceipt Kafka 消费者纳入 Runtime 管理
+        // 将 ReadReceipt JetStream 消费者纳入 Runtime 管理
         if let Some(consumer) = context.read_receipt_consumer {
             runtime = runtime.add_spawn("read-receipt-consumer", async move {
-                consumer.run().await
+                consumer
+                    .run()
+                    .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -103,10 +110,12 @@ impl ApplicationBootstrap {
             });
         }
 
-        // 将 ConversationEnsure Kafka 消费者纳入 Runtime 管理
+        // 将 ConversationEnsure JetStream 消费者纳入 Runtime 管理
         if let Some(consumer) = context.conversation_ensure_consumer {
             runtime = runtime.add_spawn("conversation-ensure-consumer", async move {
-                consumer.run().await
+                consumer
+                    .run()
+                    .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -120,8 +129,12 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_core::discovery::register_runtime_service_only(CONVERSATION, addr, None)
-                        .await
+                    flare_im_core::discovery::register_runtime_service_only(
+                        CONVERSATION,
+                        addr,
+                        None,
+                    )
+                    .await
                 })
             })
             .await

@@ -14,10 +14,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway::PushMessageRequest;
-use flare_proto::common::{mq_envelope, MqEnvelope, MqPayloadKind};
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
+use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::PushRouterHandler;
@@ -78,17 +76,16 @@ impl MessageHandler for PushMessageHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>()
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    topic = %message.context.topic,
-                    "Failed to deserialize MqEnvelope"
-                );
-                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-            })?;
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
 
-        tracing::debug!(
+        tracing::trace!(
             envelope_id = %envelope.envelope_id,
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
@@ -104,7 +101,15 @@ impl MessageHandler for PushMessageHandler {
                 "Unexpected payload_kind, expected MESSAGE, sending to DLQ"
             );
             let ctx = &message.context.ctx;
-            if let Err(e) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), message.payload.clone()).await {
+            if let Err(e) = self
+                .publisher
+                .publish_dlq(
+                    ctx,
+                    Some(&envelope.conversation_id),
+                    message.payload.clone(),
+                )
+                .await
+            {
                 tracing::error!(error = %e, "Failed to send message to DLQ");
             }
             return Ok(MessageResult::Ack);
@@ -119,7 +124,15 @@ impl MessageHandler for PushMessageHandler {
                     "Message payload missing or wrong variant, sending to DLQ"
                 );
                 let ctx = &message.context.ctx;
-                if let Err(e) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), message.payload.clone()).await {
+                if let Err(e) = self
+                    .publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await
+                {
                     tracing::error!(error = %e, "Failed to send message to DLQ");
                 }
                 return Ok(MessageResult::Ack);
@@ -139,7 +152,7 @@ impl MessageHandler for PushMessageHandler {
         // 6. 调用 Application 层
         match self.route_handler.handle_message(ctx, req).await {
             Ok(()) => {
-                tracing::debug!(
+                tracing::trace!(
                     topic = %message.context.topic,
                     partition = message.context.partition,
                     offset = message.context.offset,
@@ -156,7 +169,15 @@ impl MessageHandler for PushMessageHandler {
                     offset = message.context.offset,
                     "Failed to process MqEnvelope, sending to DLQ"
                 );
-                if let Err(dlq_err) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), message.payload.clone()).await {
+                if let Err(dlq_err) = self
+                    .publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await
+                {
                     tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
                 }
                 Ok(MessageResult::Ack)

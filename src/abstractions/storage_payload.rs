@@ -3,8 +3,8 @@
 //! 使用 common.Message 原形；envelope（sync/tags/metadata）通过 Message.extra 约定键传递。
 //! Context 与 metadata 通过 [context_to_mq_metadata] / [context_from_mq_metadata] 双向编解码。
 
-use crate::utils::{context_from_mq_metadata, context_to_mq_metadata};
 use crate::Ctx;
+use crate::utils::{context_from_mq_metadata, context_to_mq_metadata};
 use flare_proto::common::Message;
 use std::collections::HashMap;
 
@@ -37,7 +37,7 @@ impl StorageMessagePayload {
         context_from_mq_metadata(&self.metadata)
     }
 
-    /// 转为 proto Message（供 Kafka 等序列化）。envelope 写入 message.extra。
+    /// 转为 proto Message（供 JetStream 等序列化）。envelope 写入 message.extra。
     pub fn to_message(&self) -> Option<Message> {
         let mut msg = self.message.clone()?;
         if msg.conversation_id.is_empty() {

@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use flare_grpc_proto::media::{
-    DescribeBucketRequest, DescribeBucketResponse, DownloadFileRequest, DownloadFileChunk, GenerateUploadUrlRequest,
-    GenerateUploadUrlResponse, GetDirectUploadStatusRequest, GetDirectUploadStatusResponse,
-    GetFileUrlRequest, ListObjectsRequest, ListObjectsResponse, PresignDirectUploadPartsRequest,
-    PresignDirectUploadPartsResponse, PresignedUploadPart,
+    DescribeBucketRequest, DescribeBucketResponse, DownloadFileChunk, DownloadFileRequest,
+    GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetDirectUploadStatusRequest,
+    GetDirectUploadStatusResponse, GetFileUrlRequest, ListObjectsRequest, ListObjectsResponse,
+    PresignDirectUploadPartsRequest, PresignDirectUploadPartsResponse, PresignedUploadPart,
 };
 use flare_server_core::context::Context;
 
@@ -79,9 +79,10 @@ impl MediaQueryHandler {
         _ctx: &Context,
         request: GenerateUploadUrlRequest,
     ) -> Result<GenerateUploadUrlResponse> {
-        let (upload_url, object_key) = self
-            .domain_service
-            .generate_upload_url(Some(request.bucket.as_str()), Some(request.object_key.as_str()));
+        let (upload_url, object_key) = self.domain_service.generate_upload_url(
+            Some(request.bucket.as_str()),
+            Some(request.object_key.as_str()),
+        );
         Ok(GenerateUploadUrlResponse {
             upload_url,
             object_key,
@@ -168,12 +169,17 @@ impl MediaQueryHandler {
         self.domain_service.list_references(ctx, file_id).await
     }
 
-    pub fn to_proto_file_info(&self, metadata: &MediaFileMetadata) -> flare_grpc_proto::media::FileInfo {
+    pub fn to_proto_file_info(
+        &self,
+        metadata: &MediaFileMetadata,
+    ) -> flare_grpc_proto::media::FileInfo {
         crate::application::utils::to_proto_file_info(metadata)
     }
 }
 
-fn to_direct_upload_status_response(state: DirectUploadSessionState) -> GetDirectUploadStatusResponse {
+fn to_direct_upload_status_response(
+    state: DirectUploadSessionState,
+) -> GetDirectUploadStatusResponse {
     GetDirectUploadStatusResponse {
         upload_id: state.upload_id,
         file_id: state.file_id,

@@ -169,7 +169,7 @@ pub trait ConversationRepository: Send + Sync {
 /// MQ Adapter Trait
 /// 
 /// 注意：使用 async_trait 宏是因为该 trait 需要支持插件化架构，
-/// 允许运行时切换不同的消息队列实现（Kafka/RocketMQ）。
+/// 允许运行时切换不同的消息队列实现（JetStream/RocketMQ）。
 #[async_trait]
 pub trait MqAdapter: Send + Sync {
     async fn publish(&self, topic: &str, message: &[u8]) -> Result<()>;
@@ -410,7 +410,7 @@ pub fn wire_services(config: Arc<Config>) -> Result<ConversationService> {
 - 网络传输: ~1-10ms
 - 数据库查询: ~1-50ms
 - Redis 缓存: ~0.1-1ms
-- Kafka 发布: ~1-10ms
+- JetStream 发布: ~1-10ms
 - 业务逻辑: ~0.1-1ms
 - async-trait 开销: ~0.0001-0.0002ms
 

@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_im_core::service_names::PUSH_PROXY;
 use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::PUSH_PROXY;
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -39,25 +39,24 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(PUSH_PROXY)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
-                .add_spawn_with_shutdown(
-                    "push-proxy-grpc",
-                    move |shutdown_rx| async move {
-                        use flare_server_core::middleware::ContextLayer;
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
+                .add_spawn_with_shutdown("push-proxy-grpc", move |shutdown_rx| async move {
+                    use flare_server_core::middleware::ContextLayer;
 
-                        let svc = ContextLayer::new()
-                            .allow_missing()
-                            .layer(PushServiceServer::new(handler));
+                    let svc = ContextLayer::new()
+                        .allow_missing()
+                        .layer(PushServiceServer::new(handler));
 
-                        Server::builder()
-                            .add_service(svc)
-                            .serve_with_shutdown(address_clone, async {
-                                let _ = shutdown_rx.await;
-                            })
-                            .await
-                            .map_err(|e| format!("gRPC server error: {}", e).into())
-                    },
-                ),
+                    Server::builder()
+                        .add_service(svc)
+                        .serve_with_shutdown(address_clone, async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| format!("gRPC server error: {}", e).into())
+                }),
             PUSH_PROXY,
         );
 

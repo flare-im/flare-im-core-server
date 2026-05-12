@@ -2,7 +2,9 @@
 //!
 //! 封装连接管理的核心业务逻辑
 
-use flare_grpc_proto::signaling::{HeartbeatRequest, LoginRequest, LogoutRequest};
+use flare_grpc_proto::signaling::{
+    DeviceConflictStrategy, HeartbeatRequest, LoginRequest, LogoutRequest,
+};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
@@ -44,17 +46,55 @@ impl ConnectionDomainService {
         &self,
         user_id: &str,
         device_id: &str,
+        device_platform: Option<&str>,
         connection_id: Option<&str>,
         connection_metadata: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<String> {
-        use uuid::Uuid;
-
-        let _conversation_id = Uuid::new_v4().to_string();
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id is required").build_error(),
+            );
+        }
+        let device_id = device_id.trim();
+        if device_id.is_empty() || device_id.eq_ignore_ascii_case("unknown") {
+            return Err(
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "device_id is required")
+                    .build_error(),
+            );
+        }
+        let device_platform = device_platform.unwrap_or("").trim();
+        if device_platform.is_empty() || device_platform.eq_ignore_ascii_case("unknown") {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "device_platform is required",
+            )
+            .build_error());
+        }
         let server_id = self.config.gateway_id.clone();
 
         // 构建 metadata，包含 gateway_id
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("gateway_id".to_string(), self.config.gateway_id.clone());
+        if let Some(connection_id) = connection_id {
+            metadata.insert("connection_id".to_string(), connection_id.to_string());
+        }
+        if let Some(connection_metadata) = connection_metadata {
+            for key in [
+                "tenant_id",
+                "x-tenant-id",
+                "app_version",
+                "system_version",
+                "model",
+            ] {
+                if let Some(value) = connection_metadata.get(key)
+                    && !value.trim().is_empty()
+                {
+                    metadata.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        let app_version = metadata.get("app_version").cloned().unwrap_or_default();
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -62,9 +102,9 @@ impl ConnectionDomainService {
             device_id: device_id.to_string(),
             server_id: server_id.clone(),
             metadata,
-            device_platform: "unknown".to_string(),
-            app_version: "unknown".to_string(),
-            desired_conflict_strategy: 0,
+            device_platform: device_platform.to_string(),
+            app_version,
+            desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
             device_priority: 2, // Normal 优先级
             token_version: 0,
             initial_quality: None,
@@ -129,14 +169,10 @@ impl ConnectionDomainService {
     ///
     /// 通知 Signaling Online 服务注销用户连接
     #[instrument(skip(self), fields(user_id))]
-    pub async fn unregister_connection(
-        &self,
-        user_id: &str,
-        conversation_id: Option<&str>,
-    ) -> Result<()> {
+    pub async fn unregister_connection(&self, user_id: &str, conversation_id: &str) -> Result<()> {
         let logout_request = LogoutRequest {
             user_id: user_id.to_string(),
-            conversation_id: conversation_id.unwrap_or("").to_string(),
+            conversation_id: conversation_id.to_string(),
         };
 
         if let Err(e) = self.connection_port.logout(logout_request).await {
@@ -198,7 +234,7 @@ impl ConnectionDomainService {
         .await
         {
             Ok(Ok(_)) => {
-                tracing::debug!(
+                tracing::trace!(
                     user_id = %user_id,
                     conversation_id = %conversation_id,
                     "Heartbeat sent successfully"

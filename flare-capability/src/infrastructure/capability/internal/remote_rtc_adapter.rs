@@ -1,4 +1,4 @@
-//! 通过 `flare.sfu.control.v1.SfuControl` 访问独立 **flare-strom-sfu** 控制面，实现 [`RtcCapability`]。
+//! 通过 `flare.sfu.control.v1.SfuControl` 访问独立媒体控制面，实现 `RtcCapability`。
 
 use std::collections::HashMap;
 
@@ -7,25 +7,31 @@ use flare_core_base::context::Ctx;
 use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
 use flare_grpc_proto::sfu_control::{
     AcceptCallRequest as ProtoAcceptCallRequest, AddIceCandidateRequest as ProtoAddIce,
-    CreateRoomRequest, GetJoinTokenRequest as ProtoJoin,
+    CreateRoomRequest, GetJoinTokenRequest as ProtoJoin, GetPeerNetworkQualityRequest,
     HandleSdpAnswerRequest as ProtoHandleAnswer, HandleSdpOfferRequest as ProtoHandleOffer,
     HangupCallRequest as ProtoHangup, JoinRoomRequest as ProtoJoinRoom,
-    LeaveRoomRequest as ProtoLeaveRoom,
+    LeaveRoomRequest as ProtoLeaveRoom, MediaKind,
+    SetPublisherMuteRequest as ProtoSetPublisherMute,
+    SetSimulcastLayerRequest as ProtoSetSimulcastLayer,
+    SetSubscriptionRequest as ProtoSetSubscription, SimulcastLayer,
 };
 use flare_server_core::client::set_context_metadata;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use tonic::transport::Channel;
+use serde_json::{Value, json};
 use tonic::Request;
+use tonic::transport::Channel;
 use uuid::Uuid;
 
 use crate::domain::capability::{
     AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
-    CapabilityError, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
-    HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
-    HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    RejectCallRequest, RejectCallResponse, Result, RtcCapability, SfuJoinRoomRequest,
-    SfuJoinRoomResponse, SfuLeaveRoomRequest, SfuLeaveRoomResponse,
+    CapabilityError, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest,
+    GetJoinTokenResponse, HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest,
+    HandleSdpOfferResponse, HangupCallRequest, HangupCallResponse, ListParticipantsRequest,
+    ListParticipantsResponse, MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse,
+    MediaJoinTransportRequest, MediaJoinTransportResponse, MediaLeaveTransportRequest,
+    MediaLeaveTransportResponse, MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse,
+    MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest,
+    MediaSetSubscriptionResponse, RejectCallRequest, RejectCallResponse, Result, RtcCapability,
 };
 
 #[derive(Debug, Deserialize)]
@@ -34,33 +40,27 @@ struct CallRefPayload {
 }
 
 fn status_to_capability(s: tonic::Status) -> CapabilityError {
-    CapabilityError::System(format!(
-        "strom-sfu gRPC {}: {}",
-        s.code(),
-        s.message()
-    ))
+    CapabilityError::System(format!("media-control gRPC {}: {}", s.code(), s.message()))
 }
 
-/// 独立 strom-sfu 进程的 gRPC 后端（与进程内 `flare-sfu` 二选一）。
-pub struct StromSfuGrpcRtcCapability {
+/// 独立媒体控制面进程的 gRPC 后端（与进程内媒体后端二选一）。
+pub struct MediaControlGrpcRtcCapability {
     client: SfuControlClient<Channel>,
 }
 
-impl StromSfuGrpcRtcCapability {
-    /// 连接 `FLARE_STROM_SFU_GRPC_ENDPOINT` 形式的 URI（如 `http://127.0.0.1:50051`）。
+impl MediaControlGrpcRtcCapability {
     pub async fn connect(endpoint: impl Into<String>) -> anyhow::Result<Self> {
         let ep = endpoint.into();
         let channel = Channel::from_shared(ep.clone())
-            .map_err(|e| anyhow::anyhow!("invalid strom SFU gRPC endpoint {ep}: {e}"))?
+            .map_err(|e| anyhow::anyhow!("invalid media-control gRPC endpoint {ep}: {e}"))?
             .connect()
             .await
-            .map_err(|e| anyhow::anyhow!("strom SFU gRPC dial {ep}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("media-control gRPC dial {ep}: {e}"))?;
         Ok(Self {
             client: SfuControlClient::new(channel),
         })
     }
 
-    /// 供 `ExtensionPlugin` 等旁路调用 `SfuControl`（与 [`RtcCapability`] 共用同一连接）。
     pub fn control_client(&self) -> SfuControlClient<Channel> {
         self.client.clone()
     }
@@ -73,39 +73,52 @@ impl StromSfuGrpcRtcCapability {
             .unwrap_or_else(|| req_call_id.to_owned())
     }
 
-    /// 为 strom-sfu 选择稳定的房间主键，避免同一通话重复创建时漂移到不同 room/call。
-    ///
-    /// 优先级：
-    /// 1) `call_id` 可解析为 UUID（主路径，客户端通常传 UUID）
-    /// 2) `conversation_id` 可解析为 UUID
-    /// 3) 对 `call_id` 做 v5 派生（稳定）
-    /// 4) 对 `conversation_id` 做 v5 派生（稳定）
-    /// 5) 兜底随机 UUID（仅在两者都为空）
     fn resolve_room_id(call_id: &str, conversation_id: &str) -> String {
         let call_id = call_id.trim();
         if let Ok(u) = Uuid::parse_str(call_id) {
             return u.to_string();
         }
-
         let conversation_id = conversation_id.trim();
         if let Ok(u) = Uuid::parse_str(conversation_id) {
             return u.to_string();
         }
-
-        if !call_id.is_empty() {
-            return Uuid::new_v5(&Uuid::NAMESPACE_OID, call_id.as_bytes()).to_string();
-        }
-        if !conversation_id.is_empty() {
-            return Uuid::new_v5(&Uuid::NAMESPACE_OID, conversation_id.as_bytes()).to_string();
+        if !call_id.is_empty() || !conversation_id.is_empty() {
+            // 不依赖 uuid v5 feature；在无可解析 UUID 时退化为随机 room_id。
+            return Uuid::new_v4().to_string();
         }
         Uuid::new_v4().to_string()
+    }
+
+    fn parse_media_kind(media: Option<&str>) -> MediaKind {
+        match media
+            .map(str::trim)
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("audio") => MediaKind::Audio,
+            Some("video") => MediaKind::Video,
+            _ => MediaKind::Unspecified,
+        }
+    }
+
+    fn parse_simulcast_layer(layer: Option<&str>) -> SimulcastLayer {
+        match layer
+            .map(str::trim)
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("high") => SimulcastLayer::High,
+            Some("medium") => SimulcastLayer::Medium,
+            Some("low") => SimulcastLayer::Low,
+            _ => SimulcastLayer::Unspecified,
+        }
     }
 }
 
 #[async_trait]
-impl RtcCapability for StromSfuGrpcRtcCapability {
+impl RtcCapability for MediaControlGrpcRtcCapability {
     fn id(&self) -> &str {
-        "strom-sfu.rtc"
+        "media-control.rtc"
     }
 
     async fn create_call(&self, ctx: &Ctx, req: &CreateCallRequest) -> Result<CreateCallResponse> {
@@ -168,6 +181,7 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
             call_id: inner.call_id,
             ext: json!({
                 "room_id": inner.room_id,
+                "signaling_ws_base": inner.signaling_ws_base,
             }),
         })
     }
@@ -248,6 +262,7 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
             ttl_seconds: inner.ttl_seconds,
             ext: json!({
                 "room_id": inner.room_id,
+                "signaling_ws_base": inner.signaling_ws_base,
             }),
         })
     }
@@ -261,12 +276,16 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
             participants: vec![],
             ext: json!({
                 "call_id": req.call_id,
-                "note": "strom-sfu gRPC: use GetRoomSummary / events for roster (placeholder)",
+                "note": "media-control gRPC: use GetRoomSummary / events for roster (placeholder)",
             }),
         })
     }
 
-    async fn sfu_join_room(&self, ctx: &Ctx, req: &SfuJoinRoomRequest) -> Result<SfuJoinRoomResponse> {
+    async fn media_join_transport(
+        &self,
+        ctx: &Ctx,
+        req: &MediaJoinTransportRequest,
+    ) -> Result<MediaJoinTransportResponse> {
         let mut grpc_req = Request::new(ProtoJoinRoom {
             request_id: req.request_id.clone(),
             room_id: req.room_id.clone(),
@@ -286,7 +305,7 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
             .map_err(status_to_capability)?;
         let inner = resp.into_inner();
 
-        Ok(SfuJoinRoomResponse {
+        Ok(MediaJoinTransportResponse {
             room_id: inner.room_id,
             peer_id: inner.peer_id,
             session_id: inner.session_id,
@@ -295,11 +314,11 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
         })
     }
 
-    async fn sfu_leave_room(
+    async fn media_leave_transport(
         &self,
         ctx: &Ctx,
-        req: &SfuLeaveRoomRequest,
-    ) -> Result<SfuLeaveRoomResponse> {
+        req: &MediaLeaveTransportRequest,
+    ) -> Result<MediaLeaveTransportResponse> {
         let mut grpc_req = Request::new(ProtoLeaveRoom {
             request_id: req.request_id.clone(),
             room_id: req.room_id.clone(),
@@ -317,13 +336,13 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
             .map_err(status_to_capability)?;
         let inner = resp.into_inner();
 
-        Ok(SfuLeaveRoomResponse {
+        Ok(MediaLeaveTransportResponse {
             left: inner.left,
             ext: Value::Null,
         })
     }
 
-    async fn sfu_handle_sdp_offer(
+    async fn media_handle_sdp_offer(
         &self,
         ctx: &Ctx,
         req: &HandleSdpOfferRequest,
@@ -350,7 +369,7 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
         })
     }
 
-    async fn sfu_handle_sdp_answer(
+    async fn media_handle_sdp_answer(
         &self,
         ctx: &Ctx,
         req: &HandleSdpAnswerRequest,
@@ -377,7 +396,7 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
         })
     }
 
-    async fn sfu_add_ice_candidate(
+    async fn media_add_ice_candidate(
         &self,
         ctx: &Ctx,
         req: &AddIceCandidateRequest,
@@ -400,6 +419,121 @@ impl RtcCapability for StromSfuGrpcRtcCapability {
 
         Ok(AddIceCandidateResponse {
             accepted: inner.accepted,
+            ext: Value::Null,
+        })
+    }
+
+    async fn media_set_publisher_mute(
+        &self,
+        ctx: &Ctx,
+        req: &MediaSetPublisherMuteRequest,
+    ) -> Result<MediaSetPublisherMuteResponse> {
+        let mut grpc_req = Request::new(ProtoSetPublisherMute {
+            request_id: req.request_id.clone(),
+            room_id: req.room_id.clone(),
+            publisher_peer_id: req.publisher_peer_id.clone(),
+            mute_audio: req.mute_audio,
+            mute_video: req.mute_video,
+        });
+        set_context_metadata(&mut grpc_req, ctx);
+
+        let resp = self
+            .client
+            .clone()
+            .set_publisher_mute(grpc_req)
+            .await
+            .map_err(status_to_capability)?;
+        let inner = resp.into_inner();
+
+        Ok(MediaSetPublisherMuteResponse {
+            applied: inner.applied,
+            ext: Value::Null,
+        })
+    }
+
+    async fn media_set_subscription(
+        &self,
+        ctx: &Ctx,
+        req: &MediaSetSubscriptionRequest,
+    ) -> Result<MediaSetSubscriptionResponse> {
+        let mut grpc_req = Request::new(ProtoSetSubscription {
+            request_id: req.request_id.clone(),
+            room_id: req.room_id.clone(),
+            subscriber_peer_id: req.subscriber_peer_id.clone(),
+            track_id: req.track_id.clone(),
+            enable: req.enable,
+            media: Self::parse_media_kind(req.media.as_deref()) as i32,
+            preferred_layer: Self::parse_simulcast_layer(req.preferred_layer.as_deref()) as i32,
+            priority: req.priority,
+        });
+        set_context_metadata(&mut grpc_req, ctx);
+
+        let resp = self
+            .client
+            .clone()
+            .set_subscription(grpc_req)
+            .await
+            .map_err(status_to_capability)?;
+        let inner = resp.into_inner();
+        Ok(MediaSetSubscriptionResponse {
+            applied: inner.applied,
+            ext: Value::Null,
+        })
+    }
+
+    async fn media_set_simulcast_layer(
+        &self,
+        ctx: &Ctx,
+        req: &MediaSetSimulcastLayerRequest,
+    ) -> Result<MediaSetSimulcastLayerResponse> {
+        let mut grpc_req = Request::new(ProtoSetSimulcastLayer {
+            request_id: req.request_id.clone(),
+            room_id: req.room_id.clone(),
+            subscriber_peer_id: req.subscriber_peer_id.clone(),
+            track_id: req.track_id.clone(),
+            layer: Self::parse_simulcast_layer(Some(req.layer.as_str())) as i32,
+        });
+        set_context_metadata(&mut grpc_req, ctx);
+
+        let resp = self
+            .client
+            .clone()
+            .set_simulcast_layer(grpc_req)
+            .await
+            .map_err(status_to_capability)?;
+        let inner = resp.into_inner();
+        Ok(MediaSetSimulcastLayerResponse {
+            applied: inner.applied,
+            ext: Value::Null,
+        })
+    }
+
+    async fn media_get_network_quality(
+        &self,
+        ctx: &Ctx,
+        req: &MediaGetNetworkQualityRequest,
+    ) -> Result<MediaGetNetworkQualityResponse> {
+        let mut grpc_req = Request::new(GetPeerNetworkQualityRequest {
+            request_id: req.request_id.clone(),
+            room_id: req.room_id.clone(),
+            peer_id: req.peer_id.clone(),
+        });
+        set_context_metadata(&mut grpc_req, ctx);
+
+        let resp = self
+            .client
+            .clone()
+            .get_peer_network_quality(grpc_req)
+            .await
+            .map_err(status_to_capability)?;
+        let inner = resp.into_inner();
+        let quality = inner.quality;
+        Ok(MediaGetNetworkQualityResponse {
+            has_data: inner.has_data,
+            upstream_score: quality.as_ref().map(|q| q.upstream_score).unwrap_or(0),
+            downstream_score: quality.as_ref().map(|q| q.downstream_score).unwrap_or(0),
+            rtt_ms: quality.as_ref().map(|q| q.rtt_ms).unwrap_or(0),
+            packet_loss_ratio: quality.as_ref().map(|q| q.packet_loss_ratio).unwrap_or(0.0),
             ext: Value::Null,
         })
     }

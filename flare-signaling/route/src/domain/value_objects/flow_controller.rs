@@ -11,8 +11,8 @@ use crate::domain::service::RouteContext;
 
 /// 监控客户端trait，用于查询系统反压信号
 pub trait MonitoringClient: Send + Sync {
-    /// 获取Kafka Lag值
-    async fn get_kafka_lag(&self) -> anyhow::Result<u64>;
+    /// 获取JetStream Lag值
+    async fn get_jetstream_lag(&self) -> anyhow::Result<u64>;
 
     /// 获取Storage写入延迟（P99）
     async fn get_storage_latency(&self) -> anyhow::Result<f64>;
@@ -22,7 +22,7 @@ pub trait MonitoringClient: Send + Sync {
 pub struct NoopMonitoringClient;
 
 impl MonitoringClient for NoopMonitoringClient {
-    async fn get_kafka_lag(&self) -> anyhow::Result<u64> {
+    async fn get_jetstream_lag(&self) -> anyhow::Result<u64> {
         Ok(0)
     }
 
@@ -48,7 +48,7 @@ struct HotSessionInfo {
 /// 职责：
 /// - 会话级QPS限制（滑动窗口）
 /// - 群聊fanout限制
-/// - 系统反压检测（Kafka Lag、Storage延迟）
+/// - 系统反压检测（JetStream Lag、Storage延迟）
 /// - 热点会话降级
 ///
 /// 使用泛型参数以支持 Rust 2024 原生 async fn in traits
@@ -119,10 +119,10 @@ impl<MC: MonitoringClient> FlowController<MC> {
         Ok(count)
     }
 
-    /// 查询Kafka Lag（反压信号之一）
-    async fn get_kafka_lag(&self) -> Result<u64> {
+    /// 查询JetStream Lag（反压信号之一）
+    async fn get_jetstream_lag(&self) -> Result<u64> {
         if let Some(client) = &self.monitoring_client {
-            client.get_kafka_lag().await
+            client.get_jetstream_lag().await
         } else {
             Ok(0)
         }
@@ -168,7 +168,7 @@ impl<MC: MonitoringClient> FlowController<MC> {
     /// # 检查项
     /// 1. 会话级QPS限制（Redis滑动窗口）
     /// 2. 群聊fanout限制（大群消息批次限制）
-    /// 3. 系统反压信号（Kafka Lag、Storage延迟）
+    /// 3. 系统反压信号（JetStream Lag、Storage延迟）
     /// 4. 热点会话降级
     pub async fn check(&self, ctx: &RouteContext) -> Result<()> {
         // 1. 检查会话QPS（Redis INCR + EXPIRE）
@@ -203,12 +203,12 @@ impl<MC: MonitoringClient> FlowController<MC> {
         // 对于群聊消息，检查接收者数量是否超过限制
         // 注意：这里的实现需要从ctx中获取消息类型和接收者信息
 
-        // 3. 检查系统反压信号（Kafka Lag > 10000 或 Storage P99 > 500ms）
+        // 3. 检查系统反压信号（JetStream Lag > 10000 或 Storage P99 > 500ms）
         if self.backpressure_enabled {
-            // 检查Kafka Lag
-            let kafka_lag = self.get_kafka_lag().await?;
-            if kafka_lag > 10000 {
-                return Err(anyhow::anyhow!("Kafka lag too high: {}", kafka_lag));
+            // 检查JetStream Lag
+            let jetstream_lag = self.get_jetstream_lag().await?;
+            if jetstream_lag > 10000 {
+                return Err(anyhow::anyhow!("JetStream lag too high: {}", jetstream_lag));
             }
 
             // 检查Storage写入延迟

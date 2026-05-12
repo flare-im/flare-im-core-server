@@ -1,7 +1,6 @@
 //! `HookPlugin` gRPC：IM 主链与周边事件（`flare.capability.v1.HookPlugin.Call`）。
 
 use crate::error::{ErrorBuilder, ErrorCode};
-use flare_server_core::error::Result as FlareResult;
 use flare_grpc_proto::capability::hook_plugin_server::HookPlugin;
 use flare_grpc_proto::capability::{
     ConversationLifecycleHookRequest, ConversationLifecycleHookResponse,
@@ -16,17 +15,18 @@ use flare_grpc_proto::capability::{
     UserLoginHookRequest, UserLoginHookResponse, UserLogoutHookRequest, UserLogoutHookResponse,
     UserOfflineHookRequest, UserOfflineHookResponse, UserOnlineHookRequest, UserOnlineHookResponse,
 };
+use flare_server_core::error::Result as FlareResult;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::application::commands::materialize_hook_execution_plan;
 use crate::application::handler::HookCommandHandler;
+use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::HookExecutionPlan;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
 };
-use crate::composition::hook_registry::CoreHookRegistry;
 use flare_im_core::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
@@ -57,10 +57,9 @@ impl ImHookPluginServer {
 
     /// 将 protobuf HookMessageRecord 转换为 MessageRecord
     fn proto_to_message_record(proto: &HookMessageRecord) -> FlareResult<MessageRecord> {
-        let message = proto
-            .message
-            .as_ref()
-            .ok_or_else(|| ErrorBuilder::new(ErrorCode::InvalidParameter, "Message is required").build_error())?;
+        let message = proto.message.as_ref().ok_or_else(|| {
+            ErrorBuilder::new(ErrorCode::InvalidParameter, "Message is required").build_error()
+        })?;
 
         let persisted_at = proto
             .persisted_at
@@ -435,7 +434,7 @@ impl ImHookPluginServer {
         use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
         let conversation_id = get_hook_context_data(&ctx).and_then(|d| d.conversation_id.as_ref());
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 conversation_id = ?conversation_id,
                 event_type = event.event,
@@ -468,7 +467,7 @@ impl ImHookPluginServer {
         // Presence Hook 目前没有专门的配置，记录日志
         use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
         let conversation_id = get_hook_context_data(&ctx).and_then(|d| d.conversation_id.as_ref());
-        tracing::debug!(
+        tracing::trace!(
             user_id = ?conversation_id,
             "Presence hook notification received"
         );
@@ -494,7 +493,7 @@ impl ImHookPluginServer {
         let ctx = Self::proto_to_context(&context);
 
         // Custom Hook 目前没有专门的配置，记录日志
-        tracing::debug!(
+        tracing::trace!(
             hook_type = %hook_type,
             tenant_id = %ctx.tenant_id().unwrap_or(""),
             "Custom hook invocation received"
@@ -550,7 +549,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PreSend 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %draft.user_id,
                 task_id = %draft.task_id,
@@ -613,7 +612,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PostSend 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 "Executing PushPostSend hook"
             );
@@ -667,7 +666,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 Delivery 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %event.user_id,
                 task_id = %event.task_id,
@@ -720,7 +719,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PreSend 的逻辑，可以拒绝登录）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %event.user_id,
                 device_id = %event.device_id,
@@ -776,7 +775,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PostSend 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %event.user_id,
                 device_id = %event.device_id,
@@ -828,7 +827,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PostSend 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %event.user_id,
                 device_id = %event.device_id,
@@ -883,7 +882,7 @@ impl ImHookPluginServer {
 
         // 执行Hook（目前只记录日志，后续可以实现类似 PostSend 的逻辑）
         for plan in execution_plans {
-            tracing::debug!(
+            tracing::trace!(
                 hook = %plan.name(),
                 user_id = %event.user_id,
                 device_id = %event.device_id,

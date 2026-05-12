@@ -3,7 +3,7 @@ use std::sync::Arc;
 use flare_server_core::context::Context;
 
 use crate::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::application::commands::{
     BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
@@ -50,7 +50,7 @@ impl ConversationCommandHandler {
             .batch_acknowledge(ctx, command.cursors)
             .await?;
 
-        info!(user_id = %user_id, "Batch acknowledge completed");
+        debug!(user_id = %user_id, "Batch acknowledge completed");
         Ok(())
     }
 
@@ -79,7 +79,7 @@ impl ConversationCommandHandler {
             )
             .await?;
 
-        info!(conversation_id = %session.conversation_id, "Conversation created");
+        debug!(conversation_id = %session.conversation_id, "Conversation created");
         Ok(session)
     }
 
@@ -99,7 +99,7 @@ impl ConversationCommandHandler {
             .delete_conversation(ctx, &command.conversation_id, command.hard_delete)
             .await?;
 
-        info!(conversation_id = %command.conversation_id, "Conversation deleted");
+        debug!(conversation_id = %command.conversation_id, "Conversation deleted");
         Ok(())
     }
 
@@ -149,7 +149,7 @@ impl ConversationCommandHandler {
             )
             .await?;
 
-        info!(conversation_id = %command.conversation_id, "Participants managed");
+        debug!(conversation_id = %command.conversation_id, "Participants managed");
         Ok(participants)
     }
 
@@ -250,7 +250,7 @@ impl ConversationCommandHandler {
             )
             .await?;
 
-        info!(conversation_id = %command.conversation_id, "Conversation updated");
+        debug!(conversation_id = %command.conversation_id, "Conversation updated");
         Ok(conversation)
     }
 }
@@ -304,10 +304,11 @@ impl ConversationQueryHandler {
     ) -> Result<crate::domain::model::Conversation> {
         let user_id = require_user_id(ctx)?;
         if query.conversation_id.trim().is_empty() {
-            return Err(
-                ErrorBuilder::new(ErrorCode::InvalidParameter, "conversation_id is required")
-                    .build_error(),
-            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
         }
 
         let Some(conv) = self

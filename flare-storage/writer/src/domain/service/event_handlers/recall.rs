@@ -19,6 +19,7 @@ where
     let reason = (!recall.reason.is_empty()).then_some(recall.reason.as_str());
     ctx.repo
         .update_message_fsm_state(ctx.ctx, ctx.tenant_id, message_id, "RECALLED", reason)
-        .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     append_event_and_stream(ctx, message_id, event).await
 }

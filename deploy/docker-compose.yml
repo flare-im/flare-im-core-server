@@ -92,24 +92,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ===== 可选：ScyllaDB（仅用于混合架构 PoC / 未来消息体扩展） =====
-  # 启用前请阅读 deploy/STORAGE_ANALYSIS.md。当前应用层未实现 CQL 写入，仅作预留。
-  # scylla:
-  #   image: scylladb/scylla:6.0
-  #   container_name: flare-scylla
-  #   networks:
-  #     - flare-network
-  #   ports:
-  #     - "29042:9042"   # CQL native
-  #   command: --smp 1 --memory 1G --overprovisioned 1
-  #   volumes:
-  #     - ./data/scylla:/var/lib/scylla
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
-  #     interval: 15s
-  #     timeout: 10s
-  #     retries: 5
-
   # ===== Kafka - 消息队列（KRaft 无 Zookeeper） =====
   kafka:
     image: apache/kafka:3.7.0
@@ -145,76 +127,30 @@ services:
 
     volumes:
       - ./data/kafka:/var/lib/kafka/data
-  # kafka:
-  #   image: apache/kafka:3.7.0
-  #   container_name: flare-kafka
-  #   restart: always
-  #   networks:
-  #     - flare-network
-  #   ports:
-  #     - "29092:29092"
-  #   environment:
-  #     # 限制 JVM 堆内存，避免容器被 OOM 杀掉（尤其 Mac/podman 下内存紧张时）
-  #     KAFKA_HEAP_OPTS: "-Xmx1G -Xms512M"
-  #     CLUSTER_ID: 4LZEfdh1SPSb9z7J1Hf0sw
-  #     KAFKA_PROCESS_ROLES: broker,controller
-  #     KAFKA_NODE_ID: 1
-  #     KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-  #     KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
-  #     # 关键修复：EXTERNAL listener 必须返回宿主机可访问的地址
-  #     # 使用 127.0.0.1 而不是 localhost，避免 DNS 解析问题
-  #     # PLAINTEXT listener 用于容器内通信，EXTERNAL 用于宿主机连接
-  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:29092
-  #     KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-  #     KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-  #     KAFKA_LOG_DIRS: /var/lib/kafka/data
-  #     # 自动创建 topic (KRaft + Kafka 3.7.0)
-  #     KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-  #     # 默认分区数（自动创建的 topic）
-  #     KAFKA_NUM_PARTITIONS: "1"
-  #     # 消息大小限制（100MB，与代码中的 10MB 限制配合使用）
-  #     # 注意：代码层面已经限制了消息大小为 10MB，这里设置为 100MB 是为了避免 Kafka broker 拒绝消息
-  #     KAFKA_MESSAGE_MAX_BYTES: "104857600"
-  #     # Replica fetch 最大字节数（必须 >= message.max.bytes）
-  #     KAFKA_REPLICA_FETCH_MAX_BYTES: "104857600"
-  #     # 单节点 KRaft 必须将内部 topic 的副本因子设为 1
-  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-  #     KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
-  #     KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
-  #     # 修复：Broker 无法在超时内向 Controller 注册而退出（日志：unable to register with the controller quorum）
-  #     # Controller 在消费组 rebalance 等负载下可能响应变慢，延长注册与 RPC 超时
-  #     KAFKA_INITIAL_BROKER_REGISTRATION_TIMEOUT_MS: "120000"
-  #     KAFKA_CONTROLLER_QUORUM_REQUEST_TIMEOUT_MS: "10000"
-  #   volumes:
-  #     - ./data/kafka:/var/lib/kafka/data
-  #   healthcheck:
-  #     test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions", "--bootstrap-server", "kafka:9092"]
-  #     interval: 10s
-  #     timeout: 10s
-  #     retries: 5
-  #     start_period: 90s
+  # ===== NATS JetStream - 消息队列 =====
+  nats:
+    image: nats:2.10-alpine
+    container_name: flare-nats
+    restart: always
+    networks:
+      - flare-network
+    ports:
+      - "24222:4222"  # NATS client
+      - "28222:8222"  # NATS monitoring
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    volumes:
+      - ./data/nats:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # ===== MinIO - 对象存储 =====
-  # minio:
-  #   image: minio/minio:latest
-  #   container_name: flare-minio
-  #   networks:
-  #     - flare-network
-  #   ports:
-  #     - "29000:9000"
-  #     - "29001:9001"
-  #   environment:
-  #     MINIO_ROOT_USER: minioadmin
-  #     MINIO_ROOT_PASSWORD: minioadmin
-  #   volumes:
-  #     - ./data/minio:/data
-  #   command: server /data --console-address ":9001"
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-  #     interval: 30s
-  #     timeout: 20s
-  #     retries: 3
 
   # ===== rusFS - 对象存储 =====
   rustfs:

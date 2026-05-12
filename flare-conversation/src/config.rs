@@ -2,6 +2,7 @@ use crate::error::Result;
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_server_core::mq::nats::{NatsStreamSpec, default_stream_specs};
 use std::collections::HashMap;
 use std::env;
 
@@ -9,6 +10,7 @@ use crate::domain::model::{ConflictResolutionPolicy, ConversationPolicy};
 
 #[derive(Clone, Debug)]
 pub struct ConversationConfig {
+    pub mq_backend: String,
     pub redis_url: String,
     pub postgres_url: Option<String>,
     pub conversation_state_prefix: String,
@@ -18,24 +20,29 @@ pub struct ConversationConfig {
     pub storage_reader_service: Option<String>,
     pub recent_message_limit: i32,
     pub default_policy: ConversationPolicy,
-    /// Kafka bootstrap（配置则启用 ReadReceipt 消费者，未读数零成本更新）
-    pub kafka_bootstrap: Option<String>,
-    /// 与 Storage Writer 相同的 operation topic（仅 use_events_topic_only=false 时用）
-    pub kafka_operation_topic: Option<String>,
-    /// 统一事件流 topic，优先于 kafka_operation_topic（与 Orchestrator 单事件流对齐）
-    pub kafka_events_topic: Option<String>,
+    /// JetStream bootstrap（配置则启用 ReadReceipt 消费者，未读数零成本更新）
+    pub jetstream_url: Option<String>,
+    /// 与 Storage Writer 相同的 operation subject（仅 use_events_topic_only=false 时用）
+    pub jetstream_operation_subject: Option<String>,
+    /// 统一事件流 subject，优先于 jetstream_operation_subject（与 Orchestrator 单事件流对齐）
+    pub jetstream_events_subject: Option<String>,
     /// Consumer group（与 storage-writer 不同，避免抢消息）
-    pub kafka_group: Option<String>,
-    /// 会话确保 Topic（Orchestrator 异步会话创建时发布；配置则启用 ConversationEnsure 消费者）
-    pub kafka_ensure_topic: Option<String>,
+    pub jetstream_group: Option<String>,
+    pub jetstream_stream_specs: Vec<NatsStreamSpec>,
+    pub kafka_brokers: Vec<String>,
+    pub kafka_client_id: String,
+    /// 会话确保 Subject（Orchestrator 异步会话创建时发布；配置则启用 ConversationEnsure 消费者）
+    pub jetstream_ensure_subject: Option<String>,
     /// 会话确保消费者 group
-    pub kafka_ensure_group: Option<String>,
+    pub jetstream_ensure_group: Option<String>,
 }
 
 impl ConversationConfig {
     /// 从应用配置加载（新方式，推荐）
     pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service_config = app.conversation_service();
+        let mq_backend = app.mq_default_backend().to_string();
+        let kafka_profile = app.kafka_profile("message");
 
         // 解析 Redis 配置引用
         let redis_url = env::var("CONVERSATION_REDIS_URL")
@@ -141,50 +148,79 @@ impl ConversationConfig {
             metadata: policy_metadata,
         };
 
-        let kafka_bootstrap = env::var("CONVERSATION_KAFKA_BOOTSTRAP_SERVERS")
+        let jetstream_url = env::var("CONVERSATION_JETSTREAM_URL")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| {
                 service_config
-                    .kafka
+                    .jetstream
                     .as_ref()
-                    .and_then(|name| app.kafka_profile(name))
-                    .map(|p| p.bootstrap_servers.clone())
+                    .and_then(|name| app.jetstream_profile(name))
+                    .map(|p| p.url.clone())
             });
-        let kafka_operation_topic = kafka_bootstrap.as_ref().map(|_| {
-            env::var("CONVERSATION_KAFKA_OPERATION_TOPIC")
+        let jetstream_operation_subject = jetstream_url.as_ref().map(|_| {
+            env::var("CONVERSATION_JETSTREAM_OPERATION_SUBJECT")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| service_config.kafka_operation_topic.clone())
+                .or_else(|| service_config.operation_subject.clone())
                 .unwrap_or_else(|| TOPIC_MESSAGE_EVENTS.to_string())
         });
-        let kafka_events_topic = kafka_bootstrap.as_ref().map(|_| {
-            env::var("CONVERSATION_KAFKA_EVENTS_TOPIC")
+        let jetstream_events_subject = jetstream_url.as_ref().map(|_| {
+            env::var("CONVERSATION_JETSTREAM_EVENTS_SUBJECT")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| TOPIC_MESSAGE_EVENTS.to_string())
         });
-        let kafka_group = kafka_bootstrap.as_ref().map(|_| {
-            env::var("CONVERSATION_KAFKA_GROUP")
+        let jetstream_group = jetstream_url.as_ref().map(|_| {
+            env::var("CONVERSATION_JETSTREAM_GROUP")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| service_config.kafka_group.clone())
+                .or_else(|| service_config.consumer_group.clone())
                 .unwrap_or_else(|| CONVERSATION_READ_RECEIPT_GROUP_DEFAULT.to_string())
         });
-        let kafka_ensure_topic = kafka_bootstrap.as_ref().and_then(|_| {
-            env::var("CONVERSATION_KAFKA_ENSURE_TOPIC")
+        let jetstream_stream_specs = {
+            let specs = app
+                .jetstream_topology()
+                .into_iter()
+                .map(|spec| NatsStreamSpec::new(spec.stream_name, spec.subjects))
+                .collect::<Vec<_>>();
+            if specs.is_empty() {
+                default_stream_specs()
+            } else {
+                specs
+            }
+        };
+        let kafka_brokers = env::var("CONVERSATION_KAFKA_BROKERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .or_else(|| kafka_profile.map(|p| p.brokers.clone()))
+            .unwrap_or_else(|| vec!["127.0.0.1:29092".to_string()]);
+        let kafka_client_id = env::var("CONVERSATION_KAFKA_CLIENT_ID")
+            .ok()
+            .or_else(|| kafka_profile.and_then(|p| p.client_id.clone()))
+            .unwrap_or_else(|| "flare-im-conversation".to_string());
+        let jetstream_ensure_subject = jetstream_url.as_ref().and_then(|_| {
+            env::var("CONVERSATION_JETSTREAM_ENSURE_SUBJECT")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .or_else(|| Some(TOPIC_CONVERSATION_ENSURE.to_string()))
         });
-        let kafka_ensure_group = kafka_ensure_topic.as_ref().map(|_| {
-            env::var("CONVERSATION_KAFKA_ENSURE_GROUP")
+        let jetstream_ensure_group = jetstream_ensure_subject.as_ref().map(|_| {
+            env::var("CONVERSATION_JETSTREAM_ENSURE_GROUP")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "conversation-ensure".to_string())
         });
 
         Ok(Self {
+            mq_backend,
             redis_url,
             postgres_url,
             conversation_state_prefix,
@@ -194,12 +230,15 @@ impl ConversationConfig {
             storage_reader_service,
             recent_message_limit,
             default_policy,
-            kafka_bootstrap,
-            kafka_operation_topic,
-            kafka_events_topic,
-            kafka_group,
-            kafka_ensure_topic,
-            kafka_ensure_group,
+            jetstream_url,
+            jetstream_operation_subject,
+            jetstream_events_subject,
+            jetstream_group,
+            jetstream_stream_specs,
+            kafka_brokers,
+            kafka_client_id,
+            jetstream_ensure_subject,
+            jetstream_ensure_group,
         })
     }
 }

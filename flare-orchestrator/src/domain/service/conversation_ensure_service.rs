@@ -101,7 +101,7 @@ impl ConversationEnsureService {
         request: &ConversationEnsureRequest,
     ) -> Result<()> {
         let Some(conversation_repo) = &self.conversation_repository else {
-            tracing::debug!(
+            tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Conversation repository not configured, skip sync ensure"
             );
@@ -146,7 +146,7 @@ impl ConversationEnsureService {
 
         match ensure_result {
             Ok(Ok(_)) => {
-                tracing::debug!(
+                tracing::trace!(
                     conversation_id = %request.conversation_id,
                     "Conversation ensured (sync)"
                 );
@@ -179,7 +179,7 @@ impl ConversationEnsureService {
         request: &ConversationEnsureRequest,
     ) -> Result<()> {
         let Some(publisher) = &self.event_publisher else {
-            tracing::debug!(
+            tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Event publisher not configured, skip async ensure"
             );
@@ -203,7 +203,7 @@ impl ConversationEnsureService {
                 "Failed to publish conversation.ensure event (async), Conversation service may create on demand"
             );
         } else {
-            tracing::debug!(
+            tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Published conversation.ensure event (async)"
             );

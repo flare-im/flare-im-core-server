@@ -10,12 +10,11 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::model::{
-    DirectUploadSessionState, DirectUploadTransportKind, FILE_CATEGORY_METADATA_KEY, FileAccessType,
-    MediaAssetStatus, MediaDomainConfig, MediaFileMetadata, MediaReference, MediaReferenceScope,
-    MultipartChunkPayload, MultipartUploadInit, MultipartUploadSession, PresignedUploadPartUrl,
-    PresignedUrl,
-    STORAGE_BUCKET_METADATA_KEY, STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession,
-    UploadSessionStatus, UploadedPartRecord, infer_file_category,
+    DirectUploadSessionState, DirectUploadTransportKind, FILE_CATEGORY_METADATA_KEY,
+    FileAccessType, MediaAssetStatus, MediaDomainConfig, MediaFileMetadata, MediaReference,
+    MediaReferenceScope, MultipartChunkPayload, MultipartUploadInit, MultipartUploadSession,
+    PresignedUploadPartUrl, PresignedUrl, STORAGE_BUCKET_METADATA_KEY, STORAGE_PATH_METADATA_KEY,
+    UploadContext, UploadSession, UploadSessionStatus, UploadedPartRecord, infer_file_category,
 };
 use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
@@ -78,12 +77,10 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            return Err(
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "multipart upload is not configured"
-                ),
-            );
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "multipart upload is not configured"
+            ));
         };
 
         let chunk_size = init
@@ -152,24 +149,19 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            return Err(
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "multipart upload is not configured"
-                ),
-            );
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "multipart upload is not configured"
+            ));
         };
 
-        let mut session = store
-            .get_session(&chunk.upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={}", chunk.upload_id)
-                )
-            })?;
+        let mut session = store.get_session(&chunk.upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={}", chunk.upload_id)
+            )
+        })?;
 
         if session.status != UploadSessionStatus::Pending {
             return Err(flare_server_core::flare_err!(
@@ -189,7 +181,10 @@ impl MediaService {
             return Err(flare_server_core::flare_err_details!(
                 ErrorCode::MessageTooLarge,
                 "chunk size exceeds limit",
-                format!("chunk_size={} max={}", chunk_len, self.config.max_chunk_size_bytes)
+                format!(
+                    "chunk_size={} max={}",
+                    chunk_len, self.config.max_chunk_size_bytes
+                )
             ));
         }
 
@@ -249,24 +244,19 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            return Err(
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "multipart upload is not configured"
-                ),
-            );
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "multipart upload is not configured"
+            ));
         };
 
-        let mut session = store
-            .get_session(upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={upload_id}")
-                )
-            })?;
+        let mut session = store.get_session(upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={upload_id}")
+            )
+        })?;
 
         if session.uploaded_chunks.is_empty() {
             return Err(flare_server_core::flare_err_details!(
@@ -329,12 +319,10 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let Some(store) = &self.upload_conversation_store else {
-            return Err(
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "multipart upload is not configured"
-                ),
-            );
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "multipart upload is not configured"
+            ));
         };
 
         if let Some(mut session) = store.get_session(upload_id).await? {
@@ -387,7 +375,8 @@ impl MediaService {
         let bucket = object_repo
             .bucket_name()
             .unwrap_or_else(|| "media".to_string());
-        let object_key = object_repo.build_object_key_for(&file_id, &metadata.file_name, &file_category);
+        let object_key =
+            object_repo.build_object_key_for(&file_id, &metadata.file_name, &file_category);
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.chunk_ttl_seconds.max(300));
@@ -401,7 +390,11 @@ impl MediaService {
         } else {
             desired_part_size
                 .max(DIRECT_MULTIPART_MIN_PART_SIZE_BYTES)
-                .min(self.config.max_chunk_size_bytes.max(DIRECT_MULTIPART_MIN_PART_SIZE_BYTES))
+                .min(
+                    self.config
+                        .max_chunk_size_bytes
+                        .max(DIRECT_MULTIPART_MIN_PART_SIZE_BYTES),
+                )
         };
         let total_parts = if transport_kind == DirectUploadTransportKind::SinglePut {
             1
@@ -498,16 +491,13 @@ impl MediaService {
                 "direct upload is not configured"
             ));
         };
-        let session = store
-            .get_session(upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={upload_id}")
-                )
-            })?;
+        let session = store.get_session(upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={upload_id}")
+            )
+        })?;
         self.ensure_direct_session(&session)?;
         Ok(self.direct_state_from_session(&session))
     }
@@ -537,16 +527,13 @@ impl MediaService {
                 "object storage is required for direct upload"
             ));
         };
-        let session = store
-            .get_session(upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={upload_id}")
-                )
-            })?;
+        let session = store.get_session(upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={upload_id}")
+            )
+        })?;
         self.ensure_direct_session(&session)?;
         if session.transport_kind != Some(DirectUploadTransportKind::MultipartPut) {
             return Err(flare_server_core::flare_err!(
@@ -582,7 +569,11 @@ impl MediaService {
                     object_key,
                     storage_upload_id,
                     *part_number,
-                    if expires_in > 0 { expires_in } else { self.config.default_ttl },
+                    if expires_in > 0 {
+                        expires_in
+                    } else {
+                        self.config.default_ttl
+                    },
                 )
                 .await?;
             urls.push(PresignedUploadPartUrl {
@@ -612,16 +603,13 @@ impl MediaService {
                 "direct upload is not configured"
             ));
         };
-        let mut session = store
-            .get_session(upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={upload_id}")
-                )
-            })?;
+        let mut session = store.get_session(upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={upload_id}")
+            )
+        })?;
         self.ensure_direct_session(&session)?;
         let total_parts = session.total_parts.unwrap_or_default();
         for part in parts {
@@ -629,7 +617,10 @@ impl MediaService {
                 return Err(flare_server_core::flare_err_details!(
                     ErrorCode::InvalidParameter,
                     "part number out of range",
-                    format!("part_number={} total_parts={}", part.part_number, total_parts)
+                    format!(
+                        "part_number={} total_parts={}",
+                        part.part_number, total_parts
+                    )
                 ));
             }
             if part.etag.trim().is_empty() {
@@ -669,29 +660,34 @@ impl MediaService {
                 "object storage is required for direct upload"
             ));
         };
-        let mut session = store
-            .get_session(upload_id)
-            .await?
-            .ok_or_else(|| {
-                flare_server_core::flare_err_details!(
-                    ErrorCode::MessageNotFound,
-                    "upload session not found",
-                    format!("upload_id={upload_id}")
-                )
-            })?;
+        let mut session = store.get_session(upload_id).await?.ok_or_else(|| {
+            flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "upload session not found",
+                format!("upload_id={upload_id}")
+            )
+        })?;
         self.ensure_direct_session(&session)?;
 
         let object_key = session.object_key.clone().ok_or_else(|| {
             flare_server_core::flare_err!(ErrorCode::InternalError, "object_key missing in session")
         })?;
         let bucket = session.bucket.clone().unwrap_or_default();
-        let file_id = session.file_id.clone().unwrap_or_else(|| session.upload_id.clone());
+        let file_id = session
+            .file_id
+            .clone()
+            .unwrap_or_else(|| session.upload_id.clone());
         let file_size = session.total_size.unwrap_or_default();
 
-        match session.transport_kind.unwrap_or(DirectUploadTransportKind::SinglePut) {
+        match session
+            .transport_kind
+            .unwrap_or(DirectUploadTransportKind::SinglePut)
+        {
             DirectUploadTransportKind::SinglePut => {
                 let stat = object_repo.stat_object(&object_key).await?;
-                if let Some(size) = stat.size && size <= 0 {
+                if let Some(size) = stat.size
+                    && size <= 0
+                {
                     return Err(flare_server_core::flare_err!(
                         ErrorCode::InternalError,
                         "single put object is missing or empty"
@@ -718,13 +714,24 @@ impl MediaService {
                     )
                 })?;
                 object_repo
-                    .complete_multipart_upload(&object_key, &storage_upload_id, &session.uploaded_parts)
+                    .complete_multipart_upload(
+                        &object_key,
+                        &storage_upload_id,
+                        &session.uploaded_parts,
+                    )
                     .await?;
             }
         }
 
         let metadata = self
-            .persist_direct_upload_metadata(ctx, &session, &bucket, &object_key, &file_id, file_size)
+            .persist_direct_upload_metadata(
+                ctx,
+                &session,
+                &bucket,
+                &object_key,
+                &file_id,
+                file_size,
+            )
             .await?;
 
         session.status = UploadSessionStatus::Completed;
@@ -756,7 +763,9 @@ impl MediaService {
                 session.transport_kind,
             ) && kind == DirectUploadTransportKind::MultipartPut
             {
-                let _ = object_repo.abort_multipart_upload(object_key, storage_upload_id).await;
+                let _ = object_repo
+                    .abort_multipart_upload(object_key, storage_upload_id)
+                    .await;
             }
             session.status = UploadSessionStatus::Aborted;
             session.updated_at = Utc::now();
@@ -782,7 +791,7 @@ impl MediaService {
     ) -> Result<MediaFileMetadata> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             file_name = context.file_name,
             file_size = context.file_size,
@@ -796,32 +805,32 @@ impl MediaService {
             .insert(FILE_CATEGORY_METADATA_KEY.to_string(), category.clone());
 
         let sha256 = self.compute_sha256(context.payload);
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             sha256 = &sha256,
             "计算文件SHA256哈希"
         );
 
         let scope = self.extract_reference_scope(&context);
-        tracing::debug!(file_id = context.file_id, scope = ?scope, "提取引用范围");
+        tracing::trace!(file_id = context.file_id, scope = ?scope, "提取引用范围");
 
         if let Some(store) = &self.metadata_store {
-            tracing::debug!(
+            tracing::trace!(
                 file_id = context.file_id,
                 "检查数据库中是否已存在相同哈希的文件"
             );
             if let Some(mut existing) = store.load_by_hash(&sha256).await? {
-                tracing::debug!(
+                tracing::trace!(
                     file_id = context.file_id,
                     existing_file_id = existing.file_id,
                     "发现已存在的文件，使用去重机制"
                 );
                 if let Some(scope) = scope.as_ref() {
-                    tracing::debug!(file_id = context.file_id, "为已存在的文件创建引用");
+                    tracing::trace!(file_id = context.file_id, "为已存在的文件创建引用");
                     self.ensure_reference(ctx, &mut existing, &context, scope)
                         .await?;
                 } else {
-                    tracing::debug!(file_id = context.file_id, "增加已存在文件的引用计数");
+                    tracing::trace!(file_id = context.file_id, "增加已存在文件的引用计数");
                     existing.reference_count = existing.reference_count.saturating_add(1);
                     existing.status = MediaAssetStatus::Active;
                     existing.grace_expires_at = None;
@@ -837,14 +846,14 @@ impl MediaService {
                     cache.cache_metadata(&existing).await.ok();
                 }
 
-                tracing::debug!(
+                tracing::trace!(
                     file_id = context.file_id,
                     existing_file_id = existing.file_id,
                     "返回已存在的文件元数据"
                 );
                 return Ok(existing);
             } else {
-                tracing::debug!(
+                tracing::trace!(
                     file_id = context.file_id,
                     sha256 = &sha256,
                     "数据库中未找到相同哈希的文件"
@@ -855,7 +864,7 @@ impl MediaService {
         }
 
         let md5 = Some(format!("{:x}", md5_compute(context.payload)));
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             md5 = md5.as_ref().unwrap(),
             "计算文件MD5哈希"
@@ -867,10 +876,10 @@ impl MediaService {
             .and_then(|repo| repo.bucket_name());
 
         let (url, cdn_url, storage_path) = if let Some(object_repo) = &self.object_repo {
-            tracing::debug!(file_id = context.file_id, "使用对象存储存储文件");
+            tracing::trace!(file_id = context.file_id, "使用对象存储存储文件");
             match object_repo.put_object(&context).await {
                 Ok(path) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         file_id = context.file_id,
                         object_path = &path,
                         "文件已存储到对象存储"
@@ -942,9 +951,9 @@ impl MediaService {
                 }
             }
         } else if let Some(local_store) = &self.local_store {
-            tracing::debug!(file_id = context.file_id, "使用本地存储存储文件");
+            tracing::trace!(file_id = context.file_id, "使用本地存储存储文件");
             let path = local_store.write(&context).await?;
-            tracing::debug!(
+            tracing::trace!(
                 file_id = context.file_id,
                 local_path = &path,
                 "文件已存储到本地存储"
@@ -960,12 +969,10 @@ impl MediaService {
             )
         } else {
             tracing::error!(file_id = context.file_id, "未配置媒体存储后端");
-            return Err(
-                flare_server_core::flare_err!(
-                    ErrorCode::ConfigurationError,
-                    "no media storage backend configured"
-                ),
-            );
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "no media storage backend configured"
+            ));
         };
 
         if let Some(ref path) = storage_path {
@@ -979,7 +986,7 @@ impl MediaService {
                 .insert(STORAGE_BUCKET_METADATA_KEY.to_string(), bucket.clone());
         }
 
-        tracing::debug!(
+        tracing::trace!(
             file_id = context.file_id,
             url = &url,
             cdn_url = &cdn_url,
@@ -1013,22 +1020,22 @@ impl MediaService {
             storage_path: storage_path.clone(),
         };
 
-        tracing::debug!(file_id = context.file_id, "准备保存文件元数据");
+        tracing::trace!(file_id = context.file_id, "准备保存文件元数据");
 
-        self.save_and_cache(&metadata).await.map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "persist metadata")
-        })?;
+        self.save_and_cache(&metadata)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "persist metadata"))?;
 
-        tracing::debug!(file_id = context.file_id, "文件元数据已保存");
+        tracing::trace!(file_id = context.file_id, "文件元数据已保存");
 
         if let (Some(scope), Some(_)) = (scope, self.reference_store.as_ref()) {
-            tracing::debug!(file_id = context.file_id, "为新文件创建引用");
+            tracing::trace!(file_id = context.file_id, "为新文件创建引用");
             self.ensure_reference(ctx, &mut metadata, &context, &scope)
                 .await?;
-            tracing::debug!(file_id = context.file_id, "文件引用已创建");
+            tracing::trace!(file_id = context.file_id, "文件引用已创建");
         }
 
-        tracing::debug!(file_id = context.file_id, "文件存储完成");
+        tracing::trace!(file_id = context.file_id, "文件存储完成");
         Ok(metadata)
     }
 
@@ -1058,7 +1065,11 @@ impl MediaService {
             }
 
             self.save_and_cache(&metadata).await.map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "persist metadata reference update")
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "persist metadata reference update",
+                )
             })?;
 
             return Ok(());
@@ -1233,7 +1244,8 @@ impl MediaService {
                 if let Some(base) = self.object_repo.as_ref().and_then(|repo| repo.base_url()) {
                     url = Self::build_full_url(&base, &object_path);
                 }
-            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url()) {
+            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url())
+            {
                 url = Self::build_full_url(&base, &object_path);
             }
         }
@@ -1249,7 +1261,8 @@ impl MediaService {
                 if let Some(base) = self.config.cdn_base_url.clone() {
                     cdn_url = Self::build_full_url(&base, &object_path);
                 }
-            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url()) {
+            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url())
+            {
                 cdn_url = Self::build_full_url(&base, &object_path);
             }
         }
@@ -1264,7 +1277,8 @@ impl MediaService {
                 } else {
                     String::new()
                 }
-            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url()) {
+            } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url())
+            {
                 Self::build_full_url(&base, &object_path)
             } else {
                 String::new()
@@ -1293,10 +1307,16 @@ impl MediaService {
         let resolved_bucket = bucket
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.trim().to_string())
-            .or_else(|| self.object_repo.as_ref().and_then(|repo| repo.bucket_name()))
+            .or_else(|| {
+                self.object_repo
+                    .as_ref()
+                    .and_then(|repo| repo.bucket_name())
+            })
             .unwrap_or_else(|| "media".to_string());
 
-        let upload_url = if let Some(base) = self.object_repo.as_ref().and_then(|repo| repo.base_url()) {
+        let upload_url = if let Some(base) =
+            self.object_repo.as_ref().and_then(|repo| repo.base_url())
+        {
             Self::build_full_url(&base, &resolved_key)
         } else if let Some(base) = self.local_store.as_ref().and_then(|store| store.base_url()) {
             Self::build_full_url(&base, &resolved_key)
@@ -1328,7 +1348,11 @@ impl MediaService {
         let resolved_bucket = bucket
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.trim().to_string())
-            .or_else(|| self.object_repo.as_ref().and_then(|repo| repo.bucket_name()))
+            .or_else(|| {
+                self.object_repo
+                    .as_ref()
+                    .and_then(|repo| repo.bucket_name())
+            })
             .unwrap_or_else(|| "media".to_string());
         let storage_class = self
             .object_repo
@@ -1345,7 +1369,8 @@ impl MediaService {
         metadata.insert("provider".to_string(), storage_class.clone());
         if let Some(base_url) = self.object_repo.as_ref().and_then(|repo| repo.base_url()) {
             metadata.insert("base_url".to_string(), base_url);
-        } else if let Some(base_url) = self.local_store.as_ref().and_then(|store| store.base_url()) {
+        } else if let Some(base_url) = self.local_store.as_ref().and_then(|store| store.base_url())
+        {
             metadata.insert("base_url".to_string(), base_url);
         }
 
@@ -1473,10 +1498,9 @@ impl MediaService {
             return Ok(vec![]);
         };
 
-        let expired = store
-            .list_orphaned_assets(Utc::now())
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets"))?;
+        let expired = store.list_orphaned_assets(Utc::now()).await.map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets")
+        })?;
 
         for asset in &expired {
             let storage_path = asset
@@ -1619,7 +1643,10 @@ impl MediaService {
     ) -> Result<MediaFileMetadata> {
         let mut metadata_map = session.metadata.clone();
         metadata_map.insert(STORAGE_BUCKET_METADATA_KEY.to_string(), bucket.to_string());
-        metadata_map.insert(STORAGE_PATH_METADATA_KEY.to_string(), object_key.to_string());
+        metadata_map.insert(
+            STORAGE_PATH_METADATA_KEY.to_string(),
+            object_key.to_string(),
+        );
         if let Some(fingerprint) = session.file_fingerprint.as_ref() {
             metadata_map
                 .entry("file_fingerprint".to_string())
@@ -1632,11 +1659,11 @@ impl MediaService {
         }
 
         let direct_base = self.object_repo.as_ref().and_then(|repo| repo.base_url());
-        let cdn_base = self
-            .config
-            .cdn_base_url
-            .clone()
-            .or_else(|| self.object_repo.as_ref().and_then(|repo| repo.cdn_base_url()));
+        let cdn_base = self.config.cdn_base_url.clone().or_else(|| {
+            self.object_repo
+                .as_ref()
+                .and_then(|repo| repo.cdn_base_url())
+        });
         let url = direct_base
             .map(|base| Self::build_full_url(&base, object_key))
             .unwrap_or_else(|| object_key.to_string());
@@ -1652,7 +1679,10 @@ impl MediaService {
             url,
             cdn_url,
             md5: None,
-            sha256: session.full_sha256.clone().or(session.head_tail_sha256.clone()),
+            sha256: session
+                .full_sha256
+                .clone()
+                .or(session.head_tail_sha256.clone()),
             metadata: metadata_map,
             uploaded_at: Utc::now(),
             reference_count: if self.reference_store.is_some() { 0 } else { 1 },
@@ -1684,7 +1714,9 @@ impl MediaService {
                 .metadata
                 .get(FILE_CATEGORY_METADATA_KEY)
                 .cloned()
-                .unwrap_or_else(|| infer_file_category(Some(session.file_type.as_str()), &session.mime_type)),
+                .unwrap_or_else(|| {
+                    infer_file_category(Some(session.file_type.as_str()), &session.mime_type)
+                }),
             user_id: session.user_id.as_str(),
             trace_id: session.trace_id.as_deref(),
             namespace: session.namespace.as_deref(),
@@ -1923,10 +1955,7 @@ impl MediaService {
         request: &flare_grpc_proto::media::InitiateMultipartUploadRequest,
     ) -> Result<MultipartUploadInit> {
         let metadata = request.metadata.as_ref().ok_or_else(|| {
-            flare_server_core::flare_err!(
-                ErrorCode::InvalidParameter,
-                "multipart metadata missing"
-            )
+            flare_server_core::flare_err!(ErrorCode::InvalidParameter, "multipart metadata missing")
         })?;
 
         let desired_chunk_size = if request.desired_chunk_size > 0 {

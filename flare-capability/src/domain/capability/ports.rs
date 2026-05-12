@@ -13,8 +13,11 @@ use super::rtc::{
     CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
     HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
     HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    RejectCallRequest, RejectCallResponse, SfuJoinRoomRequest, SfuJoinRoomResponse,
-    SfuLeaveRoomRequest, SfuLeaveRoomResponse,
+    MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse, MediaJoinTransportRequest,
+    MediaJoinTransportResponse, MediaLeaveTransportRequest, MediaLeaveTransportResponse,
+    MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest,
+    MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest, MediaSetSubscriptionResponse,
+    RejectCallRequest, RejectCallResponse,
 };
 
 // ----------------------------------------------------------------------------- Guard / Resolver / RTC
@@ -87,58 +90,102 @@ pub trait RtcCapability: Send + Sync {
         req: &ListParticipantsRequest,
     ) -> CapabilityResult<ListParticipantsResponse>;
 
-    /// `SfuControl.JoinRoom`：进入 SFU 房间（独立 strom 进程需实现该 RPC；未实现时返回上游错误）。
-    async fn sfu_join_room(
+    /// 进入媒体传输房间（由具体 RTC 后端实现）。
+    async fn media_join_transport(
         &self,
         _ctx: &Ctx,
-        _req: &SfuJoinRoomRequest,
-    ) -> CapabilityResult<SfuJoinRoomResponse> {
+        _req: &MediaJoinTransportRequest,
+    ) -> CapabilityResult<MediaJoinTransportResponse> {
         Err(CapabilityError::NotSupported(
-            "sfu_join_room: not supported for this RTC backend".into(),
+            "media_join_transport: not supported for this RTC backend".into(),
         ))
     }
 
-    /// `SfuControl.LeaveRoom`：离开房间。
-    async fn sfu_leave_room(
+    /// 离开媒体传输房间。
+    async fn media_leave_transport(
         &self,
         _ctx: &Ctx,
-        _req: &SfuLeaveRoomRequest,
-    ) -> CapabilityResult<SfuLeaveRoomResponse> {
+        _req: &MediaLeaveTransportRequest,
+    ) -> CapabilityResult<MediaLeaveTransportResponse> {
         Err(CapabilityError::NotSupported(
-            "sfu_leave_room: not supported for this RTC backend".into(),
+            "media_leave_transport: not supported for this RTC backend".into(),
         ))
     }
 
-    /// `SfuControl.HandleSdpOffer`：终端 offer → SFU answer。
-    async fn sfu_handle_sdp_offer(
+    /// 终端 offer → 媒体后端 answer。
+    async fn media_handle_sdp_offer(
         &self,
         _ctx: &Ctx,
         _req: &HandleSdpOfferRequest,
     ) -> CapabilityResult<HandleSdpOfferResponse> {
         Err(CapabilityError::NotSupported(
-            "sfu_handle_sdp_offer: not supported for this RTC backend".into(),
+            "media_handle_sdp_offer: not supported for this RTC backend".into(),
         ))
     }
 
-    /// `SfuControl.HandleSdpAnswer`：应答型协商（strom 当前路径可能未实现）。
-    async fn sfu_handle_sdp_answer(
+    /// 处理 answer 型协商。
+    async fn media_handle_sdp_answer(
         &self,
         _ctx: &Ctx,
         _req: &HandleSdpAnswerRequest,
     ) -> CapabilityResult<HandleSdpAnswerResponse> {
         Err(CapabilityError::NotSupported(
-            "sfu_handle_sdp_answer: not supported for this RTC backend".into(),
+            "media_handle_sdp_answer: not supported for this RTC backend".into(),
         ))
     }
 
-    /// `SfuControl.AddIceCandidate`：Trickle ICE。
-    async fn sfu_add_ice_candidate(
+    /// Trickle ICE。
+    async fn media_add_ice_candidate(
         &self,
         _ctx: &Ctx,
         _req: &AddIceCandidateRequest,
     ) -> CapabilityResult<AddIceCandidateResponse> {
         Err(CapabilityError::NotSupported(
-            "sfu_add_ice_candidate: not supported for this RTC backend".into(),
+            "media_add_ice_candidate: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// 发布者软静音（摄像头/麦克风开关）。
+    async fn media_set_publisher_mute(
+        &self,
+        _ctx: &Ctx,
+        _req: &MediaSetPublisherMuteRequest,
+    ) -> CapabilityResult<MediaSetPublisherMuteResponse> {
+        Err(CapabilityError::NotSupported(
+            "media_set_publisher_mute: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// 订阅关系控制（SetSubscription）。
+    async fn media_set_subscription(
+        &self,
+        _ctx: &Ctx,
+        _req: &MediaSetSubscriptionRequest,
+    ) -> CapabilityResult<MediaSetSubscriptionResponse> {
+        Err(CapabilityError::NotSupported(
+            "media_set_subscription: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// Simulcast 层控制（SetSimulcastLayer）。
+    async fn media_set_simulcast_layer(
+        &self,
+        _ctx: &Ctx,
+        _req: &MediaSetSimulcastLayerRequest,
+    ) -> CapabilityResult<MediaSetSimulcastLayerResponse> {
+        Err(CapabilityError::NotSupported(
+            "media_set_simulcast_layer: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// 网络质量查询（GetPeerNetworkQuality）。
+    async fn media_get_network_quality(
+        &self,
+        _ctx: &Ctx,
+        _req: &MediaGetNetworkQualityRequest,
+    ) -> CapabilityResult<MediaGetNetworkQualityResponse> {
+        Err(CapabilityError::NotSupported(
+            "media_get_network_quality: not supported for this RTC backend".into(),
         ))
     }
 }

@@ -173,7 +173,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
             let _: Vec<redis::Value> = zadd_pipe.query_async(&mut conn).await?;
         }
 
-        tracing::debug!(
+        tracing::trace!(
             batch_size = messages.len(),
             "Successfully batch cached {} messages to Redis using Pipeline",
             messages.len()

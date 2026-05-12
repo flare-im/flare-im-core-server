@@ -1,7 +1,6 @@
 //! Hook 治理应用服务：配置 CRUD、统计、执行记录查询（由 `CapabilityService.Administer` 经 [`super::capability_administer`] 调用）。
 
 use crate::error::{ErrorBuilder, ErrorCode};
-use flare_server_core::error::Result as FlareResult;
 use flare_grpc_proto::capability::{
     CreateHookConfigRequest, CreateHookConfigResponse, DeleteHookConfigRequest,
     DeleteHookConfigResponse, GetHookConfigRequest, GetHookConfigResponse,
@@ -10,17 +9,18 @@ use flare_grpc_proto::capability::{
     ListHookConfigsResponse, QueryHookExecutionsRequest, QueryHookExecutionsResponse,
     SetHookStatusRequest, SetHookStatusResponse, UpdateHookConfigRequest, UpdateHookConfigResponse,
 };
+use flare_server_core::error::Result as FlareResult;
 use flare_server_core::utils::require_ctx_from_request;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConfig};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
-use crate::composition::hook_registry::CoreHookRegistry;
 use chrono::Utc;
 use std::str::FromStr;
 
-/// 从gRPC请求中提取租户ID（向后兼容函数）
+/// 从 gRPC 请求中提取租户 ID。
 ///
 /// 优先从 Context 中提取，如果没有则返回 None
 fn extract_tenant_id<T>(request: &Request<T>) -> Option<String> {
@@ -502,9 +502,7 @@ impl HookServiceServer {
             .await
             .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
 
-        Ok(Response::new(DeleteHookConfigResponse {
-            success: true,
-        }))
+        Ok(Response::new(DeleteHookConfigResponse { success: true }))
     }
 
     pub async fn grpc_set_hook_status(
@@ -563,9 +561,7 @@ impl HookServiceServer {
             .await
             .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
 
-        Ok(Response::new(SetHookStatusResponse {
-            success: true,
-        }))
+        Ok(Response::new(SetHookStatusResponse { success: true }))
     }
 
     pub async fn grpc_get_hook_statistics(
@@ -793,10 +789,9 @@ fn protobuf_to_hook_config_item(
     req: &CreateHookConfigRequest,
     _existing: Option<&HookConfigItem>,
 ) -> FlareResult<HookConfigItem> {
-    let transport = req
-        .transport
-        .as_ref()
-        .ok_or_else(|| ErrorBuilder::new(ErrorCode::InvalidParameter, "transport is required").build_error())?;
+    let transport = req.transport.as_ref().ok_or_else(|| {
+        ErrorBuilder::new(ErrorCode::InvalidParameter, "transport is required").build_error()
+    })?;
 
     let selector = req
         .selector
@@ -862,9 +857,12 @@ fn protobuf_to_hook_config_item(
             target: transport.target.clone(),
         },
         _ => {
-            return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, "Unsupported transport type")
-                .details(transport.r#type.clone())
-                .build_error());
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "Unsupported transport type",
+            )
+            .details(transport.r#type.clone())
+            .build_error());
         }
     };
 

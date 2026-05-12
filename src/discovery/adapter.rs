@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::ServiceRegistry as TransportRegistry;
-use flare_core_runtime::registry::{ServiceInfo, ServiceRegistry as RegistryTrait};
 use flare_core_runtime::error::RegistryError;
+use flare_core_runtime::registry::{ServiceInfo, ServiceRegistry as RegistryTrait};
 
 /// ServiceRegistry 适配器
 ///

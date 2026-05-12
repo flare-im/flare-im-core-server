@@ -21,8 +21,8 @@
 
 ### 核心原则
 
-1. **需要 Kafka 的操作**：走 Writer（从 Kafka 消费并更新数据库）
-2. **不需要 Kafka 的操作**：走 Reader（直接 gRPC 调用更新数据库）
+1. **需要 JetStream 的操作**：走 Writer（从 JetStream 消费并更新数据库）
+2. **不需要 JetStream 的操作**：走 Reader（直接 gRPC 调用更新数据库）
 
 ### 架构图
 
@@ -35,11 +35,11 @@
                             ▼
         ┌───────────────────┴───────────────────┐
         │                                         │
-        │ 需要 Kafka?                             │ 不需要 Kafka?
+        │ 需要 JetStream?                             │ 不需要 JetStream?
         │                                         │
         ▼                                         ▼
 ┌──────────────┐                          ┌──────────────┐
-│   Kafka      │                          │  Reader      │
+│   JetStream      │                          │  Reader      │
 │ (操作消息)    │                          │ (gRPC)       │
 └──────────────┘                          └──────────────┘
         │                                         │
@@ -65,12 +65,12 @@
 
 ### 完整操作分类表
 
-| 操作类型 | Kafka 策略 | 处理路径 | 实现位置 |
+| 操作类型 | JetStream 策略 | 处理路径 | 实现位置 |
 |---------|-----------|---------|---------|
-| **撤回消息（全局）** | ✔️ 必须 | Orchestrator → Kafka → Writer → DB | Writer 消费操作消息 |
+| **撤回消息（全局）** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
 | **撤回消息（仅自己）** | ❌ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
-| **编辑消息** | ✔️ 必须 | Orchestrator → Kafka → Writer → DB | Writer 消费操作消息 |
-| **删除消息（硬删除）** | ✔️ 必须 | Orchestrator → Kafka → Writer → DB | Writer 消费操作消息 |
+| **编辑消息** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
+| **删除消息（硬删除）** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
 | **删除消息（软删除，仅自己）** | ❌ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
 | **已读回执** | ⚠️ 条件 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
 | **反应操作** | ✔️ 必须 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
@@ -83,7 +83,7 @@
 
 ### 1. 操作消息识别
 
-Writer 从 Kafka 消费 `StoreMessageRequest`，需要识别是否为操作消息：
+Writer 从 JetStream 消费 `StoreMessageRequest`，需要识别是否为操作消息：
 
 ```rust
 // 在 prepare_message 或消费时识别
@@ -382,7 +382,7 @@ pub async fn append_operation(
 ### 1. Writer 操作消息处理流程
 
 ```
-Kafka Consumer
+JetStream Consumer
     ↓
 process_store_message()
     ↓

@@ -68,8 +68,6 @@ impl<R: crate::domain::repository::ConversationRepository + Send + Sync> OnlineQ
             );
         }
 
-        Ok(GetOnlineStatusResponse {
-            statuses: result,
-        })
+        Ok(GetOnlineStatusResponse { statuses: result })
     }
 }

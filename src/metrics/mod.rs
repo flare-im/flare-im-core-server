@@ -212,4 +212,3 @@ impl Default for AccessGatewayMetrics {
         Self::new()
     }
 }
-

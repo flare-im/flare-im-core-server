@@ -2,9 +2,9 @@
 //!
 //! Route 是路由领域的聚合根，负责维护路由的业务不变式
 
+use flare_server_core::flare_err;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use flare_server_core::flare_err;
 
 use crate::error::{ErrorCode, Result};
 

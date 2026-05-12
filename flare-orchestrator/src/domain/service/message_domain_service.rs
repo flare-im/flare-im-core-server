@@ -165,7 +165,7 @@ impl MessageDomainService {
                 )
             })?;
 
-        tracing::debug!(
+        tracing::trace!(
             conversation_id = %submission.message.conversation_id,
             seq = session_seq,
             "Allocated session sequence"
@@ -287,7 +287,7 @@ impl MessageDomainService {
         message: Message,
         recipient_user_ids: Vec<String>,
     ) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             conversation_id = %message.conversation_id,
             message_id = %message.server_id,
             recipient_count = recipient_user_ids.len(),
@@ -342,7 +342,7 @@ impl MessageDomainService {
         message: Message,
         _recipient_user_ids: Vec<String>,
     ) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             conversation_id = %message.conversation_id,
             message_id = %message.server_id,
             "Persisting message only (no push)"
@@ -391,7 +391,7 @@ impl MessageDomainService {
         let recipient_user_ids = self
             .get_recipient_user_ids(ctx, &submission.message)
             .await?;
-        tracing::debug!(
+        tracing::trace!(
             conversation_id = %submission.message.conversation_id,
             message_id = %submission.message_id,
             message_type = profile.message_type_label(),

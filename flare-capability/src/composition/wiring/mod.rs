@@ -28,17 +28,29 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         .hook_config_repository
         .as_ref()
         .map(|r| r.connection_pool());
-    let (capability_registry, capability_policy, capability_grpc, strom_sfu_rtc) =
-        init_capability_extension_stack(db_pool, hook.hook_governance.clone(), Arc::clone(&plugin_routes))
-            .await?;
+    let (capability_registry, capability_policy, capability_grpc) =
+        init_capability_extension_stack(
+            config
+                .runtime_config_file
+                .clone()
+                .or_else(|| config.config_file.clone()),
+            db_pool,
+            hook.hook_governance.clone(),
+            Arc::clone(&plugin_routes),
+        )
+        .await?;
+    let capability_runtime = capability_grpc.runtime_config();
+
+    let extension_router = capability_registry.extension_router().await;
 
     Ok(ApplicationContext {
         im_hook_plugin: hook.im_hook_plugin,
         hook_governance: hook.hook_governance,
         plugin_routes,
-        strom_sfu_rtc,
+        extension_router,
         capability_registry,
         capability_policy,
         capability_grpc,
+        capability_runtime,
     })
 }

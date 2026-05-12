@@ -57,7 +57,9 @@ impl CapabilityManager {
         kind: CapabilityKind,
         tenant_id: &str,
     ) -> CapResult<RtcBackendDescriptor> {
-        self.selector.select_for_new_call(ctx, kind, tenant_id).await
+        self.selector
+            .select_for_new_call(ctx, kind, tenant_id)
+            .await
     }
 
     pub async fn resolve_for_existing_room(

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use flare_proto::common::PushTaskEnvelope;
 use flare_im_core::Ctx;
-use flare_server_core::mq::producer::Producer;
+use flare_proto::common::PushTaskEnvelope;
 use flare_server_core::mq::kafka::KafkaProducerBuilder;
+use flare_server_core::mq::nats::NatsProducerBuilder;
+use flare_server_core::mq::producer::Producer;
 use prost::Message as _;
 
 use crate::config::PushServerConfig;
@@ -15,17 +16,23 @@ pub struct PushServerMqPublisher {
 }
 
 impl PushServerMqPublisher {
-    pub fn new(config: Arc<PushServerConfig>) -> Result<Self> {
-        let producer = Arc::new(
-            KafkaProducerBuilder::new()
-            .build(config.as_ref())
-            .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?,
-        );
+    pub async fn new(config: Arc<PushServerConfig>) -> Result<Self> {
+        let producer: Arc<dyn Producer> = match config.mq_backend.as_str() {
+            "kafka" => Arc::new(
+                KafkaProducerBuilder::new()
+                    .build(config.as_ref())
+                    .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?,
+            ),
+            "nats" | "jetstream" => Arc::new(
+                NatsProducerBuilder::new()
+                    .build(config.as_ref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to build jetstream producer: {}", e))?,
+            ),
+            other => anyhow::bail!("unsupported mq backend: {}", other),
+        };
 
-        Ok(Self {
-            producer,
-            config,
-        })
+        Ok(Self { producer, config })
     }
 
     pub async fn publish_online_task(

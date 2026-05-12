@@ -40,7 +40,10 @@ where
                 None,
                 false,
             )
-            .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+            })?;
     } else {
         for mt in ["IMPORTANT", "TODO", "DONE", "CUSTOM"] {
             let _ = ctx

@@ -4,18 +4,28 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use redis::{AsyncCommands, aio::ConnectionManager};
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::config::OnlineConfig;
 use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
 use crate::domain::repository::ConversationRepository;
-use crate::domain::value_object::{
-    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
-};
+use crate::domain::value_object::{ConnectionId, DeviceId, DevicePriority, TokenVersion, UserId};
 use flare_server_core::context::Context as SrvContext;
 
 const CONNECTION_KEY_PREFIX: &str = "session";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RedisConnectionRecord {
+    conversation_id: String,
+    gateway_id: String,
+    server_id: String,
+    device_id: String,
+    device_platform: String,
+    last_seen: i64,
+    device_priority: i32,
+    token_version: i64,
+}
 
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
@@ -40,24 +50,75 @@ impl RedisConversationRepository {
     fn to_timestamp(seconds: i64) -> Option<DateTime<Utc>> {
         Utc.timestamp_opt(seconds, 0).single()
     }
+
+    fn record_from_connection(session: &Connection) -> RedisConnectionRecord {
+        RedisConnectionRecord {
+            conversation_id: session.id().as_str().to_string(),
+            gateway_id: session.gateway_id().to_string(),
+            server_id: session.server_id().to_string(),
+            device_id: session.device_id().as_str().to_string(),
+            device_platform: session.device_platform().to_string(),
+            last_seen: session.last_heartbeat_at().timestamp(),
+            device_priority: session.device_priority().as_i32(),
+            token_version: session.token_version().value(),
+        }
+    }
+
+    fn parse_record(payload: &str) -> Result<RedisConnectionRecord> {
+        serde_json::from_str(payload).map_err(|e| anyhow::anyhow!("invalid session payload: {}", e))
+    }
+
+    fn connection_from_record(
+        user_id: &UserId,
+        record: RedisConnectionRecord,
+    ) -> Result<Connection> {
+        let conversation_id =
+            ConnectionId::from_string(record.conversation_id).map_err(|e| anyhow::anyhow!(e))?;
+        let device_id = DeviceId::new(record.device_id).map_err(|e| anyhow::anyhow!(e))?;
+        let last_seen = Self::to_timestamp(record.last_seen)
+            .ok_or_else(|| anyhow::anyhow!("invalid last_seen timestamp"))?;
+
+        Ok(Connection::reconstitute(
+            conversation_id,
+            user_id.clone(),
+            device_id,
+            record.device_platform,
+            record.server_id,
+            record.gateway_id,
+            DevicePriority::from_i32(record.device_priority),
+            TokenVersion::from(record.token_version),
+            None,
+            last_seen,
+            last_seen,
+        ))
+    }
+
+    async fn load_user_records(
+        &self,
+        conn: &mut ConnectionManager,
+        user_id: &str,
+    ) -> Result<Vec<RedisConnectionRecord>> {
+        let key = self.connection_key(user_id);
+        let values: HashMap<String, String> = conn
+            .hgetall(&key)
+            .await
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        values
+            .into_values()
+            .map(|payload| Self::parse_record(&payload))
+            .collect()
+    }
 }
 
 impl ConversationRepository for RedisConversationRepository {
     async fn save_connection(&self, session: &Connection) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(session.user_id().as_str());
-        let value = json!({
-            "conversation_id": session.id().as_str(),
-            "gateway_id": session.gateway_id(),
-            "server_id": session.server_id(),
-            "device_id": session.device_id().as_str(),
-            "device_platform": session.device_platform(),
-            "last_seen": session.last_heartbeat_at().timestamp(),
-            "device_priority": session.device_priority().as_i32(),
-            "token_version": session.token_version().value(),
-        });
-        let _: () = conn
-            .set(&key, value.to_string())
+        let record = Self::record_from_connection(session);
+        let value = serde_json::to_string(&record)
+            .map_err(|e| anyhow::anyhow!("serialize session payload: {}", e))?;
+        let _: usize = conn
+            .hset(&key, session.id().as_str(), value)
             .await
             .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         let _: bool = conn
@@ -75,16 +136,33 @@ impl ConversationRepository for RedisConversationRepository {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
         let _: usize = conn
-            .del(&key)
+            .hdel(&key, conversation_id.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         tracing::info!(conversation_id = %conversation_id.as_ref(), user_id = %user_id.as_ref(), "session removed from redis");
         Ok(())
     }
 
-    async fn touch_connection(&self, user_id: &UserId) -> Result<()> {
+    async fn touch_connection(
+        &self,
+        conversation_id: &ConnectionId,
+        user_id: &UserId,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
+        let payload = conn
+            .hget::<_, _, Option<String>>(&key, conversation_id.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("connection not found"))?;
+        let mut record = Self::parse_record(&payload)?;
+        record.last_seen = Utc::now().timestamp();
+        let value = serde_json::to_string(&record)
+            .map_err(|e| anyhow::anyhow!("serialize session payload: {}", e))?;
+        let _: usize = conn
+            .hset(&key, conversation_id.as_str(), value)
+            .await
+            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
@@ -99,41 +177,19 @@ impl ConversationRepository for RedisConversationRepository {
         let mut conn = self.connection().await?;
         let mut result = HashMap::new();
         for user_id in user_ids {
-            let key = self.connection_key(user_id.as_str());
-            let value: Option<String> = conn
-                .get(&key)
-                .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
-            if let Some(payload) = value {
-                let json: serde_json::Value = serde_json::from_str(&payload)
-                    .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
-                let last_seen = json
-                    .get("last_seen")
-                    .and_then(|v| v.as_i64())
-                    .and_then(Self::to_timestamp);
+            let records = self.load_user_records(&mut conn, user_id).await?;
+            if let Some(latest) = records.into_iter().max_by_key(|record| record.last_seen) {
+                let last_seen = Self::to_timestamp(latest.last_seen);
                 result.insert(
                     user_id.clone(),
                     OnlineStatusRecord {
                         online: true,
-                        server_id: json
-                            .get("server_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        gateway_id: json
-                            .get("gateway_id")
-                            .and_then(|v| v.as_str())
-                            .map(|v| v.to_string()),
+                        server_id: latest.server_id,
+                        gateway_id: Some(latest.gateway_id),
                         cluster_id: None,
                         last_seen,
-                        device_id: json
-                            .get("device_id")
-                            .and_then(|v| v.as_str())
-                            .map(|v| v.to_string()),
-                        device_platform: json
-                            .get("device_platform")
-                            .and_then(|v| v.as_str())
-                            .map(|v| v.to_string()),
+                        device_id: Some(latest.device_id),
+                        device_platform: Some(latest.device_platform),
                     },
                 );
             }
@@ -144,89 +200,11 @@ impl ConversationRepository for RedisConversationRepository {
 
     async fn get_user_connections(&self, user_id: &UserId) -> Result<Vec<Connection>> {
         let mut conn = self.connection().await?;
-        let key = self.connection_key(user_id.as_str());
-        let value: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
-
-        if let Some(payload) = value {
-            let json: serde_json::Value = serde_json::from_str(&payload)
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
-
-            let conversation_id_str = json
-                .get("conversation_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let conversation_id =
-                ConnectionId::from_string(conversation_id_str).map_err(|e| anyhow::anyhow!(e))?;
-
-            let device_id_str = json
-                .get("device_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let device_id = DeviceId::new(device_id_str).map_err(|e| anyhow::anyhow!(e))?;
-
-            let device_platform = json
-                .get("device_platform")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-
-            let server_id = json
-                .get("server_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-
-            let gateway_id = json
-                .get("gateway_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-
-            let last_seen = json
-                .get("last_seen")
-                .and_then(|v| v.as_i64())
-                .and_then(Self::to_timestamp)
-                .unwrap_or_else(Utc::now);
-
-            let created_at = last_seen;
-
-            let device_priority_i32 = json
-                .get("device_priority")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
-            let device_priority = DevicePriority::from_i32(device_priority_i32);
-
-            let token_version_i64 = json
-                .get("token_version")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let token_version = TokenVersion::from(token_version_i64);
-
-            let connection_quality: Option<ConnectionQuality> = None;
-
-            let session = Connection::reconstitute(
-                conversation_id,
-                user_id.clone(),
-                device_id,
-                device_platform,
-                server_id,
-                gateway_id,
-                device_priority,
-                token_version,
-                connection_quality,
-                created_at,
-                last_seen,
-            );
-
-            Ok(vec![session])
-        } else {
-            Ok(vec![])
-        }
+        self.load_user_records(&mut conn, user_id.as_str())
+            .await?
+            .into_iter()
+            .map(|record| Self::connection_from_record(user_id, record))
+            .collect()
     }
 
     async fn remove_user_connections(
@@ -237,35 +215,22 @@ impl ConversationRepository for RedisConversationRepository {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
 
-        // 如果指定了设备ID列表，需要检查设备是否匹配
-        // 当前实现中，一个用户只有一个会话，所以直接删除
-        // 未来如果需要支持多设备，可以扩展为Hash结构存储多个设备会话
         if let Some(device_ids) = device_ids {
-            // 获取当前会话
-            let value: Option<String> = conn
-                .get(&key)
+            let values: HashMap<String, String> = conn
+                .hgetall(&key)
                 .await
                 .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
 
-            if let Some(payload) = value {
-                let json: serde_json::Value = serde_json::from_str(&payload)
-                    .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
-
-                let current_device_id = json
-                    .get("device_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-
-                // 只删除匹配的设备
-                if device_ids.iter().any(|d| d.as_str() == current_device_id) {
+            for (conversation_id, payload) in values {
+                let record = Self::parse_record(&payload)?;
+                if device_ids.iter().any(|d| d.as_str() == record.device_id) {
                     let _: usize = conn
-                        .del(&key)
+                        .hdel(&key, conversation_id)
                         .await
                         .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
                 }
             }
         } else {
-            // 删除所有会话
             let _: usize = conn
                 .del(&key)
                 .await
@@ -430,6 +395,10 @@ impl RedisPresencePublisher {
             .await
             .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
     }
+
+    fn presence_channel(user_id: &str) -> String {
+        format!("presence:{}", user_id)
+    }
 }
 
 impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
@@ -443,6 +412,34 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
             .publish("presence_events", payload)
             .await
             .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        if !event.user_id.trim().is_empty() {
+            let status = event.status.as_ref();
+            let last_seen = status
+                .and_then(|s| s.last_seen.as_ref())
+                .map(|ts| ts.seconds)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+            let occurred_at = event
+                .occurred_at
+                .as_ref()
+                .map(|ts| ts.seconds)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+            let value = serde_json::json!({
+                "online": status.map(|s| s.online).unwrap_or(false),
+                "server_id": status.map(|s| s.server_id.as_str()).unwrap_or_default(),
+                "cluster_id": status.map(|s| s.cluster_id.as_str()).unwrap_or_default(),
+                "last_seen": last_seen,
+                "device_id": status.map(|s| s.device_id.as_str()).unwrap_or_default(),
+                "device_platform": status.map(|s| s.device_platform.as_str()).unwrap_or_default(),
+                "gateway_id": status.map(|s| s.gateway_id.as_str()).unwrap_or_default(),
+                "occurred_at": occurred_at,
+                "conflict_action": event.conflict_action,
+                "reason": event.reason.clone(),
+            });
+            let _: () = conn
+                .publish(Self::presence_channel(&event.user_id), value.to_string())
+                .await
+                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        }
         Ok(())
     }
 

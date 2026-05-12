@@ -1,6 +1,5 @@
 //! `ConversationManageService`：会话写命令与侧效应（游标、已读、在线等）
 
-use flare_proto::common::DeviceState as ProtoDeviceState;
 use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageService;
 use flare_grpc_proto::conversation::{
     BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse,
@@ -9,6 +8,7 @@ use flare_grpc_proto::conversation::{
     SearchConversationsResponse, UpdateConversationRequest, UpdateConversationResponse,
     UpdateCursorRequest, UpdatePresenceRequest,
 };
+use flare_proto::common::DeviceState as ProtoDeviceState;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
@@ -334,14 +334,12 @@ impl ConversationManageService for ConversationGrpcHandler {
             .into_grpc()?;
 
         if !missing.is_empty() {
-            return Err(
-                ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    format!("unknown conversations: {}", missing.join(",")),
-                )
-                .build_error()
-                .into(),
-            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                format!("unknown conversations: {}", missing.join(",")),
+            )
+            .build_error()
+            .into());
         }
 
         Ok(Response::new(()))

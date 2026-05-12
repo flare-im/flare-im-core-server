@@ -36,7 +36,7 @@ impl MqPushRepository {
     /// 从已有的 Producer 创建推送仓储
     ///
     /// # 参数
-    /// - `producer`: 生产者实例（如 KafkaProducer、NatsProducer）
+    /// - `producer`: 生产者实例（如 JetStreamProducer、NatsProducer）
     pub fn new(producer: Arc<dyn Producer>) -> Arc<Self> {
         Arc::new(Self { producer })
     }

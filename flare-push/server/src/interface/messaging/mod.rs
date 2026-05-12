@@ -13,6 +13,6 @@ pub mod push_consumer;
 
 // 导出 Handler
 pub use event_consumer::PushEventHandler;
-pub use message_consumer::PushMessageHandler;
 pub use main_consumer::PushMainHandler;
+pub use message_consumer::PushMessageHandler;
 pub use push_consumer::PushHandler;

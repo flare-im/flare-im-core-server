@@ -24,7 +24,8 @@ load_balance_strategy = "consistent_hash"
 [logging]
 # 日志级别：trace, debug, info, warn, error
 # 默认：debug（开发环境推荐，生产环境建议使用 info）
-# 可以通过环境变量 RUST_LOG 覆盖，例如：RUST_LOG=info cargo run
+# 未设置环境变量 RUST_LOG 时生效；`scripts/start_server.sh` 默认会导出带 sqlx/tokio 等降噪的 RUST_LOG。
+# 全链路排障可：`RUST_LOG=trace ./scripts/start_server.sh` 或第二参数 `trace`。
 level = "debug"
 # 是否显示目标模块名称
 with_target = false
@@ -65,16 +66,77 @@ url = "redis://localhost:26379/4"
 namespace = "flare:message:wal"
 ttl_seconds = 86400
 
-# Kafka 事件总线：各服务通过 config/services/*.toml 引用 profile，Topic 见 flare_im_core::constants::topics
-[kafka.push]
-bootstrap_servers = "127.0.0.1:29092"
-client_id = "flare-im"
-timeout_ms = 30000
+[mq]
+# 手动选择默认 MQ 实现（全小写）：
+#   - "nats" / "jetstream"：NATS JetStream（二者等价）
+#   - "kafka"：Kafka（需配置下方 [kafka.message] / [kafka.push] 等；各二进制 wire 是否已接 Kafka 以代码为准）
+#
+# 覆盖优先级（高 → 低）：
+#   1. 环境变量 FLARE_MQ_DEFAULT_BACKEND
+#   2. config/environments/{FLARE_ENV}.toml 根级 [mq]（FLARE_ENV 未设时为 development）
+#   3. 本文件此处
+#
+# 可选：FLARE_MQ_ALLOW_KAFKA_FALLBACK=true|1|yes|on
+default_backend = "kafka"
+allow_kafka_fallback = false
 
-[kafka.message]
-bootstrap_servers = "127.0.0.1:29092"
+# JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_core::constants::topics
+[jetstream.push]
+url = "nats://127.0.0.1:24222"
+client_id = "flare-im"
+timeout_ms = 5000
+retries = 8
+retry_backoff_ms = 25
+stream_name = "FLARE_PUSH"
+subjects = ["flare.im.push.*"]
+options = { retention = "limits", storage = "file", max_age_seconds = "86400", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
+
+[jetstream.message]
+url = "nats://127.0.0.1:24222"
 client_id = "flare-message-orchestrator"
-timeout_ms = 30000
+timeout_ms = 5000
+retries = 8
+retry_backoff_ms = 25
+stream_name = "FLARE_MESSAGE"
+subjects = ["flare.im.message.*", "flare.im.conversation.*"]
+options = { retention = "limits", storage = "file", max_age_seconds = "604800", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
+
+# Kafka 生产级推荐参数：默认不启用，仅在 mq.default_backend = "kafka" 或双写/审计场景使用。
+[kafka.message]
+brokers = ["127.0.0.1:29092"]
+client_id = "flare-im-message"
+acks = "all"
+# 本地默认使用 none，避免 librdkafka 未编译 zstd 支持时启动失败；生产环境可在确认镜像支持后改为 zstd/lz4/snappy。
+compression = "none"
+linger_ms = 5
+batch_size_bytes = 1048576
+message_timeout_ms = 30000
+request_timeout_ms = 10000
+enable_idempotence = true
+max_in_flight_requests_per_connection = 5
+replication_factor = 3
+min_insync_replicas = 2
+partitions = 256
+retention_ms = 604800000
+options = { "delivery.timeout.ms" = "30000", "retries" = "2147483647" }
+
+[kafka.push]
+brokers = ["127.0.0.1:29092"]
+client_id = "flare-im-push"
+acks = "all"
+# 本地默认使用 none，避免 librdkafka 未编译 zstd 支持时启动失败；生产环境可在确认镜像支持后改为 zstd/lz4/snappy。
+compression = "none"
+linger_ms = 2
+batch_size_bytes = 524288
+message_timeout_ms = 15000
+request_timeout_ms = 5000
+enable_idempotence = true
+max_in_flight_requests_per_connection = 5
+replication_factor = 3
+min_insync_replicas = 2
+partitions = 512
+retention_ms = 86400000
+options = { "delivery.timeout.ms" = "15000", "retries" = "2147483647" }
 
 # 消息/媒体/能力等共用 PostgreSQL（init_v2、storage、flare-capability 等均指向此库）
 [postgres.media]

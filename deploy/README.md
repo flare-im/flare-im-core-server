@@ -64,11 +64,20 @@ docker-compose logs -f [service_name]
   - 支持时序数据查询优化
   - 支持连续聚合视图
 
-### 4. Kafka (消息队列)
+### 4. 消息队列（NATS JetStream + Apache Kafka）
 
-- **端口**: 29092
-- **用途**: 消息队列、削峰（KRaft 模式，无需 ZooKeeper）
-- **访问**: localhost:29092
+> 二者同时拉起；测试时在应用配置中切换 `mq.default_backend`（或各服务引用的 profile）即可分别走 NATS / Kafka。
+
+**NATS JetStream**
+
+- **客户端端口**: 24222（映射容器内 4222）
+- **监控 HTTP**: http://localhost:28222
+- **数据目录**: `./data/nats`
+
+**Apache Kafka**（KRaft，无 ZooKeeper）
+
+- **宿主机 bootstrap**: `127.0.0.1:29092`（与仓库 `flare-im-core/config/base.toml` 中 `[kafka.*].brokers` 默认一致）
+- **Compose 网络内**: `kafka:9092`（服务 `hostname` 为 `kafka`）
 - **数据目录**: `./data/kafka`
 
 ### 5. MinIO (对象存储)
@@ -139,7 +148,8 @@ MINIO_ROOT_PASSWORD=minioadmin
 - `./data/etcd`: etcd 数据
 - `./data/redis`: Redis 数据
 - `./data/postgres`: PostgreSQL 数据
-- `./data/kafka`: Kafka 数据
+- `./data/nats`: NATS JetStream 数据
+- `./data/kafka`: Kafka（KRaft）数据
 - `./data/minio`: MinIO 数据
 - `./data/loki`: Loki 数据
 - `./data/prometheus`: Prometheus 数据
@@ -147,7 +157,7 @@ MINIO_ROOT_PASSWORD=minioadmin
 
 > 💡 **提示**: 首次启动前，建议创建数据目录：
 > ```bash
-> mkdir -p data/{etcd,redis,postgres,kafka,minio,loki,prometheus,grafana}
+> mkdir -p data/{etcd,redis,postgres,nats,kafka,minio,loki,prometheus,grafana,tempo}
 > ```
 
 ---
@@ -181,10 +191,10 @@ docker-compose down -v
 docker-compose logs -f
 
 # 查看特定服务日志
-docker-compose logs -f kafka
+docker-compose logs -f nats kafka
 ```
 
-### 4. 访问 MinIO 控制台
+### 5. 访问 MinIO 控制台
 
 1. 打开浏览器访问 http://localhost:29001
 2. 使用默认账号登录：minioadmin / minioadmin
@@ -207,8 +217,11 @@ redis_url = "redis://localhost:26379"
 postgres_url = "postgresql://flare:flare123@localhost:25432/flare"
 # TimescaleDB 扩展已自动启用，消息表已转换为超表（Hypertable）
 
-# Kafka
-kafka_brokers = ["localhost:29092"]
+# NATS JetStream（与 config/base.toml [jetstream.*] 一致）
+# url = "nats://127.0.0.1:24222"
+
+# Kafka（与 config/base.toml [kafka.*] 一致；mq.default_backend = "kafka" 时使用）
+# brokers = ["127.0.0.1:29092"]
 
 # MinIO
 minio_endpoint = "http://localhost:29000"

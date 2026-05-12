@@ -14,6 +14,7 @@
 //! - 置顶/取消置顶 (EVENT_PIN / EVENT_UNPIN)
 //! - 标记/取消标记 (EVENT_MARK / EVENT_UNMARK)
 //! - 自定义事件 (EVENT_CUSTOM)
+//! - 通话信令 (EVENT_CALL_SIGNAL)：WebRTC / 媒体后端编排，落库前经 `CallCapabilityBridge` enrich（见 `handlers/plugin`）
 
 use std::sync::Arc;
 
@@ -136,7 +137,7 @@ impl EventDomainService {
                 )
             })?;
 
-        tracing::debug!(
+        tracing::trace!(
             conversation_id = %event.conversation_id,
             seq = session_seq,
             "Allocated session sequence for event"
@@ -199,7 +200,7 @@ impl EventDomainService {
         event: Event,
         recipient_user_ids: Vec<String>,
     ) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?EventType::try_from(event.r#type),
@@ -255,7 +256,7 @@ impl EventDomainService {
         event_type = ?EventType::try_from(event.r#type),
     ))]
     pub async fn persistence_only(&self, ctx: &Ctx, event: Event) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?EventType::try_from(event.r#type),
@@ -304,7 +305,7 @@ impl EventDomainService {
         }
 
         let recipient_user_ids = self.get_recipient_user_ids(ctx, &event).await?;
-        tracing::debug!(
+        tracing::trace!(
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?event.r#type(),

@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use flare_grpc_proto::sync::sync_service_server::SyncService;
 use flare_im_core::utils::require_user_id_from_context;
 use flare_proto::common::{Sync, SyncRes};
-use flare_grpc_proto::sync::sync_service_server::SyncService;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 use tonic::{Request, Response, Status};
@@ -33,8 +33,7 @@ impl SyncService for SyncOrchestratorGrpcHandler {
         let ctx = extract_ctx_from_request_opt(&request)
             .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
         let sync = request.into_inner();
-        let user_id = require_user_id_from_context(&ctx)
-            .map_err(|e| Status::unauthenticated(e))?;
+        let user_id = require_user_id_from_context(&ctx).map_err(|e| Status::unauthenticated(e))?;
         let res = self
             .inner
             .execute_sync(&ctx, &user_id, sync)

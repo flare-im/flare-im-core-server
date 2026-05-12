@@ -1,4 +1,4 @@
-//! 能力插件端口：描述「一类 RTC 后端实现」（如进程内 flare-sfu、独立 flare-strom-sfu）。
+//! 能力插件端口：描述「一类 RTC 后端实现」（进程内或独立进程控制面等，由部署装配）。
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use crate::domain::capability::Result as CapResult;
 /// 插件生命周期与元数据（不负责具体 SDP；媒体信令仍走 IM + 客户端既有通路）。
 #[async_trait]
 pub trait CapabilityPlugin: Send + Sync {
-    /// 稳定插件 id（如 `strom-sfu`、`flare-sfu-inproc`）。
+    /// 稳定插件 id（部署自定义，例如 `rtc-backend-a`）。
     fn plugin_id(&self) -> &str;
 
     fn kind(&self) -> CapabilityKind;

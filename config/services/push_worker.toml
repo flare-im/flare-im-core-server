@@ -1,7 +1,7 @@
-# Push Worker 服务配置（事件总线：消费推送流，与 Orchestrator push_topic 一致）
+# Push Worker 服务配置（事件总线：消费推送流，与 Orchestrator push_subject 一致）
 
 [services.push_worker]
-kafka = "push"
+jetstream = "push"
 consumer_group = "push-worker"
 task_topic = "flare.im.push.tasks"
 hook_config = "config/hooks.toml"

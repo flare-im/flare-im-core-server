@@ -48,7 +48,7 @@ impl MessageTemporaryService {
         // TODO: 实现临时消息推送逻辑
         // 当前为占位符实现，等待后续完善
 
-        tracing::debug!(
+        tracing::trace!(
             message_id = %message.server_id,
             conversation_id = %message.conversation_id,
             message_type = message.message_type,

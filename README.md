@@ -1,8 +1,8 @@
 # Flare IM Core
 
-> **IM 服务端通信核心层（Rust 工作区）** — 基于 Tonic、gRPC、Kafka、PostgreSQL 等组件的微服务集合，与 `flare-im` 单仓内 `flare-proto`、`flare-server-core`、`flare-im-core-sdk`（客户端 SDK）等协同演进。
+> **IM 服务端通信核心层（Rust 工作区）** — 基于 Tonic、gRPC、JetStream、PostgreSQL 等组件的微服务集合，与 `flare-im` 单仓内 `flare-proto`、`flare-server-core`、`flare-im-core-sdk`（客户端 SDK）等协同演进。
 
-Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步、推送与媒资等能力；本地开发依赖 Docker Compose 拉起 Consul、Redis、Kafka、PostgreSQL 等基础设施。具体行为以本仓库源码与 `deploy/` 配置为准。
+Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步、推送与媒资等能力；本地开发依赖 Docker Compose 拉起 Consul、Redis、JetStream、PostgreSQL 等基础设施。具体行为以本仓库源码与 `deploy/` 配置为准。
 
 ## 核心特性
 
@@ -10,7 +10,7 @@ Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步
 
 - **Rust 工作区**：统一 `edition = "2024"`、`rust-version = "1.94.0"`（见根 `Cargo.toml`）
 - **gRPC**：服务间 HTTP/2，接口定义见上级目录 `flare-proto` / `flare-grpc-proto`
-- **事件驱动**：Kafka 串联编排、存储写入与推送等链路
+- **事件驱动**：JetStream 串联编排、存储写入与推送等链路
 - **存储**：PostgreSQL（含时序场景扩展能力，以实际库表与 `flare-storage` 为准）
 - **服务发现**：与 `flare-server-core` / `flare-im-core` 发现模块配合，本地 `deploy` 默认 Consul（亦可按配置对接 etcd 等后端）
 
@@ -22,7 +22,7 @@ Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步
 |------|------|
 | 消息延迟 | 接入、路由、存储分段优化，目标低延迟 |
 | 并发连接 | 接入层与在线服务可水平扩展 |
-| 吞吐 | Kafka 解耦 + 存储批量写入 |
+| 吞吐 | JetStream 解耦 + 存储批量写入 |
 | 可用性 | 多实例部署、健康检查与注册发现 |
 
 ---
@@ -70,7 +70,7 @@ graph TB
 
     subgraph "基础设施（示例）"
         Consul[Consul<br/>服务注册发现]
-        Kafka[Kafka<br/>消息队列]
+        JetStream[JetStream<br/>消息队列]
         Redis[Redis<br/>缓存]
         PostgreSQL[(PostgreSQL<br/>主库)]
         MinIO[(对象存储<br/>S3 兼容)]
@@ -88,12 +88,12 @@ graph TB
     Route --> Orchestrator
     Route --> Capability
 
-    Orchestrator --> Kafka
-    Kafka --> StorageWriter
+    Orchestrator --> JetStream
+    JetStream --> StorageWriter
     StorageWriter --> PostgreSQL
     StorageReader --> PostgreSQL
 
-    Kafka --> PushServer
+    JetStream --> PushServer
     PushServer --> PushWorker
 
     Conversation --> Redis
@@ -118,7 +118,7 @@ graph TB
 | **flare-orchestrator** | 消息编排 | 消息入队、与存储/推送协作 |
 | **flare-sync-orchestrator** | 同步编排 | 多端会话与同步相关编排（见 crate 内实现） |
 | **flare-capability** | Hook + 能力扩展 | Hook 引擎 gRPC；能力子系统按 DDD（`domain/capability` 端口）+ CQRS（`application/capability` 查询/分发）；默认集成进程内 SFU 的 `RtcCapability`、内存授权策略、与 SDK 对齐的能力管理 HTTP（`/capabilities/*`）。已移除旧 `plugin` 宿主与 outbox。 |
-| **flare-storage/writer** | 持久化 | Kafka 消费、写库 |
+| **flare-storage/writer** | 持久化 | JetStream 消费、写库 |
 | **flare-storage/reader** | 查询 | 消息查询、历史等 |
 | **flare-conversation** | 会话 | 会话元数据、光标与同步 |
 | **flare-push/proxy** | 推送代理 | 推送链路代理能力 |
@@ -146,7 +146,7 @@ graph TB
 | 语言 | Rust 1.94+ | 与工作区 `rust-version` 对齐 |
 | gRPC | Tonic 0.14 | HTTP/2 |
 | 异步 | Tokio | 各服务主运行时 |
-| 消息队列 | rdkafka / Kafka | 以配置为准 |
+| 消息队列 | async-nats / JetStream | 以配置为准 |
 | 数据库 | SQLx + PostgreSQL | 各服务独立连接配置 |
 | 缓存 | Redis | 在线、会话等 |
 | 发现 | Consul（本地 compose）/ 可扩展 | 见 `flare-im-core` `discovery` 与 `doc/` |
@@ -192,7 +192,7 @@ flare-im-core/                    # 本 README 所在工作区根
 
 - **Rust**：**1.94.0** 及以上（与 `[workspace.package]` 一致）
 - **Docker / Docker Compose**：用于 `deploy/docker-compose.yml`
-- **PostgreSQL、Redis、Kafka 等**：由 Compose 拉起或自行提供对等实例
+- **PostgreSQL、Redis、JetStream 等**：由 Compose 拉起或自行提供对等实例
 
 ### 本地开发
 
@@ -248,7 +248,7 @@ cargo test -p flare-im-core --lib
 ### 配置
 
 - 日志：`RUST_LOG`（如 `info`）
-- 注册中心、Kafka、数据库等以各服务加载的 TOML / 环境变量为准（参见 `doc/配置管理方案.md`）
+- 注册中心、JetStream、数据库等以各服务加载的 TOML / 环境变量为准（参见 `doc/配置管理方案.md`）
 
 ---
 

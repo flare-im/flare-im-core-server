@@ -18,9 +18,17 @@ pub struct CallRoomBindingRecord {
 pub trait CallRoomBindingRepository: Send + Sync {
     async fn save(&self, row: &CallRoomBindingRecord) -> anyhow::Result<()>;
 
-    async fn find_by_call_id(&self, tenant_id: &str, call_id: &str) -> anyhow::Result<Option<CallRoomBindingRecord>>;
+    async fn find_by_call_id(
+        &self,
+        tenant_id: &str,
+        call_id: &str,
+    ) -> anyhow::Result<Option<CallRoomBindingRecord>>;
 
-    async fn find_by_room_id(&self, tenant_id: &str, sfu_room_id: &str) -> anyhow::Result<Option<CallRoomBindingRecord>>;
+    async fn find_by_room_id(
+        &self,
+        tenant_id: &str,
+        sfu_room_id: &str,
+    ) -> anyhow::Result<Option<CallRoomBindingRecord>>;
 }
 
 #[derive(Clone)]

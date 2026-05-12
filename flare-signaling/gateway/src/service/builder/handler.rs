@@ -3,18 +3,17 @@
 use std::sync::Arc;
 
 use crate::application::handlers::{ConnectionHandler, SendHandler};
+use crate::config::AccessGatewayConfig;
 use crate::domain::ports::IConnectionPort;
 use crate::domain::service::{
     SendAckDomainService, SendDataDomainService, SendEventDomainService, SendMessageDomainService,
     SyncService,
 };
 use crate::infrastructure::ports::{
-    ConnectionContextResolver, RouterAckReportPort, RouterDataCommandPort,
-    RouterEventCommandPort, RouterMessageCommandPort, SignalingRouteGrpcPool, StorageSyncGrpcPool,
-    StorageSyncPort,
+    ConnectionContextResolver, RouterAckReportPort, RouterDataCommandPort, RouterEventCommandPort,
+    RouterMessageCommandPort, SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
 };
 use crate::interface::link::LongConnectionHandler;
-use crate::config::AccessGatewayConfig;
 use flare_server_core::auth::{RedisTokenStore, TokenService};
 
 /// 构建认证器
@@ -43,7 +42,9 @@ pub async fn build_authenticator(
         }
     }
 
-    Arc::new(crate::application::handlers::AuthHandler::new(Arc::new(token_service)))
+    Arc::new(crate::application::handlers::AuthHandler::new(Arc::new(
+        token_service,
+    )))
 }
 
 /// 构建长连接上行处理器

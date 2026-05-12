@@ -1,17 +1,17 @@
 //! Proto ↔ 领域模型转换（read / manage 共用）
 
 use chrono::{DateTime, TimeZone, Utc};
-use flare_proto::common::ConversationDetail as ProtoConversationDetail;
-use flare_proto::common::ConversationSummary as ProtoConversationSummary;
 use flare_grpc_proto::conversation::{
     Conversation as ProtoConversation, ConversationParticipant as ProtoConversationParticipant,
     ConversationPolicy as ProtoConversationPolicy, DevicePresence as ProtoDevicePresence,
 };
+use flare_proto::common::ConversationDetail as ProtoConversationDetail;
+use flare_proto::common::ConversationSummary as ProtoConversationSummary;
 use prost_types::Timestamp;
 
 use crate::domain::model::{
-    millis_to_datetime, Conversation, ConversationParticipant, ConversationPolicy,
-    ConversationSummary, DevicePresence,
+    Conversation, ConversationParticipant, ConversationPolicy, ConversationSummary, DevicePresence,
+    millis_to_datetime,
 };
 
 pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {

@@ -14,10 +14,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway::{PushEventRequest, PushMessageRequest};
-use flare_proto::common::{mq_envelope, MqEnvelope, MqPayloadKind};
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
+use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::PushRouterHandler;
@@ -61,7 +59,7 @@ impl PushMainHandler {
     ) -> Result<MessageResult, ConsumerError> {
         // 检查 persistence_only 标记
         if envelope.persistence_only {
-            tracing::debug!(
+            tracing::trace!(
                 envelope_id = %envelope.envelope_id,
                 "Message marked as persistence_only, skipping push"
             );
@@ -98,7 +96,11 @@ impl PushMainHandler {
                     "Failed to handle message payload, sending to DLQ"
                 );
                 // 发送到 DLQ
-                if let Err(dlq_err) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), original_payload).await {
+                if let Err(dlq_err) = self
+                    .publisher
+                    .publish_dlq(ctx, Some(&envelope.conversation_id), original_payload)
+                    .await
+                {
                     tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
                 }
                 Ok(MessageResult::Ack)
@@ -152,7 +154,11 @@ impl PushMainHandler {
                     "Failed to handle event payload, sending to DLQ"
                 );
                 // 发送到 DLQ
-                if let Err(dlq_err) = self.publisher.publish_dlq(ctx, Some(&envelope.conversation_id), original_payload).await {
+                if let Err(dlq_err) = self
+                    .publisher
+                    .publish_dlq(ctx, Some(&envelope.conversation_id), original_payload)
+                    .await
+                {
                     tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
                 }
                 Ok(MessageResult::Ack)
@@ -184,17 +190,16 @@ impl MessageHandler for PushMainHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>()
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    topic = %message.context.topic,
-                    "Failed to deserialize MqEnvelope"
-                );
-                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-            })?;
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
 
-        tracing::debug!(
+        tracing::trace!(
             envelope_id = %envelope.envelope_id,
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
@@ -210,10 +215,12 @@ impl MessageHandler for PushMainHandler {
         // 3. 根据 payload_kind 分发
         match MqPayloadKind::try_from(envelope.payload_kind) {
             Ok(MqPayloadKind::Message) => {
-                self.handle_message_payload(ctx, &envelope, message.payload.clone()).await
+                self.handle_message_payload(ctx, &envelope, message.payload.clone())
+                    .await
             }
             Ok(MqPayloadKind::Event) => {
-                self.handle_event_payload(ctx, &envelope, message.payload.clone()).await
+                self.handle_event_payload(ctx, &envelope, message.payload.clone())
+                    .await
             }
             _ => {
                 tracing::warn!(

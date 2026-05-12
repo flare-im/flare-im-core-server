@@ -17,7 +17,10 @@ pub struct FallbackUploadSessionStore {
 }
 
 impl FallbackUploadSessionStore {
-    pub fn new(primary: Arc<dyn UploadSessionStore>, fallback: Arc<dyn UploadSessionStore>) -> Self {
+    pub fn new(
+        primary: Arc<dyn UploadSessionStore>,
+        fallback: Arc<dyn UploadSessionStore>,
+    ) -> Self {
         Self { primary, fallback }
     }
 }

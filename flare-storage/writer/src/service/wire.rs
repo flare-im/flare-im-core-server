@@ -19,9 +19,11 @@ use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalC
 use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_server_core::kafka::build_kafka_producer;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
+use flare_server_core::mq::kafka::KafkaProducer;
+use flare_server_core::mq::nats::NatsProducer;
+use flare_server_core::mq::producer::Producer;
 
 // 类型别名，简化泛型参数
 type IdempotencyRepo = RedisIdempotencyRepository;
@@ -65,7 +67,7 @@ pub async fn initialize(
             .with_context(|| "Failed to load storage writer service configuration")?,
     );
 
-    let ack_publisher = build_ack_publisher(&config)?;
+    let ack_publisher = build_ack_publisher(&config).await?;
     let redis_client = build_redis_client(&config);
 
     let idempotency_repo = redis_client
@@ -129,8 +131,7 @@ pub async fn initialize(
         metrics.clone(),
     ));
 
-    let message_event_handler =
-        MessageCreatedConsumerFactory::create_handler(command_handler);
+    let message_event_handler = MessageCreatedConsumerFactory::create_handler(command_handler);
     let operation_event_handler =
         MessageEventsConsumerFactory::create_handler(operation_command_handler);
 
@@ -157,11 +158,20 @@ pub async fn initialize(
     })
 }
 
-fn build_ack_publisher(config: &Arc<StorageWriterConfig>) -> Result<Option<Arc<AckPub>>> {
-    if let Some(topic) = &config.kafka_ack_topic {
-        let producer = build_kafka_producer(config.as_ref())
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer for ACK: {}", e))?;
-        let producer = Arc::new(producer);
+async fn build_ack_publisher(config: &Arc<StorageWriterConfig>) -> Result<Option<Arc<AckPub>>> {
+    if let Some(topic) = &config.jetstream_ack_topic {
+        let producer: Arc<dyn Producer> =
+            match config.mq_backend.as_str() {
+                "kafka" => Arc::new(KafkaProducer::new(config.as_ref()).map_err(|e| {
+                    anyhow::anyhow!("Failed to create Kafka producer for ACK: {}", e)
+                })?),
+                "nats" | "jetstream" => {
+                    Arc::new(NatsProducer::new(config.as_ref()).await.map_err(|e| {
+                        anyhow::anyhow!("Failed to create JetStream producer for ACK: {}", e)
+                    })?)
+                }
+                other => anyhow::bail!("unsupported mq backend: {}", other),
+            };
         let publisher = Arc::new(MqAckPublisher::new(producer, config.clone(), topic.clone()));
         Ok(Some(publisher))
     } else {

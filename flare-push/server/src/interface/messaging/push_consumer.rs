@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use flare_im_core::Ctx;
 use flare_proto::common::PushEnvelope;
-use flare_server_core::mq::consumer::{MessageHandler, Message, MessageResult, ConsumerError};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use prost::Message as _;
 use tracing::{debug, instrument};
 
@@ -42,16 +42,19 @@ impl PushHandler {
             .get("x-trace-id")
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
+
         let _tenant_id = headers.get("x-tenant-id").cloned();
-        
-        Arc::new(flare_server_core::context::Context::with_request_id(trace_id))
+
+        Arc::new(flare_server_core::context::Context::with_request_id(
+            trace_id,
+        ))
     }
 
     /// 解析 PushEnvelope
     fn parse_envelope(payload: &[u8]) -> std::result::Result<PushEnvelope, ConsumerError> {
-        PushEnvelope::decode(payload)
-            .map_err(|e| ConsumerError::Deserialization(format!("Failed to decode PushEnvelope: {}", e)))
+        PushEnvelope::decode(payload).map_err(|e| {
+            ConsumerError::Deserialization(format!("Failed to decode PushEnvelope: {}", e))
+        })
     }
 }
 
@@ -68,7 +71,7 @@ impl MessageHandler for PushHandler {
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 解析 PushEnvelope
         let envelope = Self::parse_envelope(&message.payload)?;
-        
+
         debug!(
             envelope_id = %envelope.envelope_id,
             payload_kind = ?envelope.payload_kind,
@@ -82,7 +85,7 @@ impl MessageHandler for PushHandler {
         // 3. 根据 payload_kind 处理
         // TODO: 实现具体的推送逻辑
         let _ = (ctx, envelope);
-        
+
         Ok(MessageResult::Ack)
     }
 
@@ -95,9 +98,7 @@ impl MessageHandler for PushHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_proto::common::{
-        AckPayload, PushPayloadKind, PushTargetType,
-    };
+    use flare_proto::common::{AckPayload, PushPayloadKind, PushTargetType};
 
     #[test]
     fn test_parse_envelope() {
@@ -111,19 +112,21 @@ mod tests {
             target_device_ids: Vec::new(),
             payload_kind: PushPayloadKind::Ack as i32,
             options: None,
-            payload: Some(flare_proto::common::push_envelope::Payload::Ack(AckPayload {
-                message_id: "msg-123".to_string(),
-                conversation_id: "conv-123".to_string(),
-                seq: 100,
-                ack_type: "received".to_string(),
-                ack_at_ms: 1234567890,
-            })),
+            payload: Some(flare_proto::common::push_envelope::Payload::Ack(
+                AckPayload {
+                    message_id: "msg-123".to_string(),
+                    conversation_id: "conv-123".to_string(),
+                    seq: 100,
+                    ack_type: "received".to_string(),
+                    ack_at_ms: 1234567890,
+                },
+            )),
             headers: std::collections::HashMap::new(),
         };
 
         let payload = prost::Message::encode_to_vec(&envelope);
         let parsed = PushHandler::parse_envelope(&payload).unwrap();
-        
+
         assert_eq!(parsed.envelope_id, "test-123");
         assert_eq!(parsed.tenant_id, "tenant-1");
     }

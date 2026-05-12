@@ -13,13 +13,13 @@
 ### 1. flare-storage/writer（消息持久化服务）
 
 **职责**：
-- 订阅 Kafka `storage-messages` Topic
+- 订阅 JetStream `storage-messages` Topic
 - 消息持久化到 PostgreSQL/TimescaleDB
 - 消息缓存到 Redis（热数据）
 - 消息存储到 MongoDB（实时数据）
 - 会话状态更新（Redis）
 - 用户游标更新（Redis）
-- ACK 确认发布（Kafka）
+- ACK 确认发布（JetStream）
 
 **核心功能**：
 - ✅ 消息去重（基于 message_id，Redis SETNX）
@@ -27,11 +27,11 @@
 - ✅ 消息缓存（Redis，TTL: 1小时）
 - ✅ 会话状态更新（Redis Hash）
 - ✅ 用户游标更新（Redis Hash）
-- ✅ ACK 确认发布（Kafka）
+- ✅ ACK 确认发布（JetStream）
 
 **数据流**：
 ```
-Kafka (storage-messages) 
+JetStream (storage-messages) 
   → Writer Consumer
     → 幂等性检查 (Redis)
     → 热缓存 (Redis)
@@ -39,7 +39,7 @@ Kafka (storage-messages)
     → 归档存储 (PostgreSQL/TimescaleDB)
     → 会话状态更新 (Redis)
     → 用户游标更新 (Redis)
-    → ACK 发布 (Kafka)
+    → ACK 发布 (JetStream)
 ```
 
 ---
@@ -99,7 +99,7 @@ flare-storage/writer/
 │   │       └── ack_publisher.rs   # ACK 发布器
 │   ├── interface/
 │   │   └── messaging/
-│   │       └── consumer.rs        # Kafka 消费者
+│   │       └── consumer.rs        # JetStream 消费者
 │   └── service/
 │       ├── bootstrap.rs            # 应用启动器
 │       └── registry.rs             # 服务注册
@@ -149,10 +149,10 @@ flare-storage/reader/
 ### Writer 配置
 
 环境变量：
-- `KAFKA_BOOTSTRAP_SERVERS` - Kafka 服务器地址
-- `KAFKA_TOPIC` - 消息 Topic（默认: `storage-messages`）
-- `KAFKA_GROUP_ID` - 消费者组 ID
-- `KAFKA_ACK_TOPIC` - ACK Topic（可选）
+- `JETSTREAM_BOOTSTRAP_SERVERS` - JetStream 服务器地址
+- `JETSTREAM_TOPIC` - 消息 Topic（默认: `storage-messages`）
+- `JETSTREAM_GROUP_ID` - 消费者组 ID
+- `JETSTREAM_ACK_TOPIC` - ACK Topic（可选）
 - `REDIS_URL` - Redis 连接地址
 - `REDIS_HOT_TTL_SECONDS` - 热缓存 TTL（默认: 3600秒）
 - `REDIS_IDEMPOTENCY_TTL_SECONDS` - 幂等性 TTL（默认: 86400秒）

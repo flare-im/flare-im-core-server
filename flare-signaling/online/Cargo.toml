@@ -32,4 +32,5 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 anyhow = { workspace = true }
 tokio-stream = { workspace = true }
+futures-util = { workspace = true }
 

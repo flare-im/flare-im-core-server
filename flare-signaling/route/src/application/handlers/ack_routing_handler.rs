@@ -1,13 +1,13 @@
-//! 客户端 ACK 上行路由：Push / Conversation / Batch → Push Proxy（Kafka ack topic）。
+//! 客户端 ACK 上行路由：Push / Conversation / Batch → Push Proxy（JetStream ack topic）。
 
 use std::sync::Arc;
 use std::time::Instant;
 
+use flare_grpc_proto::signaling::router::RouteOptions;
+use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_proto::common::Ack;
 use flare_proto::common::ack::Payload as AckPayload;
-use flare_grpc_proto::signaling::router::RouteOptions;
 use flare_server_core::context::Context;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -57,13 +57,13 @@ impl AckRoutingHandler {
             .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "forward client ack"))?;
 
         let total_duration = start_time.elapsed();
-        tracing::info!(
+        tracing::trace!(
             request_id = %ctx.request_id(),
             svid = %svid,
             total_duration_ms = total_duration.as_millis(),
             "client Ack routed to push proxy"
         );
-        
+
         Ok(MessageRouteResult {
             response_data: vec![],
             routed_endpoint: "push-proxy".to_string(),

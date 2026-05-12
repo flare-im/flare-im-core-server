@@ -1,6 +1,7 @@
 # 示例：预置 Hook 配置
 #
 # 将本文件复制为 config/hooks.toml 后按需启用。
+# 除 Hook 外，也可在同一个文件配置 capability 远程扩展插件发现与健康检查（见文件尾部）。
 
 [[pre_send]]
 name = "compliance-text-check"
@@ -59,4 +60,27 @@ tenants = ["default"]
 [recall.transport]
 type = "grpc"
 endpoint = "https://hooks.internal.svc:7443"
+
+# -----------------------------------------------------------------------------
+# Capability Runtime（扩展插件发现 / 健康检查 / 动态调用）
+# -----------------------------------------------------------------------------
+[capability_runtime]
+# 可选：覆盖 dispatch 限制（与环境变量同名能力）
+# max_payload_json_bytes = 1048576
+# dispatch_timeout_ms = 25000
+# dispatch_max_per_minute = 3000
+
+# 扩展插件健康检查配置
+plugin_health_check_interval_secs = 15
+plugin_call_timeout_ms = 5000
+
+[[capability_runtime.plugin_discovery_endpoints]]
+tenant_id = "default"
+plugin_id = "flare-strom-sfu"
+capability_id = "media.strom_sfu.control"
+grpc_authority = "127.0.0.1:50055"
+[capability_runtime.plugin_discovery_endpoints.labels]
+module = "rtc"
+backend = "strom-sfu"
+# flare-capability 启动时会读取该条目并自动装配 remote RTC backend。
 

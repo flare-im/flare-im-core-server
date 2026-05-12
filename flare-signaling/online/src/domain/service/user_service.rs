@@ -36,13 +36,23 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         let user_id = &request.user_id;
 
         // 获取用户的所有会话
-        let user_id_vo = UserId::new(user_id.to_string())
-            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("invalid user_id: {}", e)))?;
+        let user_id_vo = UserId::new(user_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
         let sessions = self
             .conversation_repository
             .get_user_connections(&user_id_vo)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to get user connections",
+                )
+            })?;
 
         // 计算在线状态
         let is_online = !sessions.is_empty();
@@ -99,7 +109,10 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         }
 
         if user_ids.len() > 100 {
-            return Err(flare_err!(ErrorCode::InvalidParameter, "maximum 100 user_ids allowed"));
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "maximum 100 user_ids allowed"
+            ));
         }
 
         let mut presences = std::collections::HashMap::new();
@@ -122,9 +135,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             }
         }
 
-        Ok(BatchGetUserPresenceResponse {
-            presences,
-        })
+        Ok(BatchGetUserPresenceResponse { presences })
     }
 
     pub async fn list_user_devices(
@@ -201,9 +212,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 "device kicked"
             );
 
-            Ok(KickDeviceResponse {
-                success: true,
-            })
+            Ok(KickDeviceResponse { success: true })
         } else {
             Err(flare_err!(ErrorCode::UserNotFound, "device not found"))
         }

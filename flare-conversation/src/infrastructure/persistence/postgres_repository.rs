@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{map_infra_error, ErrorCode, Result, require_user_id};
+use crate::error::{ErrorCode, Result, map_infra_error, require_user_id};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
-use tracing::info;
+use tracing::debug;
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{
@@ -222,11 +222,11 @@ impl ConversationRepository for PostgresConversationRepository {
                     .map(ConversationType::from_int)
                     .unwrap_or(ConversationType::Unspecified),
                 business_type,
-                last_message_id: None,           // 将在ApplicationService层补充
-                last_message_time: None,         // 将在ApplicationService层补充
-                last_sender_id: None,            // 将在ApplicationService层补充
-                last_message_type: None,         // 将在ApplicationService层补充
-                last_content_type: None,         // 将在ApplicationService层补充
+                last_message_id: None,   // 将在ApplicationService层补充
+                last_message_time: None, // 将在ApplicationService层补充
+                last_sender_id: None,    // 将在ApplicationService层补充
+                last_message_type: None, // 将在ApplicationService层补充
+                last_content_type: None, // 将在ApplicationService层补充
                 unread_count,
                 last_read_seq,
                 metadata: attributes,
@@ -311,19 +311,23 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(session.conversation_type.as_int())
         .bind(&session.business_type)
         .bind(&session.display_name)
-        .bind(
-            serde_json::to_value(&session.attributes).map_err(|e| {
-                map_infra_error(e, ErrorCode::SerializationError, "serialize session attributes")
-            })?,
-        )
+        .bind(serde_json::to_value(&session.attributes).map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::SerializationError,
+                "serialize session attributes",
+            )
+        })?)
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
         .bind(&session.channel_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to create conversation"))?;
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to create conversation")
+        })?;
         if result.rows_affected() > 0 {
-            info!(conversation_id = %session.conversation_id, "Conversation row inserted");
+            debug!(conversation_id = %session.conversation_id, "Conversation row inserted");
         }
 
         // 插入参与者记录（使用 ON CONFLICT 处理重复插入）
@@ -362,7 +366,7 @@ impl ConversationRepository for PostgresConversationRepository {
         tx.commit()
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "commit transaction"))?;
-        info!(conversation_id = %session.conversation_id, "Conversation created");
+        debug!(conversation_id = %session.conversation_id, "Conversation created");
         Ok(())
     }
 
@@ -487,11 +491,13 @@ impl ConversationRepository for PostgresConversationRepository {
             "#,
         )
         .bind(&session.display_name)
-        .bind(
-            serde_json::to_value(&session.attributes).map_err(|e| {
-                map_infra_error(e, ErrorCode::SerializationError, "serialize session attributes")
-            })?,
-        )
+        .bind(serde_json::to_value(&session.attributes).map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::SerializationError,
+                "serialize session attributes",
+            )
+        })?)
         .bind(session.visibility.as_proto())
         .bind(session.lifecycle_state.as_str())
         .bind(&session.channel_id)
@@ -499,9 +505,11 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(&session.conversation_id)
         .execute(&*self.pool)
         .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update conversation"))?;
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to update conversation")
+        })?;
 
-        info!(conversation_id = %session.conversation_id, "Conversation updated");
+        debug!(conversation_id = %session.conversation_id, "Conversation updated");
         Ok(())
     }
 
@@ -519,7 +527,9 @@ impl ConversationRepository for PostgresConversationRepository {
                 .bind(conversation_id)
                 .execute(&*self.pool)
                 .await
-                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation"))?;
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation")
+                })?;
         } else {
             // 软删除（更新生命周期状态）
             sqlx::query(
@@ -533,10 +543,12 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(conversation_id)
             .execute(&*self.pool)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation"))?;
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation")
+            })?;
         }
 
-        info!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
+        debug!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
         Ok(())
     }
 
@@ -614,7 +626,13 @@ impl ConversationRepository for PostgresConversationRepository {
             .bind(user_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update participant roles"))?;
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to update participant roles",
+                )
+            })?;
         }
 
         tx.commit()
@@ -865,10 +883,13 @@ impl ConversationRepository for PostgresConversationRepository {
 
         query_builder = query_builder.bind(limit as i64).bind(offset as i64);
 
-        let rows = query_builder
-            .fetch_all(&*self.pool)
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to search conversations"))?;
+        let rows = query_builder.fetch_all(&*self.pool).await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to search conversations",
+            )
+        })?;
 
         // 转换为ConversationSummary
         let mut summaries: Vec<ConversationSummary> = rows
@@ -1055,7 +1076,7 @@ impl ConversationRepository for PostgresConversationRepository {
             let max_seq = row.get::<i64, _>("max_seq");
             let prev_unread_count = row.get::<i32, _>("prev_unread_count");
             let next_unread_count = row.get::<i32, _>("next_unread_count");
-            info!(
+            debug!(
                 user_id = %user_id,
                 conversation_id = %conversation_id,
                 seq,
@@ -1067,7 +1088,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 "Marked messages as read"
             );
         } else {
-            info!(
+            debug!(
                 user_id = %user_id,
                 conversation_id = %conversation_id,
                 seq,

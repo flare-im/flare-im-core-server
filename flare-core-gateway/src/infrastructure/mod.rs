@@ -1,3 +1,3 @@
 pub mod grpc;
 
-pub use grpc::{MediaServiceClientWrapper, GrpcClients};
+pub use grpc::{GrpcClients, MediaServiceClientWrapper};

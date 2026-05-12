@@ -7,7 +7,7 @@ use tracing::info;
 
 use flare_core_runtime::ServiceRuntime;
 use flare_im_core::service_names::ORCHESTRATOR;
-use flare_server_core::mq::KafkaConsumerConfig;
+use flare_server_core::mq::NatsConsumerConfig;
 
 use super::wire;
 
@@ -65,36 +65,38 @@ impl ApplicationBootstrap {
 
         let consumer_config = context.consumer_config.clone();
         let main_queue_dispatcher = context.main_queue_dispatcher.clone();
-        let orchestrator_kafka_config = context.config.clone();
+        let orchestrator_mq_config = context.config.clone();
 
         let topics = main_queue_dispatcher.topics();
         if topics.is_empty() {
-            anyhow::bail!("orchestrator: no Kafka topics registered on main queue dispatcher");
+            anyhow::bail!("orchestrator: no JetStream topics registered on main queue dispatcher");
         }
 
         info!(
             topics = ?topics,
-            group = %orchestrator_kafka_config.consumer_group(),
-            "Starting Message Orchestrator Kafka consumer (TOPIC_MESSAGE_MAIN)..."
+            group = %orchestrator_mq_config.consumer_group(),
+            backend = %orchestrator_mq_config.mq_backend,
+            "Starting Message Orchestrator MQ consumer (TOPIC_MESSAGE_MAIN)..."
         );
 
-        use flare_server_core::kafka::KafkaMessageFetcher;
-        use flare_server_core::mq::consumer::{ConsumerRuntimeTask, MqConsumerTask};
-
-        let fetcher = KafkaMessageFetcher::new_with_consumer_group(
-            orchestrator_kafka_config.as_ref(),
-            topics,
-            consumer_config.kafka_consumer_group_override.as_deref(),
-        )
-        .map_err(|e| anyhow::anyhow!("create orchestrator kafka fetcher: {}", e))?;
-
-        let main_queue_consumer =
-            ConsumerRuntimeTask::from_parts(consumer_config, main_queue_dispatcher, fetcher);
-
-        let mq_task = MqConsumerTask::new(
-            "orchestrator-main-queue-consumer",
-            Box::new(main_queue_consumer),
-        );
+        let mq_tasks = match orchestrator_mq_config.mq_backend.as_str() {
+            "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
+                orchestrator_mq_config.as_ref(),
+                consumer_config,
+                main_queue_dispatcher,
+                "orchestrator-main-queue-consumer",
+            )
+            .map_err(|e| anyhow::anyhow!("create orchestrator kafka consumers: {}", e))?,
+            "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
+                orchestrator_mq_config.as_ref(),
+                consumer_config,
+                main_queue_dispatcher,
+                "orchestrator-main-queue-consumer",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("create orchestrator nats consumers: {}", e))?,
+            other => anyhow::bail!("unsupported mq backend: {}", other),
+        };
 
         info!(
             address = %address,
@@ -103,39 +105,40 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let runtime = flare_im_core::health::attach_runtime_health_checks(
-            ServiceRuntime::new(ORCHESTRATOR)
-                .with_address(address)
-                .with_health_failure_action(
-                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
-                )
-                .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
-                    use flare_server_core::middleware::ContextLayer;
+        let mut service_runtime = ServiceRuntime::new(ORCHESTRATOR)
+            .with_address(address)
+            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+            .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
+                use flare_server_core::middleware::ContextLayer;
 
-                    let send_service = ContextLayer::new()
-                        .allow_missing()
-                        .layer(MessageSendServiceServer::new(send_grpc));
-                    let action_service = ContextLayer::new()
-                        .allow_missing()
-                        .layer(MessageActionServiceServer::new(action_grpc));
+                let send_service = ContextLayer::new()
+                    .allow_missing()
+                    .layer(MessageSendServiceServer::new(send_grpc));
+                let action_service = ContextLayer::new()
+                    .allow_missing()
+                    .layer(MessageActionServiceServer::new(action_grpc));
 
-                    Server::builder()
-                        .add_service(send_service)
-                        .add_service(action_service)
-                        .serve_with_shutdown(address_clone, async {
-                            let _ = shutdown_rx.await;
-                        })
-                        .await
-                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("gRPC server error: {}", e),
-                            ))
-                        })
-                })
-                .add_task(Box::new(mq_task)),
-            ORCHESTRATOR,
-        );
+                Server::builder()
+                    .add_service(send_service)
+                    .add_service(action_service)
+                    .serve_with_shutdown(address_clone, async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("gRPC server error: {}", e),
+                        ))
+                    })
+            });
+
+        for task in mq_tasks {
+            service_runtime = service_runtime.add_task(Box::new(task));
+        }
+
+        let runtime =
+            flare_im_core::health::attach_runtime_health_checks(service_runtime, ORCHESTRATOR);
 
         let config = context.config.clone();
         let mut metadata: std::collections::HashMap<String, String> =

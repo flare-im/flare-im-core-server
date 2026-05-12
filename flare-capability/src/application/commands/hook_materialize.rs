@@ -15,12 +15,7 @@ pub async fn materialize_hook_execution_plan(
 
     let mut plan = HookExecutionPlan::from_hook_config(config.clone(), hook_type);
 
-    if config.enabled
-        && !matches!(
-            config.transport,
-            HookTransportConfig::Local { .. }
-        )
-    {
+    if config.enabled && !matches!(config.transport, HookTransportConfig::Local { .. }) {
         let adapter = factory.create_adapter(&config.transport).await?;
         plan = plan.with_adapter(adapter);
     }

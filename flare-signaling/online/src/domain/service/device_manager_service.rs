@@ -27,10 +27,23 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
 
     /// 获取用户的所有在线设备会话
     pub async fn get_user_devices(&self, user_id: &str) -> Result<Vec<ConnectionRecord>> {
-        let uid = UserId::new(user_id.to_string())
-            .map_err(|e| flare_err!(ErrorCode::InvalidParameter, format!("invalid user_id: {}", e)))?;
-        let sessions = self.repository.get_user_connections(&uid).await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get user connections"))?;
+        let uid = UserId::new(user_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
+        let sessions = self
+            .repository
+            .get_user_connections(&uid)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to get user connections",
+                )
+            })?;
         let records: Vec<ConnectionRecord> = sessions
             .into_iter()
             .map(|s| ConnectionRecord {

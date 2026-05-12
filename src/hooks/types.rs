@@ -3,9 +3,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use async_trait::async_trait;
 use crate::Ctx;
 use crate::error::{ErrorBuilder, ErrorCode, FlareError, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 

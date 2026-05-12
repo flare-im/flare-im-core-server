@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use flare_im_core::Ctx;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use flare_server_core::mq::producer::Producer;
 use serde_json::to_vec;
 use tracing::instrument;
 
@@ -12,39 +11,38 @@ use crate::domain::events::AckEvent;
 use crate::domain::repository::AckPublisher;
 
 pub struct MqAckPublisher {
-    producer: Arc<FutureProducer>,
-    config: Arc<StorageWriterConfig>,
-    topic: String,
+    producer: Arc<dyn Producer>,
+    subject: String,
 }
 
 impl MqAckPublisher {
     pub fn new(
-        producer: Arc<FutureProducer>,
-        config: Arc<StorageWriterConfig>,
-        topic: String,
+        producer: Arc<dyn Producer>,
+        _config: Arc<StorageWriterConfig>,
+        subject: String,
     ) -> Self {
-        Self {
-            producer,
-            config,
-            topic,
-        }
+        Self { producer, subject }
     }
 }
 
 impl AckPublisher for MqAckPublisher {
     #[instrument(skip(self, event), fields(message_id = %event.message_id, conversation_id = %event.conversation_id))]
     async fn publish(&self, ctx: &Ctx, event: AckEvent<'_>) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
         let payload = to_vec(&event)?;
 
-        let record = FutureRecord::to(&self.topic)
-            .payload(&payload)
-            .key(event.conversation_id);
-
         self.producer
-            .send(record, Duration::from_millis(self.config.kafka_timeout_ms))
+            .send(
+                ctx,
+                &self.subject,
+                Some(event.conversation_id),
+                payload,
+                Some(std::collections::HashMap::from([(
+                    "x-message-id".to_string(),
+                    event.message_id.to_string(),
+                )])),
+            )
             .await
-            .map_err(|(err, _)| anyhow!("failed to publish ACK: {err}"))?;
+            .map_err(|err| anyhow!("failed to publish ACK: {err}"))?;
 
         Ok(())
     }

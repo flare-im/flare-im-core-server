@@ -510,7 +510,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         // 如果消息数量超过最优批量大小，分批处理
         if messages.len() > optimal_batch_size {
             let chunks: Vec<_> = messages.chunks(optimal_batch_size).collect();
-            tracing::debug!(
+            tracing::trace!(
                 total_messages = messages.len(),
                 optimal_batch_size = optimal_batch_size,
                 chunks = chunks.len(),

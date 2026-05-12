@@ -1,14 +1,16 @@
-use std::env;
 use std::sync::Once;
+use std::{collections::HashMap, env};
 
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
-use flare_server_core::kafka::KafkaProducerConfig;
-use flare_server_core::mq::kafka::KafkaConsumerConfig;
+use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
+use flare_server_core::mq::nats::{
+    NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
+};
 
 use crate::domain::model::{ConversationType, MessageDefaults};
 
-/// `flare-capability` gRPC 静态回退（无注册中心或与 `connect_grpc_channel_from_app_config` 的 fallback 一致）。
+/// `flare-capability` gRPC 默认地址（无注册中心或未配置地址时使用）。
 /// 与 `MessageOrchestratorConfig::resolve_capability_grpc_uri` 配套。
 pub const DEFAULT_CAPABILITY_GRPC_URI: &str = "http://127.0.0.1:50095";
 
@@ -36,11 +38,18 @@ impl SessionCreationMode {
 
 #[derive(Clone, Debug, Default)]
 pub struct MessageOrchestratorConfig {
-    pub kafka_bootstrap: String,
-    pub kafka_timeout_ms: u64,
+    pub mq_backend: String,
+    pub jetstream_url: String,
+    pub jetstream_timeout_ms: u64,
+    pub jetstream_retries: u32,
+    pub jetstream_retry_backoff_ms: u64,
+    pub jetstream_stream_specs: Vec<NatsStreamSpec>,
     // 批量发送配置
-    pub kafka_batch_size: usize,      // 批量发送大小
-    pub kafka_flush_interval_ms: u64, // 刷新间隔（毫秒）
+    pub jetstream_batch_size: usize,      // 批量发送大小
+    pub jetstream_flush_interval_ms: u64, // 刷新间隔（毫秒）
+    pub kafka_brokers: Vec<String>,
+    pub kafka_client_id: String,
+    pub kafka_options: HashMap<String, String>,
     pub redis_url: Option<String>,
     pub wal_hash_key: Option<String>,
     pub wal_ttl_seconds: u64,
@@ -90,11 +99,27 @@ pub struct MessageOrchestratorConfig {
     /// Hook 扩展允许的消息类型（逗号分隔 i32，空表示全量）。
     pub extension_hook_message_type_allowlist: Vec<i32>,
     /// Plugin 扩展允许的事件类型（逗号分隔 i32，空表示全量）。
+    /// 若非空，须包含 `EVENT_CALL_SIGNAL` 的整型值（与 `flare_proto::common::EventType` 一致，当前为 `10`），
+    /// 否则 [`crate::application::handlers::plugin::CallCapabilityBridge`] enrich 会被扩展路由跳过。
     pub extension_plugin_event_type_allowlist: Vec<i32>,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
     env::var(primary).ok().or_else(|| env::var(fallback).ok())
+}
+
+fn stream_specs_from_app(app: Option<&FlareAppConfig>) -> Vec<NatsStreamSpec> {
+    let specs = app
+        .map(|cfg| cfg.jetstream_topology())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|spec| NatsStreamSpec::new(spec.stream_name, spec.subjects))
+        .collect::<Vec<_>>();
+    if specs.is_empty() {
+        default_stream_specs()
+    } else {
+        specs
+    }
 }
 
 fn parse_csv_strings(raw: Option<String>) -> Vec<String> {
@@ -104,6 +129,19 @@ fn parse_csv_strings(raw: Option<String>) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn kafka_brokers_from_env_or_profile(
+    env_name: &str,
+    profile: Option<&flare_im_core::config::KafkaClusterConfig>,
+) -> Vec<String> {
+    parse_csv_strings(env::var(env_name).ok())
+        .into_iter()
+        .chain(profile.map(|p| p.brokers.clone()).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter(|v| !v.trim().is_empty())
+        .collect::<Vec<_>>()
 }
 
 fn parse_csv_i32(raw: Option<String>) -> Vec<i32> {
@@ -117,58 +155,109 @@ fn parse_csv_i32(raw: Option<String>) -> Vec<i32> {
 
 impl MessageOrchestratorConfig {
     pub fn from_sources(app: Option<&FlareAppConfig>) -> Self {
-        let (service_config, kafka_profile, redis_profile) = if let Some(cfg) = app {
-            let svc = cfg.message_orchestrator_service();
-            let kafka_profile = svc
-                .kafka
-                .as_deref()
-                .and_then(|name| cfg.kafka_profile(name))
-                .cloned();
-            let redis_profile = svc
-                .wal_store
-                .as_deref()
-                .and_then(|name| cfg.redis_profile(name))
-                .cloned();
-            (Some(svc), kafka_profile, redis_profile)
-        } else {
-            (None, None, None)
-        };
+        let jetstream_stream_specs = stream_specs_from_app(app);
+        let mq_backend = app
+            .map(|cfg| cfg.mq_default_backend().to_string())
+            .or_else(|| env::var("FLARE_MQ_DEFAULT_BACKEND").ok())
+            .unwrap_or_else(|| "nats".to_string())
+            .to_ascii_lowercase();
 
-        let kafka_bootstrap = env_or_fallback(
-            "MESSAGE_ORCHESTRATOR_KAFKA_BOOTSTRAP",
-            "STORAGE_KAFKA_BOOTSTRAP_SERVERS",
+        let (service_config, jetstream_profile, kafka_profile, redis_profile) =
+            if let Some(cfg) = app {
+                let svc = cfg.message_orchestrator_service();
+                let jetstream_profile = svc
+                    .jetstream
+                    .as_deref()
+                    .and_then(|name| cfg.jetstream_profile(name))
+                    .cloned();
+                let kafka_profile = cfg.kafka_profile("message").cloned();
+                let redis_profile = svc
+                    .wal_store
+                    .as_deref()
+                    .and_then(|name| cfg.redis_profile(name))
+                    .cloned();
+                (Some(svc), jetstream_profile, kafka_profile, redis_profile)
+            } else {
+                (None, None, None, None)
+            };
+
+        let jetstream_url = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_URL",
+            "STORAGE_JETSTREAM_URL",
         )
         .or_else(|| {
-            kafka_profile
+            jetstream_profile
                 .as_ref()
-                .map(|profile| profile.bootstrap_servers.clone())
+                .map(|profile| profile.url.clone())
         })
-        .unwrap_or_else(|| "127.0.0.1:29092".to_string());
+        .unwrap_or_else(|| "nats://127.0.0.1:24222".to_string());
 
-        let kafka_timeout_ms = env_or_fallback(
-            "MESSAGE_ORCHESTRATOR_KAFKA_TIMEOUT_MS",
-            "STORAGE_KAFKA_TIMEOUT_MS",
+        let jetstream_timeout_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_TIMEOUT_MS",
+            "STORAGE_JETSTREAM_TIMEOUT_MS",
         )
         .and_then(|v| v.parse::<u64>().ok())
         .or_else(|| {
-            kafka_profile
+            jetstream_profile
                 .as_ref()
                 .and_then(|profile| profile.timeout_ms)
         })
         .unwrap_or(5000);
+        let jetstream_retries = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_RETRIES",
+            "STORAGE_JETSTREAM_RETRIES",
+        )
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| {
+            jetstream_profile
+                .as_ref()
+                .and_then(|profile| profile.retries)
+        })
+        .unwrap_or(8);
+        let jetstream_retry_backoff_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_RETRY_BACKOFF_MS",
+            "STORAGE_JETSTREAM_RETRY_BACKOFF_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            jetstream_profile
+                .as_ref()
+                .and_then(|profile| profile.retry_backoff_ms)
+        })
+        .unwrap_or(25);
 
         // 批量发送配置
-        let kafka_batch_size =
-            env_or_fallback("MESSAGE_ORCHESTRATOR_KAFKA_BATCH_SIZE", "KAFKA_BATCH_SIZE")
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(100); // 默认批量大小：100
+        let jetstream_batch_size = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_BATCH_SIZE",
+            "JETSTREAM_BATCH_SIZE",
+        )
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100); // 默认批量大小：100
 
-        let kafka_flush_interval_ms = env_or_fallback(
-            "MESSAGE_ORCHESTRATOR_KAFKA_FLUSH_INTERVAL_MS",
-            "KAFKA_FLUSH_INTERVAL_MS",
+        let jetstream_flush_interval_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_JETSTREAM_FLUSH_INTERVAL_MS",
+            "JETSTREAM_FLUSH_INTERVAL_MS",
         )
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(50); // 默认刷新间隔：50ms
+
+        let kafka_brokers = kafka_brokers_from_env_or_profile(
+            "MESSAGE_ORCHESTRATOR_KAFKA_BROKERS",
+            kafka_profile.as_ref(),
+        );
+        let kafka_brokers = if kafka_brokers.is_empty() {
+            vec!["127.0.0.1:29092".to_string()]
+        } else {
+            kafka_brokers
+        };
+        let kafka_client_id = env::var("MESSAGE_ORCHESTRATOR_KAFKA_CLIENT_ID")
+            .ok()
+            .or_else(|| kafka_profile.as_ref().and_then(|p| p.client_id.clone()))
+            .unwrap_or_else(|| "flare-im-message".to_string());
+        let kafka_options = kafka_profile
+            .as_ref()
+            .map(|p| p.options.clone())
+            .unwrap_or_default();
 
         let redis_url = env_or_fallback("MESSAGE_ORCHESTRATOR_REDIS_URL", "STORAGE_REDIS_URL")
             .or_else(|| redis_profile.as_ref().map(|profile| profile.url.clone()));
@@ -376,10 +465,17 @@ impl MessageOrchestratorConfig {
         ));
 
         Self {
-            kafka_bootstrap,
-            kafka_timeout_ms,
-            kafka_batch_size,
-            kafka_flush_interval_ms,
+            mq_backend,
+            jetstream_url,
+            jetstream_timeout_ms,
+            jetstream_retries,
+            jetstream_retry_backoff_ms,
+            jetstream_stream_specs,
+            jetstream_batch_size,
+            jetstream_flush_interval_ms,
+            kafka_brokers,
+            kafka_client_id,
+            kafka_options,
             redis_url,
             wal_hash_key,
             wal_ttl_seconds,
@@ -411,7 +507,7 @@ impl MessageOrchestratorConfig {
         }
     }
 
-    /// Hook `capability_hooks_auto` 与 RTC 桥共用的能力服务 gRPC 地址（环境变量未设或为空时打一次 warn 并回退 [`DEFAULT_CAPABILITY_GRPC_URI`]）。
+    /// Hook `capability_hooks_auto` 与 RTC 桥共用的能力服务 gRPC 地址（环境变量未设或为空时打一次 warn 并使用 [`DEFAULT_CAPABILITY_GRPC_URI`]）。
     pub fn resolve_capability_grpc_uri(&self) -> String {
         if let Some(ref u) = self.capability_grpc_uri {
             let t = u.trim();
@@ -433,7 +529,7 @@ impl MessageOrchestratorConfig {
         Self::from_sources(Some(app))
     }
 
-    /// 从环境变量加载（保留用于向后兼容，但不推荐使用）
+    /// 从环境变量加载（旧入口，不推荐使用）
     #[deprecated(note = "Use from_app_config instead")]
     pub fn from_env() -> Self {
         Self::from_sources(None)
@@ -452,84 +548,74 @@ impl MessageOrchestratorConfig {
     }
 }
 
-// 实现 KafkaProducerConfig trait，使 MessageOrchestratorConfig 可以使用通用的 Kafka 生产者构建器
-impl KafkaProducerConfig for MessageOrchestratorConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
+impl NatsProducerConfig for MessageOrchestratorConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
     }
 
-    fn message_timeout_ms(&self) -> u64 {
-        self.kafka_timeout_ms
-    }
-
-    // 使用默认值，或根据需要覆盖
-    fn enable_idempotence(&self) -> bool {
-        true // 消息编排器需要保证消息不丢失
-    }
-
-    fn compression_type(&self) -> &str {
-        "snappy" // 使用 snappy 压缩，平衡性能和压缩比
-    }
-
-    fn batch_size(&self) -> usize {
-        (self.kafka_batch_size.saturating_mul(1024)).max(16 * 1024)
-    }
-
-    fn linger_ms(&self) -> u64 {
-        self.kafka_flush_interval_ms.max(1)
+    fn timeout_ms(&self) -> u64 {
+        self.jetstream_timeout_ms
     }
 
     fn retries(&self) -> u32 {
-        5
+        self.jetstream_retries
     }
 
     fn retry_backoff_ms(&self) -> u64 {
-        100
+        self.jetstream_retry_backoff_ms
     }
 
-    fn metadata_max_age_ms(&self) -> u64 {
-        300_000
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
     }
 }
 
-impl KafkaConsumerConfig for MessageOrchestratorConfig {
-    fn kafka_bootstrap(&self) -> &str {
-        &self.kafka_bootstrap
+impl NatsConsumerConfig for MessageOrchestratorConfig {
+    fn nats_url(&self) -> &str {
+        &self.jetstream_url
     }
 
     fn consumer_group(&self) -> &str {
         ORCHESTRATOR_MAIN_GROUP_DEFAULT
     }
 
-    fn enable_auto_commit(&self) -> bool {
-        false
+    fn enable_manual_ack(&self) -> bool {
+        true
     }
 
-    fn session_timeout_ms(&self) -> u64 {
-        10_000
+    fn batch_size(&self) -> usize {
+        64
     }
 
-    fn auto_offset_reset(&self) -> &str {
-        "earliest"
-    }
-
-    fn fetch_min_bytes(&self) -> usize {
-        1
-    }
-
-    fn fetch_max_wait_ms(&self) -> u64 {
+    fn batch_timeout_ms(&self) -> u64 {
         50
     }
 
-    fn fetch_message_max_bytes(&self) -> usize {
-        10 * 1024 * 1024
+    fn enable_durable(&self) -> bool {
+        true
     }
 
-    fn max_partition_fetch_bytes(&self) -> usize {
-        10 * 1024 * 1024
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        self.jetstream_stream_specs.clone()
+    }
+}
+
+impl KafkaProducerConfig for MessageOrchestratorConfig {
+    fn kafka_brokers(&self) -> Vec<String> {
+        self.kafka_brokers.clone()
     }
 
-    fn metadata_max_age_ms(&self) -> u64 {
-        300_000
+    fn kafka_client_id(&self) -> &str {
+        &self.kafka_client_id
+    }
+
+    fn kafka_options(&self) -> HashMap<String, String> {
+        self.kafka_options.clone()
+    }
+}
+
+impl KafkaConsumerConfig for MessageOrchestratorConfig {
+    fn kafka_consumer_group(&self) -> &str {
+        ORCHESTRATOR_MAIN_GROUP_DEFAULT
     }
 }

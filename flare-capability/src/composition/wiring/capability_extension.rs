@@ -1,4 +1,7 @@
-//! **能力扩展栈装配**（写路径基础设施）：策略后端、`CapabilityGrpcServer`、RTC（进程内 SFU / strom gRPC）。
+//! **能力扩展栈装配**（写路径基础设施）：策略后端、`CapabilityGrpcServer`、内建 Resolver。
+//!
+//! **RTC / Extension 适配在本 crate 内部装配**。此处仅构建基础注册表与服务；
+//! 具体后端接线由 `composition::wire_runtime_adapters` 在启动阶段统一完成。
 
 use std::sync::Arc;
 
@@ -10,18 +13,18 @@ use crate::infrastructure::capability::DispatchRateLimiter;
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
-use crate::interface::grpc::{CapabilityGrpcServer, CapabilityInvocationMetrics, HookServiceServer};
+use crate::interface::grpc::{
+    CapabilityGrpcServer, CapabilityInvocationMetrics, HookServiceServer,
+};
 
-/// 初始化能力扩展栈：内存 / Postgres 策略、可选 SFU RTC、内建单聊 Resolver。
+/// 初始化能力扩展栈（不直接依赖具体 RTC 实现类型）：
 ///
-/// RTC 后端选择：
-/// - 默认：进程内 `flare-sfu` + [`SfuRtcCapability`](crate::infrastructure::capability::SfuRtcCapability)。
-/// - `FLARE_CAPABILITY_RTC_BACKEND=strom`（或 `strom-grpc` / `strom_grpc`）且设置
-///   `FLARE_STROM_SFU_GRPC_ENDPOINT` 时：独立 **flare-strom-sfu** `SfuControl` gRPC，不启动进程内 `SfuPlugin`。
-///
-/// 供本进程与 **Orchestrator 等内嵌调用方** 共用；调用方可再向返回的
-/// [`CapabilityExtensionRegistry`](crate::infrastructure::capability::CapabilityExtensionRegistry) 注册额外 Guard / Resolver。
+/// - 策略后端：内存（DEV） / Postgres（配置了 `db_pool` 时）。
+/// - Recipient Resolver：内建的 `DirectConversationRecipientResolver`。
+/// - 返回的 [`CapabilityExtensionRegistry`](crate::infrastructure::capability::CapabilityExtensionRegistry)
+///   已就绪，后续由启动流程按配置调用内部适配装配逻辑挂入运行时后端。
 pub async fn init_capability_extension_stack(
+    runtime_config_file: Option<std::path::PathBuf>,
     db_pool: Option<Arc<PgPool>>,
     hook_governance: Option<Arc<HookServiceServer>>,
     plugin_routes: Arc<PluginRouteBook>,
@@ -29,17 +32,18 @@ pub async fn init_capability_extension_stack(
     crate::infrastructure::capability::CapabilityExtensionRegistry,
     Arc<dyn CapabilityPolicyBackend>,
     CapabilityGrpcServer,
-    Option<Arc<crate::infrastructure::capability::StromSfuGrpcRtcCapability>>,
 )> {
     use crate::infrastructure::capability::builtin::DirectConversationRecipientResolver;
     use crate::infrastructure::capability::{
-        CapabilityExtensionRegistry, InMemoryCapabilityGrants, SfuRtcCapability,
+        CapabilityExtensionRegistry, InMemoryCapabilityGrants,
     };
     use crate::infrastructure::persistence::PostgresCapabilityPolicy;
 
     let registry = CapabilityExtensionRegistry::new();
 
-    let runtime = Arc::new(CapabilityRuntimeConfig::from_env());
+    let runtime = Arc::new(CapabilityRuntimeConfig::from_sources(
+        runtime_config_file.as_deref(),
+    ));
     let audit = db_pool
         .as_ref()
         .map(|p| Arc::new(PostgresCapabilityAuditLog::new(p.clone())));
@@ -79,69 +83,9 @@ pub async fn init_capability_extension_stack(
         Arc::clone(&plugin_routes),
     );
 
-    if av_plugins_disabled_by_env() {
-        tracing::info!("AV capability / SFU disabled (FLARE_CAPABILITY_AV_PLUGINS)");
-        return Ok((registry, capability_policy, capability_grpc, None));
-    }
-
-    let rtc_backend = std::env::var("FLARE_CAPABILITY_RTC_BACKEND")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let strom_endpoint = std::env::var("FLARE_STROM_SFU_GRPC_ENDPOINT")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-
-    if matches!(
-        rtc_backend.as_str(),
-        "strom" | "strom-grpc" | "strom_grpc"
-    ) {
-        let Some(ep) = strom_endpoint else {
-            return Err(anyhow::anyhow!(
-                "FLARE_CAPABILITY_RTC_BACKEND=strom requires non-empty FLARE_STROM_SFU_GRPC_ENDPOINT (e.g. http://127.0.0.1:50051)"
-            ));
-        };
-        use crate::infrastructure::capability::{
-            register_strom_sfu_plugin_route, StromSfuGrpcRtcCapability,
-        };
-        let rtc = Arc::new(
-            StromSfuGrpcRtcCapability::connect(ep.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("StromSfuGrpcRtcCapability::connect: {e}"))?,
-        );
-        registry.set_rtc_backend(Some(rtc.clone())).await;
-        register_strom_sfu_plugin_route(plugin_routes.as_ref(), &ep);
-        tracing::info!(
-            %ep,
-            "Strom SFU gRPC RtcCapability registered (in-process flare-sfu not started)"
-        );
-        return Ok((registry, capability_policy, capability_grpc, Some(rtc)));
-    }
-
-    let sfu = Arc::new(
-        flare_sfu::interface::plugin::SfuPlugin::new(flare_sfu::domain::SfuConfig::default())
-            .map_err(|e| anyhow::anyhow!("SfuPlugin init: {e}"))?,
+    tracing::info!(
+        "capability extension stack initialized (no RTC backend yet; use plugin wire(..))"
     );
-    sfu.start()
-        .await
-        .map_err(|e| anyhow::anyhow!("SfuPlugin start: {e}"))?;
 
-    let rtc = Arc::new(SfuRtcCapability::new(sfu));
-    registry.set_rtc_backend(Some(rtc)).await;
-
-    tracing::info!("SFU-backed RtcCapability registered (in-process flare-sfu)");
-
-    Ok((registry, capability_policy, capability_grpc, None))
-}
-
-fn av_plugins_disabled_by_env() -> bool {
-    std::env::var("FLARE_CAPABILITY_AV_PLUGINS")
-        .map(|v| {
-            matches!(v.trim(), "0" | "false" | "off" | "no" | "disabled")
-                || v.eq_ignore_ascii_case("false")
-                || v.eq_ignore_ascii_case("off")
-                || v.eq_ignore_ascii_case("no")
-        })
-        .unwrap_or(false)
+    Ok((registry, capability_policy, capability_grpc))
 }

@@ -77,7 +77,11 @@ impl InMemoryCapabilityGrants {
         ));
     }
 
-    pub fn list_user_capabilities(&self, tenant_id: &str, user_id: &str) -> Vec<UserCapabilityGrant> {
+    pub fn list_user_capabilities(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Vec<UserCapabilityGrant> {
         self.user_capability_grants
             .iter()
             .filter(|e| {
@@ -106,11 +110,10 @@ impl InMemoryCapabilityGrants {
             }
             if let Some((namespace, _)) = capability_id.split_once('.') {
                 let wildcard = format!("{namespace}.*");
-                if let Some(grant) = self.user_capability_grants.get(&(
-                    t.to_string(),
-                    uid.to_string(),
-                    wildcard,
-                )) && grant.is_active(now)
+                if let Some(grant) =
+                    self.user_capability_grants
+                        .get(&(t.to_string(), uid.to_string(), wildcard))
+                    && grant.is_active(now)
                 {
                     return true;
                 }

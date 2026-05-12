@@ -7,8 +7,8 @@
 //! - 用户列表推送：查询指定用户的在线设备
 //! - 设备列表推送：直接返回设备列表
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use flare_im_core::Ctx;
 use flare_proto::common::PushEnvelope;
 

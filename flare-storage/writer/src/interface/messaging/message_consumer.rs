@@ -13,10 +13,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_proto::common::{mq_envelope, MqEnvelope, MqPayloadKind};
-use flare_server_core::mq::consumer::{
-    MessageHandler, Message, MessageResult, ConsumerError,
-};
+use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::handlers::MessagePersistenceCommandHandler;
@@ -60,7 +58,9 @@ impl MessageCreatedHandler {
     /// # 返回
     /// - `Self`: 消息创建消费者处理器实例
     pub fn new(persistence_handler: Arc<MessagePersistenceHandler>) -> Self {
-        Self { persistence_handler }
+        Self {
+            persistence_handler,
+        }
     }
 }
 
@@ -89,17 +89,16 @@ impl MessageHandler for MessageCreatedHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>()
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    topic = %message.context.topic,
-                    "Failed to deserialize MqEnvelope"
-                );
-                ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-            })?;
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
 
-        tracing::debug!(
+        tracing::trace!(
             envelope_id = %envelope.envelope_id,
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
@@ -140,7 +139,7 @@ impl MessageHandler for MessageCreatedHandler {
         // 6. 调用 Application 层
         match self.persistence_handler.handle(ctx, cmd).await {
             Ok(Some(result)) => {
-                tracing::debug!(
+                tracing::trace!(
                     topic = %message.context.topic,
                     partition = message.context.partition,
                     offset = message.context.offset,
@@ -153,7 +152,7 @@ impl MessageHandler for MessageCreatedHandler {
                 Ok(MessageResult::Ack)
             }
             Ok(None) => {
-                tracing::debug!(
+                tracing::trace!(
                     topic = %message.context.topic,
                     partition = message.context.partition,
                     offset = message.context.offset,
@@ -170,7 +169,10 @@ impl MessageHandler for MessageCreatedHandler {
                     offset = message.context.offset,
                     "Failed to process MqEnvelope"
                 );
-                Err(ConsumerError::Handler(format!("MessagePersistenceCommandHandler error: {}", e)))
+                Err(ConsumerError::Handler(format!(
+                    "MessagePersistenceCommandHandler error: {}",
+                    e
+                )))
             }
         }
     }

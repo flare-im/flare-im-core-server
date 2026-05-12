@@ -1,12 +1,12 @@
 //! 出站端口（防腐层）：由 `infrastructure` 实现，对接 Conversation / Storage Reader 等。
 #![allow(async_fn_in_trait)] // 内部端口，由具体类型实现并 `Send`；与仓库 Rust 2024 异步 trait 风格一致。
 
-use flare_proto::Message;
-use flare_proto::common::{Event, MultiDeviceCursor};
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, UpdateCursorRequest,
 };
 use flare_im_core::Ctx;
+use flare_proto::Message;
+use flare_proto::common::{Event, MultiDeviceCursor};
 use flare_server_core::error::FlareError;
 use std::collections::HashMap;
 

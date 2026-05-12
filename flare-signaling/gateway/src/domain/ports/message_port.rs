@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::{Message, SendAck};
 use flare_im_core::error::Result;
+use flare_proto::common::{Message, SendAck};
 
 #[async_trait]
 pub trait IMessageCommandPort: Send + Sync {

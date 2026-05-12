@@ -71,7 +71,7 @@ impl StorageHandler {
                     }
                 };
 
-                tracing::debug!(
+                tracing::trace!(
                     envelope_id = %envelope.envelope_id,
                     conversation_id = %envelope.conversation_id,
                     message_id = %message.server_id,
@@ -95,7 +95,7 @@ impl StorageHandler {
                     }
                 };
 
-                tracing::debug!(
+                tracing::trace!(
                     envelope_id = %envelope.envelope_id,
                     conversation_id = %envelope.conversation_id,
                     event_id = %event.event_id,

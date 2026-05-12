@@ -6,12 +6,12 @@
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-use crate::config::FlareAppConfig;
-use crate::RegistryConfig;
 use super::{
     BackendType, DiscoveryFactory, ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance,
     ServiceRegistry, TagFilter,
 };
+use crate::RegistryConfig;
+use crate::config::FlareAppConfig;
 
 /// 将注册中心类型字符串转换为 BackendType
 ///
@@ -613,7 +613,7 @@ pub async fn create_discover_from_registry_config_with_filters(
                 .await
                 .map_err(|e| format!("Failed to create service discover: {}", e))?;
 
-                tracing::debug!(
+                tracing::trace!(
                     service_type = %service_type,
                     registry_type = %registry_config.registry_type,
                     "✅ Service discover created (without tag filters, backend doesn't support it)"
@@ -649,7 +649,7 @@ pub async fn create_discover_from_registry_config_with_filters(
             .await
             .map_err(|e| format!("Failed to create service discover with filters: {}", e))?;
 
-        tracing::debug!(
+        tracing::trace!(
             service_type = %service_type,
             registry_type = %registry_config.registry_type,
             "✅ Service discover created with tag filters"
@@ -666,7 +666,7 @@ pub async fn create_discover_from_registry_config_with_filters(
         .await
         .map_err(|e| format!("Failed to create service discover: {}", e))?;
 
-        tracing::debug!(
+        tracing::trace!(
             service_type = %service_type,
             registry_type = %registry_config.registry_type,
             "✅ Service discover created"

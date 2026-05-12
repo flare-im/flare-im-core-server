@@ -280,7 +280,7 @@ impl PostgresBaseStorage {
         let pool_size = self.pool.size();
         let idle_connections = self.pool.num_idle();
 
-        tracing::debug!(
+        tracing::trace!(
             pool_size = pool_size,
             idle_connections = idle_connections,
             "Database connection pool status"

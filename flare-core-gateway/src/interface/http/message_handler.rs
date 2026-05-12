@@ -3,15 +3,15 @@ use axum::{
     http::HeaderMap,
 };
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
-use crate::context::Ctx;
-use crate::error::Result;
-use crate::infrastructure::grpc::GrpcClients;
 use crate::application::dto::{
     MarkReadHttpRequest, MarkReadHttpResponse, RecallMessageHttpRequest, RecallMessageHttpResponse,
     SendMessageHttpRequest, SendMessageHttpResponse,
 };
+use crate::context::Ctx;
+use crate::error::Result;
+use crate::infrastructure::grpc::GrpcClients;
 use flare_server_core::http::ApiResponse;
 
 /// 发送消息
@@ -32,11 +32,10 @@ pub async fn send_message(
     Json(req): Json<SendMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<SendMessageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    info!(
+    debug!(
         trace_id = %ctx.trace_id,
         conversation_id = %req.conversation_id,
         message_type = req.message_type,
-        content = ?req.content,
         "Sending message"
     );
 
@@ -68,7 +67,7 @@ pub async fn recall_message(
     Json(req): Json<RecallMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<RecallMessageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    info!(
+    debug!(
         trace_id = %ctx.trace_id,
         conversation_id = %req.conversation_id,
         message_id = %req.message_id,
@@ -76,9 +75,7 @@ pub async fn recall_message(
     );
 
     // TODO: 实现 gRPC 调用
-    let response = RecallMessageHttpResponse {
-        success: true,
-    };
+    let response = RecallMessageHttpResponse { success: true };
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -101,7 +98,7 @@ pub async fn mark_message_read(
     Json(req): Json<MarkReadHttpRequest>,
 ) -> Result<Json<ApiResponse<MarkReadHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    info!(
+    debug!(
         trace_id = %ctx.trace_id,
         conversation_id = %req.conversation_id,
         message_id = %req.message_id,
@@ -109,9 +106,7 @@ pub async fn mark_message_read(
     );
 
     // TODO: 实现 gRPC 调用
-    let response = MarkReadHttpResponse {
-        success: true,
-    };
+    let response = MarkReadHttpResponse { success: true };
 
     Ok(Json(ApiResponse::success(response)))
 }

@@ -4,14 +4,11 @@ use std::collections::HashMap;
 
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
 use flare_core::common::protocol::{
-    frame_with_payload_command,
+    Frame, PayloadCommand, Reliability, frame_with_payload_command,
     payload_command::Type as PayloadType,
-    Frame, PayloadCommand, Reliability,
-};
-use flare_proto::common::{
-    ack, CustomData, DataKind, DataPacket, Event, Message, SendAck,
 };
 use flare_proto::common::{Ack, AckType};
+use flare_proto::common::{CustomData, DataKind, DataPacket, Event, Message, SendAck, ack};
 use prost::Message as ProstMessage;
 
 /// 解码 MESSAGE 上行载荷
@@ -76,9 +73,8 @@ pub fn build_message_ack_frame(
     };
 
     let mut buf = Vec::new();
-    ack.encode(&mut buf).map_err(|e| {
-        CoreFlareError::serialization_error(format!("encode Ack(SendAck): {}", e))
-    })?;
+    ack.encode(&mut buf)
+        .map_err(|e| CoreFlareError::serialization_error(format!("encode Ack(SendAck): {}", e)))?;
 
     let cmd = PayloadCommand {
         r#type: PayloadType::Ack as i32,
@@ -91,10 +87,7 @@ pub fn build_message_ack_frame(
 }
 
 /// 领域事件成功 → `Ack(EventAck)`（`PayloadCommand.type=ACK`）
-pub fn build_event_ack_operation_frame(
-    message_id: &str,
-    event_id: &str,
-) -> CoreResult<Frame> {
+pub fn build_event_ack_operation_frame(message_id: &str, event_id: &str) -> CoreResult<Frame> {
     use flare_proto::common::EventAck;
 
     let event_ack = EventAck {
@@ -110,9 +103,8 @@ pub fn build_event_ack_operation_frame(
     };
 
     let mut buf = Vec::new();
-    ack.encode(&mut buf).map_err(|e| {
-        CoreFlareError::serialization_error(format!("encode Ack(EventAck): {}", e))
-    })?;
+    ack.encode(&mut buf)
+        .map_err(|e| CoreFlareError::serialization_error(format!("encode Ack(EventAck): {}", e)))?;
 
     let cmd = PayloadCommand {
         r#type: PayloadType::Ack as i32,

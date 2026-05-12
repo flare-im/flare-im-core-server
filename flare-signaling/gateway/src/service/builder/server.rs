@@ -68,9 +68,13 @@ pub fn build_flare_server(
             .with_protocol_address(TransportProtocol::WebSocket, ws_addr);
     }
 
-    builder
-        .build()
-        .map_err(|e| ErrorBuilder::new(ErrorCode::InternalError, &format!("Failed to build FlareServer: {}", e)).build_error())
+    builder.build().map_err(|e| {
+        ErrorBuilder::new(
+            ErrorCode::InternalError,
+            &format!("Failed to build FlareServer: {}", e),
+        )
+        .build_error()
+    })
 }
 
 /// 构建长连接服务器
@@ -152,7 +156,11 @@ pub async fn build_long_connection_server(
                 )?
             } else {
                 error!(error = %e, "Failed to build FlareServer");
-                return Err(ErrorBuilder::new(ErrorCode::InternalError, &format!("Failed to build server: {}", e)).build_error());
+                return Err(ErrorBuilder::new(
+                    ErrorCode::InternalError,
+                    &format!("Failed to build server: {}", e),
+                )
+                .build_error());
             }
         }
     };
@@ -163,7 +171,11 @@ pub async fn build_long_connection_server(
     // 启动服务器
     server.start().await.map_err(|e| {
         error!(error = %e, "Failed to start FlareServer");
-        ErrorBuilder::new(ErrorCode::InternalError, &format!("Failed to start server: {}", e)).build_error()
+        ErrorBuilder::new(
+            ErrorCode::InternalError,
+            &format!("Failed to start server: {}", e),
+        )
+        .build_error()
     })?;
 
     info!(ws_addr = %ws_addr, quic_addr = %quic_addr, "✅ Long connection server started");
@@ -174,13 +186,14 @@ pub async fn build_long_connection_server(
 /// 设置服务器组件
 async fn setup_server_components(
     connection_manager: &Arc<ConnectionManager>,
-    push_handle_slot: Option<&Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>>>,
+    push_handle_slot: Option<
+        &Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>>,
+    >,
 ) {
     use flare_core::server::handle::DefaultServerHandle;
 
-    let handle = Arc::new(DefaultServerHandle::new(
-        connection_manager.clone() as Arc<dyn flare_core::server::connection::ConnectionManagerTrait>,
-    ));
+    let handle = Arc::new(DefaultServerHandle::new(connection_manager.clone()
+        as Arc<dyn flare_core::server::connection::ConnectionManagerTrait>));
 
     if let Some(slot) = push_handle_slot {
         let mut guard = slot.lock().await;

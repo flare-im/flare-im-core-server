@@ -70,10 +70,9 @@ impl CapabilityError {
                 FlareError::localized(ErrorCode::HttpNotFound, msg)
             }
             CapabilityError::Timeout(msg) => FlareError::timeout(msg),
-            CapabilityError::Rejected(r) => FlareError::localized(
-                ErrorCode::PermissionDenied,
-                r.message.clone(),
-            ),
+            CapabilityError::Rejected(r) => {
+                FlareError::localized(ErrorCode::PermissionDenied, r.message.clone())
+            }
             CapabilityError::NotSupported(msg) => {
                 FlareError::localized(ErrorCode::OperationNotSupported, msg)
             }

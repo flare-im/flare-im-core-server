@@ -98,7 +98,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 .get_session_messages(conversation_id, start_ts, end_ts, limit)
                 .await
             {
-                tracing::debug!(
+                tracing::trace!(
                     conversation_id = %conversation_id,
                     cached_count = cached_messages.len(),
                     "Cache hit: retrieved messages from Redis"
@@ -110,7 +110,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     .map(|msg| message_from_proto(&msg))
                     .collect();
 
-                tracing::debug!(
+                tracing::trace!(
                     conversation_id = %conversation_id,
                     cached_count = domain_messages.len(),
                     "Cache hit: retrieved messages from Redis"
@@ -520,7 +520,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         // 实际生产环境可以维护 message_id -> conversation_id 的映射，或通过查询获取
         // 这里暂时不实现缓存失效，因为需要额外的查询开销
         if self.cache.is_some() {
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %message_id,
                 "Message updated, cache invalidation skipped (requires conversation_id query)"
             );

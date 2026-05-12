@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 
 use tracing::info;
 
+use crate::error::{ErrorCode, Result, map_infra_error};
 use crate::service::wire::{self, ApplicationContext};
-use crate::error::{map_infra_error, ErrorCode, Result};
-use flare_im_core::service_names::SIGNALING_ONLINE;
 use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::SIGNALING_ONLINE;
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -24,7 +24,13 @@ impl ApplicationBootstrap {
         info!("Parsing server address...");
         let address: SocketAddr =
             ServiceHelper::parse_server_addr(app_config, &service_config.runtime, SIGNALING_ONLINE)
-                .map_err(|e| map_infra_error(e, ErrorCode::InvalidParameter, "invalid signaling online server address"))?;
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::InvalidParameter,
+                        "invalid signaling online server address",
+                    )
+                })?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -54,7 +60,9 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(SIGNALING_ONLINE)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
                 .add_spawn_with_shutdown("signaling-online-grpc", move |shutdown_rx| async move {
                     // 使用 ContextLayer 包裹 Service
                     use flare_server_core::middleware::ContextLayer;
@@ -87,6 +95,12 @@ impl ApplicationBootstrap {
                 })
             })
             .await
-            .map_err(|e| map_infra_error(anyhow::anyhow!("{}", e), ErrorCode::InternalError, "Runtime error"))
+            .map_err(|e| {
+                map_infra_error(
+                    anyhow::anyhow!("{}", e),
+                    ErrorCode::InternalError,
+                    "Runtime error",
+                )
+            })
     }
 }

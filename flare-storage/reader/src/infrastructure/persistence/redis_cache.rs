@@ -122,7 +122,7 @@ impl RedisMessageCache {
 
         let _: Vec<redis::Value> = pipe.query_async(&mut conn).await?;
 
-        tracing::debug!(
+        tracing::trace!(
             batch_size = messages.len(),
             "Cached {} messages to Redis",
             messages.len()
@@ -302,7 +302,7 @@ impl RedisMessageCache {
 
         if !keys.is_empty() {
             let _: () = conn.del(&keys).await?;
-            tracing::debug!(
+            tracing::trace!(
                 conversation_id = %conversation_id,
                 deleted_keys = keys.len(),
                 "Invalidated session cache"
@@ -315,7 +315,7 @@ impl RedisMessageCache {
 
         if !msg_keys.is_empty() {
             let _: () = conn.del(&msg_keys).await?;
-            tracing::debug!(
+            tracing::trace!(
                 conversation_id = %conversation_id,
                 deleted_msg_keys = msg_keys.len(),
                 "Invalidated message cache for session"

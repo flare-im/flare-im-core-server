@@ -1,8 +1,8 @@
 //! 命令处理器（编排层）- 轻量级，只负责编排领域服务
 
+use flare_im_core::Ctx;
 use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::metrics::StorageWriterMetrics;
-use flare_im_core::Ctx;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
@@ -73,7 +73,11 @@ where
                     message_id = ?message_id_for_error,
                     "Failed to prepare message"
                 );
-                return Err(map_infra_error(e, ErrorCode::InternalError, "Failed to prepare message"));
+                return Err(map_infra_error(
+                    e,
+                    ErrorCode::InternalError,
+                    "Failed to prepare message",
+                ));
             }
         };
 
@@ -93,21 +97,24 @@ where
         // 记录去重统计（应用层关注点）
         if deduplicated {
             self.metrics.messages_duplicate_total.inc();
-            tracing::debug!(message_id = %message_id, "Message is duplicate, skipping persistence");
+            tracing::trace!(message_id = %message_id, "Message is duplicate, skipping persistence");
         }
 
         if is_new {
             // 数据库写入
             let db_start = Instant::now();
-            self.domain_service.persist_message(ctx, prepared).await.map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    message_id = %message_id,
-                    conversation_id = %conversation_id,
-                    "Failed to persist message to database"
-                );
-                map_infra_error(e, ErrorCode::DatabaseError, "Failed to persist message")
-            })?;
+            self.domain_service
+                .persist_message(ctx, prepared)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        message_id = %message_id,
+                        conversation_id = %conversation_id,
+                        "Failed to persist message to database"
+                    );
+                    map_infra_error(e, ErrorCode::DatabaseError, "Failed to persist message")
+                })?;
 
             let db_duration = db_start.elapsed();
 
@@ -126,7 +133,7 @@ where
                 .with_label_values(&[tenant_id.as_str()])
                 .inc();
 
-            tracing::info!(
+            tracing::trace!(
                 message_id = %message_id,
                 conversation_id = %conversation_id,
                 duration_ms = total_duration.as_millis(),
@@ -225,7 +232,7 @@ where
                         .with_label_values(&["batch"])
                         .inc_by(new_messages.len() as u64);
 
-                    tracing::info!(
+                    tracing::trace!(
                         batch_size = new_messages.len(),
                         duration_ms = total_duration.as_millis(),
                         "Batch messages persisted successfully"

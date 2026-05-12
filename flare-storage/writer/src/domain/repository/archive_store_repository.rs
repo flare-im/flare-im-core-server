@@ -63,7 +63,14 @@ pub trait ArchiveStoreRepository: Send + Sync {
         scope: i32,
         visibility_status: &str,
     ) -> Result<()> {
-        let _ = (ctx, tenant_id, message_id, user_id, scope, visibility_status);
+        let _ = (
+            ctx,
+            tenant_id,
+            message_id,
+            user_id,
+            scope,
+            visibility_status,
+        );
         Ok(())
     }
 

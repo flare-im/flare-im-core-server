@@ -1,13 +1,13 @@
 # Storage Writer 服务配置（事件总线：消费消息流 + 操作事件流）
-# Kafka 使用 base.toml 中 [kafka.message]；Topic 与 flare_im_core::constants::topics 对齐
+# JetStream 使用 base.toml 中 [jetstream.message]；Subject 与 flare_im_core::constants::topics 对齐
 
 [services.storage_writer]
 
-kafka = "message"
+jetstream = "message"
 consumer_group = "storage-writer"
-# 消息流 / 操作事件流 Topic（不配则用 topics 默认值）
-kafka_topic = "flare.im.message.created"
-kafka_operation_topic = "flare.im.message.events"
+# 消息流 / 操作事件流 Subject（不配则用 topics 默认值）
+message_subject = "flare.im.message.storage"
+operation_subject = "flare.im.message.events"
 
 # PostgreSQL 配置（可选，用于归档）
 postgres = "media"
@@ -21,5 +21,5 @@ wal_ttl_seconds = 86400
 batch_size = 1000
 batch_interval_ms = 100
 
-# 注意：此服务不提供 gRPC 接口，仅作为 Kafka 消费者运行
+# 注意：此服务不提供 gRPC 接口，仅作为 JetStream 消费者运行
 

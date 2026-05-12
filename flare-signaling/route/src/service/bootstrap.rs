@@ -6,8 +6,8 @@ use anyhow::{Context as AnyhowContext, Result};
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_im_core::service_names::SIGNALING_ROUTE;
 use flare_core_runtime::ServiceRuntime;
+use flare_im_core::service_names::SIGNALING_ROUTE;
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -50,7 +50,9 @@ impl ApplicationBootstrap {
         let runtime = flare_im_core::health::attach_runtime_health_checks(
             ServiceRuntime::new(SIGNALING_ROUTE)
                 .with_address(address)
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+                .with_health_failure_action(
+                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
+                )
                 .add_spawn_with_shutdown("router-grpc", move |shutdown_rx| async move {
                     use flare_server_core::middleware::ContextLayer;
 

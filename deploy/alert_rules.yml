@@ -64,7 +64,7 @@ groups:
       - alert: MessageSendFailureRateHigh
         expr: |
           (
-            sum(rate(kafka_produce_failure_total[5m])) by (tenant_id)
+            sum(rate(jetstream_produce_failure_total[5m])) by (tenant_id)
             /
             sum(rate(messages_sent_total[5m])) by (tenant_id)
           ) > 0.01
@@ -90,17 +90,17 @@ groups:
           summary: "消息持久化延迟 P99 超过 100ms"
           description: "租户 {{ $labels.tenant_id }} 的消息持久化延迟 P99 在过去 5 分钟内超过 100ms，当前值: {{ $value | humanizeDuration }}"
 
-      # Kafka 消费延迟告警
-      - alert: KafkaConsumerLagHigh
+      # JetStream 消费延迟告警
+      - alert: JetStreamConsumerLagHigh
         expr: |
-          kafka_consumer_lag_sum > 10000
+          jetstream_consumer_lag_sum > 10000
         for: 5m
         labels:
           severity: warning
-          component: kafka
+          component: jetstream
         annotations:
-          summary: "Kafka 消费延迟过高"
-          description: "Kafka 消费延迟超过 10000 条消息，当前值: {{ $value }}"
+          summary: "JetStream 消费延迟过高"
+          description: "JetStream 消费延迟超过 10000 条消息，当前值: {{ $value }}"
 
       # 服务可用性告警
       - alert: ServiceDown

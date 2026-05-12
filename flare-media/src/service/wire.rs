@@ -87,40 +87,41 @@ async fn build_media_service(config: &MediaConfig) -> Result<Arc<MediaService>> 
 
     let memory_fallback_store: UploadSessionStoreRef =
         Arc::new(MemoryUploadSessionStore::new()) as UploadSessionStoreRef;
-    let upload_conversation_store: Option<UploadSessionStoreRef> =
-        match config.upload_session_redis_url() {
-            Some(url) => {
-                match RedisUploadSessionStore::new(
-                    url,
-                    &config.upload_session_namespace,
-                    config.chunk_ttl_seconds,
-                )
-                .await
-                {
-                    Ok(store) => {
-                        warn!("multipart upload session store mode: redis(primary)+memory(fallback)");
-                        let primary: UploadSessionStoreRef = Arc::new(store) as UploadSessionStoreRef;
-                        Some(
-                            Arc::new(FallbackUploadSessionStore::new(primary, memory_fallback_store))
-                                as UploadSessionStoreRef,
-                        )
-                    }
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            "failed to initialize redis upload session store, fallback to in-memory store"
-                        );
-                        Some(memory_fallback_store)
-                    }
+    let upload_conversation_store: Option<UploadSessionStoreRef> = match config
+        .upload_session_redis_url()
+    {
+        Some(url) => {
+            match RedisUploadSessionStore::new(
+                url,
+                &config.upload_session_namespace,
+                config.chunk_ttl_seconds,
+            )
+            .await
+            {
+                Ok(store) => {
+                    warn!("multipart upload session store mode: redis(primary)+memory(fallback)");
+                    let primary: UploadSessionStoreRef = Arc::new(store) as UploadSessionStoreRef;
+                    Some(Arc::new(FallbackUploadSessionStore::new(
+                        primary,
+                        memory_fallback_store,
+                    )) as UploadSessionStoreRef)
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "failed to initialize redis upload session store, fallback to in-memory store"
+                    );
+                    Some(memory_fallback_store)
                 }
             }
-            None => {
-                warn!(
-                    "upload_session_redis_url is not configured, fallback to in-memory multipart session store"
-                );
-                Some(memory_fallback_store)
-            }
-        };
+        }
+        None => {
+            warn!(
+                "upload_session_redis_url is not configured, fallback to in-memory multipart session store"
+            );
+            Some(memory_fallback_store)
+        }
+    };
 
     let local_store: Option<LocalStoreRef> = match config.local_storage_dir.as_deref() {
         Some(dir) => Some(Arc::new(FilesystemMediaStore::new(

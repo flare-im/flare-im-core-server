@@ -132,7 +132,7 @@ impl HookOrchestrationService {
                 if hook.require_success() {
                     tracing::warn!(hook = %hook.name(), error = %e, "PostSend hook failed");
                 } else {
-                    tracing::debug!(hook = %hook.name(), error = %e, "PostSend hook failed but ignored");
+                    tracing::trace!(hook = %hook.name(), error = %e, "PostSend hook failed but ignored");
                 }
             }
         }
@@ -173,7 +173,7 @@ impl HookOrchestrationService {
                 if hook.require_success() {
                     tracing::warn!(hook = %hook.name(), error = %e, "Delivery hook failed");
                 } else {
-                    tracing::debug!(hook = %hook.name(), error = %e, "Delivery hook failed but ignored");
+                    tracing::trace!(hook = %hook.name(), error = %e, "Delivery hook failed but ignored");
                 }
             }
         }

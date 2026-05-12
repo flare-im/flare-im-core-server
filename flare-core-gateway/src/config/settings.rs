@@ -70,8 +70,7 @@ impl Settings {
         dotenvy::dotenv().ok();
 
         let server = ServerConfig {
-            bind: std::env::var("SERVER_BIND")
-                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            bind: std::env::var("SERVER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("SERVER_PORT")
                 .unwrap_or_else(|_| "50050".to_string())
                 .parse()
@@ -157,8 +156,9 @@ impl Settings {
         }
 
         // 验证 gRPC URL
-        if !self.grpc.media_service_url.starts_with("http://") 
-            && !self.grpc.media_service_url.starts_with("https://") {
+        if !self.grpc.media_service_url.starts_with("http://")
+            && !self.grpc.media_service_url.starts_with("https://")
+        {
             anyhow::bail!("gRPC URL must start with http:// or https://");
         }
 

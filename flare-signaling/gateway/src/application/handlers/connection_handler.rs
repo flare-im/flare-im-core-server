@@ -10,9 +10,17 @@ use crate::domain::ports::IConnectionPort;
 use flare_im_core::Ctx;
 use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
 use flare_im_core::error::Result;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 use tracing::{debug, instrument, warn};
 
 use crate::domain::service::ConnectionDomainService;
+
+#[derive(Clone, Debug)]
+struct OnlineSession {
+    user_id: String,
+    conversation_id: String,
+}
 
 /// 连接管理处理器：仅编排会话领域服务与指标，连接查询由 QueryHandler / PushDomainService 使用 ConnectionQuery 独立完成。
 pub struct ConnectionHandler {
@@ -21,6 +29,7 @@ pub struct ConnectionHandler {
     /// State 模式：连接状态通知，默认 Noop，可注入实现与 Online 打通
     state_notifier: Arc<dyn ConnectionStateNotifier>,
     connection_port: Arc<dyn IConnectionPort>,
+    online_sessions: Arc<RwLock<HashMap<String, OnlineSession>>>,
 }
 
 impl ConnectionHandler {
@@ -35,6 +44,7 @@ impl ConnectionHandler {
             metrics,
             state_notifier,
             connection_port,
+            online_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -64,10 +74,18 @@ impl ConnectionHandler {
             .register_connection(
                 &user_id,
                 &connection_info.device_id,
+                connection_info.platform.as_deref(),
                 Some(connection_id),
                 connection_info.metadata.as_ref(),
             )
             .await?;
+        self.online_sessions.write().await.insert(
+            connection_id.to_string(),
+            OnlineSession {
+                user_id: user_id.clone(),
+                conversation_id: conversation_id.clone(),
+            },
+        );
 
         // 通知连接状态(业务端通知)
         self.state_notifier
@@ -103,15 +121,31 @@ impl ConnectionHandler {
     /// 4. 记录指标和日志
     #[instrument(skip(self))]
     pub async fn handle_disconnect(&self, connection_id: &str) -> Result<()> {
-        let connection_info = self
-            .connection_port
-            .get_connection_info(connection_id)
-            .await?;
-        let user_id = connection_info.user_id.clone();
+        let session = self
+            .online_sessions
+            .write()
+            .await
+            .remove(connection_id)
+            .ok_or_else(|| {
+                flare_server_core::error::ErrorBuilder::new(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    "online session not found for connection",
+                )
+                .build_error()
+            })?;
+        let user_id = session.user_id;
+        let conversation_id = session.conversation_id;
 
-        // 检查用户是否还有其他连接
-        let user_connections = self.connection_port.list_user_connections(&user_id).await?;
-        let has_other_connections = !user_connections.is_empty();
+        // 底层连接可能已先被移除，断开清理必须以 Online 会话缓存为准。
+        let user_connections = self
+            .connection_port
+            .list_user_connections(&user_id)
+            .await
+            .unwrap_or_default();
+        let active_count_after_disconnect = user_connections
+            .iter()
+            .filter(|conn| conn.connection_id != connection_id)
+            .count();
 
         // 通知连接状态
         self.state_notifier
@@ -123,7 +157,7 @@ impl ConnectionHandler {
             .await;
 
         // 更新活跃连接数
-        let active_count = user_connections.len() as i64;
+        let active_count = active_count_after_disconnect as i64;
         self.metrics.connection_disconnected_total.inc();
         self.metrics.connections_active.set(active_count);
 
@@ -134,28 +168,26 @@ impl ConnectionHandler {
             "Connection disconnected"
         );
 
-        // 如果是最后一个连接,注销会话
-        if !has_other_connections {
-            if let Err(err) = self
-                .session_domain_service
-                .unregister_connection(&user_id, None)
-                .await
-            {
-                warn!(
-                    ?err,
-                    user_id = %user_id,
-                    connection_id = %connection_id,
-                    "Failed to unregister online status"
-                );
-                return Err(err);
-            }
-
-            debug!(
+        if let Err(err) = self
+            .session_domain_service
+            .unregister_connection(&user_id, &conversation_id)
+            .await
+        {
+            warn!(
+                ?err,
                 user_id = %user_id,
                 connection_id = %connection_id,
-                "User disconnected"
+                "Failed to unregister online status"
             );
+            return Err(err);
         }
+
+        debug!(
+            user_id = %user_id,
+            connection_id = %connection_id,
+            active_connections = active_count,
+            "User connection unregistered"
+        );
 
         Ok(())
     }
@@ -168,22 +200,21 @@ impl ConnectionHandler {
     /// 3. 记录日志
     #[instrument(skip(self))]
     pub async fn refresh_session(&self, connection_id: &str) -> Result<()> {
-        let connection_info = self
-            .connection_port
-            .get_connection_info(connection_id)
-            .await?;
-        let user_id = connection_info.user_id.clone();
-        let metadata = self
-            .connection_port
-            .get_connection_metadata(connection_id)
-            .await?;
-        let conversation_id = metadata.get("conversation_id").cloned().ok_or_else(|| {
-            flare_server_core::error::ErrorBuilder::new(
-                flare_server_core::error::ErrorCode::InvalidParameter,
-                "conversation_id not in connection metadata",
-            )
-            .build_error()
-        })?;
+        let session = self
+            .online_sessions
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| {
+                flare_server_core::error::ErrorBuilder::new(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    "online conversation_id not found for connection",
+                )
+                .build_error()
+            })?;
+        let user_id = session.user_id;
+        let conversation_id = session.conversation_id;
 
         // 刷新 Signaling Online 的心跳
         self.session_domain_service

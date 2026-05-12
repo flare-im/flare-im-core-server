@@ -1,30 +1,26 @@
 //! `flare.capability.v1.CapabilityService` gRPC 实现（生产护栏：超时、限流、管理密钥、审计）。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use flare_grpc_proto::capability::capability_service_server::CapabilityService;
+use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
 use flare_grpc_proto::capability::{
     CapabilityDescriptor as ProtoDescriptor, CapabilityDispatchResult as ProtoDispatchResult,
-    DeregisterPluginEndpointRequest, DeregisterPluginEndpointResponse,
-    DispatchCapabilityRequest, DispatchCapabilityResponse, GenericRequest, GenericResponse,
-    GrantUserCapabilityRequest, GrantUserCapabilityResponse, ListCapabilitiesRequest,
-    ListCapabilitiesResponse, ListRegisteredPluginsRequest, ListRegisteredPluginsResponse,
-    ListUserCapabilitiesRequest, ListUserCapabilitiesResponse, RegisterPluginEndpointRequest,
-    RegisterPluginEndpointResponse, RegisteredPluginInstance, RevokeUserCapabilityRequest,
-    RevokeUserCapabilityResponse, SetTenantCapabilitySwitchRequest,
-    SetTenantCapabilitySwitchResponse, UserCapabilityGrant as ProtoGrant,
+    DeregisterPluginEndpointRequest, DeregisterPluginEndpointResponse, DispatchCapabilityRequest,
+    DispatchCapabilityResponse, GenericRequest, GenericResponse, GrantUserCapabilityRequest,
+    GrantUserCapabilityResponse, ListCapabilitiesRequest, ListCapabilitiesResponse,
+    ListRegisteredPluginsRequest, ListRegisteredPluginsResponse, ListUserCapabilitiesRequest,
+    ListUserCapabilitiesResponse, RegisterPluginEndpointRequest, RegisterPluginEndpointResponse,
+    RegisteredPluginInstance, RevokeUserCapabilityRequest, RevokeUserCapabilityResponse,
+    SetTenantCapabilitySwitchRequest, SetTenantCapabilitySwitchResponse,
+    UserCapabilityGrant as ProtoGrant,
 };
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use super::administer::dispatch_hook_administer;
-use crate::interface::grpc::hooks::HookServiceServer;
-use crate::interface::grpc::shared::helpers::{
-    actor_id_from_request, capability_error_to_status, ctx_allow_missing,
-    require_capability_policy_admin, trace_id_from_request,
-};
 use crate::application::handler::dispatch_capability_command;
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
@@ -33,6 +29,11 @@ use crate::infrastructure::capability::{
 };
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
+use crate::interface::grpc::hooks::HookServiceServer;
+use crate::interface::grpc::shared::helpers::{
+    actor_id_from_request, capability_error_to_status, ctx_allow_missing,
+    require_capability_policy_admin, trace_id_from_request,
+};
 
 /// 可观测计数（后续可对接 Prometheus / OTel）。
 #[derive(Debug, Default)]
@@ -96,7 +97,7 @@ impl CapabilityGrpcServer {
         hook_governance: Option<Arc<HookServiceServer>>,
         plugin_routes: Arc<PluginRouteBook>,
     ) -> Self {
-        Self {
+        let server = Self {
             registry,
             policy,
             runtime,
@@ -105,15 +106,82 @@ impl CapabilityGrpcServer {
             metrics,
             hook_governance,
             plugin_routes,
-        }
+        };
+        server.register_discovered_plugin_endpoints();
+        server.spawn_plugin_health_checker();
+        server
     }
 
     pub fn metrics(&self) -> CapabilityMetricsSnapshot {
         self.metrics.snapshot()
     }
+
+    pub fn runtime_config(&self) -> Arc<CapabilityRuntimeConfig> {
+        Arc::clone(&self.runtime)
+    }
+
+    fn register_discovered_plugin_endpoints(&self) {
+        let endpoints = self.runtime.media_control_endpoints();
+        if endpoints.is_empty() {
+            tracing::warn!(
+                "no media control endpoints discovered from capability_runtime.plugin_discovery_endpoints"
+            );
+        }
+        for ep in endpoints {
+            let instance = RegisteredPluginInstance {
+                plugin_id: ep.plugin_id.clone(),
+                capability_id: ep.capability_id.clone(),
+                grpc_authority: ep.grpc_authority.clone(),
+                labels: ep.labels.clone(),
+            };
+            self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
+            tracing::trace!(
+                tenant_id = %ep.tenant_id,
+                plugin_id = %ep.plugin_id,
+                capability_id = %ep.capability_id,
+                grpc_authority = %ep.grpc_authority,
+                "auto-registered discovered capability plugin endpoint"
+            );
+        }
+    }
+
+    fn spawn_plugin_health_checker(&self) {
+        let routes = Arc::clone(&self.plugin_routes);
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(runtime.plugin_health_check_interval);
+            loop {
+                ticker.tick().await;
+                let snapshots = routes.list_snapshots();
+                for snapshot in snapshots {
+                    let result = check_plugin_health(
+                        snapshot.instance.grpc_authority.as_str(),
+                        runtime.plugin_call_timeout,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => routes.mark_health(
+                            snapshot.tenant_id.as_str(),
+                            snapshot.instance.plugin_id.as_str(),
+                            true,
+                            None,
+                        ),
+                        Err(err) => routes.mark_health(
+                            snapshot.tenant_id.as_str(),
+                            snapshot.instance.plugin_id.as_str(),
+                            false,
+                            Some(err),
+                        ),
+                    }
+                }
+            }
+        });
+    }
 }
 
-fn domain_descriptor_to_proto(d: crate::domain::capability::CapabilityDescriptor) -> ProtoDescriptor {
+fn domain_descriptor_to_proto(
+    d: crate::domain::capability::CapabilityDescriptor,
+) -> ProtoDescriptor {
     ProtoDescriptor {
         capability_id: d.capability_id,
         plugin_id: d.plugin_id,
@@ -131,6 +199,42 @@ fn ts_from_chrono(dt: chrono::DateTime<Utc>) -> Timestamp {
     Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,
+    }
+}
+
+async fn check_plugin_health(
+    grpc_authority: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let endpoint =
+        if grpc_authority.starts_with("http://") || grpc_authority.starts_with("https://") {
+            grpc_authority.to_string()
+        } else {
+            format!("http://{grpc_authority}")
+        };
+    let channel = tonic::transport::Channel::from_shared(endpoint.clone())
+        .map_err(|e| format!("invalid endpoint {endpoint}: {e}"))?
+        .connect_lazy();
+    let mut client = ExtensionPluginClient::new(channel);
+    let request = Request::new(GenericRequest {
+        operation: "flare.capability.v1.health_check".to_string(),
+        metadata: std::collections::HashMap::new(),
+        payload: None,
+        request_id: uuid::Uuid::new_v4().to_string(),
+    });
+
+    let response = tokio::time::timeout(timeout, client.call(request))
+        .await
+        .map_err(|_| "plugin health_check timeout".to_string())?
+        .map_err(|e| e.to_string())?
+        .into_inner();
+    if response.ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "plugin health_check returned error: {} {}",
+            response.error_code, response.error_message
+        ))
     }
 }
 
@@ -190,7 +294,7 @@ impl CapabilityService for CapabilityGrpcServer {
         } else {
             r.tenant_id.as_str()
         };
-        tracing::debug!(
+        tracing::trace!(
             capability_id = %r.capability_id,
             tenant_id = %tenant_for_log,
             "capability.dispatch"
@@ -252,7 +356,16 @@ impl CapabilityService for CapabilityGrpcServer {
             },
         };
 
-        let fut = dispatch_capability_command(&ctx, &self.registry, &self.policy, &cmd);
+        let plugin_health_stale = self.runtime.plugin_health_check_interval.saturating_mul(2);
+        let fut = dispatch_capability_command(
+            &ctx,
+            &self.registry,
+            &self.plugin_routes,
+            &self.policy,
+            self.runtime.plugin_call_timeout,
+            plugin_health_stale,
+            &cmd,
+        );
         let out = match tokio::time::timeout(self.runtime.dispatch_timeout, fut).await {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
@@ -397,7 +510,9 @@ impl CapabilityService for CapabilityGrpcServer {
         let actor = actor_id_from_request(&request);
         let r = request.into_inner();
         if r.tenant_id.is_empty() || r.capability_id.is_empty() {
-            return Err(Status::invalid_argument("tenant_id, capability_id required"));
+            return Err(Status::invalid_argument(
+                "tenant_id, capability_id required",
+            ));
         }
         self.policy
             .set_tenant_capability(&r.tenant_id, &r.capability_id, r.enabled)
@@ -445,8 +560,7 @@ impl CapabilityService for CapabilityGrpcServer {
             grpc_authority: r.grpc_authority,
             labels: r.labels,
         };
-        self.plugin_routes
-            .upsert(r.tenant_id.as_str(), instance);
+        self.plugin_routes.upsert(r.tenant_id.as_str(), instance);
         Ok(Response::new(RegisterPluginEndpointResponse {
             accepted: true,
             message: "registered".into(),
@@ -478,10 +592,9 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.tenant_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id required"));
         }
-        let instances = self.plugin_routes.list_filtered(
-            r.tenant_id.as_str(),
-            r.capability_id.as_str(),
-        );
+        let instances = self
+            .plugin_routes
+            .list_filtered(r.tenant_id.as_str(), r.capability_id.as_str());
         Ok(Response::new(ListRegisteredPluginsResponse { instances }))
     }
 

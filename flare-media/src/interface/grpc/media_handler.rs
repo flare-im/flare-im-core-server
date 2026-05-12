@@ -5,17 +5,15 @@ use flare_grpc_proto::media::media_service_server::MediaService;
 use flare_grpc_proto::media::upload_file_request;
 use flare_grpc_proto::media::{
     AbortDirectUploadRequest, AbortMultipartUploadRequest, AbortMultipartUploadResponse,
-    CleanupOrphanedAssetsRequest, CleanupOrphanedAssetsResponse,
-    CommitDirectUploadPartsRequest, CommitDirectUploadPartsResponse,
-    CompleteDirectUploadRequest, CompleteMultipartUploadRequest, CreateReferenceRequest,
-    CreateReferenceResponse, DeleteFileRequest, DeleteFileResponse, DeleteReferenceRequest,
-    DeleteReferenceResponse, DescribeBucketRequest, DescribeBucketResponse, DownloadFileChunk,
-    DownloadFileRequest,
-    GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetDirectUploadStatusRequest,
-    GetDirectUploadStatusResponse, GetFileInfoRequest, GetFileInfoResponse, GetFileUrlRequest,
-    GetFileUrlResponse, InitiateDirectUploadRequest, InitiateDirectUploadResponse,
-    InitiateMultipartUploadRequest, InitiateMultipartUploadResponse, ListObjectsRequest,
-    ListObjectsResponse, ListReferencesRequest, ListReferencesResponse,
+    CleanupOrphanedAssetsRequest, CleanupOrphanedAssetsResponse, CommitDirectUploadPartsRequest,
+    CommitDirectUploadPartsResponse, CompleteDirectUploadRequest, CompleteMultipartUploadRequest,
+    CreateReferenceRequest, CreateReferenceResponse, DeleteFileRequest, DeleteFileResponse,
+    DeleteReferenceRequest, DeleteReferenceResponse, DescribeBucketRequest, DescribeBucketResponse,
+    DownloadFileChunk, DownloadFileRequest, GenerateUploadUrlRequest, GenerateUploadUrlResponse,
+    GetDirectUploadStatusRequest, GetDirectUploadStatusResponse, GetFileInfoRequest,
+    GetFileInfoResponse, GetFileUrlRequest, GetFileUrlResponse, InitiateDirectUploadRequest,
+    InitiateDirectUploadResponse, InitiateMultipartUploadRequest, InitiateMultipartUploadResponse,
+    ListObjectsRequest, ListObjectsResponse, ListReferencesRequest, ListReferencesResponse,
     PresignDirectUploadPartsRequest, PresignDirectUploadPartsResponse, ProcessImageRequest,
     ProcessImageResponse, ProcessVideoRequest, ProcessVideoResponse, SetObjectAclRequest,
     UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
@@ -52,8 +50,9 @@ impl MediaGrpcHandler {
 
 #[tonic::async_trait]
 impl MediaService for MediaGrpcHandler {
-    type DownloadFileStream =
-        Pin<Box<dyn tokio_stream::Stream<Item = Result<DownloadFileChunk, Status>> + Send + 'static>>;
+    type DownloadFileStream = Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<DownloadFileChunk, Status>> + Send + 'static>,
+    >;
 
     #[instrument(skip(self, request))]
     async fn upload_file(
@@ -620,7 +619,11 @@ impl MediaService for MediaGrpcHandler {
     ) -> Result<Response<ListObjectsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-        let response = self.query_handler.handle_list_objects(&ctx, req).await.into_grpc()?;
+        let response = self
+            .query_handler
+            .handle_list_objects(&ctx, req)
+            .await
+            .into_grpc()?;
         Ok(Response::new(response))
     }
 
@@ -693,4 +696,3 @@ fn to_initiate_direct_upload_response(
         error_message: String::new(),
     }
 }
-

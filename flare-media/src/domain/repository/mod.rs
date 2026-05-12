@@ -85,7 +85,12 @@ pub trait MediaObjectRepository: Send + Sync {
             "object stat is not supported by current object store"
         ))
     }
-    fn build_object_key_for(&self, file_id: &str, _file_name: &str, _file_category: &str) -> String {
+    fn build_object_key_for(
+        &self,
+        file_id: &str,
+        _file_name: &str,
+        _file_category: &str,
+    ) -> String {
         file_id.to_string()
     }
     fn base_url(&self) -> Option<String>;

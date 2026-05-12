@@ -34,7 +34,7 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
         if user_id.is_empty() {
             return Err(
                 ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id cannot be empty")
-                    .build_error()
+                    .build_error(),
             );
         }
 

@@ -1,4 +1,4 @@
-//! 依赖装配：配置、Kafka 发布器、gRPC Handler
+//! 依赖装配：配置、JetStream 发布器、gRPC Handler
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub async fn initialize(
     app_config: &flare_im_core::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushProxyConfig::from_app_config(app_config));
-    let publisher = Arc::new(PushProxyMqPublisher::new(config.clone())?);
+    let publisher = Arc::new(PushProxyMqPublisher::new(config.clone()).await?);
     let store = Arc::new(RedisStateStore::new(config.clone())?);
     let command_handler = Arc::new(PushProxyCommandHandler::new(publisher));
     let status_query = Arc::new(PushTaskStatusQuery::new(store.clone()));

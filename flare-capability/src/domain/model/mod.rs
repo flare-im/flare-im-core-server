@@ -8,11 +8,11 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use flare_im_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use flare_im_core::{
     DeliveryEvent, HookGroup, HookMetadata, MessageDraft, MessageRecord, PreSendDecision,
     PreSendHook, RecallEvent,
 };
-use flare_im_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use flare_server_core::context::{Context, Ctx};
 use tokio::time::timeout;
 
@@ -432,9 +432,10 @@ impl HookExecutionPlan {
         match timeout(self.metadata.timeout, fut).await {
             Ok(inner) => inner,
             Err(_) => {
-                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "post-send hook timed out")
-                    .details(format!("hook={}", self.name()))
-                    .build_error();
+                let err =
+                    ErrorBuilder::new(ErrorCode::OperationTimeout, "post-send hook timed out")
+                        .details(format!("hook={}", self.name()))
+                        .build_error();
                 if self.require_success() {
                     Err(err)
                 } else {

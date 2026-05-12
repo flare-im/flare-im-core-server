@@ -5,7 +5,7 @@ Flare Media 是 Flare IM 的媒资子系统，负责音视频/文件的去重存
 ## 核心职责
 - 预处理上传：生成上传令牌、指导客户端直传或分片上传、完成后校验内容指纹。
 - 媒资去重与引用：依据 `sha256`（或后续扩展的感知哈希）唯一化文件，存储 `media_asset` 元数据并维护 `media_reference` 引用记录，引用计数控制文件生命周期。
-- 异步处理：向 Kafka 投递媒资创建事件，触发转码、缩略图、审核等后续工作流。
+- 异步处理：向 JetStream 投递媒资创建事件，触发转码、缩略图、审核等后续工作流。
 - 管理接口：对外提供媒资查询、引用增删、标签与审核状态更新、回收站操作等后台能力。
 - 回收与归档：对未在宽限期内被引用的资产执行回收策略，可扩展冷存储或对象存储归档。
 
@@ -117,7 +117,7 @@ flare-media/
 1. 客户端调用 `PreUpload` 获取上传令牌与直传目标。
 2. 客户端上传完成后回调 `CompleteUpload`，服务计算内容指纹。
 3. 若指纹已存在：返回既有 `asset_id`，仅新增引用记录（`media_reference`），增量更新 `ref_count`。
-4. 若为全新内容：写对象存储、落库 `media_asset` 元数据，写 Kafka 事件触发转码/审核。
+4. 若为全新内容：写对象存储、落库 `media_asset` 元数据，写 JetStream 事件触发转码/审核。
 5. Redis 负责写入阶段的临时状态与并发控制（防止重复上传冲突）。
 
 ### 分片上传与断点续传
@@ -147,7 +147,7 @@ flare-media/
    - 获取访问地址：调用 `GetFileUrl` 获取临时签名链接与 CDN 地址。
 5. **更多管理操作（后台系统）**
    - 维护引用列表：`ListReferences` 查看当前媒资被哪些业务引用；`DeleteReference` 移除单个引用（引用数归零后服务会进入宽限期）。
-   - 可选：业务后台也可清理未使用资资产，通过自身逻辑或订阅 Kafka 事件。
+   - 可选：业务后台也可清理未使用资资产，通过自身逻辑或订阅 JetStream 事件。
 6. **删除文件**
    - 主动调用 `DeleteFile`（会减少引用数；引用数 > 1 时仅更新计数，==1 时删除对象存储/会话/元数据）。
    - 如需彻底删除所有引用，可在删除前逐个 `DeleteReference` 或调用后台批量处理工具。
@@ -235,7 +235,7 @@ flare-media/
 - `CreateReference` / `DeleteReference`：引用增删，驱动 `ref_count` 变化。
 - `RestoreAsset` / `DeleteAsset`：回收站管理与彻底删除。
 - `UpdateAsset`：审核状态、标签、权限、CDN 策略等更新。
-- 事件通知（Kafka）：媒资创建、转码完成、即将清理等。
+- 事件通知（JetStream）：媒资创建、转码完成、即将清理等。
 
 ## 运行与调试
 
@@ -243,7 +243,7 @@ flare-media/
 cargo run --bin flare-media
 ```
 
-启动前确保依赖服务可用（MinIO/S3、Postgres、Redis、Kafka）。开发阶段可使用 `docker-compose` 启动本地依赖，并设置：
+启动前确保依赖服务可用（MinIO/S3、Postgres、Redis、JetStream）。开发阶段可使用 `docker-compose` 启动本地依赖，并设置：
 
 ```bash
 export DATABASE_URL="postgres://postgres:postgres@localhost:5432/flare_media"

@@ -1,6 +1,4 @@
 use anyhow::Result;
-use flare_server_core::kafka::KafkaMessageFetcher;
-use flare_server_core::mq::consumer::{ConsumerRuntimeTask, MqConsumerTask};
 use flare_core_runtime::ServiceRuntime;
 use tracing::info;
 
@@ -23,35 +21,33 @@ impl ApplicationBootstrap {
             "Starting Push Server (push-request -> push-online/push-offline) via ServiceRuntime..."
         );
 
-        let topics = context.dispatcher.topics();
-        if topics.is_empty() {
-            anyhow::bail!("push-server: no Kafka topics registered on dispatcher");
+        let mut runtime = ServiceRuntime::mq_consumer()
+            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
+
+        let tasks = match context.config.mq_backend.as_str() {
+            "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
+                context.config.as_ref(),
+                context.consumer_config,
+                context.dispatcher.clone(),
+                "push-server-consumer",
+            )
+            .map_err(|e| anyhow::anyhow!("create push-server kafka consumers: {}", e))?,
+            "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
+                context.config.as_ref(),
+                context.consumer_config,
+                context.dispatcher.clone(),
+                "push-server-consumer",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("create push-server nats consumers: {}", e))?,
+            other => anyhow::bail!("unsupported mq backend: {}", other),
+        };
+
+        for task in tasks {
+            runtime = runtime.add_task(Box::new(task));
         }
 
-        let fetcher = KafkaMessageFetcher::new_with_consumer_group(
-            context.config.as_ref(),
-            topics,
-            context
-                .consumer_config
-                .kafka_consumer_group_override
-                .as_deref(),
-        )
-        .map_err(|e| anyhow::anyhow!("create kafka fetcher error: {}", e))?;
-
-        let consumer = ConsumerRuntimeTask::from_parts(
-            context.consumer_config,
-            context.dispatcher.clone(),
-            fetcher,
-        );
-
-        let task = MqConsumerTask::new("push-request-consumer", Box::new(consumer));
-
-        flare_im_core::health::attach_runtime_health_checks(
-            ServiceRuntime::mq_consumer()
-                .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
-                .add_task(Box::new(task)),
-            PUSH_SERVER,
-        )
+        flare_im_core::health::attach_runtime_health_checks(runtime, PUSH_SERVER)
             .run()
             .await
     }

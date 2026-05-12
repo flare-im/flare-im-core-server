@@ -14,7 +14,7 @@ use prost_types::Timestamp;
 
 // --- event_type 字符串（TopicEventEnvelope.event_type） ------------------------
 
-/// Orchestrator 异步会话创建（Kafka `TOPIC_CONVERSATION_ENSURE`，载荷为 JSON，见 `MqMessagePublisher::publish_conversation_ensure`）
+/// Orchestrator 异步会话创建（JetStream `TOPIC_CONVERSATION_ENSURE`，载荷为 JSON，见 `MqMessagePublisher::publish_conversation_ensure`）
 pub const EVENT_TYPE_OPERATION_CONVERSATION_ENSURE: &str = "operation.conversation_ensure";
 pub const EVENT_TYPE_CONVERSATION_ENSURE: &str = "conversation.ensure";
 pub const EVENT_TYPE_MESSAGE_CREATED: &str = "message.created";
@@ -81,9 +81,7 @@ fn timestamp_ms_from_proto(ts: Option<&Timestamp>) -> Option<u64> {
     Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
 }
 
-pub fn to_event_envelope(
-    envelope: &flare_proto::common::TopicEventEnvelope,
-) -> EventEnvelope {
+pub fn to_event_envelope(envelope: &flare_proto::common::TopicEventEnvelope) -> EventEnvelope {
     let payload = envelope.encode_to_vec();
     let mut core = EventEnvelope::new(
         envelope.event_type.as_str(),

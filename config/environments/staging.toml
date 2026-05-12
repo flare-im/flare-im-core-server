@@ -1,5 +1,10 @@
 # 预发布环境配置示例
 
+# 可选：覆盖默认 MQ（见 config/base.toml [mq] 说明；亦可用 FLARE_MQ_DEFAULT_BACKEND）
+# [mq]
+# default_backend = "kafka"
+# allow_kafka_fallback = false
+
 [object_storage.default]
 profile_type = "oss"
 endpoint = "https://oss-cn-hangzhou.aliyuncs.com"

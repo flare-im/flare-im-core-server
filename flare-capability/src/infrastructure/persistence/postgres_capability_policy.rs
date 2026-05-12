@@ -72,12 +72,11 @@ impl PostgresCapabilityPolicy {
             return Ok(());
         }
 
-        let row: (String, Option<String>) = sqlx::query_as(
-            "SELECT current_database(), current_setting('search_path', true)",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|_| ("(unknown)".to_string(), None));
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT current_database(), current_setting('search_path', true)")
+                .fetch_one(pool)
+                .await
+                .unwrap_or_else(|_| ("(unknown)".to_string(), None));
 
         anyhow::bail!(
             "missing table public.capability_service_settings on database {:?} (search_path={:?}). \
@@ -91,12 +90,11 @@ impl PostgresCapabilityPolicy {
 
     /// 表结构已存在但无任何授权行时告警，避免首包 Dispatch 才看到 `user capability grant missing or expired`。
     pub async fn warn_if_user_grants_empty(pool: &PgPool) -> anyhow::Result<()> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint FROM public.capability_user_grants",
-        )
-        .fetch_one(pool)
-        .await
-        .context("count public.capability_user_grants")?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*)::bigint FROM public.capability_user_grants")
+                .fetch_one(pool)
+                .await
+                .context("count public.capability_user_grants")?;
 
         if row.0 == 0 {
             tracing::warn!(
@@ -181,7 +179,10 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
                 "global capability switch is disabled".into(),
             ));
         }
-        if self.tenant_capability_disabled(tenant_id, capability_id).await? {
+        if self
+            .tenant_capability_disabled(tenant_id, capability_id)
+            .await?
+        {
             return Err(CapabilityError::PolicyDenied(format!(
                 "capability {capability_id} disabled for tenant {tenant_id}"
             )));

@@ -30,6 +30,7 @@ where
             (!edit.reason.is_empty()).then_some(edit.reason.as_str()),
             content_text,
         )
-        .await.map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     append_event_and_stream(ctx, message_id, event).await
 }

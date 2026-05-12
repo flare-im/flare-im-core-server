@@ -2,7 +2,7 @@
 //!
 //! ## 核心职责
 //! 1. 消费 TOPIC_MESSAGE_MAIN 中的 MqEnvelope 消息
-//! 2. 消费者组由 [crate::config::MessageOrchestratorConfig] 的 `KafkaConsumerConfig::consumer_group`（默认 `ORCHESTRATOR_MAIN_GROUP_DEFAULT`）与 [ConsumerConfig::kafka_consumer_group_override] 决定
+//! 2. 消费者组由 [crate::config::MessageOrchestratorConfig] 的 `JetStreamConsumerConfig::consumer_group`（默认 `ORCHESTRATOR_MAIN_GROUP_DEFAULT`）与 [ConsumerConfig::jetstream_consumer_group_override] 决定
 //! 3. 反序列化 MqEnvelope 并调用 StorageHandler 处理
 //!
 //! ## 设计原则
@@ -20,7 +20,7 @@ use crate::application::handlers::StorageHandler;
 
 /// 存储消费者处理器
 ///
-/// 处理 `TOPIC_MESSAGE_MAIN` 中的消息；Kafka `group.id` 见编排器 `KafkaConsumerConfig` 与 `wire::initialize` 中的 `ConsumerConfig`。
+/// 处理 `TOPIC_MESSAGE_MAIN` 中的消息；JetStream `group.id` 见编排器 `JetStreamConsumerConfig` 与 `wire::initialize` 中的 `ConsumerConfig`。
 pub struct StorageConsumerHandler {
     /// 存储处理器（编排层）
     storage_handler: Arc<StorageHandler>,
@@ -65,7 +65,7 @@ impl MessageHandler for StorageConsumerHandler {
             ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
         })?;
 
-        tracing::debug!(
+        tracing::trace!(
             envelope_id = %envelope.envelope_id,
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
@@ -79,7 +79,7 @@ impl MessageHandler for StorageConsumerHandler {
         // 3. 调用 StorageHandler 处理
         match self.storage_handler.handle_envelope(ctx, envelope).await {
             Ok(()) => {
-                tracing::debug!(
+                tracing::trace!(
                     topic = %message.context.topic,
                     partition = message.context.partition,
                     offset = message.context.offset,

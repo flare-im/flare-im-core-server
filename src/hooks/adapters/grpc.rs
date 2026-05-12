@@ -5,17 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::Ctx;
 use crate::error::{ErrorBuilder, ErrorCode, Result};
 use async_trait::async_trait;
+use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+use flare_grpc_proto::{
+    GenericRequest, ProtoDeliveryHookRequest, ProtoDeliveryHookResponse, ProtoHookDeliveryEvent,
+    ProtoHookInvocationContext, ProtoHookMessageDraft, ProtoHookMessageRecord,
+    ProtoHookRecallEvent, ProtoPostSendHookRequest, ProtoPostSendHookResponse,
+    ProtoPreSendHookRequest, ProtoPreSendHookResponse, ProtoRecallHookRequest,
+    ProtoRecallHookResponse,
+};
+use flare_proto::common::Message as ProtoStorageMessage;
 use prost::Message;
 use prost_types::Timestamp;
 use tonic::transport::{Channel, Endpoint};
-use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
-use flare_proto::common::Message as ProtoStorageMessage;
-use flare_grpc_proto::{
-    GenericRequest, ProtoDeliveryHookRequest, ProtoDeliveryHookResponse, ProtoHookDeliveryEvent,
-    ProtoHookInvocationContext, ProtoHookMessageDraft, ProtoHookMessageRecord, ProtoHookRecallEvent,
-    ProtoPostSendHookRequest, ProtoPostSendHookResponse, ProtoPreSendHookRequest,
-    ProtoPreSendHookResponse, ProtoRecallHookRequest, ProtoRecallHookResponse,
-};
 
 use super::super::config::HookDefinition;
 use super::super::types::{
@@ -154,9 +155,10 @@ impl PreSendHook for GrpcPreSendHook {
         match response {
             Ok(inner) => {
                 if !inner.allow {
-                    let err = ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
-                        .details("allow=false")
-                        .build_error();
+                    let err =
+                        ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+                            .details("allow=false")
+                            .build_error();
                     return PreSendDecision::Reject { error: err };
                 }
                 if let Some(draft_resp) = inner.draft {
@@ -203,8 +205,11 @@ impl PostSendHook for GrpcPostSendHook {
                     HookOutcome::Completed
                 } else {
                     HookOutcome::Failed(
-                        ErrorBuilder::new(ErrorCode::OperationFailed, "post-send hook reported failure")
-                            .build_error(),
+                        ErrorBuilder::new(
+                            ErrorCode::OperationFailed,
+                            "post-send hook reported failure",
+                        )
+                        .build_error(),
                     )
                 }
             }
@@ -246,8 +251,11 @@ impl DeliveryHook for GrpcDeliveryHook {
                     HookOutcome::Completed
                 } else {
                     HookOutcome::Failed(
-                        ErrorBuilder::new(ErrorCode::OperationFailed, "delivery hook reported failure")
-                            .build_error(),
+                        ErrorBuilder::new(
+                            ErrorCode::OperationFailed,
+                            "delivery hook reported failure",
+                        )
+                        .build_error(),
                     )
                 }
             }
@@ -405,9 +413,7 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
                 // Channel is treated as Group for now
                 flare_proto::common::ConversationType::Group as i32
             }
-            "ai" | "conversation_type_ai" | "4" => {
-                flare_proto::common::ConversationType::Ai as i32
-            }
+            "ai" | "conversation_type_ai" | "4" => flare_proto::common::ConversationType::Ai as i32,
             "customer" | "conversation_type_customer" | "5" => {
                 flare_proto::common::ConversationType::Customer as i32
             }
