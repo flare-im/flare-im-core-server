@@ -7,7 +7,7 @@ use redis::{AsyncCommands, aio::ConnectionManager};
 use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
-    ConversationSort, ConversationSummary, ConversationType,
+    ConversationParticipantsPage, ConversationSort, ConversationSummary, ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
 use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
@@ -134,6 +134,8 @@ impl ConversationRepository for RedisConversationRepository {
                     .get("last_message_seq")
                     .and_then(|v| v.parse::<i64>().ok()),
                 channel_id: state.get("channel_id").cloned().unwrap_or_default(),
+                participant_version: 0,
+                member_preview: Vec::new(),
             };
 
             summaries.push(summary);
@@ -157,13 +159,13 @@ impl ConversationRepository for RedisConversationRepository {
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
-        ts: i64,
+        sync_seq: i64,
     ) -> Result<()> {
         let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
         let cursor_key = self.user_cursor_key(&user_id);
         let _: () = conn
-            .hset(cursor_key, conversation_id, ts)
+            .hset(cursor_key, conversation_id, sync_seq)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset cursor"))?;
         Ok(())
@@ -211,6 +213,17 @@ impl ConversationRepository for RedisConversationRepository {
         _role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>> {
         Err(redis_not_supported("manage_participants"))
+    }
+
+    async fn list_conversation_participants(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _cursor: Option<&str>,
+        _limit: i32,
+        _include_removed: bool,
+    ) -> Result<ConversationParticipantsPage> {
+        Err(redis_not_supported("list_conversation_participants"))
     }
 
     async fn batch_acknowledge(

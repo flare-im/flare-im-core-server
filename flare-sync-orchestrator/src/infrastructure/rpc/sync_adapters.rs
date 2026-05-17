@@ -5,7 +5,9 @@
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ConversationBootstrapResponse, UpdateCursorRequest,
+    ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
+    GetConversationDetailResponse, ListConversationParticipantsRequest,
+    ListConversationParticipantsResponse, UpdateCursorRequest,
 };
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
@@ -89,6 +91,32 @@ impl ConversationSyncPort for GrpcSyncAdapters {
             .await
             .map_err(|e| flare_from_tonic_status(&e))?;
         Ok(())
+    }
+
+    async fn conversation_detail(
+        &self,
+        ctx: &Ctx,
+        req: GetConversationDetailRequest,
+    ) -> Result<GetConversationDetailResponse, FlareError> {
+        let mut client = Self::conversation_read_client().await?;
+        let resp = client
+            .get_conversation_detail(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
+    }
+
+    async fn list_conversation_participants(
+        &self,
+        ctx: &Ctx,
+        req: ListConversationParticipantsRequest,
+    ) -> Result<ListConversationParticipantsResponse, FlareError> {
+        let mut client = Self::conversation_read_client().await?;
+        let resp = client
+            .list_conversation_participants(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
     }
 }
 

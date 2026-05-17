@@ -68,6 +68,15 @@ impl CapabilityExtensionRegistry {
             .await;
     }
 
+    pub async fn has_rtc_backend_for_tenant(&self, tenant_id: &str) -> bool {
+        self.inner
+            .read()
+            .await
+            .rtc
+            .has_backend_for_tenant(tenant_id)
+            .await
+    }
+
     /// 取通用 `ExtensionPlugin` 路由器（core 与 binary 装 tonic service 时共享同一实例）。
     pub async fn extension_router(&self) -> ExtensionPluginRouter {
         self.inner.read().await.extension_router.clone()

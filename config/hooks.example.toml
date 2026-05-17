@@ -77,8 +77,8 @@ plugin_call_timeout_ms = 5000
 [[capability_runtime.plugin_discovery_endpoints]]
 tenant_id = "default"
 plugin_id = "flare-strom-sfu"
-capability_id = "media.strom_sfu.control"
-grpc_authority = "127.0.0.1:50055"
+capability_id = "rtc.media.control"
+service_name = "flare-strom-sfu"
 [capability_runtime.plugin_discovery_endpoints.labels]
 module = "rtc"
 backend = "strom-sfu"

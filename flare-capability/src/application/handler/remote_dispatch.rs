@@ -5,22 +5,18 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use dashmap::DashMap;
 use flare_core_base::context::Ctx;
 use flare_grpc_proto::capability::GenericRequest;
 use flare_grpc_proto::capability::RegisteredPluginInstance;
 use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
-use once_cell::sync::Lazy;
 use serde_json::Value;
 use tonic::Request;
-use tonic::transport::Channel;
 
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityError, Result,
 };
 use crate::infrastructure::capability::PluginRouteBook;
-
-static CHANNEL_CACHE: Lazy<DashMap<String, Channel>> = Lazy::new(DashMap::new);
+use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 
 fn build_request_payload(req: &CapabilityDispatchCommand) -> anyhow::Result<prost_types::Any> {
     let payload_json = serde_json::to_string(req.payload.as_ref().unwrap_or(&Value::Null))
@@ -41,23 +37,6 @@ fn decode_response_payload(payload: Option<prost_types::Any>) -> Value {
     }
 }
 
-fn get_or_create_channel(grpc_authority: &str) -> Result<Channel> {
-    if let Some(ch) = CHANNEL_CACHE.get(grpc_authority) {
-        return Ok(ch.clone());
-    }
-    let endpoint =
-        if grpc_authority.starts_with("http://") || grpc_authority.starts_with("https://") {
-            grpc_authority.to_string()
-        } else {
-            format!("http://{grpc_authority}")
-        };
-    let channel = Channel::from_shared(endpoint.clone())
-        .map_err(|e| CapabilityError::System(format!("invalid plugin endpoint {endpoint}: {e}")))?
-        .connect_lazy();
-    CHANNEL_CACHE.insert(grpc_authority.to_string(), channel.clone());
-    Ok(channel)
-}
-
 async fn invoke_once(
     ctx: &Ctx,
     req: &CapabilityDispatchCommand,
@@ -65,7 +44,9 @@ async fn invoke_once(
     timeout: Duration,
 ) -> Result<CapabilityDispatchResult> {
     let payload = build_request_payload(req).map_err(|e| CapabilityError::System(e.to_string()))?;
-    let channel = get_or_create_channel(endpoint.grpc_authority.as_str())?;
+    let channel = resolve_plugin_channel(endpoint.grpc_authority.as_str())
+        .await
+        .map_err(|e| CapabilityError::System(e))?;
     let mut client = ExtensionPluginClient::new(channel);
 
     let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());

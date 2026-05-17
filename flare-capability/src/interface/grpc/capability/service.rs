@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::Utc;
 use flare_grpc_proto::capability::capability_service_server::CapabilityService;
 use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
+use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
+use flare_grpc_proto::sfu_control::HealthCheckRequest;
 use flare_grpc_proto::capability::{
     CapabilityDescriptor as ProtoDescriptor, CapabilityDispatchResult as ProtoDispatchResult,
     DeregisterPluginEndpointRequest, DeregisterPluginEndpointResponse, DispatchCapabilityRequest,
@@ -27,6 +29,7 @@ use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBacke
 use crate::infrastructure::capability::{
     CapabilityExtensionRegistry, DispatchRateLimiter, PluginRouteBook,
 };
+use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
 use crate::interface::grpc::hooks::HookServiceServer;
@@ -131,7 +134,7 @@ impl CapabilityGrpcServer {
             let instance = RegisteredPluginInstance {
                 plugin_id: ep.plugin_id.clone(),
                 capability_id: ep.capability_id.clone(),
-                grpc_authority: ep.grpc_authority.clone(),
+                grpc_authority: ep.discovery_route_authority(),
                 labels: ep.labels.clone(),
             };
             self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
@@ -139,7 +142,7 @@ impl CapabilityGrpcServer {
                 tenant_id = %ep.tenant_id,
                 plugin_id = %ep.plugin_id,
                 capability_id = %ep.capability_id,
-                grpc_authority = %ep.grpc_authority,
+                service_name = %ep.service_name,
                 "auto-registered discovered capability plugin endpoint"
             );
         }
@@ -156,6 +159,7 @@ impl CapabilityGrpcServer {
                 for snapshot in snapshots {
                     let result = check_plugin_health(
                         snapshot.instance.grpc_authority.as_str(),
+                        snapshot.instance.capability_id.as_str(),
                         runtime.plugin_call_timeout,
                     )
                     .await;
@@ -204,37 +208,48 @@ fn ts_from_chrono(dt: chrono::DateTime<Utc>) -> Timestamp {
 
 async fn check_plugin_health(
     grpc_authority: &str,
+    capability_id: &str,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let endpoint =
-        if grpc_authority.starts_with("http://") || grpc_authority.starts_with("https://") {
-            grpc_authority.to_string()
-        } else {
-            format!("http://{grpc_authority}")
-        };
-    let channel = tonic::transport::Channel::from_shared(endpoint.clone())
-        .map_err(|e| format!("invalid endpoint {endpoint}: {e}"))?
-        .connect_lazy();
-    let mut client = ExtensionPluginClient::new(channel);
-    let request = Request::new(GenericRequest {
-        operation: "flare.capability.v1.health_check".to_string(),
-        metadata: std::collections::HashMap::new(),
-        payload: None,
-        request_id: uuid::Uuid::new_v4().to_string(),
-    });
-
-    let response = tokio::time::timeout(timeout, client.call(request))
+    let channel = tokio::time::timeout(timeout, resolve_plugin_channel(grpc_authority))
         .await
-        .map_err(|_| "plugin health_check timeout".to_string())?
-        .map_err(|e| e.to_string())?
-        .into_inner();
-    if response.ok {
-        Ok(())
+        .map_err(|_| format!("plugin channel resolve timeout: {grpc_authority}"))??;
+
+    if capability_id == "rtc.media.control" {
+        let mut client = SfuControlClient::new(channel);
+        let request = Request::new(HealthCheckRequest {});
+        let response = tokio::time::timeout(timeout, client.health_check(request))
+            .await
+            .map_err(|_| "sfu health_check timeout".to_string())?
+            .map_err(|e| e.to_string())?
+            .into_inner();
+        if response.draining {
+            Err("sfu health_check: instance is draining".to_string())
+        } else {
+            Ok(())
+        }
     } else {
-        Err(format!(
-            "plugin health_check returned error: {} {}",
-            response.error_code, response.error_message
-        ))
+        let mut client = ExtensionPluginClient::new(channel);
+        let request = Request::new(GenericRequest {
+            operation: "flare.capability.v1.health_check".to_string(),
+            metadata: std::collections::HashMap::new(),
+            payload: None,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        });
+
+        let response = tokio::time::timeout(timeout, client.call(request))
+            .await
+            .map_err(|_| "plugin health_check timeout".to_string())?
+            .map_err(|e| e.to_string())?
+            .into_inner();
+        if response.ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "plugin health_check returned error: {} {}",
+                response.error_code, response.error_message
+            ))
+        }
     }
 }
 

@@ -124,6 +124,11 @@ pub mod service_names {
     /// 注册路径: `flare/flare-capability`
     pub const CAPABILITY: &str = "flare-capability";
 
+    /// Strom SFU RTC 能力插件（`SfuControl` gRPC，由 capability 按名发现）
+    ///
+    /// 注册路径: `flare/flare-strom-sfu`
+    pub const STROM_SFU: &str = "flare-strom-sfu";
+
     /// 与 [`CAPABILITY`] 同义，命名便于与业务侧 `FLARE_CAPABILITY_*` 环境变量对齐
     pub const FLARE_CAPABILITY: &str = CAPABILITY;
 }
@@ -148,6 +153,7 @@ pub fn validate_service_name(name: &str) -> bool {
             | service_names::SYNC_ORCHESTRATOR
             | service_names::MEDIA
             | service_names::CAPABILITY
+            | service_names::STROM_SFU
     )
 }
 

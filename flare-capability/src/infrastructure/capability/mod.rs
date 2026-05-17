@@ -15,6 +15,7 @@ pub mod registration;
 pub mod routing;
 
 mod internal;
+pub(crate) mod plugin_channel;
 pub mod use_case_samples;
 
 pub use dispatch::{DispatchRateLimiter, PreSendGuardRuntime, RecipientResolverRuntime};
@@ -22,4 +23,4 @@ pub use registration::{CapabilityExtensionRegistry, InMemoryCapabilityGrants, Re
 pub use routing::{PluginRouteBook, RtcCapabilityRouter};
 pub use use_case_samples::{SendMessageUseCaseExample, StartCallUseCaseExample};
 
-pub(crate) use internal::wire_media_control_backend;
+pub(crate) use internal::register_discovered_media_plugins;

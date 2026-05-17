@@ -57,7 +57,7 @@ impl MediaControlOperation {
 
 /// 认领 `flare.media.v1.*` operation 的扩展处理器。媒体后端连接可选；未连接时仅路由查询可用。
 pub struct MediaControlExtensionOperations {
-    client: Option<SfuControlClient<Channel>>,
+    media: Option<Arc<MediaControlGrpcRtcCapability>>,
     routes: Arc<PluginRouteBook>,
 }
 
@@ -66,17 +66,17 @@ impl MediaControlExtensionOperations {
         media: Option<Arc<MediaControlGrpcRtcCapability>>,
         routes: Arc<PluginRouteBook>,
     ) -> Self {
-        Self {
-            client: media.map(|s| s.control_client()),
-            routes,
-        }
+        Self { media, routes }
     }
 
-    fn require_client(&self) -> Result<SfuControlClient<Channel>, Status> {
-        self.client.clone().ok_or_else(|| {
+    async fn require_client(&self) -> Result<SfuControlClient<Channel>, Status> {
+        let media = self.media.as_ref().ok_or_else(|| {
             Status::failed_precondition(
                 "media control gRPC client not configured; wire(..) with a valid endpoint first",
             )
+        })?;
+        media.control_client().await.map_err(|e| {
+            Status::unavailable(format!("media control gRPC unavailable: {e}"))
         })
     }
 
@@ -145,7 +145,7 @@ impl ExtensionOperationHandler for MediaControlExtensionOperations {
                 ))
             }
             MediaControlOperation::HealthCheck => {
-                let mut client = self.require_client()?;
+                let mut client = self.require_client().await?;
                 let mut grpc_req = Request::new(HealthCheckRequest {});
                 set_context_metadata(&mut grpc_req, ctx);
                 let rsp = client.health_check(grpc_req).await?.into_inner();
@@ -155,7 +155,7 @@ impl ExtensionOperationHandler for MediaControlExtensionOperations {
                 ))
             }
             MediaControlOperation::GetRoomSummary => {
-                let mut client = self.require_client()?;
+                let mut client = self.require_client().await?;
                 let payload =
                     payload.ok_or_else(|| Status::invalid_argument("payload required"))?;
                 let inner =

@@ -135,9 +135,68 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             sqlx::query(
                 r#"
                 SELECT 
-                    m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
-                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
-                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at,
+                    m.tenant_id, m.server_id, m.conversation_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.client_msg_id END AS client_msg_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_id END AS sender_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_name END AS sender_name,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_avatar END AS sender_avatar,
+                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN 0 ELSE m.message_type END AS message_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '\x'::bytea ELSE m.content END AS content,
+                    m.status,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN NULL ELSE m.offline_push_info END AS offline_push_info,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM message_visibility mv
+                            WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                              AND mv.visibility_status IN (1, 2)
+                              AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                        )
+                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
+                        ELSE m.extra
+                    END AS extra,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN NULL ELSE m.extensions END AS extensions,
+                    m.created_at, m.persisted_at, m.delivered_at,
                     COALESCE((
                         SELECT jsonb_agg(
                             jsonb_build_object(
@@ -268,9 +327,68 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             sqlx::query(
                 r#"
                 SELECT 
-                    m.tenant_id, m.server_id, m.conversation_id, m.client_msg_id, m.sender_id, m.sender_name, m.sender_avatar,
-                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type, m.message_type,
-                    m.content, m.status, m.offline_push_info, m.extra, m.extensions, m.created_at, m.persisted_at, m.delivered_at,
+                    m.tenant_id, m.server_id, m.conversation_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.client_msg_id END AS client_msg_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_id END AS sender_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_name END AS sender_name,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '' ELSE m.sender_avatar END AS sender_avatar,
+                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN 0 ELSE m.message_type END AS message_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN '\x'::bytea ELSE m.content END AS content,
+                    m.status,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN NULL ELSE m.offline_push_info END AS offline_push_info,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM message_visibility mv
+                            WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                              AND mv.visibility_status IN (1, 2)
+                              AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                        )
+                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
+                        ELSE m.extra
+                    END AS extra,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
+                    ) THEN NULL ELSE m.extensions END AS extensions,
+                    m.created_at, m.persisted_at, m.delivered_at,
                     COALESCE((
                         SELECT jsonb_agg(
                             jsonb_build_object(
@@ -284,12 +402,6 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     ), '[]'::jsonb) AS reactions_json
                 FROM messages m
                 WHERE m.conversation_id = $1 AND m.seq > $2 AND ($3::BIGINT IS NULL OR m.seq < $3)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM message_visibility mv
-                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                        AND mv.visibility_status IN (1, 2)
-                        AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
-                  )
                 ORDER BY m.seq ASC
                 LIMIT $5
                 "#,

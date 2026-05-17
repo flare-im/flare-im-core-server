@@ -57,11 +57,27 @@ impl HookAdapterFactory {
                 metadata,
             } => {
                 // 优先级1: 服务发现模式（推荐，生产环境）
-                if let Some(service_name) = service_name {
-                    if let Some(service_client) = &self.service_client {
+                if let Some(service_name) = service_name
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                {
+                    if let Some(discover) =
+                        flare_im_core::discovery::create_discover(service_name.as_str())
+                        .await
+                        .map_err(|e| {
+                            map_infra_error(
+                                e,
+                                ErrorCode::InternalError,
+                                "failed to create hook service discover",
+                            )
+                        })?
+                    {
                         let strategy = load_balance.unwrap_or(LoadBalanceStrategy::RoundRobin);
+                        let service_client =
+                            Arc::new(Mutex::new(flare_server_core::ServiceClient::new(discover)));
                         let adapter = GrpcHookAdapter::new_from_service_client(
-                            service_client.clone(),
+                            service_client,
                             service_name.clone(),
                             strategy,
                             metadata.clone(),
@@ -75,13 +91,31 @@ impl HookAdapterFactory {
                             )
                         })?;
                         return Ok(Arc::new(adapter));
-                    } else {
-                        // 如果没有注册中心但配置了 service_name，给出警告并使用 endpoint fallback
-                        tracing::warn!(
-                            service_name = %service_name,
-                            "Service client not available, falling back to endpoint mode"
-                        );
                     }
+
+                    if let Some(service_client) = &self.service_client {
+                        let strategy = load_balance.unwrap_or(LoadBalanceStrategy::RoundRobin);
+                        let adapter = GrpcHookAdapter::new_from_service_client(
+                            service_client.clone(),
+                            service_name.clone(),
+                            strategy,
+                            metadata.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            map_infra_error(
+                                e,
+                                ErrorCode::InternalError,
+                                "failed to create gRPC hook adapter from injected service client",
+                            )
+                        })?;
+                        return Ok(Arc::new(adapter));
+                    }
+
+                    tracing::warn!(
+                        service_name = %service_name,
+                        "registry unavailable for hook service_name; falling back to endpoint mode"
+                    );
                 }
 
                 // 优先级2: 直接地址模式（fallback/外部系统/开发测试）

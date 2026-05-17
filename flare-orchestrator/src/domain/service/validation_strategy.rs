@@ -12,10 +12,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use flare_core::common::conversation::{is_single_chat_conversation, validate_conversation_id};
 use flare_im_core::Ctx;
+use flare_proto::common::call_audience::Shape as CallAudienceShape;
 use flare_proto::common::call_signal_event::Signal;
 use flare_proto::common::event::Payload;
-use flare_proto::common::{Event, EventType, Message};
+use flare_proto::common::{CallSessionKind, CallSignalEvent, Event, EventType, Message};
 use tracing::warn;
 
 use crate::error::Result;
@@ -70,6 +72,68 @@ impl ValidationResult {
         self.warnings.extend(other.warnings);
         self
     }
+}
+
+fn validate_call_signal_invite(conversation_id: &str, cs: &CallSignalEvent) -> ValidationResult {
+    if validate_conversation_id(conversation_id.trim()).is_err() {
+        return ValidationResult::invalid(
+            "call_signal invite requires valid canonical conversation_id (CID v1)",
+        );
+    }
+    let ms_kind_i32 = cs
+        .media_session
+        .as_ref()
+        .map(|m| m.kind)
+        .unwrap_or(CallSessionKind::Unspecified as i32);
+    if ms_kind_i32 == CallSessionKind::Unspecified as i32 || ms_kind_i32 == 0 {
+        return ValidationResult::invalid(
+            "call_signal invite requires media_session.kind (DIRECT for single-chat, GROUP otherwise)",
+        );
+    }
+    let shape = cs.audience.as_ref().and_then(|a| a.shape.as_ref());
+    if is_single_chat_conversation(conversation_id.trim()) {
+        if ms_kind_i32 != CallSessionKind::Direct as i32 {
+            return ValidationResult::invalid(
+                "single-chat call invite must set media_session.kind=DIRECT",
+            );
+        }
+        match shape {
+            Some(CallAudienceShape::Direct(d)) if !d.peer_user_id.trim().is_empty() => {}
+            _ => {
+                return ValidationResult::invalid(
+                    "single-chat call invite must set audience.direct.peer_user_id",
+                );
+            }
+        }
+    } else {
+        if ms_kind_i32 != CallSessionKind::Group as i32 {
+            return ValidationResult::invalid(
+                "non-single call invite must set media_session.kind=GROUP",
+            );
+        }
+        match shape {
+            Some(CallAudienceShape::Explicit(e)) => {
+                let non_empty: Vec<&str> = e
+                    .user_ids
+                    .iter()
+                    .map(|s| s.as_str().trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if non_empty.is_empty() {
+                    return ValidationResult::invalid(
+                        "call invite audience.explicit.user_ids must be non-empty (use audience.broadcast for ring-all)",
+                    );
+                }
+            }
+            Some(CallAudienceShape::Broadcast(_)) => {}
+            _ => {
+                return ValidationResult::invalid(
+                    "non-single call invite must use audience.explicit or audience.broadcast",
+                );
+            }
+        }
+    }
+    ValidationResult::valid()
 }
 
 /// 消息校验策略
@@ -295,6 +359,12 @@ impl EventValidationStrategy for EventCallSignalRtcValidationStrategy {
                     "call_signal.from_user_id is required for RTC / capability correlation",
                 ));
             }
+            if matches!(cs.signal.as_ref(), Some(Signal::Invite(_))) {
+                let r = validate_call_signal_invite(&event.conversation_id, cs);
+                if !r.is_valid {
+                    return Ok(r);
+                }
+            }
             match cs.signal.as_ref() {
                 Some(Signal::Accept(_) | Signal::Reject(_) | Signal::Hangup(_))
                     if cs.call_id.trim().is_empty() =>
@@ -427,5 +497,125 @@ impl EventValidationStrategy for CompositeEventValidationStrategy {
 
             Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod validate_call_signal_invite_tests {
+    use flare_core::common::conversation::{
+        generate_group_conversation_id, generate_single_chat_conversation_id,
+    };
+    use flare_proto::common::call_audience;
+    use flare_proto::common::call_signal_event::Signal;
+    use flare_proto::common::{
+        CallAudience, CallAudienceBroadcast, CallAudienceDirect, CallAudienceExplicit, CallInvite,
+        CallMediaSessionInfo, CallOfferedMedia, CallSessionKind, CallSignalEvent,
+    };
+
+    use super::validate_call_signal_invite;
+
+    fn invite_shell() -> CallInvite {
+        CallInvite {
+            offered_media: Some(CallOfferedMedia {
+                types: vec![1],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn single_chat_invite_direct_ok() {
+        let cid = generate_single_chat_conversation_id("u1", "u2");
+        let cs = CallSignalEvent {
+            audience: Some(CallAudience {
+                shape: Some(call_audience::Shape::Direct(CallAudienceDirect {
+                    peer_user_id: "u2".into(),
+                })),
+            }),
+            media_session: Some(CallMediaSessionInfo {
+                kind: CallSessionKind::Direct as i32,
+                ..Default::default()
+            }),
+            signal: Some(Signal::Invite(invite_shell())),
+            ..Default::default()
+        };
+        let r = validate_call_signal_invite(&cid, &cs);
+        assert!(r.is_valid, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn multi_party_invite_explicit_ok() {
+        let cid = generate_group_conversation_id("g1");
+        let cs = CallSignalEvent {
+            audience: Some(CallAudience {
+                shape: Some(call_audience::Shape::Explicit(CallAudienceExplicit {
+                    user_ids: vec!["x".into(), "y".into()],
+                })),
+            }),
+            media_session: Some(CallMediaSessionInfo {
+                kind: CallSessionKind::Group as i32,
+                ..Default::default()
+            }),
+            signal: Some(Signal::Invite(invite_shell())),
+            ..Default::default()
+        };
+        let r = validate_call_signal_invite(&cid, &cs);
+        assert!(r.is_valid, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn multi_party_invite_broadcast_ok() {
+        let cid = generate_group_conversation_id("g2");
+        let cs = CallSignalEvent {
+            audience: Some(CallAudience {
+                shape: Some(call_audience::Shape::Broadcast(CallAudienceBroadcast {})),
+            }),
+            media_session: Some(CallMediaSessionInfo {
+                kind: CallSessionKind::Group as i32,
+                ..Default::default()
+            }),
+            signal: Some(Signal::Invite(invite_shell())),
+            ..Default::default()
+        };
+        let r = validate_call_signal_invite(&cid, &cs);
+        assert!(r.is_valid, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn multi_party_invite_direct_rejected() {
+        let cid = generate_group_conversation_id("g3");
+        let cs = CallSignalEvent {
+            audience: Some(CallAudience {
+                shape: Some(call_audience::Shape::Direct(CallAudienceDirect {
+                    peer_user_id: "x".into(),
+                })),
+            }),
+            media_session: Some(CallMediaSessionInfo {
+                kind: CallSessionKind::Group as i32,
+                ..Default::default()
+            }),
+            signal: Some(Signal::Invite(invite_shell())),
+            ..Default::default()
+        };
+        let r = validate_call_signal_invite(&cid, &cs);
+        assert!(!r.is_valid);
+    }
+
+    #[test]
+    fn invalid_cid_rejected() {
+        let cs = CallSignalEvent {
+            audience: Some(CallAudience {
+                shape: Some(call_audience::Shape::Broadcast(CallAudienceBroadcast {})),
+            }),
+            media_session: Some(CallMediaSessionInfo {
+                kind: CallSessionKind::Group as i32,
+                ..Default::default()
+            }),
+            signal: Some(Signal::Invite(invite_shell())),
+            ..Default::default()
+        };
+        let r = validate_call_signal_invite("not-a-cid", &cs);
+        assert!(!r.is_valid);
     }
 }

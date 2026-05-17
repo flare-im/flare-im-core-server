@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+flare-core = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "nats", "kafka", "grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }

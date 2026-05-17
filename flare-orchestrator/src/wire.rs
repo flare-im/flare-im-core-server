@@ -138,19 +138,18 @@ pub async fn initialize(
         .capability_rtc_bridge_enabled
     {
         let cap_fallback = config.resolve_capability_grpc_uri();
-        let cap_channel = flare_im_core::discovery::connect_grpc_channel_from_app_config(
-            app_config,
-            CAPABILITY,
-            &cap_fallback,
-        )
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("connect flare-capability for RTC bridge ({CAPABILITY}): {e}")
-        })?;
-        let cap_client = Arc::new(CapabilityDispatchClient::new(cap_channel));
+        let cap_client = Arc::new(
+            CapabilityDispatchClient::from_app_config(app_config, &cap_fallback)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "prepare lazy flare-capability client for RTC bridge ({CAPABILITY}): {e}"
+                    )
+                })?,
+        );
         tracing::info!(
-            endpoint = %cap_fallback,
-            "Orchestrator RTC bridge: EVENT_CALL_SIGNAL → CapabilityService.Dispatch (Dispatch errors degrade to push-only)"
+            fallback = %cap_fallback,
+            "Orchestrator RTC bridge: EVENT_CALL_SIGNAL → CapabilityService.Dispatch (lazy discover; errors degrade to push-only)"
         );
         let gateway = Arc::new(CapabilityDispatchGatewayImpl::new(cap_client));
         Some(Arc::new(CallCapabilityBridge::new(gateway)))

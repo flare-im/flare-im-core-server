@@ -77,7 +77,7 @@ ttl_seconds = 86400
 #   3. 本文件此处
 #
 # 可选：FLARE_MQ_ALLOW_KAFKA_FALLBACK=true|1|yes|on
-default_backend = "kafka"
+default_backend = "nats"
 allow_kafka_fallback = false
 
 # JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_core::constants::topics

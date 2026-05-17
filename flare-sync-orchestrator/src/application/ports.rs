@@ -2,7 +2,9 @@
 #![allow(async_fn_in_trait)] // 内部端口，由具体类型实现并 `Send`；与仓库 Rust 2024 异步 trait 风格一致。
 
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ConversationBootstrapResponse, UpdateCursorRequest,
+    ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
+    GetConversationDetailResponse, ListConversationParticipantsRequest,
+    ListConversationParticipantsResponse, UpdateCursorRequest,
 };
 use flare_im_core::Ctx;
 use flare_proto::Message;
@@ -24,6 +26,18 @@ pub trait ConversationSyncPort: Send + Sync {
         ctx: &Ctx,
         req: UpdateCursorRequest,
     ) -> Result<(), FlareError>;
+
+    async fn conversation_detail(
+        &self,
+        ctx: &Ctx,
+        req: GetConversationDetailRequest,
+    ) -> Result<GetConversationDetailResponse, FlareError>;
+
+    async fn list_conversation_participants(
+        &self,
+        ctx: &Ctx,
+        req: ListConversationParticipantsRequest,
+    ) -> Result<ListConversationParticipantsResponse, FlareError>;
 }
 
 /// 存储读侧返回的会话最新消息水位（`messages` 表，按 `seq` 最大的一行）

@@ -6,14 +6,38 @@ use std::time::Duration;
 use flare_core_base::config::LayeredConfig;
 use serde::Deserialize;
 
+/// 注册中心路由占位前缀：`PluginRouteBook` 中标记按服务名发现的插件。
+pub const DISCOVERY_ROUTE_PREFIX: &str = "discovery://";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginDiscoveryEndpoint {
     pub tenant_id: String,
     pub plugin_id: String,
     pub capability_id: String,
-    pub grpc_authority: String,
+    /// 注册中心服务名，如 `flare-strom-sfu`（与 [`flare_im_core::service_names::STROM_SFU`] 对齐）。
+    pub service_name: String,
     #[serde(default)]
     pub labels: std::collections::HashMap<String, String>,
+}
+
+impl PluginDiscoveryEndpoint {
+    pub fn discovery_route_authority(&self) -> String {
+        discovery_route_authority(&self.service_name)
+    }
+}
+
+pub fn discovery_route_authority(service_name: &str) -> String {
+    format!("{DISCOVERY_ROUTE_PREFIX}{service_name}")
+}
+
+pub fn is_discovery_route_authority(authority: &str) -> bool {
+    authority.starts_with(DISCOVERY_ROUTE_PREFIX)
+}
+
+pub fn service_name_from_discovery_route(authority: &str) -> Option<&str> {
+    authority
+        .strip_prefix(DISCOVERY_ROUTE_PREFIX)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// 能力 gRPC 的运行时护栏：负载、超时、管理面鉴权、滥用防护。
@@ -175,7 +199,7 @@ impl CapabilityRuntimeConfig {
                 plugin_match
                     && capability_match
                     && !ep.tenant_id.trim().is_empty()
-                    && !ep.grpc_authority.trim().is_empty()
+                    && !ep.service_name.trim().is_empty()
             })
             .collect()
     }

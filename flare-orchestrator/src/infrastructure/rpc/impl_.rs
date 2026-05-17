@@ -9,9 +9,9 @@ use crate::error::{FlareError, Result};
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    ConversationParticipant, CreateConversationRequest, GetConversationMembersRequest,
-    MarkConversationAsReadRequest,
+    CreateConversationRequest, ListConversationParticipantsRequest, MarkConversationAsReadRequest,
 };
+use flare_proto::common::ConversationParticipant;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::{Context, ContextExt};
 use std::future::Future;
@@ -89,6 +89,7 @@ impl ConversationRpcClient for ConversationClient {
                     muted: false,
                     pinned: false,
                     attributes: std::collections::HashMap::new(),
+                    joined_at: None,
                 })
                 .collect(),
             attributes,
@@ -158,28 +159,46 @@ impl ConversationRpcClient for ConversationClient {
         ctx: &'a Context,
         conversation_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
-        let request = GetConversationMembersRequest {
-            conversation_id: conversation_id.to_string(),
-        };
-
         let client = Arc::clone(&self.read_client);
+        let conversation_id = conversation_id.to_string();
         Box::pin(async move {
-            let mut grpc_request = tonic::Request::new(request);
-            set_context_metadata(&mut grpc_request, ctx);
+            let mut member_ids = Vec::new();
+            let mut cursor = String::new();
+            loop {
+                let mut grpc_request = tonic::Request::new(ListConversationParticipantsRequest {
+                    conversation_id: conversation_id.clone(),
+                    cursor: cursor.clone(),
+                    limit: 500,
+                    include_removed: false,
+                    ext: Default::default(),
+                });
+                set_context_metadata(&mut grpc_request, ctx);
 
-            let mut client = client.lock().await;
-            let response = client
-                .get_conversation_members(grpc_request)
-                .await
-                .map_err(|e| FlareError::system(format!("GetConversationMembers failed: {}", e)))?;
-
-            let members = response.into_inner().member_ids;
+                let mut client = client.lock().await;
+                let response = client
+                    .list_conversation_participants(grpc_request)
+                    .await
+                    .map_err(|e| {
+                        FlareError::system(format!("ListConversationParticipants failed: {}", e))
+                    })?;
+                let page = response.into_inner();
+                member_ids.extend(
+                    page.participants
+                        .into_iter()
+                        .map(|p| p.user_id)
+                        .filter(|id| !id.trim().is_empty()),
+                );
+                if !page.has_more {
+                    break;
+                }
+                cursor = page.next_cursor;
+            }
             debug!(
                 conversation_id = %conversation_id,
-                member_count = members.len(),
+                member_count = member_ids.len(),
                 "Retrieved conversation members"
             );
-            Ok(members)
+            Ok(member_ids)
         })
     }
 

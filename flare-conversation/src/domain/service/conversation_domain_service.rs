@@ -300,10 +300,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         &self,
         ctx: &Context,
         conversation_id: &str,
-        message_ts: i64,
+        sync_seq: i64,
     ) -> Result<()> {
         self.conversation_repo
-            .update_cursor(ctx, conversation_id, message_ts)
+            .update_cursor(ctx, conversation_id, sync_seq)
             .await
     }
 
@@ -669,6 +669,19 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             "Participants managed"
         );
         Ok(participants)
+    }
+
+    pub async fn list_conversation_participants(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        cursor: Option<&str>,
+        limit: i32,
+        include_removed: bool,
+    ) -> Result<crate::domain::model::ConversationParticipantsPage> {
+        self.conversation_repo
+            .list_conversation_participants(ctx, conversation_id, cursor, limit, include_removed)
+            .await
     }
 
     /// 批量确认（业务逻辑）

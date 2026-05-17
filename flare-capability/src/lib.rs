@@ -36,8 +36,8 @@ pub use infrastructure::rtc;
 pub use application::commands::materialize_hook_execution_plan;
 pub use application::queries::{HookIntegrationChannelDoc, list_hook_integration_channels};
 pub use composition::{
-    ApplicationBootstrap, ApplicationContext, CapabilityServiceConfig, PluginContext,
-    init_capability_extension_stack, wire_runtime_adapters,
+    ApplicationBootstrap, ApplicationContext, CapabilityServiceConfig,
+    init_capability_extension_stack,
 };
 pub use domain::hook_integration::{HookTransportSurface, classify_transport};
 pub use domain::model::{

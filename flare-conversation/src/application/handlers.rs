@@ -164,12 +164,12 @@ impl ConversationCommandHandler {
         debug!(
             user_id = %user_id,
             conversation_id = %command.conversation_id,
-            message_ts = command.message_ts,
+            sync_seq = command.sync_seq,
             "Handling update cursor command"
         );
 
         self.domain_service
-            .update_cursor(ctx, &command.conversation_id, command.message_ts)
+            .update_cursor(ctx, &command.conversation_id, command.sync_seq)
             .await?;
 
         Ok(())
@@ -331,6 +331,30 @@ impl ConversationQueryHandler {
         }
 
         Ok(conv)
+    }
+
+    pub async fn handle_list_conversation_participants(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::ListConversationParticipantsQuery,
+    ) -> Result<crate::domain::model::ConversationParticipantsPage> {
+        if query.conversation_id.trim().is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
+
+        self.domain_service
+            .list_conversation_participants(
+                ctx,
+                query.conversation_id.trim(),
+                query.cursor.as_deref(),
+                query.limit,
+                query.include_removed,
+            )
+            .await
     }
 
     /// 处理搜索会话查询

@@ -4,12 +4,20 @@
 [services.capability]
 postgres = "media"
 
+[services.capability.server]
+address = "0.0.0.0"
+port = 50110
+
 [capability_runtime]
 plugin_call_timeout_ms = 5000
 plugin_health_check_interval_secs = 15
 
+# 插件 endpoint 仅登记 discovery 路由，启动时不拨号；Dispatch 时再经 Consul 解析。
 [[capability_runtime.plugin_discovery_endpoints]]
 tenant_id = "0"
 plugin_id = "flare-strom-sfu"
 capability_id = "rtc.media.control"
-grpc_authority = "http://127.0.0.1:50060"
+service_name = "flare-strom-sfu"
+
+# 本地静态 SFU（无 Consul）时可改用：
+# FLARE_MEDIA_CONTROL_GRPC_ENDPOINT=http://127.0.0.1:50060

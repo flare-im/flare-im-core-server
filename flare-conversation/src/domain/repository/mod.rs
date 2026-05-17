@@ -6,7 +6,8 @@ use crate::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationBootstrapResult, ConversationParticipant,
-    ConversationSummary, DevicePresence, DeviceState, MessageSyncResult,
+    ConversationParticipantsPage, ConversationSummary, DevicePresence, DeviceState,
+    MessageSyncResult,
 };
 
 #[derive(Clone, Debug)]
@@ -35,7 +36,7 @@ pub trait ConversationRepository: Send + Sync {
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
-        ts: i64,
+        sync_seq: i64,
     ) -> Result<()>;
 
     async fn create_conversation(
@@ -67,6 +68,15 @@ pub trait ConversationRepository: Send + Sync {
         to_remove: &[String],
         role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>>;
+
+    async fn list_conversation_participants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        cursor: Option<&str>,
+        limit: i32,
+        include_removed: bool,
+    ) -> Result<ConversationParticipantsPage>;
     async fn batch_acknowledge(
         &self,
         ctx: &flare_server_core::context::Context,

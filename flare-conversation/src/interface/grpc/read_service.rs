@@ -3,15 +3,16 @@
 use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadService;
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
-    GetConversationDetailResponse, GetConversationMembersRequest, GetConversationMembersResponse,
-    ListConversationsRequest, ListConversationsResponse,
+    GetConversationDetailResponse, ListConversationParticipantsRequest,
+    ListConversationParticipantsResponse, ListConversationsRequest, ListConversationsResponse,
 };
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
 use crate::application::queries::{
-    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
+    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationParticipantsQuery,
+    ListConversationsQuery,
 };
 
 use super::ConversationGrpcHandler;
@@ -115,26 +116,49 @@ impl ConversationReadService for ConversationGrpcHandler {
         }))
     }
 
-    async fn get_conversation_members(
+    async fn list_conversation_participants(
         &self,
-        request: Request<GetConversationMembersRequest>,
-    ) -> Result<Response<GetConversationMembersResponse>, Status> {
+        request: Request<ListConversationParticipantsRequest>,
+    ) -> Result<Response<ListConversationParticipantsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-
-        let conv = self
+        let page = self
             .query_handler
-            .handle_get_conversation_detail(
+            .handle_list_conversation_participants(
                 &ctx,
-                GetConversationDetailQuery {
+                ListConversationParticipantsQuery {
                     conversation_id: req.conversation_id,
+                    cursor: if req.cursor.is_empty() {
+                        None
+                    } else {
+                        Some(req.cursor)
+                    },
+                    limit: if req.limit > 0 { req.limit } else { 200 },
+                    include_removed: req.include_removed,
                 },
             )
             .await
             .into_grpc()?;
 
-        let member_ids = conv.participants.into_iter().map(|p| p.user_id).collect();
-
-        Ok(Response::new(GetConversationMembersResponse { member_ids }))
+        Ok(Response::new(ListConversationParticipantsResponse {
+            conversation_id: page.conversation_id,
+            participants: page
+                .participants
+                .into_iter()
+                .map(|p| flare_proto::common::ConversationParticipant {
+                    user_id: p.user_id,
+                    roles: p.roles,
+                    muted: p.muted,
+                    pinned: p.pinned,
+                    attributes: p.attributes,
+                    joined_at: None,
+                })
+                .collect(),
+            next_cursor: page.next_cursor.unwrap_or_default(),
+            has_more: page.has_more,
+            participant_version: page.participant_version,
+            member_count: page.member_count,
+            ext: Default::default(),
+        }))
     }
 }

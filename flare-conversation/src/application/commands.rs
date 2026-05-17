@@ -50,7 +50,7 @@ pub struct ManageParticipantsCommand {
 #[derive(Debug, Clone)]
 pub struct UpdateCursorCommand {
     pub conversation_id: String,
-    pub message_ts: i64,
+    pub sync_seq: i64,
 }
 
 /// 标记会话已读命令（read_seq 为 0 时由服务端用 last_message_seq）

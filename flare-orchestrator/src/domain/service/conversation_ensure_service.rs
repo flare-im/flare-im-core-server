@@ -226,6 +226,14 @@ pub fn build_conversation_ensure_request_from_message(
     {
         participants.push(message.channel_id.clone());
     }
+    if message.conversation_type == flare_proto::common::ConversationType::Group as i32 {
+        if let Some(member_ids) = message.extra.get("group_member_ids") {
+            participants.extend(parse_group_member_ids(member_ids));
+        }
+    }
+    participants.retain(|id| !id.trim().is_empty());
+    participants.sort();
+    participants.dedup();
 
     let business_type = message
         .extra
@@ -243,6 +251,14 @@ pub fn build_conversation_ensure_request_from_message(
         stored_channel_id,
         tenant_id: tenant_id.to_string(),
     }
+}
+
+fn parse_group_member_ids(raw: &str) -> Vec<String> {
+    raw.split([',', ';', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// 辅助函数：从事件构建会话确保请求

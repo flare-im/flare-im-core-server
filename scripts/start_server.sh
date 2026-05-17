@@ -10,6 +10,10 @@
 
 set -e
 
+# 本地基础设施（Consul/Redis/Postgres 等）必须直连，避免系统 HTTP 代理拦截 localhost。
+IM_CORE_NO_PROXY='localhost,127.0.0.1,::1'
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$IM_CORE_NO_PROXY"
+export no_proxy="${no_proxy:+$no_proxy,}$IM_CORE_NO_PROXY"
 
 # 颜色输出
 
@@ -351,9 +355,9 @@ for service in "${CORE_SERVICES[@]}"; do
         "message-orchestrator")
             PACKAGE="flare-orchestrator"
             BIN_NAME="flare-orchestrator"
-            # 本地联调默认开启 RTC bridge（EVENT_CALL_SIGNAL -> CapabilityService.Dispatch）。
+            # RTC bridge 懒连接 capability，不阻塞启动；媒体后端需单独启动 strom-sfu。
             export MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE="${MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE:-1}"
-            export MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI="${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-http://127.0.0.1:50095}"
+            export MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI="${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-http://127.0.0.1:50110}"
             ENV_VARS=""
             ;;
         "storage-writer")
@@ -456,6 +460,23 @@ done
 echo ""
 echo -e "${GREEN}✅ 核心服务启动完成${NC}"
 echo ""
+
+# SFU 能力插件（Consul 注册 flare-strom-sfu；capability 通过 service_name 发现）
+STROM_SFU_DIR="$PROJECT_ROOT/../flare-plugin/flare-strom-sfu"
+if [ "${START_STROM_SFU_PLUGIN:-1}" != "0" ] && [ -f "$STROM_SFU_DIR/Makefile" ]; then
+    echo -e "${GREEN}🚀 启动 Strom SFU 插件（flare-strom-sfu → Consul）...${NC}"
+    if (cd "$STROM_SFU_DIR" && make plugin-stop >/dev/null 2>&1 || true) \
+        && (cd "$STROM_SFU_DIR" && make plugin-start); then
+        echo -e "${GREEN}   ✓ Strom SFU plugin 已启动（gRPC :50060，服务名 flare-strom-sfu）${NC}"
+    else
+        echo -e "${YELLOW}   ⚠ Strom SFU plugin 启动失败；RTC 通话需手动: cd flare-plugin/flare-strom-sfu && make plugin-start${NC}"
+    fi
+    echo ""
+else
+    echo -e "${YELLOW}💡 跳过 Strom SFU plugin（START_STROM_SFU_PLUGIN=0 或目录不存在）${NC}"
+    echo -e "${YELLOW}   RTC 通话需: cd flare-plugin/flare-strom-sfu && make plugin-start${NC}"
+    echo ""
+fi
 
 # 启动 Access Gateway（根据模式选择单网关或多网关）
 if [ "$GATEWAY_MODE" == "single" ]; then

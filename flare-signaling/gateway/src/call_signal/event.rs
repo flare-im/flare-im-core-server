@@ -2,6 +2,7 @@
 
 use flare_proto::common::call_signal_event::Signal;
 use flare_proto::common::event::Payload;
+use flare_proto::common::{CallEndReasonCode, CallVisibilityScope};
 use flare_proto::common::{CallSignalEvent, Event, EventType};
 
 /// 与 proto `EventType::EventCallSignal` 对应。
@@ -16,6 +17,14 @@ pub enum CallSignalType {
     Hangup,
     /// ICE / SDP / SFU 状态等子类型后续按需细分
     Other,
+}
+
+/// 挂断语义补充（用于路由/审计：如无应答仅自己可见消息）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallHangupMeta {
+    pub reason_code: Option<CallEndReasonCode>,
+    pub visibility_scope: Option<CallVisibilityScope>,
+    pub timeout_seconds: Option<u32>,
 }
 
 impl CallSignalType {
@@ -39,4 +48,30 @@ pub fn try_unwrap_call_signal(event: &Event) -> Option<&CallSignalEvent> {
         Payload::CallSignal(cs) => Some(cs),
         _ => None,
     }
+}
+
+/// 提取挂断扩展元信息（reason_code / visibility_scope / timeout_seconds）。
+pub fn hangup_meta(cs: &CallSignalEvent) -> Option<CallHangupMeta> {
+    let h = match cs.signal.as_ref()? {
+        Signal::Hangup(h) => h,
+        _ => return None,
+    };
+    Some(CallHangupMeta {
+        reason_code: h
+            .reason_code
+            .and_then(|v| CallEndReasonCode::try_from(v).ok()),
+        visibility_scope: h
+            .visibility_scope
+            .and_then(|v| CallVisibilityScope::try_from(v).ok()),
+        timeout_seconds: h.timeout_seconds,
+    })
+}
+
+/// 是否「无应答超时 + 仅自己可见」挂断消息。
+pub fn is_self_only_no_answer_hangup(cs: &CallSignalEvent) -> bool {
+    let Some(meta) = hangup_meta(cs) else {
+        return false;
+    };
+    matches!(meta.reason_code, Some(CallEndReasonCode::NoAnswerTimeout))
+        && matches!(meta.visibility_scope, Some(CallVisibilityScope::SelfOnly))
 }

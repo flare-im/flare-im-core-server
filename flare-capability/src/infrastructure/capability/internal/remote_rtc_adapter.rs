@@ -8,6 +8,7 @@ use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
 use flare_grpc_proto::sfu_control::{
     AcceptCallRequest as ProtoAcceptCallRequest, AddIceCandidateRequest as ProtoAddIce,
     CreateRoomRequest, GetJoinTokenRequest as ProtoJoin, GetPeerNetworkQualityRequest,
+    GetRoomStateRequest,
     HandleSdpAnswerRequest as ProtoHandleAnswer, HandleSdpOfferRequest as ProtoHandleOffer,
     HangupCallRequest as ProtoHangup, JoinRoomRequest as ProtoJoinRoom,
     LeaveRoomRequest as ProtoLeaveRoom, MediaKind,
@@ -17,19 +18,24 @@ use flare_grpc_proto::sfu_control::{
 };
 use flare_server_core::client::set_context_metadata;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+use crate::infrastructure::capability::plugin_channel::{
+    PLUGIN_DISCOVERY_TIMEOUT, resolve_plugin_channel,
+};
+use crate::infrastructure::config::capability_runtime::discovery_route_authority;
 use crate::domain::capability::{
     AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
     CapabilityError, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest,
     GetJoinTokenResponse, HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest,
     HandleSdpOfferResponse, HangupCallRequest, HangupCallResponse, ListParticipantsRequest,
     ListParticipantsResponse, MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse,
-    MediaJoinTransportRequest, MediaJoinTransportResponse, MediaLeaveTransportRequest,
-    MediaLeaveTransportResponse, MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse,
+    MediaGetRoomStateRequest, MediaGetRoomStateResponse, MediaJoinTransportRequest,
+    MediaJoinTransportResponse, MediaLeaveTransportRequest, MediaLeaveTransportResponse,
+    MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse,
     MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest,
     MediaSetSubscriptionResponse, RejectCallRequest, RejectCallResponse, Result, RtcCapability,
 };
@@ -43,26 +49,65 @@ fn status_to_capability(s: tonic::Status) -> CapabilityError {
     CapabilityError::System(format!("media-control gRPC {}: {}", s.code(), s.message()))
 }
 
+enum MediaControlTransport {
+    Static(Channel),
+    /// `discovery://<service_name>`，与 [`resolve_plugin_channel`] / 健康检查共用缓存。
+    Discovery { route_authority: String },
+}
+
 /// 独立媒体控制面进程的 gRPC 后端（与进程内媒体后端二选一）。
 pub struct MediaControlGrpcRtcCapability {
-    client: SfuControlClient<Channel>,
+    transport: MediaControlTransport,
 }
 
 impl MediaControlGrpcRtcCapability {
-    pub async fn connect(endpoint: impl Into<String>) -> anyhow::Result<Self> {
+    /// 静态 endpoint 延迟建连：启动阶段不拨号，首次 RTC 调用时再连接。
+    pub fn from_static_lazy(endpoint: impl Into<String>) -> anyhow::Result<Self> {
         let ep = endpoint.into();
         let channel = Channel::from_shared(ep.clone())
             .map_err(|e| anyhow::anyhow!("invalid media-control gRPC endpoint {ep}: {e}"))?
-            .connect()
-            .await
-            .map_err(|e| anyhow::anyhow!("media-control gRPC dial {ep}: {e}"))?;
+            .connect_lazy();
         Ok(Self {
-            client: SfuControlClient::new(channel),
+            transport: MediaControlTransport::Static(channel),
         })
     }
 
-    pub fn control_client(&self) -> SfuControlClient<Channel> {
-        self.client.clone()
+    pub async fn from_service_name(service_name: impl Into<String>) -> anyhow::Result<Self> {
+        let service_name = service_name.into();
+        Ok(Self {
+            transport: MediaControlTransport::Discovery {
+                route_authority: discovery_route_authority(service_name.as_str()),
+            },
+        })
+    }
+
+    pub async fn control_client(&self) -> Result<SfuControlClient<Channel>> {
+        match &self.transport {
+            MediaControlTransport::Static(channel) => Ok(SfuControlClient::new(channel.clone())),
+            MediaControlTransport::Discovery { route_authority } => {
+                let channel = match tokio::time::timeout(
+                    PLUGIN_DISCOVERY_TIMEOUT,
+                    resolve_plugin_channel(route_authority),
+                )
+                .await
+                {
+                    Ok(Ok(channel)) => channel,
+                    Ok(Err(e)) => {
+                        return Err(CapabilityError::System(format!(
+                            "discover media-control service {}: {e}",
+                            route_authority.strip_prefix("discovery://").unwrap_or(route_authority)
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(CapabilityError::System(format!(
+                            "discover media-control service {}: timeout (plugin unavailable)",
+                            route_authority.strip_prefix("discovery://").unwrap_or(route_authority)
+                        )));
+                    }
+                };
+                Ok(SfuControlClient::new(channel))
+            }
+        }
     }
 
     fn resolve_call_id(req_call_id: &str, ext: &Value) -> String {
@@ -142,8 +187,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .create_room(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -151,10 +196,12 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
 
         Ok(CreateCallResponse {
             call_id: inner.call_id,
-            room_id: inner.room_id,
+            room_id: inner.room_id.clone(),
             ext: json!({
                 "created": inner.created,
-                "room_id": room_id,
+                "room_id": inner.room_id,
+                "signaling_ws_base": inner.signaling_ws_base,
+                "sfu_instance_id": inner.instance_id,
             }),
         })
     }
@@ -170,8 +217,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .accept_call(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -182,6 +229,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             ext: json!({
                 "room_id": inner.room_id,
                 "signaling_ws_base": inner.signaling_ws_base,
+                "sfu_instance_id": inner.instance_id,
             }),
         })
     }
@@ -223,8 +271,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .hangup_call(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -250,8 +298,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .get_join_token(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -263,6 +311,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             ext: json!({
                 "room_id": inner.room_id,
                 "signaling_ws_base": inner.signaling_ws_base,
+                "sfu_instance_id": inner.instance_id,
             }),
         })
     }
@@ -298,18 +347,56 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .join_room(grpc_req)
             .await
             .map_err(status_to_capability)?;
         let inner = resp.into_inner();
 
+        let mut ext = Map::new();
+        if !inner.room_snapshot_json.trim().is_empty() {
+            ext.insert(
+                "room_snapshot_json".into(),
+                inner.room_snapshot_json.clone().into(),
+            );
+            if let Ok(v) = serde_json::from_str::<Value>(&inner.room_snapshot_json) {
+                ext.insert("room_snapshot".into(), v);
+            }
+        }
         Ok(MediaJoinTransportResponse {
             room_id: inner.room_id,
             peer_id: inner.peer_id,
             session_id: inner.session_id,
             call_id: inner.call_id,
+            ext: Value::Object(ext),
+        })
+    }
+
+    async fn media_get_room_state(
+        &self,
+        ctx: &Ctx,
+        req: &MediaGetRoomStateRequest,
+    ) -> Result<MediaGetRoomStateResponse> {
+        let mut grpc_req = Request::new(GetRoomStateRequest {
+            request_id: req.request_id.clone(),
+            room_id: req.room_id.clone(),
+        });
+        set_context_metadata(&mut grpc_req, ctx);
+
+        let resp = self
+            .control_client()
+            .await?
+            .get_room_state(grpc_req)
+            .await
+            .map_err(status_to_capability)?;
+        let inner = resp.into_inner();
+
+        Ok(MediaGetRoomStateResponse {
+            room_id: inner.room_id,
+            exists: inner.exists,
+            revision: inner.revision,
+            room_snapshot_json: inner.room_snapshot_json,
             ext: Value::Null,
         })
     }
@@ -329,8 +416,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .leave_room(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -356,8 +443,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .handle_sdp_offer(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -383,8 +470,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .handle_sdp_answer(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -410,8 +497,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .add_ice_candidate(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -438,8 +525,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .set_publisher_mute(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -469,8 +556,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .set_subscription(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -496,8 +583,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .set_simulcast_layer(grpc_req)
             .await
             .map_err(status_to_capability)?;
@@ -521,8 +608,8 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
         set_context_metadata(&mut grpc_req, ctx);
 
         let resp = self
-            .client
-            .clone()
+            .control_client()
+            .await?
             .get_peer_network_quality(grpc_req)
             .await
             .map_err(status_to_capability)?;

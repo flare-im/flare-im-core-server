@@ -3,9 +3,7 @@
 //! 对外只暴露协议与通用适配装配入口；具体 RTC 后端实现类型不在公开 API 中出现。
 
 use anyhow::Result;
-use flare_capability::composition::{
-    ApplicationBootstrap, CapabilityServiceConfig, wire_runtime_adapters,
-};
+use flare_capability::composition::{ApplicationBootstrap, CapabilityServiceConfig};
 use flare_capability::domain::model::ExecutionMode;
 use flare_im_core::{load_config, tracing::init_tracing_from_config};
 
@@ -58,5 +56,5 @@ async fn main() -> Result<()> {
         refresh_interval_secs = config.refresh_interval_secs,
         "Starting Flare Capability service"
     );
-    ApplicationBootstrap::run_with_rtc_plugins(config, wire_runtime_adapters).await
+    ApplicationBootstrap::run(config).await
 }

@@ -1,4 +1,5 @@
 pub mod call_signal_enrichment_service;
+pub mod call_signal_notice_message_builder;
 pub mod conversation_ensure_service;
 pub mod event_domain_service;
 pub mod hook_execution_service;

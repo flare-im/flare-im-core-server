@@ -12,7 +12,7 @@ use crate::domain::model::{ConversationType, MessageDefaults};
 
 /// `flare-capability` gRPC 默认地址（无注册中心或未配置地址时使用）。
 /// 与 `MessageOrchestratorConfig::resolve_capability_grpc_uri` 配套。
-pub const DEFAULT_CAPABILITY_GRPC_URI: &str = "http://127.0.0.1:50095";
+pub const DEFAULT_CAPABILITY_GRPC_URI: &str = "http://127.0.0.1:50110";
 
 static WARN_EMPTY_CAPABILITY_GRPC_URI: Once = Once::new();
 

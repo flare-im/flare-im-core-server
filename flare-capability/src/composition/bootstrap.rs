@@ -1,85 +1,38 @@
 //! # 进程启动（Composition Root）
 //!
-//! 解析监听地址、调用 [`super::wiring::initialize`] 装配依赖，并注册 **gRPC + 运行时**（与领域逻辑分离）。
-//!
-//! ## 插件装配钩子
-//!
-//! [`ApplicationBootstrap::run_with_rtc_plugins`] 在 wiring 完成后、gRPC 启动前调用调用方提供的
-//! `wire_plugins(PluginContext)`，由外层 binary 按编译 `feature` 把 RTC / 媒体后端等插件 crate
-//! 通过 `set_rtc_backend` / `register_extension_operations` / `PluginRouteBook::upsert` 挂入；
-//! 核心代码对具体实现一无所知。
+//! 解析监听地址、调用 [`super::wiring::initialize`] 装配依赖，并注册 **gRPC + 运行时**。
 
-use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use flare_core_runtime::ServiceRuntime;
+use flare_im_core::ServiceHelper;
 use flare_im_core::service_names::CAPABILITY;
 use tracing::info;
-
-use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
-use crate::infrastructure::config::CapabilityRuntimeConfig;
 
 use super::process_config::CapabilityServiceConfig;
 use super::runtime_context::ApplicationContext;
 use super::wiring;
 
-/// 插件装配上下文：暴露挂入 RTC / Extension operations 所需的最小句柄集。
-///
-/// 仍在核心内定义（只依赖核心类型），避免任何实现细节泄漏。
-///
-/// 字段均为 [`Clone`] 且内部共享 `Arc`：可 **按值** 传入异步 `wire` 闭包，避免生命周期与
-/// `FnOnce(&mut …)` 的高阶 trait 问题。
-#[derive(Clone)]
-pub struct PluginContext {
-    pub registry: CapabilityExtensionRegistry,
-    pub plugin_routes: Arc<PluginRouteBook>,
-    pub runtime: Arc<CapabilityRuntimeConfig>,
-}
-
 /// 应用启动器（仅进程生命周期与传输层）。
 pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
-    /// 运行应用的主入口点（**不含**任何 RTC 后端）。
-    ///
-    /// 外层 binary 如果要默认挂入 RTC 后端，请改用 [`Self::run_with_rtc_plugins`]。
     pub async fn run(config: CapabilityServiceConfig) -> Result<()> {
-        Self::run_with_rtc_plugins(config, |_ctx| async move { Ok::<(), anyhow::Error>(()) }).await
-    }
-
-    /// 运行应用，并在 wiring 完成后调用 `wire_plugins` 挂入 RTC / Extension 实现。
-    pub async fn run_with_rtc_plugins<F, Fut>(
-        config: CapabilityServiceConfig,
-        wire_plugins: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(PluginContext) -> Fut + Send,
-        Fut: Future<Output = Result<()>> + Send,
-    {
         use flare_im_core::load_config;
 
         let app_config = load_config(Some("config"));
 
-        let address: SocketAddr = format!(
-            "{}:{}",
-            app_config.base().server.address,
-            app_config.base().server.port
+        let cap_service = app_config.capability_service();
+        let address = ServiceHelper::parse_server_addr(
+            &app_config,
+            &cap_service.runtime,
+            CAPABILITY,
         )
-        .parse()
         .context("invalid flare-capability server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         let context = wiring::initialize(config).await?;
-
-        let plugin_ctx = PluginContext {
-            registry: context.capability_registry.clone(),
-            plugin_routes: Arc::clone(&context.plugin_routes),
-            runtime: Arc::clone(&context.capability_runtime),
-        };
-        wire_plugins(plugin_ctx).await?;
-
         info!("ApplicationBootstrap created successfully");
 
         Self::run_with_context(context, address).await
@@ -97,7 +50,6 @@ impl ApplicationBootstrap {
         let address_clone = address;
         let im_hook_plugin = context.im_hook_plugin;
         let capability_grpc = context.capability_grpc;
-        let _plugin_routes = context.plugin_routes;
         let extension_router = context.extension_router;
 
         let runtime = ServiceRuntime::new(CAPABILITY)

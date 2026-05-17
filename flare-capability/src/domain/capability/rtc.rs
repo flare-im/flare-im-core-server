@@ -126,6 +126,22 @@ pub struct MediaJoinTransportResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGetRoomStateRequest {
+    pub tenant_id: String,
+    pub request_id: String,
+    pub room_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGetRoomStateResponse {
+    pub room_id: String,
+    pub exists: bool,
+    pub revision: u64,
+    pub room_snapshot_json: String,
+    pub ext: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaLeaveTransportRequest {
     pub tenant_id: String,
     pub request_id: String,

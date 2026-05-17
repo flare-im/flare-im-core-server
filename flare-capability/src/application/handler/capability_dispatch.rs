@@ -54,10 +54,7 @@ pub async fn dispatch_capability_command(
     if req.capability_id.starts_with("rtc.") {
         let rtc = registry.rtc_router().await;
         let ctx_rtc = ctx_for_rtc_dispatch(ctx, req);
-        return crate::domain::capability::dispatch_rtc_by_capability_id(
-            &ctx_rtc, &rtc, req,
-        )
-        .await;
+        return crate::domain::capability::dispatch_rtc_by_capability_id(&ctx_rtc, &rtc, req).await;
     }
 
     super::dispatch_remote_by_capability_id(

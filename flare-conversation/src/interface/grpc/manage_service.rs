@@ -237,7 +237,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 &ctx,
                 UpdateCursorCommand {
                     conversation_id: req.conversation_id.clone(),
-                    message_ts: req.message_ts,
+                    sync_seq: req.message_ts,
                 },
             )
             .await

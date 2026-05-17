@@ -37,6 +37,7 @@ const EXT_NQ_PACKET_LOSS_RATIO: &str = "flare_network_quality_packet_loss_ratio"
 const CAP_CALL_AUDIO_START: &str = "rtc.call.audio";
 const CAP_CALL_VIDEO_START: &str = "rtc.call.video";
 const CAP_CALL_ACCEPT: &str = "rtc.call.accept";
+const CAP_CALL_JOIN_TOKEN: &str = "rtc.call.join_token";
 const CAP_CALL_REJECT: &str = "rtc.call.reject";
 const CAP_CALL_END: &str = "rtc.call.end";
 const CAP_CALL_SIGNAL_SDP_OFFER: &str = "rtc.media.sdp.offer";
@@ -160,6 +161,33 @@ impl CallSignalEnrichmentService {
                     )
                     .await?;
                 apply_accept_result_to_call_signal(cs, &result)?;
+                match self
+                    .dispatch_capability_json(
+                        ctx,
+                        CAP_CALL_JOIN_TOKEN,
+                        tenant_id,
+                        &cs.from_user_id,
+                        &conversation_for_dispatch,
+                        format!("{rid}-join-token"),
+                        call_id_payload(cs)?,
+                    )
+                    .await
+                {
+                    Ok(join) => apply_join_token_result_to_call_signal(cs, &join)?,
+                    Err(err) => {
+                        // 接听信令不能因为 token 附加失败而丢失；前端仍可通过 capability join。
+                        warn!(
+                            error = %err,
+                            call_id = %cs.call_id,
+                            "call_signal_enrichment: accept succeeded but join_token enrichment failed"
+                        );
+                        cs.ext.insert("flare_rtc_enrich".into(), "degraded".into());
+                        cs.ext.insert(
+                            "flare_rtc_enrich_error".into(),
+                            "join_token_unavailable".into(),
+                        );
+                    }
+                }
             }
             Some(Signal::Reject(r)) => {
                 let payload = reject_payload(cs, &r)?;
@@ -646,6 +674,15 @@ fn merge_transport_from_capability_json(cs: &mut CallSignalEvent, v: &Value) {
     {
         t.signaling_ws_base = Some(ws.to_string());
     }
+    let instance_id = v
+        .get("sfu_instance_id")
+        .or_else(|| v.get("instance_id"))
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(instance_id) = instance_id {
+        t.instance_id = Some(instance_id.to_string());
+    }
 }
 
 fn apply_create_result_to_call_signal(cs: &mut CallSignalEvent, v: &Value) -> Result<()> {
@@ -675,5 +712,33 @@ fn apply_accept_result_to_call_signal(cs: &mut CallSignalEvent, v: &Value) -> Re
         cs.call_id = cid.to_string();
     }
     merge_transport_from_capability_json(cs, v);
+    Ok(())
+}
+
+fn apply_join_token_result_to_call_signal(cs: &mut CallSignalEvent, v: &Value) -> Result<()> {
+    if v.is_null() {
+        return Err(flare_err!(
+            ErrorCode::InternalError,
+            "capability join_token result empty"
+        ));
+    }
+    merge_transport_from_capability_json(cs, v);
+    if let Some(token) = v
+        .get("sfu_join_token")
+        .or_else(|| v.get("token"))
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cs.ext.insert("sfu_join_token".into(), token.to_string());
+    }
+    if let Some(ttl) = v
+        .get("sfu_join_token_ttl_seconds")
+        .or_else(|| v.get("ttl_seconds"))
+        .and_then(|x| x.as_u64())
+    {
+        cs.ext
+            .insert("sfu_join_token_ttl_seconds".into(), ttl.to_string());
+    }
     Ok(())
 }

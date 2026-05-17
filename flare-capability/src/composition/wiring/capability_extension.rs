@@ -1,7 +1,7 @@
 //! **能力扩展栈装配**（写路径基础设施）：策略后端、`CapabilityGrpcServer`、内建 Resolver。
 //!
 //! **RTC / Extension 适配在本 crate 内部装配**。此处仅构建基础注册表与服务；
-//! 具体后端接线由 `composition::wire_runtime_adapters` 在启动阶段统一完成。
+//! 媒体/RTC 后端在启动阶段仅登记 lazy 路由（不拨号）；调用 `Dispatch` 时再经服务发现解析。
 
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ pub async fn init_capability_extension_stack(
 )> {
     use crate::infrastructure::capability::builtin::DirectConversationRecipientResolver;
     use crate::infrastructure::capability::{
-        CapabilityExtensionRegistry, InMemoryCapabilityGrants,
+        CapabilityExtensionRegistry, InMemoryCapabilityGrants, register_discovered_media_plugins,
     };
     use crate::infrastructure::persistence::PostgresCapabilityPolicy;
 
@@ -72,6 +72,8 @@ pub async fn init_capability_extension_stack(
         .register_recipient_resolver(Arc::new(DirectConversationRecipientResolver::new()))
         .await;
 
+    register_discovered_media_plugins(&registry, &plugin_routes, runtime.as_ref()).await?;
+
     let capability_grpc = CapabilityGrpcServer::new(
         registry.clone(),
         Arc::clone(&capability_policy),
@@ -84,7 +86,7 @@ pub async fn init_capability_extension_stack(
     );
 
     tracing::info!(
-        "capability extension stack initialized (no RTC backend yet; use plugin wire(..))"
+        "capability extension stack initialized (media plugins via service discovery)"
     );
 
     Ok((registry, capability_policy, capability_grpc))

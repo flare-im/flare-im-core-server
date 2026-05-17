@@ -1,13 +1,13 @@
 //! 内部运行时适配装配（不对外暴露具体后端实现类型）。
 //!
-//! 说明：
-//! - 对外仍只暴露 `RtcCapability` / `ExtensionOperationHandler` 协议；
-//! - 具体后端实现（远端控制面）仅在本模块内接线；
-//! - 外部调用方只需通过 `wire_runtime_adapters(..)` 触发装配。
+//! 远端媒体插件（如 `flare-strom-sfu`）统一走 **lazy + 服务发现**：
+//! 启动阶段仅登记 RTC 后端与路由，首次 `Dispatch` 时再解析 Consul 实例。
 
 use std::sync::Arc;
 
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
+use crate::infrastructure::config::CapabilityRuntimeConfig;
+use crate::infrastructure::config::capability_runtime::discovery_route_authority;
 
 #[cfg(feature = "backend-remote")]
 mod remote_extension_ops;
@@ -17,24 +17,24 @@ mod remote_route_book;
 mod remote_rtc_adapter;
 
 #[cfg(feature = "backend-remote")]
-pub(crate) async fn wire_media_control_backend(
+async fn attach_media_control_backend(
     registry: &CapabilityExtensionRegistry,
     plugin_routes: &Arc<PluginRouteBook>,
     tenant_id: &str,
     plugin_id: &str,
     capability_id: &str,
-    grpc_endpoint: &str,
+    rtc: Arc<remote_rtc_adapter::MediaControlGrpcRtcCapability>,
+    route_authority: &str,
+    source: &str,
 ) -> anyhow::Result<()> {
     use crate::domain::capability::ExtensionOperationHandler;
     use remote_extension_ops::MediaControlExtensionOperations;
     use remote_route_book::register_plugin_route;
-    use remote_rtc_adapter::MediaControlGrpcRtcCapability;
 
-    let rtc = Arc::new(MediaControlGrpcRtcCapability::connect(grpc_endpoint.to_string()).await?);
     registry
         .set_rtc_backend_for_tenant(tenant_id, Some(rtc.clone()))
         .await;
-    if tenant_id == "default" {
+    if tenant_id == "default" || tenant_id == "0" {
         registry.set_rtc_backend(Some(rtc.clone())).await;
     }
 
@@ -47,25 +47,79 @@ pub(crate) async fn wire_media_control_backend(
         tenant_id,
         plugin_id,
         capability_id,
-        grpc_endpoint,
+        route_authority,
     );
     tracing::info!(
-        endpoint = %grpc_endpoint,
+        route_authority = %route_authority,
+        source = %source,
         plugin_id = %plugin_id,
         capability_id = %capability_id,
-        "wired remote media control backend"
+        tenant_id = %tenant_id,
+        "registered media control backend"
     );
     Ok(())
 }
 
-#[cfg(not(feature = "backend-remote"))]
-pub(crate) async fn wire_media_control_backend(
-    _registry: &CapabilityExtensionRegistry,
-    _plugin_routes: &Arc<PluginRouteBook>,
-    _tenant_id: &str,
-    _plugin_id: &str,
-    _capability_id: &str,
-    _grpc_endpoint: &str,
+/// 按 `capability_runtime.plugin_discovery_endpoints` 登记 lazy RTC 后端（无启动期拨号）。
+pub(crate) async fn register_discovered_media_plugins(
+    registry: &CapabilityExtensionRegistry,
+    plugin_routes: &Arc<PluginRouteBook>,
+    runtime: &CapabilityRuntimeConfig,
 ) -> anyhow::Result<()> {
+    #[cfg(feature = "backend-remote")]
+    {
+        let mut registered = 0usize;
+        for ep in runtime.media_control_endpoints() {
+            let rtc = Arc::new(
+                remote_rtc_adapter::MediaControlGrpcRtcCapability::from_service_name(
+                    ep.service_name.as_str(),
+                )
+                .await?,
+            );
+            attach_media_control_backend(
+                registry,
+                plugin_routes,
+                ep.tenant_id.as_str(),
+                ep.plugin_id.as_str(),
+                ep.capability_id.as_str(),
+                rtc,
+                discovery_route_authority(ep.service_name.as_str()).as_str(),
+                "discovery",
+            )
+            .await?;
+            registered += 1;
+        }
+
+        if registered == 0 {
+            if let Ok(endpoint) = std::env::var("FLARE_MEDIA_CONTROL_GRPC_ENDPOINT") {
+                let endpoint = endpoint.trim();
+                if !endpoint.is_empty() {
+                    let rtc = Arc::new(
+                        remote_rtc_adapter::MediaControlGrpcRtcCapability::from_static_lazy(
+                            endpoint.to_string(),
+                        )?,
+                    );
+                    attach_media_control_backend(
+                        registry,
+                        plugin_routes,
+                        "0",
+                        "media-control",
+                        "rtc.media.control",
+                        rtc,
+                        endpoint,
+                        "static-env",
+                    )
+                    .await?;
+                    registered += 1;
+                }
+            }
+        }
+
+        if registered == 0 {
+            tracing::info!(
+                "no media plugin configured; rtc.* Dispatch returns NotRegistered until plugin registers"
+            );
+        }
+    }
     Ok(())
 }

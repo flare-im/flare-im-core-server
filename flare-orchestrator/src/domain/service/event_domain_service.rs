@@ -19,12 +19,15 @@
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
+use flare_proto::common::call_audience::Shape as CallAudienceShape;
+use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{Event, EventType};
 use flare_server_core::{flare_err, flare_err_details};
 use tracing::instrument;
 
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{PushRepository, RecipientRepository};
+use crate::domain::service::call_signal_notice_message_builder::build_call_signal_notice_message;
 use crate::domain::service::sequence_allocator::SequenceAllocator;
 use crate::domain::service::validation_strategy::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
@@ -33,22 +36,40 @@ use crate::error::{ErrorCode, Result};
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
 
 /// 事件领域服务
-pub struct EventDomainService {
+pub trait SequenceAllocatorPort: Send + Sync {
+    async fn allocate_seq(&self, conversation_id: &str, tenant_id: &str) -> Result<u64>;
+}
+
+impl SequenceAllocatorPort for SequenceAllocator {
+    async fn allocate_seq(&self, conversation_id: &str, tenant_id: &str) -> Result<u64> {
+        SequenceAllocator::allocate_seq(self, conversation_id, tenant_id).await
+    }
+}
+
+pub struct EventDomainService<PR = MqPushRepository, SA = SequenceAllocator>
+where
+    PR: PushRepository,
+    SA: SequenceAllocatorPort,
+{
     /// 推送仓储（使用具体类型以支持 async fn in traits）
-    push_repository: Arc<MqPushRepository>,
+    push_repository: Arc<PR>,
     /// 接收者仓储
     recipient_repository: Arc<dyn RecipientRepository>,
     /// 序列号分配器
-    sequence_allocator: Arc<SequenceAllocator>,
+    sequence_allocator: Arc<SA>,
     /// 事件校验策略
     validation_strategy: Arc<dyn EventValidationStrategy>,
 }
 
-impl EventDomainService {
+impl<PR, SA> EventDomainService<PR, SA>
+where
+    PR: PushRepository,
+    SA: SequenceAllocatorPort,
+{
     pub fn new(
-        push_repository: Arc<MqPushRepository>,
+        push_repository: Arc<PR>,
         recipient_repository: Arc<dyn RecipientRepository>,
-        sequence_allocator: Arc<SequenceAllocator>,
+        sequence_allocator: Arc<SA>,
         validation_strategy: Option<Arc<dyn EventValidationStrategy>>,
     ) -> Self {
         Self {
@@ -160,7 +181,13 @@ impl EventDomainService {
         conversation_id = %event.conversation_id,
     ))]
     pub async fn get_recipient_user_ids(&self, ctx: &Ctx, event: &Event) -> Result<Vec<String>> {
-        self.recipient_repository
+        if let Some(recipients) = resolve_recipients_from_event_payload(event) {
+            return Ok(recipients);
+        }
+
+        let event_type = EventType::try_from(event.r#type).unwrap_or(EventType::Unspecified);
+        let mut members = self
+            .recipient_repository
             .get_conversation_members(ctx, &event.conversation_id)
             .await
             .map_err(|e| {
@@ -168,7 +195,25 @@ impl EventDomainService {
                     ErrorCode::InternalError,
                     &format!("Failed to get conversation members for event: {}", e)
                 )
-            })
+            })?;
+
+        match event_type {
+            EventType::EventTyping => {
+                if let Some(EventPayload::Typing(t)) = &event.payload {
+                    members.retain(|uid| uid != &t.user_id);
+                } else if let Some(uid) = ctx.user_id() {
+                    members.retain(|uid_m| uid_m != uid);
+                }
+            }
+            EventType::EventReadReceipt => {
+                if let Some(EventPayload::Read(r)) = &event.payload {
+                    members.retain(|uid| uid != &r.user_id);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(members)
     }
 
     /// 仅推送事件（不持久化），由服务内部自动解析接收者
@@ -226,13 +271,32 @@ impl EventDomainService {
     /// 根据 event.proto 定义，以下事件类型为临时事件：
     /// - EVENT_TYPING：正在输入（高频，无需持久化）
     /// - EVENT_PRESENCE：在线状态（实时性，无需持久化）
-    /// - EVENT_CALL_SIGNAL：通话信令（实时性，无需持久化）
+    /// - EVENT_CALL_SIGNAL：默认按临时事件处理；仅“终态信令”在 `push_event` 中提升为持久化
     fn is_temporary_event(event_type: EventType) -> bool {
         match event_type {
             EventType::EventTyping => true,     // 正在输入：高频，仅推送
             EventType::EventPresence => true,   // 在线状态：实时性，仅推送
-            EventType::EventCallSignal => true, // 通话信令：实时性，仅推送
+            EventType::EventCallSignal => true, // 默认临时；终态由策略提升
             _ => false,                         // 其他事件：需要持久化
+        }
+    }
+
+    /// 终态通话信令是否需要沉淀到会话历史。
+    ///
+    /// 仅保留用户可感知结果：
+    /// - reject / busy
+    /// - hangup（含取消、结束时长、异常中断等）
+    ///
+    /// 协商过程（invite/accept/ringing/ice/renegotiate/...）仅实时分发，不落聊天记录。
+    fn should_persist_call_signal_terminal(event: &Event) -> bool {
+        use flare_proto::common::call_signal_event::Signal;
+        let Some(flare_proto::common::event::Payload::CallSignal(call)) = event.payload.as_ref()
+        else {
+            return false;
+        };
+        match call.signal.as_ref() {
+            Some(Signal::Reject(_)) | Some(Signal::Busy(_)) | Some(Signal::Hangup(_)) => true,
+            _ => false,
         }
     }
 
@@ -299,7 +363,12 @@ impl EventDomainService {
     ) -> Result<()> {
         let event_type = EventType::try_from(event.r#type).unwrap_or(EventType::Unspecified);
         let is_temporary = Self::is_temporary_event(event_type);
-        let should_push_only = persistence_mode.should_push_only(is_temporary);
+        let should_push_only = match persistence_mode {
+            PersistenceMode::Auto if event_type == EventType::EventCallSignal => {
+                !Self::should_persist_call_signal_terminal(&event)
+            }
+            _ => persistence_mode.should_push_only(is_temporary),
+        };
         if should_push_only {
             return self.push_only(ctx, event).await;
         }
@@ -313,6 +382,25 @@ impl EventDomainService {
             persistence_mode = ?persistence_mode,
             "Publishing event (persistence + push)"
         );
+
+        // 终态通话信令附加沉淀为通知消息，沿消息主链路做 persistence+push，
+        // 保障会话历史与多端同步一致。
+        if let Some(call_notice) = build_call_signal_notice_message(&event) {
+            self.push_repository
+                .publish_message(
+                    ctx,
+                    call_notice,
+                    recipient_user_ids.clone(),
+                    event.conversation_id.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    flare_err!(
+                        ErrorCode::InternalError,
+                        &format!("Failed to publish call notice message to MQ: {}", e)
+                    )
+                })?;
+        }
 
         self.push_repository
             .publish_event(
@@ -328,5 +416,308 @@ impl EventDomainService {
                     &format!("Failed to publish event to MQ: {}", e)
                 )
             })
+    }
+}
+
+/// 从事件载荷解析推送目标，避免不必要的成员列表查询。
+fn resolve_recipients_from_event_payload(event: &Event) -> Option<Vec<String>> {
+    match &event.payload {
+        Some(EventPayload::CallSignal(cs)) => {
+            cs.audience.as_ref().and_then(|aud| match &aud.shape {
+                Some(CallAudienceShape::Direct(d)) if !d.peer_user_id.trim().is_empty() => {
+                    Some(vec![d.peer_user_id.clone()])
+                }
+                Some(CallAudienceShape::Explicit(e)) => {
+                    let ids: Vec<String> = e
+                        .user_ids
+                        .iter()
+                        .filter(|id| !id.trim().is_empty())
+                        .cloned()
+                        .collect();
+                    if ids.is_empty() { None } else { Some(ids) }
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventDomainService, SequenceAllocatorPort};
+    use crate::domain::PersistenceMode;
+    use crate::domain::model::ConversationType;
+    use crate::domain::repository::{PushRepository, RecipientRepository};
+    use crate::error::{ErrorCode, Result};
+    use flare_im_core::Ctx;
+    use flare_proto::common::call_signal_event::Signal;
+    use flare_proto::common::{
+        CallBusy, CallHangup, CallReject, CallSignalEvent, Event, EventType,
+        event::Payload as EventPayload,
+    };
+    use flare_server_core::flare_err;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    struct MockPushRepository {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl MockPushRepository {
+        fn record(&self, name: &str) -> Result<()> {
+            let mut guard = self.calls.lock().map_err(|_| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    "failed to lock call recorder in MockPushRepository"
+                )
+            })?;
+            guard.push(name.to_string());
+            Ok(())
+        }
+    }
+
+    impl PushRepository for MockPushRepository {
+        async fn publish_message(
+            &self,
+            _ctx: &Ctx,
+            _message: flare_proto::common::Message,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("publish_message")
+        }
+
+        async fn publish_event(
+            &self,
+            _ctx: &Ctx,
+            _event: Event,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("publish_event")
+        }
+
+        async fn persistence_only_message(
+            &self,
+            _ctx: &Ctx,
+            _message: flare_proto::common::Message,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("persistence_only_message")
+        }
+
+        async fn persistence_only_event(
+            &self,
+            _ctx: &Ctx,
+            _event: Event,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("persistence_only_event")
+        }
+
+        async fn push_only_message(
+            &self,
+            _ctx: &Ctx,
+            _message: flare_proto::common::Message,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("push_only_message")
+        }
+
+        async fn push_only_event(
+            &self,
+            _ctx: &Ctx,
+            _event: Event,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            self.record("push_only_event")
+        }
+
+        async fn publish_push_envelope(
+            &self,
+            _ctx: &Ctx,
+            _envelope: flare_proto::common::PushEnvelope,
+        ) -> Result<()> {
+            self.record("publish_push_envelope")
+        }
+    }
+
+    struct MockRecipientRepository;
+
+    impl RecipientRepository for MockRecipientRepository {
+        fn get_message_recipients<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _conversation_id: &'a str,
+            _conversation_type: ConversationType,
+            _channel_id: Option<&'a str>,
+            _sender_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+            Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
+        }
+
+        fn get_event_recipients<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _message_id: &'a str,
+            _conversation_id: &'a str,
+            _event_type: EventType,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+            Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
+        }
+
+        fn get_conversation_members<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _conversation_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+            Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
+        }
+    }
+
+    struct MockSequenceAllocator;
+
+    impl SequenceAllocatorPort for MockSequenceAllocator {
+        async fn allocate_seq(&self, _conversation_id: &str, _tenant_id: &str) -> Result<u64> {
+            Ok(1)
+        }
+    }
+
+    fn make_call_event(signal: Signal) -> Event {
+        Event {
+            conversation_id: "c1".to_string(),
+            seq: 10,
+            r#type: EventType::EventCallSignal as i32,
+            payload: Some(EventPayload::CallSignal(CallSignalEvent {
+                call_id: "call-1".to_string(),
+                conversation_id: "c1".to_string(),
+                from_user_id: "u1".to_string(),
+                signal: Some(signal),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn should_persist(event: &Event) -> bool {
+        EventDomainService::<MockPushRepository, MockSequenceAllocator>::should_persist_call_signal_terminal(event)
+    }
+
+    #[test]
+    fn terminal_call_signal_should_persist() {
+        assert!(should_persist(&make_call_event(Signal::Reject(
+            CallReject::default()
+        ))));
+        assert!(should_persist(&make_call_event(Signal::Busy(
+            CallBusy::default()
+        ))));
+        assert!(should_persist(&make_call_event(Signal::Hangup(
+            CallHangup::default()
+        ))));
+    }
+
+    #[test]
+    fn negotiation_call_signal_should_not_persist() {
+        assert!(!should_persist(&make_call_event(Signal::Invite(
+            Default::default()
+        ))));
+        assert!(!should_persist(&make_call_event(Signal::Accept(
+            Default::default()
+        ))));
+    }
+
+    #[test]
+    fn hangup_should_persist_for_all_terminal_reason_codes() {
+        // 1..=6: user_hangup/rejected/cancelled/no_answer_timeout/busy/failed
+        for reason_code in 1..=6 {
+            let event = make_call_event(Signal::Hangup(CallHangup {
+                reason_code: Some(reason_code),
+                ..Default::default()
+            }));
+            assert!(
+                should_persist(&event),
+                "hangup reason_code={reason_code} should persist"
+            );
+        }
+    }
+
+    #[test]
+    fn non_call_event_or_invalid_payload_should_not_persist_as_call_terminal() {
+        let non_call_event = Event {
+            conversation_id: "c1".to_string(),
+            seq: 11,
+            r#type: EventType::EventTyping as i32,
+            payload: None,
+            ..Default::default()
+        };
+        assert!(!should_persist(&non_call_event));
+
+        let call_event_without_signal = Event {
+            conversation_id: "c1".to_string(),
+            seq: 12,
+            r#type: EventType::EventCallSignal as i32,
+            payload: Some(EventPayload::CallSignal(CallSignalEvent {
+                call_id: "call-2".to_string(),
+                conversation_id: "c1".to_string(),
+                from_user_id: "u2".to_string(),
+                signal: None,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(!should_persist(&call_event_without_signal));
+    }
+
+    #[tokio::test]
+    async fn push_event_should_route_call_signal_by_terminal_policy() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let push_repository = Arc::new(MockPushRepository {
+            calls: calls.clone(),
+        });
+        let recipient_repository: Arc<dyn RecipientRepository> = Arc::new(MockRecipientRepository);
+        let sequence_allocator = Arc::new(MockSequenceAllocator);
+        let service = EventDomainService::<MockPushRepository, MockSequenceAllocator>::new(
+            push_repository,
+            recipient_repository,
+            sequence_allocator,
+            None,
+        );
+        let ctx = Ctx::default();
+
+        let invite_event = make_call_event(Signal::Invite(Default::default()));
+        let invite_result = service
+            .push_event(&ctx, invite_event, PersistenceMode::Auto)
+            .await;
+        assert!(invite_result.is_ok());
+        let invite_calls = calls
+            .lock()
+            .map(|x| x.clone())
+            .unwrap_or_else(|_| Vec::new());
+        assert_eq!(invite_calls, vec!["push_only_event".to_string()]);
+
+        if let Ok(mut guard) = calls.lock() {
+            guard.clear();
+        }
+
+        let hangup_event = make_call_event(Signal::Hangup(CallHangup {
+            reason_code: Some(6),
+            ..Default::default()
+        }));
+        let hangup_result = service
+            .push_event(&ctx, hangup_event, PersistenceMode::Auto)
+            .await;
+        assert!(hangup_result.is_ok());
+        let hangup_calls = calls
+            .lock()
+            .map(|x| x.clone())
+            .unwrap_or_else(|_| Vec::new());
+        assert_eq!(
+            hangup_calls,
+            vec!["publish_message".to_string(), "publish_event".to_string()]
+        );
     }
 }

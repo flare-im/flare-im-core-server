@@ -13,7 +13,7 @@ use tracing::debug;
 use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
-    ConversationSort, ConversationSummary, ConversationType,
+    ConversationParticipantsPage, ConversationSort, ConversationSummary, ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
 
@@ -102,6 +102,100 @@ impl PostgresConversationRepository {
 
         Ok(())
     }
+
+    /// 摘要只带非单聊成员预览和版本，完整成员由独立成员同步按需/空闲拉取。
+    async fn fill_non_single_member_preview(
+        pool: &PgPool,
+        tenant_id: &str,
+        summaries: &mut [ConversationSummary],
+    ) -> Result<()> {
+        let need_participants: Vec<String> = summaries
+            .iter()
+            .filter(|s| !matches!(s.conversation_type, ConversationType::Single))
+            .map(|s| s.conversation_id.clone())
+            .collect();
+
+        if need_participants.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                cp.conversation_id::text AS conversation_id,
+                cp.user_id::text AS user_id,
+                COALESCE(cp.roles, ARRAY[]::text[]) AS roles,
+                COALESCE(cp.muted, false) AS muted,
+                COALESCE(cp.pinned, false) AS pinned,
+                COALESCE(cp.attributes, '{}'::jsonb) AS attributes,
+                COALESCE(cp.nickname, '') AS nickname
+            FROM conversation_participants cp
+            WHERE cp.tenant_id = $1
+              AND cp.conversation_id = ANY($2)
+              AND NOT COALESCE(cp.is_deleted, false)
+              AND cp.quit_at IS NULL
+            ORDER BY cp.conversation_id, cp.joined_at ASC, cp.user_id ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&need_participants)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "fill conversation participants",
+            )
+        })?;
+
+        let mut by_cid: HashMap<String, Vec<ConversationParticipant>> = HashMap::new();
+        for row in rows {
+            let cid: String = row.get("conversation_id");
+            let mut attributes: HashMap<String, String> = row
+                .get::<serde_json::Value, _>("attributes")
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                v.as_str()
+                                    .map(ToOwned::to_owned)
+                                    .unwrap_or_else(|| v.to_string()),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let nickname: String = row.get("nickname");
+            if !nickname.trim().is_empty() {
+                attributes.insert("nickname".to_string(), nickname);
+            }
+            by_cid
+                .entry(cid)
+                .or_default()
+                .push(ConversationParticipant {
+                    user_id: row.get("user_id"),
+                    roles: row.get::<Vec<String>, _>("roles"),
+                    muted: row.get("muted"),
+                    pinned: row.get("pinned"),
+                    attributes,
+                });
+        }
+
+        for summary in summaries.iter_mut() {
+            if let Some(participants) = by_cid.remove(&summary.conversation_id) {
+                summary
+                    .metadata
+                    .insert("member_count".to_string(), participants.len().to_string());
+                summary.participant_version = participants.len() as u64;
+                summary.member_preview = participants.into_iter().take(10).collect();
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ConversationRepository for PostgresConversationRepository {
@@ -112,10 +206,24 @@ impl ConversationRepository for PostgresConversationRepository {
     ) -> Result<ConversationBootstrapResult> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let user_id = require_user_id(ctx)?;
-        // 1. 从user_sync_cursor表加载用户的光标映射
+        // 1. 从 user_sync_cursor 表加载按会话消息 seq 游标。
+        // last_synced_ts 只服务于 __conversations__ 这种列表时间游标，不能参与单会话消息游标。
         let cursor_rows = sqlx::query(
             r#"
-            SELECT conversation_id, last_synced_ts
+            SELECT
+                conversation_id,
+                CASE
+                    WHEN conversation_id = '__conversations__'
+                    THEN COALESCE(last_synced_ts, 0)
+                    ELSE GREATEST(
+                        COALESCE(last_synced_seq, 0),
+                        CASE
+                            WHEN COALESCE(last_synced_ts, 0) < 1000000000000
+                            THEN COALESCE(last_synced_ts, 0)
+                            ELSE 0
+                        END
+                    )
+                END AS sync_cursor
             FROM user_sync_cursor
             WHERE tenant_id = $1 AND user_id = $2
             "#,
@@ -130,8 +238,8 @@ impl ConversationRepository for PostgresConversationRepository {
             .into_iter()
             .map(|row| {
                 let conversation_id: String = row.get("conversation_id");
-                let ts: i64 = row.get("last_synced_ts");
-                (conversation_id, ts)
+                let cursor: i64 = row.get("sync_cursor");
+                (conversation_id, cursor)
             })
             .collect();
 
@@ -210,11 +318,10 @@ impl ConversationRepository for PostgresConversationRepository {
             );
 
             // 注释：最后一条消息信息将在ApplicationService层通过MessageProvider补充
-            // server_cursor_ts：用户级游标优先，否则用会话与成员时间较大值（晚加入者也能被增量同步命中）
-            let server_cursor_ts = server_cursor
-                .get(&conversation_id)
-                .copied()
-                .or_else(|| Some(effective_updated_at.timestamp_millis()));
+            // server_cursor_ts 必须表达「会话列表行更新时间」，供 sync snapshot 做增量过滤。
+            // user_sync_cursor 同时存放单会话消息 seq，不能覆盖这里，否则会把 seq(如 884)
+            // 当作毫秒时间游标，导致客户端误判“没有会话数据”。
+            let server_cursor_ts = Some(effective_updated_at.timestamp_millis());
 
             let summary = ConversationSummary {
                 conversation_id,
@@ -234,12 +341,15 @@ impl ConversationRepository for PostgresConversationRepository {
                 display_name,
                 last_message_seq,
                 channel_id,
+                participant_version: 0,
+                member_preview: Vec::new(),
             };
 
             summaries.push(summary);
         }
 
         Self::fill_single_chat_channel_ids(&self.pool, tenant_id, &user_id, &mut summaries).await?;
+        Self::fill_non_single_member_preview(&self.pool, tenant_id, &mut summaries).await?;
 
         // 按server_cursor_ts降序排序
         summaries.sort_by(|a, b| {
@@ -260,25 +370,51 @@ impl ConversationRepository for PostgresConversationRepository {
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
-        ts: i64,
+        sync_seq: i64,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let user_id = require_user_id(ctx)?;
-        sqlx::query(
-            r#"
-            INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_ts, updated_at)
-            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-            ON CONFLICT (tenant_id, user_id, conversation_id)
-            DO UPDATE SET last_synced_ts = $4, updated_at = CURRENT_TIMESTAMP
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(&user_id)
-        .bind(conversation_id)
-        .bind(ts)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update cursor"))?;
+        if conversation_id == "__conversations__" {
+            sqlx::query(
+                r#"
+                INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
+                VALUES ($1, $2, $3, 0, $4, CURRENT_TIMESTAMP)
+                ON CONFLICT (tenant_id, user_id, conversation_id)
+                DO UPDATE SET
+                    last_synced_seq = 0,
+                    last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(&user_id)
+            .bind(conversation_id)
+            .bind(sync_seq)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update conversation list cursor"))?;
+        } else {
+            let synced_at_ms = Utc::now().timestamp_millis();
+            sqlx::query(
+                r#"
+                INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
+                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                ON CONFLICT (tenant_id, user_id, conversation_id)
+                DO UPDATE SET
+                    last_synced_seq = GREATEST(COALESCE(user_sync_cursor.last_synced_seq, 0), EXCLUDED.last_synced_seq),
+                    last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(&user_id)
+            .bind(conversation_id)
+            .bind(sync_seq)
+            .bind(synced_at_ms)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to update message sync cursor"))?;
+        }
 
         Ok(())
     }
@@ -676,6 +812,168 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(participants)
     }
 
+    async fn list_conversation_participants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        cursor: Option<&str>,
+        limit: i32,
+        include_removed: bool,
+    ) -> Result<ConversationParticipantsPage> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let user_id = require_user_id(ctx)?;
+        let conversation_id = conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err(crate::error::ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
+        let offset = cursor
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or_default()
+            .max(0);
+        let limit = limit.clamp(1, 500);
+
+        let membership_exists: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1::BIGINT
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND user_id = $3
+              AND NOT COALESCE(is_deleted, false)
+              AND quit_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(&user_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
+        })?;
+        if membership_exists.is_none() {
+            return Err(crate::error::ErrorBuilder::new(
+                ErrorCode::MessageNotFound,
+                "conversation not found",
+            )
+            .build_error());
+        }
+
+        let active_filter = if include_removed {
+            ""
+        } else {
+            "AND NOT COALESCE(is_deleted, false) AND quit_at IS NULL"
+        };
+        let count_sql = format!(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              {active_filter}
+            "#
+        );
+        let total: i64 = sqlx::query_scalar(&count_sql)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "count participants"))?;
+
+        let version_sql = r#"
+            SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)) * 1000, 0)::BIGINT
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+        "#;
+        let participant_version: i64 = sqlx::query_scalar(version_sql)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "participant version"))?;
+
+        let list_sql = format!(
+            r#"
+            SELECT
+                user_id::text AS user_id,
+                COALESCE(roles, ARRAY[]::text[]) AS roles,
+                COALESCE(muted, false) AS muted,
+                COALESCE(pinned, false) AS pinned,
+                COALESCE(attributes, '{{}}'::jsonb) AS attributes,
+                joined_at,
+                COALESCE(nickname, '') AS nickname
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              {active_filter}
+            ORDER BY joined_at ASC, user_id ASC
+            LIMIT $3 OFFSET $4
+            "#
+        );
+        let rows = sqlx::query(&list_sql)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(limit as i64)
+            .bind(offset)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "list participants"))?;
+
+        let participants = rows
+            .into_iter()
+            .map(|row| {
+                let mut attributes: HashMap<String, String> = row
+                    .get::<serde_json::Value, _>("attributes")
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    v.as_str()
+                                        .map(ToOwned::to_owned)
+                                        .unwrap_or_else(|| v.to_string()),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let nickname: String = row.get("nickname");
+                if !nickname.trim().is_empty() {
+                    attributes.insert("nickname".to_string(), nickname.clone());
+                }
+                ConversationParticipant {
+                    user_id: row.get("user_id"),
+                    roles: row.get("roles"),
+                    muted: row.get("muted"),
+                    pinned: row.get("pinned"),
+                    attributes,
+                }
+            })
+            .collect::<Vec<_>>();
+        let next_offset = offset + participants.len() as i64;
+        let has_more = next_offset < total;
+
+        Ok(ConversationParticipantsPage {
+            conversation_id: conversation_id.to_string(),
+            participants,
+            next_cursor: if has_more {
+                Some(next_offset.to_string())
+            } else {
+                None
+            },
+            has_more,
+            participant_version: participant_version.max(0) as u64,
+            member_count: total.max(0) as i32,
+        })
+    }
+
     async fn batch_acknowledge(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -689,22 +987,48 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "begin transaction"))?;
 
-        for (conversation_id, ts) in cursors {
-            sqlx::query(
-                r#"
-                INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_ts, updated_at)
-                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-                ON CONFLICT (tenant_id, user_id, conversation_id)
-                DO UPDATE SET last_synced_ts = $4, updated_at = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(&user_id)
-            .bind(conversation_id)
-            .bind(*ts)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge cursor"))?;
+        let synced_at_ms = Utc::now().timestamp_millis();
+        for (conversation_id, seq) in cursors {
+            if conversation_id == "__conversations__" {
+                sqlx::query(
+                    r#"
+                    INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
+                    VALUES ($1, $2, $3, 0, $4, CURRENT_TIMESTAMP)
+                    ON CONFLICT (tenant_id, user_id, conversation_id)
+                    DO UPDATE SET
+                        last_synced_seq = 0,
+                        last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
+                        updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(&user_id)
+                .bind(conversation_id)
+                .bind(*seq)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge conversation list cursor"))?;
+            } else {
+                sqlx::query(
+                    r#"
+                    INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                    ON CONFLICT (tenant_id, user_id, conversation_id)
+                    DO UPDATE SET
+                        last_synced_seq = GREATEST(COALESCE(user_sync_cursor.last_synced_seq, 0), EXCLUDED.last_synced_seq),
+                        last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
+                        updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(&user_id)
+                .bind(conversation_id)
+                .bind(*seq)
+                .bind(synced_at_ms)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge message cursor"))?;
+            }
         }
 
         tx.commit()
@@ -927,6 +1251,8 @@ impl ConversationRepository for PostgresConversationRepository {
                     display_name,
                     last_message_seq: Some(last_message_seq.max(0)),
                     channel_id,
+                    participant_version: 0,
+                    member_preview: Vec::new(),
                 }
             })
             .collect();
@@ -934,6 +1260,7 @@ impl ConversationRepository for PostgresConversationRepository {
         if let Some(uid) = user_id {
             Self::fill_single_chat_channel_ids(&self.pool, tenant_id, uid, &mut summaries).await?;
         }
+        Self::fill_non_single_member_preview(&self.pool, tenant_id, &mut summaries).await?;
 
         // 查询总数（用于分页）
         // 注意：总数查询可能较慢，生产环境建议：

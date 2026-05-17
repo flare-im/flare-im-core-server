@@ -118,6 +118,10 @@ pub struct ConversationSummary {
     pub last_message_seq: Option<i64>,
     /// 与库 `conversations.channel_id` 一致；单聊为空，Bootstrap 前组装修成对端 id
     pub channel_id: String,
+    /// 非单聊成员版本，用于 SDK 判断是否需要独立同步成员。
+    pub participant_version: u64,
+    /// 非单聊成员轻量预览，严禁承载完整大群成员。
+    pub member_preview: Vec<ConversationParticipant>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +166,16 @@ pub struct ConversationBootstrapResult {
     pub recent_messages: Vec<Message>,
     pub cursor_map: HashMap<String, i64>,
     pub policy: ConversationPolicy,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConversationParticipantsPage {
+    pub conversation_id: String,
+    pub participants: Vec<ConversationParticipant>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub participant_version: u64,
+    pub member_count: i32,
 }
 
 #[derive(Clone, Debug)]

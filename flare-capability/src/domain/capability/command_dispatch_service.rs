@@ -8,8 +8,9 @@ use serde_json::{Map, Value};
 use super::{
     AcceptCallRequest, AddIceCandidateRequest, CapabilityDispatchCommand, CapabilityDispatchResult,
     CapabilityError, CapabilityPolicyBackend, CreateCallRequest, HandleSdpAnswerRequest,
-    HandleSdpOfferRequest, HangupCallRequest, MediaGetNetworkQualityRequest,
-    MediaJoinTransportRequest, MediaLeaveTransportRequest, MediaSetPublisherMuteRequest,
+    HandleSdpOfferRequest, HangupCallRequest, GetJoinTokenRequest, MediaGetNetworkQualityRequest,
+    MediaGetRoomStateRequest, MediaJoinTransportRequest, MediaLeaveTransportRequest,
+    MediaSetPublisherMuteRequest,
     MediaSetSimulcastLayerRequest, MediaSetSubscriptionRequest, RejectCallRequest, Result,
     RtcCapability,
 };
@@ -121,6 +122,31 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
             let r = rtc.accept_call(ctx, &ar).await?;
             let mut m = Map::new();
             m.insert("call_id".into(), r.call_id.into());
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.call.join_token" => {
+            let call_id = extract_call_id(&payload)?;
+            let jr = GetJoinTokenRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                call_id: call_id.clone(),
+                user_id: user,
+                ext: payload,
+            };
+            let r = rtc.get_join_token(ctx, &jr).await?;
+            let mut m = Map::new();
+            m.insert("call_id".into(), call_id.into());
+            m.insert("sfu_join_token".into(), r.token.into());
+            m.insert(
+                "sfu_join_token_ttl_seconds".into(),
+                Value::from(r.ttl_seconds),
+            );
             let data = merge_object(m, r.ext);
             Ok(CapabilityDispatchResult::ok(
                 rid,
@@ -376,6 +402,32 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
             m.insert("downstream_score".into(), Value::from(r.downstream_score));
             m.insert("rtt_ms".into(), Value::from(r.rtt_ms));
             m.insert("packet_loss_ratio".into(), Value::from(r.packet_loss_ratio));
+            let data = merge_object(m, r.ext);
+            Ok(CapabilityDispatchResult::ok(
+                rid,
+                "plugin.rtc",
+                req.capability_id.clone(),
+                data,
+            ))
+        }
+        "rtc.media.room.state" => {
+            let room_id = payload_str(&payload, "room_id")?;
+            let query = MediaGetRoomStateRequest {
+                tenant_id: tenant.clone(),
+                request_id: rid.clone(),
+                room_id,
+            };
+            let r = rtc.media_get_room_state(ctx, &query).await?;
+            let mut m = Map::new();
+            m.insert("room_id".into(), r.room_id.into());
+            m.insert("exists".into(), Value::Bool(r.exists));
+            m.insert("revision".into(), Value::from(r.revision));
+            if !r.room_snapshot_json.trim().is_empty() {
+                m.insert("room_snapshot_json".into(), r.room_snapshot_json.clone().into());
+                if let Ok(v) = serde_json::from_str::<Value>(&r.room_snapshot_json) {
+                    m.insert("room_snapshot".into(), v);
+                }
+            }
             let data = merge_object(m, r.ext);
             Ok(CapabilityDispatchResult::ok(
                 rid,

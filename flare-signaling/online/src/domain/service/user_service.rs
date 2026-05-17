@@ -16,6 +16,8 @@ use tracing::{info, warn};
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::UserId;
 
+const ONLINE_SESSION_FRESHNESS_SECONDS: i64 = 90;
+
 /// 用户领域服务 - 包含所有业务逻辑（泛型仓储，避免 `dyn` 异步 trait）
 pub struct UserService<R: ConversationRepository + Send + Sync> {
     conversation_repository: Arc<R>,
@@ -53,6 +55,15 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     "Failed to get user connections",
                 )
             })?;
+        let now = Utc::now();
+        let sessions = sessions
+            .into_iter()
+            .filter(|s| {
+                now.signed_duration_since(s.last_heartbeat_at())
+                    .num_seconds()
+                    <= ONLINE_SESSION_FRESHNESS_SECONDS
+            })
+            .collect::<Vec<_>>();
 
         // 计算在线状态
         let is_online = !sessions.is_empty();
@@ -160,6 +171,15 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             .conversation_repository
             .get_user_connections(&user_id_vo)
             .await?;
+        let now = Utc::now();
+        let sessions = sessions
+            .into_iter()
+            .filter(|s| {
+                now.signed_duration_since(s.last_heartbeat_at())
+                    .num_seconds()
+                    <= ONLINE_SESSION_FRESHNESS_SECONDS
+            })
+            .collect::<Vec<_>>();
 
         Ok(ListUserDevicesResponse {
             devices: sessions

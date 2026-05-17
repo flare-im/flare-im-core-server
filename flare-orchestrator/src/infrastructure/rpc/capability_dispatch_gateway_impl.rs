@@ -12,7 +12,6 @@ use crate::error::{ErrorCode, Result};
 use super::CapabilityDispatchClient;
 
 /// 基于 `CapabilityDispatchClient` 的领域端口实现。
-#[derive(Debug)]
 pub struct CapabilityDispatchGatewayImpl {
     client: Arc<CapabilityDispatchClient>,
 }

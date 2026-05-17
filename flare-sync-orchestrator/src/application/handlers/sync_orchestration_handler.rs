@@ -2,28 +2,29 @@
 //!
 //! 对外统一为 `flare.common.v1.Sync` / `SyncRes`（gRPC `ExecuteSync` 与 DATA 信道一致；`SyncRes` 仅承载 `payload`，错误走 gRPC `Status`）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use flare_grpc_proto::conversation::{ConversationBootstrapRequest, UpdateCursorRequest};
+use flare_grpc_proto::conversation::{
+    ConversationBootstrapRequest, ListConversationParticipantsRequest, UpdateCursorRequest,
+};
 use flare_im_core::Ctx;
 use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_proto::Message;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::sync_res::Payload as SyncResPayload;
 use flare_proto::common::{
-    ConversationDetail, ConversationDetailSync, ConversationDetailSyncRes, ConversationLight,
-    ConversationMaxSeqSync, ConversationMaxSeqSyncRes, ConversationPatch, ConversationPatchType,
-    ConversationSummary, ConversationsAllSync, ConversationsAllSyncRes,
-    ConversationsIncrementalSync, ConversationsIncrementalSyncRes, EventEnvelope,
-    EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview,
-    MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync,
-    QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow,
-    SyncKind, SyncRes, SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync,
+    ConversationDetailSync, ConversationDetailSyncRes, ConversationParticipant,
+    ConversationParticipantsSync, ConversationParticipantsSyncRes, ConversationSummary,
+    ConversationsSync, ConversationsSyncRes, EventEnvelope, EventStreamAckSyncRes,
+    GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview, MultiConversationSync,
+    MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes,
+    SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow, SyncKind, SyncRes,
+    SyncSliceItem, SyncSliceItemKind, SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync,
     UpdateSyncCursorSyncRes,
 };
 use prost::Message as ProstMessage;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
@@ -45,6 +46,8 @@ struct ConversationSyncRoutingHint {
     channel_id: String,
     conversation_type: i32,
     peer_read_seq: u64,
+    participant_version: u64,
+    member_preview: Vec<ConversationParticipant>,
 }
 
 pub struct SyncSnapshotOutcome {
@@ -111,18 +114,10 @@ where
                     payload: Some(SyncResPayload::MultiConversation(v)),
                 })
             }
-            (SyncKind::ConversationsIncremental, SyncPayload::ConversationsIncremental(req)) => {
-                let v = self
-                    .conversations_incremental_sync(ctx, user_id, req)
-                    .await?;
+            (SyncKind::Conversations, SyncPayload::Conversations(req)) => {
+                let v = self.conversations_sync(ctx, user_id, req).await?;
                 Ok(SyncRes {
-                    payload: Some(SyncResPayload::ConversationsIncremental(v)),
-                })
-            }
-            (SyncKind::ConversationsAll, SyncPayload::ConversationsAll(req)) => {
-                let v = self.conversations_all_sync(ctx, user_id, req).await?;
-                Ok(SyncRes {
-                    payload: Some(SyncResPayload::ConversationsAll(v)),
+                    payload: Some(SyncResPayload::Conversations(v)),
                 })
             }
             (SyncKind::ConversationDetail, SyncPayload::ConversationDetail(req)) => {
@@ -138,7 +133,7 @@ where
                 })
             }
             (SyncKind::GetSyncCursor, SyncPayload::GetSyncCursor(req)) => {
-                let v = self.get_sync_cursor_sync(user_id, req).await?;
+                let v = self.get_sync_cursor_sync(ctx, user_id, req).await?;
                 Ok(SyncRes {
                     payload: Some(SyncResPayload::GetSyncCursor(v)),
                 })
@@ -158,10 +153,10 @@ where
                     payload: Some(SyncResPayload::SyncSnapshotRes(outcome.res)),
                 })
             }
-            (SyncKind::ConversationMaxSeq, SyncPayload::ConversationMaxSeq(req)) => {
-                let v = self.conversation_max_seq_sync(ctx, user_id, req).await?;
+            (SyncKind::ConversationParticipants, SyncPayload::ConversationParticipants(req)) => {
+                let v = self.conversation_participants_sync(ctx, req).await?;
                 Ok(SyncRes {
-                    payload: Some(SyncResPayload::ConversationMaxSeqRes(v)),
+                    payload: Some(SyncResPayload::ConversationParticipants(v)),
                 })
             }
             _ => Err(ErrorBuilder::new(
@@ -334,6 +329,8 @@ where
                         .get("peer_read_seq")
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or_default(),
+                    participant_version: m.bootstrap.participant_version,
+                    member_preview: m.bootstrap.member_preview.clone(),
                 });
                 m.row
             })
@@ -374,42 +371,64 @@ where
         user_id: &str,
         req: SingleConversationSync,
     ) -> Result<SingleConversationSyncRes, FlareError> {
-        require_nonempty_conversation_id(&req.conversation_id)?;
+        let conversation_id = req.conversation_id;
+        require_nonempty_conversation_id(&conversation_id)?;
         let limit = req.limit.max(1).min(500);
         // `SingleConversationSync.max_seq`：客户端本地已知的最后消息 seq，语义同 `QueryMessagesBySeq.after_seq`（严格大于）。
-        let (messages, last_seq) = self
+        let (messages, _storage_last_seq) = self
             .infra
             .query_messages_by_seq(
                 ctx,
-                &req.conversation_id,
+                &conversation_id,
                 req.max_seq as i64,
                 0,
-                limit,
+                limit + 1,
                 user_id,
             )
             .await?;
-        let has_more = messages.len() as i32 >= limit;
-        let next_cursor = messages
-            .last()
-            .and_then(|m| {
-                m.extra
-                    .get("seq")
-                    .map(|s| format!("seq:{}:{}", s, m.server_id))
-            })
-            .unwrap_or_default();
-        let mut items = Vec::with_capacity(messages.len());
-        for m in &messages {
-            items.push(message_to_sync_item(m)?);
-        }
+        let head_max_seq = self
+            .conversation_head_max_seq(ctx, &conversation_id, req.max_seq as i64)
+            .await;
+        let page = build_contiguous_sync_items(
+            &conversation_id,
+            req.max_seq,
+            limit as usize,
+            messages,
+            head_max_seq as u64,
+        )?;
         Ok(SingleConversationSyncRes {
-            conversation_id: req.conversation_id,
-            items,
-            max_seq: last_seq.max(0) as u64,
-            next_cursor,
-            has_more,
+            conversation_id,
+            items: page.items,
+            max_seq: page.max_seq,
+            next_cursor: page.next_cursor,
+            has_more: page.has_more,
             hints: None,
             stale: None,
+            ..Default::default()
         })
+    }
+
+    async fn conversation_head_max_seq(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        fallback_seq: i64,
+    ) -> i64 {
+        match self
+            .infra
+            .get_conversation_message_head(ctx, conversation_id)
+            .await
+        {
+            Ok(head) => head.max_seq.max(fallback_seq).max(0),
+            Err(error) => {
+                warn!(
+                    conversation_id = %conversation_id,
+                    error = %error,
+                    "failed to load conversation message head; fallback to requested seq"
+                );
+                fallback_seq.max(0)
+            }
+        }
     }
 
     async fn multi_conversation_sync(
@@ -428,33 +447,29 @@ where
                 continue;
             }
             let after = req.last_seq_per_conversation.get(cid).copied().unwrap_or(0) as i64;
-            let (messages, last_seq) = self
+            let (messages, _storage_last_seq) = self
                 .infra
-                .query_messages_by_seq(ctx, cid, after, 0, limit, user_id)
+                .query_messages_by_seq(ctx, cid, after, 0, limit + 1, user_id)
                 .await?;
-            let slice_has_more = messages.len() as i32 >= limit;
-            if slice_has_more {
+            let head_max_seq = self.conversation_head_max_seq(ctx, cid, after).await;
+            let page = build_contiguous_sync_items(
+                cid,
+                after as u64,
+                limit as usize,
+                messages,
+                head_max_seq as u64,
+            )?;
+            let slice_has_more = page.has_more;
+            if page.has_more {
                 has_more = true;
             }
-            let next_cursor = messages
-                .last()
-                .and_then(|m| {
-                    m.extra
-                        .get("seq")
-                        .map(|s| format!("seq:{}:{}", s, m.server_id))
-                })
-                .unwrap_or_default();
-            let mut items = Vec::with_capacity(messages.len());
-            for m in &messages {
-                items.push(message_to_sync_item(m)?);
-            }
-            let max_seq = last_seq.max(0) as u64;
+            let max_seq = page.max_seq;
             max_seq_per_conversation.insert(cid.clone(), max_seq);
             slices.push(flare_proto::common::ConversationSyncSlice {
                 conversation_id: cid.clone(),
-                items,
+                items: page.items,
                 max_seq,
-                next_cursor,
+                next_cursor: page.next_cursor,
                 has_more: slice_has_more,
             });
         }
@@ -467,73 +482,25 @@ where
         })
     }
 
-    async fn conversations_incremental_sync(
+    async fn conversations_sync(
         &self,
         ctx: &Ctx,
         user_id: &str,
-        req: ConversationsIncrementalSync,
-    ) -> Result<ConversationsIncrementalSyncRes, FlareError> {
-        let snap_req = SyncSnapshotSync {
-            conversation_ids: Vec::new(),
-            messages_per_conversation: req.limit.max(1),
-            include_deleted: false,
-            include_conversations: true,
-            snapshot_cursor: build_snapshot_cursor_from_ts(req.client_conversation_cursor.as_ref()),
-        };
-        let outcome = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
-        let response = outcome.res;
-        let fallback_patched_at = response.snapshot_timestamp.clone();
-        let patches = response
-            .conversations
-            .iter()
-            .zip(outcome.routing.iter())
-            .filter_map(|(c, hint)| {
-                let patched_at = c
-                    .last_timestamp
-                    .clone()
-                    .or_else(|| fallback_patched_at.clone());
-                let summary = snapshot_row_to_summary(c, hint);
-                Some(ConversationPatch {
-                    conversation_id: c.conversation_id.clone(),
-                    patch_type: ConversationPatchType::ConversationPatchSummary as i32,
-                    light: Some(summary_to_light(&summary)),
-                    summary: Some(summary),
-                    patched_at,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        Ok(ConversationsIncrementalSyncRes {
-            patches,
-            server_conversation_cursor: snapshot_cursor_to_ts(&response.next_cursor)
-                .or(response.snapshot_timestamp),
-            has_more: response.has_more,
-            hints: None,
-        })
-    }
-
-    async fn conversations_all_sync(
-        &self,
-        ctx: &Ctx,
-        user_id: &str,
-        req: ConversationsAllSync,
-    ) -> Result<ConversationsAllSyncRes, FlareError> {
-        let limit = req
-            .sync_options
-            .as_ref()
-            .map(|o| o.max_batch_size)
-            .unwrap_or(100)
-            .max(1);
+        req: ConversationsSync,
+    ) -> Result<ConversationsSyncRes, FlareError> {
+        let limit = req.limit.max(1);
+        let client_cursor = req.client_conversation_cursor.clone();
+        let is_cold_start = client_cursor.is_none();
         let snap_req = SyncSnapshotSync {
             conversation_ids: Vec::new(),
             messages_per_conversation: limit,
-            include_deleted: req
-                .sync_options
-                .as_ref()
-                .map(|o| o.include_deleted)
-                .unwrap_or(false),
+            include_deleted: req.include_deleted,
             include_conversations: true,
-            snapshot_cursor: String::new(),
+            snapshot_cursor: if is_cold_start {
+                String::new()
+            } else {
+                build_snapshot_cursor_from_ts(client_cursor.as_ref())
+            },
         };
         let outcome = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
         let response = outcome.res;
@@ -543,101 +510,84 @@ where
             .zip(outcome.routing.iter())
             .map(|(c, hint)| snapshot_row_to_summary(c, hint))
             .collect::<Vec<_>>();
+        let server_conversation_cursor = if is_cold_start {
+            response.snapshot_timestamp
+        } else {
+            snapshot_cursor_to_ts(&response.next_cursor)
+                .or(response.snapshot_timestamp)
+                .or(client_cursor)
+        };
 
-        Ok(ConversationsAllSyncRes {
+        Ok(ConversationsSyncRes {
             conversations,
-            server_conversation_cursor: response.snapshot_timestamp,
-            server_max_seq: response.snapshot_seq as u64,
-            metadata: HashMap::new(),
+            server_conversation_cursor,
+            has_more: response.has_more,
             hints: None,
+            ..Default::default()
+        })
+    }
+
+    async fn conversation_participants_sync(
+        &self,
+        ctx: &Ctx,
+        req: ConversationParticipantsSync,
+    ) -> Result<ConversationParticipantsSyncRes, FlareError> {
+        require_nonempty_conversation_id(&req.conversation_id)?;
+        let cursor_empty = req.cursor.trim().is_empty();
+        let page = self
+            .infra
+            .list_conversation_participants(
+                ctx,
+                ListConversationParticipantsRequest {
+                    conversation_id: req.conversation_id.clone(),
+                    cursor: req.cursor,
+                    limit: req.limit,
+                    include_removed: req.include_removed,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if req.known_participant_version > 0
+            && req.known_participant_version == page.participant_version
+            && cursor_empty
+        {
+            return Ok(ConversationParticipantsSyncRes {
+                conversation_id: req.conversation_id,
+                participant_version: page.participant_version,
+                member_count: page.member_count,
+                ..Default::default()
+            });
+        }
+        Ok(ConversationParticipantsSyncRes {
+            conversation_id: req.conversation_id,
+            participants: page.participants,
+            next_cursor: page.next_cursor,
+            has_more: page.has_more,
+            participant_version: page.participant_version,
+            member_count: page.member_count,
+            ..Default::default()
         })
     }
 
     async fn conversation_detail_sync(
         &self,
         ctx: &Ctx,
-        user_id: &str,
+        _user_id: &str,
         req: ConversationDetailSync,
     ) -> Result<ConversationDetailSyncRes, FlareError> {
         require_nonempty_conversation_id(&req.conversation_id)?;
-        let max = self
-            .conversation_max_seq_sync(
+        let detail = self
+            .infra
+            .conversation_detail(
                 ctx,
-                user_id,
-                ConversationMaxSeqSync {
-                    conversation_id: req.conversation_id.clone(),
+                flare_grpc_proto::conversation::GetConversationDetailRequest {
+                    conversation_id: req.conversation_id,
                 },
             )
             .await?;
-        let outcome = self
-            .get_sync_snapshot(
-                ctx,
-                user_id,
-                SyncSnapshotSync {
-                    conversation_ids: vec![req.conversation_id.clone()],
-                    messages_per_conversation: 1,
-                    include_deleted: false,
-                    include_conversations: true,
-                    snapshot_cursor: String::new(),
-                },
-            )
-            .await?;
-        let snap = outcome.res;
-        let summary = snap
-            .conversations
-            .first()
-            .zip(outcome.routing.first())
-            .map(|(c, hint)| snapshot_row_to_summary(c, hint));
-        let mut ext = summary.as_ref().map(|s| s.ext.clone()).unwrap_or_default();
-        ext.insert("max_seq".to_string(), max.max_seq.to_string());
-        ext.insert("last_message_id".to_string(), max.last_message_id.clone());
-
         Ok(ConversationDetailSyncRes {
-            detail: Some(ConversationDetail {
-                conversation_id: req.conversation_id,
-                conversation_type: summary
-                    .as_ref()
-                    .map(|s| s.conversation_type.clone())
-                    .unwrap_or_default(),
-                business_type: summary
-                    .as_ref()
-                    .map(|s| s.business_type.clone())
-                    .unwrap_or_default(),
-                display_name: summary
-                    .as_ref()
-                    .map(|s| s.display_name.clone())
-                    .unwrap_or_default(),
-                avatar_url: summary
-                    .as_ref()
-                    .map(|s| s.avatar_url.clone())
-                    .unwrap_or_default(),
-                description: ext.get("description").cloned().unwrap_or_default(),
-                announcement: ext.get("announcement").cloned().unwrap_or_default(),
-                announcement_updated_at: None,
-                announcement_updated_by: ext
-                    .get("announcement_updated_by")
-                    .cloned()
-                    .unwrap_or_default(),
-                visibility: 0,
-                lifecycle_state: 0,
-                policy: None,
-                participants: Vec::new(),
-                presence: None,
-                created_at: summary.as_ref().and_then(|s| s.created_at.clone()),
-                updated_at: summary
-                    .as_ref()
-                    .and_then(|s| s.updated_at.clone())
-                    .or(max.last_timestamp.clone()),
-                member_count: summary.as_ref().map(|s| s.member_count).unwrap_or(0),
-                attributes: HashMap::new(),
-                channel_id: summary
-                    .as_ref()
-                    .map(|s| s.channel_id.clone())
-                    .unwrap_or_default(),
-                ext,
-            }),
-            metadata: HashMap::new(),
-            hints: None,
+            detail: detail.detail,
+            ..Default::default()
         })
     }
 
@@ -699,30 +649,9 @@ where
         })
     }
 
-    async fn conversation_max_seq_sync(
-        &self,
-        ctx: &Ctx,
-        _user_id: &str,
-        req: ConversationMaxSeqSync,
-    ) -> Result<ConversationMaxSeqSyncRes, FlareError> {
-        require_nonempty_conversation_id(&req.conversation_id)?;
-        debug!(
-            conversation_id = %req.conversation_id,
-            "get_conversation_max_seq via storage reader (message head)"
-        );
-        let head = self
-            .infra
-            .get_conversation_message_head(ctx, &req.conversation_id)
-            .await?;
-        Ok(ConversationMaxSeqSyncRes {
-            max_seq: head.max_seq,
-            last_timestamp: head.last_timestamp,
-            last_message_id: head.last_message_id,
-        })
-    }
-
     async fn get_sync_cursor_sync(
         &self,
+        ctx: &Ctx,
         user_id: &str,
         req: GetSyncCursorSync,
     ) -> Result<GetSyncCursorSyncRes, FlareError> {
@@ -743,6 +672,42 @@ where
             conversation_id = %req.conversation_id,
             "get sync cursor miss (L1)"
         );
+
+        let conv_resp = self
+            .infra
+            .conversation_bootstrap(
+                ctx,
+                ConversationBootstrapRequest {
+                    client_cursor_map: Default::default(),
+                    include_recent_messages: false,
+                    recent_message_limit: 0,
+                    device_id: req.device_id.clone(),
+                    device_platform: String::new(),
+                },
+            )
+            .await?;
+        if let Some(cursor_value) = conv_resp.server_cursor_map.get(&req.conversation_id) {
+            let cursor = MultiDeviceCursor {
+                device_id: req.device_id,
+                conversation_id: req.conversation_id,
+                last_sync_seq: (*cursor_value).max(0) as u64,
+                last_sync_at: None,
+                last_read_seq: 0,
+                last_critical_event_seq: 0,
+            };
+            self.cursor_cache.put(user_id, cursor.clone()).await;
+            debug!(
+                user_id = %user_id,
+                conversation_id = %cursor.conversation_id,
+                last_sync_seq = cursor.last_sync_seq,
+                "get sync cursor hit (persistent)"
+            );
+            return Ok(GetSyncCursorSyncRes {
+                cursor: Some(cursor),
+                hints: None,
+            });
+        }
+
         Ok(GetSyncCursorSyncRes {
             cursor: None,
             hints: None,
@@ -807,28 +772,145 @@ fn decode_sync_kind(raw: i32) -> SyncKind {
     match raw {
         1 => SyncKind::SingleConversation,
         2 => SyncKind::MultiConversation,
-        3 => SyncKind::ConversationsIncremental,
-        4 => SyncKind::ConversationsAll,
+        3 => SyncKind::Conversations,
         5 => SyncKind::ConversationDetail,
         7 => SyncKind::QueryEvents,
         8 => SyncKind::GetSyncCursor,
         9 => SyncKind::UpdateSyncCursor,
         10 => SyncKind::EventStreamAck,
         11 => SyncKind::SyncSnapshot,
-        12 => SyncKind::ConversationMaxSeq,
+        13 => SyncKind::ConversationParticipants,
         _ => SyncKind::Unspecified,
     }
 }
 
 fn message_to_sync_item(message: &Message) -> Result<SyncSliceItem, FlareError> {
+    let skip_reason = message
+        .extra
+        .get("__sync_skip")
+        .cloned()
+        .unwrap_or_default();
+    if !skip_reason.trim().is_empty() {
+        return Ok(SyncSliceItem {
+            seq: message.seq,
+            created_at: message.timestamp.clone(),
+            payload: Vec::new(),
+            kind: SyncSliceItemKind::Skip as i32,
+            skip_reason,
+        });
+    }
+
     let mut payload = Vec::new();
     message
         .encode(&mut payload)
         .map_err(|e| FlareError::system(format!("encode Message for SyncSliceItem: {e}")))?;
     Ok(SyncSliceItem {
-        seq: message.seq as u64,
+        seq: message.seq,
         created_at: message.timestamp.clone(),
         payload,
+        kind: SyncSliceItemKind::Message as i32,
+        skip_reason: String::new(),
+    })
+}
+
+struct ContiguousSyncPage {
+    items: Vec<SyncSliceItem>,
+    max_seq: u64,
+    next_cursor: String,
+    has_more: bool,
+}
+
+fn build_contiguous_sync_items(
+    conversation_id: &str,
+    after_seq: u64,
+    limit: usize,
+    messages: Vec<Message>,
+    remote_max_seq: u64,
+) -> Result<ContiguousSyncPage, FlareError> {
+    let limit = limit.max(1);
+    let max_message_seq = messages
+        .iter()
+        .map(|message| message.seq)
+        .max()
+        .unwrap_or(after_seq);
+    let authoritative_max_seq = remote_max_seq.max(max_message_seq).max(after_seq);
+    if authoritative_max_seq <= after_seq {
+        return Ok(ContiguousSyncPage {
+            items: Vec::new(),
+            max_seq: after_seq,
+            next_cursor: String::new(),
+            has_more: false,
+        });
+    }
+
+    let page_end_seq = authoritative_max_seq.min(after_seq.saturating_add(limit as u64));
+    let mut message_by_seq = BTreeMap::new();
+    for message in messages {
+        if message.seq <= after_seq || message.seq > page_end_seq {
+            continue;
+        }
+        let seq = message.seq;
+        if message_by_seq.insert(seq, message).is_some() {
+            warn!(
+                conversation_id = %conversation_id,
+                seq,
+                "duplicate message seq found while building sync page; latest row kept"
+            );
+        }
+    }
+
+    let mut items = Vec::with_capacity((page_end_seq - after_seq) as usize);
+    let mut last_real_message_id = String::new();
+    let mut missing_count = 0_u64;
+    let mut first_missing_seq = 0_u64;
+    let mut last_missing_seq = 0_u64;
+    for seq in (after_seq + 1)..=page_end_seq {
+        if let Some(message) = message_by_seq.remove(&seq) {
+            last_real_message_id = message.server_id.clone();
+            items.push(message_to_sync_item(&message)?);
+        } else {
+            missing_count += 1;
+            if first_missing_seq == 0 {
+                first_missing_seq = seq;
+            }
+            last_missing_seq = seq;
+            items.push(SyncSliceItem {
+                seq,
+                created_at: None,
+                payload: Vec::new(),
+                kind: SyncSliceItemKind::Tombstone as i32,
+                skip_reason: "storage_missing_committed_seq".to_string(),
+            });
+        }
+    }
+    if missing_count > 0 {
+        warn!(
+            conversation_id = %conversation_id,
+            after_seq,
+            page_end_seq,
+            remote_max_seq = authoritative_max_seq,
+            missing_count,
+            first_missing_seq,
+            last_missing_seq,
+            "message rows missing inside committed seq range; emitted tombstones to keep sync cursor continuous"
+        );
+    }
+
+    let next_cursor = if page_end_seq > after_seq {
+        if last_real_message_id.is_empty() {
+            format!("seq:{page_end_seq}")
+        } else {
+            format!("seq:{page_end_seq}:{last_real_message_id}")
+        }
+    } else {
+        String::new()
+    };
+
+    Ok(ContiguousSyncPage {
+        items,
+        max_seq: page_end_seq,
+        next_cursor,
+        has_more: page_end_seq < authoritative_max_seq,
     })
 }
 
@@ -945,25 +1027,14 @@ fn snapshot_row_to_summary(
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0),
         channel_id,
+        participant_version: hint.participant_version,
+        member_preview: if conversation_type == flare_proto::common::ConversationType::Single as i32
+        {
+            Vec::new()
+        } else {
+            hint.member_preview.clone()
+        },
         ext,
-    }
-}
-
-fn summary_to_light(summary: &ConversationSummary) -> ConversationLight {
-    ConversationLight {
-        conversation_id: summary.conversation_id.clone(),
-        conversation_type: summary.conversation_type.clone(),
-        unread_count: summary.unread_count,
-        max_seq: summary.max_seq,
-        last_read_seq: summary.last_read_seq,
-        preview: summary.last_message.clone(),
-        updated_at: summary.updated_at.clone(),
-        is_muted: summary.is_muted,
-        is_pinned: summary.is_pinned,
-        mute_until: summary.mute_until.clone(),
-        labels: summary.labels.clone(),
-        channel_id: summary.channel_id.clone(),
-        ext: summary.ext.clone(),
     }
 }
 
@@ -973,4 +1044,185 @@ fn filter_events_by_types(events: &mut Vec<flare_proto::common::Event>, allowed:
     }
     let set: HashSet<i32> = allowed.iter().copied().collect();
     events.retain(|e| set.contains(&e.r#type));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_grpc_proto::conversation::ConversationBootstrapResponse;
+    use flare_server_core::context::Context;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockInfra {
+        bootstrap: ConversationBootstrapResponse,
+        updates: Mutex<Vec<UpdateCursorRequest>>,
+    }
+
+    impl ConversationSyncPort for MockInfra {
+        async fn conversation_bootstrap(
+            &self,
+            _ctx: &Ctx,
+            _req: ConversationBootstrapRequest,
+        ) -> Result<ConversationBootstrapResponse, FlareError> {
+            Ok(self.bootstrap.clone())
+        }
+
+        async fn update_read_cursor(
+            &self,
+            _ctx: &Ctx,
+            req: UpdateCursorRequest,
+        ) -> Result<(), FlareError> {
+            self.updates.lock().expect("updates lock").push(req);
+            Ok(())
+        }
+
+        async fn conversation_detail(
+            &self,
+            _ctx: &Ctx,
+            req: flare_grpc_proto::conversation::GetConversationDetailRequest,
+        ) -> Result<flare_grpc_proto::conversation::GetConversationDetailResponse, FlareError>
+        {
+            Ok(
+                flare_grpc_proto::conversation::GetConversationDetailResponse {
+                    detail: Some(flare_proto::common::ConversationDetail {
+                        conversation_id: req.conversation_id,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        }
+
+        async fn list_conversation_participants(
+            &self,
+            _ctx: &Ctx,
+            req: ListConversationParticipantsRequest,
+        ) -> Result<flare_grpc_proto::conversation::ListConversationParticipantsResponse, FlareError>
+        {
+            Ok(
+                flare_grpc_proto::conversation::ListConversationParticipantsResponse {
+                    conversation_id: req.conversation_id,
+                    ..Default::default()
+                },
+            )
+        }
+    }
+
+    impl StorageReadPort for MockInfra {
+        async fn query_messages_by_seq(
+            &self,
+            _ctx: &Ctx,
+            _conversation_id: &str,
+            _after_seq: i64,
+            _before_seq: i64,
+            _limit: i32,
+            _user_id: &str,
+        ) -> Result<(Vec<Message>, i64), FlareError> {
+            Ok((Vec::new(), 0))
+        }
+
+        async fn get_conversation_message_head(
+            &self,
+            _ctx: &Ctx,
+            _conversation_id: &str,
+        ) -> Result<crate::application::ports::StorageConversationMessageHead, FlareError> {
+            Ok(Default::default())
+        }
+    }
+
+    impl ConversationEventReadPort for MockInfra {
+        async fn query_events_page(
+            &self,
+            _ctx: &Ctx,
+            _conversation_id: &str,
+            _after_seq: i64,
+            _before_seq: i64,
+            _limit: i32,
+            _event_types: &[i32],
+            _include_deleted: bool,
+        ) -> Result<crate::application::ports::QueryEventsPage, FlareError> {
+            Ok(Default::default())
+        }
+    }
+
+    fn ts(ms: i64) -> prost_types::Timestamp {
+        prost_types::Timestamp {
+            seconds: ms / 1000,
+            nanos: ((ms % 1000) * 1_000_000) as i32,
+        }
+    }
+
+    fn ctx() -> Ctx {
+        Arc::new(
+            Context::root()
+                .with_tenant_id("0")
+                .with_user_id("22")
+                .with_trace_id("test-trace"),
+        )
+    }
+
+    #[tokio::test]
+    async fn conversations_sync_echoes_client_cursor_when_no_changes() {
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                conversations: vec![ConversationSummary {
+                    conversation_id: "c1".to_string(),
+                    max_seq: 10,
+                    updated_at: Some(ts(1_000)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .conversations_sync(
+                &ctx(),
+                "22",
+                ConversationsSync {
+                    client_conversation_cursor: Some(ts(2_000)),
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("conversations sync");
+
+        assert!(response.conversations.is_empty());
+        assert_eq!(response.server_conversation_cursor, Some(ts(2_000)));
+        assert!(!response.has_more);
+    }
+
+    #[tokio::test]
+    async fn get_sync_cursor_falls_back_to_persistent_bootstrap_cursor() {
+        let mut server_cursor_map = HashMap::new();
+        server_cursor_map.insert("__conversations__".to_string(), 1_778_673_857_000);
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                server_cursor_map,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .get_sync_cursor_sync(
+                &ctx(),
+                "22",
+                GetSyncCursorSync {
+                    device_id: "sdk-22-9357".to_string(),
+                    conversation_id: "__conversations__".to_string(),
+                },
+            )
+            .await
+            .expect("get cursor");
+
+        let cursor = response.cursor.expect("cursor");
+        assert_eq!(cursor.conversation_id, "__conversations__");
+        assert_eq!(cursor.last_sync_seq, 1_778_673_857_000);
+    }
 }

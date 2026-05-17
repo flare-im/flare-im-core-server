@@ -2,10 +2,11 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use flare_grpc_proto::conversation::{
-    Conversation as ProtoConversation, ConversationParticipant as ProtoConversationParticipant,
-    ConversationPolicy as ProtoConversationPolicy, DevicePresence as ProtoDevicePresence,
+    Conversation as ProtoConversation, ConversationPolicy as ProtoConversationPolicy,
+    DevicePresence as ProtoDevicePresence,
 };
 use flare_proto::common::ConversationDetail as ProtoConversationDetail;
+use flare_proto::common::ConversationParticipant as ProtoConversationParticipant;
 use flare_proto::common::ConversationSummary as ProtoConversationSummary;
 use prost_types::Timestamp;
 
@@ -22,6 +23,24 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         .last_message_time
         .or_else(|| summary.server_cursor_ts.and_then(millis_to_datetime));
     let updated_at_for_sync = list_change_time.and_then(timestamp_from_datetime);
+
+    let member_preview =
+        if summary.conversation_type == crate::domain::model::ConversationType::Single {
+            Vec::new()
+        } else {
+            summary
+                .member_preview
+                .into_iter()
+                .map(|p| flare_proto::common::ConversationParticipant {
+                    user_id: p.user_id,
+                    roles: p.roles,
+                    muted: p.muted,
+                    pinned: p.pinned,
+                    attributes: p.attributes,
+                    joined_at: None,
+                })
+                .collect()
+        };
 
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
@@ -45,8 +64,14 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         updated_at: updated_at_for_sync.or(last_message_time),
         created_at: None,
         labels: Vec::new(),
-        member_count: 0,
+        member_count: summary
+            .metadata
+            .get("member_count")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0),
         channel_id: summary.channel_id,
+        participant_version: summary.participant_version,
+        member_preview,
         ext: summary.metadata,
     }
 }
@@ -138,26 +163,12 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
         visibility: conversation.visibility.as_proto(),
         lifecycle_state: conversation.lifecycle_state.as_proto(),
         policy: conversation.policy.map(proto_common_policy),
-        participants: conversation
-            .participants
-            .into_iter()
-            .map(|p| flare_proto::common::ConversationParticipant {
-                user_id: p.user_id,
-                roles: p.roles,
-                muted: p.muted,
-                pinned: p.pinned,
-                attributes: p.attributes,
-                joined_at: None,
-                nickname: String::new(),
-            })
-            .collect(),
         presence: None,
         created_at: timestamp_from_datetime(conversation.created_at),
         updated_at: timestamp_from_datetime(conversation.updated_at),
         member_count,
-        attributes: conversation.attributes,
         channel_id,
-        ext: std::collections::HashMap::new(),
+        ext: conversation.attributes,
     }
 }
 
@@ -168,6 +179,7 @@ pub fn participant_domain_to_proto(p: ConversationParticipant) -> ProtoConversat
         muted: p.muted,
         pinned: p.pinned,
         attributes: p.attributes,
+        joined_at: None,
     }
 }
 
@@ -188,7 +200,6 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
                 pinned: p.pinned,
                 attributes: p.attributes,
                 joined_at: None,
-                nickname: String::new(),
             })
             .collect(),
         visibility: conversation.visibility.as_proto(),

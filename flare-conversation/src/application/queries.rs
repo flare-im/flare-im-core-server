@@ -32,6 +32,14 @@ pub struct GetConversationDetailQuery {
     pub conversation_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListConversationParticipantsQuery {
+    pub conversation_id: String,
+    pub cursor: Option<String>,
+    pub limit: i32,
+    pub include_removed: bool,
+}
+
 /// 同步消息查询
 #[derive(Debug, Clone)]
 pub struct SyncMessagesQuery {

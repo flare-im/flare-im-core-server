@@ -13,6 +13,7 @@ use crate::application::queries::{
 };
 use crate::convert::{filter_expression_from_proto, message_to_proto, reaction_item_to_proto};
 use crate::domain::repository::MessageStorage;
+use flare_im_core::utils::extract_seq_from_message;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 
 #[derive(Clone)]
@@ -102,6 +103,7 @@ where
             .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
 
         let req = request.into_inner();
+        let requested_limit = req.limit.max(1);
 
         let query = QueryMessagesBySeqQuery {
             conversation_id: req.conversation_id,
@@ -111,7 +113,7 @@ where
             } else {
                 Some(req.before_seq)
             },
-            limit: req.limit,
+            limit: requested_limit + 1,
             user_id: if req.user_id.is_empty() {
                 None
             } else {
@@ -125,7 +127,16 @@ where
             .await
         {
             Ok((messages, last_seq)) => {
-                let message_count = messages.len() as i32;
+                let mut messages = messages;
+                let has_more = messages.len() as i32 > requested_limit;
+                if has_more {
+                    messages.truncate(requested_limit as usize);
+                }
+                let last_seq = messages
+                    .last()
+                    .and_then(|msg| extract_seq_from_message(&message_to_proto(msg)))
+                    .or(last_seq)
+                    .unwrap_or(0);
 
                 // 转换消息为 proto 类型
                 let proto_messages: Vec<flare_proto::Message> = messages
@@ -142,13 +153,12 @@ where
                             .map(|seq_str| format!("seq:{}:{}", seq_str, msg.server_id))
                     })
                     .unwrap_or_default();
-                let has_more = message_count >= req.limit;
 
                 Ok(Response::new(QueryMessagesBySeqResponse {
                     messages: proto_messages,
                     next_cursor: next_cursor.clone(),
                     has_more,
-                    last_seq: last_seq.unwrap_or(0),
+                    last_seq,
                 }))
             }
             Err(err) => {

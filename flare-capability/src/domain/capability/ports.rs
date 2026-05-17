@@ -13,7 +13,8 @@ use super::rtc::{
     CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
     HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
     HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse, MediaJoinTransportRequest,
+    MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse, MediaGetRoomStateRequest,
+    MediaGetRoomStateResponse, MediaJoinTransportRequest,
     MediaJoinTransportResponse, MediaLeaveTransportRequest, MediaLeaveTransportResponse,
     MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest,
     MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest, MediaSetSubscriptionResponse,
@@ -186,6 +187,17 @@ pub trait RtcCapability: Send + Sync {
     ) -> CapabilityResult<MediaGetNetworkQualityResponse> {
         Err(CapabilityError::NotSupported(
             "media_get_network_quality: not supported for this RTC backend".into(),
+        ))
+    }
+
+    /// 房间状态快照（peers + published tracks）。
+    async fn media_get_room_state(
+        &self,
+        _ctx: &Ctx,
+        _req: &MediaGetRoomStateRequest,
+    ) -> CapabilityResult<MediaGetRoomStateResponse> {
+        Err(CapabilityError::NotSupported(
+            "media_get_room_state: not supported for this RTC backend".into(),
         ))
     }
 }

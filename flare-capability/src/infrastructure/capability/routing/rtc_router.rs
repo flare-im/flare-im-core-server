@@ -13,6 +13,7 @@ use crate::domain::capability::{
     GetJoinTokenResponse, HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest,
     HandleSdpOfferResponse, HangupCallRequest, HangupCallResponse, ListParticipantsRequest,
     ListParticipantsResponse, MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse,
+    MediaGetRoomStateRequest, MediaGetRoomStateResponse,
     MediaJoinTransportRequest, MediaJoinTransportResponse, MediaLeaveTransportRequest,
     MediaLeaveTransportResponse, MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse,
     MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest,
@@ -61,6 +62,18 @@ impl RtcCapabilityRouter {
                 m.remove(tenant);
             }
         }
+    }
+
+    /// 与 [`require`](Self::require) 一致：先查租户专属 backend，再回退全局 default。
+    pub async fn has_backend_for_tenant(&self, tenant_id: &str) -> bool {
+        let tenant = tenant_id.trim();
+        if !tenant.is_empty() {
+            let m = self.tenant_backends.read().await;
+            if m.contains_key(tenant) {
+                return true;
+            }
+        }
+        self.backend.read().await.is_some()
     }
 
     async fn require(&self, ctx: &Ctx) -> Result<Arc<dyn RtcCapability>> {
@@ -200,6 +213,15 @@ impl RtcCapability for RtcCapabilityRouter {
     ) -> Result<MediaGetNetworkQualityResponse> {
         let b = self.require(ctx).await?;
         b.media_get_network_quality(ctx, req).await
+    }
+
+    async fn media_get_room_state(
+        &self,
+        ctx: &Ctx,
+        req: &MediaGetRoomStateRequest,
+    ) -> Result<MediaGetRoomStateResponse> {
+        let b = self.require(ctx).await?;
+        b.media_get_room_state(ctx, req).await
     }
 }
 
@@ -355,6 +377,23 @@ mod tests {
             .await
             .expect("tenant-b should fallback to default backend");
         assert_eq!(out_b.call_id, "default");
+    }
+
+    #[tokio::test]
+    async fn has_backend_for_tenant_matches_require_resolution() {
+        let router = RtcCapabilityRouter::new();
+        assert!(!router.has_backend_for_tenant("0").await);
+
+        router
+            .set_backend(Some(Arc::new(StubRtc { id: "default" })))
+            .await;
+        assert!(router.has_backend_for_tenant("0").await);
+        assert!(router.has_backend_for_tenant("tenant-x").await);
+
+        router
+            .set_backend_for_tenant("tenant-a", Some(Arc::new(StubRtc { id: "tenant-a" })))
+            .await;
+        assert!(router.has_backend_for_tenant("tenant-a").await);
     }
 
     #[tokio::test]
