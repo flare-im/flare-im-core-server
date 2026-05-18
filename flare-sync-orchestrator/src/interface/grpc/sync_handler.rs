@@ -10,18 +10,24 @@ use flare_server_core::utils::extract_ctx_from_request_opt;
 use tonic::{Request, Response, Status};
 
 use crate::application::handlers::SyncOrchestrationHandler;
-use crate::application::ports::MemorySyncCursorCache;
-use crate::infrastructure::rpc::GrpcSyncAdapters;
+use crate::application::ports::{GroupDirectorySyncPort, MemorySyncCursorCache};
+use crate::infrastructure::rpc::{NoopGroupDirectorySync, SyncInfra};
 
 /// gRPC 入口：`user_id` 仅从认证上下文读取。
 pub struct SyncOrchestratorGrpcHandler {
-    inner: Arc<SyncOrchestrationHandler<GrpcSyncAdapters>>,
+    inner: Arc<SyncOrchestrationHandler<SyncInfra>>,
 }
 
 impl SyncOrchestratorGrpcHandler {
+    /// 默认：仅 IM 核心下游；群目录同步返回空增量（未接社交服务）。
     pub fn new() -> Self {
+        Self::with_group_directory(Arc::new(NoopGroupDirectorySync))
+    }
+
+    /// 注入外部群目录实现（如 `flare-social-im-bridge::grpc_group_directory_sync_port()`）。
+    pub fn with_group_directory(group_directory: Arc<dyn GroupDirectorySyncPort>) -> Self {
         let cache = Arc::new(MemorySyncCursorCache::new());
-        let infra = Arc::new(GrpcSyncAdapters);
+        let infra = Arc::new(SyncInfra::new(group_directory));
         let inner = Arc::new(SyncOrchestrationHandler::new(infra, cache));
         Self { inner }
     }

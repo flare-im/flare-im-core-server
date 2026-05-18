@@ -27,6 +27,8 @@ use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
 };
+use crate::domain::capability::GuardDecision;
+use crate::infrastructure::capability::{CapabilityExtensionRegistry, evaluate_pre_send_guards};
 use flare_im_core::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
@@ -35,6 +37,7 @@ pub struct ImHookPluginServer {
     command_handler: Arc<HookCommandHandler>,
     registry: Arc<CoreHookRegistry>,
     adapter_factory: Arc<HookAdapterFactory>,
+    capability_registry: CapabilityExtensionRegistry,
 }
 
 impl ImHookPluginServer {
@@ -42,11 +45,13 @@ impl ImHookPluginServer {
         command_handler: Arc<HookCommandHandler>,
         registry: Arc<CoreHookRegistry>,
         adapter_factory: Arc<HookAdapterFactory>,
+        capability_registry: CapabilityExtensionRegistry,
     ) -> Self {
         Self {
             command_handler,
             registry,
             adapter_factory,
+            capability_registry,
         }
     }
 
@@ -155,6 +160,33 @@ impl ImHookPluginServer {
         // 转换为内部类型
         let ctx = Self::proto_to_context(&context);
         let mut message_draft = proto_to_message_draft(&draft);
+
+        // PreSend Guard（好友关系等能力扩展校验）
+        let guard_ctx: Arc<flare_server_core::Context> = Arc::new(ctx.clone());
+        match evaluate_pre_send_guards(
+            &self.capability_registry,
+            &guard_ctx,
+            &context,
+            &message_draft,
+        )
+        .await
+        {
+            Ok(GuardDecision::Allow) => {}
+            Ok(GuardDecision::Reject(rejection)) => {
+                return Ok(Response::new(PreSendHookResponse {
+                    allow: false,
+                    draft: None,
+                    routing: None,
+                    annotations: std::collections::HashMap::new(),
+                    outcome_extensions: None,
+                    deny_reason_code: rejection.code,
+                    deny_reason_message: rejection.message,
+                }));
+            }
+            Err(e) => {
+                return Err(Status::internal(format!("PreSend guard failed: {e}")));
+            }
+        }
 
         // 获取PreSend Hook列表
         let hooks = self

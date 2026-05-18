@@ -8,11 +8,13 @@ use crate::composition::wiring::config_sources::ConfigSourcesReady;
 use crate::domain::service::HookOrchestrationService;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::monitoring::{ExecutionRecorder, MetricsCollector};
-use crate::interface::grpc::{HookServiceServer, ImHookPluginServer};
+use crate::interface::grpc::HookServiceServer;
 
 /// Hook 侧已装配的 gRPC 与治理服务。
 pub(crate) struct HookRuntimeReady {
-    pub im_hook_plugin: ImHookPluginServer,
+    pub command_handler: Arc<HookCommandHandler>,
+    pub registry: Arc<CoreHookRegistry>,
+    pub adapter_factory: Arc<HookAdapterFactory>,
     pub hook_governance: Option<Arc<HookServiceServer>>,
 }
 
@@ -35,11 +37,10 @@ pub(crate) fn build_hook_runtime(sources: &ConfigSourcesReady) -> HookRuntimeRea
         tracing::warn!("database_url not set: Hook governance (Administer) unavailable");
     }
 
-    let im_hook_plugin =
-        ImHookPluginServer::new(command_handler, registry.clone(), adapter_factory);
-
     HookRuntimeReady {
-        im_hook_plugin,
+        command_handler,
+        registry,
+        adapter_factory,
         hook_governance,
     }
 }

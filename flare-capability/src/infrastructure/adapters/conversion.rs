@@ -203,15 +203,20 @@ pub fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
 
 /// 将 protobuf HookInvocationContext 转换为 flare_server_core::Context
 pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = if proto.request_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        proto.request_id.clone()
+    };
 
     let mut ctx = Context::with_request_id(request_id);
 
-    // 设置租户ID（如果有的话）
-    // 注意：由于HookInvocationContext不再包含tenant字段，这里不设置租户ID
-
-    // 设置 trace_id（如果有的话）
-    // 注意：由于HookInvocationContext不再包含request_context字段，这里不从request_context中提取trace_id
+    if !proto.tenant_id.is_empty() {
+        ctx = ctx.with_tenant_id(proto.tenant_id.clone());
+    }
+    if !proto.operator_user_id.is_empty() {
+        ctx = ctx.with_user_id(proto.operator_user_id.clone());
+    }
 
     // 设置会话ID（从 conversation_id 中提取）
     if !proto.conversation_id.is_empty() {

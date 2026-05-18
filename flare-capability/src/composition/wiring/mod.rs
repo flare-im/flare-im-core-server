@@ -14,6 +14,7 @@ use crate::infrastructure::capability::PluginRouteBook;
 
 use crate::composition::process_config::CapabilityServiceConfig;
 use crate::composition::runtime_context::ApplicationContext;
+use crate::interface::grpc::hooks::ImHookPluginServer;
 
 pub use capability_extension::init_capability_extension_stack;
 
@@ -42,9 +43,15 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let capability_runtime = capability_grpc.runtime_config();
 
     let extension_router = capability_registry.extension_router().await;
+    let im_hook_plugin = ImHookPluginServer::new(
+        hook.command_handler,
+        hook.registry,
+        hook.adapter_factory,
+        capability_registry.clone(),
+    );
 
     Ok(ApplicationContext {
-        im_hook_plugin: hook.im_hook_plugin,
+        im_hook_plugin,
         hook_governance: hook.hook_governance,
         plugin_routes,
         extension_router,

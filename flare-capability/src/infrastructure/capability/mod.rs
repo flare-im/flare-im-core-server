@@ -18,7 +18,10 @@ mod internal;
 pub(crate) mod plugin_channel;
 pub mod use_case_samples;
 
-pub use dispatch::{DispatchRateLimiter, PreSendGuardRuntime, RecipientResolverRuntime};
+pub use dispatch::{
+    DispatchRateLimiter, PreSendGuardRuntime, RecipientResolverRuntime,
+    build_pre_send_evaluate_input, evaluate_pre_send_guards,
+};
 pub use registration::{CapabilityExtensionRegistry, InMemoryCapabilityGrants, RegistryInner};
 pub use routing::{PluginRouteBook, RtcCapabilityRouter};
 pub use use_case_samples::{SendMessageUseCaseExample, StartCallUseCaseExample};

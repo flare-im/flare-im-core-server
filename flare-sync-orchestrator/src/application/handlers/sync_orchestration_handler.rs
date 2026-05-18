@@ -17,7 +17,8 @@ use flare_proto::common::{
     ConversationDetailSync, ConversationDetailSyncRes, ConversationParticipant,
     ConversationParticipantsSync, ConversationParticipantsSyncRes, ConversationSummary,
     ConversationsSync, ConversationsSyncRes, EventEnvelope, EventStreamAckSyncRes,
-    GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview, MultiConversationSync,
+    GetSyncCursorSync, GetSyncCursorSyncRes, GroupDirectoryEntry, GroupDirectorySync,
+    GroupDirectorySyncRes, MessagePreview, MultiConversationSync,
     MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes,
     SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow, SyncKind, SyncRes,
     SyncSliceItem, SyncSliceItemKind, SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync,
@@ -28,8 +29,8 @@ use tracing::{debug, trace, warn};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, StorageReadPort,
-    SyncCursorCachePort,
+    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, GroupDirectorySyncPort,
+    StorageReadPort, SyncCursorCachePort,
 };
 use crate::domain::model::{
     SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
@@ -62,7 +63,9 @@ struct MergedSnapshotRow {
 
 pub struct SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
+    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + GroupDirectorySyncPort
+        + Send
+        + Sync,
 {
     infra: Arc<I>,
     cursor_cache: Arc<MemorySyncCursorCache>,
@@ -70,7 +73,9 @@ where
 
 impl<I> SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
+    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + GroupDirectorySyncPort
+        + Send
+        + Sync,
 {
     pub fn new(infra: Arc<I>, cursor_cache: Arc<MemorySyncCursorCache>) -> Self {
         Self {
@@ -157,6 +162,12 @@ where
                 let v = self.conversation_participants_sync(ctx, req).await?;
                 Ok(SyncRes {
                     payload: Some(SyncResPayload::ConversationParticipants(v)),
+                })
+            }
+            (SyncKind::GroupDirectory, SyncPayload::GroupDirectory(req)) => {
+                let v = self.group_directory_sync(ctx, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::GroupDirectory(v)),
                 })
             }
             _ => Err(ErrorBuilder::new(
@@ -569,6 +580,34 @@ where
         })
     }
 
+    async fn group_directory_sync(
+        &self,
+        ctx: &Ctx,
+        req: GroupDirectorySync,
+    ) -> Result<GroupDirectorySyncRes, FlareError> {
+        let limit = if req.limit <= 0 { 50 } else { req.limit.min(200) };
+        let page = self
+            .infra
+            .sync_group_directory(ctx, req.since_version, req.since_updated_at, limit)
+            .await?;
+        Ok(GroupDirectorySyncRes {
+            groups: page
+                .groups
+                .into_iter()
+                .map(|g| GroupDirectoryEntry {
+                    group_id: g.group_id,
+                    name: g.name,
+                    member_version: g.member_version,
+                    updated_at: g.updated_at,
+                })
+                .collect(),
+            left_group_ids: page.left_group_ids,
+            server_version: page.server_version,
+            server_updated_at: page.server_updated_at,
+            has_more: page.has_more,
+        })
+    }
+
     async fn conversation_detail_sync(
         &self,
         ctx: &Ctx,
@@ -780,6 +819,7 @@ fn decode_sync_kind(raw: i32) -> SyncKind {
         10 => SyncKind::EventStreamAck,
         11 => SyncKind::SyncSnapshot,
         13 => SyncKind::ConversationParticipants,
+        23 => SyncKind::GroupDirectory,
         _ => SyncKind::Unspecified,
     }
 }
@@ -1142,6 +1182,18 @@ mod tests {
             _event_types: &[i32],
             _include_deleted: bool,
         ) -> Result<crate::application::ports::QueryEventsPage, FlareError> {
+            Ok(Default::default())
+        }
+    }
+
+    impl GroupDirectorySyncPort for MockInfra {
+        async fn sync_group_directory(
+            &self,
+            _ctx: &Ctx,
+            _since_version: u64,
+            _since_updated_at: Option<prost_types::Timestamp>,
+            _limit: i32,
+        ) -> Result<crate::application::ports::GroupDirectoryPage, FlareError> {
             Ok(Default::default())
         }
     }

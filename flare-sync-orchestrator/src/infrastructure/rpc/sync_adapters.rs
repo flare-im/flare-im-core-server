@@ -21,9 +21,10 @@ use flare_server_core::error::FlareError;
 use tonic::transport::Channel;
 
 use crate::application::error::{discovery_unavailable, flare_from_tonic_status};
+
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage,
-    StorageConversationMessageHead, StorageReadPort,
+    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage, StorageConversationMessageHead,
+    StorageReadPort,
 };
 
 /// gRPC 同步适配器（基于 tonic）
