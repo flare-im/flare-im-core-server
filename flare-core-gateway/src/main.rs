@@ -35,9 +35,11 @@ async fn main() -> Result<()> {
     info!("Connecting to gRPC services...");
     info!(
         media_service_url = %settings.grpc.media_service_url,
-        "Using media grpc endpoint"
+        message_service_url = %settings.grpc.message_service_url,
+        conversation_service_url = %settings.grpc.conversation_service_url,
+        "Using downstream grpc endpoints"
     );
-    let clients = Arc::new(GrpcClients::new(&settings.grpc.media_service_url).await?);
+    let clients = Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
     info!("gRPC clients initialized");
 
     let token_service = Arc::new(TokenService::new(

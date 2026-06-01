@@ -10,7 +10,7 @@ use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_im_core::Ctx;
 use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 
-use flare_im_core::gateway::{GatewayRouter, GatewayRouterTrait};
+use flare_im_core::gateway::{GatewayRouter, GatewayRouterError, GatewayRouterTrait};
 
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,
@@ -30,6 +30,25 @@ impl GatewayPushExecutor {
             online,
             gateway_router,
         }
+    }
+
+    fn route_failure_code(error: &anyhow::Error) -> ErrorCode {
+        if matches!(
+            error.downcast_ref::<GatewayRouterError>(),
+            Some(GatewayRouterError::UsersOffline(_))
+        ) {
+            ErrorCode::UserOffline
+        } else {
+            ErrorCode::ServiceUnavailable
+        }
+    }
+
+    fn map_route_failure(
+        error: impl std::fmt::Display,
+        code: ErrorCode,
+        operation: &'static str,
+    ) -> flare_im_core::FlareError {
+        map_infra_error(error, code, operation)
     }
 
     pub async fn push_message(
@@ -55,14 +74,15 @@ impl GatewayPushExecutor {
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<String>;
+        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_message_for_gateway(push.clone(), &ts);
             match self.gateway_router.route_push_message(&gid, push_g).await {
                 Ok(_) => success_count += 1,
                 Err(error) => {
                     failure_count += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
                     tracing::warn!(
                         target_user_id,
                         gateway_id = %gid,
@@ -73,11 +93,11 @@ impl GatewayPushExecutor {
             }
         }
         if success_count == 0
-            && let Some(error) = first_error
+            && let Some((error, code)) = first_error
         {
-            return Err(map_infra_error(
-                error,
-                ErrorCode::MessageSendFailed,
+            return Err(Self::map_route_failure(
+                anyhow::anyhow!(error),
+                code,
                 "Failed to route push message",
             ));
         }
@@ -115,14 +135,15 @@ impl GatewayPushExecutor {
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<String>;
+        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_event_for_gateway(push.clone(), &ts);
             match self.gateway_router.route_push_event(&gid, push_g).await {
                 Ok(_) => success_count += 1,
                 Err(error) => {
                     failure_count += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
                     tracing::warn!(
                         target_user_id,
                         gateway_id = %gid,
@@ -133,11 +154,11 @@ impl GatewayPushExecutor {
             }
         }
         if success_count == 0
-            && let Some(error) = first_error
+            && let Some((error, code)) = first_error
         {
-            return Err(map_infra_error(
-                error,
-                ErrorCode::MessageSendFailed,
+            return Err(Self::map_route_failure(
+                anyhow::anyhow!(error),
+                code,
                 "Failed to route push event",
             ));
         }
@@ -175,7 +196,7 @@ impl GatewayPushExecutor {
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<String>;
+        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_notification_for_gateway(push.clone(), &ts);
             match self
@@ -186,7 +207,8 @@ impl GatewayPushExecutor {
                 Ok(_) => success_count += 1,
                 Err(error) => {
                     failure_count += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
                     tracing::warn!(
                         target_user_id,
                         gateway_id = %gid,
@@ -197,11 +219,11 @@ impl GatewayPushExecutor {
             }
         }
         if success_count == 0
-            && let Some(error) = first_error
+            && let Some((error, code)) = first_error
         {
-            return Err(map_infra_error(
-                error,
-                ErrorCode::MessageSendFailed,
+            return Err(Self::map_route_failure(
+                anyhow::anyhow!(error),
+                code,
                 "Failed to route push notification",
             ));
         }
@@ -239,14 +261,15 @@ impl GatewayPushExecutor {
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<String>;
+        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_ack_for_gateway(push.clone(), &ts);
             match self.gateway_router.route_push_ack(&gid, push_g).await {
                 Ok(_) => success_count += 1,
                 Err(error) => {
                     failure_count += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
                     tracing::warn!(
                         target_user_id,
                         gateway_id = %gid,
@@ -257,11 +280,11 @@ impl GatewayPushExecutor {
             }
         }
         if success_count == 0
-            && let Some(error) = first_error
+            && let Some((error, code)) = first_error
         {
-            return Err(map_infra_error(
-                error,
-                ErrorCode::MessageSendFailed,
+            return Err(Self::map_route_failure(
+                anyhow::anyhow!(error),
+                code,
                 "Failed to route push ack",
             ));
         }
@@ -299,14 +322,15 @@ impl GatewayPushExecutor {
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<String>;
+        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_custom_for_gateway(push.clone(), &ts);
             match self.gateway_router.route_push_custom(&gid, push_g).await {
                 Ok(_) => success_count += 1,
                 Err(error) => {
                     failure_count += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
                     tracing::warn!(
                         target_user_id,
                         gateway_id = %gid,
@@ -317,11 +341,11 @@ impl GatewayPushExecutor {
             }
         }
         if success_count == 0
-            && let Some(error) = first_error
+            && let Some((error, code)) = first_error
         {
-            return Err(map_infra_error(
-                error,
-                ErrorCode::MessageSendFailed,
+            return Err(Self::map_route_failure(
+                anyhow::anyhow!(error),
+                code,
                 "Failed to route push custom",
             ));
         }
@@ -334,5 +358,29 @@ impl GatewayPushExecutor {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_unavailable_route_errors_are_retryable() {
+        let error = anyhow::anyhow!("Gateway instance not found: gateway_id=gateway-a");
+        let code = GatewayPushExecutor::route_failure_code(&error);
+
+        assert_eq!(code, ErrorCode::ServiceUnavailable);
+        assert!(code.is_retryable());
+    }
+
+    #[test]
+    fn users_offline_route_errors_are_not_infra_retries() {
+        let error =
+            anyhow::Error::new(GatewayRouterError::UsersOffline(vec!["user-1".to_string()]));
+        let code = GatewayPushExecutor::route_failure_code(&error);
+
+        assert_eq!(code, ErrorCode::UserOffline);
+        assert!(!code.is_retryable());
     }
 }

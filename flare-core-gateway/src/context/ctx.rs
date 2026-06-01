@@ -52,11 +52,17 @@ impl Ctx {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
+        let request_id = headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
         Self {
             trace_id,
             user_id,
             tenant_id,
-            request_id: Uuid::new_v4().to_string(),
+            request_id,
         }
     }
 
@@ -64,6 +70,10 @@ impl Ctx {
     pub fn inject_to_grpc_metadata(&self, metadata: &mut tonic::metadata::MetadataMap) {
         if let Ok(trace_id) = self.trace_id.parse() {
             metadata.insert("x-trace-id", trace_id);
+        }
+
+        if let Ok(request_id) = self.request_id.parse() {
+            metadata.insert("x-request-id", request_id);
         }
 
         if let Some(ref user_id) = self.user_id {
@@ -109,10 +119,12 @@ mod tests {
     fn test_ctx_from_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("x-trace-id", "trace-789".parse().unwrap());
+        headers.insert("x-request-id", "request-789".parse().unwrap());
         headers.insert("x-user-id", "user-012".parse().unwrap());
 
         let ctx = Ctx::from_headers(&headers);
         assert_eq!(ctx.trace_id, "trace-789");
+        assert_eq!(ctx.request_id, "request-789");
         assert_eq!(ctx.user_id, Some("user-012".to_string()));
     }
 
@@ -126,6 +138,10 @@ mod tests {
         assert_eq!(
             metadata.get("x-trace-id").unwrap().to_str().unwrap(),
             "trace-abc"
+        );
+        assert_eq!(
+            metadata.get("x-request-id").unwrap().to_str().unwrap(),
+            ctx.request_id
         );
         assert_eq!(
             metadata.get("x-user-id").unwrap().to_str().unwrap(),

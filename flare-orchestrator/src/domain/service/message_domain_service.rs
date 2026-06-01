@@ -273,6 +273,41 @@ impl MessageDomainService {
             })
     }
 
+    fn normalize_single_chat_routing(
+        &self,
+        mut message: Message,
+        recipient_user_ids: &[String],
+    ) -> Message {
+        use crate::domain::model::ConversationType;
+
+        if ConversationType::from_proto(message.conversation_type) != ConversationType::Single {
+            return message;
+        }
+
+        let sender_id = message.sender_id.trim();
+        let Some(peer_id) = recipient_user_ids
+            .iter()
+            .map(|id| id.trim())
+            .find(|id| !id.is_empty() && *id != sender_id)
+        else {
+            return message;
+        };
+
+        if message.channel_id.trim() != peer_id {
+            tracing::warn!(
+                conversation_id = %message.conversation_id,
+                message_id = %message.server_id,
+                sender_id = %message.sender_id,
+                old_channel_id = %message.channel_id,
+                normalized_channel_id = %peer_id,
+                "Normalized single chat message channel_id from resolved recipient"
+            );
+            message.channel_id = peer_id.to_string();
+        }
+
+        message
+    }
+
     /// 仅推送消息（不持久化），接收者由调用方显式提供
     ///
     /// 适用于上游已完成路由决策的场景，避免重复成员查询。
@@ -294,6 +329,7 @@ impl MessageDomainService {
             "Pushing message only (no persistence)"
         );
 
+        let message = self.normalize_single_chat_routing(message, &recipient_user_ids);
         let conversation_id = message.conversation_id.clone();
         self.push_repository
             .push_only_message(ctx, message, recipient_user_ids, conversation_id)
@@ -313,6 +349,7 @@ impl MessageDomainService {
     ))]
     pub async fn push_only(&self, ctx: &Ctx, message: Message) -> Result<()> {
         let recipient_user_ids = self.get_recipient_user_ids(ctx, &message).await?;
+        let message = self.normalize_single_chat_routing(message, &recipient_user_ids);
         self.push_only_with_recipients(ctx, message, recipient_user_ids)
             .await
     }
@@ -391,8 +428,10 @@ impl MessageDomainService {
         let recipient_user_ids = self
             .get_recipient_user_ids(ctx, &submission.message)
             .await?;
+        let message =
+            self.normalize_single_chat_routing(submission.message.clone(), &recipient_user_ids);
         tracing::trace!(
-            conversation_id = %submission.message.conversation_id,
+            conversation_id = %message.conversation_id,
             message_id = %submission.message_id,
             message_type = profile.message_type_label(),
             persistence_mode = ?persistence_mode,
@@ -402,9 +441,9 @@ impl MessageDomainService {
         self.push_repository
             .publish_message(
                 ctx,
-                submission.message.clone(),
+                message.clone(),
                 recipient_user_ids,
-                submission.message.conversation_id.clone(),
+                message.conversation_id.clone(),
             )
             .await
             .map_err(|e| {

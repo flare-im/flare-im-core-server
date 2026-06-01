@@ -136,6 +136,12 @@ impl ConversationRepository for RedisConversationRepository {
                 channel_id: state.get("channel_id").cloned().unwrap_or_default(),
                 participant_version: 0,
                 member_preview: Vec::new(),
+                is_muted: false,
+                is_pinned: false,
+                is_archived: false,
+                settings_version: 0,
+                draft: None,
+                visible_after_seq: 0,
             };
 
             summaries.push(summary);
@@ -263,6 +269,14 @@ impl ConversationRepository for RedisConversationRepository {
         _seq: i64,
     ) -> Result<()> {
         Err(redis_not_supported("mark_as_read"))
+    }
+
+    async fn update_user_settings(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _patch: &crate::domain::model::UpdateConversationUserSettingsPatch,
+    ) -> Result<crate::domain::model::ConversationUserSettings> {
+        Err(redis_not_supported("update_user_settings"))
     }
 
     async fn apply_message_event(

@@ -7,7 +7,7 @@
 pub enum MessageCategory {
     /// 临时消息（TYPING、SYSTEM_EVENT）：只推送，不持久化，不经过 WAL
     Temporary,
-    /// 通知消息（NOTIFICATION）：根据 persistent 标志决定是否持久化，但都推送
+    /// 通知消息（NOTIFICATION）：是否持久化由 NotificationContent.persistent 决定；默认推送。
     Notification,
     /// 操作消息（OPERATION）：根据操作类型决定同步/异步处理
     Operation,

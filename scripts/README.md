@@ -30,26 +30,33 @@ docker-compose up -d
 - JetStream (端口 29092)
 - etcd (端口 22379)
 
-### 2. 启动所有核心服务
+### 2. 启动 IM Core（二选一）
+
+**业务中立（默认推荐，无 Social Hook）：**
 
 ```bash
-./scripts/start_multi_gateway.sh
+./scripts/start_server_core.sh
 ```
 
-这将启动以下服务：
-- `signaling-online` - 在线状态服务
-- `signaling-route` - 路由目录服务
-- `capability`（`flare-capability`）- Hook 扩展与能力插件服务
-- `conversation` - 会话管理服务
-- `message-orchestrator` - 消息编排服务
-- `storage-writer` - 消息持久化服务
-- `push-server` - 消息推送服务
-- `access-gateway` - 客户端接入网关（默认实例）
-- `core-gateway` - 业务系统统一入口
-- `access-gateway-beijing-1` - 北京网关实例（端口 60051）
-- `access-gateway-shanghai-1` - 上海网关实例（端口 60052）
+**集成 flare-social PreSend Hook：**
 
-### 3. 启动客户端
+```bash
+# 先启动 Social（含 flare-social-hook）
+cd ../flare-social && ./scripts/start_social.sh
+
+# 再启动 IM Core（Social Hook 模式）
+cd ../flare-im-core && ./scripts/start_server_social.sh
+```
+
+Hook 配置文件：
+
+| 文件 | 说明 |
+|------|------|
+| `config/hooks.core.toml` | 空 Hook，纯 IM 链路 |
+| `config/hooks.social.toml` | Social PreSend → `discovery://flare-social-hook` |
+| `config/hooks.toml` | 运行时 symlink 目标（由启动脚本写入） |
+
+### 3. 启动客户端（示例）
 
 ```bash
 # 启动第一个客户端
@@ -67,8 +74,10 @@ cargo run --example chatroom_client -- user2
 
 | 脚本 | 说明 | 用途 |
 |------|------|------|
-| `start_multi_gateway.sh` | 启动所有核心服务 + 多地区网关 | 启动完整的 IM 系统（包括多网关实例） |
-| `stop_multi_gateway.sh` | 停止所有服务 | 停止所有核心服务和多网关实例 |
+| `start_server.sh` | 启动所有核心服务 | 通用入口；可配合 `FLARE_HOOKS_PROFILE` |
+| `start_server_core.sh` | 业务中立启动 | `hooks.core.toml`，**不**注册 flare-social Hook |
+| `start_server_social.sh` | Social Hook 启动 | `hooks.social.toml`，需 `flare-social-hook` |
+| `stop_server.sh` | 停止所有服务 | 停止全栈 |
 
 ### 辅助脚本
 
@@ -220,7 +229,7 @@ cargo run --example business_push_client
 - `MESSAGE_CONTENT` - 消息内容
 - `USER_IDS` - 目标用户ID列表（逗号分隔，为空则推送给所有在线用户）
 - `TOKEN_SECRET` - JWT Token 密钥（默认：`insecure-secret`）
-- `TENANT_ID` - 租户ID（默认：`default`）
+- `TENANT_ID` - 租户ID（默认：`0`）
 - `BUSINESS_USER_ID` - 业务系统用户ID（默认：`business-system`）
 
 ---
@@ -448,7 +457,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 | `MESSAGE_CONTENT` | 消息内容 | `Hello from business system` |
 | `USER_IDS` | 目标用户ID列表（逗号分隔） | 空（推送给所有在线用户） |
 | `TOKEN_SECRET` | JWT Token 密钥 | `insecure-secret` |
-| `TENANT_ID` | 租户ID | `default` |
+| `TENANT_ID` | 租户ID | `0` |
 | `BUSINESS_USER_ID` | 业务系统用户ID | `business-system` |
 
 ---

@@ -128,7 +128,10 @@ mod tests {
             headers: std::collections::HashMap::new(),
         };
 
-        let ctx = flare_server_core::context::Context::with_request_id("trace-123");
+        let ctx = Arc::new(flare_server_core::context::Context::with_request_id(
+            "trace-123",
+        ));
+        let devices = resolver.resolve(&ctx, &envelope).await.unwrap();
 
         assert_eq!(devices.len(), 2);
     }

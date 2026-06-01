@@ -295,7 +295,8 @@ where
             return false;
         };
         match call.signal.as_ref() {
-            Some(Signal::Reject(_)) | Some(Signal::Busy(_)) | Some(Signal::Hangup(_)) => true,
+            Some(Signal::Reject(_)) | Some(Signal::Busy(_)) => true,
+            Some(Signal::Hangup(h)) => !h.reason.trim().eq_ignore_ascii_case("participant_leave"),
             _ => false,
         }
     }

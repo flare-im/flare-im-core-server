@@ -18,7 +18,7 @@
 | `PUSH_PROXY_NOTIFICATION_TOPIC` | 推送通知 Topic | `flare.im.push.notifications` |
 | `PUSH_PROXY_ACK_TOPIC` | ACK Topic | `flare.im.push.acks` |
 | `PUSH_PROXY_JETSTREAM_TIMEOUT_MS` | JetStream 发送超时（毫秒） | `5000` |
-| `PUSH_PROXY_DEFAULT_TENANT_ID` | 默认租户 ID（信封填充） | `default` |
+| `PUSH_PROXY_DEFAULT_TENANT_ID` | 默认租户 ID（信封填充） | `0` |
 
 也可通过 `config/services/push_server.toml` 等应用配置中的 JetStream 配置引用（`push_server.jetstream`）间接影响 bootstrap 与 topic 默认值。
 

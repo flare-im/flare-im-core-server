@@ -8,6 +8,7 @@ pub struct QueryMessagesQuery {
     pub end_time: i64,
     pub limit: i32,
     pub cursor: Option<String>,
+    pub include_burned_placeholder: bool,
 }
 
 /// 获取单条消息
@@ -39,6 +40,7 @@ pub struct QueryMessagesBySeqQuery {
     pub before_seq: Option<i64>,
     pub limit: i32,
     pub user_id: Option<String>,
+    pub include_burned_placeholder: bool,
 }
 
 /// 查询消息操作历史

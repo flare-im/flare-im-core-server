@@ -1,8 +1,8 @@
 //! 接收者仓储实现：结合会话服务获取消息接收者。
 //!
 //! ## 核心逻辑
-//! 1. **消息接收者**：根据会话类型和 channel_id 确定接收者列表
-//!    - 单聊：channel_id 即为接收者（对方 user_id）
+//! 1. **消息接收者**：根据会话类型确定接收者列表
+//!    - 单聊：优先使用会话成员表，排除发送者；仅在成员缺失时降级到 channel_id
 //!    - 群聊/频道：从会话服务获取成员列表，排除发送者
 //! 2. **事件接收者**：直接使用 conversation_id 获取会话成员列表
 //! 3. **会话成员**：调用会话服务获取详情，提取参与者列表
@@ -43,7 +43,7 @@ impl RecipientRepository for RecipientRepositoryImpl {
     /// 获取消息接收者列表
     ///
     /// ## 逻辑
-    /// - 单聊：返回 channel_id（对方 user_id）
+    /// - 单聊：优先从会话成员解析对方，防止客户端误把 channel_id 传成自己导致自投递
     /// - 其他类型：从会话服务获取成员列表，排除发送者
     fn get_message_recipients<'a>(
         &'a self,
@@ -56,21 +56,49 @@ impl RecipientRepository for RecipientRepositoryImpl {
         Box::pin(async move {
             match conversation_type {
                 ConversationType::Single => {
-                    // 单聊：channel_id 即为接收者（对方 user_id）
-                    if let Some(cid) = channel_id {
+                    let members = self.get_conversation_members(ctx, conversation_id).await?;
+                    let mut recipients: Vec<String> = members
+                        .into_iter()
+                        .map(|uid| uid.trim().to_string())
+                        .filter(|uid| !uid.is_empty() && uid != sender_id)
+                        .collect();
+                    recipients.sort();
+                    recipients.dedup();
+
+                    if !recipients.is_empty() {
+                        debug!(
+                            conversation_id = %conversation_id,
+                            sender_id = %sender_id,
+                            recipient_count = recipients.len(),
+                            "Single chat recipients resolved from conversation members"
+                        );
+                        return Ok(recipients);
+                    }
+
+                    if let Some(cid) = channel_id.map(str::trim).filter(|cid| !cid.is_empty()) {
+                        if cid == sender_id {
+                            warn!(
+                                conversation_id = %conversation_id,
+                                sender_id = %sender_id,
+                                channel_id = %cid,
+                                "Single chat channel_id points to sender and no peer member was found"
+                            );
+                            return Ok(vec![]);
+                        }
                         debug!(
                             conversation_id = %conversation_id,
                             channel_id = %cid,
-                            "Single chat recipient: channel_id"
+                            "Single chat recipient fallback: channel_id"
                         );
-                        Ok(vec![cid.to_string()])
-                    } else {
-                        warn!(
-                            conversation_id = %conversation_id,
-                            "Single chat missing channel_id, returning empty recipients"
-                        );
-                        Ok(vec![])
+                        return Ok(vec![cid.to_string()]);
                     }
+
+                    warn!(
+                        conversation_id = %conversation_id,
+                        sender_id = %sender_id,
+                        "Single chat missing recipients"
+                    );
+                    Ok(vec![])
                 }
                 _ => {
                     // 其他类型：从会话服务获取成员列表，排除发送者

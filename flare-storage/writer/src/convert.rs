@@ -3,11 +3,12 @@
 
 use crate::application::commands::ProcessStoreMessageCommand;
 use crate::domain::model::{
-    DeletePayload, EditPayload, Event, EventPayload, EventType, MarkPayload, PinPayload,
-    ReactionPayload, ReadPayload, RecallPayload, RequestContext, TenantContext, UnmarkPayload,
-    UnpinPayload,
+    BurnScheduledPayload, BurnedPayload, DeletePayload, EditPayload, Event, EventPayload,
+    EventType, HardDeletedPayload, MarkPayload, PinPayload, ReactionPayload, ReadPayload,
+    RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
 };
 use flare_im_core::Ctx;
+use flare_im_core::utils::normalize_tenant_id;
 use flare_proto::common;
 use flare_proto::common::message_content::Content;
 
@@ -41,7 +42,7 @@ pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) {
             .tenant_id()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
+            .map(normalize_tenant_id)
             .unwrap_or_else(|| "0".to_string());
     }
     if event.operator_id.is_empty() {
@@ -82,6 +83,9 @@ fn event_type_from_i32(v: i32) -> EventType {
         Ok(common::EventType::EventUnpin) => EventType::Unpin,
         Ok(common::EventType::EventMark) => EventType::Mark,
         Ok(common::EventType::EventUnmark) => EventType::Unmark,
+        Ok(common::EventType::EventMessageBurnScheduled) => EventType::MessageBurnScheduled,
+        Ok(common::EventType::EventMessageBurned) => EventType::MessageBurned,
+        Ok(common::EventType::EventMessageHardDeleted) => EventType::MessageHardDeleted,
         _ => EventType::Unspecified,
     }
 }
@@ -143,6 +147,38 @@ fn event_payload_from_proto(p: &flare_proto::common::event::Payload) -> Option<E
             server_msg_id: u.server_msg_id.clone(),
             user_id: u.user_id.clone(),
             mark_type: u.mark_type,
+        }),
+        P::BurnScheduled(b) => EventPayload::BurnScheduled(BurnScheduledPayload {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            event_time: b.event_time,
+        }),
+        P::Burned(b) => EventPayload::Burned(BurnedPayload {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            burned_at: b.burned_at,
+            event_time: b.event_time,
+        }),
+        P::HardDeleted(b) => EventPayload::HardDeleted(HardDeletedPayload {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            burned_at: b.burned_at,
+            event_time: b.event_time,
         }),
         _ => return None,
     })
@@ -215,6 +251,38 @@ fn event_payload_to_proto(p: &EventPayload) -> Option<flare_proto::common::event
             mark_type: u.mark_type,
             ..Default::default()
         }),
+        EventPayload::BurnScheduled(b) => P::BurnScheduled(common::MessageBurnScheduledEvent {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            event_time: b.event_time,
+        }),
+        EventPayload::Burned(b) => P::Burned(common::MessageBurnedEvent {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            burned_at: b.burned_at,
+            event_time: b.event_time,
+        }),
+        EventPayload::HardDeleted(b) => P::HardDeleted(common::MessageHardDeletedEvent {
+            tenant_id: b.tenant_id.clone(),
+            conversation_id: b.conversation_id.clone(),
+            message_id: b.message_id.clone(),
+            server_id: b.server_id.clone(),
+            seq: b.seq,
+            reader_id: b.reader_id.clone(),
+            burn_at: b.burn_at,
+            burned_at: b.burned_at,
+            event_time: b.event_time,
+        }),
         EventPayload::Message(msg) => P::Message(message_to_proto(msg)),
         _ => return None,
     })
@@ -232,7 +300,7 @@ pub fn request_context_from_request_id(request_id: Option<&str>) -> RequestConte
 /// 从 tenant_id 构建领域 TenantContext（与 flare_server_core Context 对齐，无 proto 依赖）
 pub fn tenant_context_from_tenant_id(tenant_id: Option<&str>) -> TenantContext {
     TenantContext {
-        tenant_id: tenant_id.unwrap_or("").to_string(),
+        tenant_id: tenant_id.map(normalize_tenant_id).unwrap_or_default(),
         user_id: None,
     }
 }
@@ -269,15 +337,17 @@ pub fn dispatch_topic_event_envelope(
     if env.event_type == EVENT_TYPE_MESSAGE_CREATED {
         if let Some(flare_proto::common::event::Payload::Message(mut m)) = event.payload.clone() {
             if !env.tenant_id.is_empty() {
-                m.extra
-                    .insert("x-tenant-id".to_string(), env.tenant_id.clone());
+                m.extra.insert(
+                    "x-tenant-id".to_string(),
+                    normalize_tenant_id(&env.tenant_id),
+                );
             }
             return TopicEventDispatch::MessageCreated(message_command_from_proto(m));
         }
     }
     if env.event_type.starts_with("operation.") {
         let mut domain_event = event_from_proto(event);
-        domain_event.tenant_id = env.tenant_id.clone();
+        domain_event.tenant_id = normalize_tenant_id(&env.tenant_id);
         return TopicEventDispatch::Operation(domain_event);
     }
     TopicEventDispatch::Unsupported
@@ -295,8 +365,10 @@ pub fn command_from_message_envelope(
         msg.conversation_id = envelope.conversation_id.clone();
     }
     if !envelope.tenant_id.is_empty() {
-        msg.extra
-            .insert("x-tenant-id".to_string(), envelope.tenant_id.clone());
+        msg.extra.insert(
+            "x-tenant-id".to_string(),
+            normalize_tenant_id(&envelope.tenant_id),
+        );
     }
     msg.extra.insert(
         flare_im_core::abstractions::storage_payload::EXTRA_KEY_SYNC.to_string(),
@@ -327,7 +399,7 @@ pub fn message_command_from_proto(
         .get("x-tenant-id")
         .or_else(|| payload.metadata.get("tenant_id"))
         .map(|t| TenantContext {
-            tenant_id: t.clone(),
+            tenant_id: normalize_tenant_id(t),
             user_id: None,
         });
     ProcessStoreMessageCommand {

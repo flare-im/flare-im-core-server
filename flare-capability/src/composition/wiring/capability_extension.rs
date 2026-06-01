@@ -85,9 +85,7 @@ pub async fn init_capability_extension_stack(
         Arc::clone(&plugin_routes),
     );
 
-    tracing::info!(
-        "capability extension stack initialized (media plugins via service discovery)"
-    );
+    tracing::info!("capability extension stack initialized (media plugins via service discovery)");
 
     Ok((registry, capability_policy, capability_grpc))
 }

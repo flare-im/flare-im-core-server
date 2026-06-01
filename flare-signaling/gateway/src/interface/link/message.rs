@@ -14,10 +14,56 @@ use crate::application::commands::{SendDataCommand, SendEventCommand, SendMessag
 
 use super::connection::LongConnectionHandler;
 use crate::utils::{
-    build_data_error_frame, build_data_frame_with_payload, build_event_ack_operation_frame,
-    build_message_ack_frame, decode_ack_payload, decode_data_packet, decode_event_payload,
-    decode_message_payload,
+    SendAckFailure, build_data_error_frame, build_data_frame_with_payload,
+    build_event_ack_operation_frame, build_message_ack_frame, decode_ack_payload,
+    decode_data_packet, decode_event_payload, decode_message_payload,
 };
+
+fn proto_ack_error_code(code: flare_core::common::error::ErrorCode) -> i32 {
+    use flare_core::common::error::ErrorCode as CoreCode;
+    use flare_proto::common::ErrorCode as ProtoCode;
+
+    match code {
+        CoreCode::PermissionDenied => ProtoCode::PermissionDenied as i32,
+        CoreCode::InvalidParameter | CoreCode::MessageFormatError | CoreCode::InvalidCommand => {
+            ProtoCode::InvalidArgument as i32
+        }
+        CoreCode::MessageRateLimitExceeded => ProtoCode::RateLimited as i32,
+        CoreCode::OperationTimeout | CoreCode::ConnectionTimeout | CoreCode::NetworkTimeout => {
+            ProtoCode::Timeout as i32
+        }
+        CoreCode::ServiceUnavailable
+        | CoreCode::NetworkError
+        | CoreCode::NetworkUnreachable
+        | CoreCode::NetworkConnectionLost => ProtoCode::Unavailable as i32,
+        _ => ProtoCode::Internal as i32,
+    }
+}
+
+fn send_ack_failure_from_error(err: CoreFlareError) -> SendAckFailure {
+    match err {
+        CoreFlareError::Localized {
+            code,
+            reason,
+            details,
+            ..
+        } => {
+            let proto_code = proto_ack_error_code(code);
+            let message = details.clone().unwrap_or_else(|| reason.clone());
+            SendAckFailure::new(proto_code, message.clone()).with_error_detail(
+                flare_proto::common::ErrorDetail {
+                    code: proto_code,
+                    reason: reason.clone(),
+                    message,
+                    track: String::new(),
+                },
+            )
+        }
+        CoreFlareError::System(msg) | CoreFlareError::Io(msg) => {
+            SendAckFailure::new(flare_proto::common::ErrorCode::Internal as i32, msg)
+        }
+    }
+}
 
 #[async_trait]
 impl ServerEventHandler for LongConnectionHandler {
@@ -154,12 +200,7 @@ impl LongConnectionHandler {
             .send_handler
             .handle_send_message(&send_command)
             .await
-            .map_err(|e| {
-                (
-                    flare_proto::common::ErrorCode::Internal as i32,
-                    e.to_string(),
-                )
-            });
+            .map_err(send_ack_failure_from_error);
         build_message_ack_frame(
             &command.message_id,
             &client_msg_id,

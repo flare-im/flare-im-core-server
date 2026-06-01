@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ListConversationParticipantsRequest, UpdateCursorRequest,
+    ConversationBootstrapRequest, ListConversationParticipantsRequest,
+    UpdateConversationUserSettingsRequest, UpdateCursorRequest,
 };
 use flare_im_core::Ctx;
 use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
@@ -17,28 +18,28 @@ use flare_proto::common::{
     ConversationDetailSync, ConversationDetailSyncRes, ConversationParticipant,
     ConversationParticipantsSync, ConversationParticipantsSyncRes, ConversationSummary,
     ConversationsSync, ConversationsSyncRes, EventEnvelope, EventStreamAckSyncRes,
-    GetSyncCursorSync, GetSyncCursorSyncRes, GroupDirectoryEntry, GroupDirectorySync,
-    GroupDirectorySyncRes, MessagePreview, MultiConversationSync,
+    GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview, MultiConversationSync,
     MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes,
     SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow, SyncKind, SyncRes,
-    SyncSliceItem, SyncSliceItemKind, SyncSnapshotSync, SyncSnapshotSyncRes, UpdateSyncCursorSync,
-    UpdateSyncCursorSyncRes,
+    SyncSliceItem, SyncSliceItemKind, SyncSnapshotSync, SyncSnapshotSyncRes,
+    UpdateConversationUserSettingsSync, UpdateConversationUserSettingsSyncRes,
+    UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
 };
 use prost::Message as ProstMessage;
 use tracing::{debug, trace, warn};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, GroupDirectorySyncPort,
-    StorageReadPort, SyncCursorCachePort,
+    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, StorageReadPort,
+    SyncCursorCachePort,
 };
 use crate::domain::model::{
     SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
     normalize_query_event_types,
 };
 use crate::domain::service::{
-    build_snapshot_cursor, ensure_cursor_monotonic, max_seq_from_events, parse_snapshot_cursor,
-    snapshot_global_seq, ts_millis,
+    build_snapshot_cursor, max_seq_from_events, parse_snapshot_cursor, snapshot_global_seq,
+    ts_millis,
 };
 
 /// 与 `SyncSnapshotSyncRes.conversations` 逐行对齐，来自 ConversationBootstrap 摘要（单聊 `channel_id` 等对端路由）
@@ -49,6 +50,12 @@ struct ConversationSyncRoutingHint {
     peer_read_seq: u64,
     participant_version: u64,
     member_preview: Vec<ConversationParticipant>,
+    is_muted: bool,
+    is_pinned: bool,
+    is_archived: bool,
+    user_settings_version: u64,
+    draft: String,
+    visible_after_seq: u64,
 }
 
 pub struct SyncSnapshotOutcome {
@@ -63,9 +70,7 @@ struct MergedSnapshotRow {
 
 pub struct SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + GroupDirectorySyncPort
-        + Send
-        + Sync,
+    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
 {
     infra: Arc<I>,
     cursor_cache: Arc<MemorySyncCursorCache>,
@@ -73,9 +78,7 @@ where
 
 impl<I> SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + GroupDirectorySyncPort
-        + Send
-        + Sync,
+    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
 {
     pub fn new(infra: Arc<I>, cursor_cache: Arc<MemorySyncCursorCache>) -> Self {
         Self {
@@ -164,10 +167,13 @@ where
                     payload: Some(SyncResPayload::ConversationParticipants(v)),
                 })
             }
-            (SyncKind::GroupDirectory, SyncPayload::GroupDirectory(req)) => {
-                let v = self.group_directory_sync(ctx, req).await?;
+            (
+                SyncKind::ConversationUserSettings,
+                SyncPayload::UpdateConversationUserSettings(req),
+            ) => {
+                let v = self.conversation_user_settings_sync(ctx, req).await?;
                 Ok(SyncRes {
-                    payload: Some(SyncResPayload::GroupDirectory(v)),
+                    payload: Some(SyncResPayload::UpdateConversationUserSettingsRes(v)),
                 })
             }
             _ => Err(ErrorBuilder::new(
@@ -241,6 +247,7 @@ where
                 last_seq: max_seq.max(0),
                 last_timestamp: bootstrap.updated_at.clone(),
                 unread_count: (bootstrap.unread_count as i32).max(0),
+                last_read_seq: bootstrap.last_read_seq,
             };
 
             if message_limit > 0 && max_seq > 0 {
@@ -342,6 +349,12 @@ where
                         .unwrap_or_default(),
                     participant_version: m.bootstrap.participant_version,
                     member_preview: m.bootstrap.member_preview.clone(),
+                    is_muted: m.bootstrap.is_muted,
+                    is_pinned: m.bootstrap.is_pinned,
+                    is_archived: m.bootstrap.is_archived,
+                    user_settings_version: m.bootstrap.user_settings_version,
+                    draft: m.bootstrap.draft.clone(),
+                    visible_after_seq: m.bootstrap.visible_after_seq,
                 });
                 m.row
             })
@@ -519,6 +532,7 @@ where
             .conversations
             .iter()
             .zip(outcome.routing.iter())
+            .filter(|(c, _)| !c.conversation_id.starts_with("sync:"))
             .map(|(c, hint)| snapshot_row_to_summary(c, hint))
             .collect::<Vec<_>>();
         let server_conversation_cursor = if is_cold_start {
@@ -580,31 +594,28 @@ where
         })
     }
 
-    async fn group_directory_sync(
+    async fn conversation_user_settings_sync(
         &self,
         ctx: &Ctx,
-        req: GroupDirectorySync,
-    ) -> Result<GroupDirectorySyncRes, FlareError> {
-        let limit = if req.limit <= 0 { 50 } else { req.limit.min(200) };
-        let page = self
+        req: UpdateConversationUserSettingsSync,
+    ) -> Result<UpdateConversationUserSettingsSyncRes, FlareError> {
+        require_nonempty_conversation_id(&req.conversation_id)?;
+        let resp = self
             .infra
-            .sync_group_directory(ctx, req.since_version, req.since_updated_at, limit)
+            .update_conversation_user_settings(
+                ctx,
+                UpdateConversationUserSettingsRequest {
+                    conversation_id: req.conversation_id,
+                    is_pinned: req.is_pinned,
+                    is_muted: req.is_muted,
+                    is_archived: req.is_archived,
+                    draft: req.draft,
+                    base_settings_version: req.base_settings_version,
+                },
+            )
             .await?;
-        Ok(GroupDirectorySyncRes {
-            groups: page
-                .groups
-                .into_iter()
-                .map(|g| GroupDirectoryEntry {
-                    group_id: g.group_id,
-                    name: g.name,
-                    member_version: g.member_version,
-                    updated_at: g.updated_at,
-                })
-                .collect(),
-            left_group_ids: page.left_group_ids,
-            server_version: page.server_version,
-            server_updated_at: page.server_updated_at,
-            has_more: page.has_more,
+        Ok(UpdateConversationUserSettingsSyncRes {
+            settings: resp.settings,
         })
     }
 
@@ -725,30 +736,44 @@ where
                 },
             )
             .await?;
-        if let Some(cursor_value) = conv_resp.server_cursor_map.get(&req.conversation_id) {
-            let cursor = MultiDeviceCursor {
-                device_id: req.device_id,
-                conversation_id: req.conversation_id,
-                last_sync_seq: (*cursor_value).max(0) as u64,
-                last_sync_at: None,
-                last_read_seq: 0,
-                last_critical_event_seq: 0,
-            };
-            self.cursor_cache.put(user_id, cursor.clone()).await;
-            debug!(
-                user_id = %user_id,
-                conversation_id = %cursor.conversation_id,
-                last_sync_seq = cursor.last_sync_seq,
-                "get sync cursor hit (persistent)"
-            );
+        let summary = conv_resp
+            .conversations
+            .iter()
+            .find(|c| c.conversation_id == req.conversation_id);
+        let last_sync_seq = conv_resp
+            .server_cursor_map
+            .get(&req.conversation_id)
+            .copied()
+            .or_else(|| summary.map(|s| s.max_seq as i64))
+            .filter(|seq| *seq > 0)
+            .map(|seq| seq.max(0) as u64);
+        let Some(last_sync_seq) = last_sync_seq else {
             return Ok(GetSyncCursorSyncRes {
-                cursor: Some(cursor),
+                cursor: None,
                 hints: None,
             });
-        }
-
+        };
+        let last_read_seq = summary
+            .map(|s| normalize_participant_read_seq(s.max_seq, s.unread_count, s.last_read_seq))
+            .unwrap_or(0);
+        let cursor = MultiDeviceCursor {
+            device_id: req.device_id,
+            conversation_id: req.conversation_id,
+            last_sync_seq,
+            last_sync_at: summary.and_then(|s| s.updated_at.clone()),
+            last_read_seq,
+            last_critical_event_seq: 0,
+        };
+        self.cursor_cache.put(user_id, cursor.clone()).await;
+        debug!(
+            user_id = %user_id,
+            conversation_id = %cursor.conversation_id,
+            last_sync_seq = cursor.last_sync_seq,
+            last_read_seq = cursor.last_read_seq,
+            "get sync cursor hit (persistent)"
+        );
         Ok(GetSyncCursorSyncRes {
-            cursor: None,
+            cursor: Some(cursor),
             hints: None,
         })
     }
@@ -777,14 +802,23 @@ where
             .cursor_cache
             .previous_last_seq(user_id, &cursor.conversation_id)
             .await;
-        ensure_cursor_monotonic(prev, cursor.last_sync_seq as i64).map_err(FlareError::from)?;
+        let merged_seq =
+            crate::domain::service::merge_cursor_monotonic(prev, cursor.last_sync_seq as i64)
+                as u64;
+        let prev_read_seq = self
+            .cursor_cache
+            .get(user_id, &cursor.conversation_id)
+            .await
+            .map(|c| c.last_read_seq)
+            .unwrap_or(0);
+        let merged_read_seq = cursor.last_read_seq.max(prev_read_seq);
 
         self.infra
             .update_read_cursor(
                 ctx,
                 UpdateCursorRequest {
                     conversation_id: cursor.conversation_id.clone(),
-                    message_ts: cursor.last_sync_seq as i64,
+                    message_ts: merged_seq as i64,
                     device_id: cursor.device_id.clone(),
                 },
             )
@@ -793,9 +827,9 @@ where
         let out = MultiDeviceCursor {
             device_id: cursor.device_id.clone(),
             conversation_id: cursor.conversation_id.clone(),
-            last_sync_seq: cursor.last_sync_seq,
+            last_sync_seq: merged_seq,
             last_sync_at: cursor.last_sync_at.clone(),
-            last_read_seq: cursor.last_read_seq,
+            last_read_seq: merged_read_seq,
             last_critical_event_seq: cursor.last_critical_event_seq,
         };
         self.cursor_cache.put(user_id, out.clone()).await;
@@ -811,15 +845,18 @@ fn decode_sync_kind(raw: i32) -> SyncKind {
     match raw {
         1 => SyncKind::SingleConversation,
         2 => SyncKind::MultiConversation,
-        3 => SyncKind::Conversations,
+        3 => SyncKind::ConversationsIncremental,
+        4 => SyncKind::ConversationsAll,
         5 => SyncKind::ConversationDetail,
         7 => SyncKind::QueryEvents,
         8 => SyncKind::GetSyncCursor,
         9 => SyncKind::UpdateSyncCursor,
         10 => SyncKind::EventStreamAck,
         11 => SyncKind::SyncSnapshot,
+        12 => SyncKind::ConversationMaxSeq,
         13 => SyncKind::ConversationParticipants,
-        23 => SyncKind::GroupDirectory,
+        24 => SyncKind::Conversations,
+        25 => SyncKind::ConversationUserSettings,
         _ => SyncKind::Unspecified,
     }
 }
@@ -983,8 +1020,20 @@ fn conversation_type_int(message: Option<&Message>) -> i32 {
     msg.conversation_type
 }
 
-/// 同步补丁摘要 `channel_id`：最新消息体优先，否则 Bootstrap 摘要
-fn merge_sync_summary_channel_id(from_message: &str, hint: &ConversationSyncRoutingHint) -> String {
+/// 同步补丁摘要 `channel_id`。
+///
+/// 单聊的对端路由以 Conversation Bootstrap 从成员表解析出的 channel_id 为准；
+/// 最新消息体里的 channel_id 可能来自历史坏数据或旧客户端，不能覆盖它。
+fn merge_sync_summary_channel_id(
+    conversation_type: i32,
+    from_message: &str,
+    hint: &ConversationSyncRoutingHint,
+) -> String {
+    if conversation_type == flare_proto::common::ConversationType::Single as i32
+        && !hint.channel_id.is_empty()
+    {
+        return hint.channel_id.clone();
+    }
     if !from_message.is_empty() {
         return from_message.to_string();
     }
@@ -1011,6 +1060,10 @@ fn message_preview(
     })
 }
 
+fn normalize_participant_read_seq(_max_seq: u64, _unread_count: u32, last_read_seq: u64) -> u64 {
+    last_read_seq
+}
+
 fn snapshot_row_to_summary(
     item: &SnapshotConversationRow,
     hint: &ConversationSyncRoutingHint,
@@ -1020,45 +1073,60 @@ fn snapshot_row_to_summary(
     if let Some(msg) = latest {
         ext.extend(msg.extra.clone());
     }
+    let max_seq = item.last_seq.max(0) as u64;
+    let peer_read_seq = if hint.peer_read_seq <= max_seq {
+        hint.peer_read_seq
+    } else {
+        tracing::warn!(
+            conversation_id = %item.conversation_id,
+            peer_read_seq = hint.peer_read_seq,
+            max_seq,
+            "drop impossible peer_read_seq from conversation summary"
+        );
+        0
+    };
+    ext.insert("peer_read_seq".to_string(), peer_read_seq.to_string());
     let display_name = ext.get("display_name").cloned().unwrap_or_default();
     let avatar_url = ext.get("avatar_url").cloned().unwrap_or_default();
-    ext.entry("peer_read_seq".to_string())
-        .or_insert_with(|| hint.peer_read_seq.to_string());
-    let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
-    let channel_id = merge_sync_summary_channel_id(channel_from_msg, hint);
     let type_from_msg = conversation_type_int(latest);
     let conversation_type =
         merge_sync_summary_conversation_type(type_from_msg, hint.conversation_type);
-    // SnapshotConversationRow 当前不包含 last_read_seq。
-    // 若仅从 ext 取值（缺省为 0），会在会话增量同步后把客户端读位重置，
-    // 导致重登后 unread 计算与 read_states 上报失真。
-    let derived_last_read_seq = item
-        .last_seq
-        .saturating_sub((item.unread_count.max(0)) as i64)
-        .max(0) as u64;
-    let last_read_seq = ext
-        .get("last_read_seq")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(derived_last_read_seq);
+    let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
+    let channel_id = merge_sync_summary_channel_id(conversation_type, channel_from_msg, hint);
+    let visible_after_seq = hint.visible_after_seq;
+    let last_read_seq = normalize_participant_read_seq(
+        max_seq,
+        item.unread_count.max(0) as u32,
+        item.last_read_seq,
+    )
+    .max(visible_after_seq);
+    let last_message = if visible_after_seq > 0 && max_seq <= visible_after_seq {
+        None
+    } else {
+        message_preview(latest, item.last_timestamp.clone())
+    };
+    let unread_count = if visible_after_seq > 0 && max_seq <= visible_after_seq {
+        0
+    } else {
+        item.unread_count as u32
+    };
     ConversationSummary {
         conversation_id: item.conversation_id.clone(),
         conversation_type: conversation_type.to_string(),
         business_type: ext.get("business_type").cloned().unwrap_or_default(),
         display_name,
         avatar_url,
-        last_message: message_preview(latest, item.last_timestamp.clone()),
-        unread_count: item.unread_count as u32,
-        max_seq: item.last_seq as u64,
+        last_message,
+        unread_count,
+        max_seq,
         last_read_seq,
-        is_muted: ext
-            .get("is_muted")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false),
-        is_pinned: ext
-            .get("is_pinned")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false),
+        is_muted: hint.is_muted,
+        is_pinned: hint.is_pinned,
         mute_until: None,
+        is_archived: hint.is_archived,
+        user_settings_version: hint.user_settings_version,
+        draft: hint.draft.clone(),
+        visible_after_seq,
         updated_at: item.last_timestamp.clone(),
         created_at: None,
         labels: Vec::new(),
@@ -1147,6 +1215,21 @@ mod tests {
                 },
             )
         }
+
+        async fn update_conversation_user_settings(
+            &self,
+            _ctx: &Ctx,
+            _req: UpdateConversationUserSettingsRequest,
+        ) -> Result<
+            flare_grpc_proto::conversation::UpdateConversationUserSettingsResponse,
+            FlareError,
+        > {
+            Ok(
+                flare_grpc_proto::conversation::UpdateConversationUserSettingsResponse {
+                    settings: Some(flare_proto::common::ConversationUserSettings::default()),
+                },
+            )
+        }
     }
 
     impl StorageReadPort for MockInfra {
@@ -1186,18 +1269,6 @@ mod tests {
         }
     }
 
-    impl GroupDirectorySyncPort for MockInfra {
-        async fn sync_group_directory(
-            &self,
-            _ctx: &Ctx,
-            _since_version: u64,
-            _since_updated_at: Option<prost_types::Timestamp>,
-            _limit: i32,
-        ) -> Result<crate::application::ports::GroupDirectoryPage, FlareError> {
-            Ok(Default::default())
-        }
-    }
-
     fn ts(ms: i64) -> prost_types::Timestamp {
         prost_types::Timestamp {
             seconds: ms / 1000,
@@ -1212,6 +1283,122 @@ mod tests {
                 .with_user_id("22")
                 .with_trace_id("test-trace"),
         )
+    }
+
+    #[test]
+    fn normalize_read_seq_preserves_participant_cursor_when_unread_zero() {
+        assert_eq!(normalize_participant_read_seq(100, 0, 80), 80);
+        assert_eq!(normalize_participant_read_seq(100, 1, 99), 99);
+    }
+
+    #[test]
+    fn snapshot_summary_uses_authoritative_peer_read_seq_hint() {
+        let mut message = Message {
+            server_id: "m1".to_string(),
+            seq: 10,
+            ..Default::default()
+        };
+        message
+            .extra
+            .insert("peer_read_seq".to_string(), "999999".to_string());
+        let item = SnapshotConversationRow {
+            conversation_id: "c1".to_string(),
+            messages: vec![message],
+            last_seq: 10,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            peer_read_seq: 3,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &hint);
+
+        assert_eq!(
+            summary.ext.get("peer_read_seq").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_single_chat_channel_uses_bootstrap_peer_hint() {
+        let message = Message {
+            server_id: "m1".to_string(),
+            seq: 10,
+            conversation_type: flare_proto::common::ConversationType::Single as i32,
+            channel_id: "22".to_string(),
+            ..Default::default()
+        };
+        let item = SnapshotConversationRow {
+            conversation_id: "c1".to_string(),
+            messages: vec![message],
+            last_seq: 10,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            channel_id: "hugo1".to_string(),
+            conversation_type: flare_proto::common::ConversationType::Single as i32,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &hint);
+
+        assert_eq!(summary.channel_id, "hugo1");
+    }
+
+    #[test]
+    fn snapshot_summary_drops_impossible_peer_read_seq_hint() {
+        let item = SnapshotConversationRow {
+            conversation_id: "c1".to_string(),
+            last_seq: 10,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            peer_read_seq: 11,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &hint);
+
+        assert_eq!(
+            summary.ext.get("peer_read_seq").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
+    async fn conversations_sync_uses_participant_last_read_seq() {
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                conversations: vec![ConversationSummary {
+                    conversation_id: "c1".to_string(),
+                    max_seq: 100,
+                    unread_count: 39,
+                    last_read_seq: 99,
+                    updated_at: Some(ts(1_000)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .conversations_sync(
+                &ctx(),
+                "22",
+                ConversationsSync {
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("conversations sync");
+
+        assert_eq!(response.conversations.len(), 1);
+        assert_eq!(response.conversations[0].last_read_seq, 99);
+        assert_eq!(response.conversations[0].unread_count, 39);
     }
 
     #[tokio::test]
@@ -1246,6 +1433,45 @@ mod tests {
         assert!(response.conversations.is_empty());
         assert_eq!(response.server_conversation_cursor, Some(ts(2_000)));
         assert!(!response.has_more);
+    }
+
+    #[tokio::test]
+    async fn get_sync_cursor_returns_participant_last_read_seq() {
+        let mut server_cursor_map = HashMap::new();
+        server_cursor_map.insert("c1".to_string(), 100);
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                conversations: vec![ConversationSummary {
+                    conversation_id: "c1".to_string(),
+                    max_seq: 100,
+                    unread_count: 1,
+                    last_read_seq: 99,
+                    updated_at: Some(ts(1_000)),
+                    ..Default::default()
+                }],
+                server_cursor_map,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .get_sync_cursor_sync(
+                &ctx(),
+                "22",
+                GetSyncCursorSync {
+                    device_id: "sdk-22".to_string(),
+                    conversation_id: "c1".to_string(),
+                },
+            )
+            .await
+            .expect("get cursor");
+
+        let cursor = response.cursor.expect("cursor");
+        assert_eq!(cursor.conversation_id, "c1");
+        assert_eq!(cursor.last_sync_seq, 100);
+        assert_eq!(cursor.last_read_seq, 99);
     }
 
     #[tokio::test]

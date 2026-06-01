@@ -1,17 +1,15 @@
 //! 出站端口（防腐层）：由 `infrastructure` 实现，对接 Conversation / Storage Reader 等。
 #![allow(async_fn_in_trait)] // 内部端口，由具体类型实现并 `Send`；与仓库 Rust 2024 异步 trait 风格一致。
 
-use async_trait::async_trait;
-
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
     GetConversationDetailResponse, ListConversationParticipantsRequest,
-    ListConversationParticipantsResponse, UpdateCursorRequest,
+    ListConversationParticipantsResponse, UpdateConversationUserSettingsRequest,
+    UpdateConversationUserSettingsResponse, UpdateCursorRequest,
 };
 use flare_im_core::Ctx;
 use flare_proto::Message;
 use flare_proto::common::{Event, MultiDeviceCursor};
-use prost_types::Timestamp;
 use flare_server_core::error::FlareError;
 use std::collections::HashMap;
 
@@ -41,6 +39,12 @@ pub trait ConversationSyncPort: Send + Sync {
         ctx: &Ctx,
         req: ListConversationParticipantsRequest,
     ) -> Result<ListConversationParticipantsResponse, FlareError>;
+
+    async fn update_conversation_user_settings(
+        &self,
+        ctx: &Ctx,
+        req: UpdateConversationUserSettingsRequest,
+    ) -> Result<UpdateConversationUserSettingsResponse, FlareError>;
 }
 
 /// 存储读侧返回的会话最新消息水位（`messages` 表，按 `seq` 最大的一行）
@@ -90,35 +94,6 @@ pub struct QueryEventsPage {
     pub last_seq: i64,
     pub has_more: bool,
     pub next_cursor: String,
-}
-
-/// 外部群目录同步端口（由部署方实现，如 `flare-social-im-bridge` 或任意 gRPC 服务）。
-#[async_trait]
-pub trait GroupDirectorySyncPort: Send + Sync {
-    async fn sync_group_directory(
-        &self,
-        ctx: &Ctx,
-        since_version: u64,
-        since_updated_at: Option<Timestamp>,
-        limit: i32,
-    ) -> Result<GroupDirectoryPage, FlareError>;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GroupDirectoryEntry {
-    pub group_id: String,
-    pub name: String,
-    pub member_version: u64,
-    pub updated_at: Option<Timestamp>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GroupDirectoryPage {
-    pub groups: Vec<GroupDirectoryEntry>,
-    pub left_group_ids: Vec<String>,
-    pub server_version: u64,
-    pub server_updated_at: Option<Timestamp>,
-    pub has_more: bool,
 }
 
 /// 进程内 L1 游标缓存（可选）；权威仍以 Conversation / 未来 Redis 为准。

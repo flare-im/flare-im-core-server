@@ -818,6 +818,20 @@ pub struct SendMessageHttpRequest {
     pub conversation_id: String,
     pub content: serde_json::Value,
     pub message_type: i32,
+    #[serde(default)]
+    pub client_msg_id: String,
+    #[serde(default)]
+    pub conversation_type: i32,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub sender_name: String,
+    #[serde(default)]
+    pub sender_avatar: String,
+    #[serde(default)]
+    pub sync: bool,
+    #[serde(default)]
+    pub svid: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -842,6 +856,8 @@ pub struct RecallMessageHttpResponse {
 pub struct MarkReadHttpRequest {
     pub conversation_id: String,
     pub message_id: String,
+    #[serde(default)]
+    pub burn_after_read: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

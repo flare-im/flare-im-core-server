@@ -7,12 +7,11 @@ use serde_json::{Map, Value};
 
 use super::{
     AcceptCallRequest, AddIceCandidateRequest, CapabilityDispatchCommand, CapabilityDispatchResult,
-    CapabilityError, CapabilityPolicyBackend, CreateCallRequest, HandleSdpAnswerRequest,
-    HandleSdpOfferRequest, HangupCallRequest, GetJoinTokenRequest, MediaGetNetworkQualityRequest,
-    MediaGetRoomStateRequest, MediaJoinTransportRequest, MediaLeaveTransportRequest,
-    MediaSetPublisherMuteRequest,
-    MediaSetSimulcastLayerRequest, MediaSetSubscriptionRequest, RejectCallRequest, Result,
-    RtcCapability,
+    CapabilityError, CapabilityPolicyBackend, CreateCallRequest, GetJoinTokenRequest,
+    HandleSdpAnswerRequest, HandleSdpOfferRequest, HangupCallRequest,
+    MediaGetNetworkQualityRequest, MediaGetRoomStateRequest, MediaJoinTransportRequest,
+    MediaLeaveTransportRequest, MediaSetPublisherMuteRequest, MediaSetSimulcastLayerRequest,
+    MediaSetSubscriptionRequest, RejectCallRequest, Result, RtcCapability,
 };
 
 fn payload_str(payload: &Value, key: &str) -> Result<String> {
@@ -423,7 +422,10 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
             m.insert("exists".into(), Value::Bool(r.exists));
             m.insert("revision".into(), Value::from(r.revision));
             if !r.room_snapshot_json.trim().is_empty() {
-                m.insert("room_snapshot_json".into(), r.room_snapshot_json.clone().into());
+                m.insert(
+                    "room_snapshot_json".into(),
+                    r.room_snapshot_json.clone().into(),
+                );
                 if let Ok(v) = serde_json::from_str::<Value>(&r.room_snapshot_json) {
                     m.insert("room_snapshot".into(), v);
                 }

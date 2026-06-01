@@ -642,7 +642,9 @@ pub async fn create_discover_from_registry_config_with_filters(
             tag_filters,
             load_balance: LoadBalanceStrategy::ConsistentHash,
             health_check: None,
-            refresh_interval: Some(30),
+            refresh_interval: Some(
+                flare_server_core::discovery::default_discovery_refresh_interval_secs(),
+            ),
         };
 
         let (discover, _updater) = DiscoveryFactory::create_discover(config)

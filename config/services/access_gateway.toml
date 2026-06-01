@@ -8,6 +8,12 @@ token_store = "token_store"
 conversation_store = "conversation_store"
 conversation_store_ttl_seconds = 3600
 
+# 联调默认 Social [auth] 已与上方主 issuer/secret 一致，无需额外 trusted issuer。
+# 若生产仍使用独立 Social JWT（issuer=flare-social），可取消注释：
+# [[services.access_gateway.trusted_token_issuers]]
+# issuer = "flare-social"
+# secret = "change-me-in-production"
+
 # Route 服务配置（可选，用于通过 Route 服务路由消息）
 # 默认不使用 Route 服务，保持向后兼容
 # use_route_service = false

@@ -42,9 +42,18 @@ pub async fn build_authenticator(
         }
     }
 
-    Arc::new(crate::application::handlers::AuthHandler::new(Arc::new(
-        token_service,
-    )))
+    let trusted: Vec<(String, String)> = config
+        .trusted_token_issuers
+        .iter()
+        .map(|t| (t.secret.clone(), t.issuer.clone()))
+        .collect();
+
+    Arc::new(
+        crate::application::handlers::AuthHandler::with_trusted_issuers(
+            Arc::new(token_service),
+            &trusted,
+        ),
+    )
 }
 
 /// 构建长连接上行处理器

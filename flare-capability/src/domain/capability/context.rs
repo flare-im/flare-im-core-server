@@ -42,5 +42,8 @@ pub struct PreSendEvaluateInput {
     pub conversation_kind: ConversationKind,
     pub rtc_intent: bool,
     pub payload_type: Option<String>,
+    /// 消息正文（与 Hook draft.payload 对齐），供进程内 Guard 复用 Social PreSend 逻辑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Vec<u8>>,
     pub ext: Value,
 }

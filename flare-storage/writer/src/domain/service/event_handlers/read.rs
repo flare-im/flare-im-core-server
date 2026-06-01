@@ -15,6 +15,12 @@ where
     A: ArchiveStoreRepository + Send + Sync,
     E: EventStreamRepository + Send + Sync,
 {
+    let first_read_at = read
+        .read_at
+        .as_ref()
+        .map(|ts| ts.seconds)
+        .or_else(|| event.created_at.as_ref().map(|ts| ts.seconds))
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
     for msg_id in &read.message_ids {
         ctx.repo
             .record_message_read(
@@ -27,6 +33,20 @@ where
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
             })?;
+        if read.burn_after_read.unwrap_or(false) {
+            ctx.repo
+                .schedule_message_burn_after_read(
+                    ctx.ctx,
+                    ctx.tenant_id,
+                    msg_id.as_str(),
+                    Some(read.user_id.as_str()),
+                    first_read_at,
+                )
+                .await
+                .map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
+                })?;
+        }
         ctx.repo
             .append_event(ctx.ctx, ctx.tenant_id, msg_id.as_str(), event)
             .await

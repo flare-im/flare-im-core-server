@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use flare_im_core::discovery::{
-    build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,
+    build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
 };
 use flare_im_core::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
 use flare_server_core::mq::consumer::ConsumerConfig;
@@ -40,13 +40,10 @@ pub async fn initialize(
         static_fallback = %config.online_service_endpoint,
         "Resolving Online gRPC (registry or static fallback)"
     );
-    let online_channel = connect_grpc_channel_from_app_config(
-        app_config,
-        &online_service,
-        config.online_service_endpoint.as_str(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Online gRPC channel: {}", e))?;
+    let online_fallback = config.online_service_endpoint.as_str();
+    let online_channel =
+        connect_grpc_channel_lazy_from_app_config(app_config, &online_service, online_fallback)
+            .map_err(|e| anyhow::anyhow!("Online gRPC lazy channel: {}", e))?;
     let online_client = Arc::new(OnlineServiceClient::from_channel(online_channel));
 
     // 3. 创建 Gateway Router

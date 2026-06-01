@@ -101,6 +101,9 @@ pub fn build_call_signal_notice_message(event: &Event) -> Option<Message> {
         Signal::Reject(_) => ("reject", "已拒绝".to_string()),
         Signal::Busy(_) => ("busy", "忙线中".to_string()),
         Signal::Hangup(h) => {
+            if h.reason.trim().eq_ignore_ascii_case("participant_leave") {
+                return None;
+            }
             let reason_code = normalize_reason_code(h.reason_code);
             let visibility_scope = normalize_visibility_scope(h.visibility_scope);
             let timeout_seconds = h.timeout_seconds.unwrap_or_default();
@@ -196,6 +199,12 @@ pub fn build_call_signal_notice_message(event: &Event) -> Option<Message> {
         sender_avatar: String::new(),
         content: content.encode_to_vec(),
         status: MessageStatus::Sent as i32,
+        burn_enabled: false,
+        burn_after_read_seconds: None,
+        burn_status: 0,
+        first_read_at: None,
+        burn_at: None,
+        burned_at: None,
         offline_push_info: None,
         extra: std::collections::HashMap::new(),
         extensions: std::collections::HashMap::new(),

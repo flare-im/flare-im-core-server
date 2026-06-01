@@ -13,6 +13,7 @@ pub mod event;
 pub mod gateway;
 pub mod health;
 pub mod hooks;
+pub mod instrumentation;
 pub mod message;
 pub mod metrics;
 pub mod service_names;
@@ -68,6 +69,9 @@ pub use discovery::{
     VersionConfig,
     build_gateway_router_from_app_config,
     connect_grpc_channel_from_app_config,
+    connect_grpc_channel_lazy_from_app_config,
+    default_static_grpc_fallback,
+    get_discovered_channel_with_timeout,
     init_from_app_config,
     init_from_config,
     init_from_registry_config,
@@ -77,13 +81,23 @@ pub use discovery::{
 };
 pub use gateway::{GatewayRouter, GatewayRouterConfig, GatewayRouterError, GatewayRouterTrait};
 pub use hooks::{
-    DeliveryEvent, DeliveryHook, GetConversationParticipantsHook, GlobalHookRegistry, HookConfig,
-    HookConfigLoader, HookDefinition, HookDispatcher, HookErrorPolicy, HookGroup, HookKind,
-    HookMetadata, HookRegistry, HookRegistryBuilder, HookSelector, HookSelectorConfig,
-    HookTransportConfig, MatchRule, MessageDraft, MessageRecord, PostSendHook, PreSendDecision,
-    PreSendHook, PreSendPlan, RecallEvent, RecallHook,
+    ConversationLifecycleEvent, ConversationLifecycleEventKind, ConversationLifecycleHook,
+    ConversationMemberChangeKind, ConversationMemberEvent, ConversationMemberHook, DeliveryEvent,
+    DeliveryHook, GetConversationParticipantsHook, GlobalHookRegistry, HookConfig,
+    HookConfigLoader, HookDecision, HookDefinition, HookDispatcher, HookErrorPolicy, HookGroup,
+    HookKind, HookMetadata, HookOutcome, HookRegistry, HookRegistryBuilder, HookSelector,
+    HookSelectorConfig, HookTransportConfig, MatchRule, MessageDraft, MessageReactionEvent,
+    MessageReactionHook, MessageReadEvent, MessageReadHook, MessageRecord, PostSendHook,
+    PreSendDecision, PreSendHook, PreSendPlan, RecallEvent, RecallHook,
 };
-pub use message::{Attachment, Message as MessageDomain, message_from_proto, message_to_proto};
+pub use instrumentation::{
+    BusinessProbeDelivery, BusinessProbeEvent, BusinessProbeKind, BusinessProbeSink,
+    NoopBusinessProbeSink, SharedBusinessProbeSink,
+};
+pub use message::{
+    Attachment, BurnStatus, BurnTransitionError, Message as MessageDomain, message_from_proto,
+    message_to_proto,
+};
 pub use service_names::{get_service_name, service_name_env_var, validate_service_name};
 pub use tracing::init_tracing_from_config;
 pub use utils::ServiceHelper;

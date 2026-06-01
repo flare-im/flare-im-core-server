@@ -10,8 +10,10 @@ use crate::application::dto::{
     SendMessageHttpRequest, SendMessageHttpResponse,
 };
 use crate::context::Ctx;
-use crate::error::Result;
+use crate::error::{GatewayError, Result};
 use crate::infrastructure::grpc::GrpcClients;
+use flare_grpc_proto::message::{MarkMessageReadRequest, RecallMessageRequest, SendMessageRequest};
+use flare_proto::common::{Message, MessageSource, MessageStatus};
 use flare_server_core::http::ApiResponse;
 
 /// 发送消息
@@ -25,10 +27,10 @@ use flare_server_core::http::ApiResponse;
         (status = 400, description = "参数错误"),
     ),
 )]
-#[instrument(skip(headers, _clients))]
+#[instrument(skip(headers, clients))]
 pub async fn send_message(
     headers: HeaderMap,
-    Extension(_clients): Extension<Arc<GrpcClients>>,
+    Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<SendMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<SendMessageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -39,11 +41,58 @@ pub async fn send_message(
         "Sending message"
     );
 
-    // TODO: 实现 gRPC 调用
+    let sender_id = ctx
+        .require_user_id()
+        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
+        .to_string();
+    let content = serde_json::to_vec(&req.content)?;
+    let client_msg_id = if req.client_msg_id.trim().is_empty() {
+        format!("http_{}", uuid::Uuid::new_v4())
+    } else {
+        req.client_msg_id.clone()
+    };
+    let message = Message {
+        server_id: String::new(),
+        conversation_id: req.conversation_id.clone(),
+        client_msg_id,
+        sender_id,
+        source: MessageSource::User as i32,
+        seq: 0,
+        timestamp: None,
+        conversation_type: req.conversation_type,
+        message_type: req.message_type,
+        channel_id: req.channel_id,
+        sender_name: req.sender_name,
+        sender_avatar: req.sender_avatar,
+        // HTTP 网关保留 JSON 透明代理能力；结构化客户端仍应通过 SDK 写入 MessageContent protobuf。
+        content,
+        status: MessageStatus::Created as i32,
+        burn_enabled: false,
+        burn_after_read_seconds: None,
+        burn_status: 0,
+        first_read_at: None,
+        burn_at: None,
+        burned_at: None,
+        offline_push_info: None,
+        extra: std::collections::HashMap::new(),
+        extensions: std::collections::HashMap::new(),
+    };
+    let grpc_req = SendMessageRequest {
+        conversation_id: req.conversation_id,
+        message: Some(message),
+        sync: req.sync,
+        svid: req.svid,
+    };
+
+    let mut message_client = clients.message_send.lock().await;
+    let grpc_res = message_client
+        .send_message_with_ctx(&ctx, grpc_req)
+        .await
+        .map_err(|err| GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string()))?;
     let response = SendMessageHttpResponse {
-        server_msg_id: uuid::Uuid::new_v4().to_string(),
-        seq: 1,
-        success: true,
+        server_msg_id: grpc_res.server_msg_id,
+        seq: grpc_res.seq,
+        success: grpc_res.success,
     };
 
     Ok(Json(ApiResponse::success(response)))
@@ -60,10 +109,10 @@ pub async fn send_message(
         (status = 400, description = "参数错误"),
     ),
 )]
-#[instrument(skip(headers, _clients))]
+#[instrument(skip(headers, clients))]
 pub async fn recall_message(
     headers: HeaderMap,
-    Extension(_clients): Extension<Arc<GrpcClients>>,
+    Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<RecallMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<RecallMessageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -74,8 +123,20 @@ pub async fn recall_message(
         "Recalling message"
     );
 
-    // TODO: 实现 gRPC 调用
-    let response = RecallMessageHttpResponse { success: true };
+    let grpc_req = RecallMessageRequest {
+        message_id: req.message_id,
+        reason: String::new(),
+        recall_time_limit_seconds: 0,
+        conversation_id: req.conversation_id,
+    };
+    let mut action_client = clients.message_action.lock().await;
+    let grpc_res = action_client
+        .recall_message_with_ctx(&ctx, grpc_req)
+        .await
+        .map_err(|err| GatewayError::internal("MESSAGE_RECALL_FAILED", err.to_string()))?;
+    let response = RecallMessageHttpResponse {
+        success: grpc_res.success,
+    };
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -91,10 +152,10 @@ pub async fn recall_message(
         (status = 400, description = "参数错误"),
     ),
 )]
-#[instrument(skip(headers, _clients))]
+#[instrument(skip(headers, clients))]
 pub async fn mark_message_read(
     headers: HeaderMap,
-    Extension(_clients): Extension<Arc<GrpcClients>>,
+    Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<MarkReadHttpRequest>,
 ) -> Result<Json<ApiResponse<MarkReadHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -105,8 +166,20 @@ pub async fn mark_message_read(
         "Marking message as read"
     );
 
-    // TODO: 实现 gRPC 调用
-    let response = MarkReadHttpResponse { success: true };
+    let grpc_req = MarkMessageReadRequest {
+        message_id: req.message_id,
+        read_at: None,
+        burn_after_read: req.burn_after_read,
+        conversation_id: req.conversation_id,
+    };
+    let mut action_client = clients.message_action.lock().await;
+    let grpc_res = action_client
+        .mark_message_read_with_ctx(&ctx, grpc_req)
+        .await
+        .map_err(|err| GatewayError::internal("MESSAGE_MARK_READ_FAILED", err.to_string()))?;
+    let response = MarkReadHttpResponse {
+        success: grpc_res.success,
+    };
 
     Ok(Json(ApiResponse::success(response)))
 }

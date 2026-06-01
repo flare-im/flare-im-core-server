@@ -6,8 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::Utc;
 use flare_grpc_proto::capability::capability_service_server::CapabilityService;
 use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
-use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
-use flare_grpc_proto::sfu_control::HealthCheckRequest;
 use flare_grpc_proto::capability::{
     CapabilityDescriptor as ProtoDescriptor, CapabilityDispatchResult as ProtoDispatchResult,
     DeregisterPluginEndpointRequest, DeregisterPluginEndpointResponse, DispatchCapabilityRequest,
@@ -19,6 +17,9 @@ use flare_grpc_proto::capability::{
     SetTenantCapabilitySwitchRequest, SetTenantCapabilitySwitchResponse,
     UserCapabilityGrant as ProtoGrant,
 };
+use flare_grpc_proto::sfu_control::HealthCheckRequest;
+use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
+use flare_im_core::utils::normalize_tenant_id;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
@@ -26,10 +27,10 @@ use super::administer::dispatch_hook_administer;
 use crate::application::handler::dispatch_capability_command;
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
+use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use crate::infrastructure::capability::{
     CapabilityExtensionRegistry, DispatchRateLimiter, PluginRouteBook,
 };
-use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
 use crate::interface::grpc::hooks::HookServiceServer;
@@ -304,11 +305,12 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.capability_id.is_empty() {
             return Err(Status::invalid_argument("capability_id required"));
         }
-        let tenant_for_log = if r.tenant_id.is_empty() {
-            "default"
+        let tenant_id = if r.tenant_id.trim().is_empty() {
+            None
         } else {
-            r.tenant_id.as_str()
+            Some(normalize_tenant_id(&r.tenant_id))
         };
+        let tenant_for_log = tenant_id.as_deref().unwrap_or("0");
         tracing::trace!(
             capability_id = %r.capability_id,
             tenant_id = %tenant_for_log,
@@ -324,11 +326,6 @@ impl CapabilityService for CapabilityGrpcServer {
             )));
         }
 
-        let tenant_id = if r.tenant_id.is_empty() {
-            None
-        } else {
-            Some(r.tenant_id.as_str())
-        };
         let user_id = if r.user_id.is_empty() {
             None
         } else {
@@ -336,7 +333,7 @@ impl CapabilityService for CapabilityGrpcServer {
         };
 
         if let Some(ref lim) = self.rate_limiter {
-            let t = tenant_id.unwrap_or("_");
+            let t = tenant_id.as_deref().unwrap_or("_");
             let u = user_id.unwrap_or("_");
             if !lim.check_and_record(t, u) {
                 self.metrics
@@ -356,7 +353,7 @@ impl CapabilityService for CapabilityGrpcServer {
         };
         let cmd = CapabilityDispatchCommand {
             capability_id: r.capability_id,
-            tenant_id: tenant_id.map(str::to_string),
+            tenant_id,
             user_id: user_id.map(str::to_string),
             conversation_id: if r.conversation_id.is_empty() {
                 None

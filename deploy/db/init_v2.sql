@@ -115,6 +115,12 @@ CREATE TABLE messages (
     message_type INT NOT NULL DEFAULT 0,      -- MessageType 枚举值
     content BYTEA,
     status INT NOT NULL DEFAULT 1,  -- MessageStatus: CREATED=1, SENT=2, DELIVERED=3, READ=4, FAILED=5, RECALLED=6, DELETED_HARD=7, DELETED_SOFT=8
+    burn_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    burn_after_read_seconds BIGINT,
+    burn_status SMALLINT NOT NULL DEFAULT 0, -- BurnStatus: NONE=0 INIT=1 READ=2 BURN_PENDING=3 BURNED=4 HARD_DELETED=5
+    first_read_at BIGINT,
+    burn_at BIGINT,
+    burned_at BIGINT,
     offline_push_info JSONB,
     extra JSONB DEFAULT '{}'::jsonb,
     extensions JSONB DEFAULT '{}'::jsonb,
@@ -139,6 +145,12 @@ COMMENT ON COLUMN messages.conversation_type IS '会话类型：0=UNSPECIFIED 1=
 COMMENT ON COLUMN messages.message_type IS '消息类型（MessageType 枚举值，见 message.proto）';
 COMMENT ON COLUMN messages.content IS '消息体 bytes（按 message_type 解析，见 message_content.proto）';
 COMMENT ON COLUMN messages.status IS '消息状态：1=CREATED 2=SENT 3=DELIVERED 4=READ 5=FAILED 6=RECALLED 7=DELETED_HARD 8=DELETED_SOFT';
+COMMENT ON COLUMN messages.burn_enabled IS '是否启用阅后即焚';
+COMMENT ON COLUMN messages.burn_after_read_seconds IS '首次阅读后多少秒焚毁';
+COMMENT ON COLUMN messages.burn_status IS '阅后即焚状态：0=NONE 1=INIT 2=READ 3=BURN_PENDING 4=BURNED 5=HARD_DELETED';
+COMMENT ON COLUMN messages.first_read_at IS '首次真实阅读时间（Unix 秒，服务端写入）';
+COMMENT ON COLUMN messages.burn_at IS '服务端权威焚毁时间（Unix 秒）';
+COMMENT ON COLUMN messages.burned_at IS '实际焚毁时间（Unix 秒）';
 COMMENT ON COLUMN messages.offline_push_info IS '离线推送展示（OfflinePushInfo JSON）';
 COMMENT ON COLUMN messages.extra IS '扩展键值（conversation_type、business_type、thread_id 等）';
 COMMENT ON COLUMN messages.extensions IS '业务扩展（key 建议命名空间）';
@@ -150,6 +162,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_tenant_server_id ON messages(tena
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_seq ON messages(tenant_id, conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_ts ON messages(tenant_id, conversation_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_client ON messages(tenant_id, sender_id, client_msg_id) WHERE client_msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_burn_due ON messages(tenant_id, burn_status, burn_at) WHERE burn_status = 3 AND burn_at IS NOT NULL;
 
 SELECT create_hypertable('messages', 'created_at', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
 
@@ -450,6 +463,9 @@ CREATE TABLE conversation_participants (
     unread_count INT DEFAULT 0,
     is_deleted BOOLEAN DEFAULT FALSE,
     mute_until TIMESTAMPTZ,
+    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+    settings_version BIGINT NOT NULL DEFAULT 0,
+    draft TEXT,
     quit_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -703,7 +719,7 @@ COMMENT ON COLUMN capability_user_grants.user_id IS '用户 ID；特殊值 * 表
 CREATE INDEX IF NOT EXISTS idx_capability_user_grants_tenant_user ON capability_user_grants(tenant_id, user_id);
 
 -- 默认租户 0 + 租户级 RTC 通配（与编排器 ctx.tenant_id().unwrap_or("0")、Capability Dispatch 对齐）
--- PostgresCapabilityPolicy 将 tenant_id `0` 与 `default` 视为同一默认租户查授权，故仅插 `0` 即可覆盖网关 JWT 里仍为 default 的客户端。
+-- 默认租户统一使用 tenant_id `0`。
 INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)
 VALUES ('0', '*', 'rtc.*', 'dev', 'init_bootstrap')
 ON CONFLICT (tenant_id, user_id, capability_id) DO NOTHING;

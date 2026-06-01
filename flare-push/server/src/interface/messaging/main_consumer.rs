@@ -18,8 +18,14 @@ use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
+use flare_im_core::error::FlareError;
+
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
+
+fn retry_or_dlq_result(error: &FlareError) -> Option<MessageResult> {
+    error.is_retryable().then_some(MessageResult::Nack)
+}
 
 /// 推送主队列消费者处理器
 ///
@@ -90,6 +96,15 @@ impl PushMainHandler {
         match self.route_handler.handle_message(ctx, req).await {
             Ok(()) => Ok(MessageResult::Ack),
             Err(e) => {
+                if let Some(result) = retry_or_dlq_result(&e) {
+                    tracing::warn!(
+                        error = %e,
+                        envelope_id = %envelope.envelope_id,
+                        "Retryable failure while handling message payload, NACKing for redelivery"
+                    );
+                    return Ok(result);
+                }
+
                 tracing::error!(
                     error = %e,
                     envelope_id = %envelope.envelope_id,
@@ -148,6 +163,15 @@ impl PushMainHandler {
         match self.route_handler.handle_event(ctx, req).await {
             Ok(()) => Ok(MessageResult::Ack),
             Err(e) => {
+                if let Some(result) = retry_or_dlq_result(&e) {
+                    tracing::warn!(
+                        error = %e,
+                        envelope_id = %envelope.envelope_id,
+                        "Retryable failure while handling event payload, NACKing for redelivery"
+                    );
+                    return Ok(result);
+                }
+
                 tracing::error!(
                     error = %e,
                     envelope_id = %envelope.envelope_id,
@@ -236,5 +260,29 @@ impl MessageHandler for PushMainHandler {
     /// 获取处理器名称
     fn name(&self) -> &str {
         "push-main-handler"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use flare_im_core::error::{ErrorBuilder, ErrorCode};
+
+    use super::*;
+
+    #[test]
+    fn retryable_error_requests_nack() {
+        let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "mq unavailable").build_error();
+
+        assert!(matches!(
+            retry_or_dlq_result(&err),
+            Some(MessageResult::Nack)
+        ));
+    }
+
+    #[test]
+    fn non_retryable_error_uses_dlq_path() {
+        let err = ErrorBuilder::new(ErrorCode::MessageSendFailed, "bad payload").build_error();
+
+        assert!(retry_or_dlq_result(&err).is_none());
     }
 }

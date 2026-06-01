@@ -1,0 +1,87 @@
+# Core 业务 Hook / 埋点接入示例。
+#
+# 复制到 config/hooks.d/business.toml 后按需启用。建议：
+# - 会影响主链决策的 Hook 使用 require_success = true + fail_fast。
+# - 旁路观测 Hook 使用 require_success = false + ignore。
+# - 高 QPS Hook 必须短超时、幂等、可降级。
+
+[[pre_send]]
+name = "risk-message-pre-send"
+description = "消息发送前风控/合规门禁，可拒绝发送或补充草稿 metadata"
+enabled = true
+priority = 100
+timeout_ms = 300
+require_success = true
+error_policy = "fail_fast"
+
+[pre_send.selector]
+conversation_types = ["single", "single_chat", "direct", "group", "group_chat"]
+message_types = ["text", "image", "file", "card", "custom"]
+
+[pre_send.transport]
+type = "grpc"
+endpoint = "discovery://risk-hook"
+
+[pre_send.metadata]
+hook_operation = "flare.hook.v1.pre_send"
+policy = "risk_message_gate"
+
+[[post_send]]
+name = "audit-message-post-send"
+description = "消息进入主链后的审计、归档、BI 统计"
+enabled = true
+priority = 10
+timeout_ms = 800
+require_success = false
+error_policy = "ignore"
+
+[post_send.selector]
+conversation_types = ["single", "group", "group_chat"]
+
+[post_send.transport]
+type = "grpc"
+endpoint = "discovery://audit-hook"
+
+[post_send.metadata]
+hook_operation = "flare.hook.v1.post_send"
+delivery = "reliable_async"
+
+[[delivery]]
+name = "analytics-message-delivery"
+description = "消息送达观测，用于送达率、端类型、通道质量分析"
+enabled = true
+priority = 10
+timeout_ms = 300
+require_success = false
+error_policy = "ignore"
+
+[delivery.selector]
+conversation_types = ["single", "group", "group_chat"]
+
+[delivery.transport]
+type = "grpc"
+endpoint = "discovery://analytics-hook"
+
+[delivery.metadata]
+hook_operation = "flare.hook.v1.delivery"
+delivery = "best_effort"
+
+[[recall]]
+name = "audit-message-recall"
+description = "消息撤回权限补充检查与审计"
+enabled = true
+priority = 80
+timeout_ms = 500
+require_success = true
+error_policy = "fail_fast"
+
+[recall.selector]
+conversation_types = ["single", "group", "group_chat"]
+
+[recall.transport]
+type = "grpc"
+endpoint = "discovery://audit-hook"
+
+[recall.metadata]
+hook_operation = "flare.hook.v1.recall"
+policy = "message_recall_audit"

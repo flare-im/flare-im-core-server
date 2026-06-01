@@ -92,7 +92,12 @@ impl StorageReaderClient {
             )
             .build_error()
         })?;
-        let channel = service_client.get_channel().await.map_err(|e| {
+        let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+            &self.service_name,
+            service_client,
+        )
+        .await
+        .map_err(|e| {
             map_infra_error(
                 e,
                 ErrorCode::ServiceUnavailable,
@@ -126,6 +131,7 @@ impl StorageReaderClient {
             limit,
             cursor: cursor.unwrap_or_default().to_string(),
             pagination: None,
+            include_burned_placeholder: false,
         }
     }
 
@@ -186,39 +192,36 @@ impl MessageProvider for StorageReaderClient {
     ) -> Result<Vec<flare_proto::common::Message>> {
         use tokio::task::JoinSet;
 
+        // 并行 fan-out 前单次初始化 discovery client，避免每个 task 各自 create_discover 打爆 Consul。
+        let _ = self.client().await?;
+
         let mut join_set = JoinSet::new();
-        let service_name = self.service_name.clone();
         let service_client = Arc::clone(&self.service_client);
+        let storage_service_name = self.service_name.clone();
         let ctx = ctx.clone();
 
         for conversation_id in conversation_ids {
             let conversation_id = conversation_id.clone();
-            let since_ts = client_cursor.get(&conversation_id).copied().unwrap_or(0);
+            let after_seq = client_cursor
+                .get(&conversation_id)
+                .copied()
+                .unwrap_or(0)
+                .max(0);
             let limit = limit_per_session;
-            let service_name = service_name.clone();
             let service_client = Arc::clone(&service_client);
+            let storage_service_name = storage_service_name.clone();
             let task_ctx = ctx.clone();
 
             join_set.spawn(async move {
                 let mut service_client_guard = service_client.lock().await;
-                if service_client_guard.is_none() && !service_name.is_empty() {
-                    let discover = flare_im_core::discovery::create_discover(&service_name)
-                        .await
-                        .map_err(|e| {
-                            map_infra_error(
-                                e,
-                                ErrorCode::ServiceUnavailable,
-                                "create service discover",
-                            )
-                        })?;
-
-                    if let Some(discover) = discover {
-                        *service_client_guard = Some(ServiceClient::new(discover));
-                    }
-                }
 
                 let channel: Channel = if let Some(service_client) = service_client_guard.as_mut() {
-                    match service_client.get_channel().await {
+                    match flare_im_core::discovery::get_discovered_channel_with_timeout(
+                        &storage_service_name,
+                        service_client,
+                    )
+                    .await
+                    {
                         Ok(ch) => ch,
                         Err(_e) => {
                             let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
@@ -248,20 +251,46 @@ impl MessageProvider for StorageReaderClient {
                 };
 
                 let mut client = StorageReaderServiceClient::new(channel);
-                let mut request = Request::new(Self::build_request(
-                    &task_ctx,
-                    &conversation_id,
-                    since_ts,
-                    None,
-                    limit,
-                ));
-                set_context_metadata(&mut request, &task_ctx);
-                let response = client
-                    .query_messages(request)
-                    .await
-                    .map_err(|e| grpc_call_failed("query_messages", e))?
-                    .into_inner();
-                Ok::<Vec<flare_proto::common::Message>, crate::error::FlareError>(response.messages)
+                if after_seq > 0 {
+                    let mut request =
+                        Request::new(flare_grpc_proto::storage::QueryMessagesBySeqRequest {
+                            conversation_id: conversation_id.to_string(),
+                            after_seq,
+                            before_seq: 0,
+                            limit,
+                            user_id: task_ctx
+                                .user_id()
+                                .map(|s| s.to_string())
+                                .unwrap_or_default(),
+                            include_burned_placeholder: false,
+                        });
+                    set_context_metadata(&mut request, &task_ctx);
+                    let response = client
+                        .query_messages_by_seq(request)
+                        .await
+                        .map_err(|e| grpc_call_failed("query_messages_by_seq", e))?
+                        .into_inner();
+                    Ok::<Vec<flare_proto::common::Message>, crate::error::FlareError>(
+                        response.messages,
+                    )
+                } else {
+                    let mut request = Request::new(Self::build_request(
+                        &task_ctx,
+                        &conversation_id,
+                        0,
+                        None,
+                        limit,
+                    ));
+                    set_context_metadata(&mut request, &task_ctx);
+                    let response = client
+                        .query_messages(request)
+                        .await
+                        .map_err(|e| grpc_call_failed("query_messages", e))?
+                        .into_inner();
+                    Ok::<Vec<flare_proto::common::Message>, crate::error::FlareError>(
+                        response.messages,
+                    )
+                }
             });
         }
 
@@ -313,6 +342,7 @@ impl MessageProvider for StorageReaderClient {
             before_seq: before_seq.unwrap_or(0),
             limit,
             user_id: ctx.user_id().map(|s| s.to_string()).unwrap_or_default(),
+            include_burned_placeholder: false,
         });
 
         set_context_metadata(&mut request, ctx);

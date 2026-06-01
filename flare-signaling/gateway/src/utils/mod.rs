@@ -8,8 +8,32 @@ use flare_core::common::protocol::{
     payload_command::Type as PayloadType,
 };
 use flare_proto::common::{Ack, AckType};
-use flare_proto::common::{CustomData, DataKind, DataPacket, Event, Message, SendAck, ack};
+use flare_proto::common::{
+    CustomData, DataKind, DataPacket, ErrorDetail, Event, Message, SendAck, ack,
+};
 use prost::Message as ProstMessage;
+
+#[derive(Debug, Clone)]
+pub struct SendAckFailure {
+    pub code: i32,
+    pub message: String,
+    pub error_detail: Option<ErrorDetail>,
+}
+
+impl SendAckFailure {
+    pub fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            error_detail: None,
+        }
+    }
+
+    pub fn with_error_detail(mut self, detail: ErrorDetail) -> Self {
+        self.error_detail = Some(detail);
+        self
+    }
+}
 
 /// 解码 MESSAGE 上行载荷
 pub fn decode_message_payload(payload: &[u8]) -> Result<Message, prost::DecodeError> {
@@ -36,7 +60,7 @@ pub fn build_message_ack_frame(
     message_id: &str,
     client_msg_id: &str,
     conversation_id: Option<&str>,
-    result: std::result::Result<(String, u64), (i32, String)>,
+    result: std::result::Result<(String, u64), SendAckFailure>,
 ) -> CoreResult<Frame> {
     let send_ack = match result {
         Ok((server_msg_id, seq)) => SendAck {
@@ -49,19 +73,19 @@ pub fn build_message_ack_frame(
             error_message: String::new(),
             server_time: None,
             ack_id: None,
-            metadata: Default::default(),
+            error_detail: None,
         },
-        Err((code, msg)) => SendAck {
+        Err(failure) => SendAck {
             client_msg_id: client_msg_id.to_string(),
             server_msg_id: String::new(),
             seq: 0,
             conversation_id: conversation_id.unwrap_or_default().to_string(),
             success: false,
-            error_code: code,
-            error_message: msg,
+            error_code: failure.code,
+            error_message: failure.message,
             server_time: None,
             ack_id: None,
-            metadata: Default::default(),
+            error_detail: failure.error_detail,
         },
     };
 

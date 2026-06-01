@@ -71,11 +71,12 @@ impl HookFactory for DefaultHookFactory {
         selector: &HookSelector,
     ) -> Result<Option<Arc<dyn PreSendHook>>> {
         match &def.transport {
-            HookTransportConfig::Grpc { metadata, .. } => {
-                let channel = self.grpc.channel_for(def)?;
+            HookTransportConfig::Grpc {
+                endpoint, metadata, ..
+            } => {
                 let mut merged = def.metadata.clone();
                 merged.extend(metadata.clone());
-                Ok(Some(self.grpc.build_pre_send(merged, channel)))
+                Ok(Some(self.grpc.build_pre_send(merged, endpoint.clone())))
             }
             HookTransportConfig::Webhook {
                 endpoint,
@@ -107,11 +108,12 @@ impl HookFactory for DefaultHookFactory {
         _selector: &HookSelector,
     ) -> Result<Option<Arc<dyn PostSendHook>>> {
         match &def.transport {
-            HookTransportConfig::Grpc { metadata, .. } => {
-                let channel = self.grpc.channel_for(def)?;
+            HookTransportConfig::Grpc {
+                endpoint, metadata, ..
+            } => {
                 let mut merged = def.metadata.clone();
                 merged.extend(metadata.clone());
-                Ok(Some(self.grpc.build_post_send(merged, channel)))
+                Ok(Some(self.grpc.build_post_send(merged, endpoint.clone())))
             }
             HookTransportConfig::Webhook {
                 endpoint,
@@ -143,11 +145,12 @@ impl HookFactory for DefaultHookFactory {
         _selector: &HookSelector,
     ) -> Result<Option<Arc<dyn DeliveryHook>>> {
         match &def.transport {
-            HookTransportConfig::Grpc { metadata, .. } => {
-                let channel = self.grpc.channel_for(def)?;
+            HookTransportConfig::Grpc {
+                endpoint, metadata, ..
+            } => {
                 let mut merged = def.metadata.clone();
                 merged.extend(metadata.clone());
-                Ok(Some(self.grpc.build_delivery(merged, channel)))
+                Ok(Some(self.grpc.build_delivery(merged, endpoint.clone())))
             }
             HookTransportConfig::Webhook {
                 endpoint,
@@ -179,11 +182,12 @@ impl HookFactory for DefaultHookFactory {
         _selector: &HookSelector,
     ) -> Result<Option<Arc<dyn RecallHook>>> {
         match &def.transport {
-            HookTransportConfig::Grpc { metadata, .. } => {
-                let channel = self.grpc.channel_for(def)?;
+            HookTransportConfig::Grpc {
+                endpoint, metadata, ..
+            } => {
                 let mut merged = def.metadata.clone();
                 merged.extend(metadata.clone());
-                Ok(Some(self.grpc.build_recall(merged, channel)))
+                Ok(Some(self.grpc.build_recall(merged, endpoint.clone())))
             }
             HookTransportConfig::Webhook {
                 endpoint,

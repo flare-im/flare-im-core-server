@@ -42,11 +42,33 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
                 .collect()
         };
 
+    let max_seq = summary.last_message_seq.unwrap_or(0).max(0) as u64;
+    let visible_after_seq = summary.visible_after_seq.max(0) as u64;
+    let unread_count = if visible_after_seq > 0 && max_seq <= visible_after_seq {
+        0
+    } else {
+        summary.unread_count as u32
+    };
+    let display_name = summary
+        .display_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            if summary.conversation_type == crate::domain::model::ConversationType::Single
+                && !summary.channel_id.trim().is_empty()
+            {
+                Some(summary.channel_id.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
         conversation_type: summary.conversation_type.as_int().to_string(),
         business_type: summary.business_type.unwrap_or_default(),
-        display_name: summary.display_name.unwrap_or_default(),
+        display_name,
         avatar_url: String::new(),
         last_message: Some(flare_proto::common::MessagePreview {
             message_id: summary.last_message_id.unwrap_or_default(),
@@ -55,12 +77,16 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
             text: String::new(),
             time: last_message_time,
         }),
-        unread_count: summary.unread_count as u32,
-        max_seq: summary.last_message_seq.unwrap_or(0).max(0) as u64,
-        last_read_seq: summary.last_read_seq.max(0) as u64,
-        is_muted: false,
-        is_pinned: false,
+        unread_count,
+        max_seq,
+        last_read_seq: (summary.last_read_seq.max(0) as u64).max(visible_after_seq),
+        is_muted: summary.is_muted,
+        is_pinned: summary.is_pinned,
         mute_until: None,
+        is_archived: summary.is_archived,
+        user_settings_version: summary.settings_version,
+        draft: summary.draft.clone().unwrap_or_default(),
+        visible_after_seq,
         updated_at: updated_at_for_sync.or(last_message_time),
         created_at: None,
         labels: Vec::new(),

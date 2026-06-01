@@ -13,13 +13,14 @@ use prost::Message as ProstMessage;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use flare_im_core::error::{ErrorCode, map_infra_error};
+use flare_im_core::error::{ErrorBuilder, ErrorCode, map_infra_error};
 use flare_server_core::context::Context as ServerContext;
 use tracing::{debug, info};
 
 use crate::domain::repository::{DefaultRouteRepository, RouteRepository};
 use crate::error::Result;
 use flare_im_core::ServiceClient;
+use flare_im_core::utils::normalize_tenant_id;
 
 /// SVID 常量定义
 pub mod svid {
@@ -53,6 +54,14 @@ impl CachedClient {
     }
 }
 
+/// 发现失败缓存（用于短时熔断，避免 Consul 被失败重试风暴打爆）
+struct CachedDiscoveryFailure {
+    /// 失败信息（用于日志）
+    reason: String,
+    /// 冷却截止时间
+    retry_after: Instant,
+}
+
 /// 消息转发服务
 pub struct MessageForwarder {
     /// 业务系统客户端缓存（key: "{svid}:{endpoint}"，value: CachedClient）
@@ -64,6 +73,10 @@ pub struct MessageForwarder {
     max_cache_size: usize,
     /// 客户端最大空闲时间（超过此时间未使用会被清理）
     max_idle_duration: Duration,
+    /// 发现失败短时缓存（key: "{svid}:{endpoint}"）
+    discovery_failures: Arc<RwLock<HashMap<String, CachedDiscoveryFailure>>>,
+    /// 发现失败后的冷却时长（避免连续失败时创建大量 discover 任务）
+    discovery_failure_cooldown: Duration,
 }
 
 impl MessageForwarder {
@@ -74,6 +87,8 @@ impl MessageForwarder {
             default_tenant_id,
             max_cache_size: 100,                         // 最多缓存 100 个客户端
             max_idle_duration: Duration::from_secs(300), // 5 分钟空闲后清理
+            discovery_failures: Arc::new(RwLock::new(HashMap::new())),
+            discovery_failure_cooldown: Duration::from_secs(3),
         }
     }
 
@@ -99,6 +114,40 @@ impl MessageForwarder {
         }
     }
 
+    /// 检查发现失败冷却是否生效
+    async fn check_discovery_cooldown(&self, cache_key: &str) -> Option<(Duration, String)> {
+        let failures = self.discovery_failures.read().await;
+        let failure = failures.get(cache_key)?;
+        if failure.retry_after > Instant::now() {
+            Some((
+                failure
+                    .retry_after
+                    .saturating_duration_since(Instant::now()),
+                failure.reason.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// 记录发现失败（触发短时冷却）
+    async fn mark_discovery_failure(&self, cache_key: &str, reason: String) {
+        let mut failures = self.discovery_failures.write().await;
+        failures.insert(
+            cache_key.to_string(),
+            CachedDiscoveryFailure {
+                reason,
+                retry_after: Instant::now() + self.discovery_failure_cooldown,
+            },
+        );
+    }
+
+    /// 清理发现失败状态
+    async fn clear_discovery_failure(&self, cache_key: &str) {
+        let mut failures = self.discovery_failures.write().await;
+        failures.remove(cache_key);
+    }
+
     /// 从缓存获取客户端，如果不存在或已失效则创建新的
     async fn get_or_create_cached_client(
         &self,
@@ -121,8 +170,33 @@ impl MessageForwarder {
             }
         }
 
+        // 熔断：最近刚失败过时快速失败，避免持续新建 discover 导致服务发现雪崩
+        if let Some((remaining, reason)) = self.check_discovery_cooldown(&cache_key).await {
+            return Err(map_infra_error(
+                std::io::Error::other(format!(
+                    "Service discovery is cooling down for key={cache_key}, remaining={}ms, last_error={reason}",
+                    remaining.as_millis()
+                )),
+                ErrorCode::ServiceUnavailable,
+                &format!(
+                    "Service discovery temporarily unavailable for {} (cooldown={}ms)",
+                    endpoint,
+                    remaining.as_millis()
+                ),
+            ));
+        }
+
         // 慢速路径：需要创建新客户端（写锁）
-        let new_client = self.create_business_client(endpoint, svid).await?;
+        let new_client = match self.create_business_client(endpoint, svid).await {
+            Ok(client) => {
+                self.clear_discovery_failure(&cache_key).await;
+                client
+            }
+            Err(e) => {
+                self.mark_discovery_failure(&cache_key, e.to_string()).await;
+                return Err(e);
+            }
+        };
 
         // 检查缓存大小，必要时清理
         let mut clients = self.business_clients.write().await;
@@ -452,10 +526,12 @@ impl MessageForwarder {
             svid: resolved_svid.to_string(),
         };
 
-        let forwarding_ctx = match ctx.tenant_id().filter(|t| !t.is_empty()) {
-            Some(_) => ctx.clone(),
-            None => ctx.with_tenant_id(self.default_tenant_id.clone()),
-        };
+        let forwarding_ctx = ctx.with_tenant_id(
+            ctx.tenant_id()
+                .filter(|tenant_id| !tenant_id.trim().is_empty())
+                .map(normalize_tenant_id)
+                .unwrap_or_else(|| normalize_tenant_id(&self.default_tenant_id)),
+        );
 
         let mut grpc_request = tonic::Request::new(request);
         flare_server_core::grpc::utils::encode_context_to_metadata(
@@ -478,6 +554,13 @@ impl MessageForwarder {
                     error_message = %e.message(),
                     "❌ Failed to send message to business service"
                 );
+                if let Ok(detail) = flare_proto::common::ErrorDetail::decode(e.details()) {
+                    let code = ErrorCode::from_u32(detail.code.max(0) as u32)
+                        .unwrap_or(ErrorCode::GeneralError);
+                    return Err(ErrorBuilder::new(code, detail.reason)
+                        .details(detail.message)
+                        .build_error());
+                }
                 return Err(map_infra_error(
                     std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
@@ -571,10 +654,12 @@ impl MessageForwarder {
 
         let mut client = self.get_business_client(&endpoint, resolved_svid).await?;
 
-        let forwarding_ctx = match ctx.tenant_id().filter(|t| !t.is_empty()) {
-            Some(_) => ctx.clone(),
-            None => ctx.with_tenant_id(self.default_tenant_id.clone()),
-        };
+        let forwarding_ctx = ctx.with_tenant_id(
+            ctx.tenant_id()
+                .filter(|tenant_id| !tenant_id.trim().is_empty())
+                .map(normalize_tenant_id)
+                .unwrap_or_else(|| normalize_tenant_id(&self.default_tenant_id)),
+        );
 
         let exec_req = ExecuteEventRequest {
             svid: resolved_svid.to_string(),

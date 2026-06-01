@@ -17,13 +17,14 @@ use tracing::instrument;
 
 use crate::application::commands::{
     AddReactionCommand, DeleteMessageCommand, EditMessageCommand, MarkMessageCommand,
-    PinMessageCommand, ReadMessageCommand, RecallMessageCommand, RemoveReactionCommand,
-    UnmarkMessageCommand, UnpinMessageCommand,
+    PinMessageCommand, ReadBurnMessageCommand, ReadMessageCommand, RecallMessageCommand,
+    RemoveReactionCommand, UnmarkMessageCommand, UnpinMessageCommand,
 };
 use crate::application::handlers::EventHandler;
 use crate::domain::builder::{
-    build_delete_event, build_edit_event, build_mark_event, build_pin_event, build_reaction_event,
-    build_read_receipt_event, build_recall_event, build_unmark_event, build_unpin_event,
+    build_burn_scheduled_event, build_delete_event, build_edit_event, build_mark_event,
+    build_pin_event, build_reaction_event, build_read_receipt_event, build_recall_event,
+    build_unmark_event, build_unpin_event,
 };
 use crate::error::Result;
 
@@ -160,14 +161,49 @@ impl MessageActionHandler {
     pub async fn mark_message_read(&self, ctx: &Ctx, cmd: ReadMessageCommand) -> Result<()> {
         // 1. 构建已读回执事件
         // TODO: 从存储获取消息的 seq
-        let event = build_read_receipt_event(
+        let mut event = build_read_receipt_event(
             &cmd.base.conversation_id,
             &cmd.base.operator_id,
             0, // TODO: 从消息存储获取 seq
         );
+        if let Some(flare_proto::common::event::Payload::Read(read)) = event.payload.as_mut() {
+            read.message_ids = cmd.message_ids.clone();
+            read.read_at = cmd.read_at.map(|t| prost_types::Timestamp {
+                seconds: t.timestamp(),
+                nanos: t.timestamp_subsec_nanos() as i32,
+            });
+            read.burn_after_read = Some(cmd.burn_after_read);
+        }
 
         // 2. 调用 EventHandler 处理事件
         self.event_handler.handle_event(ctx, event).await
+    }
+
+    /// 阅后即焚单条已读：由调用方先完成消息存在性、可见性和 burn 配置查询后进入本命令。
+    #[instrument(skip(self, ctx), fields(
+        request_id = %ctx.request_id(),
+        trace_id = %ctx.trace_id(),
+        message_id = %cmd.message_id,
+    ))]
+    pub async fn read_burn_message(&self, ctx: &Ctx, cmd: ReadBurnMessageCommand) -> Result<i64> {
+        if cmd.burn_after_read_seconds <= 0 {
+            return Err(flare_server_core::flare_err!(
+                crate::error::ErrorCode::InvalidParameter,
+                "burn_after_read_seconds must be positive"
+            ));
+        }
+        let read_at = cmd.read_at.timestamp();
+        let burn_at = read_at.saturating_add(cmd.burn_after_read_seconds);
+        let event = build_burn_scheduled_event(
+            &cmd.tenant_id,
+            &cmd.conversation_id,
+            &cmd.message_id,
+            Some(&cmd.reader_id),
+            burn_at,
+            read_at,
+        );
+        self.event_handler.handle_event(ctx, event).await?;
+        Ok(burn_at)
     }
 
     /// 添加反应

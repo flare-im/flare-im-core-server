@@ -22,6 +22,7 @@ use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
+use flare_im_core::BurnStatus;
 use flare_im_core::Ctx;
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
@@ -57,6 +58,24 @@ impl OptimizedPostgresMessageStorageImpl {
     }
 }
 
+fn apply_burn_query_visibility(message: &mut Message, include_placeholder: bool) -> bool {
+    match message.burn_status() {
+        BurnStatus::Burned | BurnStatus::HardDeleted => {
+            if !include_placeholder {
+                return false;
+            }
+            message.content.clear();
+            message.offline_push_info = None;
+            message.extensions.clear();
+            message
+                .extra
+                .insert("burn_placeholder".to_string(), "该消息已销毁".to_string());
+            true
+        }
+        _ => true,
+    }
+}
+
 #[async_trait]
 impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     #[instrument(skip(self, _message), fields(message_id = %_message.server_id))]
@@ -85,6 +104,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: i32,
+        include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
         let _ = ctx; // 上下文用于日志追踪
         let start = Instant::now();
@@ -121,7 +141,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     metrics.record_cache_hit("redis");
                 }
 
-                return Ok(domain_messages);
+                let mut visible = Vec::with_capacity(domain_messages.len());
+                for mut message in domain_messages {
+                    if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                        visible.push(message);
+                    }
+                }
+                return Ok(visible);
             }
         }
 
@@ -270,7 +296,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
-            messages.push(self.base.row_to_message(&row)?);
+            let mut message = self.base.row_to_message(&row)?;
+            if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                messages.push(message);
+            }
         }
 
         // 反转顺序，使最旧的消息在前（符合历史消息查询习惯）
@@ -317,6 +346,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         after_seq: i64,
         before_seq: Option<i64>,
         limit: i32,
+        include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
         let _ = ctx; // 上下文用于日志追踪
         let limit = limit.min(1000).max(1);
@@ -447,7 +477,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
-            messages.push(self.base.row_to_message(&row)?);
+            let mut message = self.base.row_to_message(&row)?;
+            if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                messages.push(message);
+            }
         }
 
         Ok(messages)
@@ -1216,7 +1249,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             let mut max_seq = 0;
 
             for row in rows {
-                let message = self.base.row_to_message(&row)?;
+                let mut message = self.base.row_to_message(&row)?;
+                if !apply_burn_query_visibility(&mut message, false) {
+                    continue;
+                }
                 let seq_i64 = message.seq as i64;
                 max_seq = max_seq.max(seq_i64);
                 messages.push(message);

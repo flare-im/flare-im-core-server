@@ -3,6 +3,18 @@ use prost::Message as _;
 
 use crate::domain::MessageCategory;
 
+/// 从 Message.content 解析 NotificationContent.persistent；非 Notification 返回 None。
+pub fn notification_persistent(message: &StorageMessage) -> Option<bool> {
+    if message.content.is_empty() {
+        return None;
+    }
+    let content = flare_proto::common::MessageContent::decode(message.content.as_slice()).ok()?;
+    match content.content.as_ref()? {
+        flare_proto::common::message_content::Content::Notification(n) => Some(n.persistent),
+        _ => None,
+    }
+}
+
 /// 统一的消息类型推断与归一化
 #[derive(Debug, Clone)]
 pub struct MessageProfile {

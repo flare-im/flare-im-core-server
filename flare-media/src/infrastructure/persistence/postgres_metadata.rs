@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::error::{ErrorCode, FlareError, Result, map_infra_error};
 use chrono::{DateTime, Utc};
+use flare_im_core::utils::normalize_tenant_id;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool, Row};
@@ -184,12 +185,12 @@ impl MediaMetadataStore for PostgresMetadataStore {
     async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()> {
         let metadata_json = Self::metadata_to_json(&metadata.metadata)?;
 
-        // 从 metadata 中提取 tenant_id，如果没有则使用默认值（向后兼容）
+        // 从 metadata 中提取 tenant_id；默认租户统一归一为 0。
         let tenant_id = metadata
             .metadata
             .get("tenant_id")
-            .cloned()
-            .unwrap_or_else(|| "default".to_string());
+            .map(normalize_tenant_id)
+            .unwrap_or_else(|| "0".to_string());
 
         sqlx::query(
             r#"
@@ -457,10 +458,9 @@ impl MediaReferenceStore for PostgresMetadataStore {
                 })?;
 
             if let Some(row) = row {
-                row.get("tenant_id")
+                normalize_tenant_id(row.get::<String, _>("tenant_id"))
             } else {
-                // 如果找不到，使用默认值（向后兼容）
-                "default".to_string()
+                "0".to_string()
             }
         };
 

@@ -6,6 +6,7 @@ use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use crate::domain::model::{Event, EventPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
 
+mod burn;
 mod delete;
 mod edit;
 mod mark;
@@ -64,6 +65,9 @@ pub fn primary_message_id_for_metrics(event: &Event) -> String {
             EventPayload::Unmark(u) => Some(u.server_msg_id.clone()),
             EventPayload::Reaction(r) => Some(r.server_msg_id.clone()),
             EventPayload::Read(r) => r.message_ids.first().cloned(),
+            EventPayload::BurnScheduled(b) => Some(b.message_id.clone()),
+            EventPayload::Burned(b) => Some(b.message_id.clone()),
+            EventPayload::HardDeleted(b) => Some(b.message_id.clone()),
             _ => None,
         })
         .unwrap_or_default()
@@ -85,6 +89,9 @@ where
         Some(EventPayload::Unpin(p)) => unpin::apply_unpin(ctx, event, p).await,
         Some(EventPayload::Mark(p)) => mark::apply_mark(ctx, event, p).await,
         Some(EventPayload::Unmark(p)) => unmark::apply_unmark(ctx, event, p).await,
+        Some(EventPayload::BurnScheduled(p)) => burn::apply_burn_scheduled(ctx, event, p).await,
+        Some(EventPayload::Burned(p)) => burn::apply_burned(ctx, event, p).await,
+        Some(EventPayload::HardDeleted(p)) => burn::apply_hard_deleted(ctx, event, p).await,
         _ => {
             tracing::trace!(r#type = ?event.r#type, "Unsupported or non-operation event, skip");
             Ok(())

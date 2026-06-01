@@ -1,4 +1,4 @@
-//! 客户端 ACK 上行路由：Push / Conversation / Batch → Push Proxy（JetStream ack topic）。
+//! 客户端 ACK 上行路由：Conversation / Batch → Conversation 服务；PushAck 仅占位日志。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,12 +61,12 @@ impl AckRoutingHandler {
             request_id = %ctx.request_id(),
             svid = %svid,
             total_duration_ms = total_duration.as_millis(),
-            "client Ack routed to push proxy"
+            "client Ack routed"
         );
 
         Ok(MessageRouteResult {
             response_data: vec![],
-            routed_endpoint: "push-proxy".to_string(),
+            routed_endpoint: "flare-conversation".to_string(),
             metadata: build_route_metadata(
                 total_duration.as_millis() as i64,
                 total_duration.as_millis() as i64,

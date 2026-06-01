@@ -305,6 +305,13 @@ impl PostgresBaseStorage {
         let message_type: i32 = row.get("message_type");
         let content: Option<Vec<u8>> = row.get("content");
         let status: i32 = row.get("status");
+        let burn_enabled: bool = row.try_get("burn_enabled").unwrap_or(false);
+        let burn_after_read_seconds: Option<i64> =
+            row.try_get("burn_after_read_seconds").unwrap_or(None);
+        let burn_status: i32 = row.try_get("burn_status").unwrap_or(0);
+        let first_read_at: Option<i64> = row.try_get("first_read_at").unwrap_or(None);
+        let burn_at: Option<i64> = row.try_get("burn_at").unwrap_or(None);
+        let burned_at: Option<i64> = row.try_get("burned_at").unwrap_or(None);
         let offline_push_info: Option<Value> = row.get("offline_push_info");
         let extra: Option<Value> = row.get("extra");
         let extensions: Option<Value> = row.get("extensions");
@@ -387,6 +394,12 @@ impl PostgresBaseStorage {
             channel_id: channel_id.unwrap_or_default(),
             content: content.unwrap_or_default(),
             status,
+            burn_enabled,
+            burn_after_read_seconds,
+            burn_status,
+            first_read_at,
+            burn_at,
+            burned_at,
             offline_push_info: offline_push_proto,
             extra: extra_map,
             extensions: extensions_map,

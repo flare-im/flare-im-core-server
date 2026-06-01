@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
+use flare_proto::common::BurnStatus;
 use tracing::instrument;
 
 use crate::application::commands::{SendMessageCommand, SendSystemMessageCommand};
@@ -69,16 +70,36 @@ impl MessageHandler {
         cmd: SendMessageCommand,
     ) -> Result<(String, u64)> {
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let mut message = cmd.message;
+        let burn_enabled = cmd.burn_enabled || message.burn_enabled;
+        let burn_after_read_seconds = cmd
+            .burn_after_read_seconds
+            .or(message.burn_after_read_seconds);
+        if burn_enabled {
+            let Some(after_read_seconds) = burn_after_read_seconds.filter(|seconds| *seconds > 0)
+            else {
+                return Err(flare_server_core::flare_err!(
+                    crate::error::ErrorCode::InvalidParameter,
+                    "burn_after_read_seconds must be positive when burn is enabled"
+                ));
+            };
+            message.burn_enabled = true;
+            message.burn_after_read_seconds = Some(after_read_seconds);
+            message.burn_status = BurnStatus::Init as i32;
+            message.first_read_at = None;
+            message.burn_at = None;
+            message.burned_at = None;
+        }
 
         // 1. 校验消息
         self.message_domain_service
-            .validate_message(ctx, &tenant_id, &cmd.message)
+            .validate_message(ctx, &tenant_id, &message)
             .await?;
 
         // 2. 执行 PreSend Hook（经统一扩展编排器）
         let hook_context = self
             .extension_orchestrator
-            .execute_pre_send(ctx, cmd.message, true)
+            .execute_pre_send(ctx, message, true)
             .await?;
 
         // 3. 准备消息并分配序列号
@@ -92,13 +113,18 @@ impl MessageHandler {
             .write_wal_if_needed(&submission, &profile)
             .await?;
 
-        // 5. 确保会话存在
-        self.conversation_ensure_service
-            .ensure_conversation(
-                ctx,
-                &build_conversation_ensure_request_from_message(&submission.message, &tenant_id),
-            )
-            .await?;
+        // 5. 确保会话存在（Social SyncSignal 内部路由 `sync:{owner}` 仅在线推送，不落会话表）
+        if !submission.message.conversation_id.starts_with("sync:") {
+            self.conversation_ensure_service
+                .ensure_conversation(
+                    ctx,
+                    &build_conversation_ensure_request_from_message(
+                        &submission.message,
+                        &tenant_id,
+                    ),
+                )
+                .await?;
+        }
 
         // 6. 消息装饰
         submission.message = self
@@ -109,6 +135,12 @@ impl MessageHandler {
         // 7. 推送消息
         let persistence_mode = if profile.is_temporary() {
             PersistenceMode::ForcePushOnly
+        } else if profile.is_notification() {
+            // NotificationContent.persistent=false → 仅在线推送，不走 storage 队列（BusinessEphemeral）
+            match crate::domain::model::notification_persistent(&submission.message) {
+                Some(false) => PersistenceMode::ForcePushOnly,
+                _ => PersistenceMode::Auto,
+            }
         } else {
             PersistenceMode::Auto
         };
@@ -139,6 +171,8 @@ impl MessageHandler {
             message: cmd.message,
             conversation_id: cmd.conversation_id,
             sync: false,
+            burn_enabled: false,
+            burn_after_read_seconds: None,
         };
         let (message_id, _) = self.handle_send_message(ctx, send_cmd).await?;
         Ok(message_id)

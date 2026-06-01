@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result, map_infra_error, require_user_id};
+use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use tracing::debug;
@@ -96,6 +96,14 @@ impl PostgresConversationRepository {
             if s.channel_id.is_empty() {
                 if let Some(peer) = peer_by_cid.get(&s.conversation_id) {
                     s.channel_id.clone_from(peer);
+                    if s.display_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                    {
+                        s.display_name = Some(peer.clone());
+                    }
                 }
             }
         }
@@ -259,12 +267,39 @@ impl ConversationRepository for PostgresConversationRepository {
                 s.attributes,
                 s.visibility,
                 s.lifecycle_state,
-                GREATEST(s.updated_at, sp.joined_at, sp.updated_at) AS effective_updated_at,
-                s.last_message_seq,
+                GREATEST(
+                    s.updated_at,
+                    sp.joined_at,
+                    sp.updated_at,
+                    COALESCE(message_tail.last_message_at, s.updated_at)
+                ) AS effective_updated_at,
+                GREATEST(
+                    COALESCE(s.last_message_seq, 0),
+                    COALESCE(message_tail.max_seq, 0)
+                ) AS last_message_seq,
                 COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(sp.last_read_seq, 0) as last_read_seq,
-                COALESCE(sp.unread_count, 0) as unread_count,
-                COALESCE(peer.max_peer_read_seq, 0) AS peer_read_seq
+                GREATEST(
+                    COALESCE(sp.unread_count, 0),
+                    COALESCE(unread_tail.unread_count, 0)
+                ) as unread_count,
+                COALESCE(sp.muted, false) as muted,
+                COALESCE(sp.pinned, false) as pinned,
+                COALESCE(sp.is_archived, false) as is_archived,
+                COALESCE(sp.settings_version, 0) as settings_version,
+                sp.draft as draft,
+                -- visible_after_seq 是历史可见边界，不是同步游标。
+                -- 当前服务端未持久化用户级清空历史边界，不能用 last_sync_seq / user_sync_cursor 代替。
+                0::BIGINT AS visible_after_seq,
+                CASE
+                    WHEN COALESCE(peer.max_peer_read_seq, 0) <= GREATEST(
+                        COALESCE(s.last_message_seq, 0),
+                        COALESCE(message_tail.max_seq, 0),
+                        0
+                    )
+                    THEN COALESCE(peer.max_peer_read_seq, 0)
+                    ELSE 0
+                END AS peer_read_seq
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
             LEFT JOIN LATERAL (
@@ -275,6 +310,21 @@ impl ConversationRepository for PostgresConversationRepository {
                   AND sp2.user_id <> $2
                   AND NOT COALESCE(sp2.is_deleted, false)
             ) peer ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT MAX(m.seq) AS max_seq, MAX(m.timestamp) AS last_message_at
+                FROM messages m
+                WHERE m.tenant_id = s.tenant_id
+                  AND m.conversation_id = s.conversation_id
+            ) message_tail ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(1)::INT AS unread_count
+                FROM messages m
+                WHERE m.tenant_id = s.tenant_id
+                  AND m.conversation_id = s.conversation_id
+                  AND m.seq > COALESCE(sp.last_read_seq, 0)
+                  AND m.sender_id <> $2
+                  AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+            ) unread_tail ON TRUE
             WHERE s.tenant_id = $1
               AND sp.tenant_id = $1
               AND sp.user_id = $2
@@ -306,6 +356,12 @@ impl ConversationRepository for PostgresConversationRepository {
             let channel_id: String = row.get("channel_id");
             let last_read_seq: i64 = row.get("last_read_seq");
             let unread_count: i32 = row.get("unread_count");
+            let is_muted: bool = row.get("muted");
+            let is_pinned: bool = row.get("pinned");
+            let is_archived: bool = row.get("is_archived");
+            let settings_version: i64 = row.get("settings_version");
+            let draft: Option<String> = row.get("draft");
+            let visible_after_seq: i64 = row.get("visible_after_seq");
             let peer_read_seq: i64 = row.get("peer_read_seq");
 
             let attributes: HashMap<String, String> = attributes
@@ -316,6 +372,16 @@ impl ConversationRepository for PostgresConversationRepository {
                 "peer_read_seq".to_string(),
                 peer_read_seq.max(0).to_string(),
             );
+            attributes.insert("is_muted".to_string(), is_muted.to_string());
+            attributes.insert("is_pinned".to_string(), is_pinned.to_string());
+            attributes.insert("is_archived".to_string(), is_archived.to_string());
+            attributes.insert(
+                "user_settings_version".to_string(),
+                settings_version.max(0).to_string(),
+            );
+            if let Some(d) = draft.as_ref().filter(|v| !v.is_empty()) {
+                attributes.insert("draft".to_string(), d.clone());
+            }
 
             // 注释：最后一条消息信息将在ApplicationService层通过MessageProvider补充
             // server_cursor_ts 必须表达「会话列表行更新时间」，供 sync snapshot 做增量过滤。
@@ -343,6 +409,12 @@ impl ConversationRepository for PostgresConversationRepository {
                 channel_id,
                 participant_version: 0,
                 member_preview: Vec::new(),
+                is_muted,
+                is_pinned,
+                is_archived,
+                settings_version: settings_version.max(0) as u64,
+                draft,
+                visible_after_seq: visible_after_seq.max(0),
             };
 
             summaries.push(summary);
@@ -480,6 +552,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     muted = EXCLUDED.muted,
                     pinned = EXCLUDED.pinned,
                     attributes = EXCLUDED.attributes,
+                    is_deleted = FALSE,
                     updated_at = CURRENT_TIMESTAMP
                 "#,
             )
@@ -657,30 +730,109 @@ impl ConversationRepository for PostgresConversationRepository {
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         if hard_delete {
-            // 物理删除（级联删除参与者）
+            // 物理删除：消息/事件与元数据一并清理，避免同 conversation_id 重建后 sync 拉回旧历史。
+            let mut tx =
+                self.pool.begin().await.map_err(|e| {
+                    map_infra_error(e, ErrorCode::DatabaseError, "begin transaction")
+                })?;
+
+            for stmt in [
+                "DELETE FROM pinned_messages WHERE tenant_id = $1 AND conversation_id = $2",
+                "DELETE FROM marked_messages WHERE tenant_id = $1 AND conversation_id = $2",
+                "DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2",
+                "DELETE FROM messages WHERE tenant_id = $1 AND conversation_id = $2",
+            ] {
+                sqlx::query(stmt)
+                    .bind(tenant_id)
+                    .bind(conversation_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::DatabaseError,
+                            "Failed to purge conversation messages",
+                        )
+                    })?;
+            }
+
             sqlx::query("DELETE FROM conversations WHERE tenant_id = $1 AND conversation_id = $2")
                 .bind(tenant_id)
                 .bind(conversation_id)
-                .execute(&*self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| {
                     map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation")
                 })?;
+
+            tx.commit().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "commit conversation hard delete",
+                )
+            })?;
         } else {
-            // 软删除（更新生命周期状态）
+            // 用户侧软删除：只隐藏当前用户的会话视图，并把消息同步游标推进到当前尾部。
+            // 这保留全局会话与对端视图；同一用户重新加入/重建会话后不会重新拉回删除前历史。
+            let user_id = require_user_id(ctx)?;
+            let mut tx = self.pool.begin().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "begin conversation soft delete",
+                )
+            })?;
+
             sqlx::query(
                 r#"
-                UPDATE conversations
-                SET lifecycle_state = 'deleted', updated_at = CURRENT_TIMESTAMP
-                WHERE tenant_id = $1 AND conversation_id = $2
+                WITH tail AS (
+                    SELECT COALESCE(last_message_seq, 0) AS max_seq
+                    FROM conversations
+                    WHERE tenant_id = $1 AND conversation_id = $2
+                ),
+                participant AS (
+                    UPDATE conversation_participants sp
+                    SET
+                        is_deleted = TRUE,
+                        is_archived = FALSE,
+                        draft = NULL,
+                        unread_count = 0,
+                        last_read_seq = GREATEST(COALESCE(sp.last_read_seq, 0), (SELECT max_seq FROM tail)),
+                        last_sync_seq = GREATEST(COALESCE(sp.last_sync_seq, 0), (SELECT max_seq FROM tail)),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE sp.tenant_id = $1
+                      AND sp.conversation_id = $2
+                      AND sp.user_id = $3
+                    RETURNING (SELECT max_seq FROM tail) AS max_seq
+                )
+                INSERT INTO user_sync_cursor (
+                    tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at
+                )
+                SELECT $1, $3, $2, GREATEST(COALESCE(max_seq, 0), 0), (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT, CURRENT_TIMESTAMP
+                FROM participant
+                ON CONFLICT (tenant_id, user_id, conversation_id)
+                DO UPDATE SET
+                    last_synced_seq = GREATEST(COALESCE(user_sync_cursor.last_synced_seq, 0), EXCLUDED.last_synced_seq),
+                    last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
             )
             .bind(tenant_id)
             .bind(conversation_id)
-            .execute(&*self.pool)
+            .bind(&user_id)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "Failed to delete conversation")
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to soft delete conversation")
+            })?;
+
+            tx.commit().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "commit conversation soft delete",
+                )
             })?;
         }
 
@@ -717,6 +869,8 @@ impl ConversationRepository for PostgresConversationRepository {
                     muted = $5,
                     pinned = $6,
                     attributes = $7,
+                    is_deleted = FALSE,
+                    quit_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 "#,
             )
@@ -1106,6 +1260,7 @@ impl ConversationRepository for PostgresConversationRepository {
             bind_index += 1;
             conditions.push(format!("sp.user_id = ${}", bind_index));
             bind_index += 1;
+            conditions.push("NOT COALESCE(sp.is_deleted, false)".to_string());
         }
 
         // 应用过滤器
@@ -1253,6 +1408,12 @@ impl ConversationRepository for PostgresConversationRepository {
                     channel_id,
                     participant_version: 0,
                     member_preview: Vec::new(),
+                    is_muted: false,
+                    is_pinned: false,
+                    is_archived: false,
+                    settings_version: 0,
+                    draft: None,
+                    visible_after_seq: 0,
                 }
             })
             .collect();
@@ -1424,6 +1585,86 @@ impl ConversationRepository for PostgresConversationRepository {
         }
 
         Ok(())
+    }
+
+    async fn update_user_settings(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        patch: &crate::domain::model::UpdateConversationUserSettingsPatch,
+    ) -> Result<crate::domain::model::ConversationUserSettings> {
+        use crate::domain::model::ConversationUserSettings;
+
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let user_id = require_user_id(ctx)?;
+
+        let has_patch = patch.is_pinned.is_some()
+            || patch.is_muted.is_some()
+            || patch.is_archived.is_some()
+            || patch.draft.is_some();
+        if !has_patch {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "at least one user setting field is required",
+            )
+            .build_error());
+        }
+
+        let row = sqlx::query(
+            r#"
+            UPDATE conversation_participants sp
+            SET
+                pinned = CASE WHEN $5::bool IS NOT NULL THEN $5 ELSE sp.pinned END,
+                muted = CASE WHEN $6::bool IS NOT NULL THEN $6 ELSE sp.muted END,
+                is_archived = CASE WHEN $7::bool IS NOT NULL THEN $7 ELSE sp.is_archived END,
+                draft = CASE
+                    WHEN $8::text IS NULL THEN sp.draft
+                    WHEN $8 = '' THEN NULL
+                    ELSE $8
+                END,
+                settings_version = sp.settings_version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE sp.tenant_id = $1
+              AND sp.conversation_id = $2
+              AND sp.user_id = $3
+              AND NOT COALESCE(sp.is_deleted, false)
+              AND ($4 = 0 OR sp.settings_version = $4)
+            RETURNING sp.pinned, sp.muted, sp.is_archived, sp.draft, sp.settings_version
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&patch.conversation_id)
+        .bind(&user_id)
+        .bind(patch.base_settings_version as i64)
+        .bind(patch.is_pinned)
+        .bind(patch.is_muted)
+        .bind(patch.is_archived)
+        .bind(patch.draft.as_deref())
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "update user settings"))?;
+
+        let Some(row) = row else {
+            if patch.base_settings_version > 0 {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::HttpConflict,
+                    "user settings version conflict or participant not found",
+                )
+                .build_error());
+            }
+            return Err(ErrorBuilder::new(
+                ErrorCode::HttpNotFound,
+                "conversation participant not found",
+            )
+            .build_error());
+        };
+
+        Ok(ConversationUserSettings {
+            is_pinned: row.get("pinned"),
+            is_muted: row.get("muted"),
+            is_archived: row.get("is_archived"),
+            draft: row.get::<Option<String>, _>("draft"),
+            settings_version: row.get::<i64, _>("settings_version").max(0) as u64,
+        })
     }
 
     async fn apply_message_event(

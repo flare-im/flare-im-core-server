@@ -502,6 +502,8 @@ pub async fn serve_file(
                     expires_in: 3600,
                     download: false,
                     response_headers: HashMap::new(),
+                    burn_protected: false,
+                    burn_status: 0,
                 },
             )
             .await?;

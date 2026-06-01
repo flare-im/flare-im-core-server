@@ -35,11 +35,7 @@ pub fn build_pre_send_evaluate_input(
 ) -> PreSendEvaluateInput {
     let tenant_id = first_nonempty([
         hook_context.tenant_id.clone(),
-        draft
-            .metadata
-            .get("tenant_id")
-            .cloned()
-            .unwrap_or_default(),
+        draft.metadata.get("tenant_id").cloned().unwrap_or_default(),
     ])
     .unwrap_or_else(|| "0".to_string());
     let request_id = first_nonempty([
@@ -53,11 +49,7 @@ pub fn build_pre_send_evaluate_input(
     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let sender_user_id = first_nonempty([
         hook_context.operator_user_id.clone(),
-        draft
-            .metadata
-            .get("sender_id")
-            .cloned()
-            .unwrap_or_default(),
+        draft.metadata.get("sender_id").cloned().unwrap_or_default(),
     ])
     .unwrap_or_default();
     let conversation_id = first_nonempty([
@@ -90,18 +82,59 @@ pub fn build_pre_send_evaluate_input(
             .get("receiver_id")
             .cloned()
             .unwrap_or_default(),
-        hook_context.tags.get("receiver_id").cloned().unwrap_or_default(),
+        hook_context
+            .tags
+            .get("receiver_id")
+            .cloned()
+            .unwrap_or_default(),
     ]);
     let payload_type = draft
         .metadata
         .get("message_type")
         .or_else(|| draft.metadata.get("content_type"))
         .cloned();
+    let group_id = first_nonempty([
+        hook_context
+            .attributes
+            .get("group_id")
+            .cloned()
+            .unwrap_or_default(),
+        draft.metadata.get("group_id").cloned().unwrap_or_default(),
+        draft
+            .metadata
+            .get("channel_id")
+            .cloned()
+            .unwrap_or_default(),
+    ]);
+    let mention_all = first_nonempty([
+        draft
+            .metadata
+            .get("mention_all")
+            .cloned()
+            .unwrap_or_default(),
+        draft
+            .headers
+            .get("mention_all")
+            .cloned()
+            .unwrap_or_default(),
+    ]);
     let mut ext = Value::Object(Default::default());
     if let Some(peer) = peer_user_id {
         ext["direct_peer_user_id"] = json!(peer);
         ext["peer_user_id"] = json!(peer);
     }
+    if let Some(gid) = group_id {
+        ext["group_id"] = json!(gid);
+        ext["channel_id"] = json!(gid);
+    }
+    if let Some(flag) = mention_all {
+        ext["mention_all"] = json!(flag);
+    }
+    let payload = if draft.payload.is_empty() {
+        None
+    } else {
+        Some(draft.payload.clone())
+    };
     PreSendEvaluateInput {
         meta: CapabilityInvokeMeta::new(tenant_id, request_id),
         sender_user_id,
@@ -109,6 +142,7 @@ pub fn build_pre_send_evaluate_input(
         conversation_kind: conversation_kind_from_label(&conversation_type),
         rtc_intent: false,
         payload_type,
+        payload,
         ext,
     }
 }

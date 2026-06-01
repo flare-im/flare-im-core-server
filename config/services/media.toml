@@ -1,7 +1,8 @@
 # Media 服务配置
 
 [services.media]
-metadata_store = "flare-media"
+# 对应 base.toml [postgres.media]
+metadata_store = "media"
 metadata_cache = "media_metadata"
 object_store = "default"  # 使用默认的对象存储配置（现在是 rusFS）
 redis_ttl_seconds = 3600

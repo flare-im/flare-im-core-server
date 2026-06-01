@@ -7,10 +7,20 @@
 #   - multi:  启动多网关模式（启动多个 access-gateway 实例）
 #   - trace|debug: 第二参数，全量跟踪（RUST_LOG=trace；debug 为历史别名，仅排障）
 #   - 默认: 未设置环境变量 RUST_LOG 时使用「业务 debug + 第三方降噪」，避免 logs/ 暴涨
+#
+# Hook 配置档（推荐专用脚本）：
+#   ./scripts/start_server_core.sh    — config/hooks.core.toml，不注册业务 Hook
+#   ./scripts/start_server_social.sh  — config/hooks.social.toml，需 flare-social-hook
+#   FLARE_HOOKS_PROFILE=core|social ./scripts/start_server.sh ...
 
 set -e
 
-# 本地基础设施（Consul/Redis/Postgres 等）必须直连，避免系统 HTTP 代理拦截 localhost。
+# 降低本地 dev Consul 429：共享 discover 缓存 + 拉长刷新间隔（可被环境变量覆盖）
+export CONSUL_DISCOVERY_REFRESH_INTERVAL="${CONSUL_DISCOVERY_REFRESH_INTERVAL:-90}"
+export CONSUL_DISCOVER_CACHE_TTL_SECS="${CONSUL_DISCOVER_CACHE_TTL_SECS:-15}"
+export SERVICE_HEARTBEAT_INTERVAL="${SERVICE_HEARTBEAT_INTERVAL:-30}"
+
+# 本地基础设施必须直连，避免系统 HTTP 代理拦截 localhost。
 IM_CORE_NO_PROXY='localhost,127.0.0.1,::1'
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$IM_CORE_NO_PROXY"
 export no_proxy="${no_proxy:+$no_proxy,}$IM_CORE_NO_PROXY"
@@ -26,6 +36,108 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
+
+cleanup_launchctl_dev_labels() {
+    if ! command -v launchctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local label
+    for label in \
+        flare-signaling-online-dev \
+        flare-signaling-route-dev \
+        flare-capability-dev \
+        flare-conversation-dev \
+        flare-message-orchestrator-dev \
+        flare-storage-writer-dev \
+        flare-storage-reader-dev \
+        flare-sync-orchestrator-dev \
+        flare-push-server-dev \
+        flare-push-worker-dev \
+        flare-media-dev \
+        flare-core-gateway-dev \
+        flare-access-gateway-dev \
+        flare-access-gateway-beijing-1-dev \
+        flare-access-gateway-shanghai-1-dev; do
+        launchctl remove "$label" >/dev/null 2>&1 || true
+    done
+}
+
+echo -e "${YELLOW}🧹 清理本地 launchctl dev 残留任务...${NC}"
+cleanup_launchctl_dev_labels
+echo -e "${GREEN}   ✓ 清理完成${NC}"
+echo ""
+
+# Hook 配置档（可选）：core=无业务 Hook，social=flare-social PreSend
+if [ -n "${FLARE_HOOKS_PROFILE:-}" ]; then
+    # shellcheck source=lib/hooks_profile.sh
+    source "$SCRIPT_DIR/lib/hooks_profile.sh"
+    if flare_im_activate_hooks_profile "$FLARE_HOOKS_PROFILE" "$PROJECT_ROOT"; then
+        echo -e "${BLUE}🔗 Hook 配置档: ${FLARE_HOOKS_PROFILE} → config/hooks.toml${NC}"
+    else
+        exit 1
+    fi
+fi
+
+# 服务目录名（logs/pid 前缀）-> 实际 Cargo 二进制名
+service_binary_name() {
+    case "$1" in
+        message-orchestrator) printf '%s' "flare-orchestrator" ;;
+        *) printf '%s' "flare-$1" ;;
+    esac
+}
+
+# 释放监听端口（避免上次异常退出后残留进程导致 gRPC transport error / AddrInUse）
+free_listen_port() {
+    local port="$1"
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+    local pids
+    pids=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}   释放端口 ${port}（残留监听 PID: ${pids}）...${NC}"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 1
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+}
+
+launchctl_label_pid() {
+    local label="$1"
+    launchctl list 2>/dev/null | awk -v label="$label" '$3 == label { print $1; exit }'
+}
+
+start_detached_process() {
+    local label="$1"
+    local log_file="$2"
+    shift 2
+
+    DETACHED_PID=""
+    if [ "${FLARE_USE_LAUNCHCTL:-1}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
+        launchctl remove "$label" >/dev/null 2>&1 || true
+        launchctl submit -l "$label" -o "$log_file" -e "$log_file" -- \
+            /bin/sh -c 'cd "$1" && shift && exec "$@"' sh "$PROJECT_ROOT" "$@"
+
+        local waited=0
+        while [ "$waited" -lt 10 ]; do
+            DETACHED_PID=$(launchctl_label_pid "$label")
+            if [ -n "$DETACHED_PID" ] && [ "$DETACHED_PID" != "-" ]; then
+                return 0
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        return 1
+    fi
+
+    nohup /bin/sh -c 'cd "$1" && shift && exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null > "$log_file" 2>&1 &
+    DETACHED_PID=$!
+    return 0
+}
 
 # 解析 Cargo 实际产物目录：上层仓库 `.cargo/config.toml` 可能将 `target-dir` 指到仓库根的 `target/`，
 # 与 `flare-im-core/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 debug 目录。
@@ -103,6 +215,7 @@ echo ""
 
 # 检查基础设施服务
 echo -e "${YELLOW}📦 检查基础设施服务状态...${NC}"
+MISSING_INFRA=0
 check_service() {
     local service=$1
     local port=$2
@@ -114,6 +227,10 @@ check_service() {
         echo -e "${RED}   ✗ $service 未运行 (端口 $port)${NC}"
         return 1
     fi
+}
+
+check_required_service() {
+    check_service "$1" "$2" || MISSING_INFRA=1
 }
 
 resolve_mq_backend() {
@@ -136,25 +253,32 @@ resolve_mq_backend() {
 MQ_BACKEND="$(resolve_mq_backend)"
 [ -n "$MQ_BACKEND" ] || MQ_BACKEND="nats"
 
-check_service "Redis" "26379"
-check_service "PostgreSQL" "25432"
+check_required_service "Redis" "26379"
+check_required_service "PostgreSQL" "25432"
+check_required_service "RustFS/S3" "29000"
 case "$MQ_BACKEND" in
     kafka)
         echo -e "${YELLOW}   ↷ Kafka 端口检查已跳过（由服务启动时按配置连接）${NC}"
         ;;
     nats|jetstream)
-        check_service "NATS JetStream" "24222"
+        check_required_service "NATS JetStream" "24222"
         ;;
     *)
         echo -e "${RED}   ✗ 未支持的 MQ 后端: $MQ_BACKEND (期望 nats|jetstream|kafka)${NC}"
+        MISSING_INFRA=1
         ;;
 esac
-check_service "Consul" "28500"
+check_required_service "Consul" "28500"
 
 echo ""
 echo -e "${YELLOW}💡 提示: 如需启动基础设施服务，请运行:${NC}"
-echo "   ${BLUE}cd deploy && docker-compose up -d${NC}"
+echo "   ${BLUE}cd deploy && docker-compose up -d consul redis postgres nats rustfs${NC}"
 echo ""
+
+if [ "$MISSING_INFRA" -ne 0 ]; then
+    echo -e "${RED}❌ 基础设施未全部就绪，已停止启动，避免客户端连接到半活服务。${NC}"
+    exit 1
+fi
 
 case "$MQ_BACKEND" in
     kafka)
@@ -203,8 +327,11 @@ for service in "${CORE_SERVICES[@]}"; do
             rm -f "$pid_file"
         fi
     fi
-    # 额外检查：通过进程名查找并停止
-    pkill -f "target/debug/flare-$service" 2>/dev/null || true
+    # 额外检查：按实际二进制名停止（message-orchestrator -> flare-orchestrator）
+    bin=$(service_binary_name "$service")
+    pkill -f "target/debug/${bin}" 2>/dev/null || true
+    pkill -f "/target/debug/${bin}" 2>/dev/null || true
+    pkill -f "${bin}" 2>/dev/null || true
 done
 
 # 停止默认的 access-gateway 实例（如果存在）
@@ -385,6 +512,9 @@ for service in "${CORE_SERVICES[@]}"; do
         "push-worker")
             PACKAGE="flare-push-worker"
             BIN_NAME="flare-push-worker"
+            if [ "$GATEWAY_MODE" = "single" ]; then
+                export ACCESS_GATEWAY_GRPC_ENDPOINT="${ACCESS_GATEWAY_GRPC_ENDPOINT:-http://127.0.0.1:60060}"
+            fi
             ENV_VARS=""
             ;;
         "media")
@@ -395,7 +525,16 @@ for service in "${CORE_SERVICES[@]}"; do
         "core-gateway")
             PACKAGE="flare-core-gateway"
             BIN_NAME="flare-core-gateway"
-            ENV_VARS=""
+            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-50181}
+            CONVERSATION_PORT=${CONVERSATION_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/conversation.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            CONVERSATION_PORT=${CONVERSATION_PORT:-50090}
+            MEDIA_PORT=${MEDIA_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/media.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MEDIA_PORT=${MEDIA_PORT:-60081}
+            export GRPC_MESSAGE_STATIC_FALLBACK="${GRPC_MESSAGE_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_ORCH_PORT}}"
+            export GRPC_CONVERSATION_STATIC_FALLBACK="${GRPC_CONVERSATION_STATIC_FALLBACK:-http://127.0.0.1:${CONVERSATION_PORT}}"
+            export GRPC_MEDIA_STATIC_FALLBACK="${GRPC_MEDIA_STATIC_FALLBACK:-http://127.0.0.1:${MEDIA_PORT}}"
+            ENV_VARS="set"
             ;;
         *)
             echo -e "${RED}   ✗ 未知服务: $service${NC}"
@@ -406,9 +545,40 @@ for service in "${CORE_SERVICES[@]}"; do
     # 设置 PID 文件路径
     pid_file="$LOGS_DIR/flare-$service.pid"
     
+    # message-orchestrator：启动前确保 50181 未被残留进程占用
+    if [ "$service" = "message-orchestrator" ]; then
+        orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        orch_port=${orch_port:-50181}
+        free_listen_port "$orch_port"
+    fi
+
+    env_args=(
+        "PATH=$PATH"
+        "RUST_LOG=$RUST_LOG"
+        "NO_PROXY=$NO_PROXY"
+        "no_proxy=$no_proxy"
+        "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
+        "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
+        "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+    )
+    [ -n "${SIGNALING_ONLINE_SERVICE_HOST:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_HOST=$SIGNALING_ONLINE_SERVICE_HOST")
+    [ -n "${SIGNALING_ONLINE_SERVICE_PORT:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_PORT=$SIGNALING_ONLINE_SERVICE_PORT")
+    [ -n "${ONLINE_SERVICE_ENDPOINT:-}" ] && env_args+=("ONLINE_SERVICE_ENDPOINT=$ONLINE_SERVICE_ENDPOINT")
+    [ -n "${SIGNALING_ROUTE_SERVICE_HOST:-}" ] && env_args+=("SIGNALING_ROUTE_SERVICE_HOST=$SIGNALING_ROUTE_SERVICE_HOST")
+    [ -n "${SIGNALING_ROUTE_SERVICE_PORT:-}" ] && env_args+=("SIGNALING_ROUTE_SERVICE_PORT=$SIGNALING_ROUTE_SERVICE_PORT")
+    [ -n "${ROUTE_SERVICE_ENDPOINT:-}" ] && env_args+=("ROUTE_SERVICE_ENDPOINT=$ROUTE_SERVICE_ENDPOINT")
+    [ -n "${MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE:-}" ] && env_args+=("MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE=$MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE")
+    [ -n "${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-}" ] && env_args+=("MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI=$MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI")
+    [ -n "${SYNC_ORCHESTRATOR_HOST:-}" ] && env_args+=("SYNC_ORCHESTRATOR_HOST=$SYNC_ORCHESTRATOR_HOST")
+    [ -n "${SYNC_ORCHESTRATOR_PORT:-}" ] && env_args+=("SYNC_ORCHESTRATOR_PORT=$SYNC_ORCHESTRATOR_PORT")
+    [ -n "${ACCESS_GATEWAY_GRPC_ENDPOINT:-}" ] && env_args+=("ACCESS_GATEWAY_GRPC_ENDPOINT=$ACCESS_GATEWAY_GRPC_ENDPOINT")
+    [ -n "${GRPC_MESSAGE_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_MESSAGE_STATIC_FALLBACK=$GRPC_MESSAGE_STATIC_FALLBACK")
+    [ -n "${GRPC_CONVERSATION_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_CONVERSATION_STATIC_FALLBACK=$GRPC_CONVERSATION_STATIC_FALLBACK")
+    [ -n "${GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_MEDIA_STATIC_FALLBACK=$GRPC_MEDIA_STATIC_FALLBACK")
+
     # 启动服务（使用编译好的二进制，避免并发编译问题）
-    # 子进程继承当前 shell 的 RUST_LOG（默认经上方设为 debug+ 降噪，或 trace 排障模式）
-    "$CARGO_TARGET_DEBUG/$BIN_NAME" > "$LOGS_DIR/flare-$service.log" 2>&1 &
+    start_detached_process "flare-$service-dev" "$LOGS_DIR/flare-$service.log" /usr/bin/env "${env_args[@]}" "$CARGO_TARGET_DEBUG/$BIN_NAME"
+    service_pid="$DETACHED_PID"
     
     # 清理环境变量
     if [ "$service" = "signaling-online" ]; then
@@ -419,8 +589,11 @@ for service in "${CORE_SERVICES[@]}"; do
         unset MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI
     elif [ "$service" = "sync-orchestrator" ]; then
         unset SYNC_ORCHESTRATOR_HOST SYNC_ORCHESTRATOR_PORT
+    elif [ "$service" = "push-worker" ]; then
+        unset ACCESS_GATEWAY_GRPC_ENDPOINT
+    elif [ "$service" = "core-gateway" ]; then
+        unset GRPC_MESSAGE_STATIC_FALLBACK GRPC_CONVERSATION_STATIC_FALLBACK GRPC_MEDIA_STATIC_FALLBACK
     fi
-    service_pid=$!
     echo $service_pid > "$pid_file"
     sleep 3
 done
@@ -541,12 +714,19 @@ if [ "$GATEWAY_MODE" == "single" ]; then
     echo -e "${YELLOW}   启动 access-gateway (默认端口)...${NC}"
     echo -e "${BLUE}      WebSocket: $DEFAULT_WS_PORT, QUIC: $((DEFAULT_WS_PORT + 1)), gRPC: $DEFAULT_GRPC_PORT${NC}"
     
-    # 启动 Access Gateway（使用编译好的二进制，已在前面统一编译）
-    PORT="$DEFAULT_WS_PORT" \
-    GRPC_PORT="$DEFAULT_GRPC_PORT" \
-    "$CARGO_TARGET_DEBUG/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway.log" 2>&1 &
-    
-    gateway_pid=$!
+    gateway_env_args=(
+        "PATH=$PATH"
+        "RUST_LOG=$RUST_LOG"
+        "NO_PROXY=$NO_PROXY"
+        "no_proxy=$no_proxy"
+        "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
+        "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
+        "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+        "PORT=$DEFAULT_WS_PORT"
+        "GRPC_PORT=$DEFAULT_GRPC_PORT"
+    )
+    start_detached_process "flare-access-gateway-dev" "$LOGS_DIR/flare-access-gateway.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_DEBUG/flare-signaling-gateway"
+    gateway_pid="$DETACHED_PID"
     echo $gateway_pid > "$pid_file"
     sleep 3
     
@@ -607,15 +787,23 @@ else
         # 使用 eval 来设置动态环境变量名
         eval "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
         
-        # 启动服务（使用编译好的二进制，已在前面统一编译）
         eval "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
-        GATEWAY_ID="$gateway_id" \
-        GATEWAY_REGION="$region" \
-        PORT="$ws_port" \
-        GRPC_PORT="$grpc_port" \
-        "$CARGO_TARGET_DEBUG/flare-signaling-gateway" > "$LOGS_DIR/flare-access-gateway-$gateway_key.log" 2>&1 &
-        
-        gateway_pid=$!
+        gateway_env_args=(
+            "PATH=$PATH"
+            "RUST_LOG=$RUST_LOG"
+            "NO_PROXY=$NO_PROXY"
+            "no_proxy=$no_proxy"
+            "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
+            "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
+            "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+            "GATEWAY_ID=$gateway_id"
+            "GATEWAY_REGION=$region"
+            "PORT=$ws_port"
+            "GRPC_PORT=$grpc_port"
+            "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
+        )
+        start_detached_process "flare-access-gateway-$gateway_key-dev" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_DEBUG/flare-signaling-gateway"
+        gateway_pid="$DETACHED_PID"
         echo $gateway_pid > "$pid_file"
         sleep 3
         
@@ -637,9 +825,30 @@ echo -e "${GREEN}✅ Flare IM Core 所有服务启动完成！${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
-# 等待服务完全启动
+# 等待服务完全启动（signaling-route 依赖 conversation，需等端口就绪）
 echo -e "${YELLOW}⏳ 等待服务完全启动并检查状态...${NC}"
-sleep 5
+
+wait_for_listen_port() {
+    local port=$1
+    local label=$2
+    local max_wait=${3:-90}
+    local waited=0
+    while [ "$waited" -lt "$max_wait" ]; do
+        if command -v nc >/dev/null 2>&1 && nc -z localhost "$port" 2>/dev/null; then
+            return 0
+        elif lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    echo -e "${YELLOW}   ⚠ $label 端口 $port 在 ${max_wait}s 内未就绪${NC}"
+    return 1
+}
+
+wait_for_listen_port 50090 "conversation" 90 || true
+wait_for_listen_port 50062 "signaling-route" 90 || true
+sleep 2
 
 # 调用检查脚本
 echo ""
@@ -680,7 +889,7 @@ echo -e "${YELLOW}📁 所有日志文件位置:${NC}"
 echo "   $LOGS_DIR/"
 echo ""
 echo -e "${YELLOW}🛑 停止所有服务:${NC}"
-echo "   ${RED}./scripts/stop_service.sh${NC}"
+echo "   ${RED}./scripts/stop_server.sh${NC}"
 echo ""
 
 # 如果检查失败，返回非零退出码

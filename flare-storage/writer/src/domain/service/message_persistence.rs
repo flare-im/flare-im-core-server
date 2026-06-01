@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use flare_im_core::Ctx;
 use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_im_core::message::BurnStatus;
 use flare_im_core::utils::{
-    current_millis, embed_timeline_in_extra_map, extract_timeline_from_extra,
+    current_millis, embed_timeline_in_extra_map, extract_timeline_from_extra, normalize_tenant_id,
 };
 use flare_server_core::flare_err;
 use tracing::{instrument, warn};
@@ -89,15 +90,20 @@ where
             .message
             .ok_or_else(|| flare_err!(ErrorCode::InvalidParameter, "missing message payload"))?;
 
-        if let Some(ref tenant) = request.tenant {
-            message
-                .extra
-                .insert("tenant_id".to_string(), tenant.tenant_id.clone());
-        } else if let Some(tenant_id) = request.metadata.get("x-tenant-id") {
-            message
-                .extra
-                .insert("tenant_id".to_string(), tenant_id.clone());
-        }
+        let tenant_id = request
+            .tenant
+            .as_ref()
+            .map(|tenant| tenant.tenant_id.as_str())
+            .or_else(|| request.metadata.get("x-tenant-id").map(String::as_str))
+            .or_else(|| request.metadata.get("tenant_id").map(String::as_str))
+            .or_else(|| message.extra.get("x-tenant-id").map(String::as_str))
+            .or_else(|| message.extra.get("tenant_id").map(String::as_str))
+            .map(normalize_tenant_id)
+            .unwrap_or_else(|| "0".to_string());
+        message
+            .extra
+            .insert("tenant_id".to_string(), tenant_id.clone());
+        message.extra.insert("x-tenant-id".to_string(), tenant_id);
         if message.conversation_id.is_empty() {
             message.conversation_id = conversation_id.clone();
         }
@@ -111,6 +117,17 @@ where
         // 与 proto MessageStatus 语义对齐：Created=1, Sent=2
         if message.status == 1 || message.status == 0 {
             message.status = 2;
+        }
+        if message.burn_enabled {
+            if message.burn_after_read_seconds.unwrap_or_default() <= 0 {
+                return Err(flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "burn_after_read_seconds must be positive when burn is enabled"
+                ));
+            }
+            if message.burn_status == BurnStatus::None.as_i32() {
+                message.burn_status = BurnStatus::Init.as_i32();
+            }
         }
 
         let mut timeline = extract_timeline_from_extra(&message.extra, current_millis());
@@ -338,10 +355,11 @@ fn build_event_message(message: &crate::domain::model::Message) -> Event {
         .get("tenant_id")
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("default");
+        .map(normalize_tenant_id)
+        .unwrap_or_else(|| "0".to_string());
     let now = chrono::Utc::now();
     Event {
-        tenant_id: tenant_id.to_string(),
+        tenant_id,
         conversation_id: message.conversation_id.clone(),
         seq: message.seq,
         r#type: EventType::Message,

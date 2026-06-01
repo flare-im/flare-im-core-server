@@ -1,0 +1,31 @@
+# flare-social 业务 Hook 模式：发信前 Social 权限门禁。
+#
+# 激活方式：
+#   ./scripts/start_server_social.sh
+# 或：
+#   FLARE_HOOKS_PROFILE=social ./scripts/start_server.sh
+#
+# 前置条件：flare-social-hook 已启动并在 Consul 注册为 flare-social-hook
+#   ../flare-social/scripts/start_social.sh
+
+[[pre_send]]
+name = "social-policy-pre-send"
+description = "发信前 Social 权限校验：单聊好友/黑名单/陌生人策略，群聊成员/解散/禁言策略"
+enabled = true
+priority = 110
+timeout_ms = 2000
+require_success = true
+
+[pre_send.selector]
+tenants = ["0"]
+conversation_types = ["single", "single_chat", "direct", "group", "group_chat"]
+
+[pre_send.transport]
+type = "grpc"
+endpoint = "discovery://flare-social-hook"
+
+[pre_send.metadata]
+plugin = "flare-social-hook"
+hook_operation = "flare.hook.v1.pre_send"
+policy = "social_message_permission"
+deny_reason_code = "SOCIAL_PRESEND_DENIED"

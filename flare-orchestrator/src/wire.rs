@@ -83,14 +83,14 @@ pub async fn initialize(
         .conversation_service_type
         .as_deref()
         .unwrap_or(CONVERSATION);
-    let conversation_channel = flare_im_core::discovery::connect_grpc_channel_from_app_config(
+    // 启动期 lazy：不等待 conversation 在 Consul 注册，首包 RPC 再建连。
+    let conversation_channel = flare_im_core::discovery::connect_grpc_channel_lazy_from_app_config(
         app_config,
         conversation_service_type,
-        "http://127.0.0.1:50090",
+        flare_im_core::discovery::default_static_grpc_fallback(conversation_service_type),
     )
-    .await
     .map_err(|e| {
-        anyhow::anyhow!("connect conversation service ({conversation_service_type}) failed: {e}")
+        anyhow::anyhow!("lazy conversation channel ({conversation_service_type}) failed: {e}")
     })?;
     let conversation_repository = Arc::new(ConversationClient::new(conversation_channel));
 
@@ -305,6 +305,22 @@ async fn build_hook_dispatcher(
     if orchestrator_cfg.capability_hooks_auto {
         let ep = orchestrator_cfg.resolve_capability_grpc_uri();
         inject_flare_capability_hook_plugin_targets(&mut hook_cfg, ep);
+        // capability 进程内已执行 hooks.toml 中的 social PreSend，避免 orchestrator 再直连一次。
+        let before = hook_cfg.pre_send.len();
+        hook_cfg.pre_send.retain(|hook| {
+            !matches!(
+                &hook.transport,
+                HookTransportConfig::Grpc { endpoint, .. }
+                    if endpoint.contains("flare-social-hook")
+            )
+        });
+        let removed = before.saturating_sub(hook_cfg.pre_send.len());
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "deduped orchestrator pre_send hooks already executed via flare-capability"
+            );
+        }
     }
 
     let factory =

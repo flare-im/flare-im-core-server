@@ -1,5 +1,7 @@
 # Flare IM Core
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 > **IM 服务端通信核心层（Rust 工作区）** — 基于 Tonic、gRPC、JetStream、PostgreSQL 等组件的微服务集合，与 `flare-im` 单仓内 `flare-proto`、`flare-server-core`、`flare-im-core-sdk`（客户端 SDK）等协同演进。
 
 Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步、推送与媒资等能力；本地开发依赖 Docker Compose 拉起 Consul、Redis、JetStream、PostgreSQL 等基础设施。具体行为以本仓库源码与 `deploy/` 配置为准。
@@ -188,6 +190,10 @@ flare-im-core/                    # 本 README 所在工作区根
 
 ## 快速开始
 
+### 业务接入文档（Hook / Social）
+
+第三方与 Social 域接入说明见 **[docs/integration/README.md](docs/integration/README.md)**（可同步至官网 `official/docs/integration/`）。
+
 ### 环境要求
 
 - **Rust**：**1.94.0** 及以上（与 `[workspace.package]` 一致）
@@ -270,19 +276,18 @@ cargo test -p flare-im-core --lib
 
 ## 许可证
 
-许可证以根目录 `Cargo.toml` 中 `[workspace.package] license = "MIT"` 为准；若需单独分发 `LICENSE` 文本文件，请在发布流程中补充。
+本仓库采用 [Apache License 2.0](LICENSE)。与 MIT 相比，再分发时需保留 [NOTICE](NOTICE) 中的版权与来源说明；建议在产品的「关于 / 开源许可」页面注明：
+
+> Includes software from Flare IM Core (https://github.com/flare-im/flare-im)
+
+依赖的 `flare-core`、`flare-server-core` 等基础库为 MIT，各自遵循其目录下的许可文件。
 
 ---
 
-## 联系我们
+## 联系
 
-- **邮件**：flare1522@163.com（技术交流、问题反馈）
-
----
-
-若本仓库对你有帮助，欢迎 Star 与 PR。
+技术交流：`flare1522@163.com`；缺陷与功能请求请走仓库 Issue / MR。
 
 ---
 
-*文档版本与仓库工作区版本对齐：`workspace.package.version`（当前 **0.1.0**）*  
-*最近更新：2026-04-12*
+文档版本与 `Cargo.toml` 中 `workspace.package.version` 对齐（当前 **0.1.0**）。

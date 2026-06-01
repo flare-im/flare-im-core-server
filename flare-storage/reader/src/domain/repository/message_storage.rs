@@ -45,6 +45,7 @@ pub trait MessageStorage: Send + Sync {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: i32,
+        include_burned_placeholder: bool,
     ) -> Result<Vec<Message>>;
 
     /// 基于 seq 查询消息（after_seq / before_seq / limit，按 seq 升序）
@@ -56,6 +57,7 @@ pub trait MessageStorage: Send + Sync {
         after_seq: i64,
         before_seq: Option<i64>,
         limit: i32,
+        include_burned_placeholder: bool,
     ) -> Result<Vec<Message>>;
 
     async fn count_messages(

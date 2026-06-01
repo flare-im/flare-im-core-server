@@ -165,7 +165,7 @@ pub trait PushExecutor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_proto::common::{PushOptions, PushPayloadKind};
+    use flare_proto::common::PushPayloadKind;
 
     struct MockTargetResolver;
 
@@ -226,7 +226,10 @@ mod tests {
             headers: std::collections::HashMap::new(),
         };
 
-        let ctx = Ctx::new("trace-123", Some("tenant-1".to_string()));
+        let ctx = Arc::new(
+            flare_server_core::context::Context::with_request_id("trace-123")
+                .with_tenant_id("tenant-1"),
+        );
         let results = dispatcher.dispatch(&ctx, envelope).await.unwrap();
 
         assert_eq!(results.len(), 1);

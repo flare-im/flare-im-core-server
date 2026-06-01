@@ -76,7 +76,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish online push task",
                         )
                     })?;
@@ -87,7 +87,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish offline push task",
                         )
                     })?;
@@ -160,7 +160,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish online push task",
                         )
                     })?;
@@ -171,7 +171,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish offline push task",
                         )
                     })?;
@@ -271,7 +271,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish online push task",
                         )
                     })?;
@@ -282,7 +282,7 @@ impl PushRouterHandler {
                     .map_err(|e| {
                         map_infra_error(
                             e,
-                            ErrorCode::MessageSendFailed,
+                            ErrorCode::ServiceUnavailable,
                             "Failed to publish offline push task",
                         )
                     })?;

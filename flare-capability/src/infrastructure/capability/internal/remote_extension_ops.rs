@@ -75,9 +75,10 @@ impl MediaControlExtensionOperations {
                 "media control gRPC client not configured; wire(..) with a valid endpoint first",
             )
         })?;
-        media.control_client().await.map_err(|e| {
-            Status::unavailable(format!("media control gRPC unavailable: {e}"))
-        })
+        media
+            .control_client()
+            .await
+            .map_err(|e| Status::unavailable(format!("media control gRPC unavailable: {e}")))
     }
 
     fn tenant_id_from_ctx(ctx: &Ctx) -> String {

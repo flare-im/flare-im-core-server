@@ -10,9 +10,9 @@
 
 use chrono::Utc;
 use flare_proto::common::{
-    CustomEvent, Event, EventType, MarkEvent, MessageDeleteEvent, MessageEditEvent,
-    MessageRecallEvent, PinEvent, ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent,
-    UnpinEvent, event,
+    CustomEvent, Event, EventType, MarkEvent, MessageBurnScheduledEvent, MessageBurnedEvent,
+    MessageDeleteEvent, MessageEditEvent, MessageHardDeletedEvent, MessageRecallEvent, PinEvent,
+    ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent, UnpinEvent, event,
 };
 use prost_types::Timestamp;
 use uuid::Uuid;
@@ -170,6 +170,96 @@ pub fn build_read_receipt_event(conversation_id: &str, user_id: &str, read_seq: 
             message_ids: Vec::new(),
             read_at: None,
             burn_after_read: None,
+        })),
+    }
+}
+
+pub fn build_burn_scheduled_event(
+    tenant_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+    reader_id: Option<&str>,
+    burn_at: i64,
+    event_time: i64,
+) -> Event {
+    Event {
+        conversation_id: conversation_id.to_string(),
+        seq: 0,
+        r#type: EventType::EventMessageBurnScheduled as i32,
+        created_at: Some(to_timestamp(Utc::now())),
+        event_id: Uuid::new_v4().to_string(),
+        event_seq: None,
+        request_id: None,
+        payload: Some(event::Payload::BurnScheduled(MessageBurnScheduledEvent {
+            tenant_id: tenant_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            server_id: message_id.to_string(),
+            seq: None,
+            reader_id: reader_id.map(str::to_string),
+            burn_at,
+            event_time,
+        })),
+    }
+}
+
+pub fn build_burned_event(
+    tenant_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+    reader_id: Option<&str>,
+    burn_at: i64,
+    burned_at: i64,
+) -> Event {
+    Event {
+        conversation_id: conversation_id.to_string(),
+        seq: 0,
+        r#type: EventType::EventMessageBurned as i32,
+        created_at: Some(to_timestamp(Utc::now())),
+        event_id: Uuid::new_v4().to_string(),
+        event_seq: None,
+        request_id: None,
+        payload: Some(event::Payload::Burned(MessageBurnedEvent {
+            tenant_id: tenant_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            server_id: message_id.to_string(),
+            seq: None,
+            reader_id: reader_id.map(str::to_string),
+            burn_at,
+            burned_at,
+            event_time: burned_at,
+        })),
+    }
+}
+
+pub fn build_hard_deleted_event(
+    tenant_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+    reader_id: Option<&str>,
+    burn_at: Option<i64>,
+    burned_at: Option<i64>,
+    event_time: i64,
+) -> Event {
+    Event {
+        conversation_id: conversation_id.to_string(),
+        seq: 0,
+        r#type: EventType::EventMessageHardDeleted as i32,
+        created_at: Some(to_timestamp(Utc::now())),
+        event_id: Uuid::new_v4().to_string(),
+        event_seq: None,
+        request_id: None,
+        payload: Some(event::Payload::HardDeleted(MessageHardDeletedEvent {
+            tenant_id: tenant_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            server_id: message_id.to_string(),
+            seq: None,
+            reader_id: reader_id.map(str::to_string),
+            burn_at,
+            burned_at,
+            event_time,
         })),
     }
 }

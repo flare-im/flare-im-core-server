@@ -270,6 +270,9 @@ impl EventTypeValidationStrategy {
             EventType::EventUnpin,
             EventType::EventMark,
             EventType::EventUnmark,
+            EventType::EventMessageBurnScheduled,
+            EventType::EventMessageBurned,
+            EventType::EventMessageHardDeleted,
             EventType::EventCustom,
         ])
     }

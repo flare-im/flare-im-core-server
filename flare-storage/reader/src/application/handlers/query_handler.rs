@@ -77,6 +77,7 @@ where
                 start_time,
                 end_time,
                 query.limit,
+                query.include_burned_placeholder,
             )
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to query messages"))
@@ -113,6 +114,7 @@ where
                 start_time,
                 end_time,
                 query.limit,
+                query.include_burned_placeholder,
             )
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;
@@ -232,6 +234,7 @@ where
                 query.after_seq,
                 query.before_seq,
                 query.limit,
+                query.include_burned_placeholder,
             )
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))?;

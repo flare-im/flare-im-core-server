@@ -13,6 +13,10 @@ pub struct SendMessageCommand {
     pub conversation_id: String,
     /// 是否同步
     pub sync: bool,
+    /// 是否启用阅后即焚
+    pub burn_enabled: bool,
+    /// 首次阅读后多少秒焚毁
+    pub burn_after_read_seconds: Option<i64>,
 }
 
 /// 批量发送消息命令

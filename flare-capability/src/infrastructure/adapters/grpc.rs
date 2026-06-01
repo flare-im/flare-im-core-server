@@ -152,7 +152,12 @@ impl GrpcHookAdapter {
         if let Some(service_client) = &self.service_client {
             // 使用 ServiceClient 获取 Channel（已包含负载均衡）
             let mut client_guard = service_client.lock().await;
-            let channel = client_guard.get_channel().await.map_err(|e| {
+            let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+                &self.service_name,
+                &mut *client_guard,
+            )
+            .await
+            .map_err(|e| {
                 map_infra_error(
                     e,
                     ErrorCode::InternalError,

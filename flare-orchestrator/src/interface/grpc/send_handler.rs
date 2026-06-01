@@ -50,6 +50,8 @@ impl MessageSendService for MessageSendGrpcHandler {
             .ok_or_else(|| Status::invalid_argument("message required"))?;
 
         let cmd = crate::application::commands::SendMessageCommand {
+            burn_enabled: message.burn_enabled,
+            burn_after_read_seconds: message.burn_after_read_seconds,
             message,
             conversation_id: req.conversation_id.clone(),
             sync: req.sync,
@@ -101,6 +103,8 @@ impl MessageSendService for MessageSendGrpcHandler {
             .filter_map(|m| {
                 m.message
                     .map(|msg| crate::application::commands::SendMessageCommand {
+                        burn_enabled: msg.burn_enabled,
+                        burn_after_read_seconds: msg.burn_after_read_seconds,
                         message: msg,
                         conversation_id: m.conversation_id,
                         sync: m.sync,

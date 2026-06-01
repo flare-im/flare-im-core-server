@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{ErrorCode, Result};
 use flare_grpc_proto::media::{
     DescribeBucketRequest, DescribeBucketResponse, DownloadFileChunk, DownloadFileRequest,
     GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetDirectUploadStatusRequest,
@@ -50,7 +50,26 @@ impl MediaQueryHandler {
         ctx: &Context,
         request: GetFileUrlRequest,
     ) -> Result<PresignedUrl> {
-        let expires_in = i64::from(request.expires_in);
+        if request.burn_protected
+            && matches!(
+                flare_proto::common::BurnStatus::try_from(request.burn_status),
+                Ok(flare_proto::common::BurnStatus::Burned)
+                    | Ok(flare_proto::common::BurnStatus::HardDeleted)
+            )
+        {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "burned message attachment url is forbidden"
+            ));
+        }
+        let mut expires_in = i64::from(request.expires_in);
+        if request.burn_protected {
+            expires_in = if expires_in > 0 {
+                expires_in.min(300)
+            } else {
+                300
+            };
+        }
         self.domain_service
             .create_presigned_url(ctx, &request.file_id, expires_in)
             .await

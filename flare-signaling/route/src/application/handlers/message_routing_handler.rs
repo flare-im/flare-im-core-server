@@ -106,14 +106,14 @@ impl MessageRoutingHandler {
             .await
             .map_err(|e| {
                 let total_duration = start_time.elapsed();
-                tracing::error!(
+                tracing::warn!(
                     error = %e,
                     svid = %svid,
                     decision_duration_ms = decision_duration.as_millis(),
                     total_duration_ms = total_duration.as_millis(),
                     "Failed to forward message to business system"
                 );
-                map_infra_error(e, ErrorCode::InternalError, "Failed to forward message")
+                e
             })?;
 
         let business_duration = business_start.elapsed();

@@ -6,6 +6,7 @@ use flare_grpc_proto::conversation::{
     DeleteConversationRequest, ForceConversationSyncRequest, ManageParticipantsRequest,
     ManageParticipantsResponse, MarkConversationAsReadRequest, SearchConversationsRequest,
     SearchConversationsResponse, UpdateConversationRequest, UpdateConversationResponse,
+    UpdateConversationUserSettingsRequest, UpdateConversationUserSettingsResponse,
     UpdateCursorRequest, UpdatePresenceRequest,
 };
 use flare_proto::common::DeviceState as ProtoDeviceState;
@@ -16,7 +17,8 @@ use tonic::{Request, Response, Status};
 use crate::application::commands::{
     BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
     ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
-    UpdateConversationCommand, UpdateCursorCommand, UpdatePresenceCommand,
+    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
+    UpdatePresenceCommand,
 };
 use crate::application::queries::SearchConversationsQuery;
 use crate::domain::model::{
@@ -263,6 +265,39 @@ impl ConversationManageService for ConversationGrpcHandler {
             .await
             .into_grpc()?;
         Ok(Response::new(()))
+    }
+
+    async fn update_conversation_user_settings(
+        &self,
+        request: Request<UpdateConversationUserSettingsRequest>,
+    ) -> Result<Response<UpdateConversationUserSettingsResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let settings = self
+            .command_handler
+            .handle_update_conversation_user_settings(
+                &ctx,
+                UpdateConversationUserSettingsCommand {
+                    conversation_id: req.conversation_id,
+                    is_pinned: req.is_pinned,
+                    is_muted: req.is_muted,
+                    is_archived: req.is_archived,
+                    draft: req.draft,
+                    base_settings_version: req.base_settings_version,
+                },
+            )
+            .await
+            .into_grpc()?;
+        Ok(Response::new(UpdateConversationUserSettingsResponse {
+            settings: Some(flare_proto::common::ConversationUserSettings {
+                is_pinned: settings.is_pinned,
+                is_muted: settings.is_muted,
+                is_archived: settings.is_archived,
+                mute_until: None,
+                draft: settings.draft.unwrap_or_default(),
+                settings_version: settings.settings_version,
+            }),
+        }))
     }
 
     async fn update_presence(

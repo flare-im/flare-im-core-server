@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
 use flare_core::server::{AuthResult, Authenticator};
-use flare_server_core::TokenService;
+use flare_server_core::auth::{CompositeTokenValidator, TokenService};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument, warn};
@@ -12,19 +12,32 @@ use crate::constants::{
 };
 
 pub struct AuthHandler {
-    token_service: Arc<TokenService>,
+    token_validator: CompositeTokenValidator,
 }
 
 impl AuthHandler {
     pub fn new(token_service: Arc<TokenService>) -> Self {
-        Self { token_service }
+        Self {
+            token_validator: CompositeTokenValidator::new(token_service),
+        }
     }
 
-    /// 验证 token（调用核心 TokenService）
-    ///
-    /// 返回完整的 TokenClaims，如果验证失败则返回 None
+    pub fn with_trusted_issuers(
+        token_service: Arc<TokenService>,
+        trusted: &[(String, String)],
+    ) -> Self {
+        let mut validator = CompositeTokenValidator::new(token_service);
+        for (secret, issuer) in trusted {
+            validator.push_trusted_issuer(secret.clone(), issuer.clone());
+        }
+        Self {
+            token_validator: validator,
+        }
+    }
+
+    /// 验证 token（主 issuer + 可选信任 issuer）
     fn verify_token(&self, token: &str) -> Option<flare_server_core::TokenClaims> {
-        match self.token_service.validate_token(token) {
+        match self.token_validator.validate_token(token) {
             Ok(claims) => Some(claims),
             Err(err) => {
                 warn!(?err, "Token validation failed");

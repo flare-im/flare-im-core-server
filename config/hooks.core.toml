@@ -1,0 +1,10 @@
+# flare-im-core 业务中立模式：不注册任何业务 Hook。
+#
+# 激活方式：
+#   ./scripts/start_server_core.sh
+# 或：
+#   FLARE_HOOKS_PROFILE=core ./scripts/start_server.sh
+#
+# PreSend / PostSend / Delivery / Recall 均为空；发信链路不依赖 flare-social-hook。
+
+# （ intentionally empty — HookConfig 各列表默认为 [] ）

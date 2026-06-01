@@ -41,6 +41,7 @@ services:
       CONSUL_BIND_INTERFACE: eth0
     volumes:
       - ./data/consul:/consul/data
+      - ./consul-dev-limits.hcl:/consul/config/limits.hcl:ro
     command: >
       consul agent
       -server
@@ -49,6 +50,7 @@ services:
       -client=0.0.0.0
       -bind=0.0.0.0
       -data-dir=/consul/data
+      -config-file=/consul/config/limits.hcl
       -log-level=INFO
 
   # ===== Redis - 缓存 / 路由 =====

@@ -86,6 +86,64 @@ pub trait ArchiveStoreRepository: Send + Sync {
         Ok(())
     }
 
+    /// 阅后即焚：首次阅读后安排服务端权威倒计时。
+    async fn schedule_message_burn(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        reader_id: Option<&str>,
+        first_read_at: i64,
+        burn_at: i64,
+    ) -> Result<bool> {
+        let _ = (
+            ctx,
+            tenant_id,
+            message_id,
+            reader_id,
+            first_read_at,
+            burn_at,
+        );
+        Ok(false)
+    }
+
+    /// 阅后即焚：根据消息自身 `burn_after_read_seconds` 在写模型内原子安排倒计时。
+    async fn schedule_message_burn_after_read(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        reader_id: Option<&str>,
+        first_read_at: i64,
+    ) -> Result<Option<i64>> {
+        let _ = (ctx, tenant_id, message_id, reader_id, first_read_at);
+        Ok(None)
+    }
+
+    /// 阅后即焚：标记消息已焚毁并清除可见内容。
+    async fn mark_message_burned(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        burned_at: i64,
+    ) -> Result<bool> {
+        let _ = (ctx, tenant_id, message_id, burned_at);
+        Ok(false)
+    }
+
+    /// 阅后即焚：硬删除/清理完成。
+    async fn mark_message_hard_deleted(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        hard_deleted_at: i64,
+    ) -> Result<bool> {
+        let _ = (ctx, tenant_id, message_id, hard_deleted_at);
+        Ok(false)
+    }
+
     /// 添加或更新消息反应
     async fn upsert_message_reaction(
         &self,

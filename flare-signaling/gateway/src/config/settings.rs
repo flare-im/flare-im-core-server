@@ -3,7 +3,8 @@
 //! 连接与稳定性相关项（max_connections、heartbeat、auth_timeout、send_timeout）对接 flare-core
 //! ServerConfig，便于扩容连接数与调优消息收发稳定性；可通过环境变量覆盖。
 
-use flare_im_core::config::{FlareAppConfig, RedisPoolConfig};
+use flare_im_core::config::{FlareAppConfig, RedisPoolConfig, TrustedTokenIssuerConfig};
+use flare_im_core::utils::normalize_tenant_id;
 
 #[derive(Debug, Clone)]
 pub struct AccessGatewayConfig {
@@ -17,6 +18,7 @@ pub struct AccessGatewayConfig {
     pub token_secret: String,
     pub token_issuer: String,
     pub token_ttl_seconds: u64,
+    pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
     pub token_store_redis_url: Option<String>,
     // ACK上报配置（使用 gRPC，无需 JetStream）
     pub use_ack_report: bool,
@@ -84,6 +86,7 @@ impl AccessGatewayConfig {
         // 默认租户ID（新增，默认 "0"）
         let default_tenant_id = std::env::var("ACCESS_GATEWAY_DEFAULT_TENANT_ID")
             .ok()
+            .map(normalize_tenant_id)
             .unwrap_or_else(|| "0".to_string());
 
         // 是否使用 Route 服务（新增，默认 true）
@@ -106,6 +109,8 @@ impl AccessGatewayConfig {
             .unwrap_or_else(|| "flare-im-core".to_string());
 
         let token_ttl_seconds = service.token_ttl_seconds.unwrap_or(3600);
+
+        let trusted_token_issuers = service.trusted_token_issuers.clone();
 
         // ACK上报配置（使用 gRPC，默认开启）
         let use_ack_report = std::env::var("ACCESS_GATEWAY_USE_ACK_REPORT")
@@ -174,6 +179,7 @@ impl AccessGatewayConfig {
             token_secret,
             token_issuer,
             token_ttl_seconds,
+            trusted_token_issuers,
             token_store_redis_url: token_profile.as_ref().map(|p| p.url.clone()),
             use_ack_report,
             gateway_id,

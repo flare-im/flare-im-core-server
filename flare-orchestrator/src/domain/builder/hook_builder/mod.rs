@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use flare_im_core::abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAGS};
 use flare_im_core::hooks::hook_context_data::{HookContextData, set_hook_context_data};
 use flare_im_core::hooks::{MessageDraft, MessageRecord};
+use flare_im_core::utils::normalize_tenant_id;
 use flare_proto::common::Message;
 use flare_server_core::context::{Context, Ctx};
 use flare_server_core::mq::nats::consumer::context_from_nats_headers;
@@ -17,8 +18,9 @@ use crate::error::Result;
 #[allow(dead_code)]
 fn tenant_id_from_opt(tenant: Option<&str>, default: Option<&String>) -> String {
     tenant
-        .and_then(|s| non_empty(s.to_string()))
+        .and_then(|s| non_empty(normalize_tenant_id(s)))
         .or_else(|| default.cloned())
+        .map(normalize_tenant_id)
         .unwrap_or_else(|| "0".to_string())
 }
 
@@ -64,7 +66,7 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
         {
             let mut new_ctx = Context::with_request_id(request_id.clone());
             if let Some(tenant_id) = ctx.tenant_id() {
-                new_ctx = new_ctx.with_tenant_id(tenant_id.to_string());
+                new_ctx = new_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
             }
             if let Some(user_id) = ctx.user_id() {
                 new_ctx = new_ctx.with_user_id(user_id.to_string());
@@ -89,7 +91,23 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
     }
     hook_data.sender_id = non_empty(request.sender_id.clone());
     let conversation_type_str = conversation_type_int_to_label(request.conversation_type);
-    hook_data.conversation_type = Some(conversation_type_str);
+    hook_data.conversation_type = Some(conversation_type_str.clone());
+    if request.conversation_type == flare_proto::common::ConversationType::Single as i32
+        && !request.channel_id.is_empty()
+    {
+        hook_data
+            .attributes
+            .entry("receiver_id".into())
+            .or_insert(request.channel_id.clone());
+    }
+    if request.conversation_type == flare_proto::common::ConversationType::Group as i32
+        && !request.channel_id.is_empty()
+    {
+        hook_data
+            .attributes
+            .entry("group_id".into())
+            .or_insert(request.channel_id.clone());
+    }
     let message_type_str = match request.message_type {
         1 => "text",
         2 => "image",
@@ -108,7 +126,7 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
     if ctx.tenant_id().is_none() || ctx.tenant_id().map(|s| s.is_empty()).unwrap_or(true) {
         let mut c = (*ctx).clone();
         if let Some(t) = default_tenant {
-            c = c.with_tenant_id(t.as_str());
+            c = c.with_tenant_id(normalize_tenant_id(t));
         } else {
             c = c.with_tenant_id("0");
         }
@@ -130,7 +148,7 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
         hook_data
             .attributes
             .entry("tenant_id".into())
-            .or_insert(tenant_id_val.clone());
+            .or_insert(normalize_tenant_id(tenant_id_val));
     }
 
     if !request.content.is_empty() {
@@ -246,6 +264,7 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
             Some(flare_proto::common::message_content::Content::Location(_)) => "location",
             Some(flare_proto::common::message_content::Content::Card(_)) => "card",
             Some(flare_proto::common::message_content::Content::Notification(_)) => "notification",
+            Some(flare_proto::common::message_content::Content::System(_)) => "system",
             Some(flare_proto::common::message_content::Content::Custom(_)) => "custom",
             Some(flare_proto::common::message_content::Content::Forward(_)) => "forward",
             Some(flare_proto::common::message_content::Content::LinkCard(_)) => "link_card",
@@ -270,6 +289,11 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
     metadata
         .entry("receiver_id".into())
         .or_insert(receiver_list.first().cloned().unwrap_or_default());
+    if !request.channel_id.is_empty() {
+        metadata
+            .entry("channel_id".into())
+            .or_insert(request.channel_id.clone());
+    }
     if !request.conversation_id.is_empty() {
         metadata
             .entry("conversation_id".into())
@@ -439,7 +463,7 @@ pub fn merge_context(original: &Ctx, updated: Ctx) -> Ctx {
     {
         if let Some(tenant_id) = original.tenant_id() {
             if !tenant_id.is_empty() {
-                merged_ctx = merged_ctx.with_tenant_id(tenant_id.to_string());
+                merged_ctx = merged_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
             }
         }
     }
@@ -522,6 +546,7 @@ fn detect_message_type(message: &Message) -> &'static str {
         Ok(MessageType::Task) => "task",
         Ok(MessageType::Schedule) => "schedule",
         Ok(MessageType::Announcement) => "announcement",
+        Ok(MessageType::System) => "system",
         Ok(_) | Err(_) => {
             let decoded = if !message.content.is_empty() {
                 flare_proto::common::MessageContent::decode(message.content.as_slice()).ok()
@@ -540,6 +565,7 @@ fn detect_message_type(message: &Message) -> &'static str {
                     Some(flare_proto::common::message_content::Content::Notification(_)) => {
                         "notification"
                     }
+                    Some(flare_proto::common::message_content::Content::System(_)) => "system",
                     Some(flare_proto::common::message_content::Content::Custom(_)) => "custom",
                     Some(flare_proto::common::message_content::Content::Forward(_)) => "forward",
                     Some(flare_proto::common::message_content::Content::LinkCard(_)) => "link_card",

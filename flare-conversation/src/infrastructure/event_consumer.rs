@@ -209,7 +209,16 @@ impl ReadReceiptEventConsumer {
                     return Ok(());
                 }
 
-                let read_seq = read.read_seq as i64;
+                let Some(read_seq) = read_seq_for_conversation_cursor(read.read_seq) else {
+                    debug!(
+                        conversation_id = %conversation_id,
+                        user_id = %user_id,
+                        message_id_count = read.message_ids.len(),
+                        burn_after_read = read.burn_after_read.unwrap_or(false),
+                        "ReadReceipt without positive read_seq does not advance conversation read cursor"
+                    );
+                    return Ok(());
+                };
 
                 let ctx = Context::root()
                     .with_tenant_id(tenant_id)
@@ -262,6 +271,14 @@ impl ReadReceiptEventConsumer {
             _ => {}
         }
         Ok(())
+    }
+}
+
+fn read_seq_for_conversation_cursor(read_seq: u64) -> Option<i64> {
+    if read_seq == 0 {
+        None
+    } else {
+        Some(i64::try_from(read_seq).unwrap_or(i64::MAX))
     }
 }
 
@@ -551,5 +568,20 @@ impl ConversationEnsureEventConsumer {
             "Conversation ensured from event (async)"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_seq_for_conversation_cursor;
+
+    #[test]
+    fn zero_read_seq_does_not_advance_conversation_cursor() {
+        assert_eq!(read_seq_for_conversation_cursor(0), None);
+    }
+
+    #[test]
+    fn positive_read_seq_advances_conversation_cursor() {
+        assert_eq!(read_seq_for_conversation_cursor(42), Some(42));
     }
 }

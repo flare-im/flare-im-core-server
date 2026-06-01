@@ -5,7 +5,7 @@ use flare_im_core::{
     ErrorCode,
     utils::{
         TimelineMetadata, current_millis, datetime_to_timestamp, embed_timeline_in_extra,
-        timestamp_to_millis,
+        normalize_tenant_id, timestamp_to_millis,
     },
 };
 use flare_proto::common::Message;
@@ -104,18 +104,19 @@ impl MessageSubmission {
         };
         embed_timeline_in_extra(&mut request, &timeline);
 
-        // 8. 设置 tenant_id（优先级：extra > defaults > default）
+        // 8. 设置 tenant_id（优先级：extra > defaults > 0）
         let tenant_id = request
             .extra
             .get("x-tenant-id")
             .or_else(|| request.extra.get("tenant_id"))
             .cloned()
             .or_else(|| defaults.default_tenant_id.clone())
-            .unwrap_or_else(|| "default".to_string());
+            .map(normalize_tenant_id)
+            .unwrap_or_else(|| "0".to_string());
         request
             .extra
-            .entry("tenant_id".to_string())
-            .or_insert(tenant_id);
+            .insert("tenant_id".to_string(), tenant_id.clone());
+        request.extra.insert("x-tenant-id".to_string(), tenant_id);
 
         // 9. 设置 shard_key（默认为 conversation_id）
         let shard_key = request

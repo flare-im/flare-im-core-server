@@ -1,0 +1,19 @@
+Flare IM Core
+Copyright 2014-2026 Flare Team
+
+This product includes software developed as part of the Flare IM project
+(https://github.com/flare-im/flare-im).
+
+Attribution
+-----------
+
+When you redistribute source or binary forms of this software, or derivative
+works thereof, you must:
+
+1. Retain this NOTICE file and the copyright notice above in source
+   distributions, or reproduce them in documentation for binary distributions.
+2. Include visible attribution in user-facing materials where practical, for
+   example: "Includes software from Flare IM Core
+   (https://github.com/flare-im/flare-im)".
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.

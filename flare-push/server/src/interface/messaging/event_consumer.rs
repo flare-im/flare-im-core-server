@@ -18,8 +18,14 @@ use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
+use flare_im_core::error::FlareError;
+
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
+
+fn retry_or_dlq_result(error: &FlareError) -> Option<MessageResult> {
+    error.is_retryable().then_some(MessageResult::Nack)
+}
 
 /// 推送事件消费者处理器
 ///
@@ -163,6 +169,17 @@ impl MessageHandler for PushEventHandler {
                 Ok(MessageResult::Ack)
             }
             Err(e) => {
+                if let Some(result) = retry_or_dlq_result(&e) {
+                    tracing::warn!(
+                        error = %e,
+                        topic = %message.context.topic,
+                        partition = message.context.partition,
+                        offset = message.context.offset,
+                        "Retryable failure while processing MqEnvelope, NACKing for redelivery"
+                    );
+                    return Ok(result);
+                }
+
                 tracing::error!(
                     error = %e,
                     topic = %message.context.topic,
@@ -190,5 +207,29 @@ impl MessageHandler for PushEventHandler {
     /// 获取处理器名称
     fn name(&self) -> &str {
         "push-event-handler"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use flare_im_core::error::{ErrorBuilder, ErrorCode};
+
+    use super::*;
+
+    #[test]
+    fn retryable_error_requests_nack() {
+        let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "mq unavailable").build_error();
+
+        assert!(matches!(
+            retry_or_dlq_result(&err),
+            Some(MessageResult::Nack)
+        ));
+    }
+
+    #[test]
+    fn non_retryable_error_uses_dlq_path() {
+        let err = ErrorBuilder::new(ErrorCode::MessageSendFailed, "bad payload").build_error();
+
+        assert!(retry_or_dlq_result(&err).is_none());
     }
 }

@@ -1,7 +1,7 @@
 pub mod message_kind;
 pub mod message_submission;
 
-pub use message_kind::MessageProfile;
+pub use message_kind::{MessageProfile, notification_persistent};
 pub use message_submission::{MessageDefaults, MessageSubmission};
 
 /// 会话类型枚举（与 proto ConversationType、数据库 conversation_type INT 对齐）

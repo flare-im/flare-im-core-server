@@ -7,14 +7,15 @@ use flare_grpc_proto::conversation::conversation_read_service_client::Conversati
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
     GetConversationDetailResponse, ListConversationParticipantsRequest,
-    ListConversationParticipantsResponse, UpdateCursorRequest,
+    ListConversationParticipantsResponse, UpdateConversationUserSettingsRequest,
+    UpdateConversationUserSettingsResponse, UpdateCursorRequest,
 };
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
     GetConversationMessageHeadRequest, QueryConversationEventsRequest, QueryMessagesBySeqRequest,
 };
+use flare_im_core::Ctx;
 use flare_im_core::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
-use flare_im_core::{Ctx, ServiceClient};
 use flare_proto::Message;
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
@@ -23,8 +24,8 @@ use tonic::transport::Channel;
 use crate::application::error::{discovery_unavailable, flare_from_tonic_status};
 
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage, StorageConversationMessageHead,
-    StorageReadPort,
+    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage,
+    StorageConversationMessageHead, StorageReadPort,
 };
 
 /// gRPC 同步适配器（基于 tonic）
@@ -35,13 +36,8 @@ pub struct GrpcSyncAdapters;
 
 impl GrpcSyncAdapters {
     async fn create_channel(service_name: &str) -> Result<Channel, FlareError> {
-        let discover = flare_im_core::discovery::create_discover(service_name)
-            .await
-            .map_err(|e| discovery_unavailable(service_name, e))?
-            .ok_or_else(|| discovery_unavailable(service_name, "discovery not configured"))?;
-        let mut client = ServiceClient::new(discover);
-        client
-            .get_channel()
+        let fallback = flare_im_core::discovery::default_static_grpc_fallback(service_name);
+        flare_im_core::discovery::connect_grpc_channel_with_fallback(service_name, fallback)
             .await
             .map_err(|e| discovery_unavailable(service_name, e))
     }
@@ -119,6 +115,19 @@ impl ConversationSyncPort for GrpcSyncAdapters {
             .map_err(|e| flare_from_tonic_status(&e))?;
         Ok(resp.into_inner())
     }
+
+    async fn update_conversation_user_settings(
+        &self,
+        ctx: &Ctx,
+        req: UpdateConversationUserSettingsRequest,
+    ) -> Result<UpdateConversationUserSettingsResponse, FlareError> {
+        let mut client = Self::conversation_manage_client().await?;
+        let resp = client
+            .update_conversation_user_settings(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
+    }
 }
 
 impl StorageReadPort for GrpcSyncAdapters {
@@ -140,6 +149,7 @@ impl StorageReadPort for GrpcSyncAdapters {
                     before_seq,
                     limit,
                     user_id: user_id.to_string(),
+                    include_burned_placeholder: false,
                 },
                 ctx,
             ))

@@ -3,6 +3,7 @@ use std::{collections::HashMap, env};
 
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
+use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -164,7 +165,7 @@ impl MessageOrchestratorConfig {
 
         let (service_config, jetstream_profile, kafka_profile, redis_profile) =
             if let Some(cfg) = app {
-                let svc = cfg.message_orchestrator_service();
+                let svc = cfg.orchestrator_service();
                 let jetstream_profile = svc
                     .jetstream
                     .as_deref()
@@ -291,7 +292,8 @@ impl MessageOrchestratorConfig {
         let default_tenant_id = env_or_fallback(
             "MESSAGE_ORCHESTRATOR_DEFAULT_TENANT_ID",
             "STORAGE_DEFAULT_TENANT_ID",
-        );
+        )
+        .map(normalize_tenant_id);
 
         let default_business_type = env_or_fallback(
             "MESSAGE_ORCHESTRATOR_DEFAULT_BUSINESS_TYPE",
@@ -527,12 +529,6 @@ impl MessageOrchestratorConfig {
     /// 从应用配置加载（新方式，推荐）
     pub fn from_app_config(app: &FlareAppConfig) -> Self {
         Self::from_sources(Some(app))
-    }
-
-    /// 从环境变量加载（旧入口，不推荐使用）
-    #[deprecated(note = "Use from_app_config instead")]
-    pub fn from_env() -> Self {
-        Self::from_sources(None)
     }
 
     pub fn defaults(&self) -> MessageDefaults {

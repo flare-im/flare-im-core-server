@@ -8,10 +8,9 @@ use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
 use flare_grpc_proto::sfu_control::{
     AcceptCallRequest as ProtoAcceptCallRequest, AddIceCandidateRequest as ProtoAddIce,
     CreateRoomRequest, GetJoinTokenRequest as ProtoJoin, GetPeerNetworkQualityRequest,
-    GetRoomStateRequest,
-    HandleSdpAnswerRequest as ProtoHandleAnswer, HandleSdpOfferRequest as ProtoHandleOffer,
-    HangupCallRequest as ProtoHangup, JoinRoomRequest as ProtoJoinRoom,
-    LeaveRoomRequest as ProtoLeaveRoom, MediaKind,
+    GetRoomStateRequest, HandleSdpAnswerRequest as ProtoHandleAnswer,
+    HandleSdpOfferRequest as ProtoHandleOffer, HangupCallRequest as ProtoHangup,
+    JoinRoomRequest as ProtoJoinRoom, LeaveRoomRequest as ProtoLeaveRoom, MediaKind,
     SetPublisherMuteRequest as ProtoSetPublisherMute,
     SetSimulcastLayerRequest as ProtoSetSimulcastLayer,
     SetSubscriptionRequest as ProtoSetSubscription, SimulcastLayer,
@@ -23,10 +22,6 @@ use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::infrastructure::capability::plugin_channel::{
-    PLUGIN_DISCOVERY_TIMEOUT, resolve_plugin_channel,
-};
-use crate::infrastructure::config::capability_runtime::discovery_route_authority;
 use crate::domain::capability::{
     AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
     CapabilityError, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest,
@@ -35,10 +30,14 @@ use crate::domain::capability::{
     ListParticipantsResponse, MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse,
     MediaGetRoomStateRequest, MediaGetRoomStateResponse, MediaJoinTransportRequest,
     MediaJoinTransportResponse, MediaLeaveTransportRequest, MediaLeaveTransportResponse,
-    MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse,
-    MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest,
-    MediaSetSubscriptionResponse, RejectCallRequest, RejectCallResponse, Result, RtcCapability,
+    MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest,
+    MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest, MediaSetSubscriptionResponse,
+    RejectCallRequest, RejectCallResponse, Result, RtcCapability,
 };
+use crate::infrastructure::capability::plugin_channel::{
+    PLUGIN_DISCOVERY_TIMEOUT, resolve_plugin_channel,
+};
+use crate::infrastructure::config::capability_runtime::discovery_route_authority;
 
 #[derive(Debug, Deserialize)]
 struct CallRefPayload {
@@ -52,7 +51,9 @@ fn status_to_capability(s: tonic::Status) -> CapabilityError {
 enum MediaControlTransport {
     Static(Channel),
     /// `discovery://<service_name>`，与 [`resolve_plugin_channel`] / 健康检查共用缓存。
-    Discovery { route_authority: String },
+    Discovery {
+        route_authority: String,
+    },
 }
 
 /// 独立媒体控制面进程的 gRPC 后端（与进程内媒体后端二选一）。
@@ -95,13 +96,17 @@ impl MediaControlGrpcRtcCapability {
                     Ok(Err(e)) => {
                         return Err(CapabilityError::System(format!(
                             "discover media-control service {}: {e}",
-                            route_authority.strip_prefix("discovery://").unwrap_or(route_authority)
+                            route_authority
+                                .strip_prefix("discovery://")
+                                .unwrap_or(route_authority)
                         )));
                     }
                     Err(_) => {
                         return Err(CapabilityError::System(format!(
                             "discover media-control service {}: timeout (plugin unavailable)",
-                            route_authority.strip_prefix("discovery://").unwrap_or(route_authority)
+                            route_authority
+                                .strip_prefix("discovery://")
+                                .unwrap_or(route_authority)
                         )));
                     }
                 };

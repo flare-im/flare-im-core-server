@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
 
     // 生成 JWT Token（业务系统应该使用自己的密钥）
     let token_secret = env::var("TOKEN_SECRET").unwrap_or_else(|_| "insecure-secret".to_string());
-    let tenant_id = env::var("TENANT_ID").unwrap_or_else(|_| "default-tenant".to_string());
+    let tenant_id = env::var("TENANT_ID").unwrap_or_else(|_| "0".to_string());
     let business_user_id =
         env::var("BUSINESS_USER_ID").unwrap_or_else(|_| "business-system".to_string());
 

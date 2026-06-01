@@ -109,6 +109,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
                     response_headers: Default::default(),
+                    burn_protected: false,
+                    burn_status: 0,
                 },
             )
             .await
@@ -191,6 +193,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
                     response_headers: Default::default(),
+                    burn_protected: false,
+                    burn_status: 0,
                 },
             )
             .await
@@ -313,6 +317,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0,
                     download: false,
                     response_headers: Default::default(),
+                    burn_protected: false,
+                    burn_status: 0,
                 },
             )
             .await

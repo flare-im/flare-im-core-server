@@ -22,6 +22,9 @@ pub enum EventType {
     Unpin = 13,
     Mark = 14,
     Unmark = 15,
+    MessageBurnScheduled = 16,
+    MessageBurned = 17,
+    MessageHardDeleted = 18,
     Custom = 99,
 }
 
@@ -50,6 +53,9 @@ pub enum EventPayload {
     Unpin(UnpinPayload),
     Mark(MarkPayload),
     Unmark(UnmarkPayload),
+    BurnScheduled(BurnScheduledPayload),
+    Burned(BurnedPayload),
+    HardDeleted(HardDeletedPayload),
     Message(super::Message),
     Custom(CustomPayload),
     Other,
@@ -126,6 +132,44 @@ pub struct UnmarkPayload {
     pub server_msg_id: String,
     pub user_id: String,
     pub mark_type: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BurnScheduledPayload {
+    pub tenant_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub server_id: String,
+    pub seq: Option<u64>,
+    pub reader_id: Option<String>,
+    pub burn_at: i64,
+    pub event_time: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BurnedPayload {
+    pub tenant_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub server_id: String,
+    pub seq: Option<u64>,
+    pub reader_id: Option<String>,
+    pub burn_at: i64,
+    pub burned_at: i64,
+    pub event_time: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HardDeletedPayload {
+    pub tenant_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub server_id: String,
+    pub seq: Option<u64>,
+    pub reader_id: Option<String>,
+    pub burn_at: Option<i64>,
+    pub burned_at: Option<i64>,
+    pub event_time: i64,
 }
 
 #[derive(Debug, Clone)]

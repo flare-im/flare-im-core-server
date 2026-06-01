@@ -8,7 +8,8 @@ use tracing::debug;
 use crate::application::commands::{
     BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
     ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
-    UpdateConversationCommand, UpdateCursorCommand, UpdatePresenceCommand,
+    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
+    UpdatePresenceCommand,
 };
 use crate::application::queries::{
     ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
@@ -195,6 +196,33 @@ impl ConversationCommandHandler {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn handle_update_conversation_user_settings(
+        &self,
+        ctx: &Context,
+        command: UpdateConversationUserSettingsCommand,
+    ) -> Result<crate::domain::model::ConversationUserSettings> {
+        let user_id = require_user_id(ctx)?;
+        debug!(
+            user_id = %user_id,
+            conversation_id = %command.conversation_id,
+            base_settings_version = command.base_settings_version,
+            "Handling update conversation user settings"
+        );
+        self.domain_service
+            .update_user_settings(
+                ctx,
+                &crate::domain::model::UpdateConversationUserSettingsPatch {
+                    conversation_id: command.conversation_id,
+                    is_pinned: command.is_pinned,
+                    is_muted: command.is_muted,
+                    is_archived: command.is_archived,
+                    draft: command.draft,
+                    base_settings_version: command.base_settings_version,
+                },
+            )
+            .await
     }
 
     /// 处理更新设备状态命令

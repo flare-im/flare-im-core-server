@@ -59,6 +59,7 @@ where
             } else {
                 Some(req.cursor)
             },
+            include_burned_placeholder: req.include_burned_placeholder,
         };
 
         match self
@@ -119,6 +120,7 @@ where
             } else {
                 Some(req.user_id)
             },
+            include_burned_placeholder: req.include_burned_placeholder,
         };
 
         match self

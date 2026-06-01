@@ -217,7 +217,7 @@ async fn execute_operation(
     
     let tenant_id = cmd.tenant.as_ref()
         .map(|t| t.tenant_id.as_str())
-        .unwrap_or("default");
+        .unwrap_or("0");
     
     match OperationType::try_from(operation.operation_type) {
         Ok(OperationType::Recall) => {
@@ -429,4 +429,3 @@ async fn recall_message(
 4. **一致性**：所有操作都通过统一的消息推送机制
 
 这样既保持了架构的简洁性，又实现了业务逻辑的统一和可追溯性。
-

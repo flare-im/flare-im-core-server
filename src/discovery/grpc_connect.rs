@@ -1,10 +1,11 @@
 //! 基于 [`crate::config::FlareAppConfig`] 与 [`super::create_discover_from_config`] 的统一 gRPC 连接与 [`GatewayRouter`] 构建。
 //!
-//! 有注册中心时通过 `flare_server_core::discovery::ServiceDiscover` / [`ServiceClient`] 解析；无注册中心时回退到静态 URI（本地开发）。
-//! 禁止在业务 crate 中手写重复的 `create_discover` 双份与 `GatewayRouter::with_service_client_and_discover` 拼装。
+//! ## 启动 vs 运行时
+//! - [`connect_grpc_channel_lazy_from_app_config`]：**进程启动**用，不等待注册中心，避免微服务启动顺序耦合。
+//! - [`connect_grpc_channel_from_app_config`]：**首包 RPC / 运行时**用，限时发现，失败回退静态 lazy。
+//! 禁止在 `wire::initialize` / `main` 中调用会阻塞等待对端实例上线的连接 API。
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tonic::transport::{Channel, Endpoint};
 
@@ -12,10 +13,35 @@ use crate::ServiceClient;
 use crate::config::FlareAppConfig;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 
+use super::channel_resolve::DISCOVERY_CHANNEL_TIMEOUT;
 use super::init::create_discover_from_config;
 
-/// 为指定逻辑服务名建立一条 gRPC [`Channel`]（有注册中心则发现；否则连接 `static_fallback_uri`）。
+fn connect_static_lazy(
+    static_fallback_uri: &str,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    let endpoint = Endpoint::from_shared(static_fallback_uri.to_string())?;
+    Ok(endpoint.connect_lazy())
+}
+
+/// 启动期连接：立即返回 lazy Channel，**不**等待 Consul / 对端进程。
+pub fn connect_grpc_channel_lazy_from_app_config(
+    _app_config: &FlareAppConfig,
+    _service_type: &str,
+    static_fallback_uri: &str,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_static_lazy(static_fallback_uri)
+}
+
+/// 运行时连接：限时服务发现，失败则回退静态 lazy（用于首包 RPC 或需立即可用通道的场景）。
 pub async fn connect_grpc_channel_from_app_config(
+    app_config: &FlareAppConfig,
+    service_type: &str,
+    static_fallback_uri: &str,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_grpc_channel_from_app_config_inner(app_config, service_type, static_fallback_uri).await
+}
+
+async fn connect_grpc_channel_from_app_config_inner(
     app_config: &FlareAppConfig,
     service_type: &str,
     static_fallback_uri: &str,
@@ -23,28 +49,29 @@ pub async fn connect_grpc_channel_from_app_config(
     match create_discover_from_config(app_config, service_type).await? {
         Some(discover) => {
             let mut client = ServiceClient::new(discover);
-            let channel = client.get_channel().await?;
-            Ok(channel)
+            match tokio::time::timeout(DISCOVERY_CHANNEL_TIMEOUT, client.get_channel()).await {
+                Ok(Ok(channel)) => Ok(channel),
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        service_type,
+                        error = %e,
+                        fallback = static_fallback_uri,
+                        "service discovery failed, using static fallback"
+                    );
+                    connect_static_lazy(static_fallback_uri)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        service_type,
+                        timeout_secs = DISCOVERY_CHANNEL_TIMEOUT.as_secs(),
+                        fallback = static_fallback_uri,
+                        "service discovery timed out, using static fallback"
+                    );
+                    connect_static_lazy(static_fallback_uri)
+                }
+            }
         }
-        None => {
-            let endpoint = Endpoint::from_shared(static_fallback_uri.to_string())?;
-            let timeout = Duration::from_secs(10);
-            let channel = tokio::time::timeout(timeout, endpoint.connect())
-                .await
-                .map_err(|_| {
-                    format!(
-                        "timeout connecting to static gRPC endpoint {}",
-                        static_fallback_uri
-                    )
-                })?
-                .map_err(|e| {
-                    format!(
-                        "failed to connect to static gRPC endpoint {}: {}",
-                        static_fallback_uri, e
-                    )
-                })?;
-            Ok(channel)
-        }
+        None => connect_static_lazy(static_fallback_uri),
     }
 }
 
@@ -66,6 +93,7 @@ pub async fn build_gateway_router_from_app_config(
             Ok(GatewayRouter::with_service_client_and_discover(
                 GatewayRouterConfig {
                     access_gateway_service: access_gateway_service_name.to_string(),
+                    static_fallback_endpoint: static_fallback,
                     ..Default::default()
                 },
                 service_client,
@@ -73,7 +101,7 @@ pub async fn build_gateway_router_from_app_config(
             ))
         }
         None => {
-            let ep = static_fallback.unwrap_or_else(|| "http://127.0.0.1:60051".to_string());
+            let ep = static_fallback.unwrap_or_else(|| "http://127.0.0.1:60060".to_string());
             tracing::info!(
                 endpoint = %ep,
                 "No registry configured; GatewayRouter using static Access Gateway endpoint"

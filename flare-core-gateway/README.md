@@ -68,6 +68,18 @@
 ✅ CORS 支持
 ✅ 健康检查
 
+## 网关规范
+
+生产级能力边界、安全认证、错误映射、统一返回格式、限流与观测规范见 [`GATEWAY_SPEC.md`](./GATEWAY_SPEC.md)。
+Rust/gRPC 代理层、typed client、上下文透传和后续接入路线见 [`GRPC_PROXY_DESIGN.md`](./GRPC_PROXY_DESIGN.md)。
+
+核心原则：
+
+- 网关只做 HTTP/JSON 到内部 gRPC 的边界适配，不承载消息顺序、好友关系、未读数等领域规则。
+- 所有受保护 API 必须经过统一认证，并向下游透传 `x-trace-id`、`x-request-id`、`x-tenant-id`、`x-user-id`。
+- 所有 JSON API 统一返回 `flare_server_core::http::ApiResponse<T>`。
+- 下游 gRPC 错误必须映射为稳定的 HTTP status + `ErrorCode`，不能把内部错误裸露给客户端。
+
 ## 快速开始
 
 ### 1. 配置环境变量

@@ -6,8 +6,9 @@ mod message;
 
 pub use context::{RequestContext, TenantContext};
 pub use event::{
-    CustomPayload, DeletePayload, EditPayload, Event, EventPayload, EventType, MarkPayload,
-    PinPayload, ReactionPayload, ReadPayload, RecallPayload, UnmarkPayload, UnpinPayload,
+    BurnScheduledPayload, BurnedPayload, CustomPayload, DeletePayload, EditPayload, Event,
+    EventPayload, EventType, HardDeletedPayload, MarkPayload, PinPayload, ReactionPayload,
+    ReadPayload, RecallPayload, UnmarkPayload, UnpinPayload,
 };
 pub use message::{Attachment, Message};
 

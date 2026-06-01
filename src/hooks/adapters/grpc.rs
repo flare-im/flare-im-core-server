@@ -16,9 +16,10 @@ use flare_grpc_proto::{
 use flare_proto::common::Message as ProtoStorageMessage;
 use prost::Message;
 use prost_types::Timestamp;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
-use super::super::config::HookDefinition;
+use crate::discovery::resolve_grpc_channel;
+
 use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
     PreSendDecision, PreSendHook, RecallEvent, RecallHook,
@@ -63,22 +64,13 @@ impl GrpcHookFactory {
         Self
     }
 
-    fn build_channel(endpoint: &str) -> Result<Channel> {
-        let endpoint = Endpoint::from_shared(endpoint.to_string()).map_err(|err| {
-            ErrorBuilder::new(ErrorCode::ConfigurationError, "invalid gRPC hook endpoint")
-                .details(err.to_string())
-                .build_error()
-        })?;
-        Ok(endpoint.connect_lazy())
-    }
-
     pub fn build_pre_send(
         &self,
         metadata: HashMap<String, String>,
-        channel: Channel,
+        grpc_endpoint: String,
     ) -> Arc<dyn PreSendHook> {
         Arc::new(GrpcPreSendHook {
-            channel,
+            grpc_endpoint,
             static_metadata: metadata,
         })
     }
@@ -86,10 +78,10 @@ impl GrpcHookFactory {
     pub fn build_post_send(
         &self,
         metadata: HashMap<String, String>,
-        channel: Channel,
+        grpc_endpoint: String,
     ) -> Arc<dyn PostSendHook> {
         Arc::new(GrpcPostSendHook {
-            channel,
+            grpc_endpoint,
             static_metadata: metadata,
         })
     }
@@ -97,10 +89,10 @@ impl GrpcHookFactory {
     pub fn build_delivery(
         &self,
         metadata: HashMap<String, String>,
-        channel: Channel,
+        grpc_endpoint: String,
     ) -> Arc<dyn DeliveryHook> {
         Arc::new(GrpcDeliveryHook {
-            channel,
+            grpc_endpoint,
             static_metadata: metadata,
         })
     }
@@ -108,38 +100,40 @@ impl GrpcHookFactory {
     pub fn build_recall(
         &self,
         metadata: HashMap<String, String>,
-        channel: Channel,
+        grpc_endpoint: String,
     ) -> Arc<dyn RecallHook> {
         Arc::new(GrpcRecallHook {
-            channel,
+            grpc_endpoint,
             static_metadata: metadata,
         })
     }
+}
 
-    pub fn channel_for(&self, def: &HookDefinition) -> Result<Channel> {
-        match &def.transport {
-            super::super::config::HookTransportConfig::Grpc { endpoint, .. } => {
-                Self::build_channel(endpoint)
-            }
-            _ => Err(
-                ErrorBuilder::new(ErrorCode::ConfigurationError, "transport is not gRPC")
-                    .details(format!("hook={}", def.name))
-                    .build_error(),
-            ),
-        }
-    }
+async fn hook_plugin_channel(endpoint: &str) -> Result<Channel> {
+    resolve_grpc_channel(endpoint).await.map_err(|e| {
+        ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "hook gRPC channel resolve failed",
+        )
+        .details(e)
+        .build_error()
+    })
 }
 
 #[derive(Clone)]
 struct GrpcPreSendHook {
-    channel: Channel,
+    grpc_endpoint: String,
     static_metadata: HashMap<String, String>,
 }
 
 #[async_trait]
 impl PreSendHook for GrpcPreSendHook {
     async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
-        let mut client = HookPluginClient::new(self.channel.clone());
+        let channel = match hook_plugin_channel(&self.grpc_endpoint).await {
+            Ok(ch) => ch,
+            Err(err) => return PreSendDecision::Reject { error: err },
+        };
+        let mut client = HookPluginClient::new(channel);
         let mut request = ProtoPreSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.draft = Some(build_draft(draft));
@@ -178,14 +172,18 @@ impl PreSendHook for GrpcPreSendHook {
 
 #[derive(Clone)]
 struct GrpcPostSendHook {
-    channel: Channel,
+    grpc_endpoint: String,
     static_metadata: HashMap<String, String>,
 }
 
 #[async_trait]
 impl PostSendHook for GrpcPostSendHook {
     async fn handle(&self, ctx: &Ctx, record: &MessageRecord, draft: &MessageDraft) -> HookOutcome {
-        let mut client = HookPluginClient::new(self.channel.clone());
+        let channel = match hook_plugin_channel(&self.grpc_endpoint).await {
+            Ok(ch) => ch,
+            Err(err) => return HookOutcome::Failed(err),
+        };
+        let mut client = HookPluginClient::new(channel);
         let mut request = ProtoPostSendHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.record = Some(build_record(record));
@@ -225,14 +223,18 @@ impl PostSendHook for GrpcPostSendHook {
 
 #[derive(Clone)]
 struct GrpcDeliveryHook {
-    channel: Channel,
+    grpc_endpoint: String,
     static_metadata: HashMap<String, String>,
 }
 
 #[async_trait]
 impl DeliveryHook for GrpcDeliveryHook {
     async fn handle(&self, ctx: &Ctx, event: &DeliveryEvent) -> HookOutcome {
-        let mut client = HookPluginClient::new(self.channel.clone());
+        let channel = match hook_plugin_channel(&self.grpc_endpoint).await {
+            Ok(ch) => ch,
+            Err(err) => return HookOutcome::Failed(err),
+        };
+        let mut client = HookPluginClient::new(channel);
         let mut request = ProtoDeliveryHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.event = Some(build_delivery_event(event));
@@ -271,14 +273,18 @@ impl DeliveryHook for GrpcDeliveryHook {
 
 #[derive(Clone)]
 struct GrpcRecallHook {
-    channel: Channel,
+    grpc_endpoint: String,
     static_metadata: HashMap<String, String>,
 }
 
 #[async_trait]
 impl RecallHook for GrpcRecallHook {
     async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
-        let mut client = HookPluginClient::new(self.channel.clone());
+        let channel = match hook_plugin_channel(&self.grpc_endpoint).await {
+            Ok(ch) => ch,
+            Err(err) => return HookOutcome::Failed(err),
+        };
+        let mut client = HookPluginClient::new(channel);
         let mut request = ProtoRecallHookRequest::default();
         request.context = Some(build_context(ctx, &self.static_metadata));
         request.event = Some(build_recall_event(event));

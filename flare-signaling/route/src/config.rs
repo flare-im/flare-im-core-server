@@ -1,5 +1,6 @@
 use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
+use flare_im_core::utils::normalize_tenant_id;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -51,7 +52,7 @@ impl RouteConfig {
             } else {
                 default
             },
-            default_tenant_id: env::var("DEFAULT_TENANT_ID").ok(),
+            default_tenant_id: env::var("DEFAULT_TENANT_ID").ok().map(normalize_tenant_id),
             shard_count: env::var("ROUTER_SHARD_COUNT")
                 .ok()
                 .and_then(|v| v.parse().ok())

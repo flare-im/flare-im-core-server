@@ -15,6 +15,7 @@ use flare_grpc_proto::signaling::online::{
 };
 use flare_im_core::ServiceClient;
 use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
+use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, InfraResult, InfraResultExt, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -95,7 +96,12 @@ impl ConnectionRepository {
         let service_client = service_client_guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Service client not initialized"))?;
-        let channel = service_client.get_channel().await.map_err(|e| {
+        let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+            &self.service_name,
+            service_client,
+        )
+        .await
+        .map_err(|e| {
             ErrorBuilder::new(
                 ErrorCode::ServiceUnavailable,
                 "signaling online unavailable",
@@ -283,8 +289,8 @@ pub(crate) fn core_info_to_domain(
     let tenant_id = core_info
         .metadata
         .get(METADATA_KEY_TENANT_ID)
-        .cloned()
-        .unwrap_or_else(|| default_tenant_id.to_string());
+        .map(normalize_tenant_id)
+        .unwrap_or_else(|| normalize_tenant_id(default_tenant_id));
     let mut info = DomainConnectionInfo::new(connection_id, user_id, tenant_id, device_id);
     if let Some(p) = platform {
         info = info.with_platform(p);

@@ -51,6 +51,7 @@ impl SendMessageUseCaseExample {
             conversation_kind: conversation_kind.clone(),
             rtc_intent: false,
             payload_type: Some("text".into()),
+            payload: None,
             ext: Value::Null,
         };
         require_pre_send_allow(&self.registry, ctx, guard_input).await?;
@@ -97,6 +98,7 @@ impl StartCallUseCaseExample {
             conversation_kind: conversation_kind.clone(),
             rtc_intent: true,
             payload_type: Some("rtc.call".into()),
+            payload: None,
             ext: Value::Null,
         };
         require_pre_send_allow(&self.registry, ctx, guard_input).await?;

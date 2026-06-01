@@ -107,9 +107,9 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         channel_id: String::new(),
         content: Vec::new(),
         status: 1,
-        offline_push_info: None,
         extra: std::collections::HashMap::new(),
         extensions: std::collections::HashMap::new(),
+        ..Default::default()
     };
 
     HookMessageRecord {
@@ -158,11 +158,20 @@ pub fn proto_to_pre_send_decision(
         }
         PreSendDecision::Continue
     } else {
-        // 如果不允许发送：proto 中不再携带 status，统一用 PermissionDenied。
-        // 额外信息可由 annotations 承载（若上游需要，可在此解析）。
-        use flare_im_core::error::ErrorCode;
-        let error =
-            flare_server_core::flare_err!(ErrorCode::PermissionDenied, "Hook rejected the request");
+        use flare_im_core::error::{ErrorBuilder, ErrorCode};
+        let reason = if response.deny_reason_code.trim().is_empty() {
+            "HOOK_REJECTED"
+        } else {
+            response.deny_reason_code.trim()
+        };
+        let message = if response.deny_reason_message.trim().is_empty() {
+            "Hook rejected the request"
+        } else {
+            response.deny_reason_message.trim()
+        };
+        let error = ErrorBuilder::new(ErrorCode::PermissionDenied, reason)
+            .details(message)
+            .build_error();
         PreSendDecision::Reject { error }
     }
 }

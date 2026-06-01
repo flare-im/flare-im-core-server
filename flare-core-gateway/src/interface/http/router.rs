@@ -44,6 +44,9 @@ use flare_server_core::http::middleware::auth_middleware;
         message_handler::send_message,
         message_handler::recall_message,
         message_handler::mark_message_read,
+        conversation_handler::list_conversations,
+        conversation_handler::list_conversation_participants,
+        conversation_handler::manage_participants,
     ),
     components(
         schemas(
@@ -93,6 +96,12 @@ use flare_server_core::http::middleware::auth_middleware;
             super::conversation_handler::ListConversationsHttpRequest,
             super::conversation_handler::ConversationHttpResponse,
             super::conversation_handler::ListConversationsHttpResponse,
+            super::conversation_handler::ConversationParticipantHttp,
+            super::conversation_handler::ListConversationParticipantsHttpRequest,
+            super::conversation_handler::ListConversationParticipantsHttpResponse,
+            super::conversation_handler::ManageParticipantsHttpRequest,
+            super::conversation_handler::ManageParticipantsHttpResponse,
+            super::conversation_handler::ParticipantRoleUpdateHttp,
         )
     ),
     tags(
@@ -207,6 +216,14 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
     // Conversation API 路由
     let conversation_router = Router::new()
         .route("/", get(conversation_handler::list_conversations))
+        .route(
+            "/participants",
+            get(conversation_handler::list_conversation_participants),
+        )
+        .route(
+            "/participants/manage",
+            post(conversation_handler::manage_participants),
+        )
         .layer(axum::Extension(clients))
         .route_layer(middleware::from_fn(auth_middleware));
 

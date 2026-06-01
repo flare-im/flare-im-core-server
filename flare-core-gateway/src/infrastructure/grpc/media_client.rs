@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::sync::Arc;
 use tokio_stream::{self as stream};
 use tonic::Code;
 use tonic::transport::{Channel, Uri};
@@ -18,8 +17,6 @@ pub struct MediaServiceClientWrapper {
 }
 
 impl MediaServiceClientWrapper {
-    const DEFAULT_MEDIA_ENDPOINT: &'static str = "http://localhost:60081";
-
     fn request_with_ctx<T>(ctx: &Ctx, payload: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(payload);
         ctx.inject_to_grpc_metadata(request.metadata_mut());
@@ -201,20 +198,12 @@ impl MediaServiceClientWrapper {
     }
 
     /// 创建新的客户端连接
-    pub async fn new(url: &str) -> Result<Self> {
-        let uri: Uri = url.parse()?;
-        let channel = Channel::builder(uri).connect().await?;
-        let client = MediaServiceClient::new(channel);
-        let fallback_url = if url != Self::DEFAULT_MEDIA_ENDPOINT {
-            Some(Self::DEFAULT_MEDIA_ENDPOINT.to_string())
-        } else {
-            None
-        };
-        Ok(Self {
-            client,
-            current_url: url.to_string(),
+    pub fn from_channel(channel: Channel, fallback_url: Option<String>) -> Self {
+        Self {
+            client: MediaServiceClient::new(channel),
+            current_url: String::new(),
             fallback_url,
-        })
+        }
     }
 
     /// 生成上传 URL
@@ -362,22 +351,6 @@ impl MediaServiceClientWrapper {
     }
 }
 
-/// gRPC 客户端管理器
-pub struct GrpcClients {
-    pub media: Arc<tokio::sync::Mutex<MediaServiceClientWrapper>>,
-}
-
-impl GrpcClients {
-    /// 初始化所有 gRPC 客户端
-    pub async fn new(media_service_url: &str) -> Result<Self> {
-        let media = MediaServiceClientWrapper::new(media_service_url).await?;
-
-        Ok(Self {
-            media: Arc::new(tokio::sync::Mutex::new(media)),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,7 +358,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // 需要实际的 gRPC 服务
     async fn test_media_client_connection() {
-        let client = MediaServiceClientWrapper::new("http://localhost:60081").await;
-        assert!(client.is_ok());
+        let channel = Channel::from_static("http://127.0.0.1:60081").connect_lazy();
+        let _client = MediaServiceClientWrapper::from_channel(channel, None);
     }
 }

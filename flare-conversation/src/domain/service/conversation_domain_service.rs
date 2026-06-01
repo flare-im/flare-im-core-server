@@ -119,6 +119,12 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 // 为每个会话获取最后一条消息（如果有）
                 for summary in &mut summaries {
                     if summary.last_message_id.is_none() {
+                        let visible_after_seq = summary.visible_after_seq.max(0);
+                        let max_seq = summary.last_message_seq.unwrap_or_default().max(0);
+                        if max_seq > 0 && visible_after_seq >= max_seq {
+                            continue;
+                        }
+
                         // 尝试获取最后一条消息信息
                         if let Ok(sync_result) = provider
                             .sync_messages(ctx, &summary.conversation_id, 0, None, 1)
@@ -713,6 +719,16 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             "Marked messages as read"
         );
         Ok(())
+    }
+
+    pub async fn update_user_settings(
+        &self,
+        ctx: &Context,
+        patch: &crate::domain::model::UpdateConversationUserSettingsPatch,
+    ) -> Result<crate::domain::model::ConversationUserSettings> {
+        self.conversation_repo
+            .update_user_settings(ctx, patch)
+            .await
     }
 
     /// 应用消息事件（写时维护未读计数）。

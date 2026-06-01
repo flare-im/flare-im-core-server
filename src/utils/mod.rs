@@ -14,6 +14,24 @@ pub fn optional_fallback_conversation(conversation_id: &str) -> Option<&str> {
 
 pub use helpers::ServiceHelper;
 
+pub const DEFAULT_TENANT_ID: &str = "0";
+
+#[inline]
+pub fn normalize_tenant_id(tenant_id: impl AsRef<str>) -> String {
+    match tenant_id.as_ref().trim() {
+        "" | "default" => DEFAULT_TENANT_ID.to_string(),
+        tenant_id => tenant_id.to_string(),
+    }
+}
+
+#[inline]
+pub fn normalize_optional_tenant_id(tenant_id: Option<&str>) -> Option<String> {
+    tenant_id
+        .map(str::trim)
+        .filter(|tenant_id| !tenant_id.is_empty())
+        .map(normalize_tenant_id)
+}
+
 // 重新导出 flare-server-core 的 context 工具函数
 pub use flare_server_core::utils::{
     ctx_to_map as context_to_mq_metadata, map_to_ctx as context_from_mq_metadata,
@@ -45,7 +63,7 @@ pub fn require_request_id_from_context(ctx: &Ctx) -> Result<String, &'static str
 pub fn require_tenant_id_from_context(ctx: &Ctx) -> Result<String, &'static str> {
     ctx.tenant_id()
         .filter(|s: &&str| !s.is_empty())
-        .map(|s: &str| s.to_string())
+        .map(normalize_tenant_id)
         .ok_or("Tenant ID is required in context")
 }
 

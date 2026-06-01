@@ -255,16 +255,6 @@ pub struct AccessGatewayServiceConfig {
     /// 是否使用 Route 服务进行消息路由（默认 true）
     #[serde(default = "default_true")]
     pub use_route_service: bool,
-    // 保留旧字段名用于向后兼容（已废弃）
-    #[serde(default, alias = "signaling_endpoint")]
-    #[deprecated(note = "Use signaling_service instead")]
-    pub _signaling_endpoint: Option<String>,
-    #[serde(default, alias = "message_endpoint", alias = "storage_endpoint")]
-    #[deprecated(note = "Use message_service instead")]
-    pub _message_endpoint: Option<String>,
-    #[serde(default, alias = "push_endpoint")]
-    #[deprecated(note = "Use push_service instead")]
-    pub _push_endpoint: Option<String>,
     /// 令牌密钥
     #[serde(default)]
     pub token_secret: Option<String>,
@@ -274,6 +264,9 @@ pub struct AccessGatewayServiceConfig {
     /// 令牌过期时间（秒）
     #[serde(default)]
     pub token_ttl_seconds: Option<u64>,
+    /// 额外信任的 JWT 发行方（如 Social 登录 token，用于长连接鉴权）
+    #[serde(default)]
+    pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
     /// 令牌存储
     #[serde(default)]
     pub token_store: Option<String>,
@@ -300,6 +293,13 @@ pub struct AccessGatewayServiceConfig {
     pub encryption_key: Option<String>,
 }
 
+/// Access Gateway 额外信任的 JWT 发行方。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TrustedTokenIssuerConfig {
+    pub issuer: String,
+    pub secret: String,
+}
+
 /// 核心网关服务配置（业务系统统一入口）
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CoreGatewayServiceConfig {
@@ -324,22 +324,6 @@ pub struct CoreGatewayServiceConfig {
     /// Capability 服务名（Hook 扩展 + 插件，通过服务发现获取地址）
     #[serde(default)]
     pub capability_service: Option<String>,
-    // 保留旧字段名用于向后兼容（已废弃）
-    #[serde(default, alias = "signaling_endpoint")]
-    #[deprecated(note = "Use signaling_service instead")]
-    pub _signaling_endpoint: Option<String>,
-    #[serde(default, alias = "message_endpoint")]
-    #[deprecated(note = "Use message_service instead")]
-    pub _message_endpoint: Option<String>,
-    #[serde(default, alias = "push_endpoint")]
-    #[deprecated(note = "Use push_service instead")]
-    pub _push_endpoint: Option<String>,
-    #[serde(default, alias = "storage_endpoint")]
-    #[deprecated(note = "Use storage_service instead")]
-    pub _storage_endpoint: Option<String>,
-    #[serde(default, alias = "media_endpoint")]
-    #[deprecated(note = "Use media_service instead")]
-    pub _media_endpoint: Option<String>,
     /// 信令路由服务名（通过服务发现获取地址）
     #[serde(default)]
     pub route_service: Option<String>,
@@ -698,10 +682,6 @@ pub struct ConversationServiceConfig {
     /// 存储读取服务名（通过服务发现获取地址，可选）
     #[serde(default)]
     pub storage_reader_service: Option<String>,
-    // 保留旧字段名用于向后兼容（已废弃）
-    #[serde(default, alias = "storage_reader_endpoint")]
-    #[deprecated(note = "Use storage_reader_service instead")]
-    pub _storage_reader_endpoint: Option<String>,
     /// 最近消息限制
     #[serde(default)]
     pub recent_message_limit: Option<i32>,
@@ -894,11 +874,6 @@ impl FlareAppConfig {
             .message_orchestrator
             .clone()
             .unwrap_or_default()
-    }
-
-    /// @deprecated 使用 orchestrator_service
-    pub fn message_orchestrator_service(&self) -> MessageOrchestratorServiceConfig {
-        self.orchestrator_service()
     }
 
     /// 获取信令在线服务配置

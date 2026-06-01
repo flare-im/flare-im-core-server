@@ -125,33 +125,4 @@ impl StorageReaderConfig {
             redis_session_cache_ttl_seconds,
         })
     }
-
-    /// 从环境变量加载（保留用于向后兼容，但不推荐使用）
-    #[deprecated(note = "Use from_app_config instead")]
-    pub fn from_env() -> Self {
-        let redis_url = env::var("STORAGE_REDIS_URL").ok();
-        let postgres_url = env::var("STORAGE_POSTGRES_URL").ok();
-        let default_range_seconds = env::var("STORAGE_READER_DEFAULT_RANGE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(7 * 24 * 3600);
-        let max_page_size = env::var("STORAGE_READER_MAX_PAGE_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(200);
-
-        Self {
-            redis_url,
-            postgres_url,
-            default_range_seconds,
-            max_page_size,
-            postgres_max_connections: 20,
-            postgres_min_connections: 5,
-            postgres_acquire_timeout_seconds: 30,
-            postgres_idle_timeout_seconds: 600,
-            postgres_max_lifetime_seconds: 1800,
-            redis_message_cache_ttl_seconds: 3600,
-            redis_session_cache_ttl_seconds: 1800,
-        }
-    }
 }

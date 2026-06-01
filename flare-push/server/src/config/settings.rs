@@ -8,6 +8,7 @@ use flare_im_core::constants::topics::{
     TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ACKS, TOPIC_PUSH_CUSTOM, TOPIC_PUSH_DLQ, TOPIC_PUSH_EVENTS,
     TOPIC_PUSH_MESSAGES, TOPIC_PUSH_NOTIFICATIONS, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
+use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -159,7 +160,8 @@ impl PushServerConfig {
         let default_tenant_id = env::var("PUSH_SERVER_DEFAULT_TENANT_ID")
             .ok()
             .or_else(|| service.default_tenant_id.clone())
-            .unwrap_or_else(|| "default".to_string());
+            .map(normalize_tenant_id)
+            .unwrap_or_else(|| "0".to_string());
 
         Self {
             mq_backend,

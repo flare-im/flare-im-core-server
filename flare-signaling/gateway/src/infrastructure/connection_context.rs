@@ -2,6 +2,7 @@
 //!
 //! 从连接信息中提取上下文（租户ID、用户ID等）并设置到 Context，与 flare_server_core::context 对齐。
 
+use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::context::{ActorContext, ActorType, Context};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -13,7 +14,9 @@ pub const METADATA_KEY_DEVICE_ID: &str = "device_id";
 
 /// 从连接信息的 metadata 中提取租户ID
 pub fn extract_tenant_id_from_metadata(metadata: &HashMap<String, String>) -> Option<String> {
-    metadata.get(METADATA_KEY_TENANT_ID).cloned()
+    metadata
+        .get(METADATA_KEY_TENANT_ID)
+        .map(normalize_tenant_id)
 }
 
 /// 从连接信息的 metadata 中提取用户ID
@@ -37,7 +40,8 @@ pub fn build_context_from_connection(
     let mut ctx = Context::with_request_id(request_id).with_trace_id(trace_id);
     let tenant_id = connection_metadata
         .and_then(|m| m.get(METADATA_KEY_TENANT_ID).cloned())
-        .unwrap_or_else(|| default_tenant_id.to_string());
+        .map(normalize_tenant_id)
+        .unwrap_or_else(|| normalize_tenant_id(default_tenant_id));
     ctx = ctx.with_tenant_id(tenant_id);
     let uid = user_id
         .map(str::to_string)

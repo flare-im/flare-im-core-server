@@ -52,6 +52,13 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             .route_message(request)
             .await
             .map_err(|status| {
+                if let Ok(detail) = flare_proto::common::ErrorDetail::decode(status.details()) {
+                    let code = ServerErrorCode::from_u32(detail.code.max(0) as u32)
+                        .unwrap_or(ServerErrorCode::GeneralError);
+                    return ErrorBuilder::new(code, detail.reason)
+                        .details(detail.message)
+                        .build_error();
+                }
                 ErrorBuilder::new(
                     ServerErrorCode::ServiceUnavailable,
                     "RouteMessage RPC failed",
@@ -116,7 +123,7 @@ impl IMessageCommandPort for RouterMessageCommandPort {
                 })
             }),
             ack_id: None,
-            metadata: Default::default(),
+            error_detail: None,
         })
     }
 }
@@ -129,9 +136,14 @@ fn send_ack_from_failure(message: &Message, code: i32, msg: String) -> SendAck {
         conversation_id: message.conversation_id.clone(),
         success: false,
         error_code: code,
-        error_message: msg,
+        error_message: msg.clone(),
         server_time: None,
         ack_id: None,
-        metadata: Default::default(),
+        error_detail: Some(flare_proto::common::ErrorDetail {
+            code,
+            reason: "MESSAGE_SEND_FAILED".to_string(),
+            message: msg,
+            track: String::new(),
+        }),
     }
 }

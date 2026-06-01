@@ -26,7 +26,7 @@ jetstream_timeout_ms = 5000
 online_ttl_seconds = 3600
 
 # 默认租户 ID
-default_tenant_id = "default"
+default_tenant_id = "0"
 
 # Hook 配置
 hook_config = "config/hooks.toml"

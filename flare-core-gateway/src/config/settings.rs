@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use flare_im_core::discovery::{discovery_route_authority, is_discovery_route_authority};
+use flare_im_core::service_names::{CONVERSATION, MEDIA, ORCHESTRATOR};
 use serde::Deserialize;
 
 /// 网关配置
@@ -30,12 +32,19 @@ pub struct ServerConfig {
 /// gRPC 客户端配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct GrpcConfig {
-    /// MediaService 地址
+    /// MediaService 路由（`discovery://flare-media` 或静态 `http://` 覆盖）
     pub media_service_url: String,
-    /// MessageService 地址
+    /// MessageOrchestrator 路由
     pub message_service_url: String,
-    /// ConversationService 地址
+    /// ConversationService 路由
     pub conversation_service_url: String,
+    /// 无注册中心或发现失败时的 Media 静态回退 URI（本地开发）
+    #[serde(default)]
+    pub media_static_fallback: String,
+    #[serde(default)]
+    pub message_static_fallback: String,
+    #[serde(default)]
+    pub conversation_static_fallback: String,
     /// 连接超时(秒)
     pub connect_timeout_secs: u64,
     /// 请求超时(秒)
@@ -87,11 +96,17 @@ impl Settings {
 
         let grpc = GrpcConfig {
             media_service_url: std::env::var("GRPC_MEDIA_SERVICE_URL")
-                .unwrap_or_else(|_| "http://localhost:60081".to_string()),
+                .unwrap_or_else(|_| discovery_route_authority(MEDIA)),
             message_service_url: std::env::var("GRPC_MESSAGE_SERVICE_URL")
-                .unwrap_or_else(|_| "http://localhost:50052".to_string()),
+                .unwrap_or_else(|_| discovery_route_authority(ORCHESTRATOR)),
             conversation_service_url: std::env::var("GRPC_CONVERSATION_SERVICE_URL")
-                .unwrap_or_else(|_| "http://localhost:50053".to_string()),
+                .unwrap_or_else(|_| discovery_route_authority(CONVERSATION)),
+            media_static_fallback: std::env::var("GRPC_MEDIA_STATIC_FALLBACK")
+                .unwrap_or_else(|_| "http://127.0.0.1:60081".to_string()),
+            message_static_fallback: std::env::var("GRPC_MESSAGE_STATIC_FALLBACK")
+                .unwrap_or_else(|_| "http://127.0.0.1:50181".to_string()),
+            conversation_static_fallback: std::env::var("GRPC_CONVERSATION_STATIC_FALLBACK")
+                .unwrap_or_else(|_| "http://127.0.0.1:50090".to_string()),
             connect_timeout_secs: std::env::var("GRPC_CONNECT_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
@@ -155,11 +170,14 @@ impl Settings {
             anyhow::bail!("Server timeout cannot be 0");
         }
 
-        // 验证 gRPC URL
-        if !self.grpc.media_service_url.starts_with("http://")
-            && !self.grpc.media_service_url.starts_with("https://")
-        {
-            anyhow::bail!("gRPC URL must start with http:// or https://");
+        for (label, route) in [
+            ("media", self.grpc.media_service_url.as_str()),
+            ("message", self.grpc.message_service_url.as_str()),
+            ("conversation", self.grpc.conversation_service_url.as_str()),
+        ] {
+            if !is_valid_grpc_route(route) {
+                anyhow::bail!("gRPC route for {label} must be discovery://, http://, or https://");
+            }
         }
 
         // 验证限流配置
@@ -178,6 +196,12 @@ impl Settings {
     }
 }
 
+fn is_valid_grpc_route(route: &str) -> bool {
+    route.starts_with("http://")
+        || route.starts_with("https://")
+        || is_discovery_route_authority(route)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +211,8 @@ mod tests {
         let settings = Settings::from_env().unwrap();
         assert_eq!(settings.server.port, 50050);
         assert!(settings.rate_limit.enabled);
+        assert!(is_discovery_route_authority(
+            &settings.grpc.message_service_url
+        ));
     }
 }

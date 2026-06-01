@@ -74,6 +74,9 @@ fn event_type_from_i32(v: i32) -> EventType {
         Ok(ProtoEventType::EventUnpin) => EventType::Unpin,
         Ok(ProtoEventType::EventMark) => EventType::Mark,
         Ok(ProtoEventType::EventUnmark) => EventType::Unmark,
+        Ok(ProtoEventType::EventMessageBurnScheduled) => EventType::MessageBurnScheduled,
+        Ok(ProtoEventType::EventMessageBurned) => EventType::MessageBurned,
+        Ok(ProtoEventType::EventMessageHardDeleted) => EventType::MessageHardDeleted,
         _ => EventType::Unspecified,
     }
 }

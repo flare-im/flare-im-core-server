@@ -100,7 +100,7 @@ impl RecallMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: request.conversation_id.clone(),
             },
             reason: if request.reason.is_empty() {
                 None
@@ -287,16 +287,37 @@ pub struct ReadMessageCommand {
     pub burn_after_read: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadBurnMessageCommand {
+    pub tenant_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub reader_id: String,
+    pub read_at: DateTime<Utc>,
+    pub burn_after_read_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BurnDueMessagesCommand {
+    pub tenant_id: String,
+    pub now: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardDeleteBurnedMessagesCommand {
+    pub tenant_id: String,
+    pub now: i64,
+    pub limit: i64,
+}
+
 impl ReadMessageCommand {
     /// 从protobuf请求创建命令
     pub fn from_request(
         request: &flare_grpc_proto::message::MarkMessageReadRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
 
         Self {
             base: MessageOperationCommand {
@@ -304,7 +325,7 @@ impl ReadMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: request.conversation_id.clone(),
             },
             message_ids: vec![request.message_id.clone()],
             read_at: request.read_at.clone().map(|ts| {

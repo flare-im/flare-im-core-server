@@ -203,7 +203,9 @@ impl CallSignalEnrichmentService {
                     )
                     .await?;
             }
-            Some(Signal::Hangup(h)) => {
+            Some(Signal::Hangup(h))
+                if !h.reason.trim().eq_ignore_ascii_case("participant_leave") =>
+            {
                 let payload = hangup_payload(cs, &h)?;
                 let _ = self
                     .dispatch_capability_json(
@@ -216,6 +218,9 @@ impl CallSignalEnrichmentService {
                         payload,
                     )
                     .await?;
+            }
+            Some(Signal::Hangup(_)) => {
+                debug!("call_signal_enrichment: participant leave passthrough (no rtc.call.end)");
             }
             Some(Signal::Renegotiate(_)) => {
                 self.handle_renegotiate(ctx, tenant_id, &conversation_for_dispatch, rid, cs)

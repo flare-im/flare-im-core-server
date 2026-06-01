@@ -1,4 +1,6 @@
 //! gRPC：`ExecuteSync` 与 DATA 信道共用 `flare.common.v1.Sync` / `SyncRes`。
+//!
+//! 仅编排 **IM 域**（会话、消息、事件、成员）；好友/群目录等 Social 数据走 Gateway REST。
 
 use std::sync::Arc;
 
@@ -10,8 +12,8 @@ use flare_server_core::utils::extract_ctx_from_request_opt;
 use tonic::{Request, Response, Status};
 
 use crate::application::handlers::SyncOrchestrationHandler;
-use crate::application::ports::{GroupDirectorySyncPort, MemorySyncCursorCache};
-use crate::infrastructure::rpc::{NoopGroupDirectorySync, SyncInfra};
+use crate::application::ports::MemorySyncCursorCache;
+use crate::infrastructure::rpc::SyncInfra;
 
 /// gRPC 入口：`user_id` 仅从认证上下文读取。
 pub struct SyncOrchestratorGrpcHandler {
@@ -19,17 +21,17 @@ pub struct SyncOrchestratorGrpcHandler {
 }
 
 impl SyncOrchestratorGrpcHandler {
-    /// 默认：仅 IM 核心下游；群目录同步返回空增量（未接社交服务）。
     pub fn new() -> Self {
-        Self::with_group_directory(Arc::new(NoopGroupDirectorySync))
-    }
-
-    /// 注入外部群目录实现（如 `flare-social-im-bridge::grpc_group_directory_sync_port()`）。
-    pub fn with_group_directory(group_directory: Arc<dyn GroupDirectorySyncPort>) -> Self {
         let cache = Arc::new(MemorySyncCursorCache::new());
-        let infra = Arc::new(SyncInfra::new(group_directory));
+        let infra = Arc::new(SyncInfra);
         let inner = Arc::new(SyncOrchestrationHandler::new(infra, cache));
         Self { inner }
+    }
+}
+
+impl Default for SyncOrchestratorGrpcHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

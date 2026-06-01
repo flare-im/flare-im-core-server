@@ -220,9 +220,10 @@ pub fn build_conversation_ensure_request_from_message(
 ) -> ConversationEnsureRequest {
     let mut participants = vec![message.sender_id.clone()];
 
-    // 单聊时，channel_id 是对方 user_id
+    // 单聊时，channel_id 是对方 user_id；如果客户端误传成自己，不能创建单人成员会话。
     if message.conversation_type == flare_proto::common::ConversationType::Single as i32
         && !message.channel_id.is_empty()
+        && message.channel_id != message.sender_id
     {
         participants.push(message.channel_id.clone());
     }

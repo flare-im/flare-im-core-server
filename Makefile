@@ -5,7 +5,7 @@ CARGO ?= cargo
 # 自动检测 protoc 路径
 PROTOC ?= $(shell which protoc || echo "/opt/homebrew/bin/protoc" || echo "/usr/local/bin/protoc" || echo "")
 
-.PHONY: help build fmt lint check test clean
+.PHONY: help build fmt lint check test clean start-core start-social stop
 
 help:
 	@echo "Flare IM Core Make targets"
@@ -16,8 +16,12 @@ help:
 	@echo "  check           cargo check"
 	@echo "  test            cargo test"
 	@echo "  clean           cargo clean"
+	@echo "  start-core      Start full stack, single gateway, no business hooks"
+	@echo "  start-social    Start full stack, single gateway, flare-social hook"
+	@echo "  stop            Stop all services"
 	@echo "  run-<service>   Start service (see list below)"
 	@echo ""
+	@echo "Optional: make start-core ARGS=\"trace\"  (or multi / multi trace)"
 	@echo "Environment variables:"
 	@echo "  PROTOC          Path to protoc binary (auto-detected: $(PROTOC))"
 
@@ -45,6 +49,22 @@ test:
 
 clean:
 	$(CARGO) clean
+
+# Full stack launch (Hook profile) --------------------------------------------
+
+SCRIPTS := ./scripts
+ARGS ?=
+
+.PHONY: start-core start-social stop
+
+start-core:
+	$(SCRIPTS)/start_server_core.sh single $(ARGS)
+
+start-social:
+	$(SCRIPTS)/start_server_social.sh single $(ARGS)
+
+stop:
+	$(SCRIPTS)/stop_server.sh
 
 # Service launch helpers ----------------------------------------------------
 

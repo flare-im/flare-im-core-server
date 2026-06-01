@@ -22,12 +22,12 @@ use tonic::{Request, Response, Status};
 use crate::application::commands::materialize_hook_execution_plan;
 use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
+use crate::domain::capability::GuardDecision;
 use crate::domain::model::HookExecutionPlan;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
 };
-use crate::domain::capability::GuardDecision;
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, evaluate_pre_send_guards};
 use flare_im_core::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
@@ -122,6 +122,7 @@ impl ImHookPluginServer {
 
         Ok(RecallEvent {
             message_id: proto.message_id.clone(),
+            conversation_id: None,
             operator_id: proto.operator_id.clone(),
             recalled_at,
             metadata: proto.metadata.clone(),
@@ -231,15 +232,23 @@ impl ImHookPluginServer {
                 deny_reason_code: String::new(),
                 deny_reason_message: String::new(),
             },
-            PreSendDecision::Reject { .. } => PreSendHookResponse {
-                allow: false,
-                draft: None,
-                routing: None,
-                annotations: std::collections::HashMap::new(),
-                outcome_extensions: None,
-                deny_reason_code: String::new(),
-                deny_reason_message: String::new(),
-            },
+            PreSendDecision::Reject { error } => {
+                let (deny_reason_code, deny_reason_message) = match error {
+                    flare_im_core::error::FlareError::Localized {
+                        reason, details, ..
+                    } => (reason, details.unwrap_or_default()),
+                    other => ("HOOK_REJECTED".to_string(), other.to_string()),
+                };
+                PreSendHookResponse {
+                    allow: false,
+                    draft: None,
+                    routing: None,
+                    annotations: std::collections::HashMap::new(),
+                    outcome_extensions: None,
+                    deny_reason_code,
+                    deny_reason_message,
+                }
+            }
         };
 
         Ok(Response::new(response))

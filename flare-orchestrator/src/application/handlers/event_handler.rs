@@ -171,7 +171,7 @@ impl EventHandler {
 
         // 4. 推送事件
         self.event_domain_service
-            .push_event(ctx, event_with_seq, PersistenceMode::Auto)
+            .push_event(ctx, event_with_seq.clone(), PersistenceMode::Auto)
             .await?;
 
         Ok(())

@@ -20,6 +20,9 @@ pub enum EventType {
     Unpin = 13,
     Mark = 14,
     Unmark = 15,
+    MessageBurnScheduled = 16,
+    MessageBurned = 17,
+    MessageHardDeleted = 18,
     Custom = 99,
 }
 

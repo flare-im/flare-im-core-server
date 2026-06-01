@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as AnyhowContext, Result};
+use flare_im_core::utils::normalize_tenant_id;
 
 use crate::application::handlers::{
     AckRoutingHandler, DataRoutingHandler, EventRoutingHandler, MessageRoutingHandler,
@@ -34,13 +35,15 @@ pub async fn initialize(
     let default_tenant_id = route_config
         .default_tenant_id
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .map(normalize_tenant_id)
+        .unwrap_or_else(|| "0".to_string());
     let message_forwarder = Arc::new(MessageForwarder::new(default_tenant_id));
 
     let _connection_pool = Arc::new(GrpcConnectionPool::new(GrpcConnectionPoolConfig::default()));
 
     let flow_controller = Arc::new(DefaultFlowController::new());
-    let ack_to_push_proxy = AckToPushProxyForwarder::new();
+    // 不在启动期连接 Conversation，避免与 conversation 微服务启动顺序耦合。
+    let ack_to_push_proxy = AckToPushProxyForwarder::new_deferred(Arc::new(app_config.clone()));
     let message_routing_handler = Arc::new(MessageRoutingHandler::new(
         message_forwarder.clone(),
         Some(flow_controller.clone()),

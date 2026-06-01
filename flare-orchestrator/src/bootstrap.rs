@@ -126,9 +126,17 @@ impl ApplicationBootstrap {
                     })
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        tracing::error!(
+                            %address_clone,
+                            error = %e,
+                            "orchestrator gRPC listen/serve failed (常见原因: 端口已被占用 AddrInUse)"
+                        );
                         Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("gRPC server error: {}", e),
+                            std::io::ErrorKind::AddrInUse,
+                            format!(
+                                "gRPC server error on {address_clone}: {e} \
+                                 (若端口被占用，请先 stop_server.sh 或释放该端口)"
+                            ),
                         ))
                     })
             });

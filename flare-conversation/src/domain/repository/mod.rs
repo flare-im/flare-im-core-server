@@ -98,6 +98,12 @@ pub trait ConversationRepository: Send + Sync {
         seq: i64,
     ) -> Result<()>;
 
+    async fn update_user_settings(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        patch: &crate::domain::model::UpdateConversationUserSettingsPatch,
+    ) -> Result<crate::domain::model::ConversationUserSettings>;
+
     /// 应用新消息事件：推进会话最大 seq，并为非发送者增量维护 unread_count。
     async fn apply_message_event(
         &self,

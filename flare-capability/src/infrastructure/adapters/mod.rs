@@ -64,14 +64,14 @@ impl HookAdapterFactory {
                 {
                     if let Some(discover) =
                         flare_im_core::discovery::create_discover(service_name.as_str())
-                        .await
-                        .map_err(|e| {
-                            map_infra_error(
-                                e,
-                                ErrorCode::InternalError,
-                                "failed to create hook service discover",
-                            )
-                        })?
+                            .await
+                            .map_err(|e| {
+                                map_infra_error(
+                                    e,
+                                    ErrorCode::InternalError,
+                                    "failed to create hook service discover",
+                                )
+                            })?
                     {
                         let strategy = load_balance.unwrap_or(LoadBalanceStrategy::RoundRobin);
                         let service_client =

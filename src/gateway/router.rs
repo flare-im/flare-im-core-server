@@ -196,6 +196,25 @@ impl GatewayRouter {
         }
     }
 
+    async fn connect_channel(&self, uri: &str, target: impl Into<String>) -> Result<Channel> {
+        let target = target.into();
+        let endpoint = Endpoint::from_shared(uri.to_string())
+            .with_context(|| format!("Invalid URI for {}: {}", target, uri))?;
+        let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
+
+        tokio::time::timeout(timeout_duration, endpoint.connect())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Timeout connecting to {} at {} (timeout: {}ms)",
+                    target,
+                    uri,
+                    timeout_duration.as_millis()
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("Failed to connect to {} at {}: {}", target, uri, e))
+    }
+
     /// 获取或创建Access Gateway客户端
     async fn get_or_create_client(&self, gateway_id: &str) -> Result<AccessGatewayClient<Channel>> {
         // 先检查连接池
@@ -245,43 +264,33 @@ impl GatewayRouter {
                 Some(instance) => {
                     // 根据实例地址直接创建 channel
                     let uri = instance.to_grpc_uri();
-                    let endpoint = Endpoint::from_shared(uri).with_context(|| {
-                        format!(
-                            "Invalid URI for gateway {}: {}",
-                            gateway_id, instance.address
-                        )
-                    })?;
-
-                    let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
-                    tokio::time::timeout(timeout_duration, endpoint.connect())
-                        .await
-                        .map_err(|_| {
-                            anyhow::anyhow!(
-                                "Timeout connecting to gateway {} at {} (timeout: {}ms)",
-                                gateway_id,
-                                instance.address,
-                                timeout_duration.as_millis()
-                            )
-                        })?
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to connect to gateway {} at {}: {}",
-                                gateway_id,
-                                instance.address,
-                                e
-                            )
-                        })?
+                    self.connect_channel(&uri, format!("gateway {}", gateway_id))
+                        .await?
                 }
                 None => {
-                    return Err(anyhow::anyhow!(
-                        "Gateway instance not found: gateway_id={}. Available instances: {}",
-                        gateway_id,
-                        instances
-                            .iter()
-                            .map(|i| i.instance_id.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
+                    if let Some(ref uri) = self.config.static_fallback_endpoint {
+                        warn!(
+                            gateway_id = %gateway_id,
+                            fallback = %uri,
+                            available_instances = ?instances
+                                .iter()
+                                .map(|i| i.instance_id.clone())
+                                .collect::<Vec<_>>(),
+                            "Gateway instance not found in service discovery; using static Access Gateway fallback"
+                        );
+                        self.connect_channel(uri, "static Access Gateway fallback")
+                            .await?
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Gateway instance not found: gateway_id={}. Available instances: {}",
+                            gateway_id,
+                            instances
+                                .iter()
+                                .map(|i| i.instance_id.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
                 }
             }
         } else if let Some(ref service_client_arc) = self.service_client {
@@ -306,25 +315,8 @@ impl GatewayRouter {
                     anyhow::anyhow!("Failed to get channel from service discovery: {}", e)
                 })?
         } else if let Some(ref uri) = self.config.static_fallback_endpoint {
-            let endpoint = Endpoint::from_shared(uri.clone()).with_context(|| {
-                format!(
-                    "Invalid static_fallback_endpoint for Access Gateway: {}",
-                    uri
-                )
-            })?;
-            let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
-            tokio::time::timeout(timeout_duration, endpoint.connect())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Timeout connecting to static Access Gateway {} (timeout: {}ms)",
-                        uri,
-                        timeout_duration.as_millis()
-                    )
-                })?
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to connect to static Access Gateway {}: {}", uri, e)
-                })?
+            self.connect_channel(uri, "static Access Gateway fallback")
+                .await?
         } else {
             return Err(anyhow::anyhow!(
                 "Neither ServiceDiscover nor ServiceClient is available, and static_fallback_endpoint is unset. Inject discovery via with_service_client() / with_service_client_and_discover(), or set GatewayRouterConfig.static_fallback_endpoint (e.g. ACCESS_GATEWAY_GRPC_ENDPOINT in dev)."

@@ -155,7 +155,22 @@ impl MessageHandler for OnlinePushHandler {
         match result {
             Ok(()) => Ok(MessageResult::Ack),
             Err(e) => {
-                tracing::error!(error = %e, user_id = %envelope.user_id, "Push failed, sending to DLQ");
+                if e.is_retryable() {
+                    tracing::warn!(
+                        error = %e,
+                        user_id = %envelope.user_id,
+                        message_id = %envelope.message_id,
+                        "Push failed with retryable error, nacking for broker redelivery"
+                    );
+                    return Ok(MessageResult::Nack);
+                }
+
+                tracing::error!(
+                    error = %e,
+                    user_id = %envelope.user_id,
+                    message_id = %envelope.message_id,
+                    "Push failed with non-retryable error, sending to DLQ"
+                );
                 if let Err(dlq_err) = self
                     .dlq
                     .publish(

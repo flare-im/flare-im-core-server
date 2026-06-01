@@ -6,4 +6,4 @@ mod convert;
 mod model;
 
 pub use convert::{message_from_proto, message_to_proto};
-pub use model::{Attachment, Message};
+pub use model::{Attachment, BurnStatus, BurnTransitionError, Message};

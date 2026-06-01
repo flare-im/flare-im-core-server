@@ -80,3 +80,14 @@ pub struct UpdateConversationCommand {
     pub visibility: Option<ConversationVisibility>,
     pub lifecycle_state: Option<ConversationLifecycleState>,
 }
+
+/// 更新当前用户在某会话上的偏好
+#[derive(Debug, Clone)]
+pub struct UpdateConversationUserSettingsCommand {
+    pub conversation_id: String,
+    pub is_pinned: Option<bool>,
+    pub is_muted: Option<bool>,
+    pub is_archived: Option<bool>,
+    pub draft: Option<String>,
+    pub base_settings_version: u64,
+}

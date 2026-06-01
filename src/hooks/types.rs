@@ -16,6 +16,19 @@ pub enum HookKind {
     PostSend,
     Delivery,
     Recall,
+    MessageRead,
+    MessageReaction,
+    ConversationLifecycle,
+    ConversationMember,
+    PushPreSend,
+    PushPostSend,
+    PushDelivery,
+    Presence,
+    UserLogin,
+    UserLogout,
+    UserOnline,
+    UserOffline,
+    Custom,
 }
 
 /// Hook 执行策略
@@ -137,8 +150,93 @@ pub struct DeliveryEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallEvent {
     pub message_id: String,
+    pub conversation_id: Option<String>,
     pub operator_id: String,
     pub recalled_at: SystemTime,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// 已读回执事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageReadEvent {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub reader_user_id: String,
+    pub device_id: Option<String>,
+    pub read_at: SystemTime,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// 消息表态 / Reaction 事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageReactionEvent {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub actor_user_id: String,
+    pub reaction_key: String,
+    pub added: bool,
+    pub occurred_at: SystemTime,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// 会话生命周期事件类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationLifecycleEventKind {
+    Created,
+    Updated,
+    Archived,
+    Muted,
+    Unmuted,
+    DissolvePending,
+    Suspended,
+    Dissolved,
+    Restored,
+}
+
+/// 会话生命周期事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationLifecycleEvent {
+    pub conversation_id: String,
+    pub conversation_type: Option<String>,
+    pub event: ConversationLifecycleEventKind,
+    pub operator_user_id: Option<String>,
+    pub participant_version: Option<u64>,
+    pub occurred_at: SystemTime,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// 会话成员变更类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationMemberChangeKind {
+    Invited,
+    Joined,
+    Removed,
+    Left,
+    RoleChanged,
+    Muted,
+    Unmuted,
+    Blocked,
+    Unblocked,
+}
+
+/// 会话成员变更事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMemberEvent {
+    pub conversation_id: String,
+    pub tenant_id: Option<String>,
+    pub change: ConversationMemberChangeKind,
+    pub operator_user_id: Option<String>,
+    pub affected_user_id: String,
+    pub previous_role: Option<String>,
+    pub new_role: Option<String>,
+    pub participant_version: Option<u64>,
+    pub occurred_at: SystemTime,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
@@ -170,6 +268,26 @@ impl fmt::Display for PreSendDecision {
         match self {
             PreSendDecision::Continue => write!(f, "continue"),
             PreSendDecision::Reject { error } => write!(f, "reject: {error}"),
+        }
+    }
+}
+
+/// 可拦截型事件 Hook 的决策。
+#[derive(Debug)]
+pub enum HookDecision {
+    Allow,
+    Reject { error: FlareError },
+}
+
+impl HookDecision {
+    pub fn is_allow(&self) -> bool {
+        matches!(self, HookDecision::Allow)
+    }
+
+    pub fn into_result(self) -> Result<()> {
+        match self {
+            HookDecision::Allow => Ok(()),
+            HookDecision::Reject { error } => Err(error),
         }
     }
 }
@@ -218,6 +336,38 @@ pub trait DeliveryHook: Send + Sync {
 #[async_trait]
 pub trait RecallHook: Send + Sync {
     async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome;
+}
+
+/// Message-Read Hook Trait。
+///
+/// 只用于观测已读水位/会话已读，不允许修改消息事实。
+#[async_trait]
+pub trait MessageReadHook: Send + Sync {
+    async fn handle(&self, ctx: &Ctx, event: &MessageReadEvent) -> HookOutcome;
+}
+
+/// Message-Reaction Hook Trait。
+///
+/// 可用于业务表态白名单、风控与旁路统计；是否允许阻断由宿主命令决定。
+#[async_trait]
+pub trait MessageReactionHook: Send + Sync {
+    async fn handle(&self, ctx: &Ctx, event: &MessageReactionEvent) -> HookDecision;
+}
+
+/// Conversation-Lifecycle Hook Trait。
+///
+/// 会话事实应先提交，再异步通知业务侧；Hook 失败不得回滚已提交生命周期。
+#[async_trait]
+pub trait ConversationLifecycleHook: Send + Sync {
+    async fn handle(&self, ctx: &Ctx, event: &ConversationLifecycleEvent) -> HookOutcome;
+}
+
+/// Conversation-Member Hook Trait。
+///
+/// 用于成员增删、角色、禁言等变化的业务观察或拦截。
+#[async_trait]
+pub trait ConversationMemberHook: Send + Sync {
+    async fn handle(&self, ctx: &Ctx, event: &ConversationMemberEvent) -> HookDecision;
 }
 
 /// GetConversationParticipants Hook Trait
@@ -281,6 +431,46 @@ where
     T: RecallHook + ?Sized,
 {
     async fn handle(&self, ctx: &Ctx, event: &RecallEvent) -> HookOutcome {
+        (**self).handle(ctx, event).await
+    }
+}
+
+#[async_trait]
+impl<T> MessageReadHook for Arc<T>
+where
+    T: MessageReadHook + ?Sized,
+{
+    async fn handle(&self, ctx: &Ctx, event: &MessageReadEvent) -> HookOutcome {
+        (**self).handle(ctx, event).await
+    }
+}
+
+#[async_trait]
+impl<T> MessageReactionHook for Arc<T>
+where
+    T: MessageReactionHook + ?Sized,
+{
+    async fn handle(&self, ctx: &Ctx, event: &MessageReactionEvent) -> HookDecision {
+        (**self).handle(ctx, event).await
+    }
+}
+
+#[async_trait]
+impl<T> ConversationLifecycleHook for Arc<T>
+where
+    T: ConversationLifecycleHook + ?Sized,
+{
+    async fn handle(&self, ctx: &Ctx, event: &ConversationLifecycleEvent) -> HookOutcome {
+        (**self).handle(ctx, event).await
+    }
+}
+
+#[async_trait]
+impl<T> ConversationMemberHook for Arc<T>
+where
+    T: ConversationMemberHook + ?Sized,
+{
+    async fn handle(&self, ctx: &Ctx, event: &ConversationMemberEvent) -> HookDecision {
         (**self).handle(ctx, event).await
     }
 }

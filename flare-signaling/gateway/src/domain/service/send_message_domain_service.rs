@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use flare_core::common::error::{FlareError, Result};
+use flare_core::common::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use flare_im_core::Ctx;
 use tracing::instrument;
 
@@ -30,8 +30,38 @@ impl SendMessageDomainService {
             .message_port
             .send_message(tx, cmd.msg.clone())
             .await
-            .map_err(|e| FlareError::message_send_failed(e.to_string()))?;
+            .map_err(from_server_error)?;
+
+        if !ack.success {
+            return Err(FlareError::message_send_failed(
+                if ack.error_message.trim().is_empty() {
+                    "message send failed".to_string()
+                } else {
+                    ack.error_message
+                },
+            ));
+        }
 
         Ok((ack.server_msg_id, ack.seq))
+    }
+}
+
+fn from_server_error(err: flare_im_core::error::FlareError) -> FlareError {
+    match err {
+        flare_im_core::error::FlareError::Localized {
+            code,
+            reason,
+            details,
+            ..
+        } => {
+            let code = ErrorCode::from_u32(code.as_u32()).unwrap_or(ErrorCode::GeneralError);
+            let mut builder = ErrorBuilder::new(code, reason);
+            if let Some(details) = details {
+                builder = builder.details(details);
+            }
+            builder.build()
+        }
+        flare_im_core::error::FlareError::System(msg) => FlareError::system(msg),
+        flare_im_core::error::FlareError::Io(msg) => FlareError::io(msg),
     }
 }

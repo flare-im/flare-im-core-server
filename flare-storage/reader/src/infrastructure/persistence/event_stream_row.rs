@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{
     CallSignalEvent, ConversationDeleteEvent, ConversationUpdateEvent, CustomEvent, Event,
-    EventType as ProtoEventType, MarkEvent, Message, MessageDeleteEvent, MessageEditEvent,
-    MessageRecallEvent, PinEvent, PresenceEvent, ReactionEvent, ReadReceiptEvent, TypingEvent,
-    UnmarkEvent, UnpinEvent,
+    EventType as ProtoEventType, MarkEvent, Message, MessageBurnScheduledEvent, MessageBurnedEvent,
+    MessageDeleteEvent, MessageEditEvent, MessageHardDeletedEvent, MessageRecallEvent, PinEvent,
+    PresenceEvent, ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent, UnpinEvent,
 };
 use prost::Message as ProstMessage;
 
@@ -94,6 +94,15 @@ fn decode_payload_oneof(event_type: i32, payload: &[u8]) -> anyhow::Result<Optio
         ProtoEventType::EventUnmark => {
             EventPayload::Unmark(UnmarkEvent::decode(payload).context("decode Unmark")?)
         }
+        ProtoEventType::EventMessageBurnScheduled => EventPayload::BurnScheduled(
+            MessageBurnScheduledEvent::decode(payload).context("decode BurnScheduled")?,
+        ),
+        ProtoEventType::EventMessageBurned => {
+            EventPayload::Burned(MessageBurnedEvent::decode(payload).context("decode Burned")?)
+        }
+        ProtoEventType::EventMessageHardDeleted => EventPayload::HardDeleted(
+            MessageHardDeletedEvent::decode(payload).context("decode HardDeleted")?,
+        ),
         ProtoEventType::EventCustom => {
             EventPayload::Custom(CustomEvent::decode(payload).context("decode Custom")?)
         }

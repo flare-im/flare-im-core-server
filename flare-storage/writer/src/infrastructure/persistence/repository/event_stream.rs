@@ -23,6 +23,9 @@ fn encode_payload_bytes(payload: &Payload) -> Result<Vec<u8>> {
         Payload::Unpin(u) => u.encode(&mut buf)?,
         Payload::Mark(m) => m.encode(&mut buf)?,
         Payload::Unmark(u) => u.encode(&mut buf)?,
+        Payload::BurnScheduled(b) => b.encode(&mut buf)?,
+        Payload::Burned(b) => b.encode(&mut buf)?,
+        Payload::HardDeleted(b) => b.encode(&mut buf)?,
         _ => {}
     }
     Ok(buf)

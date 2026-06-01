@@ -122,6 +122,38 @@ pub struct ConversationSummary {
     pub participant_version: u64,
     /// 非单聊成员轻量预览，严禁承载完整大群成员。
     pub member_preview: Vec<ConversationParticipant>,
+    /// 当前用户：是否静音
+    pub is_muted: bool,
+    /// 当前用户：是否置顶
+    pub is_pinned: bool,
+    /// 当前用户：是否归档
+    pub is_archived: bool,
+    /// 用户偏好 LWW 版本
+    pub settings_version: u64,
+    /// 用户草稿
+    pub draft: Option<String>,
+    /// 当前用户的历史可见边界；seq <= visible_after_seq 的消息不可见。
+    pub visible_after_seq: i64,
+}
+
+/// 用户在会话上的偏好设置（读写合一）
+#[derive(Clone, Debug)]
+pub struct ConversationUserSettings {
+    pub is_pinned: bool,
+    pub is_muted: bool,
+    pub is_archived: bool,
+    pub draft: Option<String>,
+    pub settings_version: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateConversationUserSettingsPatch {
+    pub conversation_id: String,
+    pub is_pinned: Option<bool>,
+    pub is_muted: Option<bool>,
+    pub is_archived: Option<bool>,
+    pub draft: Option<String>,
+    pub base_settings_version: u64,
 }
 
 #[derive(Clone, Debug)]

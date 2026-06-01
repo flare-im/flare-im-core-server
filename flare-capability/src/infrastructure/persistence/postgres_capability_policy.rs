@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use flare_im_core::utils::normalize_tenant_id;
 use sqlx::{FromRow, PgPool};
 
 use crate::domain::capability::{
@@ -121,13 +122,14 @@ impl PostgresCapabilityPolicy {
         tenant_id: &str,
         capability_id: &str,
     ) -> Result<bool> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         let row: Option<(bool,)> = sqlx::query_as(
             r#"
             SELECT enabled FROM public.capability_tenant_switches
             WHERE tenant_id = $1 AND capability_id = $2
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(capability_id)
         .fetch_optional(self.pool.as_ref())
         .await
@@ -141,22 +143,19 @@ impl PostgresCapabilityPolicy {
         user_id: &str,
         capability_id: &str,
     ) -> Result<bool> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         // user_id = '*' 表示该租户下任意用户（与 init_v2 开发种子对齐；生产可改为按用户灌库并删除通配行）
-        // 租户 `0` 与 `default` 视为同一默认租户（网关 JWT / SDK / 编排器历史上不一致，见 flare-capability 日志 capability.dispatch tenant_id）
         let row: Option<(i64,)> = sqlx::query_as(
             r#"
             SELECT 1::bigint FROM public.capability_user_grants
-            WHERE (
-                tenant_id = $1
-                OR ($1 IN ('0', 'default') AND tenant_id IN ('0', 'default'))
-            )
+            WHERE tenant_id = $1
               AND (user_id = $2 OR user_id = '*')
               AND (capability_id = $3 OR capability_id = (split_part($3, '.', 1) || '.*'))
               AND (expires_at IS NULL OR expires_at > NOW())
             LIMIT 1
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(user_id)
         .bind(capability_id)
         .fetch_optional(self.pool.as_ref())
@@ -174,13 +173,14 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         user_id: &str,
         capability_id: &str,
     ) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         if !self.load_global_enabled().await? {
             return Err(CapabilityError::PolicyDenied(
                 "global capability switch is disabled".into(),
             ));
         }
         if self
-            .tenant_capability_disabled(tenant_id, capability_id)
+            .tenant_capability_disabled(&tenant_id, capability_id)
             .await?
         {
             return Err(CapabilityError::PolicyDenied(format!(
@@ -188,14 +188,14 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
             )));
         }
         if !self
-            .has_active_grant(tenant_id, user_id, capability_id)
+            .has_active_grant(&tenant_id, user_id, capability_id)
             .await?
         {
             tracing::warn!(
                 tenant_id = %tenant_id,
                 capability_id = %capability_id,
                 user_id_len = user_id.len(),
-                "capability_user_grants: no matching row (tenant 0/default are equivalent in lookup; need rtc.* or exact capability + user or user_id='*')"
+                "capability_user_grants: no matching row (need rtc.* or exact capability + user or user_id='*')"
             );
             return Err(CapabilityError::PolicyDenied(
                 "user capability grant missing or expired".into(),
@@ -209,6 +209,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         tenant_id: &str,
         user_id: &str,
     ) -> Result<Vec<UserCapabilityGrant>> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         let rows = sqlx::query_as::<_, GrantRow>(
             r#"
             SELECT tenant_id, user_id, capability_id, granted_at, expires_at, plan_code, source
@@ -218,7 +219,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
             ORDER BY capability_id
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(user_id)
         .fetch_all(self.pool.as_ref())
         .await
@@ -235,6 +236,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         plan_code: Option<String>,
         source: Option<String>,
     ) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         sqlx::query(
             r#"
             INSERT INTO public.capability_user_grants (
@@ -248,7 +250,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
                 source = EXCLUDED.source
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(user_id)
         .bind(capability_id)
         .bind(expires_at)
@@ -266,13 +268,14 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         user_id: &str,
         capability_id: &str,
     ) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         sqlx::query(
             r#"
             DELETE FROM public.capability_user_grants
             WHERE tenant_id = $1 AND user_id = $2 AND capability_id = $3
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(user_id)
         .bind(capability_id)
         .execute(self.pool.as_ref())
@@ -287,6 +290,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         capability_id: &str,
         enabled: bool,
     ) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
         sqlx::query(
             r#"
             INSERT INTO public.capability_tenant_switches (tenant_id, capability_id, enabled, updated_at)
@@ -296,7 +300,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
                 updated_at = NOW()
             "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(capability_id)
         .bind(enabled)
         .execute(self.pool.as_ref())

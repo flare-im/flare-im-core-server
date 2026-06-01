@@ -2,7 +2,7 @@
 //!
 //! 与 [`super::ports`] 中的 Guard trait 同用本模块类型，避免循环依赖。
 
-use flare_core_base::error::{ErrorCode, FlareError};
+use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,9 +70,9 @@ impl CapabilityError {
                 FlareError::localized(ErrorCode::HttpNotFound, msg)
             }
             CapabilityError::Timeout(msg) => FlareError::timeout(msg),
-            CapabilityError::Rejected(r) => {
-                FlareError::localized(ErrorCode::PermissionDenied, r.message.clone())
-            }
+            CapabilityError::Rejected(r) => ErrorBuilder::new(ErrorCode::PermissionDenied, r.code)
+                .details(r.message)
+                .build_error(),
             CapabilityError::NotSupported(msg) => {
                 FlareError::localized(ErrorCode::OperationNotSupported, msg)
             }

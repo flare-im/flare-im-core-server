@@ -11,7 +11,7 @@ timeout_ms = 200
 require_success = true
 
 [pre_send.selector]
-tenants = ["default"]
+tenants = ["0"]
 conversation_types = ["single_chat"]
 message_types = ["text"]
 
@@ -29,7 +29,7 @@ timeout_ms = 1000
 require_success = false
 
 [post_send.selector]
-tenants = ["default"]
+tenants = ["0"]
 
 [post_send.transport]
 type = "webhook"
@@ -44,7 +44,7 @@ name = "delivery-metrics"
 priority = 0
 
 [delivery.selector]
-tenants = ["default"]
+tenants = ["0"]
 
 [delivery.transport]
 type = "local"
@@ -55,7 +55,7 @@ name = "recall-audit"
 priority = 0
 
 [recall.selector]
-tenants = ["default"]
+tenants = ["0"]
 
 [recall.transport]
 type = "grpc"
@@ -75,7 +75,7 @@ plugin_health_check_interval_secs = 15
 plugin_call_timeout_ms = 5000
 
 [[capability_runtime.plugin_discovery_endpoints]]
-tenant_id = "default"
+tenant_id = "0"
 plugin_id = "flare-strom-sfu"
 capability_id = "rtc.media.control"
 service_name = "flare-strom-sfu"

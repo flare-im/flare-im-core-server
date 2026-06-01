@@ -22,6 +22,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
 
+cleanup_launchctl_dev_labels() {
+    if ! command -v launchctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local label
+    for label in \
+        flare-signaling-online-dev \
+        flare-signaling-route-dev \
+        flare-capability-dev \
+        flare-conversation-dev \
+        flare-message-orchestrator-dev \
+        flare-storage-writer-dev \
+        flare-storage-reader-dev \
+        flare-sync-orchestrator-dev \
+        flare-push-server-dev \
+        flare-push-worker-dev \
+        flare-media-dev \
+        flare-core-gateway-dev \
+        flare-access-gateway-dev \
+        flare-access-gateway-beijing-1-dev \
+        flare-access-gateway-shanghai-1-dev; do
+        launchctl remove "$label" >/dev/null 2>&1 || true
+    done
+}
+
+service_binary_name() {
+    case "$1" in
+        message-orchestrator) printf '%s' "flare-orchestrator" ;;
+        *) printf '%s' "flare-$1" ;;
+    esac
+}
+
 # 解析参数（可选）
 GATEWAY_MODE="${1:-auto}"  # 默认自动检测模式
 
@@ -39,6 +72,11 @@ echo -e "${BLUE}  停止 Flare IM Core 所有服务${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}📁 日志目录: $LOGS_DIR${NC}"
 echo -e "${YELLOW}🚪 停止模式: $GATEWAY_MODE${NC}"
+echo ""
+
+echo -e "${YELLOW}🧹 清理本地 launchctl dev 残留任务...${NC}"
+cleanup_launchctl_dev_labels
+echo -e "${GREEN}   ✓ 清理完成${NC}"
 echo ""
 
 # 定义所有核心服务（包含 Makefile 中所有 run-* 服务）
@@ -91,13 +129,16 @@ stop_service() {
         fi
     else
         # 如果没有 PID 文件，尝试通过进程名查找并停止
-        if pgrep -f "target/debug/flare-$service" > /dev/null 2>&1; then
-            echo -e "${YELLOW}   通过进程名停止 $service...${NC}"
-            pkill -f "target/debug/flare-$service" 2>/dev/null || true
+        bin=$(service_binary_name "$service")
+        if pgrep -f "${bin}" > /dev/null 2>&1; then
+            echo -e "${YELLOW}   通过进程名停止 $service (${bin})...${NC}"
+            pkill -f "target/debug/${bin}" 2>/dev/null || true
+            pkill -f "/target/debug/${bin}" 2>/dev/null || true
+            pkill -f "${bin}" 2>/dev/null || true
             sleep 1
             # 如果仍在运行，强制终止
-            if pgrep -f "target/debug/flare-$service" > /dev/null 2>&1; then
-                pkill -9 -f "target/debug/flare-$service" 2>/dev/null || true
+            if pgrep -f "${bin}" > /dev/null 2>&1; then
+                pkill -9 -f "${bin}" 2>/dev/null || true
             fi
             echo -e "${GREEN}      ✓ $service 已停止${NC}"
             return 0
@@ -111,7 +152,7 @@ stop_service() {
 # 停止所有核心服务
 echo -e "${YELLOW}🛑 停止核心服务...${NC}"
 for service in "${CORE_SERVICES[@]}"; do
-    stop_service "$service"
+    stop_service "$service" || true
 done
 
 echo ""
@@ -183,8 +224,8 @@ sleep 2
 
 # 调用检查脚本验证所有服务已停止
 echo ""
-"$SCRIPT_DIR/check_services.sh"
-CHECK_RESULT=$?
+CHECK_RESULT=0
+"$SCRIPT_DIR/check_services.sh" || CHECK_RESULT=$?
 
 echo ""
 echo -e "${YELLOW}💡 提示:${NC}"
@@ -195,4 +236,3 @@ echo ""
 
 # 检查脚本返回非零是正常的（因为服务已停止），不以此作为退出码
 exit 0
-

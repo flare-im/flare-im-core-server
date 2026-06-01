@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use flare_im_core::utils::normalize_tenant_id;
+
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::config::capability_runtime::discovery_route_authority;
@@ -31,10 +33,12 @@ async fn attach_media_control_backend(
     use remote_extension_ops::MediaControlExtensionOperations;
     use remote_route_book::register_plugin_route;
 
+    let tenant_id = normalize_tenant_id(tenant_id);
+
     registry
-        .set_rtc_backend_for_tenant(tenant_id, Some(rtc.clone()))
+        .set_rtc_backend_for_tenant(&tenant_id, Some(rtc.clone()))
         .await;
-    if tenant_id == "default" || tenant_id == "0" {
+    if tenant_id == "0" {
         registry.set_rtc_backend(Some(rtc.clone())).await;
     }
 
@@ -44,7 +48,7 @@ async fn attach_media_control_backend(
     registry.register_extension_operations(handler).await;
     register_plugin_route(
         plugin_routes.as_ref(),
-        tenant_id,
+        &tenant_id,
         plugin_id,
         capability_id,
         route_authority,

@@ -24,12 +24,9 @@ impl ApplicationBootstrap {
         let app_config = load_config(Some("config"));
 
         let cap_service = app_config.capability_service();
-        let address = ServiceHelper::parse_server_addr(
-            &app_config,
-            &cap_service.runtime,
-            CAPABILITY,
-        )
-        .context("invalid flare-capability server address")?;
+        let address =
+            ServiceHelper::parse_server_addr(&app_config, &cap_service.runtime, CAPABILITY)
+                .context("invalid flare-capability server address")?;
         info!(address = %address, "Server address parsed successfully");
 
         let context = wiring::initialize(config).await?;
