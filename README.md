@@ -2,13 +2,12 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
-[![Docs](https://img.shields.io/badge/docs-README-546E7A)](docs/README.md)
 
-[![DDD/CQRS](https://img.shields.io/badge/Pattern-DDD%20%2B%20CQRS-9C27B0)](docs/01-architecture-overview.md)
-[![Event Driven](https://img.shields.io/badge/Event%20Driven-JetStream%20%7C%20Kafka-2196F3)](docs/01-architecture-overview.md)
-[![Reliability](https://img.shields.io/badge/Reliability-WAL%20%2B%20Ledger-4CAF50)](docs/02-message-reliability-and-low-latency.md)
-[![Sync](https://img.shields.io/badge/Sync-seq%20%2F%20cursor-FF9800)](docs/02-message-reliability-and-low-latency.md)
-[![gRPC](https://img.shields.io/badge/API-typed%20gRPC%20%2B%20Hook-E91E63)](docs/04-third-party-integration.md)
+![DDD/CQRS](https://img.shields.io/badge/Pattern-DDD%20%2B%20CQRS-9C27B0)
+![Event Driven](https://img.shields.io/badge/Event%20Driven-JetStream%20%7C%20Kafka-2196F3)
+![Reliability](https://img.shields.io/badge/Reliability-WAL%20%2B%20Ledger-4CAF50)
+![Sync](https://img.shields.io/badge/Sync-seq%20%2F%20cursor-FF9800)
+![gRPC](https://img.shields.io/badge/API-typed%20gRPC%20%2B%20Hook-E91E63)
 
 Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编排、会话同步、在线状态、信令路由、存储读写、推送、媒资与能力扩展。它面向生产级 IM 场景设计，保持业务中立：用户、好友、群资料、业务权限和产品规则由业务系统或插件提供，Core 只消费清晰的身份、会话、成员、Hook 与能力合同。
 
@@ -128,22 +127,6 @@ Core 使用强类型 `MessageContent` 和 `Event` 表达稳定语义，`attribut
 | 临时通知 | `NotificationContent.persistent = false` | 否或不作为历史水位 | 否 | 否 | 否 |
 | 临时状态 | typing、presence、system_event | 否 | 否 | 否 | 否 |
 
-更多细节见 [消息类型与通知持久化](docs/03-message-model-and-notification-persistence.md)。
-
-## 文档导航
-
-`docs/` 是新的主文档入口；旧的 `doc/` 暂时保留为历史设计材料和深度参考，本次未修改。
-
-| 文档 | 内容 |
-|------|------|
-| [docs/README.md](docs/README.md) | 文档索引、阅读顺序、目录边界。 |
-| [docs/01-architecture-overview.md](docs/01-architecture-overview.md) | 技术栈、架构分层、服务边界、topic 与存储。 |
-| [docs/02-message-reliability-and-low-latency.md](docs/02-message-reliability-and-low-latency.md) | 关键消息链路、0 可观测丢失目标、低延迟策略、失败恢复。 |
-| [docs/03-message-model-and-notification-persistence.md](docs/03-message-model-and-notification-persistence.md) | 消息类型、事件类型、通知是否持久化、retention 和扩展字段规范。 |
-| [docs/04-third-party-integration.md](docs/04-third-party-integration.md) | 第三方接入模式、HTTP/gRPC/SDK/Hook/Capability 用法。 |
-| [docs/05-business-system-examples.md](docs/05-business-system-examples.md) | 业务系统实现用户、好友、群、权限、会话与 Core 交互的示例。 |
-| [docs/06-testing-performance-and-operations.md](docs/06-testing-performance-and-operations.md) | 测试矩阵、压测入口、性能报告、观测与运维检查。 |
-
 ## 技术栈
 
 | 领域 | 选型 |
@@ -166,7 +149,9 @@ cd deploy
 docker compose up -d
 
 cd ..
-./scripts/start_server_core.sh
+make start-core
+# 已编译过、日常联调可跳过 build：
+# make start-core-fast
 ```
 
 业务中立模式使用 `config/hooks.core.toml`。如果要接入业务系统的好友/群权限校验，请先启动业务系统 Hook 服务，并将 `config/hooks.toml` 指向对应的业务系统 Hook 配置。生产环境推荐业务系统 Hook 使用 gRPC transport（`type = "grpc"`），高频服务间调用使用 typed gRPC。
@@ -176,13 +161,14 @@ cd ..
 ```bash
 cargo test --workspace
 cargo run -p flare-im-core --example perf_message_send
+make stop   # 停止全部 Core 服务
 ```
 
-更多启动、测试、压测和排障见 [测试、性能与运维](docs/06-testing-performance-and-operations.md)。
+编译内存紧张时可限制并行度：`CARGO_BUILD_JOBS=2 make start-core`。启动失败时查看 `logs/cargo-build.log` 与各服务 `logs/flare-*.log`。
 
 ## 当前性能读数
 
-`doc/message_send_performance_report_2026-06-06.md` 记录了一次本地开发环境集成压测。该结果不是生产 SLA，但可作为链路健康参考：
+以下为本地开发环境集成压测的一次参考结果，不是生产 SLA：
 
 | 场景 | 发送量 | 成功 | ACK 吞吐 | P95 ACK 延迟 | 存储丢失观测 |
 |------|--------|------|----------|--------------|--------------|
