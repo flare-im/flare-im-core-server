@@ -5,6 +5,7 @@ mod connection_config;
 mod connection_info;
 mod event_uplink_outcome;
 mod message;
+mod message_send_outcome;
 mod push_result;
 mod quality;
 
@@ -15,5 +16,6 @@ pub use connection_info::ConnectionInfo;
 pub use connection_info::ConnectionInfo as ConnectionContext;
 pub use event_uplink_outcome::EventUplinkOutcome;
 pub use message::MessageWrapper;
+pub use message_send_outcome::MessageSendOutcome;
 pub use push_result::DomainPushResult;
 pub use quality::{ConnectionQualityMetrics, QualityLevel};

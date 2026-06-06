@@ -30,8 +30,8 @@ use crate::domain::service::validation_strategy::{
     CompositeMessageValidationStrategy, MessageValidationStrategy, ValidationContext,
 };
 use crate::domain::{MessageProfile, PersistenceMode};
-use crate::error::{ErrorCode, Result};
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
+use flare_server_core::error::{ErrorCode, Result};
 
 /// 消息领域服务
 pub struct MessageDomainService {
@@ -167,12 +167,12 @@ impl MessageDomainService {
 
         tracing::trace!(
             conversation_id = %submission.message.conversation_id,
-            seq = session_seq,
+            conversation_seq = session_seq,
             "Allocated session sequence"
         );
 
         let mut submission = submission;
-        submission.message.seq = session_seq;
+        submission.message.conversation_seq = session_seq;
 
         // 获取消息类型信息
         let mut message_for_profile = submission.message.clone();
@@ -198,17 +198,41 @@ impl MessageDomainService {
         &self,
         submission: &MessageSubmission,
         profile: &MessageProfile,
+        persistence_mode: PersistenceMode,
+        tenant_id: &str,
     ) -> Result<()> {
-        if profile.needs_wal() {
+        if should_write_wal(profile, persistence_mode) {
             let _wal_span = create_span("message-domain", "wal_write");
-            self.wal_repository.append(submission).await.map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to append WAL entry: {}", e)
-                )
-            })?;
+            self.wal_repository
+                .append(submission, tenant_id)
+                .await
+                .map_err(|e| {
+                    flare_err!(
+                        ErrorCode::InternalError,
+                        &format!("Failed to append WAL entry: {}", e)
+                    )
+                })?;
         }
         Ok(())
+    }
+
+    #[instrument(skip(self), fields(
+        conversation_id = %submission.message.conversation_id,
+        message_id = %submission.message_id,
+    ))]
+    pub async fn remove_wal_after_broker_accept(
+        &self,
+        submission: &MessageSubmission,
+    ) -> Result<()> {
+        self.wal_repository
+            .remove(&submission.message_id)
+            .await
+            .map_err(|e| {
+                flare_err!(
+                    ErrorCode::InternalError,
+                    &format!("Failed to remove WAL entry after broker accept: {}", e)
+                )
+            })
     }
 
     /// 装饰消息
@@ -334,12 +358,6 @@ impl MessageDomainService {
         self.push_repository
             .push_only_message(ctx, message, recipient_user_ids, conversation_id)
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish push-only message to MQ: {}", e)
-                )
-            })
     }
 
     /// 仅推送消息（不持久化），由服务内部自动解析接收者
@@ -389,12 +407,38 @@ impl MessageDomainService {
         self.push_repository
             .persistence_only_message(ctx, message, conversation_id)
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish persistence-only message to MQ: {}", e)
-                )
-            })
+    }
+
+    /// 持久消息主流 fanout：先写入存储 topic，再写入推送 topic。
+    ///
+    /// 主消息队列只承载一次可靠输入；这里把它拆成存储与实时投递两个专用流，
+    /// 保持 Storage Writer 和 Push Server 的职责清晰。
+    #[instrument(skip(self, recipient_user_ids), fields(
+        conversation_id = %message.conversation_id,
+        message_id = %message.server_id,
+        recipient_count = recipient_user_ids.len(),
+    ))]
+    pub async fn persist_and_push_with_recipients(
+        &self,
+        ctx: &Ctx,
+        message: Message,
+        recipient_user_ids: Vec<String>,
+    ) -> Result<()> {
+        tracing::trace!(
+            conversation_id = %message.conversation_id,
+            message_id = %message.server_id,
+            recipient_count = recipient_user_ids.len(),
+            "Fanout persistent message to storage and push topics"
+        );
+
+        let message = self.normalize_single_chat_routing(message, &recipient_user_ids);
+        let conversation_id = message.conversation_id.clone();
+        self.push_repository
+            .persistence_only_message(ctx, message.clone(), conversation_id.clone())
+            .await?;
+        self.push_repository
+            .push_only_message(ctx, message, recipient_user_ids, conversation_id)
+            .await
     }
 
     /// 推送消息
@@ -446,11 +490,76 @@ impl MessageDomainService {
                 message.conversation_id.clone(),
             )
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish message to MQ: {}", e)
-                )
-            })
+    }
+}
+
+fn should_write_wal(profile: &MessageProfile, persistence_mode: PersistenceMode) -> bool {
+    !persistence_mode.should_push_only(profile.is_temporary())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_write_wal;
+    use crate::domain::PersistenceMode;
+    use crate::domain::model::{MessageProfile, notification_persistent};
+    use flare_proto::common::message_content::Content;
+    use flare_proto::common::{Message, MessageContent, NotificationContent, TextContent};
+
+    fn text_profile() -> MessageProfile {
+        let mut message = Message {
+            content: Some(MessageContent {
+                content: Some(Content::Text(TextContent {
+                    text: "hello".to_string(),
+                    mentions: vec![],
+                })),
+            }),
+            ..Message::default()
+        };
+        MessageProfile::ensure(&mut message)
+    }
+
+    fn notification_profile(persistent: bool) -> (MessageProfile, Message) {
+        let mut message = Message {
+            content: Some(MessageContent {
+                content: Some(Content::Notification(NotificationContent {
+                    notification_type: "general".to_string(),
+                    title: "title".to_string(),
+                    body: "body".to_string(),
+                    attributes: Default::default(),
+                    target_user_ids: vec![],
+                    target_role_id: String::new(),
+                    notify_all: false,
+                    persistent,
+                    show_in_list: true,
+                    show_badge: true,
+                    play_sound: true,
+                })),
+            }),
+            ..Message::default()
+        };
+        let profile = MessageProfile::ensure(&mut message);
+        (profile, message)
+    }
+
+    #[test]
+    fn durable_message_modes_require_wal() {
+        let profile = text_profile();
+        assert!(should_write_wal(&profile, PersistenceMode::Auto));
+        assert!(should_write_wal(
+            &profile,
+            PersistenceMode::ForcePersistence
+        ));
+        assert!(!should_write_wal(&profile, PersistenceMode::ForcePushOnly));
+    }
+
+    #[test]
+    fn persistent_notifications_require_wal_when_they_enter_storage_path() {
+        let (profile, message) = notification_profile(true);
+        assert_eq!(notification_persistent(&message), Some(true));
+        assert!(should_write_wal(&profile, PersistenceMode::Auto));
+
+        let (profile, message) = notification_profile(false);
+        assert_eq!(notification_persistent(&message), Some(false));
+        assert!(!should_write_wal(&profile, PersistenceMode::ForcePushOnly));
     }
 }

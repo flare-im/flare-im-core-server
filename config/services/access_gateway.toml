@@ -1,7 +1,7 @@
 # Signaling Gateway 服务配置（原 Access Gateway，位于 flare-signaling/gateway）
 
 [services.access_gateway]
-token_secret = "insecure-secret"
+# token_secret 不应写入仓库。生产/联调用 ACCESS_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
 token_store = "token_store"
@@ -12,7 +12,7 @@ conversation_store_ttl_seconds = 3600
 # 若生产仍使用独立 Social JWT（issuer=flare-social），可取消注释：
 # [[services.access_gateway.trusted_token_issuers]]
 # issuer = "flare-social"
-# secret = "change-me-in-production"
+# secret = "set-via-secret-manager"
 
 # Route 服务配置（可选，用于通过 Route 服务路由消息）
 # 默认不使用 Route 服务，保持向后兼容
@@ -32,4 +32,3 @@ encryption_key = "01234567890123456789012345678901"  # 32字节密钥或64字符
 [services.access_gateway.server]
 address = "0.0.0.0"
 port = 60051
-

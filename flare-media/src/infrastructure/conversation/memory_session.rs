@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::domain::model::UploadSession;
 use crate::domain::repository::UploadSessionStore;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 进程内上传会话存储（开发/单机兜底）。
 ///

@@ -40,9 +40,8 @@
 ///
 /// - 微信 MsgService 序列号设计：https://cloud.tencent.com/developer/article/1006035
 /// - Telegram Sequence Number：https://core.telegram.org/mtproto/description#message-identifier-msg-id
-use crate::error::{ErrorCode, Result};
+use flare_server_core::error::{ErrorCode, Result};
 use flare_server_core::{error::AnyhowContext, flare_err};
-use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -131,19 +130,19 @@ impl SequenceAllocator {
         // 获取 Redis 连接
         let mut conn = self.connection_manager.clone();
 
-        // 执行原子递增（INCR key）
-        let seq: u64 = conn
-            .incr(&key, 1)
-            .await
-            .context("Failed to increment sequence in Redis")?;
-
-        // 设置 TTL（避免 key 永久存在）
+        // 执行原子递增并刷新 TTL（避免 key 永久存在）。
         // 注意：即使 key 过期，下次重新开始也不影响顺序性
         // 因为会话关闭后，seq 从 1 重新开始是合理的
-        let _: () = conn
-            .expire(&key, self.key_ttl_seconds)
+        let (seq, _): (u64, ()) = redis::pipe()
+            .atomic()
+            .cmd("INCR")
+            .arg(&key)
+            .cmd("EXPIRE")
+            .arg(&key)
+            .arg(self.key_ttl_seconds)
+            .query_async(&mut conn)
             .await
-            .context("Failed to set TTL for sequence key")?;
+            .context("Failed to allocate sequence in Redis")?;
 
         debug!(
             conversation_id = %conversation_id,
@@ -204,17 +203,18 @@ impl SequenceAllocator {
 
         let mut conn = self.connection_manager.clone();
 
-        // 一次性递增 batch_size（如 100）
-        let end_seq: u64 = conn
-            .incr(&key, self.batch_size)
+        // 一次性递增 batch_size（如 100）并刷新 TTL。
+        let (end_seq, _): (u64, ()) = redis::pipe()
+            .atomic()
+            .cmd("INCRBY")
+            .arg(&key)
+            .arg(self.batch_size)
+            .cmd("EXPIRE")
+            .arg(&key)
+            .arg(self.key_ttl_seconds)
+            .query_async(&mut conn)
             .await
-            .with_context(|| "Failed to increment batch sequence in Redis")?;
-
-        // 设置 TTL
-        let _: () = conn
-            .expire(&key, self.key_ttl_seconds)
-            .await
-            .context("Failed to set TTL for batch sequence key")?;
+            .with_context(|| "Failed to allocate batch sequence in Redis")?;
 
         // 计算起始序列号
         let start_seq = end_seq.saturating_sub(self.batch_size) + 1;
@@ -264,6 +264,10 @@ impl SequenceAllocator {
     /// };
     /// ```
     pub fn allocate_seq_degraded(&self) -> Result<u64> {
+        Self::generate_degraded_seq()
+    }
+
+    fn generate_degraded_seq() -> Result<u64> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // 获取当前时间戳（毫秒）
@@ -400,28 +404,9 @@ mod tests {
     /// 测试：降级模式
     #[test]
     fn test_allocate_seq_degraded() {
-        // 由于测试环境中可能没有Redis，我们只测试降级算法本身
-        // 创建一个最小化的allocator实例用于测试
-        let redis_client = Arc::new(redis::Client::open("redis://127.0.0.1/").unwrap());
-
-        // 创建一个假的连接管理器用于测试（在实际使用中会通过new方法创建）
-        // 注意：在单元测试中，我们只关心allocate_seq_degraded方法的行为
-        let fake_client = redis::Client::open("redis://127.0.0.1/").unwrap();
-        // 我们不实际调用异步方法，而是创建一个空的连接管理器用于满足结构要求
-        let connection_manager = unsafe {
-            std::mem::MaybeUninit::<redis::aio::ConnectionManager>::uninit().assume_init()
-        };
-
-        let allocator = SequenceAllocator {
-            _redis_client: redis_client,
-            connection_manager,
-            batch_size: 100,
-            key_ttl_seconds: 7 * 24 * 3600,
-        };
-
-        let seq1 = allocator.allocate_seq_degraded().unwrap();
+        let seq1 = SequenceAllocator::generate_degraded_seq().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let seq2 = allocator.allocate_seq_degraded().unwrap();
+        let seq2 = SequenceAllocator::generate_degraded_seq().unwrap();
 
         // 验证趋势递增（但不保证严格递增）
         assert!(seq2 > seq1);

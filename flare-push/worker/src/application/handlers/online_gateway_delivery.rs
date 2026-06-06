@@ -8,9 +8,9 @@ use flare_grpc_proto::access_gateway::{
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_im_core::Ctx;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
-use flare_im_core::gateway::{GatewayRouter, GatewayRouterError, GatewayRouterTrait};
+use flare_im_core::gateway::{GatewayRouter, GatewayRouterTrait};
 
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,
@@ -32,11 +32,8 @@ impl GatewayPushExecutor {
         }
     }
 
-    fn route_failure_code(error: &anyhow::Error) -> ErrorCode {
-        if matches!(
-            error.downcast_ref::<GatewayRouterError>(),
-            Some(GatewayRouterError::UsersOffline(_))
-        ) {
+    fn route_failure_code(error: &FlareError) -> ErrorCode {
+        if matches!(error.code(), Some(ErrorCode::UserOffline)) {
             ErrorCode::UserOffline
         } else {
             ErrorCode::ServiceUnavailable
@@ -47,7 +44,7 @@ impl GatewayPushExecutor {
         error: impl std::fmt::Display,
         code: ErrorCode,
         operation: &'static str,
-    ) -> flare_im_core::FlareError {
+    ) -> FlareError {
         map_infra_error(error, code, operation)
     }
 
@@ -96,7 +93,7 @@ impl GatewayPushExecutor {
             && let Some((error, code)) = first_error
         {
             return Err(Self::map_route_failure(
-                anyhow::anyhow!(error),
+                flare_server_core::error::FlareError::system((error).to_string()),
                 code,
                 "Failed to route push message",
             ));
@@ -157,7 +154,7 @@ impl GatewayPushExecutor {
             && let Some((error, code)) = first_error
         {
             return Err(Self::map_route_failure(
-                anyhow::anyhow!(error),
+                flare_server_core::error::FlareError::system((error).to_string()),
                 code,
                 "Failed to route push event",
             ));
@@ -222,7 +219,7 @@ impl GatewayPushExecutor {
             && let Some((error, code)) = first_error
         {
             return Err(Self::map_route_failure(
-                anyhow::anyhow!(error),
+                flare_server_core::error::FlareError::system((error).to_string()),
                 code,
                 "Failed to route push notification",
             ));
@@ -283,7 +280,7 @@ impl GatewayPushExecutor {
             && let Some((error, code)) = first_error
         {
             return Err(Self::map_route_failure(
-                anyhow::anyhow!(error),
+                flare_server_core::error::FlareError::system((error).to_string()),
                 code,
                 "Failed to route push ack",
             ));
@@ -344,7 +341,7 @@ impl GatewayPushExecutor {
             && let Some((error, code)) = first_error
         {
             return Err(Self::map_route_failure(
-                anyhow::anyhow!(error),
+                flare_server_core::error::FlareError::system((error).to_string()),
                 code,
                 "Failed to route push custom",
             ));
@@ -367,7 +364,9 @@ mod tests {
 
     #[test]
     fn gateway_unavailable_route_errors_are_retryable() {
-        let error = anyhow::anyhow!("Gateway instance not found: gateway_id=gateway-a");
+        let error = flare_server_core::error::FlareError::system(
+            "Gateway instance not found: gateway_id=gateway-a".to_string(),
+        );
         let code = GatewayPushExecutor::route_failure_code(&error);
 
         assert_eq!(code, ErrorCode::ServiceUnavailable);
@@ -376,8 +375,7 @@ mod tests {
 
     #[test]
     fn users_offline_route_errors_are_not_infra_retries() {
-        let error =
-            anyhow::Error::new(GatewayRouterError::UsersOffline(vec!["user-1".to_string()]));
+        let error = FlareError::user_offline("user-1");
         let code = GatewayPushExecutor::route_failure_code(&error);
 
         assert_eq!(code, ErrorCode::UserOffline);

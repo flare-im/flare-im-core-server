@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
+use flare_server_core::error::{AnyhowContext, Result};
 use tracing::{debug, error, info, warn};
 
 use crate::domain::model::HookConfig;
@@ -122,15 +122,15 @@ impl ConfigValidator {
 
     fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
         if hook.name.is_empty() {
-            anyhow::bail!("Hook name cannot be empty");
+            return Err(config_error("Hook name cannot be empty"));
         }
 
         if hook.priority < 0 || hook.priority > 1000 {
-            anyhow::bail!("Hook priority must be between 0 and 1000");
+            return Err(config_error("Hook priority must be between 0 and 1000"));
         }
 
         if hook.timeout_ms == 0 || hook.timeout_ms > 30000 {
-            anyhow::bail!("Hook timeout must be between 1ms and 30000ms");
+            return Err(config_error("Hook timeout must be between 1ms and 30000ms"));
         }
 
         Ok(())
@@ -267,7 +267,10 @@ impl ConfigCenterLoader {
             let addr = self.endpoint.strip_prefix("etcd://").unwrap();
             let parts: Vec<&str> = addr.split(':').collect();
             if parts.len() != 2 {
-                anyhow::bail!("Invalid etcd endpoint format: {}", self.endpoint);
+                return Err(config_error(format!(
+                    "Invalid etcd endpoint format: {}",
+                    self.endpoint
+                )));
             }
             let host = parts[0].to_string();
             let port = parts[1].parse::<u16>().context("Invalid etcd port")?;
@@ -276,16 +279,19 @@ impl ConfigCenterLoader {
             let addr = self.endpoint.strip_prefix("consul://").unwrap();
             let parts: Vec<&str> = addr.split(':').collect();
             if parts.len() != 2 {
-                anyhow::bail!("Invalid consul endpoint format: {}", self.endpoint);
+                return Err(config_error(format!(
+                    "Invalid consul endpoint format: {}",
+                    self.endpoint
+                )));
             }
             let host = parts[0].to_string();
             let port = parts[1].parse::<u16>().context("Invalid consul port")?;
             Ok((host, port))
         } else {
-            anyhow::bail!(
+            Err(config_error(format!(
                 "Unsupported config center endpoint format: {}",
                 self.endpoint
-            );
+            )))
         }
     }
 }
@@ -396,10 +402,10 @@ impl ConfigLoader for ConfigCenterLoader {
                             error = %e,
                             "Failed to get config from consul via KV store"
                         );
-                        Err(anyhow::anyhow!(
+                        Err(flare_server_core::error::FlareError::system(format!(
                             "Failed to get config from consul via KV store: {}",
                             e
-                        ))
+                        )))
                     }
                 }
             } else {
@@ -483,15 +489,26 @@ impl ConfigLoader for ConfigCenterLoader {
                             error = %e,
                             "Failed to get config from consul"
                         );
-                        Err(anyhow::anyhow!("Failed to get config from consul: {}", e))
+                        Err(flare_server_core::error::FlareError::system(format!(
+                            "Failed to get config from consul: {}",
+                            e
+                        )))
                     }
                 }
             }
         } else {
-            anyhow::bail!(
+            Err(config_error(format!(
                 "Unsupported config center endpoint format: {}",
                 self.endpoint
-            );
+            )))
         }
     }
+}
+
+fn config_error(reason: impl Into<String>) -> flare_server_core::error::FlareError {
+    flare_server_core::error::ErrorBuilder::new(
+        flare_server_core::error::ErrorCode::ConfigurationError,
+        reason,
+    )
+    .build_error()
 }

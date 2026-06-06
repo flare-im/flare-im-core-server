@@ -12,11 +12,12 @@
 
 use std::sync::Arc;
 
-use anyhow::Context as AnyhowContext;
+use flare_im_core::Ctx;
 use flare_im_core::hooks::HookDispatcher;
 use flare_im_core::tracing::create_span;
-use flare_im_core::{Ctx, ErrorCode};
 use flare_proto::common::Message;
+use flare_server_core::error::AnyhowContext;
+use flare_server_core::error::ErrorCode;
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -25,7 +26,7 @@ use crate::domain::builder::hook_builder::{
     build_hook_context_from_ctx, build_message_record, draft_from_submission, merge_context,
 };
 use crate::domain::model::MessageSubmission;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// Hook 执行结果
 pub struct HookExecutionContext {

@@ -4,12 +4,12 @@
 
 use crate::domain::model::MessageSyncResult;
 use crate::domain::repository::MessageProvider;
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use flare_grpc_proto::storage::QueryMessagesRequest;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_im_core::ServiceClient;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,7 +25,7 @@ pub struct StorageReaderClient {
     service_client: Arc<Mutex<Option<ServiceClient>>>,
 }
 
-fn grpc_call_failed(op: &str, status: tonic::Status) -> crate::error::FlareError {
+fn grpc_call_failed(op: &str, status: tonic::Status) -> flare_server_core::error::FlareError {
     ErrorBuilder::new(
         ErrorCode::ServiceUnavailable,
         format!("storage reader {} failed", op),
@@ -113,8 +113,8 @@ impl StorageReaderClient {
     fn last_timestamp(messages: &[flare_proto::common::Message]) -> Option<i64> {
         messages
             .last()
-            .and_then(|msg| msg.timestamp.as_ref())
-            .map(|ts| ts.seconds * 1_000 + (ts.nanos as i64 / 1_000_000))
+            .map(|msg| msg.created_at)
+            .filter(|ts| *ts > 0)
     }
 
     fn build_request(
@@ -138,7 +138,7 @@ impl StorageReaderClient {
     fn last_seq(messages: &[flare_proto::common::Message]) -> Option<i64> {
         messages
             .last()
-            .and_then(|msg| flare_im_core::utils::extract_seq_from_message(msg))
+            .and_then(flare_im_core::utils::extract_seq_from_message)
     }
 
     fn map_response(resp: flare_grpc_proto::storage::QueryMessagesResponse) -> MessageSyncResult {
@@ -270,7 +270,7 @@ impl MessageProvider for StorageReaderClient {
                         .await
                         .map_err(|e| grpc_call_failed("query_messages_by_seq", e))?
                         .into_inner();
-                    Ok::<Vec<flare_proto::common::Message>, crate::error::FlareError>(
+                    Ok::<Vec<flare_proto::common::Message>, flare_server_core::error::FlareError>(
                         response.messages,
                     )
                 } else {
@@ -287,7 +287,7 @@ impl MessageProvider for StorageReaderClient {
                         .await
                         .map_err(|e| grpc_call_failed("query_messages", e))?
                         .into_inner();
-                    Ok::<Vec<flare_proto::common::Message>, crate::error::FlareError>(
+                    Ok::<Vec<flare_proto::common::Message>, flare_server_core::error::FlareError>(
                         response.messages,
                     )
                 }
@@ -309,19 +309,7 @@ impl MessageProvider for StorageReaderClient {
             }
         }
 
-        messages.sort_by(|a, b| {
-            let a_ts = a
-                .timestamp
-                .as_ref()
-                .map(|ts| ts.seconds * 1_000_000_000 + ts.nanos as i64)
-                .unwrap_or(0);
-            let b_ts = b
-                .timestamp
-                .as_ref()
-                .map(|ts| ts.seconds * 1_000_000_000 + ts.nanos as i64)
-                .unwrap_or(0);
-            b_ts.cmp(&a_ts)
-        });
+        messages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
         Ok(messages)
     }

@@ -22,6 +22,7 @@ flare-grpc-proto = { workspace = true }
 
 # 异步运行时
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # HTTP 框架
 axum = { workspace = true }
@@ -31,6 +32,7 @@ tower-http = { workspace = true }
 # gRPC
 tonic = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 
 # 序列化
 serde = { workspace = true }
@@ -50,6 +52,7 @@ chrono = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+reqwest = { workspace = true }
 
 # 配置
 dotenvy = "0.15"

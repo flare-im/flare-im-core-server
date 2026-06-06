@@ -1,9 +1,19 @@
 //! 消息存储辅助：extra 解析等（init_v2 使用 INT 类型，不再使用字符串 message_type/status/content_type）。
 
 use flare_proto::common::MessageSource;
-use prost_types::Timestamp;
 use serde_json::{Value, from_value};
 use std::collections::HashMap;
+
+fn timestamp_json_to_millis(value: Option<&Value>) -> Option<i64> {
+    value
+        .and_then(|v| v.as_object())
+        .and_then(|obj| {
+            let seconds = obj.get("seconds")?.as_i64()?;
+            let nanos = obj.get("nanos").and_then(|v| v.as_i64()).unwrap_or(0);
+            Some(seconds.saturating_mul(1000) + nanos / 1_000_000)
+        })
+        .or_else(|| value.and_then(|v| v.as_i64()))
+}
 
 /// 从 extra 解析出的租户信息（与 metadata 解耦，仅读模型使用）
 #[derive(Debug, Clone, Default)]
@@ -104,26 +114,12 @@ pub fn parse_read_by_from_jsonb(
                         record.get("read_at"),
                         record.get("burned_at"),
                     ) {
-                        let read_at = read_at_opt.and_then(|v| v.as_object()).and_then(|obj| {
-                            let seconds = obj.get("seconds")?.as_i64()?;
-                            let nanos = obj.get("nanos")?.as_i64()?;
-                            Some(Timestamp {
-                                seconds,
-                                nanos: nanos as i32,
-                            })
-                        });
-                        let burned_at = burned_at_opt.and_then(|v| v.as_object()).and_then(|obj| {
-                            let seconds = obj.get("seconds")?.as_i64()?;
-                            let nanos = obj.get("nanos")?.as_i64()?;
-                            Some(Timestamp {
-                                seconds,
-                                nanos: nanos as i32,
-                            })
-                        });
+                        let read_at = timestamp_json_to_millis(read_at_opt).unwrap_or_default();
+                        let burned_at = timestamp_json_to_millis(burned_at_opt);
                         result.push(flare_proto::common::MessageReadRecord {
                             user_id: user_id.to_string(),
                             read_at,
-                            burned_at,
+                            retention_expired_at: burned_at,
                         });
                     }
                 }

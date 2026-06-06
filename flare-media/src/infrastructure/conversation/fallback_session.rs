@@ -4,7 +4,7 @@ use tracing::warn;
 
 use crate::domain::model::UploadSession;
 use crate::domain::repository::UploadSessionStore;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// Redis 优先、内存兜底的上传会话存储。
 ///

@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use flare_core_runtime::ServiceRuntime;
 use flare_grpc_proto::sync::sync_service_server::SyncServiceServer;
 use flare_im_core::service_names::SYNC_ORCHESTRATOR;
+use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 use tonic::transport::Server;
 
@@ -55,5 +55,6 @@ impl ApplicationBootstrap {
                 })
             })
             .await
+            .map_err(flare_server_core::error::FlareError::from)
     }
 }

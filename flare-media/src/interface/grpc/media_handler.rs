@@ -109,8 +109,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
                     response_headers: Default::default(),
-                    burn_protected: false,
-                    burn_status: 0,
+                    retention_protected: false,
+                    content_visibility: flare_proto::common::ContentVisibility::Available as i32,
                 },
             )
             .await
@@ -193,8 +193,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0, // 使用服务默认TTL
                     download: false,
                     response_headers: Default::default(),
-                    burn_protected: false,
-                    burn_status: 0,
+                    retention_protected: false,
+                    content_visibility: flare_proto::common::ContentVisibility::Available as i32,
                 },
             )
             .await
@@ -317,8 +317,8 @@ impl MediaService for MediaGrpcHandler {
                     expires_in: 0,
                     download: false,
                     response_headers: Default::default(),
-                    burn_protected: false,
-                    burn_status: 0,
+                    retention_protected: false,
+                    content_visibility: flare_proto::common::ContentVisibility::Available as i32,
                 },
             )
             .await
@@ -356,14 +356,8 @@ impl MediaService for MediaGrpcHandler {
         request: Request<CreateReferenceRequest>,
     ) -> Result<Response<CreateReferenceResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
         let req = request.into_inner();
-
-        // 将 tenant_id 添加到 metadata 中（如果未设置）
-        let mut metadata = req.metadata;
-        if !metadata.contains_key("tenant_id") {
-            metadata.insert("tenant_id".to_string(), tenant_id.clone());
-        }
+        let metadata = req.metadata;
 
         if req.file_id.is_empty() {
             return Err(status_invalid_argument("file_id is required"));
@@ -455,10 +449,7 @@ impl MediaService for MediaGrpcHandler {
             .await
             .into_grpc()?;
 
-        let references_proto = references
-            .iter()
-            .map(|reference| to_proto_reference(reference))
-            .collect();
+        let references_proto = references.iter().map(to_proto_reference).collect();
 
         Ok(Response::new(ListReferencesResponse {
             references: references_proto,

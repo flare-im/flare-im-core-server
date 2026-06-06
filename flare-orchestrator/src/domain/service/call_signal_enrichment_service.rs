@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use tracing::{debug, instrument, warn};
 
 use crate::domain::repository::CapabilityDispatchGateway;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::flare_err;
 
 const EXT_SDP_TYPE: &str = "flare_sdp_type";

@@ -1,6 +1,6 @@
-use anyhow::Result;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_core::service_names::PUSH_WORKER;
+use flare_server_core::error::Result;
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
@@ -29,7 +29,12 @@ impl ApplicationBootstrap {
                 context.dispatcher.clone(),
                 "push-delivery-consumer",
             )
-            .map_err(|e| anyhow::anyhow!("create push-worker kafka consumers: {}", e))?,
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "create push-worker kafka consumers: {}",
+                    e
+                ))
+            })?,
             "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
                 context.config.as_ref(),
                 context.consumer_config,
@@ -37,8 +42,17 @@ impl ApplicationBootstrap {
                 "push-delivery-consumer",
             )
             .await
-            .map_err(|e| anyhow::anyhow!("create push-worker nats consumers: {}", e))?,
-            other => anyhow::bail!("unsupported mq backend: {}", other),
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "create push-worker nats consumers: {}",
+                    e
+                ))
+            })?,
+            other => {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "unsupported mq backend: {other}"
+                )));
+            }
         };
 
         for task in tasks {
@@ -48,5 +62,6 @@ impl ApplicationBootstrap {
         flare_im_core::health::attach_runtime_health_checks(runtime, PUSH_WORKER)
             .run()
             .await
+            .map_err(flare_server_core::error::FlareError::from)
     }
 }

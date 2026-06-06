@@ -76,6 +76,7 @@ pub trait StorageReadPort: Send + Sync {
 
 /// 会话级事件流（关键事件回放），经 Storage Reader `events` 表。
 pub trait ConversationEventReadPort: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn query_events_page(
         &self,
         ctx: &Ctx,
@@ -103,7 +104,7 @@ pub trait SyncCursorCachePort: Send + Sync {
     /// `user_id` 为认证上下文中的用户（`MultiDeviceCursor` 不再携带 user_id）。
     async fn put(&self, user_id: &str, cursor: MultiDeviceCursor);
 
-    /// 返回更新前的 `last_sync_seq`（若存在），用于单调性校验。
+    /// 返回更新前的 `last_conversation_seq`（若存在），用于单调性校验。
     async fn previous_last_seq(&self, user_id: &str, conversation_id: &str) -> Option<i64>;
 }
 
@@ -138,6 +139,6 @@ impl SyncCursorCachePort for MemorySyncCursorCache {
             .read()
             .await
             .get(&key)
-            .map(|c| c.last_sync_seq as i64)
+            .map(|c| c.last_conversation_seq as i64)
     }
 }

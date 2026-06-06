@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
 use flare_grpc_proto::media::{
     AbortDirectUploadRequest, AbortMultipartUploadRequest, CommitDirectUploadPartsRequest,
     CompleteDirectUploadRequest, CompleteMultipartUploadRequest, DeleteFileRequest,
@@ -12,6 +11,7 @@ use flare_grpc_proto::media::{
     ProcessVideoRequest, SetObjectAclRequest, UploadFileMetadata, UploadMultipartChunkRequest,
 };
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use tracing::debug;
 
 use crate::domain::model::{

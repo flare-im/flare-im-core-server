@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as AnyhowContext, Result};
 use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::error::{AnyhowContext, Result};
 
 use crate::application::handlers::{
     AckRoutingHandler, DataRoutingHandler, EventRoutingHandler, MessageRoutingHandler,

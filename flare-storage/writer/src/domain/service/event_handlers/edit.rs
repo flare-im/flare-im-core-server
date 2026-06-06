@@ -3,7 +3,7 @@
 use crate::convert;
 use crate::domain::model::{EditPayload, Event};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 use super::{EventContext, append_event_and_stream};
 

@@ -7,10 +7,9 @@ use std::collections::HashMap;
 use super::EventEnvelope;
 use crate::Ctx;
 use crate::TopicEventBus;
-use crate::error::Result as ServerResult;
 use flare_proto::common::EventType;
+use flare_server_core::error::{FlareError, Result as ServerResult};
 use prost::Message as _;
-use prost_types::Timestamp;
 
 // --- event_type 字符串（TopicEventEnvelope.event_type） ------------------------
 
@@ -32,13 +31,7 @@ pub const CONVERSATION_UPDATE_TYPE_UNREAD: &str = "unread";
 pub const CONVERSATION_UPDATE_TYPE_SUMMARY: &str = "summary";
 pub const CONVERSATION_UPDATE_TYPE_REMOVE: &str = "remove";
 
-#[derive(Debug, thiserror::Error)]
-pub enum EventBusPublishError {
-    #[error("publish failed: {0}")]
-    Publish(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[error("serialization failed: {0}")]
-    Serialization(String),
-}
+pub type EventBusPublishError = FlareError;
 
 pub trait ImTopicEventPublisher: Send + Sync {
     async fn publish_topic_event(
@@ -68,17 +61,18 @@ pub fn encode_topic_event_envelope(
     let mut buf = Vec::with_capacity(envelope.encoded_len());
     envelope
         .encode(&mut buf)
-        .map_err(|e| EventBusPublishError::Serialization(e.to_string()))?;
+        .map_err(|e| FlareError::serialization_error(e.to_string()))?;
     Ok(buf)
 }
 
 const EVENT_ENVELOPE_SOURCE_IM_CORE: &str = "flare-im-core";
 
-fn timestamp_ms_from_proto(ts: Option<&Timestamp>) -> Option<u64> {
-    let t = ts?;
-    let secs = t.seconds.max(0) as u64;
-    let nanos = t.nanos.max(0) as u32 as u64;
-    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+fn timestamp_ms_from_proto(created_at_ms: i64) -> Option<u64> {
+    if created_at_ms <= 0 {
+        None
+    } else {
+        Some(created_at_ms as u64)
+    }
 }
 
 pub fn to_event_envelope(envelope: &flare_proto::common::TopicEventEnvelope) -> EventEnvelope {
@@ -93,7 +87,7 @@ pub fn to_event_envelope(envelope: &flare_proto::common::TopicEventEnvelope) -> 
         if !ev.event_id.is_empty() {
             core.event_id = ev.event_id.clone();
         }
-        core.timestamp_ms = timestamp_ms_from_proto(ev.created_at.as_ref());
+        core.timestamp_ms = timestamp_ms_from_proto(ev.created_at);
     }
     if !envelope.request_id.is_empty() {
         core = core.with_source(format!(
@@ -128,14 +122,14 @@ pub fn message_envelope_from_message(
     tenant_id: impl AsRef<str>,
 ) -> flare_proto::common::MessageEnvelope {
     use crate::abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAGS};
-    let sync = msg.extra.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
+    let sync = msg.attributes.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
     let tags = msg
-        .extra
+        .attributes
         .get(EXTRA_KEY_TAGS)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     let mut metadata = HashMap::new();
-    for (k, v) in &msg.extra {
+    for (k, v) in &msg.attributes {
         if k.as_str() != EXTRA_KEY_SYNC && k.as_str() != EXTRA_KEY_TAGS {
             metadata.insert(k.clone(), v.clone());
         }
@@ -144,10 +138,10 @@ pub fn message_envelope_from_message(
         conversation_id: msg.conversation_id.clone(),
         message: Some(msg.clone()),
         sync,
-        tags,
-        metadata,
+        attributes: tags,
+        headers: metadata,
         event_type: event_type.into(),
-        created_at_ms,
+        created_at: created_at_ms,
         tenant_id: tenant_id.as_ref().to_string(),
     }
 }
@@ -170,6 +164,7 @@ pub fn topic_event_envelope_from_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn conversation_update_envelope(
     user_id: impl Into<String>,
     conversation_id: impl Into<String>,
@@ -189,8 +184,8 @@ pub fn conversation_update_envelope(
         max_seq,
         last_read_seq,
         summary_snapshot,
-        metadata,
-        updated_at_ms,
+        attributes: metadata,
+        updated_at: updated_at_ms,
     }
 }
 
@@ -203,16 +198,15 @@ pub fn message_to_topic_event_envelope(
     let payload = Some(flare_proto::common::event::Payload::Message(msg.clone()));
     let event = Event {
         conversation_id: msg.conversation_id.clone(),
-        seq,
+        conversation_seq: seq,
         r#type: EventType::EventMessage as i32,
-        created_at: None,
+        created_at: msg.created_at,
         event_id: String::new(),
-        event_seq: None,
         request_id: None,
         payload,
     };
     let request_id = msg
-        .extra
+        .attributes
         .get("x-request-id")
         .map(|s| s.as_str())
         .unwrap_or("");

@@ -1,6 +1,6 @@
 use crate::domain::model::{Thread, ThreadSortOrder};
-use crate::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::instrument;
 

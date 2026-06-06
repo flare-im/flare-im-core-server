@@ -1,15 +1,18 @@
 use flare_proto::common::{Message as StorageMessage, MessageType};
-use prost::Message as _;
 
 use crate::domain::MessageCategory;
 
+fn extension_string(message: &StorageMessage, key: &str) -> Option<String> {
+    message
+        .extensions
+        .get(key)
+        .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+        .filter(|value| !value.is_empty())
+}
+
 /// 从 Message.content 解析 NotificationContent.persistent；非 Notification 返回 None。
 pub fn notification_persistent(message: &StorageMessage) -> Option<bool> {
-    if message.content.is_empty() {
-        return None;
-    }
-    let content = flare_proto::common::MessageContent::decode(message.content.as_slice()).ok()?;
-    match content.content.as_ref()? {
+    match message.content.as_ref()?.content.as_ref()? {
         flare_proto::common::message_content::Content::Notification(n) => Some(n.persistent),
         _ => None,
     }
@@ -25,16 +28,9 @@ pub struct MessageProfile {
 
 impl MessageProfile {
     pub fn ensure(message: &mut StorageMessage) -> Self {
-        // 从 extra 中获取 message_type 标签，或从 content 推断
-        let message_type_label = message
-            .extra
-            .get("message_type")
-            .cloned()
+        let message_type_label = extension_string(message, "message_type")
             .or_else(|| {
-                if !message.content.is_empty() {
-                    let content =
-                        flare_proto::common::MessageContent::decode(message.content.as_slice())
-                            .ok()?;
+                if let Some(content) = message.content.as_ref() {
                     match content.content.as_ref() {
                         Some(flare_proto::common::message_content::Content::Text(_)) => {
                             Some("text".to_string())
@@ -76,20 +72,26 @@ impl MessageProfile {
                         Some(flare_proto::common::message_content::Content::LinkCard(_)) => {
                             Some("link_card".to_string())
                         }
-                        Some(flare_proto::common::message_content::Content::MiniProgram(_)) => {
-                            Some("mini_program".to_string())
+                        Some(flare_proto::common::message_content::Content::AppCard(_)) => {
+                            Some("app_card".to_string())
                         }
-                        Some(flare_proto::common::message_content::Content::Vote(_)) => {
-                            Some("vote".to_string())
+                        Some(flare_proto::common::message_content::Content::RichText(_)) => {
+                            Some("rich_text".to_string())
                         }
-                        Some(flare_proto::common::message_content::Content::Task(_)) => {
-                            Some("task".to_string())
+                        Some(flare_proto::common::message_content::Content::ImageGroup(_)) => {
+                            Some("image_group".to_string())
                         }
-                        Some(flare_proto::common::message_content::Content::Schedule(_)) => {
-                            Some("schedule".to_string())
+                        Some(flare_proto::common::message_content::Content::Sticker(_)) => {
+                            Some("sticker".to_string())
                         }
-                        Some(flare_proto::common::message_content::Content::Announcement(_)) => {
-                            Some("announcement".to_string())
+                        Some(flare_proto::common::message_content::Content::Emoji(_)) => {
+                            Some("emoji".to_string())
+                        }
+                        Some(flare_proto::common::message_content::Content::Quote(_)) => {
+                            Some("quote".to_string())
+                        }
+                        Some(flare_proto::common::message_content::Content::Placeholder(_)) => {
+                            Some("placeholder".to_string())
                         }
                         None => None,
                         _ => Some("custom".to_string()),
@@ -110,18 +112,25 @@ impl MessageProfile {
             "file" => MessageType::File,
             "location" => MessageType::Location,
             "card" => MessageType::Card,
-            "custom" | "json" | "sticker" | "command" | "event" | "system" => MessageType::Custom,
+            "custom" | "json" | "command" | "event" => MessageType::Custom,
+            "sticker" => MessageType::Sticker,
+            "emoji" => MessageType::Emoji,
+            "system" => MessageType::System,
             "notification" => MessageType::Notification,
 
             // 功能消息类型（typing/operation 在 proto 中已移除，用 Unspecified + label 区分）
             "typing" | "system_event" => MessageType::Unspecified,
             "recall" | "operation" | "read" => MessageType::Unspecified,
-            "forward" => MessageType::MergeForward,
+            "forward" => MessageType::Forward,
 
-            // 扩展消息类型（5种）
-            "mini_program" | "miniprogram" => MessageType::MiniProgram,
+            // 通用扩展消息类型
             "link_card" | "linkcard" => MessageType::LinkCard,
-            "merge_forward" | "mergeforward" => MessageType::MergeForward,
+            "merge_forward" | "mergeforward" => MessageType::Forward,
+            "app_card" | "appcard" => MessageType::AppCard,
+            "rich_text" | "richtext" => MessageType::RichText,
+            "image_group" | "imagegroup" => MessageType::ImageGroup,
+            "quote" => MessageType::Quote,
+            "placeholder" => MessageType::Placeholder,
 
             _ => MessageType::Unspecified,
         };
@@ -129,14 +138,15 @@ impl MessageProfile {
         // 设置 message_type 字段
         message.message_type = message_type as i32;
 
-        // 将 message_type_label 保存到 extra
-        message
-            .extra
-            .entry("message_type".into())
-            .or_insert_with(|| message_type_label.clone());
+        if message.message_type == MessageType::Unspecified as i32 {
+            message.message_type = message_type as i32;
+        }
 
-        // 判断消息类别（Temporary/Notification/Operation/Normal）
-        let category = Self::determine_category(&message_type, &message_type_label, &message.extra);
+        let category = Self::determine_category(
+            &message_type,
+            &message_type_label,
+            extension_string(message, "notification_type").as_deref(),
+        );
 
         MessageProfile {
             message_type,
@@ -156,7 +166,7 @@ impl MessageProfile {
     fn determine_category(
         message_type: &MessageType,
         message_type_label: &str,
-        extra: &std::collections::HashMap<String, String>,
+        notification_type: Option<&str>,
     ) -> MessageCategory {
         use MessageType::*;
         // typing/operation 在最新 proto 中无对应 MessageType，仅通过 label 判断
@@ -173,10 +183,8 @@ impl MessageProfile {
             Notification => {
                 // **关键修复**：检查是否为操作消息（notification_type = "message_operation"）
                 // 操作消息应该被识别为 Operation 类别，而不是 Notification 类别
-                if let Some(notification_type) = extra.get("notification_type") {
-                    if notification_type == "message_operation" {
-                        return MessageCategory::Operation;
-                    }
+                if notification_type == Some("message_operation") {
+                    return MessageCategory::Operation;
                 }
                 MessageCategory::Notification
             }
@@ -229,13 +237,16 @@ impl MessageProfile {
 mod tests {
     use super::*;
     use flare_proto::common::{Message, MessageContent, TextContent};
-    use prost::Message as _;
 
     fn message_with_extra(message_type_label: &str, message_type: i32) -> Message {
-        let mut msg = Message::default();
-        msg.message_type = message_type;
-        msg.extra
-            .insert("message_type".to_string(), message_type_label.to_string());
+        let mut msg = Message {
+            message_type,
+            ..Default::default()
+        };
+        msg.extensions.insert(
+            "message_type".to_string(),
+            message_type_label.as_bytes().to_vec(),
+        );
         let msg_content = MessageContent {
             content: Some(flare_proto::common::message_content::Content::Text(
                 TextContent {
@@ -244,7 +255,7 @@ mod tests {
                 },
             )),
         };
-        msg.content = msg_content.encode_to_vec();
+        msg.content = Some(msg_content);
         msg
     }
 

@@ -10,11 +10,13 @@
 
 use chrono::Utc;
 use flare_proto::common::{
-    CustomEvent, Event, EventType, MarkEvent, MessageBurnScheduledEvent, MessageBurnedEvent,
-    MessageDeleteEvent, MessageEditEvent, MessageHardDeletedEvent, MessageRecallEvent, PinEvent,
-    ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent, UnpinEvent, event,
+    ContentVisibility, CustomEvent, Event, EventType, MarkEvent, MessageContent,
+    MessageDeleteEvent, MessageEditEvent, MessageRecallEvent, MessageRetentionExpiredEvent,
+    MessageRetentionLifecycle, MessageRetentionPolicy, MessageRetentionPurgedEvent,
+    MessageRetentionScheduledEvent, MessageRetentionState, PinEvent, ReactionEvent,
+    ReadReceiptEvent, RetentionMode, RetentionTrigger, UnmarkEvent, UnpinEvent, event,
 };
-use prost_types::Timestamp;
+use prost::Message as ProstMessage;
 use uuid::Uuid;
 
 use crate::application::commands::{
@@ -27,11 +29,57 @@ use crate::application::commands::{
 // 工具函数
 // =============================================================================
 
-/// 将 chrono DateTime 转换为 prost Timestamp
-fn to_timestamp(dt: chrono::DateTime<Utc>) -> Timestamp {
-    Timestamp {
-        seconds: dt.timestamp(),
-        nanos: dt.timestamp_subsec_nanos() as i32,
+/// 将 chrono DateTime 转换为 Unix epoch millis。
+fn to_timestamp(dt: chrono::DateTime<Utc>) -> i64 {
+    dt.timestamp_millis()
+}
+
+fn now_millis() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn timestamp_seconds(seconds: i64) -> i64 {
+    seconds
+}
+
+fn decode_message_content(bytes: &[u8]) -> MessageContent {
+    MessageContent::decode(bytes).unwrap_or_default()
+}
+
+fn retention_policy_after_read(burn_at: i64, event_time: i64) -> MessageRetentionPolicy {
+    MessageRetentionPolicy {
+        mode: RetentionMode::AfterRead as i32,
+        trigger: RetentionTrigger::AfterRead as i32,
+        expire_after_seconds: burn_at
+            .checked_sub(event_time)
+            .filter(|seconds| *seconds > 0),
+        expire_at: Some(timestamp_seconds(burn_at)),
+        visibility_after_expiration: ContentVisibility::Redacted as i32,
+        attributes: Default::default(),
+    }
+}
+
+fn retention_state(
+    lifecycle: MessageRetentionLifecycle,
+    reader_id: Option<&str>,
+    first_triggered_at: Option<i64>,
+    expire_at: Option<i64>,
+    expired_at: Option<i64>,
+    purged_at: Option<i64>,
+) -> MessageRetentionState {
+    let content_visibility = match lifecycle {
+        MessageRetentionLifecycle::Expired => ContentVisibility::Redacted,
+        MessageRetentionLifecycle::Purged => ContentVisibility::Purged,
+        _ => ContentVisibility::Available,
+    };
+    MessageRetentionState {
+        lifecycle: lifecycle as i32,
+        content_visibility: content_visibility as i32,
+        first_triggered_at: first_triggered_at.map(timestamp_seconds),
+        expire_at: expire_at.map(timestamp_seconds),
+        expired_at: expired_at.map(timestamp_seconds),
+        purged_at: purged_at.map(timestamp_seconds),
+        triggered_by_user_id: reader_id.map(str::to_string),
     }
 }
 
@@ -57,11 +105,10 @@ pub fn build_recall_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0, // 由服务分配
+        conversation_seq: 0, // 由服务分配
         r#type: EventType::EventMessageRecall as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Recall(MessageRecallEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -92,15 +139,14 @@ pub fn build_edit_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventMessageEdit as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
-            new_content,
+            new_content: Some(decode_message_content(&new_content)),
             edit_version,
             reason: String::new(),
             show_edited_mark: true,
@@ -126,11 +172,10 @@ pub fn build_delete_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventMessageDelete as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Delete(MessageDeleteEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -157,11 +202,10 @@ pub fn build_delete_event(
 pub fn build_read_receipt_event(conversation_id: &str, user_id: &str, read_seq: u64) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventReadReceipt as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Read(ReadReceiptEvent {
             conversation_id: conversation_id.to_string(),
@@ -169,13 +213,12 @@ pub fn build_read_receipt_event(conversation_id: &str, user_id: &str, read_seq: 
             user_id: user_id.to_string(),
             message_ids: Vec::new(),
             read_at: None,
-            burn_after_read: None,
         })),
     }
 }
 
 pub fn build_burn_scheduled_event(
-    tenant_id: &str,
+    _tenant_id: &str,
     conversation_id: &str,
     message_id: &str,
     reader_id: Option<&str>,
@@ -184,27 +227,33 @@ pub fn build_burn_scheduled_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
-        r#type: EventType::EventMessageBurnScheduled as i32,
-        created_at: Some(to_timestamp(Utc::now())),
+        conversation_seq: 0,
+        r#type: EventType::EventMessageRetentionScheduled as i32,
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
-        payload: Some(event::Payload::BurnScheduled(MessageBurnScheduledEvent {
-            tenant_id: tenant_id.to_string(),
-            conversation_id: conversation_id.to_string(),
-            message_id: message_id.to_string(),
-            server_id: message_id.to_string(),
-            seq: None,
-            reader_id: reader_id.map(str::to_string),
-            burn_at,
-            event_time,
-        })),
+        payload: Some(event::Payload::RetentionScheduled(
+            MessageRetentionScheduledEvent {
+                conversation_id: conversation_id.to_string(),
+                server_msg_id: message_id.to_string(),
+                reader_id: reader_id.map(str::to_string),
+                policy: Some(retention_policy_after_read(burn_at, event_time)),
+                state: Some(retention_state(
+                    MessageRetentionLifecycle::Scheduled,
+                    reader_id,
+                    Some(event_time),
+                    Some(burn_at),
+                    None,
+                    None,
+                )),
+                scheduled_at: timestamp_seconds(event_time),
+            },
+        )),
     }
 }
 
 pub fn build_burned_event(
-    tenant_id: &str,
+    _tenant_id: &str,
     conversation_id: &str,
     message_id: &str,
     reader_id: Option<&str>,
@@ -213,28 +262,32 @@ pub fn build_burned_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
-        r#type: EventType::EventMessageBurned as i32,
-        created_at: Some(to_timestamp(Utc::now())),
+        conversation_seq: 0,
+        r#type: EventType::EventMessageRetentionExpired as i32,
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
-        payload: Some(event::Payload::Burned(MessageBurnedEvent {
-            tenant_id: tenant_id.to_string(),
-            conversation_id: conversation_id.to_string(),
-            message_id: message_id.to_string(),
-            server_id: message_id.to_string(),
-            seq: None,
-            reader_id: reader_id.map(str::to_string),
-            burn_at,
-            burned_at,
-            event_time: burned_at,
-        })),
+        payload: Some(event::Payload::RetentionExpired(
+            MessageRetentionExpiredEvent {
+                conversation_id: conversation_id.to_string(),
+                server_msg_id: message_id.to_string(),
+                reader_id: reader_id.map(str::to_string),
+                state: Some(retention_state(
+                    MessageRetentionLifecycle::Expired,
+                    reader_id,
+                    None,
+                    Some(burn_at),
+                    Some(burned_at),
+                    None,
+                )),
+                expired_at: timestamp_seconds(burned_at),
+            },
+        )),
     }
 }
 
 pub fn build_hard_deleted_event(
-    tenant_id: &str,
+    _tenant_id: &str,
     conversation_id: &str,
     message_id: &str,
     reader_id: Option<&str>,
@@ -244,23 +297,27 @@ pub fn build_hard_deleted_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
-        r#type: EventType::EventMessageHardDeleted as i32,
-        created_at: Some(to_timestamp(Utc::now())),
+        conversation_seq: 0,
+        r#type: EventType::EventMessageRetentionPurged as i32,
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
-        payload: Some(event::Payload::HardDeleted(MessageHardDeletedEvent {
-            tenant_id: tenant_id.to_string(),
-            conversation_id: conversation_id.to_string(),
-            message_id: message_id.to_string(),
-            server_id: message_id.to_string(),
-            seq: None,
-            reader_id: reader_id.map(str::to_string),
-            burn_at,
-            burned_at,
-            event_time,
-        })),
+        payload: Some(event::Payload::RetentionPurged(
+            MessageRetentionPurgedEvent {
+                conversation_id: conversation_id.to_string(),
+                server_msg_id: message_id.to_string(),
+                reader_id: reader_id.map(str::to_string),
+                state: Some(retention_state(
+                    MessageRetentionLifecycle::Purged,
+                    reader_id,
+                    None,
+                    burn_at,
+                    burned_at,
+                    Some(event_time),
+                )),
+                purged_at: timestamp_seconds(event_time),
+            },
+        )),
     }
 }
 
@@ -286,11 +343,10 @@ pub fn build_reaction_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventReaction as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Reaction(ReactionEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -315,11 +371,10 @@ pub fn build_reaction_event(
 pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &str) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventPin as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Pin(PinEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -343,11 +398,10 @@ pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &s
 pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventUnpin as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Unpin(UnpinEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -375,11 +429,10 @@ pub fn build_mark_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventMark as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Mark(MarkEvent {
             server_msg_id: server_msg_id.to_string(),
@@ -410,44 +463,15 @@ pub fn build_unmark_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventUnmark as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Unmark(UnmarkEvent {
             server_msg_id: server_msg_id.to_string(),
             user_id: user_id.to_string(),
             mark_type: mark_type as i32,
-        })),
-    }
-}
-
-/// 构建正在输入事件
-///
-/// # 参数
-/// - `conversation_id`: 会话 ID
-/// - `user_id`: 正在输入的用户 ID
-/// - `typing`: 是否正在输入
-///
-/// # 示例
-/// ```rust
-/// let event = build_typing_event("conv-123", "user-456", true);
-/// ```
-pub fn build_typing_event(conversation_id: &str, user_id: &str, typing: bool) -> Event {
-    Event {
-        conversation_id: conversation_id.to_string(),
-        seq: 0,
-        r#type: EventType::EventTyping as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
-        event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
-        request_id: None,
-        payload: Some(event::Payload::Typing(TypingEvent {
-            conversation_id: conversation_id.to_string(),
-            user_id: user_id.to_string(),
-            typing,
         })),
     }
 }
@@ -472,18 +496,17 @@ pub fn build_custom_event(
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
-        seq: 0,
+        conversation_seq: 0,
         r#type: EventType::EventCustom as i32,
-        created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+        created_at: now_millis(),
         event_id: Uuid::new_v4().to_string(),
-        event_seq: None,
         request_id: None,
         payload: Some(event::Payload::Custom(CustomEvent {
             namespace: namespace.to_string(),
             name: name.to_string(),
             version: "1.0".to_string(),
             payload,
-            metadata: std::collections::HashMap::new(),
+            attributes: std::collections::HashMap::new(),
         })),
     }
 }
@@ -561,7 +584,7 @@ impl EventBuilder {
     ) -> Self {
         self.payload = Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
-            new_content,
+            new_content: Some(decode_message_content(&new_content)),
             edit_version,
             reason: String::new(),
             show_edited_mark: true,
@@ -594,7 +617,6 @@ impl EventBuilder {
             user_id: user_id.to_string(),
             message_ids: Vec::new(),
             read_at: None,
-            burn_after_read: None,
         }));
         self
     }
@@ -620,11 +642,10 @@ impl EventBuilder {
     pub fn build(self) -> Event {
         Event {
             conversation_id: self.conversation_id,
-            seq: 0, // 由服务分配
+            conversation_seq: 0, // 由服务分配
             r#type: self.event_type as i32,
-            created_at: Some(Timestamp::from(std::time::SystemTime::now())),
+            created_at: now_millis(),
             event_id: self.event_id,
-            event_seq: None,
             request_id: self.request_id,
             payload: self.payload,
         }
@@ -638,11 +659,10 @@ impl EventBuilder {
     pub fn recall(cmd: &RecallMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventMessageRecall as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Recall(MessageRecallEvent {
                 server_msg_id: cmd.base.message_id.clone(),
@@ -657,15 +677,14 @@ impl EventBuilder {
     pub fn edit(cmd: &EditMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventMessageEdit as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Edit(MessageEditEvent {
                 server_msg_id: cmd.base.message_id.clone(),
-                new_content: cmd.new_content.clone(),
+                new_content: Some(decode_message_content(&cmd.new_content)),
                 edit_version: 0, // 由 storage 持久化时确定
                 reason: cmd.reason.clone().unwrap_or_default(),
                 show_edited_mark: true,
@@ -685,11 +704,10 @@ impl EventBuilder {
         };
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventMessageDelete as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Delete(MessageDeleteEvent {
                 server_msg_id: server_msg_id.to_string(),
@@ -706,11 +724,10 @@ impl EventBuilder {
     pub fn read(cmd: &ReadMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventReadReceipt as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Read(ReadReceiptEvent {
                 conversation_id: cmd.base.conversation_id.clone(),
@@ -718,7 +735,6 @@ impl EventBuilder {
                 user_id: cmd.base.operator_id.clone(),
                 message_ids: cmd.message_ids.clone(),
                 read_at: Some(to_timestamp(cmd.read_at.unwrap_or_else(Utc::now))),
-                burn_after_read: Some(cmd.burn_after_read),
             })),
         }
     }
@@ -727,11 +743,10 @@ impl EventBuilder {
     pub fn reaction_add(cmd: &AddReactionCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventReaction as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Reaction(ReactionEvent {
                 server_msg_id: cmd.base.message_id.clone(),
@@ -746,11 +761,10 @@ impl EventBuilder {
     pub fn reaction_remove(cmd: &RemoveReactionCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventReaction as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Reaction(ReactionEvent {
                 server_msg_id: cmd.base.message_id.clone(),
@@ -765,17 +779,16 @@ impl EventBuilder {
     pub fn pin(cmd: &PinMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventPin as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Pin(PinEvent {
                 server_msg_id: cmd.base.message_id.clone(),
                 pinned_by: cmd.base.operator_id.clone(),
                 reason: cmd.reason.clone(),
-                expire_at: cmd.expire_at.map(|dt| to_timestamp(dt)),
+                expire_at: cmd.expire_at.map(to_timestamp),
             })),
         }
     }
@@ -784,11 +797,10 @@ impl EventBuilder {
     pub fn unpin(cmd: &UnpinMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventUnpin as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Unpin(UnpinEvent {
                 server_msg_id: cmd.base.message_id.clone(),
@@ -800,11 +812,10 @@ impl EventBuilder {
     pub fn mark(cmd: &MarkMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventMark as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Mark(MarkEvent {
                 server_msg_id: cmd.base.message_id.clone(),
@@ -819,11 +830,10 @@ impl EventBuilder {
     pub fn unmark(cmd: &UnmarkMessageCommand, seq: u64) -> Event {
         Event {
             conversation_id: cmd.base.conversation_id.clone(),
-            seq,
+            conversation_seq: seq,
             r#type: EventType::EventUnmark as i32,
-            created_at: Some(to_timestamp(Utc::now())),
+            created_at: now_millis(),
             event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            event_seq: None,
             request_id: None,
             payload: Some(event::Payload::Unmark(UnmarkEvent {
                 server_msg_id: cmd.base.message_id.clone(),

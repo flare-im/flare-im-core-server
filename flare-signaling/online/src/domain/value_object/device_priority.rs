@@ -13,10 +13,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// 设备优先级值对象
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum DevicePriority {
     Unspecified = 0,
     Low = 1,
+    #[default]
     Normal = 2,
     High = 3,
     Critical = 4,
@@ -53,12 +56,6 @@ impl DevicePriority {
     /// 判断是否忽略免打扰
     pub fn ignores_do_not_disturb(&self) -> bool {
         matches!(self, Self::Critical)
-    }
-}
-
-impl Default for DevicePriority {
-    fn default() -> Self {
-        Self::Normal
     }
 }
 

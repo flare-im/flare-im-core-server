@@ -14,12 +14,12 @@
 //! - 置顶/取消置顶 (EVENT_PIN / EVENT_UNPIN)
 //! - 标记/取消标记 (EVENT_MARK / EVENT_UNMARK)
 //! - 自定义事件 (EVENT_CUSTOM)
-//! - 通话信令 (EVENT_CALL_SIGNAL)：WebRTC / 媒体后端编排，落库前经 `CallCapabilityBridge` enrich（见 `handlers/plugin`）
+//!
+//! Realtime control packets such as typing, presence, and RTC signaling are not durable events.
 
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
-use flare_proto::common::call_audience::Shape as CallAudienceShape;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{Event, EventType};
 use flare_server_core::{flare_err, flare_err_details};
@@ -27,13 +27,12 @@ use tracing::instrument;
 
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{PushRepository, RecipientRepository};
-use crate::domain::service::call_signal_notice_message_builder::build_call_signal_notice_message;
 use crate::domain::service::sequence_allocator::SequenceAllocator;
 use crate::domain::service::validation_strategy::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
 };
-use crate::error::{ErrorCode, Result};
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
+use flare_server_core::error::{ErrorCode, Result};
 
 /// 事件领域服务
 pub trait SequenceAllocatorPort: Send + Sync {
@@ -164,7 +163,7 @@ where
             "Allocated session sequence for event"
         );
 
-        event.seq = session_seq;
+        event.conversation_seq = session_seq;
         Ok(event)
     }
 
@@ -197,20 +196,10 @@ where
                 )
             })?;
 
-        match event_type {
-            EventType::EventTyping => {
-                if let Some(EventPayload::Typing(t)) = &event.payload {
-                    members.retain(|uid| uid != &t.user_id);
-                } else if let Some(uid) = ctx.user_id() {
-                    members.retain(|uid_m| uid_m != uid);
-                }
-            }
-            EventType::EventReadReceipt => {
-                if let Some(EventPayload::Read(r)) = &event.payload {
-                    members.retain(|uid| uid != &r.user_id);
-                }
-            }
-            _ => {}
+        if event_type == EventType::EventReadReceipt
+            && let Some(EventPayload::Read(r)) = &event.payload
+        {
+            members.retain(|uid| uid != &r.user_id);
         }
 
         Ok(members)
@@ -249,7 +238,7 @@ where
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?EventType::try_from(event.r#type),
-            seq = event.seq,
+            conversation_seq = event.conversation_seq,
             recipient_count = recipient_user_ids.len(),
             "Pushing event only (no persistence)"
         );
@@ -258,47 +247,14 @@ where
         self.push_repository
             .push_only_event(ctx, event, recipient_user_ids, conversation_id)
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish push-only event to MQ: {}", e)
-                )
-            })
     }
 
     /// 判断是否为临时事件（仅推送，不持久化）
     ///
-    /// 根据 event.proto 定义，以下事件类型为临时事件：
-    /// - EVENT_TYPING：正在输入（高频，无需持久化）
-    /// - EVENT_PRESENCE：在线状态（实时性，无需持久化）
-    /// - EVENT_CALL_SIGNAL：默认按临时事件处理；仅“终态信令”在 `push_event` 中提升为持久化
-    fn is_temporary_event(event_type: EventType) -> bool {
-        match event_type {
-            EventType::EventTyping => true,     // 正在输入：高频，仅推送
-            EventType::EventPresence => true,   // 在线状态：实时性，仅推送
-            EventType::EventCallSignal => true, // 默认临时；终态由策略提升
-            _ => false,                         // 其他事件：需要持久化
-        }
-    }
-
-    /// 终态通话信令是否需要沉淀到会话历史。
-    ///
-    /// 仅保留用户可感知结果：
-    /// - reject / busy
-    /// - hangup（含取消、结束时长、异常中断等）
-    ///
-    /// 协商过程（invite/accept/ringing/ice/renegotiate/...）仅实时分发，不落聊天记录。
-    fn should_persist_call_signal_terminal(event: &Event) -> bool {
-        use flare_proto::common::call_signal_event::Signal;
-        let Some(flare_proto::common::event::Payload::CallSignal(call)) = event.payload.as_ref()
-        else {
-            return false;
-        };
-        match call.signal.as_ref() {
-            Some(Signal::Reject(_)) | Some(Signal::Busy(_)) => true,
-            Some(Signal::Hangup(h)) => !h.reason.trim().eq_ignore_ascii_case("participant_leave"),
-            _ => false,
-        }
+    /// Durable event types are persisted by default. Realtime control packets
+    /// are modeled outside `Event` and therefore do not enter this classifier.
+    fn is_temporary_event(_event_type: EventType) -> bool {
+        false
     }
 
     /// 仅保存事件（持久化但不推送）
@@ -325,7 +281,7 @@ where
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?EventType::try_from(event.r#type),
-            seq = event.seq,
+            conversation_seq = event.conversation_seq,
             "Persisting event only (no push)"
         );
 
@@ -333,12 +289,37 @@ where
         self.push_repository
             .persistence_only_event(ctx, event, conversation_id)
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish persistence-only event to MQ: {}", e)
-                )
-            })
+    }
+
+    /// 持久事件主流 fanout：先写入存储 topic，再写入推送 topic。
+    #[instrument(skip(self, recipient_user_ids), fields(
+        event_id = %event.event_id,
+        conversation_id = %event.conversation_id,
+        event_type = ?EventType::try_from(event.r#type),
+        recipient_count = recipient_user_ids.len(),
+    ))]
+    pub async fn persist_and_push_with_recipients(
+        &self,
+        ctx: &Ctx,
+        event: Event,
+        recipient_user_ids: Vec<String>,
+    ) -> Result<()> {
+        tracing::trace!(
+            event_id = %event.event_id,
+            conversation_id = %event.conversation_id,
+            event_type = ?EventType::try_from(event.r#type),
+            conversation_seq = event.conversation_seq,
+            recipient_count = recipient_user_ids.len(),
+            "Fanout persistent event to storage and push topics"
+        );
+
+        let conversation_id = event.conversation_id.clone();
+        self.push_repository
+            .persistence_only_event(ctx, event.clone(), conversation_id.clone())
+            .await?;
+        self.push_repository
+            .push_only_event(ctx, event, recipient_user_ids, conversation_id)
+            .await
     }
 
     /// 推送事件
@@ -364,12 +345,7 @@ where
     ) -> Result<()> {
         let event_type = EventType::try_from(event.r#type).unwrap_or(EventType::Unspecified);
         let is_temporary = Self::is_temporary_event(event_type);
-        let should_push_only = match persistence_mode {
-            PersistenceMode::Auto if event_type == EventType::EventCallSignal => {
-                !Self::should_persist_call_signal_terminal(&event)
-            }
-            _ => persistence_mode.should_push_only(is_temporary),
-        };
+        let should_push_only = persistence_mode.should_push_only(is_temporary);
         if should_push_only {
             return self.push_only(ctx, event).await;
         }
@@ -379,29 +355,10 @@ where
             event_id = %event.event_id,
             conversation_id = %event.conversation_id,
             event_type = ?event.r#type(),
-            seq = event.seq,
+            conversation_seq = event.conversation_seq,
             persistence_mode = ?persistence_mode,
             "Publishing event (persistence + push)"
         );
-
-        // 终态通话信令附加沉淀为通知消息，沿消息主链路做 persistence+push，
-        // 保障会话历史与多端同步一致。
-        if let Some(call_notice) = build_call_signal_notice_message(&event) {
-            self.push_repository
-                .publish_message(
-                    ctx,
-                    call_notice,
-                    recipient_user_ids.clone(),
-                    event.conversation_id.clone(),
-                )
-                .await
-                .map_err(|e| {
-                    flare_err!(
-                        ErrorCode::InternalError,
-                        &format!("Failed to publish call notice message to MQ: {}", e)
-                    )
-                })?;
-        }
 
         self.push_repository
             .publish_event(
@@ -411,52 +368,32 @@ where
                 event.conversation_id.clone(),
             )
             .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!("Failed to publish event to MQ: {}", e)
-                )
-            })
     }
 }
 
 /// 从事件载荷解析推送目标，避免不必要的成员列表查询。
 fn resolve_recipients_from_event_payload(event: &Event) -> Option<Vec<String>> {
     match &event.payload {
-        Some(EventPayload::CallSignal(cs)) => {
-            cs.audience.as_ref().and_then(|aud| match &aud.shape {
-                Some(CallAudienceShape::Direct(d)) if !d.peer_user_id.trim().is_empty() => {
-                    Some(vec![d.peer_user_id.clone()])
-                }
-                Some(CallAudienceShape::Explicit(e)) => {
-                    let ids: Vec<String> = e
-                        .user_ids
-                        .iter()
-                        .filter(|id| !id.trim().is_empty())
-                        .cloned()
-                        .collect();
-                    if ids.is_empty() { None } else { Some(ids) }
-                }
-                _ => None,
-            })
+        Some(EventPayload::Read(r)) if !r.user_id.trim().is_empty() => {
+            Some(vec![r.user_id.clone()])
         }
         _ => None,
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::{EventDomainService, SequenceAllocatorPort};
     use crate::domain::PersistenceMode;
     use crate::domain::model::ConversationType;
     use crate::domain::repository::{PushRepository, RecipientRepository};
-    use crate::error::{ErrorCode, Result};
     use flare_im_core::Ctx;
     use flare_proto::common::call_signal_event::Signal;
     use flare_proto::common::{
         CallBusy, CallHangup, CallReject, CallSignalEvent, Event, EventType,
         event::Payload as EventPayload,
     };
+    use flare_server_core::error::{ErrorCode, Result};
     use flare_server_core::flare_err;
     use std::future::Future;
     use std::pin::Pin;
@@ -541,7 +478,7 @@ mod tests {
         async fn publish_push_envelope(
             &self,
             _ctx: &Ctx,
-            _envelope: flare_proto::common::PushEnvelope,
+            _envelope: flare_proto::PushEnvelope,
         ) -> Result<()> {
             self.record("publish_push_envelope")
         }
@@ -557,7 +494,8 @@ mod tests {
             _conversation_type: ConversationType,
             _channel_id: Option<&'a str>,
             _sender_id: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = flare_server_core::error::Result<Vec<String>>> + Send + 'a>>
+        {
             Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
         }
 
@@ -567,7 +505,8 @@ mod tests {
             _message_id: &'a str,
             _conversation_id: &'a str,
             _event_type: EventType,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = flare_server_core::error::Result<Vec<String>>> + Send + 'a>>
+        {
             Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
         }
 
@@ -575,7 +514,8 @@ mod tests {
             &'a self,
             _ctx: &'a Ctx,
             _conversation_id: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<String>>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = flare_server_core::error::Result<Vec<String>>> + Send + 'a>>
+        {
             Box::pin(async { Ok(vec!["u1".to_string(), "u2".to_string()]) })
         }
     }

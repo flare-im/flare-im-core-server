@@ -2,8 +2,8 @@
 //!
 //! 定义 ACK 路由的抽象接口
 
-use anyhow::Result;
 use async_trait::async_trait;
+use flare_server_core::error::Result;
 
 use crate::domain::model::{RouteCommand, RoutedEndpoint};
 

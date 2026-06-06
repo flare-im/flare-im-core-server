@@ -7,10 +7,10 @@
 //! - 用户列表推送：查询指定用户的在线设备
 //! - 设备列表推送：直接返回设备列表
 
-use anyhow::Result;
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::PushEnvelope;
+use flare_proto::PushEnvelope;
+use flare_server_core::error::Result;
 
 use crate::domain::model::DeviceInfo;
 

@@ -1,10 +1,10 @@
 //! 应用启动器 - 负责依赖注入和服务启动
 
 use crate::config::PortConfig;
-use crate::error::Result;
 use crate::service::startup::start_services;
 use flare_im_core::FlareAppConfig;
 use flare_im_core::service_names::ACCESS_GATEWAY;
+use flare_server_core::error::Result;
 use tracing::{error, info};
 
 use super::wire;

@@ -11,7 +11,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::service::ConversationEventPublisher;
-use crate::error::{Result, to_system_err_with};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 #[derive(Serialize)]
 struct ConversationEnsurePayload {
@@ -49,8 +49,14 @@ impl ConversationEventPublisher for MqConversationEnsurePublisher {
                 channel_id: stored_channel_id,
             };
 
-            let payload_bytes = serde_json::to_vec(&payload)
-                .map_err(|e| to_system_err_with(e, "serialize_conversation_ensure_payload"))?;
+            let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
+                ErrorBuilder::new(
+                    ErrorCode::SerializationError,
+                    "serialize conversation ensure payload failed",
+                )
+                .details(e.to_string())
+                .build_error()
+            })?;
 
             let envelope = EventEnvelope::new(
                 EVENT_TYPE_OPERATION_CONVERSATION_ENSURE,
@@ -58,12 +64,17 @@ impl ConversationEventPublisher for MqConversationEnsurePublisher {
                 0,
                 payload_bytes,
             );
-            let event_bytes = envelope
-                .to_json_bytes()
-                .map_err(|e| to_system_err_with(e, "serialize_conversation_ensure_envelope"))?;
+            let event_bytes = envelope.to_json_bytes().map_err(|e| {
+                ErrorBuilder::new(
+                    ErrorCode::SerializationError,
+                    "serialize conversation ensure envelope failed",
+                )
+                .details(e.to_string())
+                .build_error()
+            })?;
 
             let ctx: Ctx = Context::with_request_id(Uuid::new_v4().to_string())
-                .with_tenant_id(tenant_id.to_string())
+                .with_tenant_id(tenant_id)
                 .into();
 
             self.producer
@@ -75,7 +86,7 @@ impl ConversationEventPublisher for MqConversationEnsurePublisher {
                     None,
                 )
                 .await
-                .map_err(|e| to_system_err_with(e, "publish_conversation_ensure"))?;
+                .map_err(|e| e.into_flare_error())?;
 
             Ok(())
         })

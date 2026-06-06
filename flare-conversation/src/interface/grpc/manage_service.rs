@@ -25,7 +25,7 @@ use crate::domain::model::{
     ConflictResolutionPolicy, ConversationLifecycleState, ConversationType, ConversationVisibility,
     DeviceState,
 };
-use crate::error::{ErrorBuilder, ErrorCode};
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 
 use super::ConversationGrpcHandler;
 use super::shared::{

@@ -1,0 +1,29 @@
+[package]
+name = "flare-admin-gateway"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "flare-admin-gateway"
+path = "src/main.rs"
+
+[lib]
+name = "flare_admin_gateway"
+path = "src/lib.rs"
+
+[dependencies]
+flare-core-runtime = { workspace = true }
+flare-im-core = { path = "..", features = ["discovery"] }
+flare-core-base = { workspace = true }
+flare-grpc-proto = { workspace = true }
+flare-proto = { workspace = true }
+flare-server-core = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+utoipa = "4"

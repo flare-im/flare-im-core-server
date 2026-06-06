@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
+use chrono::TimeZone;
 use flare_core::common::conversation::{
     generate_ai_conversation_id, generate_customer_conversation_id, generate_group_conversation_id,
     generate_single_chat_conversation_id, generate_system_conversation_id,
@@ -11,8 +11,8 @@ use flare_core::common::conversation::{
 };
 use flare_proto::common::Message;
 use flare_proto::common::message_content::Content;
-use flare_proto::message_content_ext::decode_message_content;
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -114,116 +114,87 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         }
 
         // 仅在需要 recent 数据时补充最后一条消息，避免 bootstrap 首屏同步超时。
-        if include_recent {
-            if let Some(provider) = &self.message_provider {
-                // 为每个会话获取最后一条消息（如果有）
-                for summary in &mut summaries {
-                    if summary.last_message_id.is_none() {
-                        let visible_after_seq = summary.visible_after_seq.max(0);
-                        let max_seq = summary.last_message_seq.unwrap_or_default().max(0);
-                        if max_seq > 0 && visible_after_seq >= max_seq {
-                            continue;
-                        }
-
-                        // 尝试获取最后一条消息信息
-                        if let Ok(sync_result) = provider
-                            .sync_messages(ctx, &summary.conversation_id, 0, None, 1)
-                            .await
-                        {
-                            if let Some(last_msg) = sync_result.messages.first() {
-                                summary.last_message_id = Some(last_msg.server_id.clone());
-
-                                // 转换 Timestamp 为 DateTime<Utc>
-                                summary.last_message_time =
-                                    last_msg.timestamp.as_ref().and_then(|ts| {
-                                        chrono::TimeZone::timestamp_opt(
-                                            &chrono::Utc,
-                                            ts.seconds,
-                                            ts.nanos as u32,
-                                        )
-                                        .single()
-                                    });
-
-                                summary.last_sender_id = Some(last_msg.sender_id.clone());
-                                summary.last_message_type = Some(last_msg.message_type() as i32);
-
-                                // Message.content 为按 message_content.proto 序列化的 bytes
-                                summary.last_content_type = if last_msg.content.is_empty() {
-                                    None
-                                } else {
-                                    decode_message_content(&last_msg.content)
-                                        .ok()
-                                        .and_then(|mc| {
-                                            mc.content.map(|c| match c {
-                                                Content::Text(_) => "text".to_string(),
-                                                Content::Image(_) => "image".to_string(),
-                                                Content::Video(_) => "video".to_string(),
-                                                Content::Audio(_) => "audio".to_string(),
-                                                Content::File(_) => "file".to_string(),
-                                                Content::Location(_) => "location".to_string(),
-                                                Content::Card(_) => "card".to_string(),
-                                                Content::Sticker(_) => "sticker".to_string(),
-                                                Content::Emoji(_) => "emoji".to_string(),
-                                                Content::Quote(_) => "quote".to_string(),
-                                                Content::LinkCard(_) => "link_card".to_string(),
-                                                Content::Forward(_) => "forward".to_string(),
-                                                Content::Thread(_) => "thread".to_string(),
-                                                Content::MiniProgram(_) => {
-                                                    "mini_program".to_string()
-                                                }
-                                                Content::RichText(_) => "rich_text".to_string(),
-                                                Content::ImageGroup(_) => "image_group".to_string(),
-                                                Content::System(_) => "system".to_string(),
-                                                Content::Notification(_) => {
-                                                    "notification".to_string()
-                                                }
-                                                Content::Vote(_) => "vote".to_string(),
-                                                Content::Task(_) => "task".to_string(),
-                                                Content::Schedule(_) => "schedule".to_string(),
-                                                Content::Announcement(_) => {
-                                                    "announcement".to_string()
-                                                }
-                                                Content::Custom(_) => "custom".to_string(),
-                                                Content::Placeholder(_) => {
-                                                    "placeholder".to_string()
-                                                }
-                                            })
-                                        })
-                                };
-
-                                // 更新server_cursor_ts为最后消息的时间戳
-                                if let Some(ts) = last_msg.timestamp.as_ref() {
-                                    summary.server_cursor_ts =
-                                        Some(ts.seconds * 1_000 + (ts.nanos as i64 / 1_000_000));
-                                }
-                            }
-                        }
-
-                        // 未读数已在 load_bootstrap 中从数据库读取（基于 seq）
-                        // 这里不再需要重新计算
+        if include_recent && let Some(provider) = &self.message_provider {
+            // 为每个会话获取最后一条消息（如果有）
+            for summary in &mut summaries {
+                if summary.last_message_id.is_none() {
+                    let visible_after_seq = summary.visible_after_seq.max(0);
+                    let max_seq = summary.last_message_seq.unwrap_or_default().max(0);
+                    if max_seq > 0 && visible_after_seq >= max_seq {
+                        continue;
                     }
+
+                    // 尝试获取最后一条消息信息
+                    if let Ok(sync_result) = provider
+                        .sync_messages(ctx, &summary.conversation_id, 0, None, 1)
+                        .await
+                        && let Some(last_msg) = sync_result.messages.first()
+                    {
+                        summary.last_message_id = Some(last_msg.server_id.clone());
+
+                        let last_message_at = last_msg.created_at;
+                        summary.last_message_time = if last_message_at > 0 {
+                            chrono::Utc.timestamp_millis_opt(last_message_at).single()
+                        } else {
+                            None
+                        };
+
+                        summary.last_sender_id = Some(last_msg.sender_id.clone());
+                        summary.last_message_type = Some(last_msg.message_type() as i32);
+
+                        summary.last_content_type = last_msg.content.as_ref().and_then(|mc| {
+                            mc.content.as_ref().map(|c| match c {
+                                Content::Text(_) => "text".to_string(),
+                                Content::Image(_) => "image".to_string(),
+                                Content::Video(_) => "video".to_string(),
+                                Content::Audio(_) => "audio".to_string(),
+                                Content::File(_) => "file".to_string(),
+                                Content::Location(_) => "location".to_string(),
+                                Content::Card(_) => "card".to_string(),
+                                Content::Sticker(_) => "sticker".to_string(),
+                                Content::Emoji(_) => "emoji".to_string(),
+                                Content::Quote(_) => "quote".to_string(),
+                                Content::LinkCard(_) => "link_card".to_string(),
+                                Content::Forward(_) => "forward".to_string(),
+                                Content::Thread(_) => "thread".to_string(),
+                                Content::AppCard(_) => "app_card".to_string(),
+                                Content::RichText(_) => "rich_text".to_string(),
+                                Content::ImageGroup(_) => "image_group".to_string(),
+                                Content::System(_) => "system".to_string(),
+                                Content::Notification(_) => "notification".to_string(),
+                                Content::Custom(_) => "custom".to_string(),
+                                Content::Placeholder(_) => "placeholder".to_string(),
+                            })
+                        });
+
+                        // 更新 server_cursor_ts 为最后消息的毫秒时间戳
+                        if last_message_at > 0 {
+                            summary.server_cursor_ts = Some(last_message_at);
+                        }
+                    }
+
+                    // 未读数已在 load_bootstrap 中从数据库读取（基于 seq）
+                    // 这里不再需要重新计算
                 }
             }
         }
 
         let mut recent_messages = Vec::new();
-        if include_recent {
-            if let Some(provider) = &self.message_provider {
-                let conversation_ids: Vec<String> = summaries
-                    .iter()
-                    .map(|s| s.conversation_id.clone())
-                    .collect();
-                if !conversation_ids.is_empty() {
-                    recent_messages = provider
-                        .recent_messages(
-                            ctx,
-                            &conversation_ids,
-                            recent_limit.unwrap_or(self.config.recent_message_limit),
-                            &bootstrap.cursor_map,
-                        )
-                        .await
-                        .unwrap_or_default();
-                }
+        if include_recent && let Some(provider) = &self.message_provider {
+            let conversation_ids: Vec<String> = summaries
+                .iter()
+                .map(|s| s.conversation_id.clone())
+                .collect();
+            if !conversation_ids.is_empty() {
+                recent_messages = provider
+                    .recent_messages(
+                        ctx,
+                        &conversation_ids,
+                        recent_limit.unwrap_or(self.config.recent_message_limit),
+                        &bootstrap.cursor_map,
+                    )
+                    .await
+                    .unwrap_or_default();
             }
         }
 
@@ -314,6 +285,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
     }
 
     /// 更新设备状态（业务逻辑）
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_presence(
         &self,
         ctx: &Context,
@@ -391,6 +363,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
     /// 否则生成新的 UUID 作为 conversation_id
     ///
     /// 如果会话已存在，则更新参与者，确保所有参与者都在会话中
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_conversation(
         &self,
         ctx: &Context,
@@ -767,12 +740,11 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
 }
 
 fn parse_cursor(cursor: Option<&str>) -> (Option<i64>, String) {
-    if let Some(cursor) = cursor {
-        if let Some((ts, id)) = cursor.split_once(':') {
-            if let Ok(parsed) = ts.parse::<i64>() {
-                return (Some(parsed), id.to_string());
-            }
-        }
+    if let Some(cursor) = cursor
+        && let Some((ts, id)) = cursor.split_once(':')
+        && let Ok(parsed) = ts.parse::<i64>()
+    {
+        return (Some(parsed), id.to_string());
     }
     (None, String::new())
 }

@@ -1,6 +1,6 @@
 //! 路由仓储接口（SVID → 业务端点）
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use crate::domain::model::route::Route;
 

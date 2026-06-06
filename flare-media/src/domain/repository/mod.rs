@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::error::Result;
 use chrono::{DateTime, Utc};
+use flare_server_core::{context::Context, error::Result};
 
 use crate::domain::model::{
     MediaAssetStatus, MediaFileMetadata, MediaReference, ObjectStat, UploadContext, UploadSession,
@@ -31,7 +31,7 @@ pub trait MediaObjectRepository: Send + Sync {
     ) -> Result<String> {
         let _ = (object_path, content_type, expires_in);
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "direct upload is not supported by current object store"
         ))
     }
@@ -42,7 +42,7 @@ pub trait MediaObjectRepository: Send + Sync {
     ) -> Result<String> {
         let _ = (object_path, content_type);
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "multipart direct upload is not supported by current object store"
         ))
     }
@@ -55,7 +55,7 @@ pub trait MediaObjectRepository: Send + Sync {
     ) -> Result<String> {
         let _ = (object_path, upload_id, part_number, expires_in);
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "multipart direct upload is not supported by current object store"
         ))
     }
@@ -67,21 +67,21 @@ pub trait MediaObjectRepository: Send + Sync {
     ) -> Result<()> {
         let _ = (object_path, upload_id, parts);
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "multipart direct upload is not supported by current object store"
         ))
     }
     async fn abort_multipart_upload(&self, object_path: &str, upload_id: &str) -> Result<()> {
         let _ = (object_path, upload_id);
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "multipart direct upload is not supported by current object store"
         ))
     }
     async fn stat_object(&self, object_path: &str) -> Result<ObjectStat> {
         let _ = object_path;
         Err(flare_server_core::flare_err!(
-            crate::error::ErrorCode::ConfigurationError,
+            flare_server_core::error::ErrorCode::ConfigurationError,
             "object stat is not supported by current object store"
         ))
     }
@@ -115,11 +115,20 @@ pub trait MediaMetadataStore: Send + Sync {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<Option<MediaFileMetadata>>;
-    async fn load_by_hash(&self, sha256: &str) -> Result<Option<MediaFileMetadata>>;
-    async fn delete_metadata(&self, file_id: &str) -> Result<()>;
+    async fn load_by_hash(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        sha256: &str,
+    ) -> Result<Option<MediaFileMetadata>>;
+    async fn delete_metadata(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<()>;
     async fn list_orphaned_assets(&self, before: DateTime<Utc>) -> Result<Vec<MediaFileMetadata>>;
     async fn update_status(
         &self,
+        ctx: &flare_server_core::context::Context,
         file_id: &str,
         status: MediaAssetStatus,
         grace_expires_at: Option<DateTime<Utc>>,
@@ -131,9 +140,13 @@ pub trait MediaMetadataStore: Send + Sync {
 /// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaMetadataCache: Send + Sync {
-    async fn cache_metadata(&self, metadata: &MediaFileMetadata) -> Result<()>;
-    async fn get_cached_metadata(&self, file_id: &str) -> Result<Option<MediaFileMetadata>>;
-    async fn invalidate(&self, file_id: &str) -> Result<()>;
+    async fn cache_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()>;
+    async fn get_cached_metadata(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<Option<MediaFileMetadata>>;
+    async fn invalidate(&self, ctx: &Context, file_id: &str) -> Result<()>;
 }
 
 /// 本地存储接口
@@ -153,7 +166,11 @@ pub trait MediaLocalStore: Send + Sync {
 #[async_trait::async_trait]
 pub trait MediaReferenceStore: Send + Sync {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool>;
-    async fn delete_reference(&self, reference_id: &str) -> Result<bool>;
+    async fn delete_reference(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        reference_id: &str,
+    ) -> Result<bool>;
     async fn delete_any_reference(
         &self,
         ctx: &flare_server_core::context::Context,

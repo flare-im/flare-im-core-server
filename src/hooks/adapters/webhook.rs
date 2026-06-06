@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Ctx;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

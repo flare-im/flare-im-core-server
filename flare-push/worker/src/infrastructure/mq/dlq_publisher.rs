@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_im_core::Ctx;
 use flare_im_core::event::types::types;
+use flare_server_core::error::Result;
 use flare_server_core::eventbus::{EventEnvelope, EventPublisher, MqEventBus};
 use flare_server_core::mq::kafka::KafkaProducerBuilder;
 use flare_server_core::mq::nats::NatsProducerBuilder;
@@ -18,18 +18,30 @@ pub struct DlqPublisher {
 impl DlqPublisher {
     pub async fn new(config: Arc<PushWorkerConfig>) -> Result<Self> {
         let producer: Arc<dyn Producer> = match config.mq_backend.as_str() {
-            "kafka" => Arc::new(
-                KafkaProducerBuilder::new()
-                    .build(config.as_ref())
-                    .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?,
-            ),
+            "kafka" => Arc::new(KafkaProducerBuilder::new().build(config.as_ref()).map_err(
+                |e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to build kafka producer: {}",
+                        e
+                    ))
+                },
+            )?),
             "nats" | "jetstream" => Arc::new(
                 NatsProducerBuilder::new()
                     .build(config.as_ref())
                     .await
-                    .map_err(|e| anyhow::anyhow!("failed to build jetstream producer: {}", e))?,
+                    .map_err(|e| {
+                        flare_server_core::error::FlareError::system(format!(
+                            "failed to build jetstream producer: {}",
+                            e
+                        ))
+                    })?,
             ),
-            other => anyhow::bail!("unsupported mq backend: {}", other),
+            other => {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "unsupported mq backend: {other}"
+                )));
+            }
         };
 
         Ok(Self {
@@ -46,6 +58,8 @@ impl DlqPublisher {
         self.event_publisher
             .publish(ctx, &self.dlq_topic, &envelope)
             .await
-            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
+            })
     }
 }

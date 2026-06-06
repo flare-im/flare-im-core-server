@@ -14,6 +14,7 @@ use std::fmt;
 /// （例如 `in_proc_sfu`、`remote_grpc`、`vendor_x`）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[derive(Default)]
 pub struct CapabilityKind(String);
 
 impl CapabilityKind {
@@ -38,12 +39,6 @@ impl CapabilityKind {
     /// 预留：任意自定义实现 id。
     pub fn custom(id: impl Into<String>) -> Self {
         Self(id.into())
-    }
-}
-
-impl Default for CapabilityKind {
-    fn default() -> Self {
-        Self(String::new())
     }
 }
 

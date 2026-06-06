@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use super::registry::HookRegistry;
 use super::selector::{HookSelector, MatchRule};

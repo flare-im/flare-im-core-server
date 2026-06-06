@@ -7,7 +7,7 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use tracing::info;
 
 use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 订阅领域服务 - 包含所有业务逻辑（泛型依赖，避免 `dyn` 异步 trait）
 pub struct SubscriptionService<
@@ -59,8 +59,7 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
         if user_ids.is_empty() {
             return Err(
                 ErrorBuilder::new(ErrorCode::InvalidParameter, "user_ids cannot be empty")
-                    .build_error()
-                    .into(),
+                    .build_error(),
             );
         }
 

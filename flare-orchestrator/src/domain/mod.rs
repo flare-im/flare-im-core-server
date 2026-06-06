@@ -20,5 +20,5 @@ pub use service::MessageDomainService;
 pub use builder::{
     EventBuilder, build_custom_event, build_delete_event, build_edit_event, build_mark_event,
     build_pin_event, build_reaction_event, build_read_receipt_event, build_recall_event,
-    build_typing_event, build_unmark_event, build_unpin_event,
+    build_unmark_event, build_unpin_event,
 };

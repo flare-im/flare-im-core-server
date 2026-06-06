@@ -22,13 +22,13 @@
 //!         conversation_id: "conv-123".to_string(),
 //!         seq: 100,
 //!         ack_type: "received".to_string(),
-//!         ack_at_ms: 1234567890,
+//!         ack_at: 1234567890,
 //!     })
 //!     .priority(5)
 //!     .build();
 //! ```
 
-use flare_proto::common::{
+use flare_proto::{
     AckPayload, CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind,
     PushTargetType, SystemPayload,
 };
@@ -216,7 +216,7 @@ impl PushEnvelopeBuilder {
     /// 设置过期时间（毫秒时间戳）
     pub fn expire_at_ms(mut self, ts: i64) -> Self {
         let mut options = self.options.unwrap_or_default();
-        options.expire_at_ms = ts;
+        options.expire_at = (ts > 0).then_some(ts);
         self.options = Some(options);
         self
     }
@@ -248,7 +248,7 @@ impl PushEnvelopeBuilder {
     /// 添加扩展选项
     pub fn extra_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         let mut options = self.options.unwrap_or_default();
-        options.extra.insert(key.into(), value.into());
+        options.attributes.insert(key.into(), value.into());
         self.options = Some(options);
         self
     }
@@ -266,24 +266,24 @@ impl PushEnvelopeBuilder {
     pub fn build(self) -> PushEnvelope {
         let envelope_id = self.envelope_id.expect("envelope_id is required");
         let tenant_id = self.tenant_id.expect("tenant_id is required");
-        let created_at_ms = self.created_at_ms.unwrap_or_else(|| current_time_ms());
+        let created_at_ms = self.created_at_ms.unwrap_or_else(current_time_ms);
 
         // 构建 payload oneof
         let payload = match self.payload_kind {
-            PushPayloadKind::Ack => Some(flare_proto::common::push_envelope::Payload::Ack(
+            PushPayloadKind::Ack => Some(flare_proto::push_envelope::Payload::Ack(
                 self.ack.expect("ack payload is required for ACK kind"),
             )),
             PushPayloadKind::Notification => {
-                Some(flare_proto::common::push_envelope::Payload::Notification(
+                Some(flare_proto::push_envelope::Payload::Notification(
                     self.notification
                         .expect("notification payload is required for Notification kind"),
                 ))
             }
-            PushPayloadKind::Custom => Some(flare_proto::common::push_envelope::Payload::Custom(
+            PushPayloadKind::Custom => Some(flare_proto::push_envelope::Payload::Custom(
                 self.custom
                     .expect("custom payload is required for Custom kind"),
             )),
-            PushPayloadKind::System => Some(flare_proto::common::push_envelope::Payload::System(
+            PushPayloadKind::System => Some(flare_proto::push_envelope::Payload::System(
                 self.system
                     .expect("system payload is required for System kind"),
             )),
@@ -296,7 +296,7 @@ impl PushEnvelopeBuilder {
             envelope_id,
             tenant_id,
             trace_id: self.trace_id.unwrap_or_default(),
-            created_at_ms,
+            created_at: created_at_ms,
             target_type: self.target_type as i32,
             target_user_ids: self.target_user_ids,
             target_device_ids: self.target_device_ids,
@@ -408,7 +408,7 @@ mod tests {
                 conversation_id: "conv-123".to_string(),
                 seq: 100,
                 ack_type: "received".to_string(),
-                ack_at_ms: 1234567890,
+                ack_at: 1234567890,
             })
             .priority(5)
             .build();
@@ -433,8 +433,8 @@ mod tests {
                 icon: String::new(),
                 sound: String::new(),
                 click_action: String::new(),
-                data: std::collections::HashMap::new(),
-                created_at_ms: 1234567890,
+                attributes: std::collections::HashMap::new(),
+                created_at: 1234567890,
             })
             .build();
 

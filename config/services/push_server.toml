@@ -14,10 +14,15 @@ redis = "conversation_store"
 # Consumer Group 名称
 consumer_group = "push-server"
 
-# 消息 Subject 配置
-message_topic = "push-messages"
-notification_topic = "push-notifications"
-task_topic = "flare.im.push.tasks"
+# 推送入口 Subject：Push Server 只消费推送专用流，不消费 message main 主消息流。
+push_message_topic = "flare.im.push.messages"
+push_event_topic = "flare.im.push.events"
+push_envelope_topic = "flare.im.push.envelope"
+
+# Push Server -> Push Worker 任务 Subject
+push_online_topic = "flare.im.push.online"
+push_offline_topic = "flare.im.push.offline"
+push_dlq_topic = "flare.im.push.dlq"
 
 # JetStream 超时配置（毫秒）
 jetstream_timeout_ms = 5000
@@ -126,29 +131,3 @@ ack_timeout_concurrent_limit = 50
 # ============================================
 # 离线推送队列配置
 # ============================================
-
-# 离线推送 Subject
-offline_topic = "flare.im.push.offline"
-
-# 死信队列 Subject
-dlq_topic = "flare.im.push.dlq"
-
-# ACK Subject（从 Push Proxy 消费客户端 ACK）
-ack_topic = "flare.im.push.acks"
-
-# ============================================
-# ACK 服务配置（集成到 Push Server 配置中）
-# ============================================
-
-[services.push_server.ack]
-# Redis 默认过期时间（秒）
-redis_ttl = 3600
-
-# 内存缓存容量
-cache_capacity = 10000
-
-# 批量处理间隔（毫秒）
-batch_interval_ms = 100
-
-# 批量处理大小
-batch_size = 100

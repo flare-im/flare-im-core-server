@@ -7,7 +7,7 @@ use flare_server_core::flare_err;
 use serde_json::Value;
 
 use crate::domain::repository::CapabilityDispatchGateway;
-use crate::error::{ErrorCode, Result};
+use flare_server_core::error::{ErrorCode, Result};
 
 use super::CapabilityDispatchClient;
 

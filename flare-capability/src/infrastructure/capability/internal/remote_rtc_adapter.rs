@@ -63,17 +63,23 @@ pub struct MediaControlGrpcRtcCapability {
 
 impl MediaControlGrpcRtcCapability {
     /// 静态 endpoint 延迟建连：启动阶段不拨号，首次 RTC 调用时再连接。
-    pub fn from_static_lazy(endpoint: impl Into<String>) -> anyhow::Result<Self> {
+    pub fn from_static_lazy(endpoint: impl Into<String>) -> flare_server_core::error::Result<Self> {
         let ep = endpoint.into();
         let channel = Channel::from_shared(ep.clone())
-            .map_err(|e| anyhow::anyhow!("invalid media-control gRPC endpoint {ep}: {e}"))?
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "invalid media-control gRPC endpoint {ep}: {e}"
+                ))
+            })?
             .connect_lazy();
         Ok(Self {
             transport: MediaControlTransport::Static(channel),
         })
     }
 
-    pub async fn from_service_name(service_name: impl Into<String>) -> anyhow::Result<Self> {
+    pub async fn from_service_name(
+        service_name: impl Into<String>,
+    ) -> flare_server_core::error::Result<Self> {
         let service_name = service_name.into();
         Ok(Self {
             transport: MediaControlTransport::Discovery {

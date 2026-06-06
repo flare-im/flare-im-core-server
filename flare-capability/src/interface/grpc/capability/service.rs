@@ -91,6 +91,7 @@ pub struct CapabilityGrpcServer {
 }
 
 impl CapabilityGrpcServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: CapabilityExtensionRegistry,
         policy: Arc<dyn CapabilityPolicyBackend>,

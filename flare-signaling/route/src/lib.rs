@@ -8,7 +8,6 @@ pub mod application;
 pub mod config;
 pub mod convert;
 pub mod domain;
-pub mod error;
 pub mod infrastructure;
 pub mod interface;
 pub mod service;

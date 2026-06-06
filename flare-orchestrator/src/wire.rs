@@ -18,16 +18,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
 use flare_im_core::constants::topics::TOPIC_MESSAGE_MAIN;
 use flare_im_core::hooks::adapters::DefaultHookFactory;
 use flare_im_core::hooks::{
     HookConfig, HookConfigLoader, HookDefinition, HookDispatcher, HookRegistry, HookTransportConfig,
 };
+use flare_im_core::metrics::MessageOrchestratorMetrics;
 use flare_im_core::service_names::{CAPABILITY, CONVERSATION};
+use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::mq::consumer::dispatcher::{Dispatcher, TopicDispatcher};
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler as MqMessageHandler};
+use flare_server_core::mq::consumer::{
+    ConsumerFailurePublishers, FailureTopic, ProducerDeadLetterPublisher, ProducerRetryPublisher,
+    RetryForwarderHandler,
+};
 use flare_server_core::mq::kafka::KafkaProducer;
 use flare_server_core::mq::nats::NatsProducer;
 
@@ -36,7 +42,7 @@ use crate::application::extension::{
 };
 use crate::application::handlers::{
     EventHandler, MessageActionHandler, MessageHandler as AppMessageHandler, StorageHandler,
-    plugin::CallCapabilityBridge,
+    WalReplayHandler, plugin::CallCapabilityBridge,
 };
 use crate::config::MessageOrchestratorConfig;
 use crate::domain::service::{
@@ -60,8 +66,11 @@ pub struct ApplicationContext {
     pub message_action_grpc: MessageActionGrpcHandler,
     /// `TOPIC_MESSAGE_MAIN` 消费者逻辑（与 [ConsumerConfig]、[Dispatcher] 配套使用）
     pub storage_consumer_handler: Arc<StorageConsumerHandler>,
+    pub wal_replay_handler: Arc<WalReplayHandler>,
     pub consumer_config: ConsumerConfig,
     pub main_queue_dispatcher: Arc<dyn Dispatcher>,
+    pub retry_forwarder_dispatcher: Option<Arc<dyn Dispatcher>>,
+    pub failure_publishers: ConsumerFailurePublishers,
     pub config: Arc<MessageOrchestratorConfig>,
 }
 
@@ -75,9 +84,12 @@ pub async fn initialize(
 
     let redis_client = build_redis_client(&config).await?;
 
-    let jetstream_producer = build_mq_producer(&config).await?;
+    let mq_producer = build_mq_producer(&config).await?;
+    let failure_publishers = build_failure_publishers(&config, mq_producer.clone());
+    let retry_forwarder_dispatcher =
+        build_retry_forwarder_dispatcher(&config, mq_producer.clone())?;
 
-    let push_repository = MqPushRepository::new(jetstream_producer.clone());
+    let push_repository = MqPushRepository::new(mq_producer.clone());
 
     let conversation_service_type = config
         .conversation_service_type
@@ -90,7 +102,9 @@ pub async fn initialize(
         flare_im_core::discovery::default_static_grpc_fallback(conversation_service_type),
     )
     .map_err(|e| {
-        anyhow::anyhow!("lazy conversation channel ({conversation_service_type}) failed: {e}")
+        flare_server_core::error::FlareError::system(format!(
+            "lazy conversation channel ({conversation_service_type}) failed: {e}"
+        ))
     })?;
     let conversation_repository = Arc::new(ConversationClient::new(conversation_channel));
 
@@ -104,16 +118,23 @@ pub async fn initialize(
 
     let sequence_allocator = SequenceAllocator::new(redis_client.clone(), 100)
         .await
-        .map_err(|e| anyhow::anyhow!("sequence allocator: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
+        })?;
 
     let message_domain_service = Arc::new(MessageDomainService::new(
         push_repository.clone(),
         recipient_repository.clone(),
-        wal_repository,
+        wal_repository.clone(),
         Arc::new(sequence_allocator.clone()),
         config.defaults(),
         None,
         None,
+    ));
+    let wal_replay_handler = Arc::new(WalReplayHandler::new(
+        wal_repository,
+        message_domain_service.clone(),
+        config.default_tenant_id.clone(),
     ));
 
     let event_domain_service = Arc::new(EventDomainService::new(
@@ -131,7 +152,7 @@ pub async fn initialize(
     let conversation_ensure_service = Arc::new(ConversationEnsureService::new(
         Some(conversation_repository.clone()),
         config.session_creation_mode,
-        Some(MqConversationEnsurePublisher::new(jetstream_producer)),
+        Some(MqConversationEnsurePublisher::new(mq_producer)),
     ));
 
     let call_capability_bridge: Option<Arc<CallCapabilityBridge>> = if config
@@ -142,9 +163,9 @@ pub async fn initialize(
             CapabilityDispatchClient::from_app_config(app_config, &cap_fallback)
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "prepare lazy flare-capability client for RTC bridge ({CAPABILITY}): {e}"
-                    )
+                    ))
                 })?,
         );
         tracing::info!(
@@ -185,10 +206,13 @@ pub async fn initialize(
         ),
     ));
 
+    let orchestrator_metrics = Arc::new(MessageOrchestratorMetrics::new());
+
     let message_handler = Arc::new(AppMessageHandler::new(
         message_domain_service.clone(),
         extension_orchestrator.clone(),
         conversation_ensure_service,
+        orchestrator_metrics.clone(),
     ));
 
     let event_handler = Arc::new(EventHandler::new(
@@ -196,7 +220,8 @@ pub async fn initialize(
         extension_orchestrator,
     ));
 
-    let message_send_grpc = MessageSendGrpcHandler::new(message_handler, event_handler.clone());
+    let message_send_grpc =
+        MessageSendGrpcHandler::new(message_handler, event_handler.clone(), orchestrator_metrics);
 
     let message_action_handler = Arc::new(MessageActionHandler::new(event_handler));
 
@@ -212,7 +237,12 @@ pub async fn initialize(
     let mq_handler: Arc<dyn MqMessageHandler> = storage_consumer_handler.clone();
     topic_dispatcher
         .register(TOPIC_MESSAGE_MAIN.to_string(), mq_handler)
-        .map_err(|e| anyhow::anyhow!("register main queue dispatcher: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "register main queue dispatcher: {}",
+                e
+            ))
+        })?;
     let main_queue_dispatcher: Arc<dyn Dispatcher> = Arc::new(topic_dispatcher);
 
     let consumer_config = ConsumerConfig::default()
@@ -223,8 +253,11 @@ pub async fn initialize(
         message_send_grpc,
         message_action_grpc,
         storage_consumer_handler,
+        wal_replay_handler,
         consumer_config,
         main_queue_dispatcher,
+        retry_forwarder_dispatcher,
+        failure_publishers,
         config,
     })
 }
@@ -246,18 +279,74 @@ async fn build_mq_producer(
 ) -> Result<Arc<dyn flare_server_core::mq::producer::Producer>> {
     match config.mq_backend.as_str() {
         "kafka" => {
-            let producer = KafkaProducer::new(config)
-                .map_err(|e| anyhow::anyhow!("failed to create Kafka producer: {}", e))?;
+            let producer = KafkaProducer::new(config).map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to create Kafka producer: {}",
+                    e
+                ))
+            })?;
             Ok(Arc::new(producer))
         }
         "nats" | "jetstream" => {
-            let producer = NatsProducer::new(config)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to create JetStream producer: {}", e))?;
+            let producer = NatsProducer::new(config).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to create JetStream producer: {}",
+                    e
+                ))
+            })?;
             Ok(Arc::new(producer))
         }
-        other => Err(anyhow::anyhow!("unsupported mq backend: {}", other)),
+        other => Err(flare_server_core::error::FlareError::system(format!(
+            "unsupported mq backend: {}",
+            other
+        ))),
     }
+}
+
+fn build_failure_publishers(
+    config: &MessageOrchestratorConfig,
+    producer: Arc<dyn flare_server_core::mq::producer::Producer>,
+) -> ConsumerFailurePublishers {
+    let dlq = Arc::new(ProducerDeadLetterPublisher::new(
+        producer.clone(),
+        FailureTopic::fixed(config.message_dlq_topic.clone()),
+    ));
+
+    match config.mq_backend.as_str() {
+        "kafka" => ConsumerFailurePublishers::new()
+            .with_retry(Arc::new(
+                ProducerRetryPublisher::new(
+                    producer,
+                    FailureTopic::fixed(config.message_retry_topic.clone()),
+                )
+                .with_not_before_delay(Duration::from_millis(config.message_retry_delay_ms.max(1))),
+            ))
+            .with_dead_letter(dlq),
+        "nats" | "jetstream" => ConsumerFailurePublishers::new().with_dead_letter(dlq),
+        _ => ConsumerFailurePublishers::new(),
+    }
+}
+
+fn build_retry_forwarder_dispatcher(
+    config: &MessageOrchestratorConfig,
+    producer: Arc<dyn flare_server_core::mq::producer::Producer>,
+) -> Result<Option<Arc<dyn Dispatcher>>> {
+    if config.mq_backend.as_str() != "kafka" {
+        return Ok(None);
+    }
+
+    let handler: Arc<dyn MqMessageHandler> =
+        Arc::new(RetryForwarderHandler::new(producer).with_name("orchestrator-retry-forwarder"));
+    let mut dispatcher = TopicDispatcher::new();
+    dispatcher
+        .register(config.message_retry_topic.clone(), handler)
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "register orchestrator retry-forwarder consumer {}: {}",
+                config.message_retry_topic, e
+            ))
+        })?;
+    Ok(Some(Arc::new(dispatcher)))
 }
 
 fn inject_flare_capability_hook_plugin_targets(cfg: &mut HookConfig, endpoint: String) {
@@ -298,9 +387,9 @@ async fn build_hook_dispatcher(
         loader = loader.add_candidate(PathBuf::from(d));
     }
 
-    let mut hook_cfg = loader
-        .load()
-        .map_err(|e| anyhow::anyhow!("load hook config: {e}"))?;
+    let mut hook_cfg = loader.load().map_err(|e| {
+        flare_server_core::error::FlareError::system(format!("load hook config: {e}"))
+    })?;
 
     if orchestrator_cfg.capability_hooks_auto {
         let ep = orchestrator_cfg.resolve_capability_grpc_uri();
@@ -323,8 +412,9 @@ async fn build_hook_dispatcher(
         }
     }
 
-    let factory =
-        DefaultHookFactory::new().map_err(|e| anyhow::anyhow!("hook DefaultHookFactory: {e}"))?;
+    let factory = DefaultHookFactory::new().map_err(|e| {
+        flare_server_core::error::FlareError::system(format!("hook DefaultHookFactory: {e}"))
+    })?;
 
     let pre_n = hook_cfg.pre_send.len();
     let post_n = hook_cfg.post_send.len();
@@ -334,7 +424,7 @@ async fn build_hook_dispatcher(
     hook_cfg
         .install(registry.clone(), &factory)
         .await
-        .map_err(|e| anyhow::anyhow!("install hooks: {e}"))?;
+        .map_err(|e| flare_server_core::error::FlareError::system(format!("install hooks: {e}")))?;
 
     tracing::info!(
         pre_send = pre_n,

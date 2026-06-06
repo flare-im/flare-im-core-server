@@ -2,14 +2,14 @@
 //!
 //! DATA 通道载荷为 [`flare_proto::common::DataPacket`]（`common/data.proto`）：`SYNC_REQUEST` / `SYNC_RESPONSE` / `USER_CUSTOM`。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use flare_core::common::ErrorCode;
 use flare_core::common::error::{FlareError, Result};
 use flare_im_core::Ctx;
 use flare_proto::common::data_packet::Payload as DataPayload;
-use flare_proto::common::{CustomData, DataKind, DataPacket};
+use flare_proto::common::sync::Payload as SyncPayload;
+use flare_proto::common::{CustomData, DataPacket};
 use prost::Message;
 
 use crate::application::commands::SendDataCommand;
@@ -30,18 +30,12 @@ impl SendDataDomainService {
     }
 
     pub async fn execute(&self, tx: &Ctx, cmd: &SendDataCommand) -> Result<Option<Vec<u8>>> {
-        match (cmd.packet.kind, cmd.packet.payload.as_ref()) {
-            (k, Some(DataPayload::SyncRequest(sync))) => {
-                if k != DataKind::SyncRequest as i32 {
-                    return Err(FlareError::localized(
-                        ErrorCode::MessageFormatError,
-                        "DataPacket.kind must be DATA_KIND_SYNC_REQUEST when payload is sync_request",
-                    ));
-                }
+        match cmd.packet.payload.as_ref() {
+            Some(DataPayload::SyncRequest(sync)) => {
                 let sync = sync.clone();
                 tracing::trace!(
                     connection_id = %cmd.connection_id,
-                    sync_kind = sync.kind,
+                    sync_payload = sync_payload_name(sync.payload.as_ref()),
                     "DATA SYNC_REQUEST → forward"
                 );
                 let sync_res = self
@@ -49,25 +43,18 @@ impl SendDataDomainService {
                     .execute(tx, cmd.connection_id.as_str(), sync)
                     .await?;
                 let out = DataPacket {
-                    kind: DataKind::SyncResponse as i32,
                     payload: Some(DataPayload::SyncResponse(sync_res)),
                 };
                 Ok(Some(out.encode_to_vec()))
             }
-            (k, Some(DataPayload::UserCustom(data))) => {
-                if k != DataKind::UserCustom as i32 {
-                    return Err(FlareError::localized(
-                        ErrorCode::MessageFormatError,
-                        "DataPacket.kind must be DATA_KIND_USER_CUSTOM when payload is user_custom",
-                    ));
-                }
-                self.forward_user_custom(tx, data).await
-            }
-            (_, Some(DataPayload::SyncResponse(_))) => Err(FlareError::localized(
+            Some(DataPayload::UserCustom(data)) => self.forward_user_custom(tx, data).await,
+            Some(DataPayload::SyncResponse(_)) => Err(FlareError::localized(
                 ErrorCode::MessageFormatError,
                 "uplink DataPacket must not use sync_response",
             )),
-            (_, None) => Err(FlareError::localized(
+            Some(DataPayload::Capability(_)) => Ok(None),
+            Some(DataPayload::RealtimeControl(_)) => Ok(None),
+            None => Err(FlareError::localized(
                 ErrorCode::MessageFormatError,
                 "DataPacket.payload is required",
             )),
@@ -86,12 +73,30 @@ impl SendDataDomainService {
         let custom = CustomData::decode(raw.as_slice()).unwrap_or_else(|_| CustomData {
             r#type: "binary".to_string(),
             payload: raw,
-            metadata: HashMap::new(),
+            attributes: Default::default(),
         });
         let reply = DataPacket {
-            kind: DataKind::UserCustom as i32,
             payload: Some(DataPayload::UserCustom(custom)),
         };
         Ok(Some(reply.encode_to_vec()))
+    }
+}
+
+fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
+    match payload {
+        Some(SyncPayload::SingleConversation(_)) => "single_conversation",
+        Some(SyncPayload::MultiConversation(_)) => "multi_conversation",
+        Some(SyncPayload::ConversationsIncremental(_)) => "conversations_incremental",
+        Some(SyncPayload::ConversationsAll(_)) => "conversations_all",
+        Some(SyncPayload::ConversationDetail(_)) => "conversation_detail",
+        Some(SyncPayload::QueryEvents(_)) => "query_events",
+        Some(SyncPayload::GetSyncCursor(_)) => "get_sync_cursor",
+        Some(SyncPayload::UpdateSyncCursor(_)) => "update_sync_cursor",
+        Some(SyncPayload::EventStreamAck(_)) => "event_stream_ack",
+        Some(SyncPayload::SyncSnapshot(_)) => "sync_snapshot",
+        Some(SyncPayload::ConversationMaxSeq(_)) => "conversation_max_seq",
+        Some(SyncPayload::Conversations(_)) => "conversations",
+        Some(SyncPayload::ConversationParticipants(_)) => "conversation_participants",
+        None => "none",
     }
 }

@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use flare_im_core::context_from_mq_metadata;
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -108,17 +109,21 @@ impl MessageHandler for MessageEventsHandler {
             }
         };
 
-        // 4. 从 headers 中重建上下文
-        let ctx = &message.context.ctx;
+        // 4. 从外层 MQ headers + 内层 MqEnvelope headers 中重建上下文。
+        let mut merged_headers = message.context.headers.clone();
+        for (key, value) in &envelope.headers {
+            merged_headers.insert(key.clone(), value.clone());
+        }
+        let ctx = context_from_mq_metadata(&merged_headers);
 
         // 5. 转换为领域事件并补全上下文
         let mut event = event_from_proto(proto_event);
-        enrich_operation_event_from_ctx(&mut event, ctx);
+        enrich_operation_event_from_ctx(&mut event, &ctx);
 
         // 6. 调用 Application 层
         match self
             .operation_handler
-            .handle(ctx, ProcessEventCommand { event })
+            .handle(&ctx, ProcessEventCommand { event })
             .await
         {
             Ok(result) => {

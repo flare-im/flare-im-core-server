@@ -23,12 +23,13 @@ use crate::application::dto::{
     ProcessVideoHttpResponse, UploadFileHttpRequest, UploadFileHttpResponse,
     UploadMultipartChunkHttpRequest, UploadMultipartChunkHttpResponse, VideoOperationHttp,
 };
-use crate::context::Ctx;
-use crate::error::{GatewayError, Result};
-use crate::infrastructure::grpc::GrpcClients;
 use flare_grpc_proto::media::*;
+use flare_im_core::clients::GrpcClients;
 use flare_server_core::context::keys;
-use flare_server_core::http::ApiResponse;
+use flare_server_core::{
+    context::Ctx,
+    http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
+};
 
 #[utoipa::path(
     post,
@@ -51,7 +52,7 @@ pub async fn generate_upload_url(
         .get(keys::USER_ID)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("anonymous");
-    debug!(trace_id = %ctx.trace_id, user_id = %user_id, "Generating upload URL");
+    debug!(trace_id = %ctx.trace_id(), user_id = %user_id, "Generating upload URL");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.generate_upload_url(req).await?;
@@ -73,7 +74,7 @@ pub async fn upload_file(
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     debug!(
-        trace_id = %ctx.trace_id,
+        trace_id = %ctx.trace_id(),
         file_name = %req.metadata.file_name,
         payload_size = req.payload.len(),
         "Uploading file by stream"
@@ -117,7 +118,7 @@ pub async fn initiate_multipart_upload(
     Json(req): Json<InitiateMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<InitiateMultipartUploadHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_name = %req.metadata.file_name, "Initiating multipart upload");
+    debug!(trace_id = %ctx.trace_id(), file_name = %req.metadata.file_name, "Initiating multipart upload");
 
     let grpc_req = InitiateMultipartUploadRequest {
         metadata: Some(UploadFileMetadata::from(req.metadata)),
@@ -129,7 +130,7 @@ pub async fn initiate_multipart_upload(
         .await
         .map_err(|err| {
             tracing::error!(
-                trace_id = %ctx.trace_id,
+                trace_id = %ctx.trace_id(),
                 error = %err,
                 "initiate multipart upload grpc call failed"
             );
@@ -155,7 +156,7 @@ pub async fn upload_multipart_chunk(
 ) -> Result<Json<ApiResponse<UploadMultipartChunkHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     debug!(
-        trace_id = %ctx.trace_id,
+        trace_id = %ctx.trace_id(),
         upload_id = %req.upload_id,
         chunk_index = req.chunk_index,
         payload_size = req.payload.len(),
@@ -188,7 +189,7 @@ pub async fn complete_multipart_upload(
     Json(req): Json<CompleteMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, upload_id = %req.upload_id, "Completing multipart upload");
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing multipart upload");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
@@ -215,7 +216,7 @@ pub async fn abort_multipart_upload(
     Json(req): Json<AbortMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<AbortMultipartUploadHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, upload_id = %req.upload_id, "Aborting multipart upload");
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting multipart upload");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
@@ -251,7 +252,7 @@ pub async fn initiate_direct_upload(
     };
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.initiate_direct_upload(grpc_req).await.map_err(|err| {
-        tracing::error!(trace_id = %ctx.trace_id, error = %err, "initiate direct upload grpc call failed");
+        tracing::error!(trace_id = %ctx.trace_id(), error = %err, "initiate direct upload grpc call failed");
         GatewayError::internal("MEDIA_DIRECT_UPLOAD_INITIATE_FAILED", err.to_string())
     })?;
     Ok(Json(ApiResponse::success(
@@ -280,7 +281,7 @@ pub async fn get_direct_upload_status(
         })
         .await
         .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id, error = %err, "get direct upload status grpc call failed");
+            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "get direct upload status grpc call failed");
             GatewayError::internal("MEDIA_DIRECT_UPLOAD_STATUS_FAILED", err.to_string())
         })?;
     Ok(Json(ApiResponse::success(
@@ -311,7 +312,7 @@ pub async fn presign_direct_upload_parts(
         })
         .await
         .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id, error = %err, "presign direct upload parts grpc call failed");
+            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "presign direct upload parts grpc call failed");
             GatewayError::internal("MEDIA_DIRECT_UPLOAD_PRESIGN_FAILED", err.to_string())
         })?;
     Ok(Json(ApiResponse::success(
@@ -351,7 +352,7 @@ pub async fn commit_direct_upload_parts(
         })
         .await
         .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id, error = %err, "commit direct upload parts grpc call failed");
+            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "commit direct upload parts grpc call failed");
             GatewayError::internal("MEDIA_DIRECT_UPLOAD_COMMIT_FAILED", err.to_string())
         })?;
     Ok(Json(ApiResponse::success(
@@ -380,7 +381,7 @@ pub async fn complete_direct_upload(
         })
         .await
         .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id, error = %err, "complete direct upload grpc call failed");
+            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "complete direct upload grpc call failed");
             GatewayError::internal("MEDIA_DIRECT_UPLOAD_COMPLETE_FAILED", err.to_string())
         })?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
@@ -409,7 +410,7 @@ pub async fn abort_direct_upload(
         })
         .await
         .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id, error = %err, "abort direct upload grpc call failed");
+            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "abort direct upload grpc call failed");
             GatewayError::internal("MEDIA_DIRECT_UPLOAD_ABORT_FAILED", err.to_string())
         })?;
     Ok(Json(ApiResponse::success(
@@ -434,7 +435,7 @@ pub async fn get_file_url(
     Json(req): Json<GetFileUrlRequest>,
 ) -> Result<Json<ApiResponse<GetFileUrlHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Getting file URL");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file URL");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.get_file_url(req).await?;
@@ -462,7 +463,7 @@ pub async fn get_file_info(
     axum::extract::Query(req): axum::extract::Query<GetFileInfoRequest>,
 ) -> Result<Json<ApiResponse<FileInfoHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Getting file info");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file info");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.get_file_info(req).await?;
@@ -478,7 +479,7 @@ pub async fn serve_file(
     Extension(clients): Extension<Arc<GrpcClients>>,
 ) -> Result<Response> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %file_id, "Serving media file");
+    debug!(trace_id = %ctx.trace_id(), file_id = %file_id, "Serving media file");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
@@ -502,8 +503,8 @@ pub async fn serve_file(
                     expires_in: 3600,
                     download: false,
                     response_headers: HashMap::new(),
-                    burn_protected: false,
-                    burn_status: 0,
+                    retention_protected: false,
+                    content_visibility: flare_proto::common::ContentVisibility::Available as i32,
                 },
             )
             .await?;
@@ -573,7 +574,7 @@ pub async fn delete_file(
     Json(req): Json<DeleteFileRequest>,
 ) -> Result<Json<ApiResponse<DeleteFileResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Deleting file");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting file");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.delete_file(req).await?;
@@ -593,7 +594,7 @@ pub async fn create_reference(
     Json(req): Json<CreateReferenceRequest>,
 ) -> Result<Json<ApiResponse<CreateReferenceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Creating media reference");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Creating media reference");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.create_reference(req).await?;
@@ -615,7 +616,7 @@ pub async fn delete_reference(
     Json(req): Json<DeleteReferenceRequest>,
 ) -> Result<Json<ApiResponse<DeleteReferenceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Deleting media reference");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting media reference");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.delete_reference(req).await?;
@@ -640,7 +641,7 @@ pub async fn list_references(
     axum::extract::Query(req): axum::extract::Query<GetFileInfoRequest>,
 ) -> Result<Json<ApiResponse<ListReferencesHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Listing media references");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Listing media references");
 
     let grpc_req = ListReferencesRequest {
         file_id: req.file_id,
@@ -668,7 +669,7 @@ pub async fn cleanup_orphaned_assets(
     Json(req): Json<CleanupOrphanedAssetsRequest>,
 ) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, limit = req.limit, "Cleaning up orphaned media assets");
+    debug!(trace_id = %ctx.trace_id(), limit = req.limit, "Cleaning up orphaned media assets");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.cleanup_orphaned_assets(req).await?;
@@ -689,7 +690,7 @@ pub async fn process_image(
     Json(req): Json<ProcessImageHttpRequest>,
 ) -> Result<Json<ApiResponse<ProcessImageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Processing image");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Processing image");
 
     let grpc_req = ProcessImageRequest {
         file_id: req.file_id,
@@ -744,7 +745,7 @@ pub async fn process_video(
     Json(req): Json<ProcessVideoHttpRequest>,
 ) -> Result<Json<ApiResponse<ProcessVideoHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Processing video");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Processing video");
 
     let grpc_req = ProcessVideoRequest {
         file_id: req.file_id,
@@ -809,7 +810,7 @@ pub async fn set_object_acl(
     Json(req): Json<SetObjectAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, file_id = %req.file_id, "Setting media object ACL");
+    debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Setting media object ACL");
 
     let mut media_client = clients.media.lock().await;
     media_client.set_object_acl(req).await?;
@@ -840,7 +841,7 @@ pub async fn list_objects(
     axum::extract::Query(req): axum::extract::Query<ListObjectsHttpRequest>,
 ) -> Result<Json<ApiResponse<ListObjectsHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, bucket = %req.bucket, prefix = %req.prefix, "Listing media objects");
+    debug!(trace_id = %ctx.trace_id(), bucket = %req.bucket, prefix = %req.prefix, "Listing media objects");
 
     let grpc_req = ListObjectsRequest {
         bucket: req.bucket,
@@ -872,7 +873,7 @@ pub async fn describe_bucket(
     axum::extract::Query(req): axum::extract::Query<DescribeBucketRequest>,
 ) -> Result<Json<ApiResponse<DescribeBucketResponse>>> {
     let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id, bucket = %req.bucket, "Describing bucket");
+    debug!(trace_id = %ctx.trace_id(), bucket = %req.bucket, "Describing bucket");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client.describe_bucket(req).await?;

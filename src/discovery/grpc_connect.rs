@@ -3,6 +3,7 @@
 //! ## 启动 vs 运行时
 //! - [`connect_grpc_channel_lazy_from_app_config`]：**进程启动**用，不等待注册中心，避免微服务启动顺序耦合。
 //! - [`connect_grpc_channel_from_app_config`]：**首包 RPC / 运行时**用，限时发现，失败回退静态 lazy。
+//!
 //! 禁止在 `wire::initialize` / `main` 中调用会阻塞等待对端实例上线的连接 API。
 
 use std::sync::Arc;

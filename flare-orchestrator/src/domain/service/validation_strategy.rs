@@ -12,22 +12,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use flare_core::common::conversation::{is_single_chat_conversation, validate_conversation_id};
 use flare_im_core::Ctx;
-use flare_proto::common::call_audience::Shape as CallAudienceShape;
-use flare_proto::common::call_signal_event::Signal;
-use flare_proto::common::event::Payload;
-use flare_proto::common::{CallSessionKind, CallSignalEvent, Event, EventType, Message};
-use tracing::warn;
+use flare_proto::common::{Event, Message};
 
-use crate::error::Result;
-
-const LEGACY_EXT_KEYS: [&str; 4] = [
-    "flareSdpType",
-    "flareSdp",
-    "flareCameraEnabled",
-    "flareMicrophoneEnabled",
-];
+use flare_server_core::error::Result;
 
 /// 校验上下文
 pub struct ValidationContext<'a> {
@@ -72,68 +60,6 @@ impl ValidationResult {
         self.warnings.extend(other.warnings);
         self
     }
-}
-
-fn validate_call_signal_invite(conversation_id: &str, cs: &CallSignalEvent) -> ValidationResult {
-    if validate_conversation_id(conversation_id.trim()).is_err() {
-        return ValidationResult::invalid(
-            "call_signal invite requires valid canonical conversation_id (CID v1)",
-        );
-    }
-    let ms_kind_i32 = cs
-        .media_session
-        .as_ref()
-        .map(|m| m.kind)
-        .unwrap_or(CallSessionKind::Unspecified as i32);
-    if ms_kind_i32 == CallSessionKind::Unspecified as i32 || ms_kind_i32 == 0 {
-        return ValidationResult::invalid(
-            "call_signal invite requires media_session.kind (DIRECT for single-chat, GROUP otherwise)",
-        );
-    }
-    let shape = cs.audience.as_ref().and_then(|a| a.shape.as_ref());
-    if is_single_chat_conversation(conversation_id.trim()) {
-        if ms_kind_i32 != CallSessionKind::Direct as i32 {
-            return ValidationResult::invalid(
-                "single-chat call invite must set media_session.kind=DIRECT",
-            );
-        }
-        match shape {
-            Some(CallAudienceShape::Direct(d)) if !d.peer_user_id.trim().is_empty() => {}
-            _ => {
-                return ValidationResult::invalid(
-                    "single-chat call invite must set audience.direct.peer_user_id",
-                );
-            }
-        }
-    } else {
-        if ms_kind_i32 != CallSessionKind::Group as i32 {
-            return ValidationResult::invalid(
-                "non-single call invite must set media_session.kind=GROUP",
-            );
-        }
-        match shape {
-            Some(CallAudienceShape::Explicit(e)) => {
-                let non_empty: Vec<&str> = e
-                    .user_ids
-                    .iter()
-                    .map(|s| s.as_str().trim())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if non_empty.is_empty() {
-                    return ValidationResult::invalid(
-                        "call invite audience.explicit.user_ids must be non-empty (use audience.broadcast for ring-all)",
-                    );
-                }
-            }
-            Some(CallAudienceShape::Broadcast(_)) => {}
-            _ => {
-                return ValidationResult::invalid(
-                    "non-single call invite must use audience.explicit or audience.broadcast",
-                );
-            }
-        }
-    }
-    ValidationResult::valid()
 }
 
 /// 消息校验策略
@@ -260,19 +186,16 @@ impl EventTypeValidationStrategy {
             EventType::EventMessageEdit,
             EventType::EventMessageDelete,
             EventType::EventReadReceipt,
-            EventType::EventTyping,
             EventType::EventConversationUpdate,
             EventType::EventConversationDelete,
-            EventType::EventPresence,
-            EventType::EventCallSignal,
             EventType::EventReaction,
             EventType::EventPin,
             EventType::EventUnpin,
             EventType::EventMark,
             EventType::EventUnmark,
-            EventType::EventMessageBurnScheduled,
-            EventType::EventMessageBurned,
-            EventType::EventMessageHardDeleted,
+            EventType::EventMessageRetentionScheduled,
+            EventType::EventMessageRetentionExpired,
+            EventType::EventMessageRetentionPurged,
             EventType::EventCustom,
         ])
     }
@@ -327,87 +250,6 @@ impl EventValidationStrategy for EventRequiredFieldsValidationStrategy {
             }
 
             Ok(result)
-        })
-    }
-}
-
-/// `EVENT_CALL_SIGNAL` 与 **RTC / 媒体扩展编排** 对齐的基础校验（在调用 `flare-capability` 之前执行）。
-///
-/// - 必须带 `CallSignal` 载荷且 `from_user_id` 非空（用于 `Dispatch.user_id` 与审计）。
-/// - `accept` / `reject` / `hangup` 必须已有 `call_id`（`invite` 可由服务端回填）。
-pub struct EventCallSignalRtcValidationStrategy;
-
-impl EventValidationStrategy for EventCallSignalRtcValidationStrategy {
-    fn validate<'a>(
-        &'a self,
-        _context: &'a ValidationContext<'a>,
-        event: &'a Event,
-    ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
-        Box::pin(async move {
-            if EventType::try_from(event.r#type).ok() != Some(EventType::EventCallSignal) {
-                return Ok(ValidationResult::valid());
-            }
-            let Some(ref payload) = event.payload else {
-                return Ok(ValidationResult::invalid(
-                    "EVENT_CALL_SIGNAL requires payload",
-                ));
-            };
-            let Payload::CallSignal(cs) = payload else {
-                return Ok(ValidationResult::invalid(
-                    "EVENT_CALL_SIGNAL payload must be CallSignal",
-                ));
-            };
-            if cs.from_user_id.trim().is_empty() {
-                return Ok(ValidationResult::invalid(
-                    "call_signal.from_user_id is required for RTC / capability correlation",
-                ));
-            }
-            if matches!(cs.signal.as_ref(), Some(Signal::Invite(_))) {
-                let r = validate_call_signal_invite(&event.conversation_id, cs);
-                if !r.is_valid {
-                    return Ok(r);
-                }
-            }
-            match cs.signal.as_ref() {
-                Some(Signal::Accept(_) | Signal::Reject(_) | Signal::Hangup(_))
-                    if cs.call_id.trim().is_empty() =>
-                {
-                    return Ok(ValidationResult::invalid(
-                        "call_signal.call_id is required for accept/reject/hangup",
-                    ));
-                }
-                Some(Signal::IceCandidate(ic))
-                    if ic
-                        .candidate_json
-                        .as_ref()
-                        .map(|s| s.trim().is_empty())
-                        .unwrap_or(true) =>
-                {
-                    warn!(
-                        call_id = %cs.call_id,
-                        from_user_id = %cs.from_user_id,
-                        "reject call_signal.ice_candidate: candidate_json is required"
-                    );
-                    return Ok(ValidationResult::invalid(
-                        "call_signal.ice_candidate.candidate_json is required",
-                    ));
-                }
-                _ => {}
-            }
-            for key in LEGACY_EXT_KEYS {
-                if cs.ext.contains_key(key) {
-                    warn!(
-                        call_id = %cs.call_id,
-                        from_user_id = %cs.from_user_id,
-                        legacy_key = %key,
-                        "reject call_signal.ext: unsupported legacy key"
-                    );
-                    return Ok(ValidationResult::invalid(format!(
-                        "call_signal.ext contains unsupported legacy key: {key}"
-                    )));
-                }
-            }
-            Ok(ValidationResult::valid())
         })
     }
 }
@@ -474,7 +316,6 @@ impl CompositeEventValidationStrategy {
         Self::new(vec![
             Arc::new(EventTypeValidationStrategy::all_supported()),
             Arc::new(EventRequiredFieldsValidationStrategy),
-            Arc::new(EventCallSignalRtcValidationStrategy),
         ])
     }
 }
@@ -503,7 +344,7 @@ impl EventValidationStrategy for CompositeEventValidationStrategy {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod validate_call_signal_invite_tests {
     use flare_core::common::conversation::{
         generate_group_conversation_id, generate_single_chat_conversation_id,

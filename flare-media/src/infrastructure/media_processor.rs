@@ -5,7 +5,7 @@
 use std::path::Path;
 use tracing::instrument;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 图片处理操作
 #[derive(Debug, Clone)]

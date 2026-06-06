@@ -14,11 +14,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Config, RegistryConfig, ServerConfig, ServiceConfig};
-use anyhow::{Context as AnyhowContext, Result, anyhow};
+use flare_server_core::error::{AnyhowContext, Result};
 use serde::Deserialize;
 use std::sync::OnceLock;
 use toml::Value;
 use tracing::warn;
+
+pub use flare_server_core::auth::TrustedIssuerConfig as TrustedTokenIssuerConfig;
 
 // 导入配置管理器模块
 mod manager;
@@ -84,13 +86,13 @@ pub struct JetStreamTopologySpec {
 /// 2. `config/environments/{FLARE_ENV}.toml` 根级 `[mq]`（由 [`ConfigManager::load_environment_config`] 合并）
 /// 3. `config/base.toml` 中的 `[mq]`
 ///
-/// `jetstream` 与 `nats` 等价（均表示 NATS JetStream）。各进程是否已按该字段切换实现，见对应 `wire`/启动逻辑。
+/// `jetstream` 与 `nats` 等价（均表示 NATS JetStream）。生产运行时 Kafka 与 JetStream 二选一。
 #[derive(Debug, Clone, Deserialize)]
 pub struct MqBackendConfig {
     /// 当前选择的 MQ 后端（已小写、去首尾空格，见 [`Self::ensure_defaults`]）。
     #[serde(default = "default_mq_backend")]
     pub default_backend: String,
-    /// 预留：Kafka 不可用时的降级策略等（由各服务消费端实现解释）。
+    /// 迁移期显式开关；生产建议保持 false，避免同链路 fallback 造成语义不清。
     #[serde(default)]
     pub allow_kafka_fallback: bool,
 }
@@ -108,7 +110,7 @@ fn default_mq_backend() -> String {
     "nats".to_string()
 }
 
-/// Kafka 集群配置。当前业务默认走 NATS；Kafka 配置用于生产环境按需切换/双写/审计流。
+/// Kafka 集群配置。仅在 `[mq].default_backend = "kafka"` 时作为主 MQ 后端使用。
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct KafkaClusterConfig {
     pub brokers: Vec<String>,
@@ -293,13 +295,6 @@ pub struct AccessGatewayServiceConfig {
     pub encryption_key: Option<String>,
 }
 
-/// Access Gateway 额外信任的 JWT 发行方。
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct TrustedTokenIssuerConfig {
-    pub issuer: String,
-    pub secret: String,
-}
-
 /// 核心网关服务配置（业务系统统一入口）
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CoreGatewayServiceConfig {
@@ -342,6 +337,29 @@ pub struct CoreGatewayServiceConfig {
     /// JWT Token 过期时间（秒）
     #[serde(default)]
     pub token_ttl_seconds: Option<u64>,
+    /// 额外信任的 JWT 发行方（如业务系统登录 token，用于 Core Gateway 鉴权）
+    #[serde(default)]
+    pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
+}
+
+/// 管理网关服务配置（内网管理 API 入口）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AdminGatewayServiceConfig {
+    /// 运行时配置
+    #[serde(flatten)]
+    pub runtime: ServiceRuntimeConfig,
+    /// JWT Token 密钥。未配置时可由启动入口回退到 core_gateway 配置。
+    #[serde(default)]
+    pub token_secret: Option<String>,
+    /// JWT Token 发行方。未配置时可由启动入口回退到 core_gateway 配置。
+    #[serde(default)]
+    pub token_issuer: Option<String>,
+    /// JWT Token 过期时间（秒）
+    #[serde(default)]
+    pub token_ttl_seconds: Option<u64>,
+    /// 额外信任的 JWT 发行方（如业务管理后台 token）
+    #[serde(default)]
+    pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
 }
 
 /// 媒体服务配置
@@ -400,15 +418,24 @@ pub struct PushServerServiceConfig {
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
-    /// 消息主题
+    /// 临时消息推送入口主题
     #[serde(default)]
-    pub message_topic: Option<String>,
-    /// 通知主题
+    pub push_message_topic: Option<String>,
+    /// 临时事件推送入口主题
     #[serde(default)]
-    pub notification_topic: Option<String>,
-    /// 任务主题
+    pub push_event_topic: Option<String>,
+    /// ACK/通知/自定义统一推送入口主题
     #[serde(default)]
-    pub task_topic: Option<String>,
+    pub push_envelope_topic: Option<String>,
+    /// 在线推送任务主题
+    #[serde(default)]
+    pub push_online_topic: Option<String>,
+    /// 离线推送任务主题
+    #[serde(default)]
+    pub push_offline_topic: Option<String>,
+    /// 推送死信主题
+    #[serde(default)]
+    pub push_dlq_topic: Option<String>,
     /// Redis 配置
     #[serde(default)]
     pub redis: Option<String>,
@@ -471,9 +498,15 @@ pub struct PushWorkerServiceConfig {
     /// 消费者组
     #[serde(default)]
     pub consumer_group: Option<String>,
-    /// 任务主题
+    /// 在线推送任务主题
     #[serde(default)]
-    pub task_topic: Option<String>,
+    pub push_online_topic: Option<String>,
+    /// 离线推送任务主题
+    #[serde(default)]
+    pub push_offline_topic: Option<String>,
+    /// 推送死信主题
+    #[serde(default)]
+    pub push_dlq_topic: Option<String>,
     /// 信令端点
     #[serde(default)]
     pub signaling_endpoint: Option<String>,
@@ -506,6 +539,15 @@ pub struct MessageOrchestratorServiceConfig {
     /// 推送流 subject（与 constants::topics::TOPIC_PUSH_MESSAGES 对齐）
     #[serde(default)]
     pub push_subject: Option<String>,
+    /// 消息主链路 DLQ topic / subject
+    #[serde(default)]
+    pub message_dlq_topic: Option<String>,
+    /// 消息主链路 retry topic / subject
+    #[serde(default)]
+    pub message_retry_topic: Option<String>,
+    /// retry topic 转发回原 topic 前的延迟毫秒
+    #[serde(default)]
+    pub message_retry_delay_ms: Option<u64>,
     /// WAL 存储
     #[serde(default)]
     pub wal_store: Option<String>,
@@ -515,6 +557,21 @@ pub struct MessageOrchestratorServiceConfig {
     /// WAL 过期时间（秒）
     #[serde(default)]
     pub wal_ttl_seconds: Option<u64>,
+    /// 是否启用 WAL 后台回放
+    #[serde(default)]
+    pub wal_replay_enabled: Option<bool>,
+    /// WAL 后台回放巡检间隔（毫秒）
+    #[serde(default)]
+    pub wal_replay_interval_ms: Option<u64>,
+    /// WAL 后台回放错误退避（毫秒）
+    #[serde(default)]
+    pub wal_replay_error_backoff_ms: Option<u64>,
+    /// WAL 后台回放单批上限
+    #[serde(default)]
+    pub wal_replay_batch_limit: Option<usize>,
+    /// WAL 后台回放 claim 租约时间（毫秒）
+    #[serde(default)]
+    pub wal_replay_claim_lease_ms: Option<u64>,
     /// Hook 配置
     #[serde(default)]
     pub hook_config: Option<String>,
@@ -524,6 +581,18 @@ pub struct MessageOrchestratorServiceConfig {
     /// Conversation 服务类型（用于自动创建 conversation，如果配置了 registry，会自动发现）
     #[serde(default)]
     pub conversation_service_type: Option<String>,
+    /// Prometheus 指标出口开关
+    #[serde(default)]
+    pub metrics_enabled: Option<bool>,
+    /// Prometheus 指标监听地址
+    #[serde(default)]
+    pub metrics_address: Option<String>,
+    /// Prometheus 指标监听端口
+    #[serde(default)]
+    pub metrics_port: Option<u16>,
+    /// Prometheus 指标路径
+    #[serde(default)]
+    pub metrics_path: Option<String>,
 }
 
 /// 信令在线服务配置
@@ -606,6 +675,15 @@ pub struct StorageWriterServiceConfig {
     /// 操作事件流 subject（Recall/Edit/Read 等，与 constants::topics::TOPIC_MESSAGE_EVENTS 对齐）
     #[serde(default)]
     pub operation_subject: Option<String>,
+    /// 消息写入链路 DLQ topic / subject
+    #[serde(default)]
+    pub message_dlq_topic: Option<String>,
+    /// 消息写入链路 retry topic / subject
+    #[serde(default)]
+    pub message_retry_topic: Option<String>,
+    /// retry topic 转发回原 topic 前的延迟毫秒
+    #[serde(default)]
+    pub message_retry_delay_ms: Option<u64>,
     /// MongoDB 配置
     #[serde(default)]
     pub mongo: Option<String>,
@@ -627,6 +705,18 @@ pub struct StorageWriterServiceConfig {
     /// 批量间隔（毫秒）
     #[serde(default)]
     pub batch_interval_ms: Option<u64>,
+    /// Prometheus 指标出口开关
+    #[serde(default)]
+    pub metrics_enabled: Option<bool>,
+    /// Prometheus 指标监听地址
+    #[serde(default)]
+    pub metrics_address: Option<String>,
+    /// Prometheus 指标监听端口
+    #[serde(default)]
+    pub metrics_port: Option<u16>,
+    /// Prometheus 指标路径
+    #[serde(default)]
+    pub metrics_path: Option<String>,
 }
 
 /// 会话策略配置
@@ -745,7 +835,7 @@ pub struct FlareAppConfig {
     /// MQ 后端选择，默认 NATS。
     #[serde(default)]
     pub mq: MqBackendConfig,
-    /// Kafka 配置映射。默认不启用，作为可切换后端/审计日志后端。
+    /// Kafka 配置映射。默认不启用；选择 Kafka 后作为主 MQ 后端配置。
     #[serde(default)]
     pub kafka: HashMap<String, KafkaClusterConfig>,
     /// PostgreSQL 配置映射
@@ -851,6 +941,11 @@ impl FlareAppConfig {
     /// 获取核心网关服务配置
     pub fn core_gateway_service(&self) -> CoreGatewayServiceConfig {
         self.services.core_gateway.clone().unwrap_or_default()
+    }
+
+    /// 获取管理网关服务配置
+    pub fn admin_gateway_service(&self) -> AdminGatewayServiceConfig {
+        self.services.admin_gateway.clone().unwrap_or_default()
     }
 
     /// 获取媒体服务配置
@@ -961,16 +1056,17 @@ impl FlareAppConfig {
             "nats" | "jetstream" => {}
             "kafka" => {
                 if self.kafka.is_empty() {
-                    return Err(anyhow!(
+                    return Err(flare_server_core::error::FlareError::system(
                         "mq.default_backend is kafka but no [kafka.*] profile is configured"
+                            .to_string(),
                     ));
                 }
             }
             other => {
-                return Err(anyhow!(
+                return Err(flare_server_core::error::FlareError::system(format!(
                     "unsupported mq.default_backend '{}'; expected 'nats' or 'kafka'",
                     other
-                ));
+                )));
             }
         }
 
@@ -978,12 +1074,18 @@ impl FlareAppConfig {
         if let Some(cfg) = &self.services.access_gateway {
             if let Some(token_store) = &cfg.token_store {
                 self.redis_profile(token_store).ok_or_else(|| {
-                    anyhow!("Redis config '{}' not found (token_store)", token_store)
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (token_store)",
+                        token_store
+                    ))
                 })?;
             }
             if let Some(session_store) = &cfg.session_store {
                 self.redis_profile(session_store).ok_or_else(|| {
-                    anyhow!("Redis config '{}' not found (session_store)", session_store)
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (session_store)",
+                        session_store
+                    ))
                 })?;
             }
         }
@@ -992,34 +1094,34 @@ impl FlareAppConfig {
         if let Some(cfg) = &self.services.media {
             if let Some(metadata_store) = &cfg.metadata_store {
                 self.postgres_profile(metadata_store).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "PostgreSQL config '{}' not found (metadata_store)",
                         metadata_store
-                    )
+                    ))
                 })?;
             }
             if let Some(metadata_cache) = &cfg.metadata_cache {
                 self.redis_profile(metadata_cache).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "Redis config '{}' not found (metadata_cache)",
                         metadata_cache
-                    )
+                    ))
                 })?;
             }
             if let Some(object_store) = &cfg.object_store {
                 self.object_store_profile(object_store).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "Object storage config '{}' not found (object_store)",
                         object_store
-                    )
+                    ))
                 })?;
             }
             if let Some(upload_session_store) = &cfg.upload_session_store {
                 self.redis_profile(upload_session_store).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "Redis config '{}' not found (upload_session_store)",
                         upload_session_store
-                    )
+                    ))
                 })?;
             }
         }
@@ -1027,12 +1129,19 @@ impl FlareAppConfig {
         if let Some(cfg) = &self.services.push_server {
             if let Some(jetstream) = &cfg.jetstream {
                 self.jetstream_profile(jetstream).ok_or_else(|| {
-                    anyhow!("JetStream config '{}' not found (push_server)", jetstream)
+                    flare_server_core::error::FlareError::system(format!(
+                        "JetStream config '{}' not found (push_server)",
+                        jetstream
+                    ))
                 })?;
             }
             if let Some(redis) = &cfg.redis {
-                self.redis_profile(redis)
-                    .ok_or_else(|| anyhow!("Redis config '{}' not found (push_server)", redis))?;
+                self.redis_profile(redis).ok_or_else(|| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (push_server)",
+                        redis
+                    ))
+                })?;
             }
         }
 
@@ -1040,7 +1149,10 @@ impl FlareAppConfig {
             && let Some(jetstream) = &cfg.jetstream
         {
             self.jetstream_profile(jetstream).ok_or_else(|| {
-                anyhow!("JetStream config '{}' not found (push_worker)", jetstream)
+                flare_server_core::error::FlareError::system(format!(
+                    "JetStream config '{}' not found (push_worker)",
+                    jetstream
+                ))
             })?;
         }
 
@@ -1048,96 +1160,123 @@ impl FlareAppConfig {
         if let Some(cfg) = &self.services.message_orchestrator {
             if let Some(jetstream) = &cfg.jetstream {
                 self.jetstream_profile(jetstream).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "JetStream config '{}' not found (message_orchestrator)",
                         jetstream
-                    )
+                    ))
                 })?;
             }
             if let Some(wal_store) = &cfg.wal_store {
-                self.redis_profile(wal_store)
-                    .ok_or_else(|| anyhow!("Redis config '{}' not found (wal_store)", wal_store))?;
+                self.redis_profile(wal_store).ok_or_else(|| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (wal_store)",
+                        wal_store
+                    ))
+                })?;
             }
         }
 
         if let Some(cfg) = &self.services.signaling_online
             && let Some(redis) = &cfg.redis
         {
-            self.redis_profile(redis)
-                .ok_or_else(|| anyhow!("Redis config '{}' not found (signaling_online)", redis))?;
+            self.redis_profile(redis).ok_or_else(|| {
+                flare_server_core::error::FlareError::system(format!(
+                    "Redis config '{}' not found (signaling_online)",
+                    redis
+                ))
+            })?;
         }
 
         // 验证存储读取服务配置
         if let Some(cfg) = &self.services.storage_reader {
             if let Some(mongo) = &cfg.mongo {
                 self.mongodb_profile(mongo).ok_or_else(|| {
-                    anyhow!("MongoDB config '{}' not found (storage_reader)", mongo)
+                    flare_server_core::error::FlareError::system(format!(
+                        "MongoDB config '{}' not found (storage_reader)",
+                        mongo
+                    ))
                 })?;
             }
             if let Some(redis) = &cfg.redis {
                 self.redis_profile(redis).ok_or_else(|| {
-                    anyhow!("Redis config '{}' not found (storage_reader)", redis)
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (storage_reader)",
+                        redis
+                    ))
                 })?;
             }
             if let Some(postgres) = &cfg.postgres {
                 self.postgres_profile(postgres).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "PostgreSQL config '{}' not found (storage_reader)",
                         postgres
-                    )
+                    ))
                 })?;
             }
         }
 
-        if let Some(cfg) = &self.services.capability {
-            if let Some(postgres) = &cfg.postgres {
-                self.postgres_profile(postgres).ok_or_else(|| {
-                    anyhow!("PostgreSQL config '{}' not found (capability)", postgres)
-                })?;
-            }
+        if let Some(cfg) = &self.services.capability
+            && let Some(postgres) = &cfg.postgres
+        {
+            self.postgres_profile(postgres).ok_or_else(|| {
+                flare_server_core::error::FlareError::system(format!(
+                    "PostgreSQL config '{}' not found (capability)",
+                    postgres
+                ))
+            })?;
         }
 
         // 验证存储写入服务配置
         if let Some(cfg) = &self.services.storage_writer {
             if let Some(jetstream) = &cfg.jetstream {
                 self.jetstream_profile(jetstream).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "JetStream config '{}' not found (storage_writer)",
                         jetstream
-                    )
+                    ))
                 })?;
             }
             if let Some(mongo) = &cfg.mongo {
                 self.mongodb_profile(mongo).ok_or_else(|| {
-                    anyhow!("MongoDB config '{}' not found (storage_writer)", mongo)
+                    flare_server_core::error::FlareError::system(format!(
+                        "MongoDB config '{}' not found (storage_writer)",
+                        mongo
+                    ))
                 })?;
             }
             if let Some(postgres) = &cfg.postgres {
                 self.postgres_profile(postgres).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "PostgreSQL config '{}' not found (storage_writer)",
                         postgres
-                    )
+                    ))
                 })?;
             }
             if let Some(wal_store) = &cfg.wal_store {
                 self.redis_profile(wal_store).ok_or_else(|| {
-                    anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "Redis config '{}' not found (storage_writer.wal_store)",
                         wal_store
-                    )
+                    ))
                 })?;
             }
         }
 
         if let Some(cfg) = &self.services.conversation {
             if let Some(redis) = &cfg.redis {
-                self.redis_profile(redis)
-                    .ok_or_else(|| anyhow!("Redis config '{}' not found (conversation)", redis))?;
+                self.redis_profile(redis).ok_or_else(|| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "Redis config '{}' not found (conversation)",
+                        redis
+                    ))
+                })?;
             }
             if let Some(jetstream) = &cfg.jetstream {
                 self.jetstream_profile(jetstream).ok_or_else(|| {
-                    anyhow!("JetStream config '{}' not found (conversation)", jetstream)
+                    flare_server_core::error::FlareError::system(format!(
+                        "JetStream config '{}' not found (conversation)",
+                        jetstream
+                    ))
                 })?;
             }
         }
@@ -1149,7 +1288,7 @@ impl FlareAppConfig {
 /// 环境变量覆盖 `[mq]`（优先级高于 `config/environments/{FLARE_ENV}.toml` 合并结果）。
 ///
 /// - `FLARE_MQ_DEFAULT_BACKEND`：`nats` \| `jetstream` \| `kafka`
-/// - `FLARE_MQ_ALLOW_KAFKA_FALLBACK`：`true` / `1` / `yes` / `on` 开启
+/// - `FLARE_MQ_ALLOW_KAFKA_FALLBACK`：迁移期显式开关；生产建议保持关闭
 fn apply_mq_env_overrides(cfg: &mut FlareAppConfig) {
     if let Ok(v) = env::var("FLARE_MQ_DEFAULT_BACKEND") {
         let t = v.trim().to_ascii_lowercase();
@@ -1276,10 +1415,10 @@ fn load_with_fallback(candidates: &[PathBuf]) -> FlareAppConfig {
 fn load_config_from_source(path: &Path) -> Result<FlareAppConfig> {
     // 检查配置路径是否存在
     if !path.exists() {
-        return Err(anyhow!(
+        return Err(flare_server_core::error::FlareError::system(format!(
             "configuration path {} does not exist",
             path.display()
-        ));
+        )));
     }
 
     // 获取路径元数据
@@ -1316,19 +1455,19 @@ fn load_config_from_file(path: &Path) -> Result<FlareAppConfig> {
 fn load_config_from_directory(path: &Path) -> Result<FlareAppConfig> {
     let base_file = path.join("base.toml");
     if !base_file.exists() {
-        return Err(anyhow!(
+        return Err(flare_server_core::error::FlareError::system(format!(
             "missing base configuration: {}",
             base_file.display()
-        ));
+        )));
     }
 
     let mut merged = load_toml_value(&base_file)?;
 
     if !merged.is_table() {
-        return Err(anyhow!(
+        return Err(flare_server_core::error::FlareError::system(format!(
             "base configuration must be a table: {}",
             base_file.display()
-        ));
+        )));
     }
 
     merge_directory(&mut merged, &path.join("shared"))?;
@@ -1454,6 +1593,9 @@ pub struct ServicesConfig {
     /// 核心网关服务配置（业务系统统一入口）
     #[serde(default, rename = "core_gateway")]
     pub core_gateway: Option<CoreGatewayServiceConfig>,
+    /// 管理网关服务配置（内网管理 API 入口）
+    #[serde(default, rename = "admin_gateway")]
+    pub admin_gateway: Option<AdminGatewayServiceConfig>,
     /// 媒体服务配置
     #[serde(default, rename = "media")]
     pub media: Option<MediaServiceConfig>,

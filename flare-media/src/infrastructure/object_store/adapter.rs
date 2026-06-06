@@ -1,4 +1,4 @@
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 use super::s3::S3ObjectStore;
 use crate::domain::repository::ObjectRepositoryRef;

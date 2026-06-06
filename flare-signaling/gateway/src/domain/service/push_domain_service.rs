@@ -191,10 +191,10 @@ impl PushDomainService {
         events: Vec<Event>,
         options: &PushOptions,
     ) -> Result<Vec<(String, i32, i32, i32)>> {
-        let max_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
+        let max_conversation_seq = events.iter().map(|e| e.conversation_seq).max().unwrap_or(0);
         let envelope = EventEnvelope {
             events,
-            max_seq,
+            max_conversation_seq,
             has_more: false,
             next_cursor: String::new(),
             window_id: String::new(),
@@ -271,7 +271,7 @@ impl PushDomainService {
         limit: i32,
     ) -> Result<Vec<ConnectionInfo>> {
         let connections = self.connection_query.list_user_connections(user_id).await?;
-        let limit = limit.max(0).min(500) as usize;
+        let limit = limit.clamp(0, 500) as usize;
         let filtered: Vec<ConnectionInfo> = if platforms.is_empty() {
             connections
         } else {

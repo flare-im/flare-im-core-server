@@ -157,7 +157,7 @@ impl ConnectionQuality {
             NetworkType::Unknown => 0.0,
         };
 
-        (rtt_score + loss_score + network_bonus).max(0.0).min(100.0)
+        (rtt_score + loss_score + network_bonus).clamp(0.0, 100.0)
     }
 
     /// 判断是否健康（Good 或更好）

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 
 use crate::application::handlers::{MediaCommandHandler, MediaQueryHandler};
 use crate::config::MediaConfig;

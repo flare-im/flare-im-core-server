@@ -1,11 +1,11 @@
-//! PostgreSQL 实现的能力策略（`capability_*` 表，与 `init_v2.sql` 对齐）。
+//! PostgreSQL 实现的能力策略（`capability_*` 表，与 `deploy/init.sql` 对齐）。
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::error::AnyhowContext as _;
 use sqlx::{FromRow, PgPool};
 
 use crate::domain::capability::{
@@ -50,9 +50,11 @@ impl PostgresCapabilityPolicy {
 
     /// 启动时校验 `public.capability_service_settings` 是否存在，避免首包 Dispatch 才报错。
     ///
-    /// 典型误配：在库 A 执行了 `init_v2.sql`，但 `DATABASE_URL` 指向库 B；或未设置 `DATABASE_URL` 时
+    /// 典型误配：在库 A 执行了 `deploy/init.sql`，但 `DATABASE_URL` 指向库 B；或未设置 `DATABASE_URL` 时
     /// 二进制默认连 `localhost:25432`，而脚本在 `5432` 执行。
-    pub async fn assert_public_capability_schema(pool: &PgPool) -> anyhow::Result<()> {
+    pub async fn assert_public_capability_schema(
+        pool: &PgPool,
+    ) -> flare_server_core::error::Result<()> {
         let exists: (bool,) = sqlx::query_as(
             r#"
             SELECT EXISTS (
@@ -79,18 +81,17 @@ impl PostgresCapabilityPolicy {
                 .await
                 .unwrap_or_else(|_| ("(unknown)".to_string(), None));
 
-        anyhow::bail!(
+        Err(flare_server_core::error::FlareError::system(format!(
             "missing table public.capability_service_settings on database {:?} (search_path={:?}). \
-             Run flare-im-core/deploy/db/init_v2.sql section 9 on **this** database. \
+             Run flare-im-core/deploy/init.sql Hook+Capability section on **this** database. \
              If you already ran init elsewhere, align DATABASE_URL host/port/dbname with that instance; \
              unset DATABASE_URL defaults to postgresql://*:*@localhost:25432/flare2 (see config base.toml [postgres.media]) in flare-capability cmd.",
-            row.0,
-            row.1
-        );
+            row.0, row.1
+        )))
     }
 
     /// 表结构已存在但无任何授权行时告警，避免首包 Dispatch 才看到 `user capability grant missing or expired`。
-    pub async fn warn_if_user_grants_empty(pool: &PgPool) -> anyhow::Result<()> {
+    pub async fn warn_if_user_grants_empty(pool: &PgPool) -> flare_server_core::error::Result<()> {
         let row: (i64,) =
             sqlx::query_as("SELECT COUNT(*)::bigint FROM public.capability_user_grants")
                 .fetch_one(pool)
@@ -101,7 +102,7 @@ impl PostgresCapabilityPolicy {
             tracing::warn!(
                 target = "flare_capability::db",
                 "public.capability_user_grants is empty: Dispatch will fail with \"user capability grant missing or expired\" until seeded. \
-                 Apply flare-im-core/deploy/db/init_v2.sql section 9 (INSERT tenant_id='0', user_id='*', capability_id='rtc.*') on **this** database (host/db must match DATABASE_URL / startup log postgres_after_at)."
+                 Apply flare-im-core/deploy/init.sql Hook+Capability section (INSERT tenant_id='0', user_id='*', capability_id='rtc.*') on **this** database (host/db must match DATABASE_URL / startup log postgres_after_at)."
             );
         }
         Ok(())

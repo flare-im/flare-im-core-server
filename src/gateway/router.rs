@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as AnyhowContext, Result};
+use flare_server_core::error::{AnyhowContext, ErrorBuilder, ErrorCode, FlareError, Result};
 
 use flare_grpc_proto::access_gateway::access_gateway_client::AccessGatewayClient;
 use flare_grpc_proto::access_gateway::{
@@ -28,17 +28,6 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info, warn};
 
 use crate::{ServiceClient, ServiceDiscover};
-
-/// Gateway Router 错误类型
-#[derive(Debug, thiserror::Error)]
-pub enum GatewayRouterError {
-    /// 用户离线错误（需要重新查询在线状态）
-    #[error("Users offline: {0:?}")]
-    UsersOffline(Vec<String>),
-    /// 其他错误
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
 
 /// Gateway Router 配置
 #[derive(Debug, Clone)]
@@ -76,7 +65,6 @@ impl Default for GatewayRouterConfig {
 }
 
 /// Gateway Router trait
-
 pub trait GatewayRouterTrait: Send + Sync {
     /// 路由推送请求到Access Gateway
     async fn route_push_message(
@@ -205,14 +193,19 @@ impl GatewayRouter {
         tokio::time::timeout(timeout_duration, endpoint.connect())
             .await
             .map_err(|_| {
-                anyhow::anyhow!(
+                flare_server_core::error::FlareError::system(format!(
                     "Timeout connecting to {} at {} (timeout: {}ms)",
                     target,
                     uri,
                     timeout_duration.as_millis()
-                )
+                ))
             })?
-            .map_err(|e| anyhow::anyhow!("Failed to connect to {} at {}: {}", target, uri, e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "Failed to connect to {} at {}: {}",
+                    target, uri, e
+                ))
+            })
     }
 
     /// 获取或创建Access Gateway客户端
@@ -281,7 +274,7 @@ impl GatewayRouter {
                         self.connect_channel(uri, "static Access Gateway fallback")
                             .await?
                     } else {
-                        return Err(anyhow::anyhow!(
+                        return Err(flare_server_core::error::FlareError::system(format!(
                             "Gateway instance not found: gateway_id={}. Available instances: {}",
                             gateway_id,
                             instances
@@ -289,7 +282,7 @@ impl GatewayRouter {
                                 .map(|i| i.instance_id.clone())
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        ));
+                        )));
                     }
                 }
             }
@@ -305,21 +298,25 @@ impl GatewayRouter {
             tokio::time::timeout(timeout_duration, service_client.get_channel())
                 .await
                 .map_err(|_| {
-                    anyhow::anyhow!(
+                    flare_server_core::error::FlareError::system(format!(
                         "Timeout waiting for service discovery to get channel for gateway {} (timeout: {}ms)",
                         gateway_id,
                         timeout_duration.as_millis()
-                    )
+                    ))
                 })?
                 .map_err(|e| {
-                    anyhow::anyhow!("Failed to get channel from service discovery: {}", e)
+                    flare_server_core::error::FlareError::system(format!(
+                        "Failed to get channel from service discovery: {}",
+                        e
+                    ))
                 })?
         } else if let Some(ref uri) = self.config.static_fallback_endpoint {
             self.connect_channel(uri, "static Access Gateway fallback")
                 .await?
         } else {
-            return Err(anyhow::anyhow!(
+            return Err(flare_server_core::error::FlareError::system(
                 "Neither ServiceDiscover nor ServiceClient is available, and static_fallback_endpoint is unset. Inject discovery via with_service_client() / with_service_client_and_discover(), or set GatewayRouterConfig.static_fallback_endpoint (e.g. ACCESS_GATEWAY_GRPC_ENDPOINT in dev)."
+                    .to_string(),
             ));
         };
 
@@ -417,10 +414,11 @@ impl GatewayRouterTrait for GatewayRouter {
                 // 按用户明细推断「全未触达在线设备且存在离线队列」视为需重查在线态
                 let mut offline_users = Vec::new();
                 for ur in &response.user_results {
-                    if let Some(pr) = ur.result.as_ref() {
-                        if pr.pushed_device_count == 0 && pr.offline_pending_count > 0 {
-                            offline_users.push(ur.user_id.clone());
-                        }
+                    if let Some(pr) = ur.result.as_ref()
+                        && pr.pushed_device_count == 0
+                        && pr.offline_pending_count > 0
+                    {
+                        offline_users.push(ur.user_id.clone());
                     }
                 }
 
@@ -431,7 +429,7 @@ impl GatewayRouterTrait for GatewayRouter {
                         offline_users = ?offline_users,
                         "Some users have no online delivery (offline pending), caller may re-query online"
                     );
-                    return Err(GatewayRouterError::UsersOffline(offline_users).into());
+                    return Err(users_offline_error(offline_users));
                 }
 
                 info!(
@@ -447,7 +445,10 @@ impl GatewayRouterTrait for GatewayRouter {
                     gateway_id = %gateway_id,
                     "Failed to call Access Gateway push_message"
                 );
-                return Err(anyhow::anyhow!("Failed to call access gateway: {}", e));
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "Failed to call access gateway: {}",
+                    e
+                )));
             }
             Err(_) => {
                 warn!(
@@ -455,10 +456,10 @@ impl GatewayRouterTrait for GatewayRouter {
                     timeout_secs = timeout_duration.as_secs(),
                     "Timeout calling Access Gateway push_message"
                 );
-                return Err(anyhow::anyhow!(
+                return Err(flare_server_core::error::FlareError::system(format!(
                     "Timeout calling access gateway push_message (timeout: {}s)",
                     timeout_duration.as_secs()
-                ));
+                )));
             }
         };
 
@@ -479,11 +480,14 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("push_event: {}", e)),
-            Err(_) => Err(anyhow::anyhow!(
+            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
+                "push_event: {}",
+                e
+            ))),
+            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
                 "Timeout access gateway push_event ({}s)",
                 timeout_duration.as_secs()
-            )),
+            ))),
         }
     }
 
@@ -501,11 +505,14 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("push_notification: {}", e)),
-            Err(_) => Err(anyhow::anyhow!(
+            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
+                "push_notification: {}",
+                e
+            ))),
+            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
                 "Timeout access gateway push_notification ({}s)",
                 timeout_duration.as_secs()
-            )),
+            ))),
         }
     }
 
@@ -523,11 +530,14 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("push_ack: {}", e)),
-            Err(_) => Err(anyhow::anyhow!(
+            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
+                "push_ack: {}",
+                e
+            ))),
+            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
                 "Timeout access gateway push_ack ({}s)",
                 timeout_duration.as_secs()
-            )),
+            ))),
         }
     }
 
@@ -545,11 +555,23 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("push_custom: {}", e)),
-            Err(_) => Err(anyhow::anyhow!(
+            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
+                "push_custom: {}",
+                e
+            ))),
+            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
                 "Timeout access gateway push_custom ({}s)",
                 timeout_duration.as_secs()
-            )),
+            ))),
         }
     }
+}
+
+fn users_offline_error(user_ids: Vec<String>) -> FlareError {
+    ErrorBuilder::new(
+        ErrorCode::UserOffline,
+        "users have no online delivery and require online state refresh",
+    )
+    .details(format!("offline_users={user_ids:?}"))
+    .build_error()
 }

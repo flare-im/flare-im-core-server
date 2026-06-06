@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// gRPC 连接池配置
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ impl GrpcConnectionPool {
                 map_infra_error(
                     e,
                     ErrorCode::NetworkError,
-                    &format!("Invalid gRPC endpoint: {}", address),
+                    format!("Invalid gRPC endpoint: {}", address),
                 )
             })?
             .connect_timeout(Duration::from_secs(self.config.connect_timeout))
@@ -82,7 +82,7 @@ impl GrpcConnectionPool {
                 map_infra_error(
                     e,
                     ErrorCode::NetworkError,
-                    &format!(
+                    format!(
                         "Failed to connect to service {} at {}",
                         service_name, address
                     ),

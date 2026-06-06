@@ -1,5 +1,5 @@
-use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
+use flare_server_core::error::Result;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ impl OnlineConfig {
         let redis_ttl_seconds = env::var("SIGNALING_ONLINE_REDIS_TTL")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| service_config.online_ttl_seconds)
+            .or(service_config.online_ttl_seconds)
             .unwrap_or(3600);
 
         let presence_prefix = env::var("SIGNALING_ONLINE_PRESENCE_PREFIX")

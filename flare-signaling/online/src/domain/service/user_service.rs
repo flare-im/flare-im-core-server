@@ -160,13 +160,15 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         } else {
             ctx.user_id()
                 .ok_or_else(|| {
-                    anyhow::anyhow!("user_id is required in ListUserDevicesRequest or context")
+                    flare_server_core::error::FlareError::system(
+                        "user_id is required in ListUserDevicesRequest or context".to_string(),
+                    )
                 })?
                 .to_string()
         };
 
-        let user_id_vo =
-            crate::domain::value_object::UserId::new(user_id).map_err(|e| anyhow::anyhow!(e))?;
+        let user_id_vo = crate::domain::value_object::UserId::new(user_id)
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let sessions = self
             .conversation_repository
             .get_user_connections(&user_id_vo)
@@ -211,9 +213,9 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         // 查找设备对应的会话
         let user_vo = crate::domain::value_object::UserId::new(user_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let device_vo = crate::domain::value_object::DeviceId::new(device_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let session = self
             .conversation_repository
             .get_connection_by_device(&user_vo, &device_vo)
@@ -222,7 +224,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         if let Some(session) = session {
             // 删除会话
             self.conversation_repository
-                .remove_connection(&session.id(), &user_vo)
+                .remove_connection(session.id(), &user_vo)
                 .await?;
 
             info!(
@@ -243,15 +245,17 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         ctx: &flare_server_core::context::Context,
         request: GetDeviceRequest,
     ) -> Result<GetDeviceResponse> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
         let device_id = &request.device_id;
 
         let user_id_vo = crate::domain::value_object::UserId::new(user_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let device_vo = crate::domain::value_object::DeviceId::new(device_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let session = self
             .conversation_repository
             .get_connection_by_device(&user_id_vo, &device_vo)

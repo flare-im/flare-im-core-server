@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
 use chrono::Utc;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use sqlx::{PgPool, Row};
 use tracing::instrument;
 

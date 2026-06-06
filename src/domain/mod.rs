@@ -160,13 +160,13 @@ pub trait MessageCommandHandler: Send + Sync {
         &self,
         ctx: &Ctx,
         cmd: &SendMessageCommand,
-    ) -> anyhow::Result<SendAckResult>;
+    ) -> flare_server_core::error::Result<SendAckResult>;
 
     async fn handle_message_operation(
         &self,
         ctx: &Ctx,
         cmd: &MessageCommand,
-    ) -> anyhow::Result<Option<OperationResult>>;
+    ) -> flare_server_core::error::Result<Option<OperationResult>>;
 }
 
 /// 同步查询结果
@@ -207,7 +207,7 @@ pub trait SyncQueryHandler: Send + Sync {
         cursor: Option<&str>,
         limit: i32,
         device_id: Option<&DeviceId>,
-    ) -> anyhow::Result<SyncResult>;
+    ) -> flare_server_core::error::Result<SyncResult>;
 
     async fn handle_multi_device_sync(
         &self,
@@ -217,5 +217,5 @@ pub trait SyncQueryHandler: Send + Sync {
         conversation_ids: &[ConversationId],
         last_seq_per_conversation: &HashMap<String, u64>,
         limit: i32,
-    ) -> anyhow::Result<MultiDeviceSyncResult>;
+    ) -> flare_server_core::error::Result<MultiDeviceSyncResult>;
 }

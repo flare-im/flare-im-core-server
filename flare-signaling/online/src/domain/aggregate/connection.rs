@@ -100,6 +100,7 @@ impl Connection {
     /// 从持久化数据重建聚合根（仓储专用）
     ///
     /// 注意：此方法不发布事件，因为是从已存在的数据重建
+    #[allow(clippy::too_many_arguments)]
     pub fn reconstitute(
         conversation_id: ConnectionId,
         user_id: UserId,

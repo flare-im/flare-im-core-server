@@ -90,7 +90,7 @@ impl CapabilityRuntimeConfig {
                 "FLARE_CAPABILITY_DISPATCH_TIMEOUT_MS",
                 "capability_runtime.dispatch_timeout_ms",
             )
-            .filter(|&n: &u64| n >= 1_000 && n <= 120_000)
+            .filter(|&n: &u64| (1_000..=120_000).contains(&n))
         {
             dispatch_timeout_ms = v;
         }
@@ -141,7 +141,7 @@ impl CapabilityRuntimeConfig {
                 "FLARE_CAPABILITY_PLUGIN_CALL_TIMEOUT_MS",
                 "capability_runtime.plugin_call_timeout_ms",
             )
-            .filter(|&n: &u64| n >= 200 && n <= 60_000)
+            .filter(|&n: &u64| (200..=60_000).contains(&n))
         {
             plugin_call_timeout_ms = v;
         }

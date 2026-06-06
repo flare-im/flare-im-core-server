@@ -5,8 +5,8 @@ use std::{collections::HashMap, env};
 use flare_im_core::config::{FlareAppConfig, ServiceEndpointConfig};
 use flare_im_core::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{
-    TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ACKS, TOPIC_PUSH_CUSTOM, TOPIC_PUSH_DLQ, TOPIC_PUSH_EVENTS,
-    TOPIC_PUSH_MESSAGES, TOPIC_PUSH_NOTIFICATIONS, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+    TOPIC_PUSH_DLQ, TOPIC_PUSH_ENVELOPE, TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
+    TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
 use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
@@ -28,11 +28,8 @@ pub struct PushServerConfig {
     pub consumer_group: String,
 
     pub push_message_topic: String,
-    pub message_main_topic: String,
     pub push_event_topic: String,
-    pub push_notification_topic: String,
-    pub push_ack_topic: String,
-    pub push_custom_topic: String,
+    pub push_envelope_topic: String,
     pub push_online_topic: String,
     pub push_offline_topic: String,
     pub push_dlq_topic: String,
@@ -127,30 +124,27 @@ impl PushServerConfig {
 
         let push_message_topic = env::var("PUSH_SERVER_PUSH_MESSAGE_TOPIC")
             .ok()
+            .or_else(|| service.push_message_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_MESSAGES.to_string());
-        let message_main_topic = env::var("PUSH_SERVER_MESSAGE_MAIN_TOPIC")
-            .ok()
-            .unwrap_or_else(|| TOPIC_MESSAGE_MAIN.to_string());
         let push_event_topic = env::var("PUSH_SERVER_PUSH_EVENT_TOPIC")
             .ok()
+            .or_else(|| service.push_event_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_EVENTS.to_string());
-        let push_notification_topic = env::var("PUSH_SERVER_PUSH_NOTIFICATION_TOPIC")
+        let push_envelope_topic = env::var("PUSH_SERVER_PUSH_ENVELOPE_TOPIC")
             .ok()
-            .unwrap_or_else(|| TOPIC_PUSH_NOTIFICATIONS.to_string());
-        let push_ack_topic = env::var("PUSH_SERVER_PUSH_ACK_TOPIC")
-            .ok()
-            .unwrap_or_else(|| TOPIC_PUSH_ACKS.to_string());
-        let push_custom_topic = env::var("PUSH_SERVER_PUSH_CUSTOM_TOPIC")
-            .ok()
-            .unwrap_or_else(|| TOPIC_PUSH_CUSTOM.to_string());
+            .or_else(|| service.push_envelope_topic.clone())
+            .unwrap_or_else(|| TOPIC_PUSH_ENVELOPE.to_string());
         let push_online_topic = env::var("PUSH_SERVER_PUSH_ONLINE_TOPIC")
             .ok()
+            .or_else(|| service.push_online_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_ONLINE.to_string());
         let push_offline_topic = env::var("PUSH_SERVER_PUSH_OFFLINE_TOPIC")
             .ok()
+            .or_else(|| service.push_offline_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_OFFLINE.to_string());
         let push_dlq_topic = env::var("PUSH_SERVER_PUSH_DLQ_TOPIC")
             .ok()
+            .or_else(|| service.push_dlq_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_DLQ.to_string());
 
         let online_service_endpoint = env::var("PUSH_SERVER_ONLINE_SERVICE_ENDPOINT")
@@ -175,11 +169,8 @@ impl PushServerConfig {
             kafka_options,
             consumer_group,
             push_message_topic,
-            message_main_topic,
             push_event_topic,
-            push_notification_topic,
-            push_ack_topic,
-            push_custom_topic,
+            push_envelope_topic,
             push_online_topic,
             push_offline_topic,
             push_dlq_topic,

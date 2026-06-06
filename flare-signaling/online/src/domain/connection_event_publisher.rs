@@ -7,7 +7,7 @@ use flare_im_core::ConnectionEvent;
 
 pub trait ConnectionEventPublisher: Send + Sync {
     /// 发布连接领域事件（ConnectionRegistered / ConnectionKicked / ConnectionDisconnected）
-    async fn publish(&self, event: &ConnectionEvent) -> anyhow::Result<()>;
+    async fn publish(&self, event: &ConnectionEvent) -> flare_server_core::error::Result<()>;
 }
 
 /// 默认无操作实现（Rust 2024：避免 `dyn ConnectionEventPublisher`）
@@ -15,7 +15,7 @@ pub trait ConnectionEventPublisher: Send + Sync {
 pub struct NoopConnectionEventPublisher;
 
 impl ConnectionEventPublisher for NoopConnectionEventPublisher {
-    async fn publish(&self, _event: &ConnectionEvent) -> anyhow::Result<()> {
+    async fn publish(&self, _event: &ConnectionEvent) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 }

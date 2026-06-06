@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context as AnyhowContext, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgPoolOptions;
@@ -48,9 +48,7 @@ pub async fn initialize(
     let postgres_url = config
         .postgres_url
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!(
-            "PostgreSQL URL not configured. Set POSTGRES_URL or STORAGE_POSTGRES_URL, or define postgres profile in config"
-        ))?;
+        .ok_or_else(|| flare_server_core::error::FlareError::system("PostgreSQL URL not configured. Set POSTGRES_URL or STORAGE_POSTGRES_URL, or define postgres profile in config".to_string()))?;
     let connect_opts: PgConnectOptions = postgres_url
         .parse::<PgConnectOptions>()
         .with_context(|| "Invalid PostgreSQL URL")?

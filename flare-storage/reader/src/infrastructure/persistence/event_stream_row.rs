@@ -1,20 +1,20 @@
 //! 将 Storage Writer 写入 `events` 表的 `payload` 列还原为 `flare.common.v1.Event`。
 //! 写入侧仅序列化 `Event.payload` oneof 的内层消息（见 `flare-storage/writer` `event_stream.rs`）。
 
-use anyhow::Context;
 use chrono::{DateTime, Utc};
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{
-    CallSignalEvent, ConversationDeleteEvent, ConversationUpdateEvent, CustomEvent, Event,
-    EventType as ProtoEventType, MarkEvent, Message, MessageBurnScheduledEvent, MessageBurnedEvent,
-    MessageDeleteEvent, MessageEditEvent, MessageHardDeletedEvent, MessageRecallEvent, PinEvent,
-    PresenceEvent, ReactionEvent, ReadReceiptEvent, TypingEvent, UnmarkEvent, UnpinEvent,
+    ConversationDeleteEvent, ConversationUpdateEvent, CustomEvent, Event,
+    EventType as ProtoEventType, MarkEvent, Message, MessageDeleteEvent, MessageEditEvent,
+    MessageRecallEvent, MessageRetentionExpiredEvent, MessageRetentionPurgedEvent,
+    MessageRetentionScheduledEvent, PinEvent, ReactionEvent, ReadReceiptEvent, UnmarkEvent,
+    UnpinEvent,
 };
+use flare_server_core::error::AnyhowContext;
 use prost::Message as ProstMessage;
 
-use crate::convert::datetime_to_timestamp;
-
 /// 由 `events` 表一行组装完整 `Event`（`event_id` = `{conversation_id}:{seq}`）。
+#[allow(clippy::too_many_arguments)]
 pub fn proto_event_from_events_row(
     conversation_id: &str,
     seq: i64,
@@ -22,26 +22,27 @@ pub fn proto_event_from_events_row(
     created_at: DateTime<Utc>,
     _operator_id: String,
     request_id: Option<String>,
-    event_seq: Option<i64>,
+    _event_seq: Option<i64>,
     payload: &[u8],
-) -> anyhow::Result<Event> {
-    let created_at_ts = datetime_to_timestamp(Some(created_at));
+) -> flare_server_core::error::Result<Event> {
     let event_id = format!("{conversation_id}:{seq}");
     let payload_oneof = decode_payload_oneof(event_type, payload)?;
 
     Ok(Event {
         conversation_id: conversation_id.to_string(),
-        seq: seq as u64,
+        conversation_seq: seq as u64,
         r#type: event_type,
-        created_at: created_at_ts,
+        created_at: created_at.timestamp_millis(),
         event_id,
-        event_seq: event_seq.map(|v| v as u64),
         request_id,
         payload: payload_oneof,
     })
 }
 
-fn decode_payload_oneof(event_type: i32, payload: &[u8]) -> anyhow::Result<Option<EventPayload>> {
+fn decode_payload_oneof(
+    event_type: i32,
+    payload: &[u8],
+) -> flare_server_core::error::Result<Option<EventPayload>> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -64,21 +65,12 @@ fn decode_payload_oneof(event_type: i32, payload: &[u8]) -> anyhow::Result<Optio
         ProtoEventType::EventReadReceipt => {
             EventPayload::Read(ReadReceiptEvent::decode(payload).context("decode Read")?)
         }
-        ProtoEventType::EventTyping => {
-            EventPayload::Typing(TypingEvent::decode(payload).context("decode Typing")?)
-        }
         ProtoEventType::EventConversationUpdate => EventPayload::Conversation(
             ConversationUpdateEvent::decode(payload).context("decode ConversationUpdate")?,
         ),
         ProtoEventType::EventConversationDelete => EventPayload::ConversationDelete(
             ConversationDeleteEvent::decode(payload).context("decode ConversationDelete")?,
         ),
-        ProtoEventType::EventPresence => {
-            EventPayload::Presence(PresenceEvent::decode(payload).context("decode Presence")?)
-        }
-        ProtoEventType::EventCallSignal => {
-            EventPayload::CallSignal(CallSignalEvent::decode(payload).context("decode CallSignal")?)
-        }
         ProtoEventType::EventReaction => {
             EventPayload::Reaction(ReactionEvent::decode(payload).context("decode Reaction")?)
         }
@@ -94,14 +86,14 @@ fn decode_payload_oneof(event_type: i32, payload: &[u8]) -> anyhow::Result<Optio
         ProtoEventType::EventUnmark => {
             EventPayload::Unmark(UnmarkEvent::decode(payload).context("decode Unmark")?)
         }
-        ProtoEventType::EventMessageBurnScheduled => EventPayload::BurnScheduled(
-            MessageBurnScheduledEvent::decode(payload).context("decode BurnScheduled")?,
+        ProtoEventType::EventMessageRetentionScheduled => EventPayload::RetentionScheduled(
+            MessageRetentionScheduledEvent::decode(payload).context("decode RetentionScheduled")?,
         ),
-        ProtoEventType::EventMessageBurned => {
-            EventPayload::Burned(MessageBurnedEvent::decode(payload).context("decode Burned")?)
-        }
-        ProtoEventType::EventMessageHardDeleted => EventPayload::HardDeleted(
-            MessageHardDeletedEvent::decode(payload).context("decode HardDeleted")?,
+        ProtoEventType::EventMessageRetentionExpired => EventPayload::RetentionExpired(
+            MessageRetentionExpiredEvent::decode(payload).context("decode RetentionExpired")?,
+        ),
+        ProtoEventType::EventMessageRetentionPurged => EventPayload::RetentionPurged(
+            MessageRetentionPurgedEvent::decode(payload).context("decode RetentionPurged")?,
         ),
         ProtoEventType::EventCustom => {
             EventPayload::Custom(CustomEvent::decode(payload).context("decode Custom")?)

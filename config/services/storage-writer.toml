@@ -8,6 +8,9 @@ consumer_group = "storage-writer"
 # 消息流 / 操作事件流 Subject（不配则用 topics 默认值）
 message_subject = "flare.im.message.storage"
 operation_subject = "flare.im.message.events"
+message_dlq_topic = "flare.im.message.main.dlq"
+message_retry_topic = "flare.im.message.storage.retry.5s"
+message_retry_delay_ms = 5000
 
 # PostgreSQL 配置（可选，用于归档）
 postgres = "media"
@@ -20,6 +23,9 @@ wal_ttl_seconds = 86400
 # 批量写入配置
 batch_size = 1000
 batch_interval_ms = 100
+metrics_enabled = true
+metrics_address = "0.0.0.0"
+metrics_port = 19182
+metrics_path = "/metrics"
 
 # 注意：此服务不提供 gRPC 接口，仅作为 JetStream 消费者运行
-

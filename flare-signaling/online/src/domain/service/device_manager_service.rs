@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use crate::domain::model::{ConnectionQualityRecord, ConnectionRecord};
 use crate::domain::repository::ConversationRepository;
 use crate::domain::value_object::{ConnectionId, UserId};
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 
 /// 设备管理领域服务（泛型仓储，避免 `dyn` 异步 trait）
@@ -77,7 +77,8 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
         user_id: &str,
         new_token_version: i64,
     ) -> Result<Vec<String>> {
-        let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let uid = UserId::new(user_id.to_string())
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let sessions = self.repository.get_user_connections(&uid).await?;
 
         let mut to_kick = Vec::new();
@@ -101,7 +102,7 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     ///
     /// 优先级顺序：Critical(4) > High(3) > Normal(2) > Low(1) > Unspecified(0)
     /// 同优先级按链接质量排序（RTT越低越好）
-    pub fn sort_devices_by_priority(sessions: &mut Vec<ConnectionRecord>) {
+    pub fn sort_devices_by_priority(sessions: &mut [ConnectionRecord]) {
         sessions.sort_by(|a, b| {
             // 首先按优先级降序
             let priority_cmp = b.device_priority.cmp(&a.device_priority);
@@ -125,7 +126,8 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     /// 1. 优先选择 Critical 或 High 优先级
     /// 2. 同优先级选择链接质量最好的（RTT 最低）
     pub async fn select_best_device(&self, user_id: &str) -> Result<Option<ConnectionRecord>> {
-        let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let uid = UserId::new(user_id.to_string())
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let mut sessions: Vec<ConnectionRecord> = self
             .repository
             .get_user_connections(&uid)
@@ -173,7 +175,8 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
         user_id: &str,
         include_low_priority: bool,
     ) -> Result<Vec<ConnectionRecord>> {
-        let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let uid = UserId::new(user_id.to_string())
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let sessions = self.repository.get_user_connections(&uid).await?;
 
         let result: Vec<ConnectionRecord> = sessions
@@ -245,9 +248,10 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
         conversation_id: &str,
         reason: &str,
     ) -> Result<()> {
-        let uid = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let uid = UserId::new(user_id.to_string())
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let sid = ConnectionId::from_string(conversation_id.to_string())
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         warn!(
             user_id = %user_id,
             conversation_id = %conversation_id,

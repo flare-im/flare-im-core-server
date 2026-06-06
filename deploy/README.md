@@ -7,7 +7,7 @@
 
 ## 📋 概述
 
-本目录包含 Flare IM 通信核心层所需的中间件和服务的 Docker Compose 配置，覆盖注册发现、消息队列、缓存、存储，以及基于 Grafana Stack（Prometheus + Loki）的可观测性能力。
+本目录只保留 Flare IM Core 本地开发/压测所需的中间件编排，覆盖注册发现、缓存、主存储、消息队列、对象存储和 Grafana 可观测性栈。数据库 schema 以根目录 `init.sql` 为唯一入口。
 
 ---
 
@@ -17,31 +17,31 @@
 
 ```bash
 cd deploy
-docker-compose up -d
+docker compose up -d
 ```
 
 ### 2. 检查服务状态
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 ### 3. 查看日志
 
 ```bash
-docker-compose logs -f [service_name]
+docker compose logs -f [service_name]
 ```
 
 ---
 
 ## 📦 包含的服务
 
-### 1. etcd (服务注册发现)
+### 1. Consul (服务注册 / 配置中心)
 
-- **端口**: 22379 (客户端), 22380 (节点间通信)
-- **用途**: 服务注册和发现
-- **访问**: http://localhost:22379
-- **数据目录**: `./data/etcd`
+- **端口**: 28500 (HTTP/UI), 28600/udp (DNS)
+- **用途**: 服务注册、发现和本地配置中心
+- **访问**: http://localhost:28500
+- **数据目录**: `./data/consul`
 
 ### 2. Redis / Dragonfly (缓存)
 
@@ -53,16 +53,16 @@ docker-compose logs -f [service_name]
 ### 3. PostgreSQL + TimescaleDB (时序数据库)
 
 - **端口**: 25432
-- **数据库**: flare
+- **数据库**: flare2
 - **用户**: flare
 - **密码**: flare123
-- **访问**: postgresql://flare:flare123@localhost:25432/flare
+- **访问**: postgresql://flare:flare123@localhost:25432/flare2
 - **数据目录**: `./data/postgres`
+- **初始化脚本**: `./init.sql`
 - **特性**: 
   - TimescaleDB 扩展已启用
-  - 消息表使用超表（Hypertable）按时间分区
-  - 支持时序数据查询优化
-  - 支持连续聚合视图
+  - 消息表使用超表（Hypertable）按 `created_at` 分区
+  - 支持消息、会话、媒体、Hook、Capability、ACK 审计等核心表
 
 ### 4. 消息队列（NATS JetStream + Apache Kafka）
 
@@ -80,16 +80,16 @@ docker-compose logs -f [service_name]
 - **Compose 网络内**: `kafka:9092`（服务 `hostname` 为 `kafka`）
 - **数据目录**: `./data/kafka`
 
-### 5. MinIO (对象存储)
+### 5. RustFS (对象存储)
 
 - **API端口**: 29000
 - **控制台端口**: 29001
-- **默认用户**: minioadmin
-- **默认密码**: minioadmin
+- **默认用户**: rustfsadmin
+- **默认密码**: rustfsadmin
 - **访问**: 
   - API: http://localhost:29000
   - 控制台: http://localhost:29001
-- **数据目录**: `./data/minio`
+- **数据目录**: `./data/rustfs`
 
 ### 6. Loki (日志聚合)
 
@@ -114,7 +114,11 @@ docker-compose logs -f [service_name]
 - **默认用户**: admin / admin
 - **数据目录**: `./data/grafana`
 
-> 📌 **扩展提示**：若后续需要全文检索或分布式追踪能力，可追加部署 OpenSearch、OpenSearch Dashboards、Tempo 等组件，并在 Grafana 中新增相应数据源。
+### 9. Tempo (分布式追踪)
+
+- **端口**: 3200 (HTTP), 4317 (OTLP gRPC), 4318 (OTLP HTTP)
+- **用途**: Trace 采集与查询
+- **数据目录**: `./data/tempo`
 
 ---
 
@@ -125,39 +129,37 @@ docker-compose logs -f [service_name]
 可以通过环境变量配置各个服务：
 
 ```bash
-# etcd
-ETCD_DATA_DIR=/etcd-data
-
 # Redis
 REDIS_PASSWORD=your_password
 
 # PostgreSQL
 POSTGRES_USER=flare
 POSTGRES_PASSWORD=flare123
-POSTGRES_DB=flare
+POSTGRES_DB=flare2
 
-# MinIO
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=minioadmin
+# RustFS
+RUSTFS_ACCESS_KEY=rustfsadmin
+RUSTFS_SECRET_KEY=rustfsadmin
 ```
 
 ### 存储配置
 
 数据持久化存储在本地目录 `./data/` 下：
 
-- `./data/etcd`: etcd 数据
+- `./data/consul`: Consul 数据
 - `./data/redis`: Redis 数据
 - `./data/postgres`: PostgreSQL 数据
 - `./data/nats`: NATS JetStream 数据
 - `./data/kafka`: Kafka（KRaft）数据
-- `./data/minio`: MinIO 数据
+- `./data/rustfs`: RustFS 数据
 - `./data/loki`: Loki 数据
 - `./data/prometheus`: Prometheus 数据
 - `./data/grafana`: Grafana 数据
+- `./data/tempo`: Tempo 数据
 
 > 💡 **提示**: 首次启动前，建议创建数据目录：
 > ```bash
-> mkdir -p data/{etcd,redis,postgres,nats,kafka,minio,loki,prometheus,grafana,tempo}
+> mkdir -p data/{consul,redis,postgres,nats,kafka,rustfs,loki,prometheus,grafana,tempo}
 > ```
 
 ---
@@ -168,37 +170,37 @@ MINIO_ROOT_PASSWORD=minioadmin
 
 ```bash
 # 启动所有服务
-docker-compose up -d
+docker compose up -d
 
 # 启动特定服务
-docker-compose up -d redis postgres
+docker compose up -d redis postgres
 ```
 
 ### 2. 停止服务
 
 ```bash
 # 停止所有服务
-docker-compose down
+docker compose down
 
 # 停止并删除数据
-docker-compose down -v
+docker compose down -v
 ```
 
 ### 3. 查看日志
 
 ```bash
 # 查看所有日志
-docker-compose logs -f
+docker compose logs -f
 
 # 查看特定服务日志
-docker-compose logs -f nats kafka
+docker compose logs -f nats kafka
 ```
 
-### 5. 访问 MinIO 控制台
+### 5. 访问 RustFS 控制台
 
 1. 打开浏览器访问 http://localhost:29001
-2. 使用默认账号登录：minioadmin / minioadmin
-3. 创建 bucket：flare-media（已自动创建）
+2. 使用默认账号登录：rustfsadmin / rustfsadmin
+3. 按需创建 bucket：flare-media
 
 ---
 
@@ -207,15 +209,15 @@ docker-compose logs -f nats kafka
 ### 开发环境连接
 
 ```toml
-# etcd
-etcd_endpoints = ["http://localhost:22379"]
+# Consul
+consul_endpoint = "http://localhost:28500"
 
 # Redis
 redis_url = "redis://localhost:26379"
 
 # PostgreSQL + TimescaleDB
-postgres_url = "postgresql://flare:flare123@localhost:25432/flare"
-# TimescaleDB 扩展已自动启用，消息表已转换为超表（Hypertable）
+postgres_url = "postgresql://flare:flare123@localhost:25432/flare2"
+# TimescaleDB 扩展已自动启用，消息表已按 created_at 转换为超表（Hypertable）
 
 # NATS JetStream（与 config/base.toml [jetstream.*] 一致）
 # url = "nats://127.0.0.1:24222"
@@ -223,11 +225,11 @@ postgres_url = "postgresql://flare:flare123@localhost:25432/flare"
 # Kafka（与 config/base.toml [kafka.*] 一致；mq.default_backend = "kafka" 时使用）
 # brokers = ["127.0.0.1:29092"]
 
-# MinIO
-minio_endpoint = "http://localhost:29000"
-minio_access_key = "minioadmin"
-minio_secret_key = "minioadmin"
-minio_bucket = "flare-media"
+# RustFS / S3 compatible
+s3_endpoint = "http://localhost:29000"
+s3_access_key = "rustfsadmin"
+s3_secret_key = "rustfsadmin"
+s3_bucket = "flare-media"
 
 # Loki
 loki_url = "http://localhost:3100"
@@ -253,4 +255,3 @@ grafana_url = "http://localhost:23000"
 **文档维护**: Flare IM Architecture Team  
 **最后更新**: 2025-01-XX  
 **版本**: 0.1.0
-

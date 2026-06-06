@@ -69,7 +69,10 @@ impl CallSession {
         }
     }
 
-    pub fn accept(&mut self, user_id: String) -> anyhow::Result<CallSessionEvent> {
+    pub fn accept(
+        &mut self,
+        user_id: String,
+    ) -> flare_server_core::error::Result<CallSessionEvent> {
         self.state = CallSessionState::Active;
         self.updated_at = Utc::now();
         Ok(CallSessionEvent::Accepted {
@@ -83,7 +86,7 @@ impl CallSession {
         &mut self,
         user_id: String,
         reason: Option<String>,
-    ) -> anyhow::Result<CallSessionEvent> {
+    ) -> flare_server_core::error::Result<CallSessionEvent> {
         self.state = CallSessionState::Ended;
         self.updated_at = Utc::now();
         Ok(CallSessionEvent::Rejected {
@@ -94,7 +97,10 @@ impl CallSession {
         })
     }
 
-    pub fn cancel(&mut self, by_user_id: String) -> anyhow::Result<CallSessionEvent> {
+    pub fn cancel(
+        &mut self,
+        by_user_id: String,
+    ) -> flare_server_core::error::Result<CallSessionEvent> {
         self.state = CallSessionState::Ended;
         self.updated_at = Utc::now();
         Ok(CallSessionEvent::Cancelled {
@@ -104,7 +110,10 @@ impl CallSession {
         })
     }
 
-    pub fn hangup(&mut self, by_user_id: String) -> anyhow::Result<CallSessionEvent> {
+    pub fn hangup(
+        &mut self,
+        by_user_id: String,
+    ) -> flare_server_core::error::Result<CallSessionEvent> {
         self.state = CallSessionState::Ended;
         self.updated_at = Utc::now();
         Ok(CallSessionEvent::Hangup {

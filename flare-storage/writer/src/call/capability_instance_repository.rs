@@ -20,9 +20,12 @@ pub struct CapabilityInstanceRecord {
 
 #[async_trait]
 pub trait CapabilityInstanceRepository: Send + Sync {
-    async fn save(&self, row: &CapabilityInstanceRecord) -> anyhow::Result<()>;
+    async fn save(&self, row: &CapabilityInstanceRecord) -> flare_server_core::error::Result<()>;
 
-    async fn find_by_id(&self, id: &Uuid) -> anyhow::Result<Option<CapabilityInstanceRecord>>;
+    async fn find_by_id(
+        &self,
+        id: &Uuid,
+    ) -> flare_server_core::error::Result<Option<CapabilityInstanceRecord>>;
 
     async fn update_status(
         &self,
@@ -30,17 +33,17 @@ pub trait CapabilityInstanceRepository: Send + Sync {
         status: &str,
         draining: bool,
         disabled: bool,
-    ) -> anyhow::Result<()>;
+    ) -> flare_server_core::error::Result<()>;
 
     async fn list_active_instances(
         &self,
         tenant_id: Option<&str>,
-    ) -> anyhow::Result<Vec<CapabilityInstanceRecord>>;
+    ) -> flare_server_core::error::Result<Vec<CapabilityInstanceRecord>>;
 
     async fn list_draining_instances(
         &self,
         tenant_id: Option<&str>,
-    ) -> anyhow::Result<Vec<CapabilityInstanceRecord>>;
+    ) -> flare_server_core::error::Result<Vec<CapabilityInstanceRecord>>;
 }
 
 #[derive(Clone)]
@@ -56,11 +59,14 @@ impl PostgresCapabilityInstanceRepository {
 
 #[async_trait]
 impl CapabilityInstanceRepository for PostgresCapabilityInstanceRepository {
-    async fn save(&self, _row: &CapabilityInstanceRecord) -> anyhow::Result<()> {
+    async fn save(&self, _row: &CapabilityInstanceRecord) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 
-    async fn find_by_id(&self, _id: &Uuid) -> anyhow::Result<Option<CapabilityInstanceRecord>> {
+    async fn find_by_id(
+        &self,
+        _id: &Uuid,
+    ) -> flare_server_core::error::Result<Option<CapabilityInstanceRecord>> {
         Ok(None)
     }
 
@@ -70,21 +76,21 @@ impl CapabilityInstanceRepository for PostgresCapabilityInstanceRepository {
         _status: &str,
         _draining: bool,
         _disabled: bool,
-    ) -> anyhow::Result<()> {
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 
     async fn list_active_instances(
         &self,
         _tenant_id: Option<&str>,
-    ) -> anyhow::Result<Vec<CapabilityInstanceRecord>> {
+    ) -> flare_server_core::error::Result<Vec<CapabilityInstanceRecord>> {
         Ok(vec![])
     }
 
     async fn list_draining_instances(
         &self,
         _tenant_id: Option<&str>,
-    ) -> anyhow::Result<Vec<CapabilityInstanceRecord>> {
+    ) -> flare_server_core::error::Result<Vec<CapabilityInstanceRecord>> {
         Ok(vec![])
     }
 }

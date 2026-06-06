@@ -2,7 +2,7 @@
 //!
 //! 定义Hook引擎的核心领域服务
 
-use flare_im_core::error::Result;
+use flare_server_core::error::Result;
 use futures_util::future::join_all;
 use std::sync::Arc;
 

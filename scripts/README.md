@@ -21,31 +21,30 @@
 
 ```bash
 cd deploy
-docker-compose up -d
+docker compose up -d
 ```
 
 这将启动以下基础设施服务：
 - Redis (端口 26379)
 - PostgreSQL (端口 25432)
 - JetStream (端口 29092)
-- etcd (端口 22379)
+- Consul (端口 28500)
 
 ### 2. 启动 IM Core（二选一）
 
-**业务中立（默认推荐，无 Social Hook）：**
+**业务中立（默认推荐，无业务系统 Hook）：**
 
 ```bash
 ./scripts/start_server_core.sh
 ```
 
-**集成 flare-social PreSend Hook：**
+**集成业务系统 gRPC PreSend Hook：**
 
 ```bash
-# 先启动 Social（含 flare-social-hook）
-cd ../flare-social && ./scripts/start_social.sh
+# 先启动业务系统 gRPC Hook 服务，并确保它可通过服务发现或固定 endpoint 访问
 
-# 再启动 IM Core（Social Hook 模式）
-cd ../flare-im-core && ./scripts/start_server_social.sh
+# 再启动 IM Core（业务系统 Hook 模式）
+cd ../flare-im-core && ./scripts/start_server.sh
 ```
 
 Hook 配置文件：
@@ -53,7 +52,7 @@ Hook 配置文件：
 | 文件 | 说明 |
 |------|------|
 | `config/hooks.core.toml` | 空 Hook，纯 IM 链路 |
-| `config/hooks.social.toml` | Social PreSend → `discovery://flare-social-hook` |
+| 业务系统 Hook 配置 | 业务系统 gRPC PreSend → `discovery://business-policy-hook` |
 | `config/hooks.toml` | 运行时 symlink 目标（由启动脚本写入） |
 
 ### 3. 启动客户端（示例）
@@ -75,8 +74,7 @@ cargo run --example chatroom_client -- user2
 | 脚本 | 说明 | 用途 |
 |------|------|------|
 | `start_server.sh` | 启动所有核心服务 | 通用入口；可配合 `FLARE_HOOKS_PROFILE` |
-| `start_server_core.sh` | 业务中立启动 | `hooks.core.toml`，**不**注册 flare-social Hook |
-| `start_server_social.sh` | Social Hook 启动 | `hooks.social.toml`，需 `flare-social-hook` |
+| `start_server_core.sh` | 业务中立启动 | `hooks.core.toml`，**不**注册业务系统 Hook |
 | `stop_server.sh` | 停止所有服务 | 停止全栈 |
 
 ### 辅助脚本
@@ -228,7 +226,7 @@ cargo run --example business_push_client
 - `GATEWAY_ENDPOINT` - Core Gateway 地址（默认：`http://localhost:50050`）
 - `MESSAGE_CONTENT` - 消息内容
 - `USER_IDS` - 目标用户ID列表（逗号分隔，为空则推送给所有在线用户）
-- `TOKEN_SECRET` - JWT Token 密钥（默认：`insecure-secret`）
+- `TOKEN_SECRET` - JWT Token 密钥；必须显式提供并与网关签名密钥一致，或直接提供 `TOKEN`
 - `TENANT_ID` - 租户ID（默认：`0`）
 - `BUSINESS_USER_ID` - 业务系统用户ID（默认：`business-system`）
 
@@ -291,7 +289,7 @@ jetstream-broker-api-versions --bootstrap-server localhost:29092
 **手动迁移**：
 ```bash
 # 使用 sqlx-cli
-sqlx migrate run --database-url "postgresql://flare:flare123@localhost:25432/flare"
+sqlx migrate run --database-url "postgresql://flare:flare123@localhost:25432/flare2"
 ```
 
 ---
@@ -324,7 +322,7 @@ pkill -f "flare-<service-name>"
 ./scripts/check_services.sh
 
 # 启动基础设施服务
-cd deploy && docker-compose up -d
+cd deploy && docker compose up -d
 
 # 等待服务就绪（约10秒）
 sleep 10
@@ -351,7 +349,7 @@ sleep 10
 
 **问题**：`flare-capability` 启动失败，或报 `capability_service_settings` 不存在、或 `user capability grant missing`（`PostgresCapabilityPolicy`）
 
-**说明**：数据库初始化与种子数据均在 **`deploy/db/init_v2.sql`**（开发阶段可删库后整文件重跑，或按需执行其中第 9 节 Hook+Capability）。
+**说明**：数据库初始化与种子数据均在 **`deploy/init.sql`**（开发阶段可删库后整文件重跑，或按需执行其中 Hook+Capability 节）。
 
 **排查**：
 ```bash
@@ -359,10 +357,10 @@ sleep 10
 docker ps | grep postgres
 
 # 检查数据库连接
-psql -h localhost -p 25432 -U flare -d flare
+psql -h localhost -p 25432 -U flare -d flare2
 
 # 设置数据库URL（如果使用环境变量）
-export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare"
+export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare2"
 ```
 
 ### 5. 客户端无法连接到网关
@@ -400,7 +398,7 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare"
 | Redis | 26379 | Redis 服务 |
 | PostgreSQL | 25432 | PostgreSQL 服务 |
 | JetStream | 29092 | JetStream 服务（外部端口） |
-| etcd | 22379 | etcd 服务 |
+| Consul | 28500 | 服务注册 / 配置中心 |
 
 ---
 
@@ -456,7 +454,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 | `GATEWAY_ENDPOINT` | Core Gateway 地址 | `http://localhost:50050` |
 | `MESSAGE_CONTENT` | 消息内容 | `Hello from business system` |
 | `USER_IDS` | 目标用户ID列表（逗号分隔） | 空（推送给所有在线用户） |
-| `TOKEN_SECRET` | JWT Token 密钥 | `insecure-secret` |
+| `TOKEN_SECRET` | JWT Token 密钥 | 必须显式提供，或直接提供 `TOKEN` |
 | `TENANT_ID` | 租户ID | `0` |
 | `BUSINESS_USER_ID` | 业务系统用户ID | `business-system` |
 
@@ -468,7 +466,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 
 ```bash
 # 1. 启动基础设施
-cd deploy && docker-compose up -d
+cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
 cd ../flare-im-core
@@ -488,7 +486,7 @@ cargo run --example chatroom_client -- user2
 
 ```bash
 # 1. 启动基础设施
-cd deploy && docker-compose up -d
+cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
 cd ../flare-im-core
@@ -539,7 +537,7 @@ cargo run --example business_push_client
 
 ---
 
-**最后更新**：2025-11-17  
+**最后更新**：2025-11-17
 **维护者**：Flare IM Core Team
 
 ## 测试脚本

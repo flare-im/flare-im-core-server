@@ -16,7 +16,7 @@ use flare_grpc_proto::signaling::online::{
 use flare_im_core::ServiceClient;
 use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
 use flare_im_core::utils::normalize_tenant_id;
-use flare_server_core::error::{ErrorBuilder, ErrorCode, InfraResult, InfraResultExt, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
@@ -64,7 +64,7 @@ impl ConnectionRepository {
         }
     }
 
-    async fn ensure_client(&self) -> InfraResult<OnlineServiceClient<Channel>> {
+    async fn ensure_client(&self) -> Result<OnlineServiceClient<Channel>> {
         let mut guard = self.client.lock().await;
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
@@ -89,13 +89,17 @@ impl ConnectionRepository {
             if let Some(discover) = discover {
                 *service_client_guard = Some(ServiceClient::new(discover));
             } else {
-                return Err(anyhow::anyhow!("Service discovery not configured"));
+                return Err(flare_server_core::error::FlareError::system(
+                    "Service discovery not configured".to_string(),
+                ));
             }
         }
 
-        let service_client = service_client_guard
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Service client not initialized"))?;
+        let service_client = service_client_guard.as_mut().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "Service client not initialized".to_string(),
+            )
+        })?;
         let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
             &self.service_name,
             service_client,
@@ -124,10 +128,7 @@ impl ConnectionRepository {
 #[async_trait]
 impl IConnectionPort for ConnectionRepository {
     async fn login(&self, request: LoginRequest) -> Result<LoginResponse> {
-        let mut client = self.ensure_client().await.into_flare(
-            ErrorCode::ServiceUnavailable,
-            "failed to connect signaling online service",
-        )?;
+        let mut client = self.ensure_client().await?;
         client
             .login(request)
             .await
@@ -140,10 +141,7 @@ impl IConnectionPort for ConnectionRepository {
     }
 
     async fn logout(&self, request: LogoutRequest) -> Result<LogoutResponse> {
-        let mut client = self.ensure_client().await.into_flare(
-            ErrorCode::ServiceUnavailable,
-            "failed to connect signaling online service",
-        )?;
+        let mut client = self.ensure_client().await?;
         client
             .logout(request)
             .await
@@ -156,10 +154,7 @@ impl IConnectionPort for ConnectionRepository {
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<HeartbeatResponse> {
-        let mut client = self.ensure_client().await.into_flare(
-            ErrorCode::ServiceUnavailable,
-            "failed to connect signaling online service",
-        )?;
+        let mut client = self.ensure_client().await?;
         client
             .heartbeat(request)
             .await
@@ -175,10 +170,7 @@ impl IConnectionPort for ConnectionRepository {
         &self,
         request: GetOnlineStatusRequest,
     ) -> Result<GetOnlineStatusResponse> {
-        let mut client = self.ensure_client().await.into_flare(
-            ErrorCode::ServiceUnavailable,
-            "failed to connect signaling online service",
-        )?;
+        let mut client = self.ensure_client().await?;
         client
             .get_online_status(request)
             .await
@@ -258,7 +250,7 @@ pub(crate) fn core_info_to_domain(
     core_info: &TraitConnectionInfo,
     default_tenant_id: &str,
 ) -> DomainConnectionInfo {
-    let user_id = core_info.user_id.clone().unwrap_or_else(String::new);
+    let user_id = core_info.user_id.clone().unwrap_or_default();
     let device_id = core_info
         .device_info
         .as_ref()

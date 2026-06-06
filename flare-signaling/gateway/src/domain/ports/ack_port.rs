@@ -2,14 +2,16 @@
 
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_im_core::error::Result;
-use flare_proto::common::{AckBatch, ConversationAck, PushAck};
+use flare_proto::common::{AckBatch, ConversationAck, PushAck, ReadAck};
+use flare_server_core::error::Result;
 
 #[async_trait]
 pub trait IAckReportPort: Send + Sync {
     async fn report_push_ack(&self, tx: &Ctx, ack: PushAck) -> Result<()>;
 
     async fn report_conversation_ack(&self, tx: &Ctx, ack: ConversationAck) -> Result<()>;
+
+    async fn report_read_ack(&self, tx: &Ctx, ack: ReadAck) -> Result<()>;
 
     async fn report_ack_batch(&self, tx: &Ctx, ack: AckBatch) -> Result<()>;
 }

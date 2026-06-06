@@ -68,10 +68,12 @@ mod tests {
 
     #[test]
     fn test_to_proto_file_info_includes_storage_fields() {
-        let mut metadata = MediaFileMetadata::default();
-        metadata.file_id = "file-123".to_string();
-        metadata.storage_bucket = Some("test-bucket".to_string());
-        metadata.storage_path = Some("images/2025/01/01/file-123.png".to_string());
+        let mut metadata = MediaFileMetadata {
+            file_id: "file-123".to_string(),
+            storage_bucket: Some("test-bucket".to_string()),
+            storage_path: Some("images/2025/01/01/file-123.png".to_string()),
+            ..Default::default()
+        };
         metadata.metadata.insert(
             STORAGE_BUCKET_METADATA_KEY.to_string(),
             "test-bucket".to_string(),

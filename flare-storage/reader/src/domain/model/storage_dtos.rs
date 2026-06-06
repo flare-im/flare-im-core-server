@@ -66,6 +66,52 @@ pub struct FilterExpression {
     pub value: String,
 }
 
+/// 管理面消息导出任务草案。Storage Reader 只创建任务，真实文件生成由后续 export worker 执行。
+#[derive(Debug, Clone)]
+pub struct MessageExportTaskDraft {
+    pub task_id: String,
+    pub tenant_id: String,
+    pub conversation_id: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub filters: serde_json::Value,
+    pub requested_by: Option<String>,
+    pub request_id: String,
+    pub trace_id: String,
+}
+
+/// 消息写链路账本过滤条件（Admin/运维查询）。
+#[derive(Debug, Clone)]
+pub struct MessageWriteLedgerQuery {
+    pub tenant_id: String,
+    pub server_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub write_state: Option<String>,
+    pub failed_only: bool,
+    pub updated_after: Option<DateTime<Utc>>,
+    pub updated_before: Option<DateTime<Utc>>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// 消息写链路账本单条记录。
+#[derive(Debug, Clone)]
+pub struct MessageWriteLedgerEntry {
+    pub tenant_id: String,
+    pub server_id: String,
+    pub conversation_id: String,
+    pub seq: i64,
+    pub write_state: String,
+    pub archive_persisted_at: Option<DateTime<Utc>>,
+    pub storage_persisted_at: Option<DateTime<Utc>>,
+    pub wal_cleaned_at: Option<DateTime<Utc>>,
+    pub ack_published_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// 同步游标（对应 storage.proto SyncCursor）
 #[derive(Debug, Clone)]
 pub struct SyncCursor {

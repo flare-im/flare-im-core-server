@@ -1,17 +1,17 @@
 //! 协议工具：解码 `PayloadCommand` 载荷、构造下行 Frame（SendAck / EventAck / DATA）。
 
-use std::collections::HashMap;
-
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
 use flare_core::common::protocol::{
     Frame, PayloadCommand, Reliability, frame_with_payload_command,
     payload_command::Type as PayloadType,
 };
-use flare_proto::common::{Ack, AckType};
 use flare_proto::common::{
-    CustomData, DataKind, DataPacket, ErrorDetail, Event, Message, SendAck, ack,
+    Ack, CustomData, DataPacket, ErrorDetail, Event, Message, SendAccepted, SendAck, ack,
+    data_packet, send_ack,
 };
 use prost::Message as ProstMessage;
+
+use crate::domain::model::MessageSendOutcome;
 
 #[derive(Debug, Clone)]
 pub struct SendAckFailure {
@@ -60,39 +60,39 @@ pub fn build_message_ack_frame(
     message_id: &str,
     client_msg_id: &str,
     conversation_id: Option<&str>,
-    result: std::result::Result<(String, u64), SendAckFailure>,
+    result: std::result::Result<MessageSendOutcome, SendAckFailure>,
 ) -> CoreResult<Frame> {
     let send_ack = match result {
-        Ok((server_msg_id, seq)) => SendAck {
+        Ok(outcome) => SendAck {
             client_msg_id: client_msg_id.to_string(),
-            server_msg_id,
-            seq,
             conversation_id: conversation_id.unwrap_or_default().to_string(),
-            success: true,
-            error_code: flare_proto::common::ErrorCode::Ok as i32,
-            error_message: String::new(),
-            server_time: None,
             ack_id: None,
-            error_detail: None,
+            result: Some(send_ack::Result::Accepted(SendAccepted {
+                server_msg_id: outcome.server_msg_id,
+                conversation_seq: outcome.conversation_seq,
+                server_time: now_millis(),
+                durability: outcome.durability as i32,
+            })),
         },
-        Err(failure) => SendAck {
-            client_msg_id: client_msg_id.to_string(),
-            server_msg_id: String::new(),
-            seq: 0,
-            conversation_id: conversation_id.unwrap_or_default().to_string(),
-            success: false,
-            error_code: failure.code,
-            error_message: failure.message,
-            server_time: None,
-            ack_id: None,
-            error_detail: failure.error_detail,
-        },
+        Err(failure) => {
+            let detail = failure.error_detail.unwrap_or_else(|| ErrorDetail {
+                code: failure.code,
+                reason: "MESSAGE_SEND_FAILED".to_string(),
+                message: failure.message,
+                track: String::new(),
+            });
+            SendAck {
+                client_msg_id: client_msg_id.to_string(),
+                conversation_id: conversation_id.unwrap_or_default().to_string(),
+                ack_id: None,
+                result: Some(send_ack::Result::Error(detail)),
+            }
+        }
     };
 
     let ack = Ack {
-        r#type: AckType::Send as i32,
         ack_id: None,
-        at: None,
+        ack_at: None,
         payload: Some(ack::Payload::Send(send_ack)),
     };
 
@@ -116,13 +116,12 @@ pub fn build_event_ack_operation_frame(message_id: &str, event_id: &str) -> Core
 
     let event_ack = EventAck {
         event_id: event_id.to_string(),
-        metadata: HashMap::new(),
+        attributes: Default::default(),
     };
 
     let ack = Ack {
-        r#type: AckType::Event as i32,
         ack_id: None,
-        at: None,
+        ack_at: None,
         payload: Some(ack::Payload::Event(event_ack)),
     };
 
@@ -146,15 +145,12 @@ pub fn build_data_error_frame(
     _kind: &str,
     err: impl std::fmt::Display,
 ) -> Frame {
-    use flare_proto::common::data_packet;
-
     let inner = CustomData {
         r#type: "error".to_string(),
         payload: err.to_string().into_bytes(),
-        metadata: Default::default(),
+        attributes: Default::default(),
     };
     let packet = DataPacket {
-        kind: DataKind::UserCustom as i32,
         payload: Some(data_packet::Payload::UserCustom(inner)),
     };
     let cmd = PayloadCommand {
@@ -167,6 +163,13 @@ pub fn build_data_error_frame(
     frame_with_payload_command(cmd, Reliability::AtLeastOnce)
 }
 
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 /// DATA 通道成功回包（原始 `DataPacket` 编码字节）
 pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> Frame {
     let cmd = PayloadCommand {
@@ -177,4 +180,45 @@ pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> Fr
         seq: 0,
     };
     frame_with_payload_command(cmd, Reliability::AtLeastOnce)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_core::common::protocol::command;
+    use flare_proto::common::{
+        SendAckDurability, ack::Payload as AckPayload, send_ack::Result as SendAckResult,
+    };
+    #[test]
+    fn message_ack_frame_preserves_send_ack_durability() {
+        let frame = build_message_ack_frame(
+            "frame-1",
+            "client-1",
+            Some("conversation-1"),
+            Ok(MessageSendOutcome {
+                server_msg_id: "server-1".to_string(),
+                conversation_seq: 42,
+                durability: SendAckDurability::BrokerAccepted,
+            }),
+        )
+        .expect("ack frame should build");
+
+        let payload = match frame.command.and_then(|command| command.r#type) {
+            Some(command::Type::Payload(payload)) => payload,
+            other => panic!("expected payload command, got {other:?}"),
+        };
+        let ack = Ack::decode(payload.payload.as_slice()).expect("payload should decode as Ack");
+
+        match ack.payload {
+            Some(AckPayload::Send(send)) => match send.result {
+                Some(SendAckResult::Accepted(accepted)) => {
+                    assert_eq!(accepted.server_msg_id, "server-1");
+                    assert_eq!(accepted.conversation_seq, 42);
+                    assert_eq!(accepted.durability(), SendAckDurability::BrokerAccepted);
+                }
+                other => panic!("expected accepted SendAck, got {other:?}"),
+            },
+            other => panic!("expected SendAck payload, got {other:?}"),
+        }
+    }
 }

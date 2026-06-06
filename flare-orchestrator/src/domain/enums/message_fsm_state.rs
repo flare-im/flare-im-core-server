@@ -16,10 +16,12 @@ use std::fmt;
 /// - DELETED_SOFT: 已软删除（用户维度）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum MessageFsmState {
     /// 服务端构建中（客户端不可见）
     Init,
     /// 已发送（正常态）
+    #[default]
     Sent,
     /// 已被编辑（可多次进入）
     Edited,
@@ -45,7 +47,7 @@ impl MessageFsmState {
     }
 
     /// 从数据库字符串解析
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn parse_db_value(s: &str) -> Result<Self, String> {
         match s {
             "INIT" => Ok(MessageFsmState::Init),
             "SENT" => Ok(MessageFsmState::Sent),
@@ -86,12 +88,6 @@ impl MessageFsmState {
             self,
             MessageFsmState::Sent | MessageFsmState::Edited | MessageFsmState::Recalled
         )
-    }
-}
-
-impl Default for MessageFsmState {
-    fn default() -> Self {
-        MessageFsmState::Sent
     }
 }
 

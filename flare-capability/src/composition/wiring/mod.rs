@@ -8,7 +8,7 @@ mod hook_runtime;
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use crate::infrastructure::capability::PluginRouteBook;
 

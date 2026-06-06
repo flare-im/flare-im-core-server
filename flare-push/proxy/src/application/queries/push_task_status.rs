@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_im_core::Ctx;
+use flare_server_core::error::Result;
 
 use crate::infrastructure::RedisStateStore;
 

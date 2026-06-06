@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
 use flare_im_core::Ctx;
+use flare_server_core::error::Result;
 use flare_server_core::mq::producer::Producer;
 use serde_json::to_vec;
 use tracing::instrument;
@@ -42,7 +42,11 @@ impl AckPublisher for MqAckPublisher {
                 )])),
             )
             .await
-            .map_err(|err| anyhow!("failed to publish ACK: {err}"))?;
+            .map_err(|err| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to publish ACK: {err}"
+                ))
+            })?;
 
         Ok(())
     }

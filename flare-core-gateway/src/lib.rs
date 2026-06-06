@@ -11,14 +11,10 @@
 // =============================================================================
 
 pub mod application;
-pub mod config;
-pub mod context;
 pub mod domain;
-pub mod error;
-pub mod infrastructure;
 pub mod interface;
 
 // 重新导出常用类型
-pub use config::Settings;
-pub use context::Ctx;
-pub use error::{GatewayError, Result};
+pub use flare_im_core::gateway::GatewaySettings;
+pub use flare_server_core::context::Ctx;
+pub use flare_server_core::http::{HttpApiError as GatewayError, Result};

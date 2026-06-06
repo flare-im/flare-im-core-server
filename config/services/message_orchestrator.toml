@@ -6,12 +6,24 @@ jetstream = "message"
 # 消息流 / 操作事件流 / 推送流 Subject（不配则用 topics 默认值）
 storage_subject = "flare.im.message.storage"
 operation_subject = "flare.im.message.events"
-push_subject = "flare.im.push.tasks"
+push_subject = "flare.im.push.messages"
+message_dlq_topic = "flare.im.message.main.dlq"
+message_retry_topic = "flare.im.message.main.retry.5s"
+message_retry_delay_ms = 5000
 wal_store = "message_wal"
 wal_hash_key = "flare:message:wal"
 wal_ttl_seconds = 86400
+wal_replay_enabled = true
+wal_replay_interval_ms = 1000
+wal_replay_error_backoff_ms = 5000
+wal_replay_batch_limit = 256
+wal_replay_claim_lease_ms = 30000
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
+metrics_enabled = true
+metrics_address = "0.0.0.0"
+metrics_port = 19181
+metrics_path = "/metrics"
 
 # 默认 50181：50081 常被本机 VS Code/Cursor Gradle 语言服务占用（127.0.0.1:50081），
 # 与 Consul 注册 127.0.0.1 时会导致 Route 连错进程（SendMessage Unimplemented）。

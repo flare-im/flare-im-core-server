@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
@@ -95,7 +95,7 @@ pub async fn initialize(
             .map_err(|e| {
                 ErrorBuilder::new(
                     ErrorCode::NetworkError,
-                    &format!(
+                    format!(
                         "Failed to create storage reader service discover for {}: {}",
                         storage_reader_service, e
                     ),

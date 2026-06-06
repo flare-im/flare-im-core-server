@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use flare_server_core::context::Context;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, require_user_id};
 use tracing::debug;
 
 use crate::application::commands::{

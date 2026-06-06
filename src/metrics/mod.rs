@@ -1,14 +1,134 @@
 //! # Prometheus 指标收集模块
 //!
-//! 为各个服务模块提供统一的 Prometheus 指标收集能力。
+//! 为各个服务模块提供统一的 Prometheus 指标收集与导出能力。
 
+use std::{net::SocketAddr, time::Duration};
+
+use axum::{
+    Router,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use once_cell::sync::Lazy;
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
+    Registry, TextEncoder,
 };
+use tokio::{net::TcpListener, sync::oneshot};
 
 /// 全局指标注册表
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
+
+/// Prometheus 指标 HTTP 出口配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsEndpointConfig {
+    pub enabled: bool,
+    pub address: String,
+    pub port: u16,
+    pub path: String,
+}
+
+impl MetricsEndpointConfig {
+    pub fn new(address: impl Into<String>, port: u16) -> Self {
+        Self {
+            enabled: true,
+            address: address.into(),
+            port,
+            path: "/metrics".to_string(),
+        }
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = normalize_metrics_path(path.into());
+        self
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            address: "127.0.0.1".to_string(),
+            port: 0,
+            path: "/metrics".to_string(),
+        }
+    }
+
+    pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+        format!("{}:{}", self.address, self.port).parse()
+    }
+}
+
+impl Default for MetricsEndpointConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+fn normalize_metrics_path(path: String) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        "/metrics".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+/// 将全局注册表编码为 Prometheus text format。
+pub fn encode_prometheus_text() -> Result<String, prometheus::Error> {
+    let encoder = TextEncoder::new();
+    let metric_families = REGISTRY.gather();
+    let mut buffer = Vec::new();
+    encoder.encode(&metric_families, &mut buffer)?;
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+async fn metrics_handler() -> Response {
+    match encode_prometheus_text() {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, prometheus::TEXT_FORMAT)],
+            body,
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode prometheus metrics failed: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+/// 启动轻量 Prometheus `/metrics` HTTP 出口。
+pub async fn serve_prometheus_metrics(
+    config: MetricsEndpointConfig,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !config.enabled {
+        let _ = shutdown_rx.await;
+        return Ok(());
+    }
+
+    let address = config.socket_addr()?;
+    let path = normalize_metrics_path(config.path);
+    let app = Router::new().route(&path, get(metrics_handler));
+    let listener = TcpListener::bind(address).await?;
+
+    tracing::info!(
+        %address,
+        path = %path,
+        "Prometheus metrics endpoint listening"
+    );
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await?;
+
+    Ok(())
+}
 
 /// 存储写入服务指标
 pub struct StorageWriterMetrics {
@@ -96,6 +216,84 @@ impl StorageWriterMetrics {
 }
 
 impl Default for StorageWriterMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Message Orchestrator send-path 指标。
+///
+/// Label 保持低基数：只使用固定 stage/outcome/durability，避免按租户、会话或消息 ID 打标签。
+pub struct MessageOrchestratorMetrics {
+    /// Send path 分段耗时。
+    pub send_stage_duration_seconds: HistogramVec,
+    /// Send 请求结果总数。
+    pub send_total: IntCounterVec,
+    /// Batch send 请求大小。
+    pub batch_send_size: Histogram,
+}
+
+impl MessageOrchestratorMetrics {
+    pub fn new() -> Self {
+        let send_stage_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "message_orchestrator_send_stage_duration_seconds",
+                "Message orchestrator send path stage duration in seconds",
+            )
+            .buckets(vec![
+                0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+            ]),
+            &["stage", "outcome"],
+        )
+        .expect("Failed to create message_orchestrator_send_stage_duration_seconds metric");
+
+        let send_total = IntCounterVec::new(
+            Opts::new(
+                "message_orchestrator_send_total",
+                "Total number of message send attempts handled by orchestrator",
+            ),
+            &["durability", "outcome"],
+        )
+        .expect("Failed to create message_orchestrator_send_total metric");
+
+        let batch_send_size = Histogram::with_opts(
+            HistogramOpts::new(
+                "message_orchestrator_batch_send_size",
+                "Batch size for orchestrator batch send requests",
+            )
+            .buckets(vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]),
+        )
+        .expect("Failed to create message_orchestrator_batch_send_size metric");
+
+        let _ = REGISTRY.register(Box::new(send_stage_duration_seconds.clone()));
+        let _ = REGISTRY.register(Box::new(send_total.clone()));
+        let _ = REGISTRY.register(Box::new(batch_send_size.clone()));
+
+        Self {
+            send_stage_duration_seconds,
+            send_total,
+            batch_send_size,
+        }
+    }
+
+    pub fn observe_send_stage(&self, stage: &str, outcome: &str, duration: Duration) {
+        self.send_stage_duration_seconds
+            .with_label_values(&[stage, outcome])
+            .observe(duration.as_secs_f64());
+    }
+
+    pub fn record_send_total(&self, durability: &str, outcome: &str) {
+        self.send_total
+            .with_label_values(&[durability, outcome])
+            .inc();
+    }
+
+    pub fn observe_batch_size(&self, size: usize) {
+        self.batch_send_size.observe(size as f64);
+    }
+}
+
+impl Default for MessageOrchestratorMetrics {
     fn default() -> Self {
         Self::new()
     }
@@ -210,5 +408,51 @@ impl AccessGatewayMetrics {
 impl Default for AccessGatewayMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_orchestrator_metrics_records_send_result() {
+        let metrics = MessageOrchestratorMetrics::new();
+
+        metrics.observe_send_stage("mq_publish", "success", Duration::from_millis(7));
+        metrics.record_send_total("broker_accepted", "success");
+        metrics.observe_batch_size(3);
+
+        assert_eq!(
+            metrics
+                .send_total
+                .with_label_values(&["broker_accepted", "success"])
+                .get(),
+            1
+        );
+    }
+
+    #[test]
+    fn metrics_endpoint_config_normalizes_path() {
+        let config = MetricsEndpointConfig::new("127.0.0.1", 9090).with_path("custom_metrics");
+
+        assert_eq!(config.path, "/custom_metrics");
+        assert_eq!(
+            config.socket_addr().expect("valid socket address"),
+            "127.0.0.1:9090"
+                .parse::<SocketAddr>()
+                .expect("valid literal")
+        );
+    }
+
+    #[test]
+    fn encode_prometheus_text_exports_registered_metrics() {
+        let metrics = MessageOrchestratorMetrics::new();
+        metrics.observe_send_stage("mq_publish", "success", Duration::from_millis(3));
+
+        let encoded = encode_prometheus_text().expect("metrics encode succeeds");
+
+        assert!(encoded.contains("message_orchestrator_send_stage_duration_seconds"));
+        assert!(encoded.contains("stage=\"mq_publish\""));
     }
 }

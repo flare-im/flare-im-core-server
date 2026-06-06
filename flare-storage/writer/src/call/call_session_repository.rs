@@ -25,14 +25,19 @@ pub struct CallSessionRecord {
 
 #[async_trait]
 pub trait CallSessionRepository: Send + Sync {
-    async fn save(&self, row: &CallSessionRecord) -> anyhow::Result<()>;
+    async fn save(&self, row: &CallSessionRecord) -> flare_server_core::error::Result<()>;
 
-    async fn find_by_id(&self, id: &Uuid) -> anyhow::Result<Option<CallSessionRecord>>;
+    async fn find_by_id(
+        &self,
+        id: &Uuid,
+    ) -> flare_server_core::error::Result<Option<CallSessionRecord>>;
 
-    async fn find_by_room_id(&self, sfu_room_id: &str)
-    -> anyhow::Result<Option<CallSessionRecord>>;
+    async fn find_by_room_id(
+        &self,
+        sfu_room_id: &str,
+    ) -> flare_server_core::error::Result<Option<CallSessionRecord>>;
 
-    async fn update_status(&self, id: &Uuid, status: &str) -> anyhow::Result<()>;
+    async fn update_status(&self, id: &Uuid, status: &str) -> flare_server_core::error::Result<()>;
 }
 
 /// PostgreSQL 实现骨架（SQL 后续落地）。
@@ -49,22 +54,29 @@ impl PostgresCallSessionRepository {
 
 #[async_trait]
 impl CallSessionRepository for PostgresCallSessionRepository {
-    async fn save(&self, _row: &CallSessionRecord) -> anyhow::Result<()> {
+    async fn save(&self, _row: &CallSessionRecord) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 
-    async fn find_by_id(&self, _id: &Uuid) -> anyhow::Result<Option<CallSessionRecord>> {
+    async fn find_by_id(
+        &self,
+        _id: &Uuid,
+    ) -> flare_server_core::error::Result<Option<CallSessionRecord>> {
         Ok(None)
     }
 
     async fn find_by_room_id(
         &self,
         _sfu_room_id: &str,
-    ) -> anyhow::Result<Option<CallSessionRecord>> {
+    ) -> flare_server_core::error::Result<Option<CallSessionRecord>> {
         Ok(None)
     }
 
-    async fn update_status(&self, _id: &Uuid, _status: &str) -> anyhow::Result<()> {
+    async fn update_status(
+        &self,
+        _id: &Uuid,
+        _status: &str,
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 }

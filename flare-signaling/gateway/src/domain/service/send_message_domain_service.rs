@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use flare_core::common::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use flare_im_core::Ctx;
+use flare_proto::common::send_ack;
 use tracing::instrument;
 
 use crate::application::commands::SendMessageCommand;
+use crate::domain::model::MessageSendOutcome;
 use crate::domain::ports::IMessageCommandPort;
 
 /// 消息发送领域服务
@@ -23,32 +25,41 @@ impl SendMessageDomainService {
         Self { message_port }
     }
 
-    /// 处理发送消息：解析上下文 → 调用端口发送 → 返回 (server_msg_id, seq)
+    /// 处理发送消息：解析上下文 → 调用端口发送 → 返回发送结果。
     #[instrument(skip(self, tx, cmd), fields(connection_id = %cmd.connection_id))]
-    pub async fn execute(&self, tx: &Ctx, cmd: &SendMessageCommand) -> Result<(String, u64)> {
+    pub async fn execute(&self, tx: &Ctx, cmd: &SendMessageCommand) -> Result<MessageSendOutcome> {
         let ack = self
             .message_port
             .send_message(tx, cmd.msg.clone())
             .await
             .map_err(from_server_error)?;
 
-        if !ack.success {
-            return Err(FlareError::message_send_failed(
-                if ack.error_message.trim().is_empty() {
+        match ack.result {
+            Some(send_ack::Result::Accepted(accepted)) => {
+                let durability = accepted.durability();
+                Ok(MessageSendOutcome {
+                    server_msg_id: accepted.server_msg_id,
+                    conversation_seq: accepted.conversation_seq,
+                    durability,
+                })
+            }
+            Some(send_ack::Result::Error(error)) => Err(FlareError::message_send_failed(
+                if error.message.trim().is_empty() {
                     "message send failed".to_string()
                 } else {
-                    ack.error_message
+                    error.message
                 },
-            ));
+            )),
+            None => Err(FlareError::message_send_failed(
+                "message send failed: empty SendAck.result".to_string(),
+            )),
         }
-
-        Ok((ack.server_msg_id, ack.seq))
     }
 }
 
-fn from_server_error(err: flare_im_core::error::FlareError) -> FlareError {
+fn from_server_error(err: flare_server_core::error::FlareError) -> FlareError {
     match err {
-        flare_im_core::error::FlareError::Localized {
+        flare_server_core::error::FlareError::Localized {
             code,
             reason,
             details,
@@ -61,7 +72,7 @@ fn from_server_error(err: flare_im_core::error::FlareError) -> FlareError {
             }
             builder.build()
         }
-        flare_im_core::error::FlareError::System(msg) => FlareError::system(msg),
-        flare_im_core::error::FlareError::Io(msg) => FlareError::io(msg),
+        flare_server_core::error::FlareError::System(msg) => FlareError::system(msg),
+        flare_server_core::error::FlareError::Io(msg) => FlareError::io(msg),
     }
 }

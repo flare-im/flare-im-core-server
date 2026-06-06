@@ -1,7 +1,7 @@
-use crate::error::Result;
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_server_core::error::Result;
 use flare_server_core::mq::nats::{NatsStreamSpec, default_stream_specs};
 use std::collections::HashMap;
 use std::env;
@@ -95,7 +95,7 @@ impl ConversationConfig {
         let recent_message_limit = env::var("CONVERSATION_RECENT_MESSAGE_LIMIT")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
-            .or_else(|| service_config.recent_message_limit)
+            .or(service_config.recent_message_limit)
             .unwrap_or(20);
 
         // 解析策略配置
@@ -103,11 +103,11 @@ impl ConversationConfig {
 
         let conflict_resolution = env::var("CONVERSATION_CONFLICT_RESOLUTION")
             .ok()
-            .and_then(|s| ConflictResolutionPolicy::from_str(s.trim()))
+            .and_then(|s| ConflictResolutionPolicy::parse_config_value(s.trim()))
             .or_else(|| {
                 policy_cfg
                     .and_then(|p| p.conflict_resolution.as_ref())
-                    .and_then(|s| ConflictResolutionPolicy::from_str(s.trim()))
+                    .and_then(|s| ConflictResolutionPolicy::parse_config_value(s.trim()))
             })
             .unwrap_or(ConflictResolutionPolicy::Coexist);
 

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use flare_im_core::tracing::init_tracing_from_config;
+use flare_server_core::error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -9,5 +9,5 @@ async fn main() -> Result<()> {
     // 创建应用并启动
     flare_signaling_gateway::ApplicationBootstrap::run()
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
+        .map_err(|e| flare_server_core::error::FlareError::system(format!("{}", e)))
 }

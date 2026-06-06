@@ -3,6 +3,7 @@ members = [
     
     # 通信核心层 - 统一网关
     "flare-core-gateway",
+    "flare-admin-gateway",
     
     # 通信核心层 - 信令系统
     "flare-signaling/gateway",
@@ -145,10 +146,12 @@ name = "flare_im_core"
 path = "src/lib.rs"
 
 [dependencies]
+axum = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
 flare-core-base = { workspace = true }
 flare-core-runtime = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
@@ -179,6 +182,7 @@ dashmap = "6.0"
 redis = { workspace = true }
 sqlx = { workspace = true }
 zstd = "0.13"
+dotenvy = "0.15"
 
 # OpenTelemetry 分布式追踪（可选功能）
 opentelemetry = { version = "0.28", optional = true }

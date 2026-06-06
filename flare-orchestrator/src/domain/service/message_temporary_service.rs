@@ -15,8 +15,8 @@ use flare_im_core::Ctx;
 use flare_proto::common::Message;
 use tracing::instrument;
 
-use crate::error::Result;
 use crate::infrastructure::messaging::push_repository::MqPushRepository;
+use flare_server_core::error::Result;
 
 /// 临时消息处理服务
 pub struct MessageTemporaryService {
@@ -70,20 +70,11 @@ impl MessageTemporaryService {
     fn extract_recipient_user_ids(&self, message: &Message) -> Vec<String> {
         let mut user_ids = Vec::new();
 
-        if let Ok(conversation_type) =
+        if let Ok(flare_proto::common::ConversationType::Single) =
             flare_proto::common::ConversationType::try_from(message.conversation_type)
+            && !message.channel_id.is_empty()
         {
-            match conversation_type {
-                flare_proto::common::ConversationType::Single => {
-                    // 单聊：使用 channel_id（对方 user_id）
-                    if !message.channel_id.is_empty() {
-                        user_ids.push(message.channel_id.clone());
-                    }
-                }
-                _ => {
-                    // 非单聊：user_ids 留空，由推送服务按 conversation_id 解析成员
-                }
-            }
+            user_ids.push(message.channel_id.clone());
         }
 
         user_ids
@@ -104,13 +95,8 @@ pub enum TemporaryMessageType {
 impl TemporaryMessageType {
     /// 从消息类型判断是否为临时消息
     pub fn from_message_type(message_type: i32) -> Option<Self> {
-        use flare_proto::common::MessageType;
-
-        match MessageType::try_from(message_type) {
-            // 目前没有定义 Typing 和 SystemEvent 类型
-            // 如果需要支持，需要在 proto 中添加
-            _ => None,
-        }
+        let _ = message_type;
+        None
     }
 
     /// 是否需要持久化

@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context as AnyhowContext, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use toml::Value;
 
 use super::{FlareAppConfig, MqBackendConfig, ObjectStoreConfig};

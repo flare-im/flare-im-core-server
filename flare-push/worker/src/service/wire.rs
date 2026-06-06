@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use flare_im_core::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
@@ -43,7 +43,12 @@ pub async fn initialize(
     let online_fallback = config.online_service_endpoint.as_str();
     let online_channel =
         connect_grpc_channel_lazy_from_app_config(app_config, &online_service, online_fallback)
-            .map_err(|e| anyhow::anyhow!("Online gRPC lazy channel: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "Online gRPC lazy channel: {}",
+                    e
+                ))
+            })?;
     let online_client = Arc::new(OnlineServiceClient::from_channel(online_channel));
 
     // 3. 创建 Gateway Router
@@ -54,7 +59,7 @@ pub async fn initialize(
         config.access_gateway_static_endpoint.clone(),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("GatewayRouter: {}", e))?;
+    .map_err(|e| flare_server_core::error::FlareError::system(format!("GatewayRouter: {}", e)))?;
 
     // 4. 创建 GatewayPushExecutor
     let gateway_push = Arc::new(GatewayPushExecutor::new(online_client, gateway_router));
@@ -75,13 +80,25 @@ pub async fn initialize(
         &mut dispatcher,
         config.push_online_topic.clone(),
         online_handler,
-    )?;
+    )
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "register push worker consumer {}: {err}",
+            config.push_online_topic
+        ))
+    })?;
 
     Dispatcher::register(
         &mut dispatcher,
         config.push_offline_topic.clone(),
         offline_handler,
-    )?;
+    )
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "register push worker consumer {}: {err}",
+            config.push_offline_topic
+        ))
+    })?;
 
     Ok(ApplicationContext {
         config,

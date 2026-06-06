@@ -3,9 +3,13 @@
 //! **架构落地**：消费 **TOPIC_MESSAGE_EVENTS**（统一事件流），
 //! 与 Orchestrator 单事件流对齐，处理 message.created 和 operation.* 事件。
 
-use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT;
+use flare_im_core::constants::topics::{
+    TOPIC_MESSAGE_MAIN_DLQ, TOPIC_MESSAGE_STORAGE_RETRY_5S, TOPIC_PUSH_ACKS,
+};
+use flare_im_core::metrics::MetricsEndpointConfig;
+use flare_server_core::error::Result;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -25,6 +29,9 @@ pub struct StorageWriterConfig {
     pub kafka_brokers: Vec<String>,
     pub kafka_client_id: String,
     pub kafka_options: HashMap<String, String>,
+    pub message_dlq_topic: String,
+    pub message_retry_topic: String,
+    pub message_retry_delay_ms: u64,
 
     // 批量消费配置
     pub max_poll_records: usize,
@@ -42,6 +49,7 @@ pub struct StorageWriterConfig {
     pub postgres_idle_timeout_seconds: u64,
     pub postgres_max_lifetime_seconds: u64,
     pub media_service_endpoint: Option<String>,
+    pub metrics: MetricsEndpointConfig,
 }
 
 impl StorageWriterConfig {
@@ -81,7 +89,10 @@ impl StorageWriterConfig {
             .or_else(|| service_config.consumer_group.clone())
             .unwrap_or_else(|| STORAGE_GROUP_DEFAULT.to_string());
 
-        let jetstream_ack_topic = env::var("STORAGE_JETSTREAM_ACK_SUBJECT").ok();
+        let jetstream_ack_topic = Some(
+            env::var("STORAGE_JETSTREAM_ACK_SUBJECT")
+                .unwrap_or_else(|_| TOPIC_PUSH_ACKS.to_string()),
+        );
 
         let jetstream_timeout_ms = env::var("STORAGE_JETSTREAM_TIMEOUT_MS")
             .ok()
@@ -126,12 +137,25 @@ impl StorageWriterConfig {
             .or_else(|| kafka_profile.and_then(|p| p.client_id.clone()))
             .unwrap_or_else(|| "flare-im-storage-writer".to_string());
         let kafka_options = kafka_profile.map(|p| p.options.clone()).unwrap_or_default();
+        let message_dlq_topic = env::var("STORAGE_MESSAGE_DLQ_TOPIC")
+            .ok()
+            .or_else(|| service_config.message_dlq_topic.clone())
+            .unwrap_or_else(|| TOPIC_MESSAGE_MAIN_DLQ.to_string());
+        let message_retry_topic = env::var("STORAGE_MESSAGE_RETRY_TOPIC")
+            .ok()
+            .or_else(|| service_config.message_retry_topic.clone())
+            .unwrap_or_else(|| TOPIC_MESSAGE_STORAGE_RETRY_5S.to_string());
+        let message_retry_delay_ms = env::var("STORAGE_MESSAGE_RETRY_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or(service_config.message_retry_delay_ms)
+            .unwrap_or(5000);
 
         // 批量消费配置
         let max_poll_records = env::var("STORAGE_MAX_POLL_RECORDS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100);
+            .unwrap_or(32);
 
         let fetch_min_bytes = env::var("STORAGE_FETCH_MIN_BYTES")
             .ok()
@@ -141,7 +165,7 @@ impl StorageWriterConfig {
         let fetch_max_wait_ms = env::var("STORAGE_FETCH_MAX_WAIT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(100);
+            .unwrap_or(5);
 
         // 解析 Redis 配置引用（WAL 存储）
         let redis_url = env::var("STORAGE_REDIS_URL").ok().or_else(|| {
@@ -206,6 +230,30 @@ impl StorageWriterConfig {
 
         let media_service_endpoint = env::var("MEDIA_SERVICE_ENDPOINT").ok();
 
+        let metrics_enabled = parse_bool_env("STORAGE_WRITER_METRICS_ENABLED")
+            .or_else(|| parse_bool_env("STORAGE_METRICS_ENABLED"))
+            .or(service_config.metrics_enabled)
+            .unwrap_or(true);
+        let metrics_address = env::var("STORAGE_WRITER_METRICS_ADDRESS")
+            .ok()
+            .or_else(|| env::var("STORAGE_METRICS_ADDRESS").ok())
+            .or_else(|| service_config.metrics_address.clone())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let metrics_port = env::var("STORAGE_WRITER_METRICS_PORT")
+            .ok()
+            .or_else(|| env::var("STORAGE_METRICS_PORT").ok())
+            .and_then(|value| value.parse::<u16>().ok())
+            .or(service_config.metrics_port)
+            .unwrap_or(19182);
+        let metrics_path = env::var("STORAGE_WRITER_METRICS_PATH")
+            .ok()
+            .or_else(|| env::var("STORAGE_METRICS_PATH").ok())
+            .or_else(|| service_config.metrics_path.clone())
+            .unwrap_or_else(|| "/metrics".to_string());
+        let mut metrics =
+            MetricsEndpointConfig::new(metrics_address, metrics_port).with_path(metrics_path);
+        metrics.enabled = metrics_enabled;
+
         Ok(Self {
             mq_backend,
             jetstream_url,
@@ -218,6 +266,9 @@ impl StorageWriterConfig {
             kafka_brokers,
             kafka_client_id,
             kafka_options,
+            message_dlq_topic,
+            message_retry_topic,
+            message_retry_delay_ms,
             max_poll_records,
             fetch_min_bytes,
             fetch_max_wait_ms,
@@ -232,8 +283,19 @@ impl StorageWriterConfig {
             postgres_idle_timeout_seconds,
             postgres_max_lifetime_seconds,
             media_service_endpoint,
+            metrics,
         })
     }
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Some(true),
+            "0" | "false" | "off" | "no" => Some(false),
+            _ => None,
+        })
 }
 
 // 实现 NatsConsumerConfig trait，使 StorageWriterConfig 可以使用通用的 JetStream 消费者构建器

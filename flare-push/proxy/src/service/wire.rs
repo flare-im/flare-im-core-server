@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use crate::application::{PushProxyCommandHandler, PushTaskStatusQuery};
 use crate::config::PushProxyConfig;

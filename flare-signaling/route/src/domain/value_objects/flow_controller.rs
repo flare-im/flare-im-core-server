@@ -2,7 +2,7 @@
 //!
 //! 负责会话QPS、群聊fanout、系统反压检查
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -12,21 +12,21 @@ use crate::domain::service::RouteContext;
 /// 监控客户端trait，用于查询系统反压信号
 pub trait MonitoringClient: Send + Sync {
     /// 获取JetStream Lag值
-    async fn get_jetstream_lag(&self) -> anyhow::Result<u64>;
+    async fn get_jetstream_lag(&self) -> flare_server_core::error::Result<u64>;
 
     /// 获取Storage写入延迟（P99）
-    async fn get_storage_latency(&self) -> anyhow::Result<f64>;
+    async fn get_storage_latency(&self) -> flare_server_core::error::Result<f64>;
 }
 
 /// Noop 监控客户端实现（用于不需要监控的场景）
 pub struct NoopMonitoringClient;
 
 impl MonitoringClient for NoopMonitoringClient {
-    async fn get_jetstream_lag(&self) -> anyhow::Result<u64> {
+    async fn get_jetstream_lag(&self) -> flare_server_core::error::Result<u64> {
         Ok(0)
     }
 
-    async fn get_storage_latency(&self) -> anyhow::Result<f64> {
+    async fn get_storage_latency(&self) -> flare_server_core::error::Result<f64> {
         Ok(0.0)
     }
 }
@@ -67,6 +67,12 @@ pub struct FlowController<MC> {
     hot_sessions: Arc<RwLock<HashMap<String, HotSessionInfo>>>,
 }
 
+impl<MC: MonitoringClient> Default for FlowController<MC> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<MC: MonitoringClient> FlowController<MC> {
     pub fn new() -> Self {
         Self {
@@ -95,7 +101,9 @@ impl<MC: MonitoringClient> FlowController<MC> {
         if let Some(client) = &self.redis_client {
             Ok(ConnectionManager::new(client.as_ref().clone()).await?)
         } else {
-            Err(anyhow::anyhow!("Redis client not configured"))
+            Err(flare_server_core::error::FlareError::system(
+                "Redis client not configured".to_string(),
+            ))
         }
     }
 
@@ -172,7 +180,7 @@ impl<MC: MonitoringClient> FlowController<MC> {
     /// 4. 热点会话降级
     pub async fn check(&self, ctx: &RouteContext) -> Result<()> {
         // 1. 检查会话QPS（Redis INCR + EXPIRE）
-        let conversation_id_str = ctx.conversation_id.as_ref().map(|c| c.as_str());
+        let conversation_id_str = ctx.conversation_id.as_deref();
         let session_qps = if let Some(conversation_id) = conversation_id_str {
             let qps = self.get_session_qps(conversation_id).await?;
             // 检查是否为热点会话
@@ -189,14 +197,11 @@ impl<MC: MonitoringClient> FlowController<MC> {
             0
         };
 
-        if ctx.conversation_id.is_some() {
-            if session_qps > self.session_qps_limit {
-                return Err(anyhow::anyhow!(
-                    "Session QPS limit exceeded: {} > {}",
-                    session_qps,
-                    self.session_qps_limit
-                ));
-            }
+        if ctx.conversation_id.is_some() && session_qps > self.session_qps_limit {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "Session QPS limit exceeded: {} > {}",
+                session_qps, self.session_qps_limit
+            )));
         }
 
         // 2. 检查群聊fanout（大群消息批次限制）
@@ -208,16 +213,19 @@ impl<MC: MonitoringClient> FlowController<MC> {
             // 检查JetStream Lag
             let jetstream_lag = self.get_jetstream_lag().await?;
             if jetstream_lag > 10000 {
-                return Err(anyhow::anyhow!("JetStream lag too high: {}", jetstream_lag));
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "JetStream lag too high: {}",
+                    jetstream_lag
+                )));
             }
 
             // 检查Storage写入延迟
             let storage_latency = self.get_storage_latency().await?;
             if storage_latency > 500.0 {
-                return Err(anyhow::anyhow!(
+                return Err(flare_server_core::error::FlareError::system(format!(
                     "Storage latency too high: {}ms",
                     storage_latency
-                ));
+                )));
             }
         }
 

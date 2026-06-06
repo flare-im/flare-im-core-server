@@ -2,61 +2,39 @@
 
 use std::collections::HashMap;
 
-/// 阅后即焚 FSM 状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum BurnStatus {
-    None = 0,
-    Init = 1,
-    Read = 2,
-    BurnPending = 3,
-    Burned = 4,
-    HardDeleted = 5,
-}
-
-impl BurnStatus {
-    pub fn from_i32(value: i32) -> Self {
-        match value {
-            1 => Self::Init,
-            2 => Self::Read,
-            3 => Self::BurnPending,
-            4 => Self::Burned,
-            5 => Self::HardDeleted,
-            _ => Self::None,
-        }
-    }
-
-    pub fn as_i32(self) -> i32 {
-        self as i32
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Burned | Self::HardDeleted)
-    }
-}
+use flare_proto::common::{
+    ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionPolicy,
+    MessageRetentionState, OfflinePushInfo, RetentionMode, RetentionTrigger,
+};
+use prost_types::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BurnTransitionError {
-    InvalidAfterReadSeconds,
-    BurnDisabled,
-    AlreadyTerminal(BurnStatus),
-    BurnNotDue { burn_at: i64, now: i64 },
+pub enum RetentionTransitionError {
+    InvalidExpireAfterSeconds,
+    RetentionDisabled,
+    AlreadyTerminal(MessageRetentionLifecycle),
+    RetentionNotDue { expire_at: i64, now: i64 },
 }
 
-impl std::fmt::Display for BurnTransitionError {
+impl std::fmt::Display for RetentionTransitionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidAfterReadSeconds => write!(f, "burn_after_read_seconds must be positive"),
-            Self::BurnDisabled => write!(f, "burn is not enabled for this message"),
-            Self::AlreadyTerminal(status) => write!(f, "burn state is terminal: {status:?}"),
-            Self::BurnNotDue { burn_at, now } => {
-                write!(f, "message burn is not due: burn_at={burn_at}, now={now}")
+            Self::InvalidExpireAfterSeconds => write!(f, "expire_after_seconds must be positive"),
+            Self::RetentionDisabled => write!(f, "retention is not enabled for this message"),
+            Self::AlreadyTerminal(lifecycle) => {
+                write!(f, "retention lifecycle is terminal: {lifecycle:?}")
+            }
+            Self::RetentionNotDue { expire_at, now } => {
+                write!(
+                    f,
+                    "message retention is not due: expire_at={expire_at}, now={now}"
+                )
             }
         }
     }
 }
 
-impl std::error::Error for BurnTransitionError {}
+impl std::error::Error for RetentionTransitionError {}
 
 /// 消息领域模型（与 common/message.proto Message 一一对应）
 #[derive(Debug, Clone, Default)]
@@ -66,23 +44,20 @@ pub struct Message {
     pub client_msg_id: String,
     pub sender_id: String,
     pub source: i32,
-    pub seq: u64,
-    pub timestamp: Option<prost_types::Timestamp>,
+    pub conversation_seq: u64,
+    pub timestamp: Option<Timestamp>,
     pub conversation_type: i32,
     pub message_type: i32,
+    pub message_seq: Option<u64>,
     /// 会话频道 ID：单聊=对方 user_id，群聊=群 ID，频道/话题=对应 ID
     pub channel_id: String,
     pub sender_name: String,
     pub sender_avatar: String,
-    pub content: Vec<u8>,
+    pub content: Option<MessageContent>,
     pub status: i32,
-    pub burn_enabled: bool,
-    pub burn_after_read_seconds: Option<i64>,
-    pub burn_status: i32,
-    pub first_read_at: Option<i64>,
-    pub burn_at: Option<i64>,
-    pub burned_at: Option<i64>,
-    pub offline_push_info: Option<flare_proto::common::OfflinePushInfo>,
+    pub retention_policy: Option<MessageRetentionPolicy>,
+    pub retention_state: Option<MessageRetentionState>,
+    pub offline_push_info: Option<OfflinePushInfo>,
     pub extra: HashMap<String, String>,
     pub extensions: HashMap<String, Vec<u8>>,
 }
@@ -97,125 +72,221 @@ impl Message {
         }
     }
 
-    pub fn burn_status(&self) -> BurnStatus {
-        BurnStatus::from_i32(self.burn_status)
+    pub fn retention_lifecycle(&self) -> MessageRetentionLifecycle {
+        self.retention_state
+            .as_ref()
+            .and_then(|state| MessageRetentionLifecycle::try_from(state.lifecycle).ok())
+            .unwrap_or(MessageRetentionLifecycle::None)
     }
 
-    pub fn enable_burn(&mut self, after_read_seconds: i64) -> Result<(), BurnTransitionError> {
-        if after_read_seconds <= 0 {
-            return Err(BurnTransitionError::InvalidAfterReadSeconds);
+    pub fn content_visibility(&self) -> ContentVisibility {
+        self.retention_state
+            .as_ref()
+            .and_then(|state| ContentVisibility::try_from(state.content_visibility).ok())
+            .unwrap_or(ContentVisibility::Available)
+    }
+
+    pub fn enable_retention_after_read(
+        &mut self,
+        expire_after_seconds: i64,
+        visibility_after_expiration: ContentVisibility,
+    ) -> Result<(), RetentionTransitionError> {
+        if expire_after_seconds <= 0 {
+            return Err(RetentionTransitionError::InvalidExpireAfterSeconds);
         }
-        if self.burn_status().is_terminal() {
-            return Err(BurnTransitionError::AlreadyTerminal(self.burn_status()));
+        if self.retention_lifecycle().is_terminal() {
+            return Err(RetentionTransitionError::AlreadyTerminal(
+                self.retention_lifecycle(),
+            ));
         }
-        self.burn_enabled = true;
-        self.burn_after_read_seconds = Some(after_read_seconds);
-        self.burn_status = BurnStatus::Init.as_i32();
-        self.first_read_at = None;
-        self.burn_at = None;
-        self.burned_at = None;
+        self.retention_policy = Some(MessageRetentionPolicy {
+            mode: RetentionMode::AfterRead as i32,
+            trigger: RetentionTrigger::AfterRead as i32,
+            expire_after_seconds: Some(expire_after_seconds),
+            expire_at: None,
+            visibility_after_expiration: visibility_after_expiration as i32,
+            attributes: HashMap::new(),
+        });
+        self.retention_state = Some(MessageRetentionState {
+            lifecycle: MessageRetentionLifecycle::Active as i32,
+            content_visibility: ContentVisibility::Available as i32,
+            first_triggered_at: None,
+            expire_at: None,
+            expired_at: None,
+            purged_at: None,
+            triggered_by_user_id: None,
+        });
         Ok(())
     }
 
-    /// Marks the first real read and schedules burn with server time.
+    /// Marks the first real read and schedules retention expiration with server time.
     /// Repeated ReadAck is idempotent and returns `Ok(false)`.
-    pub fn mark_read_for_burn(
+    pub fn mark_read_for_retention(
         &mut self,
         reader_id: &str,
-        now: i64,
-    ) -> Result<bool, BurnTransitionError> {
-        let _ = reader_id; // per-user burn state is reserved for the next storage model.
-        if !self.burn_enabled {
+        now_seconds: i64,
+    ) -> Result<bool, RetentionTransitionError> {
+        if !self.retention_enabled() {
             return Ok(false);
         }
-        match self.burn_status() {
-            BurnStatus::None => {
-                self.burn_status = BurnStatus::Init.as_i32();
+        match self.retention_lifecycle() {
+            MessageRetentionLifecycle::None => {
+                self.ensure_retention_state().lifecycle = MessageRetentionLifecycle::Active as i32;
             }
-            BurnStatus::BurnPending | BurnStatus::Burned | BurnStatus::HardDeleted => {
+            MessageRetentionLifecycle::Scheduled
+            | MessageRetentionLifecycle::Expired
+            | MessageRetentionLifecycle::Purged => return Ok(false),
+            MessageRetentionLifecycle::Active | MessageRetentionLifecycle::Unspecified => {}
+        }
+        let state = self.ensure_retention_state();
+        state.first_triggered_at = Some(now_seconds);
+        state.triggered_by_user_id = Some(reader_id.to_string());
+        self.schedule_retention_expiration(now_seconds)
+    }
+
+    pub fn schedule_retention_expiration(
+        &mut self,
+        now_seconds: i64,
+    ) -> Result<bool, RetentionTransitionError> {
+        let policy = self
+            .retention_policy
+            .as_ref()
+            .ok_or(RetentionTransitionError::RetentionDisabled)?;
+        let after = policy
+            .expire_after_seconds
+            .filter(|seconds| *seconds > 0)
+            .ok_or(RetentionTransitionError::InvalidExpireAfterSeconds)?;
+        if self.retention_lifecycle().is_terminal() {
+            return Ok(false);
+        }
+        if self
+            .retention_state
+            .as_ref()
+            .and_then(|state| state.expire_at.as_ref())
+            .is_some()
+        {
+            self.ensure_retention_state().lifecycle = MessageRetentionLifecycle::Scheduled as i32;
+            return Ok(false);
+        }
+        let expire_at = now_seconds.saturating_add(after);
+        let state = self.ensure_retention_state();
+        state.lifecycle = MessageRetentionLifecycle::Scheduled as i32;
+        state.expire_at = Some(expire_at);
+        Ok(true)
+    }
+
+    pub fn expire_retained_content(
+        &mut self,
+        now_seconds: i64,
+    ) -> Result<bool, RetentionTransitionError> {
+        if !self.retention_enabled() {
+            return Err(RetentionTransitionError::RetentionDisabled);
+        }
+        match self.retention_lifecycle() {
+            MessageRetentionLifecycle::Expired | MessageRetentionLifecycle::Purged => {
                 return Ok(false);
             }
-            BurnStatus::Read => {
-                return self.schedule_burn(now);
-            }
-            BurnStatus::Init => {}
+            MessageRetentionLifecycle::Scheduled => {}
+            lifecycle => return Err(RetentionTransitionError::AlreadyTerminal(lifecycle)),
         }
-        self.first_read_at = Some(now);
-        self.burn_status = BurnStatus::Read.as_i32();
-        self.schedule_burn(now)
-    }
-
-    pub fn schedule_burn(&mut self, now: i64) -> Result<bool, BurnTransitionError> {
-        if !self.burn_enabled {
-            return Err(BurnTransitionError::BurnDisabled);
-        }
-        if self.burn_status().is_terminal() {
-            return Ok(false);
-        }
-        if self.burn_at.is_some() {
-            self.burn_status = BurnStatus::BurnPending.as_i32();
-            return Ok(false);
-        }
-        let after = self
-            .burn_after_read_seconds
-            .filter(|seconds| *seconds > 0)
-            .ok_or(BurnTransitionError::InvalidAfterReadSeconds)?;
-        if self.first_read_at.is_none() {
-            self.first_read_at = Some(now);
-        }
-        self.burn_at = Some(now.saturating_add(after));
-        self.burn_status = BurnStatus::BurnPending.as_i32();
-        Ok(true)
-    }
-
-    pub fn burn(&mut self, now: i64) -> Result<bool, BurnTransitionError> {
-        if !self.burn_enabled {
-            return Err(BurnTransitionError::BurnDisabled);
-        }
-        match self.burn_status() {
-            BurnStatus::Burned | BurnStatus::HardDeleted => return Ok(false),
-            BurnStatus::BurnPending => {}
-            status => return Err(BurnTransitionError::AlreadyTerminal(status)),
-        }
-        if let Some(burn_at) = self.burn_at
-            && now < burn_at
+        if let Some(expire_at) = self
+            .retention_state
+            .as_ref()
+            .and_then(|state| state.expire_at.as_ref())
+            .copied()
+            && now_seconds < expire_at
         {
-            return Err(BurnTransitionError::BurnNotDue { burn_at, now });
+            return Err(RetentionTransitionError::RetentionNotDue {
+                expire_at,
+                now: now_seconds,
+            });
         }
-        self.burned_at = Some(now);
-        self.burn_status = BurnStatus::Burned.as_i32();
-        self.content.clear();
+        let visibility_after_expiration = self
+            .retention_policy
+            .as_ref()
+            .and_then(|policy| ContentVisibility::try_from(policy.visibility_after_expiration).ok())
+            .unwrap_or(ContentVisibility::Redacted);
+        let state = self.ensure_retention_state();
+        state.lifecycle = MessageRetentionLifecycle::Expired as i32;
+        state.content_visibility = visibility_after_expiration as i32;
+        state.expired_at = Some(now_seconds);
+        if matches!(
+            visibility_after_expiration,
+            ContentVisibility::Hidden | ContentVisibility::Redacted | ContentVisibility::Purged
+        ) {
+            self.content = None;
+        }
         Ok(true)
     }
 
-    pub fn hard_delete(&mut self, now: i64) -> Result<bool, BurnTransitionError> {
-        let _ = now;
-        if !self.burn_enabled {
-            return Err(BurnTransitionError::BurnDisabled);
+    pub fn purge_retained_content(
+        &mut self,
+        now_seconds: i64,
+    ) -> Result<bool, RetentionTransitionError> {
+        if !self.retention_enabled() {
+            return Err(RetentionTransitionError::RetentionDisabled);
         }
-        if self.burn_status() == BurnStatus::HardDeleted {
+        if self.retention_lifecycle() == MessageRetentionLifecycle::Purged {
             return Ok(false);
         }
-        self.burn_status = BurnStatus::HardDeleted.as_i32();
-        self.content.clear();
+        let state = self.ensure_retention_state();
+        state.lifecycle = MessageRetentionLifecycle::Purged as i32;
+        state.content_visibility = ContentVisibility::Purged as i32;
+        state.purged_at = Some(now_seconds);
+        self.content = None;
         self.extensions.clear();
         Ok(true)
     }
 
     pub fn can_read(&self) -> bool {
-        !self.burn_status().is_terminal()
+        !matches!(
+            self.content_visibility(),
+            ContentVisibility::Hidden | ContentVisibility::Redacted | ContentVisibility::Purged
+        )
     }
 
     pub fn can_edit(&self) -> bool {
-        !self.burn_status().is_terminal()
+        !self.retention_lifecycle().is_terminal()
     }
 
     pub fn can_forward(&self) -> bool {
-        !self.burn_status().is_terminal()
+        self.can_read()
     }
 
     pub fn can_quote(&self) -> bool {
-        !self.burn_status().is_terminal()
+        self.can_read()
+    }
+
+    fn retention_enabled(&self) -> bool {
+        self.retention_policy
+            .as_ref()
+            .and_then(|policy| RetentionMode::try_from(policy.mode).ok())
+            .is_some_and(|mode| mode != RetentionMode::None)
+    }
+
+    fn ensure_retention_state(&mut self) -> &mut MessageRetentionState {
+        self.retention_state.get_or_insert(MessageRetentionState {
+            lifecycle: MessageRetentionLifecycle::None as i32,
+            content_visibility: ContentVisibility::Available as i32,
+            first_triggered_at: None,
+            expire_at: None,
+            expired_at: None,
+            purged_at: None,
+            triggered_by_user_id: None,
+        })
+    }
+}
+
+trait RetentionLifecycleExt {
+    fn is_terminal(&self) -> bool;
+}
+
+impl RetentionLifecycleExt for MessageRetentionLifecycle {
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            MessageRetentionLifecycle::Expired | MessageRetentionLifecycle::Purged
+        )
     }
 }
 
@@ -231,90 +302,94 @@ pub struct Attachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flare_proto::common::{TextContent, message_content::Content};
 
     fn plain_message() -> Message {
         Message {
             server_id: "m1".to_string(),
-            content: b"hello".to_vec(),
+            content: Some(MessageContent {
+                content: Some(Content::Text(TextContent {
+                    text: "hello".to_string(),
+                    mentions: Vec::new(),
+                })),
+            }),
             ..Default::default()
         }
     }
 
     #[test]
-    fn ordinary_message_is_not_affected_by_burn_ack() {
+    fn ordinary_message_is_not_affected_by_retention_ack() {
         let mut message = plain_message();
 
-        assert!(!message.mark_read_for_burn("u1", 100).unwrap());
-        assert_eq!(message.burn_status(), BurnStatus::None);
-        assert_eq!(message.content, b"hello");
+        assert!(!message.mark_read_for_retention("u1", 100).unwrap());
+        assert_eq!(
+            message.retention_lifecycle(),
+            MessageRetentionLifecycle::None
+        );
+        assert!(message.content.is_some());
     }
 
     #[test]
-    fn enable_burn_sets_initial_state() {
+    fn enable_retention_sets_active_policy() {
         let mut message = plain_message();
 
-        message.enable_burn(30).unwrap();
+        message
+            .enable_retention_after_read(30, ContentVisibility::Redacted)
+            .unwrap();
 
-        assert!(message.burn_enabled);
-        assert_eq!(message.burn_after_read_seconds, Some(30));
-        assert_eq!(message.burn_status(), BurnStatus::Init);
-        assert_eq!(message.burn_at, None);
+        let policy = message.retention_policy.as_ref().unwrap();
+        assert_eq!(policy.mode, RetentionMode::AfterRead as i32);
+        assert_eq!(policy.expire_after_seconds, Some(30));
+        assert_eq!(
+            message.retention_lifecycle(),
+            MessageRetentionLifecycle::Active
+        );
     }
 
     #[test]
-    fn first_read_schedules_server_authoritative_burn_at() {
+    fn first_read_schedules_retention_expiration() {
         let mut message = plain_message();
-        message.enable_burn(30).unwrap();
+        message
+            .enable_retention_after_read(30, ContentVisibility::Redacted)
+            .unwrap();
 
-        assert!(message.mark_read_for_burn("u2", 1000).unwrap());
+        assert!(message.mark_read_for_retention("u1", 100).unwrap());
 
-        assert_eq!(message.first_read_at, Some(1000));
-        assert_eq!(message.burn_at, Some(1030));
-        assert_eq!(message.burn_status(), BurnStatus::BurnPending);
+        let state = message.retention_state.unwrap();
+        assert_eq!(state.lifecycle, MessageRetentionLifecycle::Scheduled as i32);
+        assert_eq!(state.expire_at, Some(130));
+        assert_eq!(state.triggered_by_user_id.as_deref(), Some("u1"));
     }
 
     #[test]
     fn repeated_read_ack_is_idempotent() {
         let mut message = plain_message();
-        message.enable_burn(30).unwrap();
+        message
+            .enable_retention_after_read(30, ContentVisibility::Redacted)
+            .unwrap();
 
-        assert!(message.mark_read_for_burn("u2", 1000).unwrap());
-        assert!(!message.mark_read_for_burn("u2", 1010).unwrap());
+        assert!(message.mark_read_for_retention("u1", 100).unwrap());
+        assert!(!message.mark_read_for_retention("u1", 101).unwrap());
 
-        assert_eq!(message.first_read_at, Some(1000));
-        assert_eq!(message.burn_at, Some(1030));
-        assert_eq!(message.burn_status(), BurnStatus::BurnPending);
+        let state = message.retention_state.unwrap();
+        assert_eq!(state.expire_at, Some(130));
     }
 
     #[test]
-    fn burn_due_message_hides_content_and_blocks_mutations() {
+    fn expiration_redacts_content() {
         let mut message = plain_message();
-        message.enable_burn(30).unwrap();
-        message.mark_read_for_burn("u2", 1000).unwrap();
+        message
+            .enable_retention_after_read(30, ContentVisibility::Redacted)
+            .unwrap();
+        message.mark_read_for_retention("u1", 100).unwrap();
 
-        assert!(message.burn(1030).unwrap());
+        assert!(message.expire_retained_content(131).unwrap());
 
-        assert_eq!(message.burn_status(), BurnStatus::Burned);
-        assert_eq!(message.burned_at, Some(1030));
-        assert!(message.content.is_empty());
+        assert_eq!(
+            message.retention_lifecycle(),
+            MessageRetentionLifecycle::Expired
+        );
+        assert!(message.content.is_none());
         assert!(!message.can_read());
-        assert!(!message.can_edit());
-        assert!(!message.can_forward());
-        assert!(!message.can_quote());
-    }
-
-    #[test]
-    fn burn_before_due_is_rejected() {
-        let mut message = plain_message();
-        message.enable_burn(30).unwrap();
-        message.mark_read_for_burn("u2", 1000).unwrap();
-
-        assert!(matches!(
-            message.burn(1029),
-            Err(BurnTransitionError::BurnNotDue {
-                burn_at: 1030,
-                now: 1029
-            })
-        ));
     }
 }

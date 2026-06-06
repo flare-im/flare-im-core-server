@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// 配置中心客户端 trait，用于查询租户偏好机房（Rust 2024 原生 async，禁止 `dyn`）
 pub trait ConfigClient: Send + Sync {
     /// 获取租户偏好机房
-    async fn get_tenant_preferred_az(&self, tenant_id: &str) -> anyhow::Result<Option<String>>;
+    async fn get_tenant_preferred_az(&self, tenant_id: &str) -> flare_server_core::error::Result<Option<String>>;
 }
 
 /// 无配置中心时的占位实现
@@ -16,7 +16,7 @@ pub trait ConfigClient: Send + Sync {
 pub struct NoopConfigClient;
 
 impl ConfigClient for NoopConfigClient {
-    async fn get_tenant_preferred_az(&self, _tenant_id: &str) -> anyhow::Result<Option<String>> {
+    async fn get_tenant_preferred_az(&self, _tenant_id: &str) -> flare_server_core::error::Result<Option<String>> {
         Ok(None)
     }
 }

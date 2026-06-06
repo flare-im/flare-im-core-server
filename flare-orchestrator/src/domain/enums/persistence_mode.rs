@@ -5,11 +5,12 @@
 /// 持久化模式
 ///
 /// 用于控制消息和事件的持久化行为
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PersistenceMode {
     /// 自动模式：根据消息/事件类型自动判断
     /// - 临时消息/事件（TYPING、SYSTEM_EVENT、PRESENCE 等）：仅推送
     /// - 普通消息/事件：持久化 + 推送
+    #[default]
     Auto,
 
     /// 强制持久化：无论消息/事件类型如何，都进行持久化 + 推送
@@ -19,12 +20,6 @@ pub enum PersistenceMode {
     /// 强制仅推送：无论消息/事件类型如何，都仅推送不持久化
     /// 用于临时消息、实时状态等
     ForcePushOnly,
-}
-
-impl Default for PersistenceMode {
-    fn default() -> Self {
-        PersistenceMode::Auto
-    }
 }
 
 impl PersistenceMode {

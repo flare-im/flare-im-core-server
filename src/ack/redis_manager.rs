@@ -312,10 +312,19 @@ mod tests {
     use super::*;
     use tokio;
 
+    fn redis_test_url() -> Option<String> {
+        std::env::var("FLARE_REDIS_TEST_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
     #[tokio::test]
     async fn test_ack_status_management() -> RedisResult<()> {
-        // 注意：这需要一个运行中的Redis实例
-        let manager = RedisAckManager::new("redis://127.0.0.1/", 3600)?;
+        let Some(redis_url) = redis_test_url() else {
+            eprintln!("skip Redis integration test: set FLARE_REDIS_TEST_URL to enable");
+            return Ok(());
+        };
+        let manager = RedisAckManager::new(&redis_url, 3600)?;
 
         let ack_info = AckStatusInfo {
             message_id: "test_msg_1".to_string(),

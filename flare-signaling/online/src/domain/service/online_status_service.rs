@@ -190,7 +190,7 @@ where
         let gateway_id = request
             .metadata
             .get("gateway_id")
-            .map(|s| s.clone())
+            .cloned()
             .unwrap_or_else(|| self.gateway_id.clone());
 
         // 提取设备优先级（默认为普通优先级=2）
@@ -353,7 +353,7 @@ where
                 session
                     .session
                     .refresh_heartbeat(quality_opt)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                    .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
             }
         }
 
@@ -437,47 +437,56 @@ where
 pub struct NoopConversationRepository;
 
 impl ConversationRepository for NoopConversationRepository {
-    async fn save_connection(&self, _connection: &Connection) -> anyhow::Result<()> {
+    async fn save_connection(
+        &self,
+        _connection: &Connection,
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
     async fn remove_connection(
         &self,
         _conversation_id: &ConnectionId,
         _user_id: &UserId,
-    ) -> anyhow::Result<()> {
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
     async fn touch_connection(
         &self,
         _conversation_id: &ConnectionId,
         _user_id: &UserId,
-    ) -> anyhow::Result<()> {
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
     async fn fetch_statuses(
         &self,
         _user_ids: &[String],
-    ) -> anyhow::Result<HashMap<String, OnlineStatusRecord>> {
+    ) -> flare_server_core::error::Result<HashMap<String, OnlineStatusRecord>> {
         Ok(HashMap::new())
     }
-    async fn get_user_connections(&self, _user_id: &UserId) -> anyhow::Result<Vec<Connection>> {
+    async fn get_user_connections(
+        &self,
+        _user_id: &UserId,
+    ) -> flare_server_core::error::Result<Vec<Connection>> {
         Ok(vec![])
     }
     async fn remove_user_connections(
         &self,
         _user_id: &UserId,
         _device_ids: Option<&[DeviceId]>,
-    ) -> anyhow::Result<()> {
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
     async fn get_connection_by_device(
         &self,
         _user_id: &UserId,
         _device_id: &DeviceId,
-    ) -> anyhow::Result<Option<Connection>> {
+    ) -> flare_server_core::error::Result<Option<Connection>> {
         Ok(None)
     }
-    async fn list_user_connections(&self, _ctx: &Context) -> anyhow::Result<Vec<Connection>> {
+    async fn list_user_connections(
+        &self,
+        _ctx: &Context,
+    ) -> flare_server_core::error::Result<Vec<Connection>> {
         Ok(vec![])
     }
 }

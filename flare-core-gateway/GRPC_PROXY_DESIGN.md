@@ -8,7 +8,11 @@
 - `Ctx`、认证身份、租户、trace、request_id 透传。
 - 下游服务发现、channel 生命周期、超时、错误映射。
 - HTTP REST、管理面 API、机器人/后台 API 的统一出口。
-- 后续可选的 gRPC transparent proxy / BFF orchestration 能力。
+- 后续可选的 gRPC facade / BFF orchestration 能力。
+
+Gateway 保持轻量：gRPC 代理层只做 typed client、metadata、错误和策略适配，不承载 token 生命周期，也不实现 IM 领域规则。
+
+接入策略上，可信内网的业务系统高频调用推荐直接使用 typed gRPC；Gateway HTTP facade 面向外部三方、后台和低频任务。业务规则主链扩展推荐 gRPC Hook，不建议用 HTTP/Webhook 承载高 QPS 权限校验。
 
 ## 2. 分层设计
 
@@ -74,6 +78,23 @@ Generic Proxy 适合：
 - 灰度新 proto 前的内部验证。
 - 运维工具访问只读 gRPC。
 
+### 3.3 Third-party gRPC Facade
+
+外部三方默认使用 HTTP OpenAPI。确实需要 gRPC 时，应新增版本化 facade，而不是直接暴露内部 service：
+
+| facade | 目标用户 | 能力 |
+|--------|----------|------|
+| `CoreGatewayPublicService` | 可信业务服务、机器人、BFF | 发消息、撤回、会话查询、媒体查询、在线查询 |
+| `CoreGatewayAdminService` | 管理后台、运维工具 | 消息查询/导出、设备管理、能力管理、审计查询 |
+
+Facade 规则：
+
+- 使用公开 proto 包名，例如 `flare.core_gateway.v1`。
+- 只暴露可长期承诺的字段和错误，不直接透出所有内部 proto。
+- metadata 与 HTTP header 保持同名语义：`x-tenant-id`、`x-user-id`、`x-actor-id`、`x-request-id`、`x-trace-id`。
+- Admin facade 必须有 service token/mTLS、allowlist、审计和限流。
+- 不允许通过 facade 绕过 orchestrator、storage writer 或 capability 校验。
+
 ## 4. Channel 与服务发现
 
 生产建议支持两种 endpoint：
@@ -114,6 +135,8 @@ tonic client clone 成本低，可在每个请求 clone client，减少 mutex �
 | `x-user-id` | 认证中间件注入 |
 | `x-device-id` | 设备 |
 | `x-app-id` | 开放平台应用 |
+| `x-actor-id` | 管理或代操作主体 |
+| `x-audit-reason` | 管理写操作原因 |
 
 出站 gRPC metadata 必须包含：
 
@@ -123,6 +146,8 @@ tonic client clone 成本低，可在每个请求 clone client，减少 mutex �
 | `x-request-id` | 幂等和日志关联 |
 | `x-tenant-id` | 多租户隔离 |
 | `x-user-id` | 操作用户 |
+| `x-actor-id` | 管理或代操作主体 |
+| `x-audit-reason` | 审计原因 |
 
 对于管理面代操作，应增加 `x-actor-id`，区分实际管理员与被操作用户。
 
@@ -148,7 +173,7 @@ gRPC 错误映射推荐：
 原则：
 
 - 下游业务拒绝不能统一变成 `502`。
-- `pre_send` 被 Social 拒绝应透出明确业务 reason，例如 `SOCIAL_PRESEND_DENIED`。
+- `pre_send` 被业务系统拒绝应透出明确业务 reason，例如 `BUSINESS_PRESEND_DENIED`。
 - 错误响应必须带 `track`，对应 trace 或 request id。
 
 ## 7. 超时、重试、幂等
@@ -188,7 +213,7 @@ HTTP `POST /api/v1/messages/send` 到 gRPC `SendMessage` 的转换：
 - SDK 仍使用 protobuf `MessageContent` 编码。
 - HTTP API 可保留 JSON 透明代理能力，但应在 `extra.content_format = json` 或版本字段中标识。
 - 服务端校验 `conversation_type`、`channel_id`，单聊必须有对端 ID。
-- 发消息前会触发 Orchestrator `pre_send` Hook，包括 Social 权限校验。
+- 发消息前会触发 Orchestrator `pre_send` Hook，包括业务系统权限校验。
 
 ## 9. Conversation / Sync / Capability 代理路线
 
@@ -199,6 +224,18 @@ HTTP `POST /api/v1/messages/send` 到 gRPC `SendMessage` 的转换：
 3. `SyncService`：暴露管理/测试用同步入口，客户端仍优先 SDK。
 4. `CapabilityService`：能力列表、授权管理、Dispatch。
 5. `ConversationManageService`：继续补齐 update/read/force sync 等管理接口，必须强权限和审计。
+
+## 9.1 Admin API 与 gRPC 对齐路线
+
+Admin API 必须先以 typed HTTP proxy 落地，再按需要暴露 gRPC facade。映射关系见 [`ADMIN_AND_THIRD_PARTY_API.md`](./ADMIN_AND_THIRD_PARTY_API.md)。
+
+| Admin 能力 | HTTP 前缀 | gRPC facade | 下游 |
+|------------|-----------|-------------|------|
+| 消息查询/导出 | `/api/v1/admin/messages` | `CoreGatewayAdminService.QueryMessages/ExportMessages` | `StorageReaderService` |
+| 会话管理 | `/api/v1/admin/conversations` | `CoreGatewayAdminService.GetConversationDetail/ManageParticipants` | `ConversationReadService` / `ConversationManageService` |
+| 媒体管理 | `/api/v1/admin/media` | `CoreGatewayAdminService.GetFileInfo/DeleteFile` | `MediaService` |
+| 在线设备 | `/api/v1/admin/presence` | `CoreGatewayAdminService.ListUserDevices/KickDevice` | `OnlineService` |
+| 能力插件 | `/api/v1/admin/capabilities` | `CoreGatewayAdminService.ListCapabilities/GrantUserCapability` | `CapabilityService` |
 
 ## 10. Rust 实现要求
 
@@ -218,5 +255,7 @@ HTTP `POST /api/v1/messages/send` 到 gRPC `SendMessage` 的转换：
 | P1 | gateway 级 `GrpcProxyPolicy`：timeout、retry、body limit、rate limit |
 | P1 | OpenAPI security scheme 与统一错误 schema |
 | P1 | Capability 管理 API |
+| P1 | Admin API 使用文档与公开/管理分组 |
+| P2 | gRPC facade，仅暴露稳定 public/admin 子集 |
 | P2 | Generic gRPC proxy，仅内部 allowlist |
 | P2 | metrics、audit log、admin operation trail |

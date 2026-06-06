@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::domain::ports::IConnectionPort;
 use flare_im_core::Ctx;
 use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
-use flare_im_core::error::Result;
+use flare_server_core::error::Result;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, instrument, warn};

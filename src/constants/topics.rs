@@ -1,9 +1,14 @@
-//! JetStream Topic 名称常量。
+//! IM Core MQ topic/subject 名称常量。
 
 // --- Storage Writer / 消息与操作流 ---
 
 pub const TOPIC_MESSAGE_MAIN: &str = "flare.im.message.main";
 pub const TOPIC_MESSAGE_MAIN_DLQ: &str = "flare.im.message.main.dlq";
+pub const TOPIC_MESSAGE_RETRY_5S: &str = "flare.im.message.retry.5s";
+pub const TOPIC_MESSAGE_RETRY_30S: &str = "flare.im.message.retry.30s";
+pub const TOPIC_MESSAGE_RETRY_5M: &str = "flare.im.message.retry.5m";
+pub const TOPIC_MESSAGE_MAIN_RETRY_5S: &str = "flare.im.message.main.retry.5s";
+pub const TOPIC_MESSAGE_STORAGE_RETRY_5S: &str = "flare.im.message.storage.retry.5s";
 pub const TOPIC_MESSAGE_CREATED: &str = "flare.im.message.storage";
 pub const TOPIC_MESSAGE_EVENTS: &str = "flare.im.message.events";
 

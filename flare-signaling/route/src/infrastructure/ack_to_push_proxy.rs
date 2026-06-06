@@ -1,7 +1,7 @@
 //! 客户端 ACK 上行处理：仅显式已读回执写入 Conversation 服务。
 //!
-//! PushAck 与普通 Conversation delivery ACK 仅记录/跳过；Conversation / Batch 中显式
-//! `ack_kind=read` 的会话 ACK 才调用 `ConversationManageService::MarkConversationAsRead`。
+//! PushAck 与普通 Conversation delivery ACK 仅记录/跳过；ReadAck / Batch.read_acks
+//! 才调用 `ConversationManageService::MarkConversationAsRead`。
 //! 这样避免“收到即已读”，同时仍保证显式已读后重登不会出现服务端未读回弹。
 //!
 //! **启动解耦**：不在 `wire::initialize` 中连接 Conversation；首条会话 ACK 到达时再解析通道。
@@ -13,7 +13,7 @@ use flare_grpc_proto::conversation::conversation_manage_service_client::Conversa
 use flare_im_core::config::FlareAppConfig;
 use flare_proto::common::Ack;
 use flare_proto::common::ack::Payload as AckPayload;
-use flare_proto::common::{ConversationAck, PushAck};
+use flare_proto::common::{ConversationAck, PushAck, ReadAck};
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
@@ -21,14 +21,9 @@ use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use crate::error::{Result, require_user_id};
+use flare_server_core::error::{Result, require_user_id};
 
 const CONVERSATION_STATIC_FALLBACK: &str = "http://127.0.0.1:50090";
-const ACK_KIND_KEY: &str = "ack_kind";
-const ACK_KIND_READ: &str = "read";
-const ACK_KIND_READ_RECEIPT: &str = "read_receipt";
-const READ_SEQ_KEY: &str = "read_seq";
-
 /// 客户端 ACK 转发器：显式会话已读 → Conversation；PushAck / delivery ACK → 占位日志。
 pub struct AckToPushProxyForwarder {
     app_config: Arc<FlareAppConfig>,
@@ -71,23 +66,25 @@ impl AckToPushProxyForwarder {
     pub async fn forward_client_ack(&self, ctx: &Context, ack: Ack) -> Result<()> {
         match ack.payload {
             Some(AckPayload::Conversation(conversation_ack)) => {
-                self.apply_conversation_read_ack(ctx, &conversation_ack)
-                    .await?;
+                self.log_conversation_ack_skip(ctx, &conversation_ack);
+            }
+            Some(AckPayload::Read(read_ack)) => {
+                self.apply_read_ack(ctx, &read_ack).await?;
             }
             Some(AckPayload::Batch(batch)) => {
                 for push in batch.push_acks {
                     self.log_push_ack_skip(ctx, &push);
                 }
                 for conversation_ack in batch.conversation_acks {
-                    if let Err(error) = self
-                        .apply_conversation_read_ack(ctx, &conversation_ack)
-                        .await
-                    {
+                    self.log_conversation_ack_skip(ctx, &conversation_ack);
+                }
+                for read_ack in batch.read_acks {
+                    if let Err(error) = self.apply_read_ack(ctx, &read_ack).await {
                         warn!(
                             request_id = %ctx.request_id(),
-                            conversation_id = %conversation_ack.conversation_id,
+                            conversation_id = %read_ack.conversation_id,
                             %error,
-                            "batch conversation ack mark read failed"
+                            "batch read ack mark read failed"
                         );
                     }
                 }
@@ -98,7 +95,7 @@ impl AckToPushProxyForwarder {
             _ => {
                 debug!(
                     request_id = %ctx.request_id(),
-                    ack_type = ack.r#type,
+                    ack_payload = ack_payload_name(ack.payload.as_ref()),
                     "skip client ack: unsupported payload for conversation read"
                 );
             }
@@ -116,23 +113,28 @@ impl AckToPushProxyForwarder {
         );
     }
 
-    async fn apply_conversation_read_ack(
-        &self,
-        ctx: &Context,
-        ack: &ConversationAck,
-    ) -> Result<()> {
+    fn log_conversation_ack_skip(&self, ctx: &Context, ack: &ConversationAck) {
+        debug!(
+            request_id = %ctx.request_id(),
+            user_id = ctx.user_id().unwrap_or_default(),
+            conversation_id = %ack.conversation_id,
+            delivered_seq = ack.last_delivered_seq,
+            "skip conversation ack forward: delivery ack does not update read position"
+        );
+    }
+
+    async fn apply_read_ack(&self, ctx: &Context, ack: &ReadAck) -> Result<()> {
         let conversation_id = ack.conversation_id.trim();
         if conversation_id.is_empty() {
             return Ok(());
         }
 
-        let Some(read_seq) = read_seq_from_ack(ack) else {
+        let Some(read_seq) = read_seq_from_read_ack(ack) else {
             debug!(
                 request_id = %ctx.request_id(),
                 user_id = ctx.user_id().unwrap_or_default(),
                 conversation_id = %conversation_id,
-                delivered_seq = ack.last_delivered_seq,
-                "skip conversation ack: not an explicit read ack"
+                "skip read ack: empty read seq"
             );
             return Ok(());
         };
@@ -175,71 +177,45 @@ impl AckToPushProxyForwarder {
     }
 }
 
-fn read_seq_from_ack(ack: &ConversationAck) -> Option<i64> {
-    let kind = ack.metadata.get(ACK_KIND_KEY)?.trim();
-    if kind != ACK_KIND_READ && kind != ACK_KIND_READ_RECEIPT {
-        return None;
+fn ack_payload_name(payload: Option<&AckPayload>) -> &'static str {
+    match payload {
+        Some(AckPayload::Send(_)) => "send",
+        Some(AckPayload::Event(_)) => "event",
+        Some(AckPayload::Push(_)) => "push",
+        Some(AckPayload::Conversation(_)) => "conversation",
+        Some(AckPayload::Read(_)) => "read",
+        Some(AckPayload::Batch(_)) => "batch",
+        None => "none",
     }
+}
 
-    let seq = ack
-        .metadata
-        .get(READ_SEQ_KEY)
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(ack.last_delivered_seq);
-    if seq == 0 {
+fn read_seq_from_read_ack(ack: &ReadAck) -> Option<i64> {
+    if ack.read_seq == 0 {
         return None;
     }
-    Some(i64::try_from(seq).unwrap_or(i64::MAX))
+    Some(i64::try_from(ack.read_seq).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
-    fn conversation_ack(metadata: HashMap<String, String>, delivered_seq: u64) -> ConversationAck {
-        ConversationAck {
+    fn read_ack(read_seq: u64) -> flare_proto::common::ReadAck {
+        flare_proto::common::ReadAck {
             conversation_id: "c1".to_string(),
-            server_msg_ids: Vec::new(),
-            last_delivered_seq: delivered_seq,
-            metadata,
+            read_seq,
+            device_id: Some("device-1".to_string()),
+            ack_id: Some("ack-read-1".to_string()),
         }
     }
 
     #[test]
-    fn delivery_ack_without_read_kind_is_not_read() {
-        let ack = conversation_ack(HashMap::new(), 42);
-
-        assert_eq!(read_seq_from_ack(&ack), None);
+    fn typed_read_ack_uses_read_seq() {
+        assert_eq!(read_seq_from_read_ack(&read_ack(99)), Some(99));
     }
 
     #[test]
-    fn explicit_read_ack_uses_read_seq_metadata() {
-        let mut metadata = HashMap::new();
-        metadata.insert(ACK_KIND_KEY.to_string(), ACK_KIND_READ.to_string());
-        metadata.insert(READ_SEQ_KEY.to_string(), "99".to_string());
-        let ack = conversation_ack(metadata, 42);
-
-        assert_eq!(read_seq_from_ack(&ack), Some(99));
-    }
-
-    #[test]
-    fn explicit_read_ack_falls_back_to_delivered_seq() {
-        let mut metadata = HashMap::new();
-        metadata.insert(ACK_KIND_KEY.to_string(), ACK_KIND_READ_RECEIPT.to_string());
-        let ack = conversation_ack(metadata, 42);
-
-        assert_eq!(read_seq_from_ack(&ack), Some(42));
-    }
-
-    #[test]
-    fn explicit_read_ack_with_zero_seq_is_ignored() {
-        let mut metadata = HashMap::new();
-        metadata.insert(ACK_KIND_KEY.to_string(), ACK_KIND_READ.to_string());
-        metadata.insert(READ_SEQ_KEY.to_string(), "0".to_string());
-        let ack = conversation_ack(metadata, 42);
-
-        assert_eq!(read_seq_from_ack(&ack), None);
+    fn typed_read_ack_with_zero_seq_is_ignored() {
+        assert_eq!(read_seq_from_read_ack(&read_ack(0)), None);
     }
 }

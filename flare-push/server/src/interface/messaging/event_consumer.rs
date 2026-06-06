@@ -18,7 +18,7 @@ use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
-use flare_im_core::error::FlareError;
+use flare_server_core::error::FlareError;
 
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
@@ -82,14 +82,28 @@ impl MessageHandler for PushEventHandler {
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
-            tracing::error!(
-                error = %e,
-                topic = %message.context.topic,
-                "Failed to deserialize MqEnvelope"
-            );
-            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-        })?;
+        let envelope = match message.decode_protobuf::<MqEnvelope>() {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    topic = %message.context.topic,
+                    "Failed to deserialize MqEnvelope, sending raw payload to DLQ"
+                );
+                if let Err(dlq_err) = self
+                    .publisher
+                    .publish_dlq(
+                        &message.context.ctx,
+                        message.context.key.as_deref(),
+                        message.payload.clone(),
+                    )
+                    .await
+                {
+                    return Err(ConsumerError::DeadLetter(dlq_err.to_string()));
+                }
+                return Ok(MessageResult::Ack);
+            }
+        };
 
         tracing::trace!(
             envelope_id = %envelope.envelope_id,
@@ -212,7 +226,7 @@ impl MessageHandler for PushEventHandler {
 
 #[cfg(test)]
 mod tests {
-    use flare_im_core::error::{ErrorBuilder, ErrorCode};
+    use flare_server_core::error::{ErrorBuilder, ErrorCode};
 
     use super::*;
 

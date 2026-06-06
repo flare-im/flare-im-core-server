@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::application::commands::{
     SendAckCommand, SendDataCommand, SendEventCommand, SendMessageCommand,
 };
-use crate::domain::model::EventUplinkOutcome;
+use crate::domain::model::{EventUplinkOutcome, MessageSendOutcome};
 use crate::domain::ports::IContextResolver;
 use crate::domain::service::{
     SendAckDomainService, SendDataDomainService, SendEventDomainService, SendMessageDomainService,
@@ -39,7 +39,10 @@ impl SendHandler {
     }
 
     /// 处理发送消息 → 委托 SendMessageDomainService
-    pub async fn handle_send_message(&self, command: &SendMessageCommand) -> Result<(String, u64)> {
+    pub async fn handle_send_message(
+        &self,
+        command: &SendMessageCommand,
+    ) -> Result<MessageSendOutcome> {
         let ctx = self
             .context_resolver
             .resolve(&command.connection_id)
@@ -68,7 +71,7 @@ impl SendHandler {
         self.send_data_service.execute(&ctx, command).await
     }
 
-    /// 处理发送 ack（PushAck/ConversationAck 等上报）→ 委托 SendAckDomainService
+    /// 处理发送 ack（PushAck/ConversationAck/ReadAck 等上报）→ 委托 SendAckDomainService
     pub async fn handle_send_ack(&self, command: &SendAckCommand) -> Result<()> {
         let ctx = self
             .context_resolver

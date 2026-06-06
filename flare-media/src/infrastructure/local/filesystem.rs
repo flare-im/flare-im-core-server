@@ -5,7 +5,7 @@ use tokio::fs;
 
 use crate::domain::model::UploadContext;
 use crate::domain::repository::MediaLocalStore;
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 #[derive(Clone)]
 pub struct FilesystemMediaStore {

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Ctx;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
 use async_trait::async_trait;
 use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
 use flare_grpc_proto::{
@@ -14,6 +13,7 @@ use flare_grpc_proto::{
     ProtoRecallHookResponse,
 };
 use flare_proto::common::Message as ProtoStorageMessage;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use prost::Message;
 use prost_types::Timestamp;
 use tonic::transport::Channel;
@@ -109,6 +109,12 @@ impl GrpcHookFactory {
     }
 }
 
+impl Default for GrpcHookFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 async fn hook_plugin_channel(endpoint: &str) -> Result<Channel> {
     resolve_grpc_channel(endpoint).await.map_err(|e| {
         ErrorBuilder::new(
@@ -134,9 +140,10 @@ impl PreSendHook for GrpcPreSendHook {
             Err(err) => return PreSendDecision::Reject { error: err },
         };
         let mut client = HookPluginClient::new(channel);
-        let mut request = ProtoPreSendHookRequest::default();
-        request.context = Some(build_context(ctx, &self.static_metadata));
-        request.draft = Some(build_draft(draft));
+        let request = ProtoPreSendHookRequest {
+            context: Some(build_context(ctx, &self.static_metadata)),
+            draft: Some(build_draft(draft)),
+        };
 
         let response = hook_plugin_call::<ProtoPreSendHookResponse>(
             &mut client,
@@ -184,10 +191,11 @@ impl PostSendHook for GrpcPostSendHook {
             Err(err) => return HookOutcome::Failed(err),
         };
         let mut client = HookPluginClient::new(channel);
-        let mut request = ProtoPostSendHookRequest::default();
-        request.context = Some(build_context(ctx, &self.static_metadata));
-        request.record = Some(build_record(record));
-        request.draft = Some(build_draft(draft));
+        let request = ProtoPostSendHookRequest {
+            context: Some(build_context(ctx, &self.static_metadata)),
+            record: Some(build_record(record)),
+            draft: Some(build_draft(draft)),
+        };
 
         match hook_plugin_call::<ProtoPostSendHookResponse>(
             &mut client,
@@ -235,9 +243,10 @@ impl DeliveryHook for GrpcDeliveryHook {
             Err(err) => return HookOutcome::Failed(err),
         };
         let mut client = HookPluginClient::new(channel);
-        let mut request = ProtoDeliveryHookRequest::default();
-        request.context = Some(build_context(ctx, &self.static_metadata));
-        request.event = Some(build_delivery_event(event));
+        let request = ProtoDeliveryHookRequest {
+            context: Some(build_context(ctx, &self.static_metadata)),
+            event: Some(build_delivery_event(event)),
+        };
 
         match hook_plugin_call::<ProtoDeliveryHookResponse>(
             &mut client,
@@ -285,9 +294,10 @@ impl RecallHook for GrpcRecallHook {
             Err(err) => return HookOutcome::Failed(err),
         };
         let mut client = HookPluginClient::new(channel);
-        let mut request = ProtoRecallHookRequest::default();
-        request.context = Some(build_context(ctx, &self.static_metadata));
-        request.event = Some(build_recall_event(event));
+        let request = ProtoRecallHookRequest {
+            context: Some(build_context(ctx, &self.static_metadata)),
+            event: Some(build_recall_event(event)),
+        };
 
         match hook_plugin_call::<ProtoRecallHookResponse>(
             &mut client,
@@ -401,70 +411,67 @@ fn apply_draft(target: &mut MessageDraft, source: ProtoHookMessageDraft) {
 fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
     let persisted_ts = system_time_to_timestamp(record.persisted_at);
 
-    let mut message = ProtoStorageMessage::default();
-    message.server_id = record.message_id.clone();
-    message.conversation_id = record.conversation_id.clone();
-    message.sender_id = record.sender_id.clone();
-    message.conversation_type = record
-        .conversation_type
-        .as_deref()
-        .map(|t| match t.to_ascii_lowercase().as_str() {
-            "single" | "conversation_type_single" | "1" => {
-                flare_proto::common::ConversationType::Single as i32
-            }
-            "group" | "conversation_type_group" | "2" => {
-                flare_proto::common::ConversationType::Group as i32
-            }
-            "channel" | "conversation_type_channel" | "3" => {
-                // Channel is treated as Group for now
-                flare_proto::common::ConversationType::Group as i32
-            }
-            "ai" | "conversation_type_ai" | "4" => flare_proto::common::ConversationType::Ai as i32,
-            "customer" | "conversation_type_customer" | "5" => {
-                flare_proto::common::ConversationType::Customer as i32
-            }
-            "system" | "conversation_type_system" | "6" => {
-                flare_proto::common::ConversationType::System as i32
-            }
-            "temp" | "conversation_type_temp" | "7" => {
-                flare_proto::common::ConversationType::Temp as i32
-            }
-            _ => flare_proto::common::ConversationType::Unspecified as i32,
-        })
-        .unwrap_or(flare_proto::common::ConversationType::Unspecified as i32);
-    message.extra = record.metadata.clone();
-    message.timestamp = Some(persisted_ts.clone());
-    message.message_type = record
-        .message_type
-        .as_deref()
-        .map(|kind| match kind.to_ascii_lowercase().as_str() {
-            "text" | "message_type_text" => flare_proto::common::MessageType::Text as i32,
-            "image" => flare_proto::common::MessageType::Image as i32,
-            "video" => flare_proto::common::MessageType::Video as i32,
-            "audio" => flare_proto::common::MessageType::Audio as i32,
-            "file" => flare_proto::common::MessageType::File as i32,
-            "location" => flare_proto::common::MessageType::Location as i32,
-            "card" => flare_proto::common::MessageType::Card as i32,
-            "notification" => flare_proto::common::MessageType::Notification as i32,
-            "binary" | "attachment" | "message_type_binary" => {
-                flare_proto::common::MessageType::Custom as i32
-            } // 二进制消息映射到 Custom
-            "custom" | "message_type_custom" => flare_proto::common::MessageType::Custom as i32,
-            _ => flare_proto::common::MessageType::Unspecified as i32,
-        })
-        .unwrap_or(flare_proto::common::MessageType::Unspecified as i32);
-    if let Some(message_type) = &record.message_type {
-        message
-            .extra
-            .entry("message_type".into())
-            .or_insert_with(|| message_type.clone());
-    }
-
-    if let Some(client_id) = record.client_message_id.as_ref() {
-        message
-            .extra
-            .entry("client_message_id".into())
-            .or_insert_with(|| client_id.clone());
+    let mut message = ProtoStorageMessage {
+        server_id: record.message_id.clone(),
+        conversation_id: record.conversation_id.clone(),
+        sender_id: record.sender_id.clone(),
+        conversation_type: record
+            .conversation_type
+            .as_deref()
+            .map(|t| match t.to_ascii_lowercase().as_str() {
+                "single" | "conversation_type_single" | "1" => {
+                    flare_proto::common::ConversationType::Single as i32
+                }
+                "group" | "conversation_type_group" | "2" => {
+                    flare_proto::common::ConversationType::Group as i32
+                }
+                "channel" | "conversation_type_channel" | "3" => {
+                    flare_proto::common::ConversationType::Group as i32
+                }
+                "ai" | "conversation_type_ai" | "4" => {
+                    flare_proto::common::ConversationType::Ai as i32
+                }
+                "customer" | "conversation_type_customer" | "5" => {
+                    flare_proto::common::ConversationType::Customer as i32
+                }
+                "system" | "conversation_type_system" | "6" => {
+                    flare_proto::common::ConversationType::System as i32
+                }
+                "temp" | "conversation_type_temp" | "7" => {
+                    flare_proto::common::ConversationType::Temp as i32
+                }
+                _ => flare_proto::common::ConversationType::Unspecified as i32,
+            })
+            .unwrap_or(flare_proto::common::ConversationType::Unspecified as i32),
+        created_at: persisted_ts
+            .seconds
+            .saturating_mul(1000)
+            .saturating_add((persisted_ts.nanos as i64) / 1_000_000),
+        message_type: record
+            .message_type
+            .as_deref()
+            .map(|kind| match kind.to_ascii_lowercase().as_str() {
+                "text" | "message_type_text" => flare_proto::common::MessageType::Text as i32,
+                "image" => flare_proto::common::MessageType::Image as i32,
+                "video" => flare_proto::common::MessageType::Video as i32,
+                "audio" => flare_proto::common::MessageType::Audio as i32,
+                "file" => flare_proto::common::MessageType::File as i32,
+                "location" => flare_proto::common::MessageType::Location as i32,
+                "card" => flare_proto::common::MessageType::Card as i32,
+                "notification" => flare_proto::common::MessageType::Notification as i32,
+                "binary" | "attachment" | "message_type_binary" => {
+                    flare_proto::common::MessageType::Custom as i32
+                }
+                "custom" | "message_type_custom" => flare_proto::common::MessageType::Custom as i32,
+                _ => flare_proto::common::MessageType::Unspecified as i32,
+            })
+            .unwrap_or(flare_proto::common::MessageType::Unspecified as i32),
+        ..Default::default()
+    };
+    if message.client_msg_id.is_empty()
+        && let Some(client_id) = record.client_message_id.as_ref()
+    {
+        message.client_msg_id = client_id.clone();
     }
 
     ProtoHookMessageRecord {

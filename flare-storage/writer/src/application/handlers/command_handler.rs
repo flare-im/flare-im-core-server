@@ -1,14 +1,14 @@
 //! 命令处理器（编排层）- 轻量级，只负责编排领域服务
 
 use flare_im_core::Ctx;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::metrics::StorageWriterMetrics;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
 
 use crate::application::commands::ProcessStoreMessageCommand;
-use crate::domain::model::{PersistenceResult, PreparedMessage};
+use crate::domain::model::PersistenceResult;
 use crate::domain::service::MessagePersistenceDomainService;
 
 /// 普通消息持久化命令处理器（编排层）
@@ -47,7 +47,7 @@ where
     }
 
     /// 处理存储消息命令 - 只处理普通消息，如果是操作消息则返回 None
-    #[instrument(skip(self), fields(tenant_id, message_id))]
+    #[instrument(skip(self, ctx, command), fields(tenant_id, message_id))]
     pub async fn handle(
         &self,
         ctx: &Ctx,
@@ -81,49 +81,34 @@ where
             }
         };
 
-        // 操作类由 Event 驱动，由 OperationMessageConsumer + EventApplicationService 处理
-        // 保存必要信息用于后续操作（因为 prepared 会被移动到 persist_message）
         let message_id = prepared.message_id.clone();
         let conversation_id = prepared.conversation_id.clone();
-        let timeline = prepared.timeline.clone();
+        let db_start = Instant::now();
+        let result = self
+            .domain_service
+            .ensure_consistency(ctx, prepared)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    message_id = %message_id,
+                    conversation_id = %conversation_id,
+                    "Failed to ensure message consistency"
+                );
+                e
+            })?;
 
-        // 检查幂等性
-        let is_new = self.domain_service.check_idempotency(ctx, &prepared).await.map_err(|e| {
-            tracing::error!(error = %e, message_id = %message_id, "Failed to check idempotency");
-            map_infra_error(e, ErrorCode::DatabaseError, "Failed to check idempotency")
-        })?;
-        let deduplicated = !is_new;
-
-        // 记录去重统计（应用层关注点）
-        if deduplicated {
+        if result.deduplicated {
             self.metrics.messages_duplicate_total.inc();
-            tracing::trace!(message_id = %message_id, "Message is duplicate, skipping persistence");
-        }
-
-        if is_new {
-            // 数据库写入
-            let db_start = Instant::now();
-            self.domain_service
-                .persist_message(ctx, prepared)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        error = %e,
-                        message_id = %message_id,
-                        conversation_id = %conversation_id,
-                        "Failed to persist message to database"
-                    );
-                    map_infra_error(e, ErrorCode::DatabaseError, "Failed to persist message")
-                })?;
-
-            let db_duration = db_start.elapsed();
-
-            // 记录数据库写入耗时（应用层关注点）
+            tracing::trace!(
+                message_id = %result.message_id,
+                "Message is duplicate, skipping persistence"
+            );
+        } else {
             self.metrics
                 .db_write_duration_seconds
-                .observe(db_duration.as_secs_f64());
+                .observe(db_start.elapsed().as_secs_f64());
 
-            // 记录总耗时和持久化计数（应用层关注点）
             let total_duration = start.elapsed();
             self.metrics
                 .messages_persisted_duration_seconds
@@ -134,36 +119,18 @@ where
                 .inc();
 
             tracing::trace!(
-                message_id = %message_id,
-                conversation_id = %conversation_id,
+                message_id = %result.message_id,
+                conversation_id = %result.conversation_id,
                 duration_ms = total_duration.as_millis(),
                 "Message persisted successfully"
             );
-        }
-
-        // 清理 WAL（即使失败也不影响消息持久化，只记录警告）
-        if let Err(e) = self.domain_service.cleanup_wal(ctx, &message_id).await {
-            tracing::warn!(error = %e, message_id = %message_id, "Failed to cleanup WAL, but message is already persisted");
-        }
-
-        // 构建结果（使用已保存的信息）
-        let result = PersistenceResult {
-            conversation_id,
-            message_id,
-            timeline,
-            deduplicated,
-        };
-
-        // 发布 ACK 事件（即使失败也不影响消息持久化，只记录警告）
-        if let Err(e) = self.domain_service.publish_ack(ctx, &result).await {
-            tracing::warn!(error = %e, message_id = %result.message_id, "Failed to publish ACK, but message is already persisted");
         }
 
         Ok(Some(result))
     }
 
     /// 批量处理存储消息命令（优化性能）
-    #[instrument(skip(self), fields(batch_size = commands.len()))]
+    #[instrument(skip(self, ctx, commands), fields(batch_size = commands.len()))]
     pub async fn handle_batch(
         &self,
         ctx: &Ctx,
@@ -180,7 +147,11 @@ where
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to prepare message in batch");
-                    // 继续处理其他消息
+                    return Err(map_infra_error(
+                        e,
+                        ErrorCode::InternalError,
+                        "Failed to prepare message in batch",
+                    ));
                 }
             }
         }
@@ -189,95 +160,315 @@ where
             return Ok(Vec::new());
         }
 
-        // 2. 批量检查幂等性
-        let mut new_messages: Vec<PreparedMessage> = Vec::new();
-        let mut deduplicated_count = 0;
+        let db_start = Instant::now();
+        let results = self
+            .domain_service
+            .ensure_batch_consistency(ctx, prepared_messages)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to ensure batch message consistency");
+                e
+            })?;
 
-        for prepared in &prepared_messages {
-            match self.domain_service.check_idempotency(ctx, prepared).await {
-                Ok(true) => {
-                    new_messages.push(PreparedMessage::clone(prepared));
-                }
-                Ok(false) => {
-                    deduplicated_count += 1;
-                    self.metrics.messages_duplicate_total.inc();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, message_id = %prepared.message_id, "Idempotency check failed, treating as new");
-                    new_messages.push(PreparedMessage::clone(prepared));
-                }
-            }
+        let deduplicated_count = results.iter().filter(|result| result.deduplicated).count();
+        for _ in 0..deduplicated_count {
+            self.metrics.messages_duplicate_total.inc();
         }
 
-        // 3. 批量持久化新消息
-        if !new_messages.is_empty() {
-            let db_start = Instant::now();
-            match self
-                .domain_service
-                .persist_batch(ctx, new_messages.clone())
-                .await
-            {
-                Ok(_) => {
-                    let db_duration = db_start.elapsed();
-                    self.metrics
-                        .db_write_duration_seconds
-                        .observe(db_duration.as_secs_f64());
+        let persisted_count = results.len().saturating_sub(deduplicated_count);
+        if persisted_count > 0 {
+            self.metrics
+                .db_write_duration_seconds
+                .observe(db_start.elapsed().as_secs_f64());
 
-                    let total_duration = start.elapsed();
-                    self.metrics
-                        .messages_persisted_duration_seconds
-                        .observe(total_duration.as_secs_f64());
-                    self.metrics
-                        .messages_persisted_total
-                        .with_label_values(&["batch"])
-                        .inc_by(new_messages.len() as u64);
+            let total_duration = start.elapsed();
+            self.metrics
+                .messages_persisted_duration_seconds
+                .observe(total_duration.as_secs_f64());
+            self.metrics
+                .messages_persisted_total
+                .with_label_values(&["batch"])
+                .inc_by(persisted_count as u64);
 
-                    tracing::trace!(
-                        batch_size = new_messages.len(),
-                        duration_ms = total_duration.as_millis(),
-                        "Batch messages persisted successfully"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to persist batch messages");
-                    return Err(e);
-                }
-            }
-        }
-
-        // 4. 批量清理 WAL 和发布 ACK
-        let mut results = Vec::new();
-        for prepared in &prepared_messages {
-            let deduplicated = deduplicated_count > 0
-                && !new_messages
-                    .iter()
-                    .any(|m| m.message_id == prepared.message_id);
-
-            // 清理 WAL
-            if let Err(e) = self
-                .domain_service
-                .cleanup_wal(ctx, &prepared.message_id)
-                .await
-            {
-                tracing::warn!(error = %e, message_id = %prepared.message_id, "Failed to cleanup WAL");
-            }
-
-            // 构建结果
-            let result = PersistenceResult {
-                conversation_id: prepared.conversation_id.clone(),
-                message_id: prepared.message_id.clone(),
-                timeline: prepared.timeline.clone(),
-                deduplicated,
-            };
-
-            // 发布 ACK
-            if let Err(e) = self.domain_service.publish_ack(ctx, &result).await {
-                tracing::warn!(error = %e, message_id = %result.message_id, "Failed to publish ACK");
-            }
-
-            results.push(result);
+            tracing::trace!(
+                batch_size = persisted_count,
+                duration_ms = total_duration.as_millis(),
+                "Batch messages persisted successfully"
+            );
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::commands::ProcessStoreMessageCommand;
+    use crate::domain::events::AckEvent;
+    use crate::domain::model::{Event, TenantContext};
+    use crate::domain::repository::{
+        AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
+        MessageIdempotencyRepository, WalCleanupRepository,
+    };
+    use flare_im_core::message::Message;
+    use flare_im_core::utils::Context;
+    use flare_server_core::error::Result as AnyhowResult;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FailingIdempotencyRepository;
+
+    impl MessageIdempotencyRepository for FailingIdempotencyRepository {
+        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
+            Err(flare_server_core::error::FlareError::system(
+                "idempotency store unavailable".to_string(),
+            ))
+        }
+    }
+
+    struct ReservingIdempotencyRepository {
+        reserved: Arc<AtomicBool>,
+    }
+
+    impl MessageIdempotencyRepository for ReservingIdempotencyRepository {
+        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
+            Ok(!self.reserved.swap(true, Ordering::SeqCst))
+        }
+
+        async fn release(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<()> {
+            self.reserved.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct NoopHotCacheRepository;
+
+    impl HotCacheRepository for NoopHotCacheRepository {
+        async fn store_hot(&self, _ctx: &Ctx, _message: &Message) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    struct CountingArchiveRepository {
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl ArchiveStoreRepository for CountingArchiveRepository {
+        async fn store_archive(&self, _ctx: &Ctx, _message: &Message) -> AnyhowResult<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct NoopEventStreamRepository;
+
+    impl EventStreamRepository for NoopEventStreamRepository {
+        async fn append_event_to_stream(&self, _ctx: &Ctx, _event: &Event) -> AnyhowResult<()> {
+            Ok(())
+        }
+
+        async fn event_exists(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+            _seq: i64,
+        ) -> AnyhowResult<bool> {
+            Ok(false)
+        }
+    }
+
+    struct FailOnceEventStreamRepository {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl EventStreamRepository for FailOnceEventStreamRepository {
+        async fn append_event_to_stream(&self, _ctx: &Ctx, _event: &Event) -> AnyhowResult<()> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(flare_server_core::error::FlareError::system(
+                    "event stream unavailable on first attempt".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn event_exists(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+            _seq: i64,
+        ) -> AnyhowResult<bool> {
+            Ok(false)
+        }
+    }
+
+    struct NoopWalCleanupRepository;
+
+    impl WalCleanupRepository for NoopWalCleanupRepository {
+        async fn remove(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopAckPublisher;
+
+    impl AckPublisher for NoopAckPublisher {
+        async fn publish(&self, _ctx: &Ctx, _event: AckEvent<'_>) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    type TestDomainService = MessagePersistenceDomainService<
+        FailingIdempotencyRepository,
+        NoopHotCacheRepository,
+        CountingArchiveRepository,
+        NoopEventStreamRepository,
+        NoopWalCleanupRepository,
+        NoopAckPublisher,
+    >;
+
+    type TestCommandHandler = MessagePersistenceCommandHandler<
+        FailingIdempotencyRepository,
+        NoopHotCacheRepository,
+        CountingArchiveRepository,
+        NoopEventStreamRepository,
+        NoopWalCleanupRepository,
+        NoopAckPublisher,
+    >;
+
+    fn test_ctx() -> Ctx {
+        Arc::new(Context::with_request_id("req-batch-idempotency-test").with_tenant_id("tenant-a"))
+    }
+
+    fn test_command(message_id: &str) -> ProcessStoreMessageCommand {
+        let mut extra = HashMap::new();
+        extra.insert("tenant_id".to_string(), "tenant-a".to_string());
+        ProcessStoreMessageCommand {
+            conversation_id: "conversation-a".to_string(),
+            message: Some(Message {
+                server_id: message_id.to_string(),
+                conversation_id: "conversation-a".to_string(),
+                sender_id: "sender-a".to_string(),
+                conversation_seq: 1,
+                status: 2,
+                extra,
+                ..Message::default()
+            }),
+            sync: true,
+            context: None,
+            tenant: Some(TenantContext {
+                tenant_id: "tenant-a".to_string(),
+                user_id: Some("sender-a".to_string()),
+            }),
+            tags: HashMap::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn handler_with_failing_idempotency(writes: Arc<AtomicUsize>) -> TestCommandHandler {
+        let domain_service: Arc<TestDomainService> =
+            Arc::new(MessagePersistenceDomainService::new(
+                Some(Arc::new(FailingIdempotencyRepository)),
+                None,
+                Some(Arc::new(CountingArchiveRepository { writes })),
+                None,
+                None,
+                None,
+            ));
+        MessagePersistenceCommandHandler::new(domain_service, Arc::new(StorageWriterMetrics::new()))
+    }
+
+    type RetryDomainService = MessagePersistenceDomainService<
+        ReservingIdempotencyRepository,
+        NoopHotCacheRepository,
+        CountingArchiveRepository,
+        FailOnceEventStreamRepository,
+        NoopWalCleanupRepository,
+        NoopAckPublisher,
+    >;
+
+    type RetryCommandHandler = MessagePersistenceCommandHandler<
+        ReservingIdempotencyRepository,
+        NoopHotCacheRepository,
+        CountingArchiveRepository,
+        FailOnceEventStreamRepository,
+        NoopWalCleanupRepository,
+        NoopAckPublisher,
+    >;
+
+    fn handler_with_reservation_and_fail_once_event_stream(
+        reserved: Arc<AtomicBool>,
+        archive_writes: Arc<AtomicUsize>,
+        stream_attempts: Arc<AtomicUsize>,
+    ) -> RetryCommandHandler {
+        let domain_service: Arc<RetryDomainService> =
+            Arc::new(MessagePersistenceDomainService::new(
+                Some(Arc::new(ReservingIdempotencyRepository { reserved })),
+                None,
+                Some(Arc::new(CountingArchiveRepository {
+                    writes: archive_writes,
+                })),
+                Some(Arc::new(FailOnceEventStreamRepository {
+                    attempts: stream_attempts,
+                })),
+                None,
+                Some(Arc::new(NoopAckPublisher)),
+            ));
+        MessagePersistenceCommandHandler::new(domain_service, Arc::new(StorageWriterMetrics::new()))
+    }
+
+    #[tokio::test]
+    async fn handle_batch_returns_error_and_skips_writes_when_idempotency_check_fails() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let handler = handler_with_failing_idempotency(writes.clone());
+
+        let err = handler
+            .handle_batch(&test_ctx(), vec![test_command("message-a")])
+            .await
+            .expect_err("batch idempotency failures must fail closed");
+
+        assert!(
+            err.to_string().contains("Failed to check idempotency"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "idempotency failures must not continue into archive writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_releases_idempotency_reservation_after_durable_write_failure() {
+        let reserved = Arc::new(AtomicBool::new(false));
+        let archive_writes = Arc::new(AtomicUsize::new(0));
+        let stream_attempts = Arc::new(AtomicUsize::new(0));
+        let handler = handler_with_reservation_and_fail_once_event_stream(
+            reserved,
+            archive_writes.clone(),
+            stream_attempts.clone(),
+        );
+        let ctx = test_ctx();
+
+        handler
+            .handle(&ctx, test_command("message-a"))
+            .await
+            .expect_err("first attempt should fail at durable event stream append");
+
+        let retry = handler
+            .handle(&ctx, test_command("message-a"))
+            .await
+            .expect("retry after a failed durable write must be allowed")
+            .expect("message handler should return a persistence result");
+
+        assert!(
+            !retry.deduplicated,
+            "handler retry after a failed durable write must not be reported as duplicate"
+        );
+        assert_eq!(archive_writes.load(Ordering::SeqCst), 2);
+        assert_eq!(stream_attempts.load(Ordering::SeqCst), 2);
     }
 }

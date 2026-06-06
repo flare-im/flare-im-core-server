@@ -13,14 +13,14 @@ use prost::Message as ProstMessage;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use flare_im_core::error::{ErrorBuilder, ErrorCode, map_infra_error};
 use flare_server_core::context::Context as ServerContext;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, map_infra_error};
 use tracing::{debug, info};
 
 use crate::domain::repository::{DefaultRouteRepository, RouteRepository};
-use crate::error::Result;
 use flare_im_core::ServiceClient;
 use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::error::Result;
 
 /// SVID 常量定义
 pub mod svid {
@@ -178,7 +178,7 @@ impl MessageForwarder {
                     remaining.as_millis()
                 )),
                 ErrorCode::ServiceUnavailable,
-                &format!(
+                format!(
                     "Service discovery temporarily unavailable for {} (cooldown={}ms)",
                     endpoint,
                     remaining.as_millis()
@@ -266,7 +266,7 @@ impl MessageForwarder {
                     map_infra_error(
                         e,
                         ErrorCode::NetworkError,
-                        &format!(
+                        format!(
                             "Failed to create service discover for {} with SVID filter (svid={})",
                             message_orchestrator_service,
                             svid::IM
@@ -280,7 +280,7 @@ impl MessageForwarder {
                         "Service discovery not configured",
                     ),
                     ErrorCode::NetworkError,
-                    &format!(
+                    format!(
                         "Service discovery not configured for {}",
                         message_orchestrator_service
                     ),
@@ -297,9 +297,9 @@ impl MessageForwarder {
             .map_err(|_| map_infra_error(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Timeout waiting for service discovery"),
                 ErrorCode::NetworkError,
-                &format!("Timeout waiting for service discovery to get channel for {} (svid={}) (3s)", message_orchestrator_service, svid::IM)
+                format!("Timeout waiting for service discovery to get channel for {} (svid={}) (3s)", message_orchestrator_service, svid::IM)
             ))?
-            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, &format!("Failed to get channel from service discovery for {} (svid={})", message_orchestrator_service, svid::IM)))?;
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, format!("Failed to get channel from service discovery for {} (svid={})", message_orchestrator_service, svid::IM)))?;
 
             return Ok(MessageSendServiceClient::new(channel));
         }
@@ -365,7 +365,7 @@ impl MessageForwarder {
                         tag_filters,
                     )
                     .await
-                    .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, &format!("Failed to create service discover for {} with SVID filter (svid={})", endpoint, svid)))?
+                    .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, format!("Failed to create service discover for {} with SVID filter (svid={})", endpoint, svid)))?
                 } else {
                     // 没有 SVID，使用普通的服务发现
                     let discover_result = flare_im_core::discovery::create_discover(endpoint)
@@ -374,7 +374,7 @@ impl MessageForwarder {
                             map_infra_error(
                                 e,
                                 ErrorCode::NetworkError,
-                                &format!("Failed to create service discover for {}", endpoint),
+                                format!("Failed to create service discover for {}", endpoint),
                             )
                         })?;
 
@@ -385,7 +385,7 @@ impl MessageForwarder {
                                 "Service discovery not configured",
                             ),
                             ErrorCode::NetworkError,
-                            &format!("Service discovery not configured for {}", endpoint),
+                            format!("Service discovery not configured for {}", endpoint),
                         )
                     })?
                 }
@@ -396,7 +396,7 @@ impl MessageForwarder {
                         "Service discovery not configured",
                     ),
                     ErrorCode::NetworkError,
-                    &format!("Service discovery not configured for {}", endpoint),
+                    format!("Service discovery not configured for {}", endpoint),
                 ));
             };
 
@@ -410,9 +410,9 @@ impl MessageForwarder {
             .map_err(|_| map_infra_error(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Timeout waiting for service discovery"),
                 ErrorCode::NetworkError,
-                &format!("Timeout waiting for service discovery to get channel for {} (svid={}) (3s)", endpoint, svid)
+                format!("Timeout waiting for service discovery to get channel for {} (svid={}) (3s)", endpoint, svid)
             ))?
-            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, &format!("Failed to get channel from service discovery for {} (svid={})", endpoint, svid)))?
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, format!("Failed to get channel from service discovery for {} (svid={})", endpoint, svid)))?
         };
 
         Ok(MessageSendServiceClient::new(channel))
@@ -479,21 +479,21 @@ impl MessageForwarder {
                             "Business service not found",
                         ),
                         ErrorCode::DatabaseError,
-                        &format!("Business service not found for SVID {}", resolved_svid),
+                        format!("Business service not found for SVID {}", resolved_svid),
                     ));
                 }
                 Err(e) => {
                     return Err(map_infra_error(
                         e,
                         ErrorCode::DatabaseError,
-                        &format!("Failed to resolve route for SVID {}", resolved_svid),
+                        format!("Failed to resolve route for SVID {}", resolved_svid),
                     ));
                 }
             }
         };
 
         // 获取或创建业务系统客户端（带缓存，使用 SVID 过滤）
-        let mut client = self.get_business_client(&endpoint, &resolved_svid).await?;
+        let mut client = self.get_business_client(&endpoint, resolved_svid).await?;
 
         // 保存消息信息用于错误日志
         let message_id = message.server_id.clone();
@@ -567,7 +567,7 @@ impl MessageForwarder {
                         e.message().to_string(),
                     ),
                     ErrorCode::NetworkError,
-                    &format!(
+                    format!(
                         "Failed to send message to business service {} (svid={}): {} (code: {:?})",
                         endpoint,
                         resolved_svid,
@@ -639,14 +639,14 @@ impl MessageForwarder {
                             "Business service not found",
                         ),
                         ErrorCode::DatabaseError,
-                        &format!("Business service not found for SVID {}", resolved_svid),
+                        format!("Business service not found for SVID {}", resolved_svid),
                     ));
                 }
                 Err(e) => {
                     return Err(map_infra_error(
                         e,
                         ErrorCode::DatabaseError,
-                        &format!("Failed to resolve route for SVID {}", resolved_svid),
+                        format!("Failed to resolve route for SVID {}", resolved_svid),
                     ));
                 }
             }
@@ -678,7 +678,7 @@ impl MessageForwarder {
                     e.message().to_string(),
                 ),
                 ErrorCode::NetworkError,
-                &format!(
+                format!(
                     "ExecuteEvent failed (svid={}): {} ({:?})",
                     resolved_svid,
                     e.message(),
@@ -687,7 +687,7 @@ impl MessageForwarder {
             )
         })?;
         // ExecuteEvent returns google.protobuf.Empty, no response data to encode
-        let _ = response.into_inner();
+        response.into_inner();
         info!(
             "✅ Event forwarded to business service: SVID={}, Endpoint={}",
             resolved_svid, endpoint

@@ -328,11 +328,11 @@ impl ReadMessageCommand {
                 conversation_id: request.conversation_id.clone(),
             },
             message_ids: vec![request.message_id.clone()],
-            read_at: request.read_at.clone().map(|ts| {
+            read_at: request.read_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
-            burn_after_read: request.burn_after_read,
+            burn_after_read: false,
         }
     }
 }
@@ -441,9 +441,9 @@ impl PinMessageCommand {
             } else {
                 Some(request.reason.clone())
             },
-            expire_at: request.expire_at.clone().map(|ts| {
+            expire_at: request.expire_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
         }
     }
@@ -578,12 +578,11 @@ impl BatchMarkMessageReadCommand {
     ) -> Self {
         let read_at = request
             .read_at
-            .clone()
             .map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             })
-            .unwrap_or_else(|| chrono::Utc::now());
+            .unwrap_or_else(chrono::Utc::now);
 
         Self {
             conversation_id: request.conversation_id.clone(),
@@ -619,12 +618,11 @@ impl MarkConversationReadCommand {
     ) -> Self {
         let read_at = request
             .read_at
-            .clone()
             .map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             })
-            .unwrap_or_else(|| chrono::Utc::now());
+            .unwrap_or_else(chrono::Utc::now);
 
         Self {
             conversation_id: request.conversation_id.clone(),
@@ -891,9 +889,9 @@ impl From<&flare_grpc_proto::message::PinMessageRequest> for AppPinMessageComman
             } else {
                 Some(request.reason.clone())
             },
-            expire_at: request.expire_at.clone().map(|ts| {
+            expire_at: request.expire_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
@@ -1009,9 +1007,9 @@ impl From<&flare_grpc_proto::message::BatchMarkMessageReadRequest>
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             message_ids: request.message_ids.clone(),
-            read_at: request.read_at.clone().map(|ts| {
+            read_at: request.read_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             tenant_id: String::new(), // 从context填充
         }
@@ -1038,9 +1036,9 @@ impl From<&flare_grpc_proto::message::MarkConversationReadRequest>
         Self {
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
-            read_at: request.read_at.clone().map(|ts| {
+            read_at: request.read_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             tenant_id: String::new(), // 从context填充
         }
@@ -1066,9 +1064,9 @@ impl From<&flare_grpc_proto::message::MarkAllConversationsReadRequest>
     fn from(request: &flare_grpc_proto::message::MarkAllConversationsReadRequest) -> Self {
         Self {
             user_id: String::new(), // 由 handler 从 context 填充
-            read_at: request.read_at.clone().map(|ts| {
+            read_at: request.read_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             conversation_types: request.conversation_types.clone(),
             tenant_id: String::new(), // 从context填充
@@ -1099,9 +1097,9 @@ impl From<&flare_grpc_proto::message::MarkMessagesReadUntilRequest>
             conversation_id: request.conversation_id.clone(),
             user_id: String::new(), // 由 handler 从 context 填充
             until_message_id: request.until_message_id.clone(),
-            read_at: request.read_at.clone().map(|ts| {
+            read_at: request.read_at.map(|ts| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             tenant_id: String::new(), // 从context填充
         }

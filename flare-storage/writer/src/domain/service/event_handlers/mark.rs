@@ -2,7 +2,7 @@
 
 use crate::domain::model::{Event, MarkPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 
 use super::{EventContext, append_event_and_stream};

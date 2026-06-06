@@ -6,8 +6,8 @@ use flare_grpc_proto::signaling::online::{
     HeartbeatResponse, LoginRequest, LoginResponse, LogoutResponse, OnlineStatus, PresenceEvent,
     UserPresenceEvent, WatchPresenceRequest,
 };
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use prost_types::Timestamp;
 use tracing::{instrument, warn};
 
@@ -132,7 +132,7 @@ where
             online: true,
             server_id: request.server_id.clone(),
             cluster_id: String::new(),
-            last_seen: Some(ts.clone()),
+            last_seen: Some(ts),
             device_id: request.device_id.clone(),
             device_platform: request.device_platform.clone(),
             gateway_id: request
@@ -144,7 +144,7 @@ where
         let presence = PresenceEvent {
             user_id: request.user_id.clone(),
             status: Some(status),
-            occurred_at: Some(ts.clone()),
+            occurred_at: Some(ts),
             conflict_action: 0,
             reason: "login".to_string(),
         };
@@ -195,7 +195,7 @@ where
             online: false,
             server_id: String::new(),
             cluster_id: String::new(),
-            last_seen: Some(ts.clone()),
+            last_seen: Some(ts),
             device_id: String::new(),
             device_platform: String::new(),
             gateway_id: String::new(),
@@ -203,7 +203,7 @@ where
         let presence = PresenceEvent {
             user_id: user_id.to_string(),
             status: Some(status.clone()),
-            occurred_at: Some(ts.clone()),
+            occurred_at: Some(ts),
             conflict_action: 0,
             reason: reason.to_string(),
         };

@@ -6,7 +6,7 @@ use flare_server_core::flare_err;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::error::{ErrorCode, Result};
+use flare_server_core::error::{ErrorCode, Result};
 
 /// 路由聚合根
 ///

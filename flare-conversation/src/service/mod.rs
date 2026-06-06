@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use anyhow::Context;
 use flare_im_core::service_names::CONVERSATION;
+use flare_server_core::error::AnyhowContext;
 use tracing::info;
 
 use flare_core_runtime::ServiceRuntime;
@@ -15,7 +15,7 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
-    pub async fn run() -> anyhow::Result<()> {
+    pub async fn run() -> flare_server_core::error::Result<()> {
         use flare_im_core::{ServiceHelper, load_config};
 
         // 加载应用配置
@@ -28,7 +28,12 @@ impl ApplicationBootstrap {
             &service_config.runtime,
             "flare-conversation",
         )
-        .map_err(|e| anyhow::anyhow!("invalid conversation server address: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "invalid conversation server address: {}",
+                e
+            ))
+        })?;
         info!(address = %address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
@@ -46,7 +51,7 @@ impl ApplicationBootstrap {
     async fn run_with_context(
         context: ApplicationContext,
         address: SocketAddr,
-    ) -> anyhow::Result<()> {
+    ) -> flare_server_core::error::Result<()> {
         use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageServiceServer;
         use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
         use tonic::transport::Server;
@@ -86,10 +91,7 @@ impl ApplicationBootstrap {
                         })
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("gRPC server error: {}", e),
-                            ))
+                            Box::new(std::io::Error::other(format!("gRPC server error: {}", e)))
                         })
                 }),
             CONVERSATION,
@@ -102,10 +104,10 @@ impl ApplicationBootstrap {
                     .run()
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("read-receipt-consumer error: {}", e),
-                        ))
+                        Box::new(std::io::Error::other(format!(
+                            "read-receipt-consumer error: {}",
+                            e
+                        )))
                     })
             });
         }
@@ -117,10 +119,10 @@ impl ApplicationBootstrap {
                     .run()
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("conversation-ensure-consumer error: {}", e),
-                        ))
+                        Box::new(std::io::Error::other(format!(
+                            "conversation-ensure-consumer error: {}",
+                            e
+                        )))
                     })
             });
         }
@@ -138,6 +140,8 @@ impl ApplicationBootstrap {
                 })
             })
             .await
-            .map_err(|e| anyhow::anyhow!("runtime error: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("runtime error: {}", e))
+            })
     }
 }

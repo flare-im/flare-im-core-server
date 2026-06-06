@@ -56,7 +56,7 @@ pub enum EventPayload {
     BurnScheduled(BurnScheduledPayload),
     Burned(BurnedPayload),
     HardDeleted(HardDeletedPayload),
-    Message(super::Message),
+    Message(Box<super::Message>),
     Custom(CustomPayload),
     Other,
 }

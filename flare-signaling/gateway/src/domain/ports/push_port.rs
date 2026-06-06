@@ -23,7 +23,7 @@
 
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_im_core::error::Result;
+use flare_server_core::error::Result;
 
 /// 推送端口：仅描述「如何把载荷送到连接/用户」，由基础设施适配 `ServerHandle`。
 #[async_trait]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::Result;
-use flare_im_core::ErrorCode;
+use flare_server_core::error::ErrorCode;
+use flare_server_core::error::Result;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
@@ -127,16 +127,20 @@ impl PresenceWatcher for RedisPresenceWatcher {
             let mut pubsub = match client.get_async_pubsub().await {
                 Ok(pubsub) => pubsub,
                 Err(err) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("redis pubsub: {err}"))).await;
+                    let _ = tx
+                        .send(Err(flare_server_core::error::FlareError::system(format!(
+                            "redis pubsub: {err}"
+                        ))))
+                        .await;
                     return;
                 }
             };
             for channel in &channels {
                 if let Err(err) = pubsub.subscribe(channel).await {
                     let _ = tx
-                        .send(Err(anyhow::anyhow!(
+                        .send(Err(flare_server_core::error::FlareError::system(format!(
                             "redis subscribe channel={channel}: {err}"
-                        )))
+                        ))))
                         .await;
                     return;
                 }
@@ -153,7 +157,9 @@ impl PresenceWatcher for RedisPresenceWatcher {
                     Ok(payload) => payload,
                     Err(err) => {
                         let _ = tx
-                            .send(Err(anyhow::anyhow!("redis pubsub payload: {err}")))
+                            .send(Err(flare_server_core::error::FlareError::system(format!(
+                                "redis pubsub payload: {err}"
+                            ))))
                             .await;
                         continue;
                     }

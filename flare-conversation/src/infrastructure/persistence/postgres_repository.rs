@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 use chrono::{DateTime, Utc};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 use sqlx::{PgPool, Row};
 use tracing::debug;
 
@@ -93,17 +93,17 @@ impl PostgresConversationRepository {
         }
 
         for s in summaries.iter_mut() {
-            if s.channel_id.is_empty() {
-                if let Some(peer) = peer_by_cid.get(&s.conversation_id) {
-                    s.channel_id.clone_from(peer);
-                    if s.display_name
-                        .as_deref()
-                        .unwrap_or_default()
-                        .trim()
-                        .is_empty()
-                    {
-                        s.display_name = Some(peer.clone());
-                    }
+            if s.channel_id.is_empty()
+                && let Some(peer) = peer_by_cid.get(&s.conversation_id)
+            {
+                s.channel_id.clone_from(peer);
+                if s.display_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    s.display_name = Some(peer.clone());
                 }
             }
         }
@@ -978,7 +978,7 @@ impl ConversationRepository for PostgresConversationRepository {
         let user_id = require_user_id(ctx)?;
         let conversation_id = conversation_id.trim();
         if conversation_id.is_empty() {
-            return Err(crate::error::ErrorBuilder::new(
+            return Err(flare_server_core::error::ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
                 "conversation_id is required",
             )
@@ -1011,7 +1011,7 @@ impl ConversationRepository for PostgresConversationRepository {
             map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
         })?;
         if membership_exists.is_none() {
-            return Err(crate::error::ErrorBuilder::new(
+            return Err(flare_server_core::error::ErrorBuilder::new(
                 ErrorCode::MessageNotFound,
                 "conversation not found",
             )

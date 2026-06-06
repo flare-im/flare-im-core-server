@@ -13,8 +13,8 @@ use tonic::transport::{Channel, Endpoint};
 
 use super::create_discover;
 use crate::service_names::service_names::{
-    ACCESS_GATEWAY, CONVERSATION, CORE_GATEWAY, MEDIA, ORCHESTRATOR, SIGNALING_ONLINE,
-    SIGNALING_ROUTE, STORAGE_READER, SYNC_ORCHESTRATOR,
+    ACCESS_GATEWAY, ADMIN_GATEWAY, CONVERSATION, CORE_GATEWAY, MEDIA, ORCHESTRATOR,
+    SIGNALING_ONLINE, SIGNALING_ROUTE, STORAGE_READER, SYNC_ORCHESTRATOR,
 };
 
 /// 注册中心路由前缀，与 capability `PluginRouteBook` 一致。
@@ -32,6 +32,7 @@ pub fn default_static_grpc_fallback(service_name: &str) -> &'static str {
         MEDIA => "http://127.0.0.1:60081",
         ACCESS_GATEWAY => "http://127.0.0.1:60051",
         CORE_GATEWAY => "http://127.0.0.1:50050",
+        ADMIN_GATEWAY => "http://127.0.0.1:50051",
         _ => "http://127.0.0.1:65535",
     }
 }

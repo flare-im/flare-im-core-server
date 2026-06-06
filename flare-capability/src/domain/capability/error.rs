@@ -4,6 +4,7 @@
 
 use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 use serde_json::Value;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GuardRejection {
@@ -37,28 +38,15 @@ pub enum GuardDecision {
     Reject(GuardRejection),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum CapabilityError {
-    #[error("capability not registered: {0}")]
     NotRegistered(String),
-
-    #[error("capability timeout: {0}")]
     Timeout(String),
-
-    #[error("guard rejected: {0:?}")]
-    Rejected(GuardRejection),
-
-    #[error("operation not supported: {0}")]
+    Rejected(Box<GuardRejection>),
     NotSupported(String),
-
-    #[error("policy denied: {0}")]
     PolicyDenied(String),
-
-    #[error("system: {0}")]
     System(String),
-
-    #[error(transparent)]
-    Flare(#[from] FlareError),
+    Flare(FlareError),
 }
 
 pub type Result<T> = std::result::Result<T, CapabilityError>;
@@ -70,9 +58,12 @@ impl CapabilityError {
                 FlareError::localized(ErrorCode::HttpNotFound, msg)
             }
             CapabilityError::Timeout(msg) => FlareError::timeout(msg),
-            CapabilityError::Rejected(r) => ErrorBuilder::new(ErrorCode::PermissionDenied, r.code)
-                .details(r.message)
-                .build_error(),
+            CapabilityError::Rejected(r) => {
+                let rejection = *r;
+                ErrorBuilder::new(ErrorCode::PermissionDenied, rejection.code)
+                    .details(rejection.message)
+                    .build_error()
+            }
             CapabilityError::NotSupported(msg) => {
                 FlareError::localized(ErrorCode::OperationNotSupported, msg)
             }
@@ -81,6 +72,35 @@ impl CapabilityError {
             }
             CapabilityError::System(msg) => FlareError::system(msg),
             CapabilityError::Flare(e) => e,
+        }
+    }
+}
+
+impl From<FlareError> for CapabilityError {
+    fn from(value: FlareError) -> Self {
+        Self::Flare(value)
+    }
+}
+
+impl fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CapabilityError::NotRegistered(msg) => write!(f, "capability not registered: {msg}"),
+            CapabilityError::Timeout(msg) => write!(f, "capability timeout: {msg}"),
+            CapabilityError::Rejected(rejection) => write!(f, "guard rejected: {rejection:?}"),
+            CapabilityError::NotSupported(msg) => write!(f, "operation not supported: {msg}"),
+            CapabilityError::PolicyDenied(msg) => write!(f, "policy denied: {msg}"),
+            CapabilityError::System(msg) => write!(f, "system: {msg}"),
+            CapabilityError::Flare(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for CapabilityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CapabilityError::Flare(err) => Some(err),
+            _ => None,
         }
     }
 }

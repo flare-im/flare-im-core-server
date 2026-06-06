@@ -15,7 +15,7 @@ pub struct StartCallCommand {
 
 #[async_trait]
 pub trait StartCallHandlerPort: Send + Sync {
-    async fn handle(&self, cmd: StartCallCommand) -> anyhow::Result<CallSession>;
+    async fn handle(&self, cmd: StartCallCommand) -> flare_server_core::error::Result<CallSession>;
 }
 
 pub struct StartCallHandler {
@@ -30,7 +30,7 @@ impl StartCallHandler {
 
 #[async_trait]
 impl StartCallHandlerPort for StartCallHandler {
-    async fn handle(&self, cmd: StartCallCommand) -> anyhow::Result<CallSession> {
+    async fn handle(&self, cmd: StartCallCommand) -> flare_server_core::error::Result<CallSession> {
         let (session, _ev) = CallSession::start(cmd.conversation_id, cmd.tenant_id);
         self.repo.save(&session).await?;
         Ok(session)

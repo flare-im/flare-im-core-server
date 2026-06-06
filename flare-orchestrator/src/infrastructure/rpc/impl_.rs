@@ -5,7 +5,6 @@
 
 use super::ConversationRpcClient;
 use crate::domain::model::ConversationType;
-use crate::error::{FlareError, Result};
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
@@ -14,6 +13,7 @@ use flare_grpc_proto::conversation::{
 use flare_proto::common::ConversationParticipant;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::{Context, ContextExt};
+use flare_server_core::error::{FlareError, Result};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -72,7 +72,6 @@ impl ConversationRpcClient for ConversationClient {
         let conversation_id = conversation_id.to_string();
         let conversation_type_proto = conversation_type.as_proto();
         let business_type = business_type.to_string();
-        let participants = participants; // 移动 participants
 
         // 将 conversation_id 放入 attributes，确保会话服务使用传入的 conversation_id
         let mut attributes = std::collections::HashMap::new();
@@ -89,7 +88,7 @@ impl ConversationRpcClient for ConversationClient {
                     muted: false,
                     pinned: false,
                     attributes: std::collections::HashMap::new(),
-                    joined_at: None,
+                    joined_at: 0,
                 })
                 .collect(),
             attributes,

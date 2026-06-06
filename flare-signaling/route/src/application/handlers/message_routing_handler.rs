@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use flare_grpc_proto::signaling::router::RouteOptions;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_proto::common::Message;
 use flare_server_core::context::{Context, ContextExt};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -77,21 +77,21 @@ impl MessageRoutingHandler {
         let decision_start = Instant::now();
         let decision_duration = decision_start.elapsed();
 
-        if let Some(ref fc) = self.flow_controller {
-            if let Some(route_ctx) = build_route_ctx_for_flow(ctx, svid, &message) {
-                fc.check(&route_ctx).await.map_err(|e| {
-                    let total_duration = start_time.elapsed();
-                    tracing::warn!(
-                        error = %e,
-                        svid = %svid,
-                        conversation_id = ?route_ctx.conversation_id,
-                        decision_duration_ms = decision_duration.as_millis(),
-                        total_duration_ms = total_duration.as_millis(),
-                        "Flow control rejected"
-                    );
-                    map_infra_error(e, ErrorCode::ResourceExhausted, "Flow control rejected")
-                })?;
-            }
+        if let Some(ref fc) = self.flow_controller
+            && let Some(route_ctx) = build_route_ctx_for_flow(ctx, svid, &message)
+        {
+            fc.check(&route_ctx).await.map_err(|e| {
+                let total_duration = start_time.elapsed();
+                tracing::warn!(
+                    error = %e,
+                    svid = %svid,
+                    conversation_id = ?route_ctx.conversation_id,
+                    decision_duration_ms = decision_duration.as_millis(),
+                    total_duration_ms = total_duration.as_millis(),
+                    "Flow control rejected"
+                );
+                map_infra_error(e, ErrorCode::ResourceExhausted, "Flow control rejected")
+            })?;
         }
 
         let business_start = Instant::now();

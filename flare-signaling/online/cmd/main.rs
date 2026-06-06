@@ -1,5 +1,5 @@
-use flare_im_core::error::Result;
 use flare_im_core::tracing::init_tracing_from_config;
+use flare_server_core::error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {

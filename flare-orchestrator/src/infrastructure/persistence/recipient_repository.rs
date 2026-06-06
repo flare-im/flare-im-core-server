@@ -2,7 +2,7 @@
 //!
 //! ## 核心逻辑
 //! 1. **消息接收者**：根据会话类型确定接收者列表
-//!    - 单聊：优先使用会话成员表，排除发送者；仅在成员缺失时降级到 channel_id
+//!    - 单聊：优先使用显式对端 channel_id，缺失或异常时再降级到会话成员表
 //!    - 群聊/频道：从会话服务获取成员列表，排除发送者
 //! 2. **事件接收者**：直接使用 conversation_id 获取会话成员列表
 //! 3. **会话成员**：调用会话服务获取详情，提取参与者列表
@@ -11,9 +11,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_im_core::Ctx;
 use flare_proto::common::EventType;
+use flare_server_core::error::Result;
 use tracing::{debug, warn};
 
 use crate::domain::model::ConversationType;
@@ -37,13 +37,18 @@ impl RecipientRepositoryImpl {
     pub fn new(conversation_repo: Arc<ConversationClient>) -> Self {
         Self { conversation_repo }
     }
+
+    fn explicit_single_chat_recipient(channel_id: Option<&str>, sender_id: &str) -> Option<String> {
+        let cid = channel_id.map(str::trim).filter(|cid| !cid.is_empty())?;
+        (cid != sender_id).then(|| cid.to_string())
+    }
 }
 
 impl RecipientRepository for RecipientRepositoryImpl {
     /// 获取消息接收者列表
     ///
     /// ## 逻辑
-    /// - 单聊：优先从会话成员解析对方，防止客户端误把 channel_id 传成自己导致自投递
+    /// - 单聊：优先使用显式对端 channel_id，避免依赖会话服务热路径
     /// - 其他类型：从会话服务获取成员列表，排除发送者
     fn get_message_recipients<'a>(
         &'a self,
@@ -56,6 +61,28 @@ impl RecipientRepository for RecipientRepositoryImpl {
         Box::pin(async move {
             match conversation_type {
                 ConversationType::Single => {
+                    if let Some(recipient_id) =
+                        Self::explicit_single_chat_recipient(channel_id, sender_id)
+                    {
+                        debug!(
+                            conversation_id = %conversation_id,
+                            channel_id = %recipient_id,
+                            "Single chat recipient resolved from channel_id"
+                        );
+                        return Ok(vec![recipient_id]);
+                    }
+
+                    if let Some(cid) = channel_id.map(str::trim).filter(|cid| !cid.is_empty())
+                        && cid == sender_id
+                    {
+                        warn!(
+                            conversation_id = %conversation_id,
+                            sender_id = %sender_id,
+                            channel_id = %cid,
+                            "Single chat channel_id points to sender, falling back to conversation members"
+                        );
+                    }
+
                     let members = self.get_conversation_members(ctx, conversation_id).await?;
                     let mut recipients: Vec<String> = members
                         .into_iter()
@@ -73,24 +100,6 @@ impl RecipientRepository for RecipientRepositoryImpl {
                             "Single chat recipients resolved from conversation members"
                         );
                         return Ok(recipients);
-                    }
-
-                    if let Some(cid) = channel_id.map(str::trim).filter(|cid| !cid.is_empty()) {
-                        if cid == sender_id {
-                            warn!(
-                                conversation_id = %conversation_id,
-                                sender_id = %sender_id,
-                                channel_id = %cid,
-                                "Single chat channel_id points to sender and no peer member was found"
-                            );
-                            return Ok(vec![]);
-                        }
-                        debug!(
-                            conversation_id = %conversation_id,
-                            channel_id = %cid,
-                            "Single chat recipient fallback: channel_id"
-                        );
-                        return Ok(vec![cid.to_string()]);
                     }
 
                     warn!(
@@ -138,12 +147,7 @@ impl RecipientRepository for RecipientRepositoryImpl {
             );
 
             // 直接使用 conversation_id 获取成员列表
-            let mut members = self.get_conversation_members(ctx, conversation_id).await?;
-            if event_type == EventType::EventTyping {
-                if let Some(current_uid) = ctx.user_id() {
-                    members.retain(|uid| uid != current_uid);
-                }
-            }
+            let members = self.get_conversation_members(ctx, conversation_id).await?;
 
             debug!(
                 message_id = %message_id,
@@ -190,5 +194,34 @@ impl RecipientRepository for RecipientRepositoryImpl {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecipientRepositoryImpl;
+
+    #[test]
+    fn explicit_single_chat_recipient_prefers_non_self_channel_id() {
+        assert_eq!(
+            RecipientRepositoryImpl::explicit_single_chat_recipient(Some(" user-b "), "user-a"),
+            Some("user-b".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_single_chat_recipient_ignores_empty_or_self_channel_id() {
+        assert_eq!(
+            RecipientRepositoryImpl::explicit_single_chat_recipient(Some(""), "user-a"),
+            None
+        );
+        assert_eq!(
+            RecipientRepositoryImpl::explicit_single_chat_recipient(Some("user-a"), "user-a"),
+            None
+        );
+        assert_eq!(
+            RecipientRepositoryImpl::explicit_single_chat_recipient(None, "user-a"),
+            None
+        );
     }
 }

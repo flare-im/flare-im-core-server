@@ -6,7 +6,8 @@
 pub use flare_im_core::constants::topics::TOPIC_MESSAGE_MAIN;
 pub use flare_im_core::event::{
     MqEnvelopeDecodeError, decode_mq_envelope, mq_envelope_for_main_queue_event,
-    mq_envelope_for_main_queue_message,
+    mq_envelope_for_main_queue_event_with_headers, mq_envelope_for_main_queue_message,
+    mq_envelope_for_main_queue_message_with_headers,
 };
 pub use flare_proto::common::mq_envelope::Payload as MqPayload;
 pub use flare_proto::common::{MqEnvelope, MqPayloadKind};

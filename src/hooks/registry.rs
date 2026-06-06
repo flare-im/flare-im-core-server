@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::Ctx;
-use crate::error::{ErrorBuilder, ErrorCode, FlareError, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
 
@@ -536,13 +536,13 @@ impl GlobalHookRegistry {
 mod tests {
     use super::HookRegistry;
     use crate::Ctx;
-    use crate::error::{ErrorBuilder, ErrorCode};
     use crate::hooks::selector::HookSelector;
     use crate::hooks::{
         DeliveryEvent, DeliveryHook, HookMetadata, MessageDraft, PreSendDecision, PreSendHook,
     };
     use async_trait::async_trait;
     use flare_server_core::context::Context;
+    use flare_server_core::error::{ErrorBuilder, ErrorCode};
     use std::sync::Arc;
     use std::time::SystemTime;
     use tokio::time::Duration;

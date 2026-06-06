@@ -17,6 +17,7 @@ help:
 	@echo "  test            cargo test"
 	@echo "  clean           cargo clean"
 	@echo "  start-core      Start full stack, single gateway, no business hooks"
+	@echo "  start-core-fast Start core stack without cargo build (FLARE_SKIP_BUILD=1)"
 	@echo "  start-social    Start full stack, single gateway, flare-social hook"
 	@echo "  stop            Stop all services"
 	@echo "  run-<service>   Start service (see list below)"
@@ -24,6 +25,8 @@ help:
 	@echo "Optional: make start-core ARGS=\"trace\"  (or multi / multi trace)"
 	@echo "Environment variables:"
 	@echo "  PROTOC          Path to protoc binary (auto-detected: $(PROTOC))"
+	@echo "  FLARE_SKIP_BUILD=1  Skip cargo build when binaries already exist"
+	@echo "  CARGO_BUILD_JOBS=N  Limit parallel rustc jobs (helps avoid OOM on start)"
 
 build:
 	@if [ -z "$(PROTOC)" ] || [ ! -f "$(PROTOC)" ]; then \
@@ -55,13 +58,16 @@ clean:
 SCRIPTS := ./scripts
 ARGS ?=
 
-.PHONY: start-core start-social stop
+.PHONY: start-core start-core-fast start-social stop
 
 start-core:
-	$(SCRIPTS)/start_server_core.sh single $(ARGS)
+	bash $(SCRIPTS)/start_server_core.sh single $(ARGS)
+
+start-core-fast:
+	FLARE_SKIP_BUILD=1 bash $(SCRIPTS)/start_server_core.sh single $(ARGS)
 
 start-social:
-	$(SCRIPTS)/start_server_social.sh single $(ARGS)
+	bash $(SCRIPTS)/start_server_social.sh single $(ARGS)
 
 stop:
 	$(SCRIPTS)/stop_server.sh

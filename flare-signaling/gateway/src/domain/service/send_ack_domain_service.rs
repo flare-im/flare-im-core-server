@@ -1,4 +1,4 @@
-//! 客户端 ACK 领域服务：上行 `Ack` 仅允许 `push` / `conversation` / `batch`（见 `common/ack.proto`）。
+//! 客户端 ACK 领域服务：上行 `Ack` 仅允许 `push` / `conversation` / `read` / `batch`（见 `common/ack.proto`）。
 //! `send` / `event` 为下行回执语义，不得经本路径上行。
 
 use std::sync::Arc;
@@ -49,6 +49,12 @@ impl SendAckDomainService {
                     .map_err(|e| {
                         FlareError::system(format!("report conversation ack failed: {e}"))
                     })?;
+            }
+            AckPayload::Read(read_ack) => {
+                self.ack_port
+                    .report_read_ack(tx, read_ack.clone())
+                    .await
+                    .map_err(|e| FlareError::system(format!("report read ack failed: {e}")))?;
             }
             AckPayload::Batch(batch) => {
                 self.ack_port

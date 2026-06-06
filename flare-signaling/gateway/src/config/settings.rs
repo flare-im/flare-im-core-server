@@ -4,7 +4,9 @@
 //! ServerConfig，便于扩容连接数与调优消息收发稳定性；可通过环境变量覆盖。
 
 use flare_im_core::config::{FlareAppConfig, RedisPoolConfig, TrustedTokenIssuerConfig};
+use flare_im_core::gateway::require_secure_token_secret;
 use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct AccessGatewayConfig {
@@ -46,7 +48,7 @@ pub struct AccessGatewayConfig {
 }
 
 impl AccessGatewayConfig {
-    pub fn from_app_config(app: &FlareAppConfig) -> Self {
+    pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service = app.access_gateway_service();
 
         let token_profile: Option<RedisPoolConfig> = service
@@ -100,9 +102,11 @@ impl AccessGatewayConfig {
             service.use_route_service
         };
 
-        let token_secret = service
-            .token_secret
-            .unwrap_or_else(|| "insecure-secret".to_string());
+        let token_secret = require_secure_token_secret(
+            "ACCESS_GATEWAY_TOKEN_SECRET",
+            service.token_secret.as_deref(),
+            "services.access_gateway.token_secret",
+        )?;
 
         let token_issuer = service
             .token_issuer
@@ -168,7 +172,7 @@ impl AccessGatewayConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10);
 
-        Self {
+        Ok(Self {
             signaling_service,
             route_service,
             message_service,
@@ -193,6 +197,6 @@ impl AccessGatewayConfig {
             heartbeat_timeout_secs,
             auth_timeout_secs,
             send_timeout_secs,
-        }
+        })
     }
 }

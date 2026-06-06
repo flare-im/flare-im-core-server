@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 
 use tracing::info;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
 use crate::service::wire::{self, ApplicationContext};
 use flare_core_runtime::ServiceRuntime;
 use flare_im_core::service_names::SIGNALING_ONLINE;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -97,7 +97,7 @@ impl ApplicationBootstrap {
             .await
             .map_err(|e| {
                 map_infra_error(
-                    anyhow::anyhow!("{}", e),
+                    flare_server_core::error::FlareError::system(format!("{}", e)),
                     ErrorCode::InternalError,
                     "Runtime error",
                 )

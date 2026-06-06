@@ -10,10 +10,13 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
 use async_trait::async_trait;
 use flare_im_core::Ctx;
-use flare_proto::common::{PushEnvelope, PushResult};
+use flare_proto::common::{
+    ErrorCode as ProtoErrorCode, ErrorDetail, PushDelivered, PushEnvelope, PushFailed, PushResult,
+    push_result,
+};
+use flare_server_core::error::Result;
 use prost::Message as _;
 use tonic::transport::Channel;
 use tracing::{debug, error, instrument};
@@ -139,10 +142,9 @@ impl PushExecutor for PushExecutorImpl {
                     envelope_id,
                     device_id,
                     user_id,
-                    success: true,
-                    error_code: String::new(),
-                    error_message: String::new(),
-                    pushed_at_ms: Self::current_time_ms(),
+                    result: Some(push_result::Result::Delivered(PushDelivered {
+                        pushed_at: Self::current_time_ms(),
+                    })),
                 }
             }
             Err(e) => {
@@ -158,10 +160,15 @@ impl PushExecutor for PushExecutorImpl {
                     envelope_id,
                     device_id,
                     user_id,
-                    success: false,
-                    error_code: "PUSH_FAILED".to_string(),
-                    error_message: e.to_string(),
-                    pushed_at_ms: Self::current_time_ms(),
+                    result: Some(push_result::Result::Failed(PushFailed {
+                        error: Some(ErrorDetail {
+                            code: ProtoErrorCode::Internal as i32,
+                            reason: "PUSH_FAILED".to_string(),
+                            message: e.to_string(),
+                            track: String::new(),
+                        }),
+                        failed_at: Self::current_time_ms(),
+                    })),
                 }
             }
         }
@@ -193,7 +200,7 @@ pub struct DeviceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_proto::common::{AckPayload, PushTargetType};
+    use flare_proto::{AckPayload, PushPayloadKind, PushTargetType};
 
     #[test]
     fn test_serialize_envelope() {
@@ -201,21 +208,19 @@ mod tests {
             envelope_id: "test-123".to_string(),
             tenant_id: "tenant-1".to_string(),
             trace_id: "trace-123".to_string(),
-            created_at_ms: 1234567890,
+            created_at: 1234567890,
             target_type: PushTargetType::Users as i32,
             target_user_ids: vec!["user-1".to_string()],
             target_device_ids: Vec::new(),
             payload_kind: PushPayloadKind::Ack as i32,
             options: None,
-            payload: Some(flare_proto::common::push_envelope::Payload::Ack(
-                AckPayload {
-                    message_id: "msg-123".to_string(),
-                    conversation_id: "conv-123".to_string(),
-                    seq: 100,
-                    ack_type: "received".to_string(),
-                    ack_at_ms: 1234567890,
-                },
-            )),
+            payload: Some(flare_proto::push_envelope::Payload::Ack(AckPayload {
+                message_id: "msg-123".to_string(),
+                conversation_id: "conv-123".to_string(),
+                seq: 100,
+                ack_type: "received".to_string(),
+                ack_at: 1234567890,
+            })),
             headers: std::collections::HashMap::new(),
         };
 

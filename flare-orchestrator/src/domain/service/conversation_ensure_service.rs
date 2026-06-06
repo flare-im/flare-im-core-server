@@ -16,8 +16,8 @@ use flare_server_core::context::Context;
 
 use crate::config::SessionCreationMode;
 use crate::domain::repository::ConversationClient;
-use crate::error::Result;
 use crate::infrastructure::rpc::ConversationRpcClient;
+use flare_server_core::error::Result;
 
 /// 会话生成服务
 ///
@@ -122,7 +122,7 @@ impl ConversationEnsureService {
                 ensure_ctx = ensure_ctx.with_trace_id(trace_id);
             }
             if let Some(t) = ctx.tenant_id() {
-                ensure_ctx = ensure_ctx.with_tenant_id(t.to_string());
+                ensure_ctx = ensure_ctx.with_tenant_id(t);
             } else {
                 ensure_ctx = ensure_ctx.with_tenant_id(request.tenant_id.clone());
             }
@@ -227,17 +227,17 @@ pub fn build_conversation_ensure_request_from_message(
     {
         participants.push(message.channel_id.clone());
     }
-    if message.conversation_type == flare_proto::common::ConversationType::Group as i32 {
-        if let Some(member_ids) = message.extra.get("group_member_ids") {
-            participants.extend(parse_group_member_ids(member_ids));
-        }
+    if message.conversation_type == flare_proto::common::ConversationType::Group as i32
+        && let Some(member_ids) = message.attributes.get("group_member_ids")
+    {
+        participants.extend(parse_group_member_ids(member_ids));
     }
     participants.retain(|id| !id.trim().is_empty());
     participants.sort();
     participants.dedup();
 
     let business_type = message
-        .extra
+        .attributes
         .get("business_type")
         .cloned()
         .unwrap_or_default();

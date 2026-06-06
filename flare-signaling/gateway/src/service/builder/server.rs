@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::AccessGatewayConfig;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
 use crate::interface::link::LongConnectionHandler;
 use flare_core::server::builder::flare::{FlareServer, FlareServerBuilder};
 use flare_core::server::connection::ConnectionManager;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
+
+type PushHandleSlot = Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>>;
 
 /// 使用 Flare 模式构建服务器
 ///
@@ -16,6 +18,7 @@ use tokio::sync::Mutex;
 /// - 只需实现 `ServerEventHandler` trait
 /// - 自动消息路由和 ACK 处理
 /// - 支持设备管理、认证、多协议等完整功能
+#[allow(clippy::too_many_arguments)]
 pub fn build_flare_server(
     ws_addr: String,
     quic_addr: Option<String>,
@@ -71,13 +74,14 @@ pub fn build_flare_server(
     builder.build().map_err(|e| {
         ErrorBuilder::new(
             ErrorCode::InternalError,
-            &format!("Failed to build FlareServer: {}", e),
+            format!("Failed to build FlareServer: {}", e),
         )
         .build_error()
     })
 }
 
 /// 构建长连接服务器
+#[allow(clippy::too_many_arguments)]
 pub async fn build_long_connection_server(
     runtime_config: &flare_server_core::Config,
     ws_port: u16,
@@ -86,7 +90,7 @@ pub async fn build_long_connection_server(
     authenticator: Arc<dyn flare_core::server::auth::Authenticator + Send + Sync>,
     connection_handler: Arc<LongConnectionHandler>,
     access_config: Arc<AccessGatewayConfig>,
-    push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>>,
+    push_handle_slot: PushHandleSlot,
 ) -> Result<Arc<tokio::sync::Mutex<Option<FlareServer>>>> {
     use tracing::{error, info, warn};
 
@@ -158,7 +162,7 @@ pub async fn build_long_connection_server(
                 error!(error = %e, "Failed to build FlareServer");
                 return Err(ErrorBuilder::new(
                     ErrorCode::InternalError,
-                    &format!("Failed to build server: {}", e),
+                    format!("Failed to build server: {}", e),
                 )
                 .build_error());
             }
@@ -173,7 +177,7 @@ pub async fn build_long_connection_server(
         error!(error = %e, "Failed to start FlareServer");
         ErrorBuilder::new(
             ErrorCode::InternalError,
-            &format!("Failed to start server: {}", e),
+            format!("Failed to start server: {}", e),
         )
         .build_error()
     })?;
@@ -186,9 +190,7 @@ pub async fn build_long_connection_server(
 /// 设置服务器组件
 async fn setup_server_components(
     connection_manager: &Arc<ConnectionManager>,
-    push_handle_slot: Option<
-        &Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>>,
-    >,
+    push_handle_slot: Option<&PushHandleSlot>,
 ) {
     use flare_core::server::handle::DefaultServerHandle;
 

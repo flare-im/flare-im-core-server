@@ -1,5 +1,5 @@
-use anyhow::Result;
 use flare_im_core::config::FlareAppConfig;
+use flare_server_core::error::Result;
 use std::env;
 
 #[derive(Clone, Debug)]

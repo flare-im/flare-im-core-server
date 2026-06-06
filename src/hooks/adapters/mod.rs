@@ -4,7 +4,7 @@ mod webhook;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use super::config::{HookDefinition, HookFactory, HookTransportConfig};
 use super::selector::HookSelector;

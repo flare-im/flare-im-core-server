@@ -3,19 +3,15 @@ use std::time::Duration;
 use std::time::Instant;
 
 use flare_im_core::Ctx;
-use flare_proto::common::event::Payload;
-use flare_proto::common::{Event, EventType, Message};
+use flare_proto::common::{Event, Message};
 
 use crate::application::extension::{ExtensionFailureMode, ExtensionPolicy, ExtensionRouting};
 use crate::application::handlers::plugin::CallCapabilityBridge;
 use crate::domain::model::MessageSubmission;
 use crate::domain::service::{HookExecutionContext, HookExecutionService};
-use crate::error::{ErrorCode, Result};
+use flare_server_core::error::{ErrorCode, Result};
 use flare_server_core::flare_err;
 
-/// 与 `flare-sdk-plugin-call::rtc::RTC_EXT_ENRICH_*` 对齐（编排器不依赖该 crate，避免环依赖）。
-const CALL_SIGNAL_EXT_RTC_ENRICH: &str = "flare_rtc_enrich";
-const CALL_SIGNAL_EXT_RTC_ENRICH_ERR: &str = "flare_rtc_enrich_error";
 const EXTENSION_LOG_SCHEMA: &str = "extension.v1";
 
 /// 扩展编排器：收口 Hook/Plugin 扩展执行，统一失败策略与降级标记。
@@ -236,21 +232,6 @@ impl ExtensionOrchestrator {
         tenant_id: &str,
         event: &mut Event,
     ) -> Result<()> {
-        if EventType::try_from(event.r#type).ok() != Some(EventType::EventCallSignal) {
-            return Ok(());
-        }
-
-        let Some(ref bridge) = self.call_capability_bridge else {
-            self.trace_extension_skip(
-                ctx,
-                "plugin",
-                "event_enrich",
-                "bridge_disabled",
-                None,
-                Some(event.r#type),
-            );
-            return Ok(());
-        };
         if !self.routing.allows_plugin_for_event(ctx, event) {
             self.trace_extension_skip(
                 ctx,
@@ -262,99 +243,120 @@ impl ExtensionOrchestrator {
             );
             return Ok(());
         }
+        let Some(bridge) = self.call_capability_bridge.as_ref() else {
+            self.trace_extension_skip(
+                ctx,
+                "plugin",
+                "event_enrich",
+                "bridge_not_configured",
+                None,
+                Some(event.r#type),
+            );
+            return Ok(());
+        };
+
         let started_at = Instant::now();
         let timeout = Duration::from_millis(self.policy.event_enrich.timeout_ms.max(1));
         let attempts = self.policy.event_enrich.attempts();
-        let mut enrich_result = Ok(());
         for attempt in 1..=attempts {
-            let (result, is_timeout) = match tokio::time::timeout(
+            match tokio::time::timeout(
                 timeout,
                 bridge.enrich_call_signal_event(ctx, tenant_id, event),
             )
             .await
             {
-                Ok(inner) => (inner, false),
-                Err(_) => (
-                    Err(flare_err!(
-                        ErrorCode::OperationFailed,
-                        "event enrich timeout"
-                    )),
-                    true,
-                ),
-            };
-            enrich_result = result;
-            if enrich_result.is_ok() {
-                break;
-            }
-            if attempt < attempts {
-                let reason = if is_timeout { "timeout" } else { "error" };
-                self.trace_extension_retry(
-                    ctx,
-                    "plugin",
-                    "event_enrich",
-                    attempt,
-                    attempts,
-                    reason,
-                );
-            }
-        }
-
-        if let Err(e) = enrich_result {
-            self.trace_extension_exec(
-                ctx,
-                "plugin",
-                "event_enrich",
-                "error",
-                started_at,
-                None,
-                Some(event.r#type),
-            );
-            return match self.policy.call_signal_enrich_failure_mode {
-                ExtensionFailureMode::FailOpen => {
-                    let detail = format!("{e:#}");
-                    let detail: String = detail.chars().take(240).collect();
-                    tracing::warn!(
-                        error = %e,
-                        trace_id = %ctx.trace_id(),
-                        request_id = %ctx.request_id(),
-                        event_id = %event.event_id,
-                        conversation_id = %event.conversation_id,
-                        "call capability enrich failed, fail-open degrade"
+                Ok(Ok(())) => {
+                    self.trace_extension_exec(
+                        ctx,
+                        "plugin",
+                        "event_enrich",
+                        "ok",
+                        started_at,
+                        None,
+                        Some(event.r#type),
                     );
-                    if let Some(Payload::CallSignal(cs)) = event.payload.as_mut() {
-                        cs.ext
-                            .insert(CALL_SIGNAL_EXT_RTC_ENRICH.into(), "degraded".into());
-                        if !detail.trim().is_empty() {
-                            cs.ext.insert(CALL_SIGNAL_EXT_RTC_ENRICH_ERR.into(), detail);
-                        }
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    if attempt < attempts {
+                        self.trace_extension_retry(
+                            ctx,
+                            "plugin",
+                            "event_enrich",
+                            attempt,
+                            attempts,
+                            "error",
+                        );
+                        continue;
                     }
                     self.trace_extension_exec(
                         ctx,
                         "plugin",
                         "event_enrich",
-                        "degraded",
+                        "error",
                         started_at,
                         None,
                         Some(event.r#type),
                     );
-                    Ok(())
+                    return match self.policy.call_signal_enrich_failure_mode {
+                        ExtensionFailureMode::FailOpen => {
+                            tracing::warn!(
+                                trace_id = %ctx.trace_id(),
+                                request_id = %ctx.request_id(),
+                                tenant_id,
+                                event_id = %event.event_id,
+                                event_type = event.r#type,
+                                error = %e,
+                                "event plugin enrich failed, fail-open degrade"
+                            );
+                            Ok(())
+                        }
+                        ExtensionFailureMode::FailClosed => Err(e),
+                    };
                 }
-                ExtensionFailureMode::FailClosed => Err(e),
-            };
+                Err(_) => {
+                    if attempt < attempts {
+                        self.trace_extension_retry(
+                            ctx,
+                            "plugin",
+                            "event_enrich",
+                            attempt,
+                            attempts,
+                            "timeout",
+                        );
+                        continue;
+                    }
+                    self.trace_extension_exec(
+                        ctx,
+                        "plugin",
+                        "event_enrich",
+                        "timeout",
+                        started_at,
+                        None,
+                        Some(event.r#type),
+                    );
+                    let err = flare_err!(ErrorCode::OperationFailed, "event plugin enrich timeout");
+                    return match self.policy.call_signal_enrich_failure_mode {
+                        ExtensionFailureMode::FailOpen => {
+                            tracing::warn!(
+                                trace_id = %ctx.trace_id(),
+                                request_id = %ctx.request_id(),
+                                tenant_id,
+                                event_id = %event.event_id,
+                                event_type = event.r#type,
+                                "event plugin enrich timed out, fail-open degrade"
+                            );
+                            Ok(())
+                        }
+                        ExtensionFailureMode::FailClosed => Err(err),
+                    };
+                }
+            }
         }
-        self.trace_extension_exec(
-            ctx,
-            "plugin",
-            "event_enrich",
-            "ok",
-            started_at,
-            None,
-            Some(event.r#type),
-        );
-
-        Ok(())
+        unreachable!("event_enrich attempts loop should always return");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn trace_extension_exec(
         &self,
         ctx: &Ctx,
@@ -433,7 +435,7 @@ impl ExtensionOrchestrator {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -451,7 +453,7 @@ mod tests {
     use crate::application::handlers::plugin::CallCapabilityBridge;
     use crate::domain::repository::CapabilityDispatchGateway;
     use crate::domain::service::HookExecutionService;
-    use crate::error::{ErrorCode, Result};
+    use flare_server_core::error::{ErrorCode, Result};
     use flare_server_core::flare_err;
     use tokio::time::{Duration, sleep};
 

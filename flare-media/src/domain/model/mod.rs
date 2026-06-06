@@ -6,6 +6,9 @@ use chrono::{DateTime, Utc};
 pub const STORAGE_PATH_METADATA_KEY: &str = "storage_path";
 pub const STORAGE_BUCKET_METADATA_KEY: &str = "storage_bucket";
 pub const FILE_CATEGORY_METADATA_KEY: &str = "file_category";
+pub const MEDIA_LIFECYCLE_SCOPE_METADATA_KEY: &str = "media_lifecycle_scope";
+pub const MESSAGE_MEDIA_LIFECYCLE_SCOPE: &str = "message";
+pub const EXTERNAL_MEDIA_LIFECYCLE_SCOPE: &str = "external";
 
 /// 媒体领域配置值对象（只包含领域相关的配置）
 #[derive(Clone, Debug)]
@@ -44,8 +47,9 @@ impl MediaDomainConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaAssetStatus {
+    #[default]
     Pending,
     Active,
     SoftDeleted,
@@ -74,26 +78,16 @@ impl FromStr for MediaAssetStatus {
     }
 }
 
-impl Default for MediaAssetStatus {
-    fn default() -> Self {
-        MediaAssetStatus::Pending
-    }
-}
-
 /// 文件访问类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FileAccessType {
     /// 公开文件 - 可直接访问
     Public,
     /// 私有文件 - 需要授权访问
+    #[default]
     Private,
-}
-
-impl Default for FileAccessType {
-    fn default() -> Self {
-        FileAccessType::Private
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +222,7 @@ pub struct UploadContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct MediaReference {
+    pub tenant_id: String,
     pub reference_id: String,
     pub file_id: String,
     pub namespace: String,
@@ -247,16 +242,12 @@ pub struct MediaReferenceScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UploadSessionStatus {
+    #[default]
     Pending,
     Completed,
     Aborted,
-}
-
-impl Default for UploadSessionStatus {
-    fn default() -> Self {
-        UploadSessionStatus::Pending
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -305,7 +296,7 @@ pub struct UploadSession {
 
 impl UploadSession {
     pub fn has_chunk(&self, index: u32) -> bool {
-        self.uploaded_chunks.iter().any(|chunk| *chunk == index)
+        self.uploaded_chunks.contains(&index)
     }
 
     pub fn add_chunk(&mut self, index: u32, size: i64) {

@@ -1,33 +1,8 @@
-version: '3.8'
-
 networks:
   flare-network:
     driver: bridge
 
 services:
-  # ===== Etcd - 服务注册发现 =====
-  # etcd:
-  #   image: quay.io/coreos/etcd:v3.5.9
-  #   container_name: flare-etcd
-  #   networks:
-  #     - flare-network
-  #   ports:
-  #     - "22379:2379"
-  #     - "22380:2380"
-  #   volumes:
-  #     - ./data/etcd:/etcd-data
-  #   command: 
-  #     /usr/local/bin/etcd
-  #     --name=etcd0
-  #     --data-dir=/etcd-data
-  #     --listen-client-urls=http://0.0.0.0:2379
-  #     --advertise-client-urls=http://etcd:2379
-  #     --listen-peer-urls=http://0.0.0.0:2380
-  #     --initial-advertise-peer-urls=http://etcd:2380
-  #     --initial-cluster=etcd0=http://etcd:2380
-  #     --initial-cluster-token=etcd-cluster-1
-  #     --initial-cluster-state=new
-
   # ===== Consul - 服务注册 / 配置中心 =====
   consul:
     image: hashicorp/consul:1.17
@@ -71,9 +46,7 @@ services:
       retries: 5
 
   # ===== PostgreSQL + TimescaleDB - 主存储（消息/事件流/会话/媒体/Hook） =====
-  # 选型说明：不替换为 ScyllaDB。原因见 deploy/STORAGE_ANALYSIS.md
-  # - 当前架构深度依赖 SQL、事务、多表关系与 TimescaleDB 时序能力；
-  # - 若未来需超大规模消息体，可采用混合架构（仅消息体迁 ScyllaDB），见下方可选 ScyllaDB 注释块。
+  # 当前本地开发/压测默认使用 SQL 事务 + TimescaleDB 时序能力承载 IM Core 主存储。
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: flare-postgres
@@ -82,12 +55,13 @@ services:
     environment:
       POSTGRES_USER: flare
       POSTGRES_PASSWORD: flare123
-      POSTGRES_DB: flare
+      POSTGRES_DB: flare2
     ports:
       - "25432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: ["postgres", "-c", "max_connections=200"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U flare"]
       interval: 10s
@@ -129,6 +103,27 @@ services:
 
     volumes:
       - ./data/kafka:/var/lib/kafka/data
+
+  # ===== Kafka topic 初始化 =====
+  # Flare IM Core 运行时 Kafka / JetStream 二选一；本服务只在选择 Kafka 时用于预建 topic。
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: flare-kafka-init
+    networks:
+      - flare-network
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      FLARE_KAFKA_MESSAGE_PARTITIONS: "12"
+      FLARE_KAFKA_PUSH_PARTITIONS: "12"
+      FLARE_KAFKA_REPLICATION_FACTOR: "1"
+      FLARE_KAFKA_MIN_INSYNC_REPLICAS: "1"
+    volumes:
+      - ./kafka-topics.sh:/opt/flare/kafka-topics.sh:ro
+    command: ["/bin/bash", "/opt/flare/kafka-topics.sh"]
+    restart: "no"
+
   # ===== NATS JetStream - 消息队列 =====
   nats:
     image: nats:2.10-alpine
@@ -263,4 +258,3 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-

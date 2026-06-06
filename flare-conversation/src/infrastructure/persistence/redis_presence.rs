@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
 use chrono::{TimeZone, Utc};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::config::ConversationConfig;
@@ -53,7 +53,7 @@ impl PresenceRepository for RedisPresenceRepository {
             if let Some((_, device_id)) = key.rsplit_once(':') {
                 let state = map
                     .get("state")
-                    .map(|v| DeviceState::from_str(v.as_str()))
+                    .map(|v| DeviceState::from_persistence_value(v.as_str()))
                     .unwrap_or(DeviceState::Unspecified);
                 let last_seen_at = map
                     .get("last_seen_ts")
@@ -94,7 +94,7 @@ impl PresenceRepository for RedisPresenceRepository {
 
         let notify_conflict = if update.notify_conflict { "1" } else { "0" };
 
-        let fields = vec![
+        let fields = [
             (
                 "platform".to_string(),
                 update.device_platform.clone().unwrap_or_default(),

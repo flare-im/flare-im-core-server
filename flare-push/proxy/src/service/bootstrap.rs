@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use anyhow::{Context, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
@@ -68,5 +68,6 @@ impl ApplicationBootstrap {
                 })
             })
             .await
+            .map_err(flare_server_core::error::FlareError::from)
     }
 }

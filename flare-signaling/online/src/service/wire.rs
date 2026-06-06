@@ -12,12 +12,12 @@ use crate::application::handlers::{
 use crate::config::OnlineConfig;
 use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
 use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
-use crate::error::{ErrorCode, Result, map_infra_error};
 use crate::infrastructure::persistence::redis::{
     RedisConversationRepository, RedisPresencePublisher, RedisPresenceWatcher,
     RedisSubscriptionRepository,
 };
 use crate::interface::grpc::OnlineHandler;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 单态化后的 gRPC Handler（Redis 实现 + 无事件发布）
 pub type WiredOnlineHandler = OnlineHandler<
@@ -76,10 +76,7 @@ pub async fn initialize(
     ));
 
     // 4. 构建领域服务
-    let gateway_id = format!(
-        "gateway-{}",
-        uuid::Uuid::new_v4().to_string()[..8].to_string()
-    );
+    let gateway_id = format!("gateway-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let online_domain_service = Arc::new(OnlineStatusService::<
         RedisConversationRepository,
         NoopConnectionEventPublisher,

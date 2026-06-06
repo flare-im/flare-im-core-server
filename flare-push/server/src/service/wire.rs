@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::MessageHandler;
 use flare_server_core::mq::consumer::TopicDispatcher;
@@ -10,11 +10,7 @@ use crate::application::PushRouterHandler;
 use crate::config::PushServerConfig;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
-// 旧的 consumer 已被删除，使用统一的 PushHandler
-use crate::interface::messaging::event_consumer::PushEventHandler;
-use crate::interface::messaging::main_consumer::PushMainHandler;
-use crate::interface::messaging::message_consumer::PushMessageHandler;
-use crate::interface::messaging::push_consumer::PushHandler;
+use crate::interface::messaging::{PushEventHandler, PushHandler, PushMessageHandler};
 
 pub struct ApplicationContext {
     pub config: Arc<PushServerConfig>,
@@ -31,58 +27,46 @@ pub async fn initialize(
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
     let route_handler = Arc::new(PushRouterHandler::new(online_status, publisher.clone()));
     let message_handler = PushMessageHandler::new(route_handler.clone(), publisher.clone());
-    let main_handler = PushMainHandler::new(route_handler.clone(), publisher.clone());
     let event_handler = PushEventHandler::new(route_handler.clone(), publisher.clone());
-    let notification_handler = PushHandler::new(route_handler.clone());
-    let ack_handler = PushHandler::new(route_handler.clone());
-    let custom_handler = PushHandler::new(route_handler);
+    let push_handler = PushHandler::new(route_handler);
 
     let consumer_cfg = ConsumerConfig::default()
         .with_concurrency(64)
         .with_ordered(true);
 
     let mut dispatcher = TopicDispatcher::new();
-    let message_adapter: Arc<dyn MessageHandler> = Arc::new(message_handler);
-    Dispatcher::register(
+
+    register_handler(
         &mut dispatcher,
         config.push_message_topic.clone(),
-        message_adapter,
+        Arc::new(message_handler),
     )?;
-
-    let main_adapter: Arc<dyn MessageHandler> = Arc::new(main_handler);
-    Dispatcher::register(
-        &mut dispatcher,
-        config.message_main_topic.clone(),
-        main_adapter,
-    )?;
-
-    let event_adapter: Arc<dyn MessageHandler> = Arc::new(event_handler);
-    Dispatcher::register(
+    register_handler(
         &mut dispatcher,
         config.push_event_topic.clone(),
-        event_adapter,
+        Arc::new(event_handler),
     )?;
-
-    let notification_adapter: Arc<dyn MessageHandler> = Arc::new(notification_handler);
-    Dispatcher::register(
+    register_handler(
         &mut dispatcher,
-        config.push_notification_topic.clone(),
-        notification_adapter,
-    )?;
-
-    let ack_adapter: Arc<dyn MessageHandler> = Arc::new(ack_handler);
-    Dispatcher::register(&mut dispatcher, config.push_ack_topic.clone(), ack_adapter)?;
-
-    let custom_adapter: Arc<dyn MessageHandler> = Arc::new(custom_handler);
-    Dispatcher::register(
-        &mut dispatcher,
-        config.push_custom_topic.clone(),
-        custom_adapter,
+        config.push_envelope_topic.clone(),
+        Arc::new(push_handler),
     )?;
 
     Ok(ApplicationContext {
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),
+    })
+}
+
+fn register_handler(
+    dispatcher: &mut TopicDispatcher,
+    topic: String,
+    handler: Arc<dyn MessageHandler>,
+) -> Result<()> {
+    Dispatcher::register(dispatcher, topic.clone(), handler).map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "register push server consumer {topic}: {err}"
+        ))
     })
 }

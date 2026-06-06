@@ -8,27 +8,22 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use flare_im_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use flare_im_core::{
     DeliveryEvent, HookGroup, HookMetadata, MessageDraft, MessageRecord, PreSendDecision,
     PreSendHook, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use tokio::time::timeout;
 
 /// Hook执行模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExecutionMode {
     /// 串行执行（保证顺序，快速失败）
+    #[default]
     Sequential,
     /// 并发执行（提高性能）
     Concurrent,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        ExecutionMode::Sequential
-    }
 }
 
 /// Hook配置项
@@ -106,8 +101,10 @@ pub struct HookSelectorConfig {
 /// 负载均衡策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LoadBalanceStrategy {
     /// 轮询（Round Robin）
+    #[default]
     RoundRobin,
     /// 随机（Random）
     Random,
@@ -115,12 +112,6 @@ pub enum LoadBalanceStrategy {
     ConsistentHash,
     /// 最少连接（Least Connections）
     LeastConn,
-}
-
-impl Default for LoadBalanceStrategy {
-    fn default() -> Self {
-        LoadBalanceStrategy::RoundRobin
-    }
 }
 
 impl std::str::FromStr for LoadBalanceStrategy {

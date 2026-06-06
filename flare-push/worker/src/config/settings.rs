@@ -111,12 +111,15 @@ impl PushWorkerConfig {
 
         let push_online_topic = env::var("PUSH_WORKER_PUSH_ONLINE_TOPIC")
             .ok()
+            .or_else(|| service.push_online_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_ONLINE.to_string());
         let push_offline_topic = env::var("PUSH_WORKER_PUSH_OFFLINE_TOPIC")
             .ok()
+            .or_else(|| service.push_offline_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_OFFLINE.to_string());
         let push_dlq_topic = env::var("PUSH_WORKER_PUSH_DLQ_TOPIC")
             .ok()
+            .or_else(|| service.push_dlq_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_DLQ.to_string());
 
         let online_service_endpoint = env::var("PUSH_WORKER_ONLINE_SERVICE_ENDPOINT")

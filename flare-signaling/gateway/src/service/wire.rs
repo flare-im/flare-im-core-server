@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use flare_server_core::error::AnyhowContext;
 use uuid::Uuid;
 
 use crate::application::handlers::{ConnectionHandler, ConnectionQueryHandler, PushHandler};
@@ -14,7 +14,6 @@ use crate::domain::ports::{ConnectionQuery, IConnectionPort};
 use crate::domain::service::{
     ConnectionDomainService, ConnectionQualityService, PushDomainService,
 };
-use crate::error::Result;
 use crate::infrastructure::ports::{
     ConnectionRepository, ManagerConnectionQuery, PushRepository, SignalingRouteGrpcPool,
     StorageSyncGrpcPool,
@@ -26,6 +25,7 @@ use crate::service::builder::{
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use flare_im_core::metrics::AccessGatewayMetrics;
 use flare_server_core::Config;
+use flare_server_core::error::Result;
 use tokio::sync::Mutex;
 
 /// gRPC 服务集合
@@ -55,7 +55,7 @@ pub async fn initialize(
     use tracing::{debug, info};
 
     // 1. 加载配置
-    let access_config = Arc::new(AccessGatewayConfig::from_app_config(app_config));
+    let access_config = Arc::new(AccessGatewayConfig::from_app_config(app_config)?);
 
     // 2. 获取 gateway_id 和 region
     let gateway_id = access_config

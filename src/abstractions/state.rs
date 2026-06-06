@@ -6,9 +6,10 @@
 use std::fmt;
 
 /// 连接级状态（网关单连接）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ConnectionState {
     /// 已建立传输，未完成认证
+    #[default]
     Connecting,
     /// 已认证，可收发业务消息
     Authenticated,
@@ -16,27 +17,16 @@ pub enum ConnectionState {
     Disconnected,
 }
 
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Connecting
-    }
-}
-
 /// 会话级状态（用户/设备维度，可多端）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SessionState {
     /// 未登录或已登出
+    #[default]
     Offline,
     /// 已登录，当前无活跃连接
     OnlineIdle,
     /// 已登录，至少一端在线
     OnlineActive,
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self::Offline
-    }
 }
 
 /// 连接状态转换端口（由网关/信令基础设施实现）

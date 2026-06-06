@@ -16,19 +16,19 @@ pub struct CallRoomBindingRecord {
 
 #[async_trait]
 pub trait CallRoomBindingRepository: Send + Sync {
-    async fn save(&self, row: &CallRoomBindingRecord) -> anyhow::Result<()>;
+    async fn save(&self, row: &CallRoomBindingRecord) -> flare_server_core::error::Result<()>;
 
     async fn find_by_call_id(
         &self,
         tenant_id: &str,
         call_id: &str,
-    ) -> anyhow::Result<Option<CallRoomBindingRecord>>;
+    ) -> flare_server_core::error::Result<Option<CallRoomBindingRecord>>;
 
     async fn find_by_room_id(
         &self,
         tenant_id: &str,
         sfu_room_id: &str,
-    ) -> anyhow::Result<Option<CallRoomBindingRecord>>;
+    ) -> flare_server_core::error::Result<Option<CallRoomBindingRecord>>;
 }
 
 #[derive(Clone)]
@@ -44,7 +44,7 @@ impl PostgresCallRoomBindingRepository {
 
 #[async_trait]
 impl CallRoomBindingRepository for PostgresCallRoomBindingRepository {
-    async fn save(&self, _row: &CallRoomBindingRecord) -> anyhow::Result<()> {
+    async fn save(&self, _row: &CallRoomBindingRecord) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 
@@ -52,7 +52,7 @@ impl CallRoomBindingRepository for PostgresCallRoomBindingRepository {
         &self,
         _tenant_id: &str,
         _call_id: &str,
-    ) -> anyhow::Result<Option<CallRoomBindingRecord>> {
+    ) -> flare_server_core::error::Result<Option<CallRoomBindingRecord>> {
         Ok(None)
     }
 
@@ -60,7 +60,7 @@ impl CallRoomBindingRepository for PostgresCallRoomBindingRepository {
         &self,
         _tenant_id: &str,
         _sfu_room_id: &str,
-    ) -> anyhow::Result<Option<CallRoomBindingRecord>> {
+    ) -> flare_server_core::error::Result<Option<CallRoomBindingRecord>> {
         Ok(None)
     }
 }

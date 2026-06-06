@@ -6,8 +6,8 @@ use flare_core::common::config_types::{HeartbeatConfig, TransportProtocol};
 use flare_core::common::device::{DeviceInfo, DevicePlatform};
 use flare_core::common::error::Result;
 use flare_core::common::protocol::flare::core::commands::command::Type;
-use flare_core::common::protocol::flare::core::commands::message_command::Type as MsgType;
 use flare_core::common::protocol::flare::core::commands::notification_command::Type as NotifType;
+use flare_core::common::protocol::flare::core::commands::payload_command::Type as MsgType;
 use flare_core::common::protocol::flare::core::commands::system_command::Type as SysType;
 use flare_core::common::protocol::{
     Frame, Reliability, frame_with_message_command, generate_message_id, send_message,
@@ -151,7 +151,10 @@ impl ConnectionObserver for Observer {
                 let parser = MessageParser::protobuf();
                 if let Ok(frame) = parser.parse(data) {
                     if let Some(cmd) = &frame.command {
-                        if let Some(Type::Message(msg)) = &cmd.r#type {
+                        if let Some(Type::Payload(msg)) = &cmd.r#type {
+                            if msg.r#type != MsgType::Message as i32 {
+                                return;
+                            }
                             match flare_proto::common::Message::decode(msg.payload.as_slice()) {
                                 Ok(message) => {
                                     let sender = message.sender_id;

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flare_im_core::Ctx;
+use flare_server_core::error::Result;
 use prost::Message as _;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use std::convert::TryInto;
@@ -34,7 +34,7 @@ impl RedisHotCacheRepository {
 }
 
 impl HotCacheRepository for RedisHotCacheRepository {
-    #[instrument(skip(self, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
+    #[instrument(skip(self, ctx, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
     async fn store_hot(&self, ctx: &Ctx, message: &crate::domain::model::Message) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         let message = crate::convert::message_to_proto(message);
@@ -56,9 +56,9 @@ impl HotCacheRepository for RedisHotCacheRepository {
             let _: () = conn.expire(&message_key, ttl).await?;
         }
 
-        // 从 extra 中提取 ingestion_ts，如果没有则使用当前时间
+        // 从 attributes 中提取 ingestion_ts，如果没有则使用当前时间
         let ingestion_ts = flare_im_core::utils::extract_timeline_from_extra(
-            &message.extra,
+            &message.attributes,
             flare_im_core::utils::current_millis(),
         )
         .ingestion_ts;
@@ -78,7 +78,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
     ///
     /// 使用 Redis Pipeline 批量执行命令，减少网络往返次数，
     /// 性能比逐个执行提升 10-50 倍（取决于批量大小）
-    #[instrument(skip(self, messages), fields(batch_size = messages.len()))]
+    #[instrument(skip(self, ctx, messages), fields(batch_size = messages.len()))]
     async fn store_hot_batch(
         &self,
         ctx: &Ctx,
@@ -133,7 +133,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
 
             // 收集索引更新（按会话分组）
             let ingestion_ts = flare_im_core::utils::extract_timeline_from_extra(
-                &message.extra,
+                &message.attributes,
                 flare_im_core::utils::current_millis(),
             )
             .ingestion_ts;

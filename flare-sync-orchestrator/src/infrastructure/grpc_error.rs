@@ -3,7 +3,7 @@
 //! 本模块属于 infrastructure 层，处理框架相关的错误转换。
 //! 使用 flare-server-core 提供的统一错误处理机制。
 
-use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use tonic::Status;
 
 /// 将下游 `tonic::Status` 分类为 `FlareError`，便于客户端按 `ErrorCode::is_retryable()` 做退避重试。

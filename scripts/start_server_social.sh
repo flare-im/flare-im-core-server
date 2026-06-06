@@ -39,4 +39,5 @@ if [ "${START_SOCIAL_HOOK_CHECK:-1}" != "0" ]; then
 fi
 
 export FLARE_HOOKS_PROFILE=social
-exec "$SCRIPT_DIR/start_server.sh" "$@"
+# 通过 bash 解释执行，避免部分环境下直接 ./start_server.sh 被 SIGKILL(9)
+bash "$SCRIPT_DIR/start_server.sh" "$@"

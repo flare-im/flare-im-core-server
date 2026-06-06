@@ -2,7 +2,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::{
+    context::Context,
+    error::{ErrorCode, Result, map_infra_error},
+};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -51,14 +55,18 @@ impl RedisMetadataCache {
         })
     }
 
-    fn key(&self, file_id: &str) -> String {
-        format!("{}:media:metadata:{}", self.namespace, file_id)
+    fn key(&self, ctx: &Context, file_id: &str) -> String {
+        let tenant_id = normalize_tenant_id(ctx.tenant_id().unwrap_or("0"));
+        format!(
+            "{}:media:metadata:{}:{}",
+            self.namespace, tenant_id, file_id
+        )
     }
 }
 
 #[async_trait::async_trait]
 impl MediaMetadataCache for RedisMetadataCache {
-    async fn cache_metadata(&self, metadata: &MediaFileMetadata) -> Result<()> {
+    async fn cache_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
         let cached = CachedMetadata {
             file_id: metadata.file_id.clone(),
             file_name: metadata.file_name.clone(),
@@ -90,7 +98,7 @@ impl MediaMetadataCache for RedisMetadataCache {
         })?;
         let mut conn = self.connection.lock().await;
         let _: () = conn
-            .set(self.key(&metadata.file_id), payload)
+            .set(self.key(ctx, &metadata.file_id), payload)
             .await
             .map_err(|e| {
                 map_infra_error(
@@ -102,9 +110,13 @@ impl MediaMetadataCache for RedisMetadataCache {
         Ok(())
     }
 
-    async fn get_cached_metadata(&self, file_id: &str) -> Result<Option<MediaFileMetadata>> {
+    async fn get_cached_metadata(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<Option<MediaFileMetadata>> {
         let mut conn = self.connection.lock().await;
-        let value: Option<String> = conn.get(self.key(file_id)).await.map_err(|e| {
+        let value: Option<String> = conn.get(self.key(ctx, file_id)).await.map_err(|e| {
             map_infra_error(e, ErrorCode::NetworkError, "redis get cached metadata")
         })?;
         if let Some(value) = value {
@@ -140,12 +152,12 @@ impl MediaMetadataCache for RedisMetadataCache {
                 sha256: cached.sha256,
                 metadata: cached.metadata,
                 uploaded_at: chrono::DateTime::from_timestamp_millis(cached.uploaded_at)
-                    .unwrap_or_else(|| chrono::Utc::now()),
+                    .unwrap_or_else(chrono::Utc::now),
                 reference_count: cached.reference_count,
                 status,
                 grace_expires_at: cached
                     .grace_expires_at
-                    .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts)),
+                    .and_then(chrono::DateTime::from_timestamp_millis),
                 access_type,
                 storage_bucket: cached.storage_bucket.clone(),
                 storage_path: cached.storage_path.clone(),
@@ -155,10 +167,10 @@ impl MediaMetadataCache for RedisMetadataCache {
         }
     }
 
-    async fn invalidate(&self, file_id: &str) -> Result<()> {
+    async fn invalidate(&self, ctx: &Context, file_id: &str) -> Result<()> {
         let mut conn = self.connection.lock().await;
         let _: () = conn
-            .del(self.key(file_id))
+            .del(self.key(ctx, file_id))
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "redis delete cache key"))?;
         Ok(())

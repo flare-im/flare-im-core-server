@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Ctx;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// Core 对外承诺的业务埋点命名空间。
 pub mod probe_name {

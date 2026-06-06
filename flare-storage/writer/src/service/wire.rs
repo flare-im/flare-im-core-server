@@ -1,14 +1,16 @@
 //! Wire 风格依赖注入：仅组装「消息与操作消息存储」相关组件
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context as AnyhowContext, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use tracing::warn;
 
 use crate::application::handlers::{
     MessageOperationCommandHandler, MessagePersistenceCommandHandler,
 };
 use crate::config::StorageWriterConfig;
+use crate::domain::repository::MessageWriteLedgerRepository;
 use crate::domain::service::{EventApplicationService, MessagePersistenceDomainService};
 use crate::infrastructure::messaging::ack_publisher::MqAckPublisher;
 use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
@@ -21,6 +23,10 @@ use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsCo
 use flare_im_core::metrics::StorageWriterMetrics;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
+use flare_server_core::mq::consumer::{
+    ConsumerFailurePublishers, FailureTopic, ProducerDeadLetterPublisher, ProducerRetryPublisher,
+    RetryForwarderHandler,
+};
 use flare_server_core::mq::kafka::KafkaProducer;
 use flare_server_core::mq::nats::NatsProducer;
 use flare_server_core::mq::producer::Producer;
@@ -57,6 +63,8 @@ pub struct ApplicationContext {
     pub config: Arc<StorageWriterConfig>,
     pub consumer_config: ConsumerConfig,
     pub dispatcher: Arc<dyn Dispatcher>,
+    pub retry_forwarder_dispatcher: Option<Arc<dyn Dispatcher>>,
+    pub failure_publishers: ConsumerFailurePublishers,
 }
 
 pub async fn initialize(
@@ -67,7 +75,10 @@ pub async fn initialize(
             .with_context(|| "Failed to load storage writer service configuration")?,
     );
 
-    let ack_publisher = build_ack_publisher(&config).await?;
+    let mq_producer = build_mq_producer(&config).await?;
+    let ack_publisher = build_ack_publisher(&config, mq_producer.clone())?;
+    let failure_publishers = build_failure_publishers(&config, mq_producer.clone());
+    let retry_forwarder_dispatcher = build_retry_forwarder_dispatcher(&config, mq_producer)?;
     let redis_client = build_redis_client(&config);
 
     let idempotency_repo = redis_client
@@ -86,40 +97,41 @@ pub async fn initialize(
         _ => None,
     };
 
-    let archive_repo = match PostgresMessageStore::new(&config).await {
-        Ok(Some(store)) => Some(Arc::new(store)),
-        Ok(None) => None,
-        Err(err) => {
-            warn!(error = ?err, "PostgreSQL init failed, archive storage disabled");
-            None
-        }
-    };
+    let archive_repo = Arc::new(PostgresMessageStore::new(&config).await?.ok_or_else(|| {
+        flare_server_core::error::FlareError::system(
+            "PostgreSQL archive store is required".to_string(),
+        )
+    })?);
 
-    let event_stream_repo = match PostgresEventStreamStore::from_config(&config).await {
-        Ok(Some(store)) => Some(Arc::new(store)),
-        Ok(None) => None,
-        Err(err) => {
-            warn!(error = ?err, "Event stream store init failed, sync event stream disabled");
-            None
-        }
-    };
+    let event_stream_repo = Arc::new(
+        PostgresEventStreamStore::from_config(&config)
+            .await?
+            .ok_or_else(|| {
+                flare_server_core::error::FlareError::system(
+                    "PostgreSQL event stream store is required".to_string(),
+                )
+            })?,
+    );
 
     let metrics = Arc::new(StorageWriterMetrics::new());
 
     // 使用具体类型创建 domain_service
-    let domain_service: Arc<MessagePersistenceService> =
-        Arc::new(MessagePersistenceDomainService::new(
+    let write_ledger_repo: Arc<dyn MessageWriteLedgerRepository> = archive_repo.clone();
+    let domain_service: Arc<MessagePersistenceService> = Arc::new(
+        MessagePersistenceDomainService::new(
             idempotency_repo,
             hot_cache_repo,
-            archive_repo.clone(),
-            event_stream_repo.clone(),
+            Some(archive_repo.clone()),
+            Some(event_stream_repo.clone()),
             wal_cleanup_repo,
-            ack_publisher,
-        ));
+            Some(ack_publisher),
+        )
+        .with_write_ledger_repo(Some(write_ledger_repo)),
+    );
 
     let event_service: Arc<EventApplicationServiceType> = Arc::new(EventApplicationService::new(
-        archive_repo.clone(),
-        event_stream_repo,
+        Some(archive_repo.clone()),
+        Some(event_stream_repo),
     ));
 
     let command_handler: Arc<MessagePersistenceHandler> = Arc::new(
@@ -135,7 +147,10 @@ pub async fn initialize(
     let operation_event_handler =
         MessageEventsConsumerFactory::create_handler(operation_command_handler);
 
-    let consumer_cfg = ConsumerConfig::default().with_concurrency(32);
+    let consumer_cfg = ConsumerConfig::default()
+        .with_concurrency(32)
+        .with_batch_size(config.max_poll_records.max(1))
+        .with_batch_timeout_ms(config.fetch_max_wait_ms.max(1));
 
     let mut dispatcher = TopicDispatcher::new();
     let message_adapter: Arc<dyn MessageHandler> = message_event_handler;
@@ -143,40 +158,120 @@ pub async fn initialize(
         &mut dispatcher,
         MessageCreatedConsumerFactory::topic().to_string(),
         message_adapter,
-    )?;
+    )
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "register storage writer consumer {}: {err}",
+            MessageCreatedConsumerFactory::topic()
+        ))
+    })?;
     let operation_adapter: Arc<dyn MessageHandler> = operation_event_handler;
     Dispatcher::register(
         &mut dispatcher,
         MessageEventsConsumerFactory::topic().to_string(),
         operation_adapter,
-    )?;
+    )
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "register storage writer consumer {}: {err}",
+            MessageEventsConsumerFactory::topic()
+        ))
+    })?;
 
     Ok(ApplicationContext {
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),
+        retry_forwarder_dispatcher,
+        failure_publishers,
     })
 }
 
-async fn build_ack_publisher(config: &Arc<StorageWriterConfig>) -> Result<Option<Arc<AckPub>>> {
-    if let Some(topic) = &config.jetstream_ack_topic {
-        let producer: Arc<dyn Producer> =
-            match config.mq_backend.as_str() {
-                "kafka" => Arc::new(KafkaProducer::new(config.as_ref()).map_err(|e| {
-                    anyhow::anyhow!("Failed to create Kafka producer for ACK: {}", e)
-                })?),
-                "nats" | "jetstream" => {
-                    Arc::new(NatsProducer::new(config.as_ref()).await.map_err(|e| {
-                        anyhow::anyhow!("Failed to create JetStream producer for ACK: {}", e)
-                    })?)
-                }
-                other => anyhow::bail!("unsupported mq backend: {}", other),
-            };
-        let publisher = Arc::new(MqAckPublisher::new(producer, config.clone(), topic.clone()));
-        Ok(Some(publisher))
-    } else {
-        Ok(None)
+fn build_ack_publisher(
+    config: &Arc<StorageWriterConfig>,
+    producer: Arc<dyn Producer>,
+) -> Result<Arc<AckPub>> {
+    let topic = config.jetstream_ack_topic.as_ref().ok_or_else(|| {
+        flare_server_core::error::FlareError::system(
+            "STORAGE_JETSTREAM_ACK_SUBJECT is required".to_string(),
+        )
+    })?;
+    Ok(Arc::new(MqAckPublisher::new(
+        producer,
+        config.clone(),
+        topic.clone(),
+    )))
+}
+
+async fn build_mq_producer(config: &Arc<StorageWriterConfig>) -> Result<Arc<dyn Producer>> {
+    let producer: Arc<dyn Producer> = match config.mq_backend.as_str() {
+        "kafka" => Arc::new(KafkaProducer::new(config.as_ref()).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "Failed to create Kafka producer: {}",
+                e
+            ))
+        })?),
+        "nats" | "jetstream" => {
+            Arc::new(NatsProducer::new(config.as_ref()).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "Failed to create JetStream producer: {}",
+                    e
+                ))
+            })?)
+        }
+        other => {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "unsupported mq backend: {other}"
+            )));
+        }
+    };
+    Ok(producer)
+}
+
+fn build_failure_publishers(
+    config: &StorageWriterConfig,
+    producer: Arc<dyn Producer>,
+) -> ConsumerFailurePublishers {
+    let dlq = Arc::new(ProducerDeadLetterPublisher::new(
+        producer.clone(),
+        FailureTopic::fixed(config.message_dlq_topic.clone()),
+    ));
+
+    match config.mq_backend.as_str() {
+        "kafka" => ConsumerFailurePublishers::new()
+            .with_retry(Arc::new(
+                ProducerRetryPublisher::new(
+                    producer,
+                    FailureTopic::fixed(config.message_retry_topic.clone()),
+                )
+                .with_not_before_delay(Duration::from_millis(config.message_retry_delay_ms.max(1))),
+            ))
+            .with_dead_letter(dlq),
+        "nats" | "jetstream" => ConsumerFailurePublishers::new().with_dead_letter(dlq),
+        _ => ConsumerFailurePublishers::new(),
     }
+}
+
+fn build_retry_forwarder_dispatcher(
+    config: &StorageWriterConfig,
+    producer: Arc<dyn Producer>,
+) -> Result<Option<Arc<dyn Dispatcher>>> {
+    if config.mq_backend.as_str() != "kafka" {
+        return Ok(None);
+    }
+
+    let handler: Arc<dyn MessageHandler> =
+        Arc::new(RetryForwarderHandler::new(producer).with_name("storage-retry-forwarder"));
+    let mut dispatcher = TopicDispatcher::new();
+    Dispatcher::register(&mut dispatcher, config.message_retry_topic.clone(), handler).map_err(
+        |err| {
+            flare_server_core::error::FlareError::system(format!(
+                "register storage retry-forwarder consumer {}: {err}",
+                config.message_retry_topic
+            ))
+        },
+    )?;
+    Ok(Some(Arc::new(dispatcher)))
 }
 
 fn build_redis_client(config: &Arc<StorageWriterConfig>) -> Option<Arc<redis::Client>> {

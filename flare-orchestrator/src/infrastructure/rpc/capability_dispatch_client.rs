@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 use tracing::instrument;
 
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const STATIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);

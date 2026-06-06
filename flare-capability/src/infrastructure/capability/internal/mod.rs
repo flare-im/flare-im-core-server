@@ -19,6 +19,7 @@ mod remote_route_book;
 mod remote_rtc_adapter;
 
 #[cfg(feature = "backend-remote")]
+#[allow(clippy::too_many_arguments)]
 async fn attach_media_control_backend(
     registry: &CapabilityExtensionRegistry,
     plugin_routes: &Arc<PluginRouteBook>,
@@ -28,7 +29,7 @@ async fn attach_media_control_backend(
     rtc: Arc<remote_rtc_adapter::MediaControlGrpcRtcCapability>,
     route_authority: &str,
     source: &str,
-) -> anyhow::Result<()> {
+) -> flare_server_core::error::Result<()> {
     use crate::domain::capability::ExtensionOperationHandler;
     use remote_extension_ops::MediaControlExtensionOperations;
     use remote_route_book::register_plugin_route;
@@ -69,7 +70,7 @@ pub(crate) async fn register_discovered_media_plugins(
     registry: &CapabilityExtensionRegistry,
     plugin_routes: &Arc<PluginRouteBook>,
     runtime: &CapabilityRuntimeConfig,
-) -> anyhow::Result<()> {
+) -> flare_server_core::error::Result<()> {
     #[cfg(feature = "backend-remote")]
     {
         let mut registered = 0usize;
@@ -94,28 +95,28 @@ pub(crate) async fn register_discovered_media_plugins(
             registered += 1;
         }
 
-        if registered == 0 {
-            if let Ok(endpoint) = std::env::var("FLARE_MEDIA_CONTROL_GRPC_ENDPOINT") {
-                let endpoint = endpoint.trim();
-                if !endpoint.is_empty() {
-                    let rtc = Arc::new(
-                        remote_rtc_adapter::MediaControlGrpcRtcCapability::from_static_lazy(
-                            endpoint.to_string(),
-                        )?,
-                    );
-                    attach_media_control_backend(
-                        registry,
-                        plugin_routes,
-                        "0",
-                        "media-control",
-                        "rtc.media.control",
-                        rtc,
-                        endpoint,
-                        "static-env",
-                    )
-                    .await?;
-                    registered += 1;
-                }
+        if registered == 0
+            && let Ok(endpoint) = std::env::var("FLARE_MEDIA_CONTROL_GRPC_ENDPOINT")
+        {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                let rtc = Arc::new(
+                    remote_rtc_adapter::MediaControlGrpcRtcCapability::from_static_lazy(
+                        endpoint.to_string(),
+                    )?,
+                );
+                attach_media_control_backend(
+                    registry,
+                    plugin_routes,
+                    "0",
+                    "media-control",
+                    "rtc.media.control",
+                    rtc,
+                    endpoint,
+                    "static-env",
+                )
+                .await?;
+                registered += 1;
             }
         }
 

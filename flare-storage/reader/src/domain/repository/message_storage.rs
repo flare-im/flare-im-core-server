@@ -10,20 +10,23 @@
 //! - **同步**：`query_events`（按会话 after_seq 拉取）、`get_conversation_max_seq`、
 //!   `get_sync_cursor` / `update_sync_cursor`。
 //! - **标签**：`list_all_tags`。
+//!
 //! 典型实现：PostgreSQL（+ 可选 Redis 缓存）见 `infrastructure::persistence::optimized_postgres_store`。
 
 use crate::domain::model::{
-    ConversationMessageHead, EditHistoryEntry, Event, EventType, FilterExpression, Message,
-    MessageUpdate, PinnedMessageInfo, ReactionItem, ReadListEntry, SyncCursor, VisibilityStatus,
+    ConversationMessageHead, EditHistoryEntry, Event, EventType, FilterExpression, MarkEntry,
+    Message, MessageExportTaskDraft, MessageUpdate, MessageWriteLedgerEntry,
+    MessageWriteLedgerQuery, PinnedMessageInfo, ReactionItem, ReadListEntry, SyncCursor,
+    VisibilityStatus,
 };
-use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use flare_im_core::Ctx;
+use flare_server_core::error::Result;
 use std::collections::HashMap;
 
 /// 使用 `async-trait` 保证返回的 Future 为 `Send`，满足 tonic gRPC 对 `async` 方法的线程间调度要求。
-
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait MessageStorage: Send + Sync {
     /// CQRS 读侧不落库：写入由 Storage Writer 消费事件完成；此处固定 no-op，仅保留以兼容 trait 对象。
@@ -153,6 +156,32 @@ pub trait MessageStorage: Send + Sync {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<ReactionItem>>;
+
+    /// 查询消息标记
+    async fn query_message_marks(&self, _ctx: &Ctx, _message_id: &str) -> Result<Vec<MarkEntry>> {
+        Err(flare_server_core::error::FlareError::system(
+            "message mark query is not implemented for this storage backend".to_string(),
+        ))
+    }
+
+    /// 创建管理面消息导出任务。该方法只登记任务，不在请求线程内同步生成大文件。
+    async fn create_message_export_task(
+        &self,
+        _ctx: &Ctx,
+        _draft: MessageExportTaskDraft,
+    ) -> Result<String> {
+        Err(flare_server_core::error::FlareError::system(
+            "message export task persistence is not implemented for this storage backend"
+                .to_string(),
+        ))
+    }
+
+    /// 管理面查询消息写链路账本，用于定位 storage/WAL/ACK 失败或卡住的消息。
+    async fn query_message_write_ledger(
+        &self,
+        ctx: &Ctx,
+        query: MessageWriteLedgerQuery,
+    ) -> Result<(Vec<MessageWriteLedgerEntry>, bool)>;
 
     /// 查询置顶消息
     async fn query_pinned_messages(

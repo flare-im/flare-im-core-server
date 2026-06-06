@@ -25,17 +25,22 @@ impl StorageSyncPort {
 
 #[async_trait]
 impl ISyncPort for StorageSyncPort {
-    async fn forward_sync(&self, tx: &Ctx, sync: Sync) -> anyhow::Result<SyncRes> {
-        let _ = require_user_id_from_context(tx).map_err(|s| anyhow::anyhow!("{}", s))?;
-        let mut client = self
-            .pool
-            .ensure_sync_client()
-            .await
-            .map_err(|e| anyhow::anyhow!("sync client: {e}"))?;
+    async fn forward_sync(
+        &self,
+        tx: &Ctx,
+        sync: Sync,
+    ) -> flare_server_core::error::Result<SyncRes> {
+        let _ = require_user_id_from_context(tx)
+            .map_err(|s| flare_server_core::error::FlareError::system(s.to_string()))?;
+        let mut client = self.pool.ensure_sync_client().await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("sync client: {e}"))
+        })?;
         let res = client
             .execute_sync(request_with_context(sync, tx))
             .await
-            .map_err(|s: Status| anyhow::anyhow!("ExecuteSync RPC: {}", s))?
+            .map_err(|s: Status| {
+                flare_server_core::error::FlareError::system(format!("ExecuteSync RPC: {}", s))
+            })?
             .into_inner();
         Ok(res)
     }

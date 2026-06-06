@@ -1,0 +1,112 @@
+{
+  "dashboard": {
+    "title": "系统资源监控",
+    "tags": ["flare-im", "system"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "服务可用性",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "up{job=~\"message-orchestrator|storage-writer|push-server|access-gateway\"}",
+            "legendFormat": "{{job}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+            ]
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "CPU 使用率",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "100 - (avg(irate(process_cpu_seconds_total[5m])) * 100)",
+            "legendFormat": "CPU 使用率"
+          }
+        ],
+        "yaxes": [
+          {"format": "percent", "label": "CPU"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "内存使用",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes",
+            "legendFormat": "{{job}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "bytes", "label": "内存"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "JetStream 消费延迟",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "jetstream_consumer_lag_sum",
+            "legendFormat": "{{consumer_group}} - {{topic}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "延迟"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Redis 连接数",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "redis_connected_clients",
+            "legendFormat": "Redis 连接数"
+          }
+        ],
+        "yaxes": [
+          {"format": "short"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "PostgreSQL 连接数",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "pg_stat_database_numbackends",
+            "legendFormat": "数据库连接数"
+          }
+        ],
+        "yaxes": [
+          {"format": "short"},
+          {"format": "short"}
+        ]
+      }
+    ]
+  }
+}
+

@@ -1,7 +1,7 @@
 use flare_im_core::Ctx;
 // 假设 Message 和 Event 类型由 flare_common_v1 proto 生成
-use crate::error::Result;
 use flare_proto::common::{Event, Message, PushEnvelope};
+use flare_server_core::error::Result;
 
 /// 推送仓储接口
 ///

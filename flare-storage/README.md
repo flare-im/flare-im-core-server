@@ -50,7 +50,7 @@ JetStream (storage-messages)
 - 提供消息查询接口（gRPC）
 - Redis 缓存查询（优先）
 - 数据库回源查询（缓存未命中）
-- 消息搜索和导出
+- 消息搜索和导出任务登记
 
 **已实现的接口**：
 - ✅ `QueryMessages` - 查询消息列表（支持分页、时间范围、游标）
@@ -59,13 +59,13 @@ JetStream (storage-messages)
 - ✅ `RecallMessage` - 撤回消息（支持时间限制）
 - ✅ `ClearConversation` - 清理会话消息
 - ✅ `MarkMessageRead` - 标记消息已读（支持阅后即焚）
+- ✅ `ExportMessages` - 创建消息导出任务（持久化 pending task，文件生成由后续 worker 处理）
 
 **待实现的接口**：
 - ⏳ `DeleteMessageForUser` - 为用户删除消息（软删除，只对特定用户隐藏）
 - ⏳ `SearchMessages` - 全文搜索消息
 - ⏳ `SetMessageAttributes` - 设置消息属性
 - ⏳ `ListMessageTags` - 列出消息标签
-- ⏳ `ExportMessages` - 导出消息（流式）
 
 ---
 
@@ -179,49 +179,17 @@ flare-storage/reader/
 
 ### PostgreSQL/TimescaleDB
 
-```sql
-CREATE TABLE messages (
-    message_id VARCHAR(64) PRIMARY KEY,
-    tenant_id VARCHAR(64) NOT NULL DEFAULT '',
-    conversation_id VARCHAR(64) NOT NULL,
-    sender_id VARCHAR(64) NOT NULL,
-    sender_type VARCHAR(32) NOT NULL DEFAULT 'user',
-    receiver_id VARCHAR(64) DEFAULT '',
-    receiver_ids TEXT[] DEFAULT '{}',
-    content BYTEA NOT NULL,
-    content_type VARCHAR(32) NOT NULL DEFAULT 'text/plain',
-    message_type INTEGER NOT NULL DEFAULT 0,
-    business_type VARCHAR(64) NOT NULL DEFAULT '',
-    conversation_type VARCHAR(32) NOT NULL DEFAULT 'single',
-    status VARCHAR(32) NOT NULL DEFAULT 'sent',
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ,
-    is_recalled BOOLEAN DEFAULT FALSE,
-    recalled_at TIMESTAMPTZ,
-    is_burn_after_read BOOLEAN DEFAULT FALSE,
-    burn_after_seconds INTEGER DEFAULT 0,
-    extra JSONB DEFAULT '{}'::jsonb,
-    tags TEXT[] DEFAULT '{}',
-    attributes JSONB DEFAULT '{}'::jsonb
-);
+数据库初始化以 `deploy/init.sql` 为唯一入口，不在 storage 模块 README 中复制 DDL，避免 schema 漂移。
 
--- 索引
-CREATE INDEX idx_messages_tenant_conversation_time 
-ON messages (tenant_id, conversation_id, timestamp DESC);
+当前核心约定：
 
-CREATE INDEX idx_messages_tenant_sender_time 
-ON messages (tenant_id, sender_id, timestamp DESC);
+- `messages` 是消息聚合根，按 `created_at` 建 TimescaleDB Hypertable。
+- `timestamp` 是业务消息时间，用于时间线、筛选和展示，不作为分区键。
+- `message_write_ledger` 是普通表，负责 `tenant_id + server_id` 的最终幂等和写链路状态诊断。
+- 同步查询优先使用 `(tenant_id, conversation_id, seq)`。
+- 管理端检索优先使用租户 + 维度 + `timestamp DESC` 组合索引。
 
-CREATE INDEX idx_messages_conversation_id 
-ON messages (conversation_id, timestamp DESC);
-
--- TimescaleDB Hypertable（可选）
-SELECT create_hypertable('messages', 'timestamp', 
-    chunk_time_interval => INTERVAL '1 month',
-    if_not_exists => TRUE);
-```
+完整字段、索引、压缩策略和触发器见 `deploy/init.sql` 与 `deploy/TIMESCALEDB_GUIDE.md`。
 
 ---
 
@@ -320,4 +288,3 @@ docker run flare-storage-reader
 **文档维护**: Flare IM Architecture Team  
 **最后更新**: 2025-01-XX  
 **版本**: v1.0.0
-

@@ -11,8 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
-use flare_proto::common::PushEnvelope;
+use flare_proto::PushEnvelope;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use prost::Message as _;
 use tracing::{debug, instrument};
@@ -26,7 +25,6 @@ use crate::application::handlers::PushRouterHandler;
 /// - 持有 `PushRouterHandler` 引用，负责实际推送逻辑
 /// - 支持上下文传播（从 headers 提取 trace_id/tenant_id）
 pub struct PushHandler {
-    #[allow(dead_code)]
     route_handler: Arc<PushRouterHandler>,
 }
 
@@ -34,20 +32,6 @@ impl PushHandler {
     /// 创建推送消费者
     pub fn new(route_handler: Arc<PushRouterHandler>) -> Self {
         Self { route_handler }
-    }
-
-    /// 从 MQ headers 提取上下文
-    fn extract_ctx_from_headers(headers: &std::collections::HashMap<String, String>) -> Ctx {
-        let trace_id = headers
-            .get("x-trace-id")
-            .cloned()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let _tenant_id = headers.get("x-tenant-id").cloned();
-
-        Arc::new(flare_server_core::context::Context::with_request_id(
-            trace_id,
-        ))
     }
 
     /// 解析 PushEnvelope
@@ -70,7 +54,17 @@ impl MessageHandler for PushHandler {
     #[instrument(skip(self, message), fields(topic = %message.context.topic))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
         // 1. 解析 PushEnvelope
-        let envelope = Self::parse_envelope(&message.payload)?;
+        let envelope = match Self::parse_envelope(&message.payload) {
+            Ok(envelope) => envelope,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    topic = %message.context.topic,
+                    "Failed to decode PushEnvelope, terminating poison message"
+                );
+                return Ok(MessageResult::DeadLetter);
+            }
+        };
 
         debug!(
             envelope_id = %envelope.envelope_id,
@@ -79,14 +73,29 @@ impl MessageHandler for PushHandler {
             "Received PushEnvelope"
         );
 
-        // 2. 提取上下文
-        let ctx = Self::extract_ctx_from_headers(&message.context.headers);
-
-        // 3. 根据 payload_kind 处理
-        // TODO: 实现具体的推送逻辑
-        let _ = (ctx, envelope);
-
-        Ok(MessageResult::Ack)
+        match self
+            .route_handler
+            .handle_push_envelope(&message.context.ctx, envelope)
+            .await
+        {
+            Ok(()) => Ok(MessageResult::Ack),
+            Err(err) if err.is_retryable() => {
+                tracing::warn!(
+                    error = %err,
+                    topic = %message.context.topic,
+                    "Retryable PushEnvelope handling failure, nacking for broker redelivery"
+                );
+                Ok(MessageResult::Nack)
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    topic = %message.context.topic,
+                    "Non-retryable PushEnvelope handling failure"
+                );
+                Ok(MessageResult::DeadLetter)
+            }
+        }
     }
 
     /// 返回消费者名称（用于监控）
@@ -98,7 +107,7 @@ impl MessageHandler for PushHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_proto::common::{AckPayload, PushPayloadKind, PushTargetType};
+    use flare_proto::{AckPayload, PushPayloadKind, PushTargetType};
 
     #[test]
     fn test_parse_envelope() {
@@ -106,21 +115,19 @@ mod tests {
             envelope_id: "test-123".to_string(),
             tenant_id: "tenant-1".to_string(),
             trace_id: "trace-123".to_string(),
-            created_at_ms: 1234567890,
+            created_at: 1234567890,
             target_type: PushTargetType::Users as i32,
             target_user_ids: vec!["user-1".to_string()],
             target_device_ids: Vec::new(),
             payload_kind: PushPayloadKind::Ack as i32,
             options: None,
-            payload: Some(flare_proto::common::push_envelope::Payload::Ack(
-                AckPayload {
-                    message_id: "msg-123".to_string(),
-                    conversation_id: "conv-123".to_string(),
-                    seq: 100,
-                    ack_type: "received".to_string(),
-                    ack_at_ms: 1234567890,
-                },
-            )),
+            payload: Some(flare_proto::push_envelope::Payload::Ack(AckPayload {
+                message_id: "msg-123".to_string(),
+                conversation_id: "conv-123".to_string(),
+                seq: 100,
+                ack_type: "received".to_string(),
+                ack_at: 1234567890,
+            })),
             headers: std::collections::HashMap::new(),
         };
 

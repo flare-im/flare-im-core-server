@@ -13,7 +13,7 @@ use flare_server_core::context::Context;
 
 use crate::domain::repository::ConversationRepository;
 use crate::domain::service::UserService;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 #[derive(Clone)]
 pub struct OnlineUserHandler<R: ConversationRepository + Send + Sync> {

@@ -24,9 +24,9 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 { "codec": "VP8" }
 ```
 
-进程配置 **`database_url`** 时，`CapabilityService` 的授权/租户开关走 **`PostgresCapabilityPolicy`**，与 Hook 配置共用连接池；Hook 与 capability 表均在 **`deploy/db/init_v2.sql`** 第 9 节「Hook 引擎 + Capability 策略」（`hook_configs`、`hook_executions`、`capability_user_grants`、`capability_tenant_switches`、`capability_service_settings`、`capability_audit_log` 等；该节对前述对象均 **`DROP TABLE IF EXISTS ... CASCADE` 后再 `CREATE TABLE`**）。若报错 `relation "capability_service_settings" does not exist`，说明 **flare-capability 当前连接的那套 PostgreSQL** 里没有该表：常见原因是 **脚本跑在别的实例/库**（例如编排器用 `5432`，独立进程 **`flare-capability` 未设 `DATABASE_URL` 时默认连 `localhost:25432/flare`**，见 `cmd/main.rs`）。启动时会打 `flare_capability::db` 日志（脱敏后的 `host:port/dbname`），请与执行 `init_v2.sql` 的目标对齐。**注意**：第 9 节会删除并重建 Hook/Capability 相关表，生产库请用迁移流程评估数据。未配置数据库时使用 **`InMemoryCapabilityGrants`** 并注入开发用示例授权。
+进程配置 **`database_url`** 时，`CapabilityService` 的授权/租户开关走 **`PostgresCapabilityPolicy`**，与 Hook 配置共用连接池；Hook 与 capability 表均在 **`deploy/init.sql`** 的「Hook 引擎 + Capability 策略」节（`hook_configs`、`hook_executions`、`capability_user_grants`、`capability_tenant_switches`、`capability_service_settings`、`capability_audit_log` 等；该节对前述对象均 **`DROP TABLE IF EXISTS ... CASCADE` 后再 `CREATE TABLE`**）。若报错 `relation "capability_service_settings" does not exist`，说明 **flare-capability 当前连接的那套 PostgreSQL** 里没有该表：常见原因是 **脚本跑在别的实例/库**（例如编排器用 `5432`，独立进程 **`flare-capability` 未设 `DATABASE_URL` 时默认连 `localhost:25432/flare2`**，见 `cmd/main.rs`）。启动时会打 `flare_capability::db` 日志（脱敏后的 `host:port/dbname`），请与执行 `deploy/init.sql` 的目标对齐。**注意**：该节会删除并重建 Hook/Capability 相关表，生产库请用迁移流程评估数据。未配置数据库时使用 **`InMemoryCapabilityGrants`** 并注入开发用示例授权。
 
-**`user capability grant missing or expired`**：`Dispatch` 在 `capability_user_grants` 中未找到匹配 **tenant_id + user_id + capability_id**（含 `namespace.*`）的未过期行。编排器默认 **tenant_id = `0`**（见 `ctx.tenant_id().unwrap_or("0")`）。`init_v2.sql` 第 9 节在抽取段内会插入 **`('0','*','rtc.*')`**：`user_id = *` 表示该租户下任意用户均可 RTC（开发友好；生产请按用户灌库并删除通配行）。若库是旧版脚本建的，请手动执行：
+**`user capability grant missing or expired`**：`Dispatch` 在 `capability_user_grants` 中未找到匹配 **tenant_id + user_id + capability_id**（含 `namespace.*`）的未过期行。编排器默认 **tenant_id = `0`**（见 `ctx.tenant_id().unwrap_or("0")`）。`deploy/init.sql` 会插入 **`('0','*','rtc.*')`**：`user_id = *` 表示该租户下任意用户均可 RTC（开发友好；生产请按用户灌库并删除通配行）。若库是旧版脚本建的，请手动执行：
 
 `INSERT INTO public.capability_user_grants (tenant_id, user_id, capability_id, plan_code, source) VALUES ('0', '*', 'rtc.*', 'dev', 'manual') ON CONFLICT DO NOTHING;`
 
@@ -44,7 +44,7 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 - 支持版本管理
 - 支持审计日志（记录创建者、创建时间、更新时间）
 
-**表结构**：以 **`deploy/db/init_v2.sql`** 为准（含 `group_name`、`require_success`、`metadata`、`created_by` 等与 `PostgresHookConfigRepository` 对齐的列）。以下为概念示意：
+**表结构**：以 **`deploy/init.sql`** 为准（含 `group_name`、`require_success`、`metadata`、`created_by` 等与 `PostgresHookConfigRepository` 对齐的列）。以下为概念示意：
 
 ```sql
 CREATE TABLE hook_configs (
@@ -242,7 +242,7 @@ async fn main() -> Result<()> {
         config_file: Some("config/hooks.toml".into()),
         database_url: Some(
             std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://flare:flare123@localhost:25432/flare".to_string()),
+                .unwrap_or_else(|_| "postgresql://flare:flare123@localhost:25432/flare2".to_string()),
         ),
         config_center_endpoint: Some("etcd://localhost:22379".to_string()),
         tenant_id: Some("tenant-a".to_string()),

@@ -1,34 +1,33 @@
-/target
-.idea
-.vscode
-.cursor
-.DS_Store
-.cargo
-
-.git
-target
+# 构建产物
+/target/
 Cargo.lock
-data
-/deploy/data
+
+# IDE / 本地工具状态
+/.cargo/
+/.idea/
+/.vscode/
+/.cursor/
+.DS_Store
+
+# 运行时数据
+/data/
+/deploy/data/
 
 # 本地配置覆盖（不提交到 Git）
 config/overrides/local.toml
 .env.local
 .env.*.local
 
-dev/
-doc/
-docs/
-tests/
+# 本地临时工作区
+/dev/
+/doc/
+/tests/
 
 # 临时文件
 *.log
 *.tmp
-/tmp
+/tmp/
 
 # 日志目录
 logs/
 *.pid
-
-.idea/
-.vscode/

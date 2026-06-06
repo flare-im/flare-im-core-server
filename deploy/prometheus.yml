@@ -1,0 +1,97 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'flare-im'
+    replica: '0'
+
+rule_files:
+  - 'alert_rules.yml'
+
+scrape_configs:
+  # Prometheus 自身
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Flare IM Core 服务
+  - job_name: 'message-orchestrator'
+    static_configs:
+      - targets: ['message-orchestrator:9091']
+        labels:
+          service: 'message-orchestrator'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'storage-writer'
+    static_configs:
+      - targets: ['storage-writer:9091']
+        labels:
+          service: 'storage-writer'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'storage-reader'
+    static_configs:
+      - targets: ['storage-reader:9091']
+        labels:
+          service: 'storage-reader'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'push-server'
+    static_configs:
+      - targets: ['push-server:9091']
+        labels:
+          service: 'push-server'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'push-worker'
+    static_configs:
+      - targets: ['push-worker:9091']
+        labels:
+          service: 'push-worker'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'access-gateway'
+    static_configs:
+      - targets: ['access-gateway:9091']
+        labels:
+          service: 'access-gateway'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'core-gateway'
+    static_configs:
+      - targets: ['core-gateway:9091']
+        labels:
+          service: 'core-gateway'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'signaling-online'
+    static_configs:
+      - targets: ['signaling-online:9091']
+        labels:
+          service: 'signaling-online'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'signaling-route'
+    static_configs:
+      - targets: ['signaling-route:9091']
+        labels:
+          service: 'signaling-route'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # 中间件服务 —— 只抓取有 /metrics HTTP 端点的服务
+  # jetstream/redis/postgres 使用自有协议，不能直接 scrape，
+  # 需要单独的 exporter（如 jetstream_exporter、redis_exporter、postgres_exporter）
+
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['loki:3100']
+

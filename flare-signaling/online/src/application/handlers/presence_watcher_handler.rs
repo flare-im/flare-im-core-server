@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::domain::repository::{PresenceChangeEvent, PresenceWatcher};
-use crate::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 #[derive(Clone)]
 pub struct OnlinePresenceWatcherHandler<PW: PresenceWatcher + Send + Sync> {
@@ -22,7 +22,7 @@ impl<PW: PresenceWatcher + Send + Sync> OnlinePresenceWatcherHandler<PW> {
     pub async fn watch_presence(
         &self,
         user_ids: &[String],
-    ) -> Result<mpsc::Receiver<anyhow::Result<PresenceChangeEvent>>> {
+    ) -> Result<mpsc::Receiver<flare_server_core::error::Result<PresenceChangeEvent>>> {
         self.inner
             .watch_presence(user_ids)
             .await

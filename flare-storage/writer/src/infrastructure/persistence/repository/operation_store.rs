@@ -1,8 +1,7 @@
-use anyhow::Result;
 use base64::Engine;
 use chrono::Utc;
-use flare_im_core::utils::timestamp_to_datetime;
 use flare_proto::common::{Event, EventType};
+use flare_server_core::error::Result;
 use prost::Message as ProstMessage;
 use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, Row};
@@ -87,6 +86,7 @@ impl OperationStore {
     }
 
     /// init_v2: messages 仅更新 content、extra；extra 内编辑元数据为 camelCase（`currentEditVersion` 等）
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_message_content(
         &self,
         tenant_id: &str,
@@ -114,11 +114,10 @@ impl OperationStore {
             Some(r) => (r.get::<Value, _>("extra"), r.get::<String, _>("server_id")),
             None => {
                 tx.rollback().await?;
-                return Err(anyhow::anyhow!(
+                return Err(flare_server_core::error::FlareError::system(format!(
                     "Message not found: {} (tenant_id: {}).",
-                    message_id,
-                    tenant_id
-                ));
+                    message_id, tenant_id
+                )));
             }
         };
 
@@ -396,11 +395,12 @@ impl OperationStore {
         event: &Event,
         operator_id: &str,
     ) -> Result<()> {
-        let ts = event
-            .created_at
-            .as_ref()
-            .and_then(timestamp_to_datetime)
-            .unwrap_or_else(Utc::now);
+        let ts = if event.created_at > 0 {
+            chrono::DateTime::<Utc>::from_timestamp_millis(event.created_at)
+                .unwrap_or_else(Utc::now)
+        } else {
+            Utc::now()
+        };
         let mut buf = Vec::new();
         event.encode(&mut buf)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);

@@ -1,7 +1,7 @@
 //! 消息发送相关命令：`SendMessage`、批量发送、系统消息、临时消息等。
 
 use flare_grpc_proto::message::SendMessageRequest;
-use flare_proto::common::Message;
+use flare_proto::common::{Message, SendAckDurability};
 
 /// 发送消息命令（包含消息类别判断和路由逻辑）
 /// 请求/租户信息通过调用链的 Context 传递，不在此结构体中承载。
@@ -17,6 +17,17 @@ pub struct SendMessageCommand {
     pub burn_enabled: bool,
     /// 首次阅读后多少秒焚毁
     pub burn_after_read_seconds: Option<i64>,
+}
+
+/// 发送消息结果。
+///
+/// `durability` 明确描述成功 ACK 已跨过的可靠性边界，避免调用方把“已入队”
+/// 误解为“已持久化”。
+#[derive(Debug, Clone)]
+pub struct SendMessageOutcome {
+    pub message_id: String,
+    pub conversation_seq: u64,
+    pub durability: SendAckDurability,
 }
 
 /// 批量发送消息命令

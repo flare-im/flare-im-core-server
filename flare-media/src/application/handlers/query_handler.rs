@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, Result};
 use flare_grpc_proto::media::{
     DescribeBucketRequest, DescribeBucketResponse, DownloadFileChunk, DownloadFileRequest,
     GenerateUploadUrlRequest, GenerateUploadUrlResponse, GetDirectUploadStatusRequest,
@@ -16,6 +15,7 @@ use flare_grpc_proto::media::{
     PresignDirectUploadPartsRequest, PresignDirectUploadPartsResponse, PresignedUploadPart,
 };
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorCode, Result};
 
 use crate::domain::model::{
     DirectUploadSessionState, MediaFileMetadata, MediaReference, PresignedUrl,
@@ -50,20 +50,21 @@ impl MediaQueryHandler {
         ctx: &Context,
         request: GetFileUrlRequest,
     ) -> Result<PresignedUrl> {
-        if request.burn_protected
+        if request.retention_protected
             && matches!(
-                flare_proto::common::BurnStatus::try_from(request.burn_status),
-                Ok(flare_proto::common::BurnStatus::Burned)
-                    | Ok(flare_proto::common::BurnStatus::HardDeleted)
+                flare_proto::common::ContentVisibility::try_from(request.content_visibility),
+                Ok(flare_proto::common::ContentVisibility::Hidden)
+                    | Ok(flare_proto::common::ContentVisibility::Redacted)
+                    | Ok(flare_proto::common::ContentVisibility::Purged)
             )
         {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::PermissionDenied,
-                "burned message attachment url is forbidden"
+                "retention-protected message attachment url is forbidden"
             ));
         }
         let mut expires_in = i64::from(request.expires_in);
-        if request.burn_protected {
+        if request.retention_protected {
             expires_in = if expires_in > 0 {
                 expires_in.min(300)
             } else {
@@ -120,7 +121,7 @@ impl MediaQueryHandler {
         Ok(ListObjectsResponse {
             files: files
                 .iter()
-                .map(|file| crate::application::utils::to_proto_file_info(file))
+                .map(crate::application::utils::to_proto_file_info)
                 .collect(),
             pagination: None,
         })

@@ -1,7 +1,7 @@
 //! 领域事件 Payload 处理器（策略式分发）- 使用领域 Event，不依赖 proto
 
 use flare_im_core::Ctx;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 use crate::domain::model::{Event, EventPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
@@ -45,7 +45,16 @@ where
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;
     if let Some(stream) = ctx.stream {
-        let _ = stream.append_event_to_stream(ctx.ctx, event).await;
+        stream
+            .append_event_to_stream(ctx.ctx, event)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to append operation event to durable event stream",
+                )
+            })?;
     }
     Ok(())
 }
@@ -96,5 +105,98 @@ where
             tracing::trace!(r#type = ?event.r#type, "Unsupported or non-operation event, skip");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::model::EventType;
+    use flare_im_core::utils::Context;
+    use flare_server_core::error::Result as AnyhowResult;
+    use std::sync::Arc;
+
+    struct NoopArchiveRepository;
+
+    impl ArchiveStoreRepository for NoopArchiveRepository {
+        async fn store_archive(
+            &self,
+            _ctx: &Ctx,
+            _message: &crate::domain::model::Message,
+        ) -> AnyhowResult<()> {
+            Ok(())
+        }
+
+        async fn append_event(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _message_id: &str,
+            _event: &Event,
+        ) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingEventStreamRepository;
+
+    impl EventStreamRepository for FailingEventStreamRepository {
+        async fn append_event_to_stream(&self, _ctx: &Ctx, _event: &Event) -> AnyhowResult<()> {
+            Err(flare_server_core::error::FlareError::system(
+                "operation event stream unavailable".to_string(),
+            ))
+        }
+
+        async fn event_exists(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+            _seq: i64,
+        ) -> AnyhowResult<bool> {
+            Ok(false)
+        }
+    }
+
+    fn test_ctx() -> Ctx {
+        Arc::new(Context::with_request_id("req-operation-stream-test").with_tenant_id("tenant-a"))
+    }
+
+    fn operation_event() -> Event {
+        Event {
+            tenant_id: "tenant-a".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            seq: 2,
+            r#type: EventType::MessageRecall,
+            created_at: None,
+            operator_id: "operator-a".to_string(),
+            event_seq: None,
+            request_id: None,
+            payload: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn append_event_and_stream_returns_error_when_event_stream_append_fails() {
+        let repo = NoopArchiveRepository;
+        let stream = FailingEventStreamRepository;
+        let ctx = test_ctx();
+        let event_ctx = EventContext {
+            repo: &repo,
+            stream: Some(&stream),
+            ctx: &ctx,
+            tenant_id: "tenant-a",
+            conversation_id: "conversation-a",
+        };
+
+        let err = append_event_and_stream(&event_ctx, "message-a", &operation_event())
+            .await
+            .expect_err("operation event stream failure must fail the durable write path");
+
+        assert!(
+            err.to_string()
+                .contains("Failed to append operation event to durable event stream"),
+            "unexpected error: {err}"
+        );
     }
 }

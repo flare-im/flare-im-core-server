@@ -7,7 +7,6 @@ pub mod application;
 pub mod bootstrap;
 pub mod config;
 pub mod domain;
-pub mod error;
 pub mod infrastructure;
 pub mod interface;
 pub mod wire;

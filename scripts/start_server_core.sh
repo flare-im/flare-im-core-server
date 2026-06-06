@@ -12,4 +12,5 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export FLARE_HOOKS_PROFILE=core
-exec "$SCRIPT_DIR/start_server.sh" "$@"
+# 通过 bash 解释执行，避免部分环境下直接 ./start_server.sh 被 SIGKILL(9)
+bash "$SCRIPT_DIR/start_server.sh" "$@"

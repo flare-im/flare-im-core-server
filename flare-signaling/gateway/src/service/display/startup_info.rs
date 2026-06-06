@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use crate::config::PortConfig;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 /// 启动信息展示器
 pub struct StartupInfo {
@@ -125,7 +125,7 @@ impl StartupInfo {
             .map_err(|err| {
                 ErrorBuilder::new(
                     ErrorCode::InvalidParameter,
-                    &format!("Invalid gRPC address: {}", err),
+                    format!("Invalid gRPC address: {}", err),
                 )
                 .build_error()
             })

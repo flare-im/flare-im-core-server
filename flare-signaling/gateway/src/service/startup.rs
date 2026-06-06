@@ -5,9 +5,9 @@
 use std::net::SocketAddr;
 
 use crate::config::PortConfig;
-use crate::error::{ErrorBuilder, ErrorCode, Result};
 use crate::service::display::StartupInfo;
 use crate::service::wire::ApplicationContext;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tracing::{error, info};
 
 /// 启动服务
@@ -38,7 +38,7 @@ pub async fn start_services(
         .map_err(|err| {
             ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
-                &format!("Invalid gRPC address: {}", err),
+                format!("Invalid gRPC address: {}", err),
             )
             .build_error()
         })?;

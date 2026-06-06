@@ -7,14 +7,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
-use crate::context::Ctx;
-use crate::error::{GatewayError, Result};
-use crate::infrastructure::grpc::GrpcClients;
 use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListConversationsRequest, ManageParticipantsRequest,
     ParticipantRoleUpdate,
 };
-use flare_server_core::http::ApiResponse;
+use flare_im_core::clients::GrpcClients;
+use flare_server_core::{
+    context::Ctx,
+    http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
+};
 
 /// 获取会话列表请求
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -161,7 +162,7 @@ pub async fn list_conversations(
 ) -> Result<Json<ApiResponse<ListConversationsHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     debug!(
-        trace_id = %ctx.trace_id,
+        trace_id = %ctx.trace_id(),
         user_id = %req.user_id,
         page = req.page,
         page_size = req.page_size,
@@ -197,11 +198,11 @@ pub async fn list_conversations(
             .map(|c| ConversationHttpResponse {
                 conversation_id: c.conversation_id,
                 conversation_type: c.conversation_type,
-                business_type: c.business_type,
+                business_type: String::new(),
                 display_name: c.display_name,
                 channel_id: c.channel_id,
                 unread_count: c.unread_count,
-                max_seq: c.max_seq,
+                max_seq: c.max_conversation_seq,
                 member_count: c.member_count,
                 participant_version: c.participant_version,
             })
@@ -330,6 +331,6 @@ fn participant_http_to_proto(
         muted: p.muted,
         pinned: p.pinned,
         attributes: p.attributes,
-        joined_at: None,
+        joined_at: 0,
     }
 }

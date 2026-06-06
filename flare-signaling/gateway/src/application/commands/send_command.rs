@@ -2,7 +2,7 @@ use flare_proto::Message;
 use flare_proto::common::{Ack, DataPacket, Event};
 use std::collections::HashMap;
 
-///! 上行命令
+// 上行命令
 
 /// 发消息命令（PayloadCommand.type = MESSAGE）
 #[derive(Debug, Clone)]

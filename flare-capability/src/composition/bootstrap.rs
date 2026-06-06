@@ -4,10 +4,10 @@
 
 use std::net::SocketAddr;
 
-use anyhow::{Context, Result};
 use flare_core_runtime::ServiceRuntime;
 use flare_im_core::ServiceHelper;
 use flare_im_core::service_names::CAPABILITY;
+use flare_server_core::error::{AnyhowContext, Result};
 use tracing::info;
 
 use super::process_config::CapabilityServiceConfig;
@@ -25,7 +25,7 @@ impl ApplicationBootstrap {
 
         let cap_service = app_config.capability_service();
         let address =
-            ServiceHelper::parse_server_addr(&app_config, &cap_service.runtime, CAPABILITY)
+            ServiceHelper::parse_server_addr(app_config, &cap_service.runtime, CAPABILITY)
                 .context("invalid flare-capability server address")?;
         info!(address = %address, "Server address parsed successfully");
 
@@ -103,5 +103,6 @@ impl ApplicationBootstrap {
                 })
             })
             .await
+            .map_err(flare_server_core::error::FlareError::from)
     }
 }

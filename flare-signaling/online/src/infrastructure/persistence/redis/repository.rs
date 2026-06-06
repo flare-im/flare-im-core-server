@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
+use flare_server_core::error::Result;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,9 @@ impl RedisConversationRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("redis connection: {}", e))
+            })
     }
 
     fn to_timestamp(seconds: i64) -> Option<DateTime<Utc>> {
@@ -65,18 +67,22 @@ impl RedisConversationRepository {
     }
 
     fn parse_record(payload: &str) -> Result<RedisConnectionRecord> {
-        serde_json::from_str(payload).map_err(|e| anyhow::anyhow!("invalid session payload: {}", e))
+        serde_json::from_str(payload).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("invalid session payload: {}", e))
+        })
     }
 
     fn connection_from_record(
         user_id: &UserId,
         record: RedisConnectionRecord,
     ) -> Result<Connection> {
-        let conversation_id =
-            ConnectionId::from_string(record.conversation_id).map_err(|e| anyhow::anyhow!(e))?;
-        let device_id = DeviceId::new(record.device_id).map_err(|e| anyhow::anyhow!(e))?;
-        let last_seen = Self::to_timestamp(record.last_seen)
-            .ok_or_else(|| anyhow::anyhow!("invalid last_seen timestamp"))?;
+        let conversation_id = ConnectionId::from_string(record.conversation_id)
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
+        let device_id = DeviceId::new(record.device_id)
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
+        let last_seen = Self::to_timestamp(record.last_seen).ok_or_else(|| {
+            flare_server_core::error::FlareError::system("invalid last_seen timestamp".to_string())
+        })?;
 
         Ok(Connection::reconstitute(
             conversation_id,
@@ -99,10 +105,9 @@ impl RedisConversationRepository {
         user_id: &str,
     ) -> Result<Vec<RedisConnectionRecord>> {
         let key = self.connection_key(user_id);
-        let values: HashMap<String, String> = conn
-            .hgetall(&key)
-            .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        let values: HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
         values
             .into_values()
             .map(|payload| Self::parse_record(&payload))
@@ -115,16 +120,24 @@ impl ConversationRepository for RedisConversationRepository {
         let mut conn = self.connection().await?;
         let key = self.connection_key(session.user_id().as_str());
         let record = Self::record_from_connection(session);
-        let value = serde_json::to_string(&record)
-            .map_err(|e| anyhow::anyhow!("serialize session payload: {}", e))?;
+        let value = serde_json::to_string(&record).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "serialize session payload: {}",
+                e
+            ))
+        })?;
         let _: usize = conn
             .hset(&key, session.id().as_str(), value)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -138,7 +151,9 @@ impl ConversationRepository for RedisConversationRepository {
         let _: usize = conn
             .hdel(&key, conversation_id.as_str())
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         tracing::info!(conversation_id = %conversation_id.as_ref(), user_id = %user_id.as_ref(), "session removed from redis");
         Ok(())
     }
@@ -153,20 +168,32 @@ impl ConversationRepository for RedisConversationRepository {
         let payload = conn
             .hget::<_, _, Option<String>>(&key, conversation_id.as_str())
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?
-            .ok_or_else(|| anyhow::anyhow!("connection not found"))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?
+            .ok_or_else(|| {
+                flare_server_core::error::FlareError::system("connection not found".to_string())
+            })?;
         let mut record = Self::parse_record(&payload)?;
         record.last_seen = Utc::now().timestamp();
-        let value = serde_json::to_string(&record)
-            .map_err(|e| anyhow::anyhow!("serialize session payload: {}", e))?;
+        let value = serde_json::to_string(&record).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "serialize session payload: {}",
+                e
+            ))
+        })?;
         let _: usize = conn
             .hset(&key, conversation_id.as_str(), value)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -216,25 +243,25 @@ impl ConversationRepository for RedisConversationRepository {
         let key = self.connection_key(user_id.as_str());
 
         if let Some(device_ids) = device_ids {
-            let values: HashMap<String, String> = conn
-                .hgetall(&key)
-                .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            let values: HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
             for (conversation_id, payload) in values {
                 let record = Self::parse_record(&payload)?;
                 if device_ids.iter().any(|d| d.as_str() == record.device_id) {
-                    let _: usize = conn
-                        .hdel(&key, conversation_id)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+                    let _: usize = conn.hdel(&key, conversation_id).await.map_err(|e| {
+                        flare_server_core::error::FlareError::system(format!(
+                            "operation failed: {}",
+                            e
+                        ))
+                    })?;
                 }
             }
         } else {
-            let _: usize = conn
-                .del(&key)
-                .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            let _: usize = conn.del(&key).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         }
 
         Ok(())
@@ -252,10 +279,13 @@ impl ConversationRepository for RedisConversationRepository {
     }
 
     async fn list_user_connections(&self, ctx: &SrvContext) -> Result<Vec<Connection>> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
-        let user_id_vo = UserId::new(user_id.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
+        let user_id_vo = UserId::new(user_id.to_string())
+            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         self.get_user_connections(&user_id_vo).await
     }
 }
@@ -282,7 +312,9 @@ impl RedisSubscriptionRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("redis connection: {}", e))
+            })
     }
 }
 
@@ -290,25 +322,27 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
     async fn add_subscription(&self, user_id: String, topic: String) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.subscription_key(&user_id, &topic);
-        let _: () = conn
-            .set(&key, "1")
-            .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        let _: () = conn.set(&key, "1").await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
         let _: bool = conn
             .expire(&key, self.config.redis_ttl_seconds as i64)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
         // 添加到主题订阅者集合
         let topic_key = self.topic_subscribers_key(&topic);
-        let _: () = conn
-            .sadd(&topic_key, &user_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        let _: () = conn.sadd(&topic_key, &user_id).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
         let _: bool = conn
             .expire(&topic_key, self.config.redis_ttl_seconds as i64)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
         Ok(())
     }
@@ -318,24 +352,24 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         ctx: &flare_server_core::context::Context,
         topics: &[String],
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
         let mut conn = self.connection().await?;
 
         for topic in topics {
-            let key = self.subscription_key(&user_id, topic);
-            let _: usize = conn
-                .del(&key)
-                .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            let key = self.subscription_key(user_id, topic);
+            let _: usize = conn.del(&key).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
             // 从主题订阅者集合中移除
             let topic_key = self.topic_subscribers_key(topic);
-            let _: () = conn
-                .srem(&topic_key, &user_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            let _: () = conn.srem(&topic_key, user_id).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         }
 
         Ok(())
@@ -345,9 +379,11 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         &self,
         ctx: &flare_server_core::context::Context,
     ) -> Result<Vec<(String, HashMap<String, String>)>> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("user_id is required in context"))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
         let mut conn = self.connection().await?;
 
         // 查找该用户的所有订阅键
@@ -356,7 +392,9 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
             .arg(&pattern)
             .query_async(&mut conn)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
         let mut subscriptions = Vec::new();
         for key in keys {
@@ -372,10 +410,9 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
     async fn get_topic_subscribers(&self, topic: &str) -> Result<Vec<String>> {
         let mut conn = self.connection().await?;
         let key = self.topic_subscribers_key(topic);
-        let subscribers: Vec<String> = conn
-            .smembers(&key)
-            .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+        let subscribers: Vec<String> = conn.smembers(&key).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
         Ok(subscribers)
     }
 }
@@ -393,7 +430,9 @@ impl RedisPresencePublisher {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .map_err(|e| anyhow::anyhow!("redis connection: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("redis connection: {}", e))
+            })
     }
 
     fn presence_channel(user_id: &str) -> String {
@@ -411,7 +450,9 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
         let _: () = conn
             .publish("presence_events", payload)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         if !event.user_id.trim().is_empty() {
             let status = event.status.as_ref();
             let last_seen = status
@@ -438,7 +479,9 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
             let _: () = conn
                 .publish(Self::presence_channel(&event.user_id), value.to_string())
                 .await
-                .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+                })?;
         }
         Ok(())
     }
@@ -452,7 +495,9 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
         let _: () = conn
             .publish("user_presence_events", payload)
             .await
-            .map_err(|e| anyhow::anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
         Ok(())
     }
 }

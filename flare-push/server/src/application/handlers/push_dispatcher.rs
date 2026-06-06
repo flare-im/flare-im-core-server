@@ -12,9 +12,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
 use flare_im_core::Ctx;
 use flare_proto::common::{PushEnvelope, PushResult};
+use flare_server_core::error::Result;
 use tracing::{debug, instrument};
 
 use crate::domain::{DeviceInfo, TargetResolver};
@@ -47,14 +47,15 @@ impl PushDispatcher {
 
     /// 检查推送信封是否过期
     fn is_expired(&self, envelope: &PushEnvelope) -> bool {
-        if let Some(ref options) = envelope.options {
-            if options.expire_at_ms > 0 {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64;
-                return now > options.expire_at_ms;
-            }
+        if let Some(ref options) = envelope.options
+            && let Some(expire_at) = options.expire_at
+            && expire_at > 0
+        {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            return now > expire_at;
         }
         false
     }
@@ -165,7 +166,8 @@ pub trait PushExecutor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_proto::common::PushPayloadKind;
+    use flare_proto::PushPayloadKind;
+    use flare_proto::common::{PushDelivered, push_result};
 
     struct MockTargetResolver;
 
@@ -195,13 +197,12 @@ mod tests {
                 envelope_id: envelope.envelope_id.clone(),
                 device_id: device.device_id.clone(),
                 user_id: device.user_id.clone(),
-                success: true,
-                error_code: String::new(),
-                error_message: String::new(),
-                pushed_at_ms: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64,
+                result: Some(push_result::Result::Delivered(PushDelivered {
+                    pushed_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64,
+                })),
             }
         }
     }
@@ -216,7 +217,7 @@ mod tests {
             envelope_id: "test-123".to_string(),
             tenant_id: "tenant-1".to_string(),
             trace_id: "trace-123".to_string(),
-            created_at_ms: 1234567890,
+            created_at: 1234567890,
             target_type: 0,
             target_user_ids: Vec::new(),
             target_device_ids: Vec::new(),
@@ -233,6 +234,9 @@ mod tests {
         let results = dispatcher.dispatch(&ctx, envelope).await.unwrap();
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].success);
+        assert!(matches!(
+            results[0].result,
+            Some(push_result::Result::Delivered(_))
+        ));
     }
 }

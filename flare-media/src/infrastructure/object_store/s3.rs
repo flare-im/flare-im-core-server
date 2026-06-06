@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{ErrorCode, Result, map_infra_error};
 use aws_config::BehaviorVersion;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client as S3Client;
@@ -11,6 +10,7 @@ use aws_sdk_s3::types::{
     BucketLocationConstraint, CompletedMultipartUpload, CompletedPart, CreateBucketConfiguration,
 };
 use chrono::{Datelike, Utc};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 use crate::domain::model::{ObjectStat, UploadContext, UploadedPartRecord};
 use crate::domain::repository::MediaObjectRepository;

@@ -14,8 +14,7 @@ pub mod push_envelope_builder;
 pub use event_builder::{
     EventBuilder, build_burn_scheduled_event, build_burned_event, build_custom_event,
     build_delete_event, build_edit_event, build_mark_event, build_pin_event, build_reaction_event,
-    build_read_receipt_event, build_recall_event, build_typing_event, build_unmark_event,
-    build_unpin_event,
+    build_read_receipt_event, build_recall_event, build_unmark_event, build_unpin_event,
 };
 
 pub use hook_builder::*;

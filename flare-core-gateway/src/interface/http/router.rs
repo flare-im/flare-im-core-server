@@ -6,11 +6,12 @@ use axum::{
 use std::sync::Arc;
 use utoipa::OpenApi;
 
+use super::auth_middleware::gateway_auth_middleware;
 use super::conversation_handler;
 use super::media_handler;
 use super::message_handler;
-use crate::infrastructure::grpc::GrpcClients;
-use flare_server_core::http::middleware::auth_middleware;
+use super::presence_handler;
+use flare_im_core::clients::GrpcClients;
 
 /// OpenAPI 文档定义（由 utoipa 过程宏消费，编译器视为未构造）
 #[allow(dead_code)]
@@ -47,6 +48,9 @@ use flare_server_core::http::middleware::auth_middleware;
         conversation_handler::list_conversations,
         conversation_handler::list_conversation_participants,
         conversation_handler::manage_participants,
+        presence_handler::get_user_presence,
+        presence_handler::batch_get_user_presence,
+        presence_handler::logout_presence,
     ),
     components(
         schemas(
@@ -102,11 +106,18 @@ use flare_server_core::http::middleware::auth_middleware;
             super::conversation_handler::ManageParticipantsHttpRequest,
             super::conversation_handler::ManageParticipantsHttpResponse,
             super::conversation_handler::ParticipantRoleUpdateHttp,
+            super::presence_handler::UserPresenceHttp,
+            super::presence_handler::DevicePresenceHttp,
+            super::presence_handler::BatchGetUserPresenceHttpRequest,
+            super::presence_handler::BatchGetUserPresenceHttpResponse,
+            super::presence_handler::LogoutPresenceHttpRequest,
+            super::presence_handler::LogoutPresenceHttpResponse,
         )
     ),
     tags(
         (name = "Media", description = "媒体文件管理接口"),
         (name = "Message", description = "消息管理接口"),
+        (name = "Presence", description = "在线状态接口"),
     )
 )]
 struct ApiDoc;
@@ -140,8 +151,16 @@ async fn swagger_ui_html() -> Html<&'static str> {
     )
 }
 
-/// 创建路由
+/// 创建默认路由。
+///
+/// `flare-core-gateway` 现在只暴露 public/third-party API；Admin API 由
+/// `flare-admin-gateway` 单独承载。
 pub fn create_router(clients: Arc<GrpcClients>) -> Router {
+    create_public_router(clients)
+}
+
+/// 创建 public Core Gateway 路由。
+pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
     let media_public_router = Router::new()
         .route("/files/{file_id}", get(media_handler::serve_file))
         .layer(axum::Extension(clients.clone()));
@@ -203,7 +222,7 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
         .route("/objects", get(media_handler::list_objects))
         .route("/bucket", get(media_handler::describe_bucket))
         .layer(axum::Extension(clients.clone()))
-        .route_layer(middleware::from_fn(auth_middleware));
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
 
     // Message API 路由
     let message_router = Router::new()
@@ -211,7 +230,7 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
         .route("/recall", post(message_handler::recall_message))
         .route("/read", post(message_handler::mark_message_read))
         .layer(axum::Extension(clients.clone()))
-        .route_layer(middleware::from_fn(auth_middleware));
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
 
     // Conversation API 路由
     let conversation_router = Router::new()
@@ -224,14 +243,26 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
             "/participants/manage",
             post(conversation_handler::manage_participants),
         )
-        .layer(axum::Extension(clients))
-        .route_layer(middleware::from_fn(auth_middleware));
+        .layer(axum::Extension(clients.clone()))
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
+
+    // Presence API 路由
+    let presence_router = Router::new()
+        .route("/users/{user_id}", get(presence_handler::get_user_presence))
+        .route(
+            "/users/batch",
+            post(presence_handler::batch_get_user_presence),
+        )
+        .route("/logout", post(presence_handler::logout_presence))
+        .layer(axum::Extension(clients.clone()))
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
 
     // 主路由
     Router::new()
         .nest("/api/v1/medias", media_public_router.merge(media_router))
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)
+        .nest("/api/v1/presence", presence_router)
         .route("/api-doc/openapi.json", get(openapi_json))
         .route("/swagger-ui", get(swagger_ui_html))
         .route("/swagger-ui/", get(swagger_ui_html))

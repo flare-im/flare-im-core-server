@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use flare_grpc_proto::signaling::router::RouteOptions;
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_proto::common::Ack;
 use flare_proto::common::ack::Payload as AckPayload;
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::instrument;
 
@@ -42,7 +42,7 @@ impl AckRoutingHandler {
         if !forward {
             tracing::warn!(
                 request_id = %ctx.request_id(),
-                ack_type = ack.r#type,
+                ack_payload = ack_payload_name(ack.payload.as_ref()),
                 "RouteAck: not a client uplink variant (push/conversation/batch)"
             );
             return Err(flare_err!(
@@ -75,5 +75,17 @@ impl AckRoutingHandler {
                 route_options.load_balance_strategy,
             ),
         })
+    }
+}
+
+fn ack_payload_name(payload: Option<&AckPayload>) -> &'static str {
+    match payload {
+        Some(AckPayload::Send(_)) => "send",
+        Some(AckPayload::Event(_)) => "event",
+        Some(AckPayload::Push(_)) => "push",
+        Some(AckPayload::Conversation(_)) => "conversation",
+        Some(AckPayload::Read(_)) => "read",
+        Some(AckPayload::Batch(_)) => "batch",
+        None => "none",
     }
 }

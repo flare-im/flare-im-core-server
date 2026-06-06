@@ -1,6 +1,5 @@
 //! Hook 治理应用服务：配置 CRUD、统计、执行记录查询（由 `CapabilityService.Administer` 经 [`super::capability_administer`] 调用）。
 
-use crate::error::{ErrorBuilder, ErrorCode};
 use flare_grpc_proto::capability::{
     CreateHookConfigRequest, CreateHookConfigResponse, DeleteHookConfigRequest,
     DeleteHookConfigResponse, GetHookConfigRequest, GetHookConfigResponse,
@@ -10,6 +9,7 @@ use flare_grpc_proto::capability::{
     SetHookStatusRequest, SetHookStatusResponse, UpdateHookConfigRequest, UpdateHookConfigResponse,
 };
 use flare_server_core::error::Result as FlareResult;
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::utils::require_ctx_from_request;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -123,7 +123,7 @@ impl HookServiceServer {
             .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
 
         // 保存到数据库（优先从 Context 提取，其次从请求参数）
-        let created_by = ctx.user_id().map(|s: &str| s.as_ref()).or_else(|| None);
+        let created_by = ctx.user_id().map(|s: &str| s).or(None);
 
         let hook_id = self
             .repository
@@ -361,7 +361,7 @@ impl HookServiceServer {
         // 构建响应
         let hook_config = hook_config_item_to_protobuf(
             &row.id.to_string(),
-            &row.tenant_id.as_deref().unwrap_or(""),
+            row.tenant_id.as_deref().unwrap_or(""),
             &row.hook_type,
             &hook_item,
         )
@@ -711,29 +711,22 @@ impl HookServiceServer {
 
                     // 时间范围过滤
                     if let Some(ref time_range) = req.time_range {
-                        // 将执行时间转换为Timestamp进行比较
-                        let executed_timestamp = r
+                        let executed_at_ms = r
                             .executed_at
                             .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                            .map(|d| prost_types::Timestamp {
-                                seconds: d.as_secs() as i64,
-                                nanos: d.subsec_nanos() as i32,
-                            })
-                            .unwrap_or_else(|_| prost_types::Timestamp {
-                                seconds: 0,
-                                nanos: 0,
-                            });
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or_default();
 
                         // 检查是否在时间范围内
-                        if let Some(ref start) = time_range.start_time {
-                            if executed_timestamp.seconds < start.seconds {
-                                return false;
-                            }
+                        if let Some(start) = time_range.start_time
+                            && executed_at_ms < start
+                        {
+                            return false;
                         }
-                        if let Some(ref end) = time_range.end_time {
-                            if executed_timestamp.seconds > end.seconds {
-                                return false;
-                            }
+                        if let Some(end) = time_range.end_time
+                            && executed_at_ms > end
+                        {
+                            return false;
                         }
                     }
 

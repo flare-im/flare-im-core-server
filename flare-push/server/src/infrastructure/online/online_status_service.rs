@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_grpc_proto::signaling::online::GetOnlineStatusRequest;
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_im_core::Ctx;
+use flare_server_core::error::{FlareError, Result};
 use tonic::transport::Channel;
 
 use crate::config::PushServerConfig;
@@ -15,9 +15,14 @@ pub struct OnlineStatusService {
 
 impl OnlineStatusService {
     pub async fn new(config: Arc<PushServerConfig>) -> Result<Self> {
-        let channel = Channel::from_shared(config.online_service_endpoint.clone())?
+        let endpoint = config.online_service_endpoint.clone();
+        let channel = Channel::from_shared(endpoint.clone())
+            .map_err(|err| {
+                FlareError::system(format!("invalid online grpc uri {endpoint}: {err}"))
+            })?
             .connect()
-            .await?;
+            .await
+            .map_err(|err| FlareError::system(format!("connect online grpc {endpoint}: {err}")))?;
         let client = OnlineServiceClient::new(channel);
         Ok(Self { config, client })
     }

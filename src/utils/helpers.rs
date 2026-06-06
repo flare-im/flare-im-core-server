@@ -3,7 +3,7 @@
 //! 提供配置加载、服务初始化等常用辅助函数
 
 use crate::config::{FlareAppConfig, ServiceRuntimeConfig};
-use anyhow::{Context as AnyhowContext, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 
 /// 服务启动辅助函数

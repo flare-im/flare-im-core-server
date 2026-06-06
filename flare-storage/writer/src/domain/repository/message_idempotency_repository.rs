@@ -8,7 +8,13 @@ use flare_im_core::Ctx;
 
 pub trait MessageIdempotencyRepository: Send + Sync {
     /// 检查消息ID是否为新消息（基于服务端消息ID）
-    async fn is_new(&self, ctx: &Ctx, message_id: &str) -> anyhow::Result<bool>;
+    async fn is_new(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<bool>;
+
+    /// 释放一次尚未完成 durable write 的服务端消息 ID 预占坑。
+    async fn release(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<()> {
+        let _ = (ctx, message_id);
+        Ok(())
+    }
 
     /// 检查客户端消息ID是否为新消息（用于去重）；默认委托给 is_new。
     async fn is_new_by_client_msg_id(
@@ -16,10 +22,23 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         ctx: &Ctx,
         client_msg_id: &str,
         _sender_id: Option<&str>,
-    ) -> anyhow::Result<bool> {
+    ) -> flare_server_core::error::Result<bool> {
         if client_msg_id.is_empty() {
             return Ok(true);
         }
         self.is_new(ctx, client_msg_id).await
+    }
+
+    /// 释放一次尚未完成 durable write 的客户端消息 ID 预占坑。
+    async fn release_by_client_msg_id(
+        &self,
+        ctx: &Ctx,
+        client_msg_id: &str,
+        _sender_id: Option<&str>,
+    ) -> flare_server_core::error::Result<()> {
+        if client_msg_id.is_empty() {
+            return Ok(());
+        }
+        self.release(ctx, client_msg_id).await
     }
 }

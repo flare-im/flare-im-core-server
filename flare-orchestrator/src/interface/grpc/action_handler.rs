@@ -160,7 +160,7 @@ impl MessageActionService for MessageActionGrpcHandler {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
-            burned_at: None,
+            retention_expired_at: None,
         }))
     }
 
@@ -385,7 +385,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         // 调用 application 层的标记所有会话已读方法
         let user_id = ctx.user_id().unwrap_or_default();
         self.action_handler
-            .mark_all_conversations_read(&ctx, &user_id)
+            .mark_all_conversations_read(&ctx, user_id)
             .await
             .into_grpc()?;
 

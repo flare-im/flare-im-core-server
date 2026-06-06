@@ -15,13 +15,19 @@ use flare_im_core::constants::topics::{
     TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS, TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ENVELOPE,
     TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
 };
-use flare_im_core::event::{mq_envelope_for_main_queue_event, mq_envelope_for_main_queue_message};
-use flare_proto::common::{Event, Message, PushEnvelope};
+use flare_im_core::event::{
+    mq_envelope_for_main_queue_event_with_headers, mq_envelope_for_main_queue_message_with_headers,
+};
+use flare_im_core::utils::{
+    TimelineMetadata, context_to_mq_metadata, current_millis, embed_timeline_in_extra_map,
+    normalize_tenant_id,
+};
+use flare_proto::common::{Event, Message, MqEnvelope, PushEnvelope};
 use flare_server_core::mq::producer::{Producer, ProducerError};
 use prost::Message as _;
 
 use crate::domain::repository::PushRepository;
-use crate::error::{ErrorBuilder, ErrorCode, Result, to_system_err_with};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 /// 推送仓储实现：基于 Producer trait 发布消息和事件
 ///
@@ -42,13 +48,83 @@ impl MqPushRepository {
     }
 
     /// 将 ProducerError 转换为 FlareError
-    fn map_producer_error(e: ProducerError) -> crate::error::FlareError {
-        to_system_err_with(e, "producer_error")
+    fn map_producer_error(e: ProducerError) -> flare_server_core::error::FlareError {
+        e.into_flare_error()
     }
 
-    /// 从 Ctx 构造 headers
-    fn build_headers_from_ctx(_ctx: &Ctx) -> Option<HashMap<String, String>> {
-        Some(HashMap::new())
+    /// 从 Ctx 构造跨队列 headers，供外层 MQ 与内层 MqEnvelope 同时携带。
+    fn build_headers_from_ctx(ctx: &Ctx) -> HashMap<String, String> {
+        let mut headers = context_to_mq_metadata(ctx);
+        headers
+            .entry("x-tenant-id".to_string())
+            .or_insert_with(|| normalize_tenant_id(ctx.tenant_id().unwrap_or("0")));
+        headers
+    }
+
+    fn build_timeline_headers(ctx: &Ctx, emit_ts: Option<i64>) -> HashMap<String, String> {
+        let ingestion_ts = current_millis();
+        let mut headers = Self::build_headers_from_ctx(ctx);
+        embed_timeline_in_extra_map(
+            &mut headers,
+            &TimelineMetadata {
+                emit_ts,
+                ingestion_ts,
+                ..TimelineMetadata::default()
+            },
+        );
+        headers
+    }
+
+    fn message_headers(ctx: &Ctx, message: &Message) -> HashMap<String, String> {
+        Self::build_timeline_headers(ctx, (message.created_at > 0).then_some(message.created_at))
+    }
+
+    fn event_headers(ctx: &Ctx, event: &Event) -> HashMap<String, String> {
+        Self::build_timeline_headers(ctx, (event.created_at > 0).then_some(event.created_at))
+    }
+
+    fn finalize_mq_headers(mq: &mut MqEnvelope) {
+        mq.headers
+            .entry("x-envelope-id".to_string())
+            .or_insert_with(|| mq.envelope_id.clone());
+        mq.headers
+            .entry("x-produced-at-ms".to_string())
+            .or_insert_with(|| mq.produced_at.to_string());
+        mq.headers
+            .entry("x-conversation-id".to_string())
+            .or_insert_with(|| mq.conversation_id.clone());
+        mq.headers
+            .entry("x-conversation-seq".to_string())
+            .or_insert_with(|| mq.seq.to_string());
+    }
+
+    fn envelope_headers(ctx: &Ctx, envelope: &mut PushEnvelope) -> HashMap<String, String> {
+        if envelope.envelope_id.trim().is_empty() {
+            envelope.envelope_id = uuid::Uuid::new_v4().to_string();
+        }
+        let mut headers = Self::build_headers_from_ctx(ctx);
+        for (key, value) in envelope.headers.drain() {
+            headers.insert(key, value);
+        }
+        if envelope.tenant_id.trim().is_empty() {
+            envelope.tenant_id = headers
+                .get("x-tenant-id")
+                .cloned()
+                .unwrap_or_else(|| "0".to_string());
+        }
+        if envelope.trace_id.trim().is_empty()
+            && let Some(trace_id) = headers.get("x-trace-id")
+        {
+            envelope.trace_id = trace_id.clone();
+        }
+        headers
+            .entry("x-envelope-id".to_string())
+            .or_insert_with(|| envelope.envelope_id.clone());
+        headers
+            .entry("x-produced-at-ms".to_string())
+            .or_insert_with(|| envelope.created_at.to_string());
+        envelope.headers = headers.clone();
+        headers
     }
 }
 
@@ -70,8 +146,12 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope
-        let mq: flare_proto::MqEnvelope =
-            mq_envelope_for_main_queue_message(&message, recipient_user_ids);
+        let mut mq = mq_envelope_for_main_queue_message_with_headers(
+            &message,
+            recipient_user_ids,
+            Self::message_headers(ctx, &message),
+        );
+        Self::finalize_mq_headers(&mut mq);
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -90,8 +170,7 @@ impl PushRepository for MqPushRepository {
             .build_error());
         }
 
-        // 从 Ctx 构造 headers
-        let headers = Self::build_headers_from_ctx(ctx);
+        let headers = Some(mq.headers.clone());
 
         // 发布到 TOPIC_MESSAGE_MAIN，使用 conversation_id 作为分区键
         self.producer
@@ -123,7 +202,12 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope
-        let mq = mq_envelope_for_main_queue_event(&event, recipient_user_ids);
+        let mut mq = mq_envelope_for_main_queue_event_with_headers(
+            &event,
+            recipient_user_ids,
+            Self::event_headers(ctx, &event),
+        );
+        Self::finalize_mq_headers(&mut mq);
         let payload = mq.encode_to_vec();
 
         // 校验消息大小
@@ -141,8 +225,7 @@ impl PushRepository for MqPushRepository {
             );
         }
 
-        // 从 Ctx 构造 headers
-        let headers = Self::build_headers_from_ctx(ctx);
+        let headers = Some(mq.headers.clone());
 
         // 发布到 TOPIC_MESSAGE_MAIN，使用 conversation_id 作为分区键
         self.producer
@@ -181,10 +264,17 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope
-        let mut mq = mq_envelope_for_main_queue_message(&message, recipient_user_ids);
+        let mut mq = mq_envelope_for_main_queue_message_with_headers(
+            &message,
+            recipient_user_ids,
+            Self::message_headers(ctx, &message),
+        );
 
         // 标记为仅推送（不持久化）
         mq.push_only = true;
+        mq.headers
+            .insert("push-only".to_string(), "true".to_string());
+        Self::finalize_mq_headers(&mut mq);
 
         let payload = mq.encode_to_vec();
 
@@ -204,9 +294,7 @@ impl PushRepository for MqPushRepository {
             .build_error());
         }
 
-        // 从 Ctx 构造 headers
-        let mut headers = Self::build_headers_from_ctx(ctx).unwrap_or_default();
-        headers.insert("push-only".to_string(), "true".to_string());
+        let headers = mq.headers.clone();
 
         // 发布到 TOPIC_PUSH_MESSAGES，使用 conversation_id 作为分区键
         self.producer
@@ -244,10 +332,17 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope
-        let mut mq = mq_envelope_for_main_queue_event(&event, recipient_user_ids);
+        let mut mq = mq_envelope_for_main_queue_event_with_headers(
+            &event,
+            recipient_user_ids,
+            Self::event_headers(ctx, &event),
+        );
 
         // 标记为仅推送（不持久化）
         mq.push_only = true;
+        mq.headers
+            .insert("push-only".to_string(), "true".to_string());
+        Self::finalize_mq_headers(&mut mq);
 
         let payload = mq.encode_to_vec();
 
@@ -266,9 +361,7 @@ impl PushRepository for MqPushRepository {
             );
         }
 
-        // 从 Ctx 构造 headers
-        let mut headers = Self::build_headers_from_ctx(ctx).unwrap_or_default();
-        headers.insert("push-only".to_string(), "true".to_string());
+        let headers = mq.headers.clone();
 
         // 发布到 TOPIC_PUSH_EVENTS，使用 conversation_id 作为分区键
         self.producer
@@ -304,10 +397,17 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope（不需要接收者列表）
-        let mut mq = mq_envelope_for_main_queue_message(&message, Vec::new());
+        let mut mq = mq_envelope_for_main_queue_message_with_headers(
+            &message,
+            Vec::new(),
+            Self::message_headers(ctx, &message),
+        );
 
         // 标记为仅持久化（不推送）
         mq.persistence_only = true;
+        mq.headers
+            .insert("persistence-only".to_string(), "true".to_string());
+        Self::finalize_mq_headers(&mut mq);
 
         let payload = mq.encode_to_vec();
 
@@ -327,9 +427,7 @@ impl PushRepository for MqPushRepository {
             .build_error());
         }
 
-        // 从 Ctx 构造 headers
-        let mut headers = Self::build_headers_from_ctx(ctx).unwrap_or_default();
-        headers.insert("persistence-only".to_string(), "true".to_string());
+        let headers = mq.headers.clone();
 
         // 发布到 TOPIC_MESSAGE_CREATED，使用 conversation_id 作为分区键
         self.producer
@@ -366,10 +464,17 @@ impl PushRepository for MqPushRepository {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
         // 构造 MqEnvelope（不需要接收者列表）
-        let mut mq = mq_envelope_for_main_queue_event(&event, Vec::new());
+        let mut mq = mq_envelope_for_main_queue_event_with_headers(
+            &event,
+            Vec::new(),
+            Self::event_headers(ctx, &event),
+        );
 
         // 标记为仅持久化（不推送）
         mq.persistence_only = true;
+        mq.headers
+            .insert("persistence-only".to_string(), "true".to_string());
+        Self::finalize_mq_headers(&mut mq);
 
         let payload = mq.encode_to_vec();
 
@@ -388,9 +493,7 @@ impl PushRepository for MqPushRepository {
             );
         }
 
-        // 从 Ctx 构造 headers
-        let mut headers = Self::build_headers_from_ctx(ctx).unwrap_or_default();
-        headers.insert("persistence-only".to_string(), "true".to_string());
+        let headers = mq.headers.clone();
 
         // 发布到 TOPIC_MESSAGE_EVENTS，使用 conversation_id 作为分区键
         self.producer
@@ -417,8 +520,10 @@ impl PushRepository for MqPushRepository {
     /// 1. 将 PushEnvelope 序列化
     /// 2. 从 Ctx 提取 trace_id/tenant_id 填充 headers（如果未设置）
     /// 3. 发布到 TOPIC_PUSH_ENVELOPE（由 Push Server 消费并执行推送）
-    async fn publish_push_envelope(&self, ctx: &Ctx, envelope: PushEnvelope) -> Result<()> {
+    async fn publish_push_envelope(&self, ctx: &Ctx, mut envelope: PushEnvelope) -> Result<()> {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+        let headers = Self::envelope_headers(ctx, &mut envelope);
 
         // 序列化 PushEnvelope
         let payload = envelope.encode_to_vec();
@@ -438,22 +543,172 @@ impl PushRepository for MqPushRepository {
             );
         }
 
-        // 从 Ctx 构造 headers，并添加 envelope 中的 headers
-        let headers = Self::build_headers_from_ctx(ctx).unwrap_or_default();
-
         // 使用 envelope_id 作为分区键
-        let partition_key = &envelope.envelope_id;
+        let partition_key = envelope.envelope_id.clone();
 
         // 发布到 TOPIC_PUSH_ENVELOPE
         self.producer
             .send(
                 ctx,
                 TOPIC_PUSH_ENVELOPE,
-                Some(partition_key),
+                Some(&partition_key),
                 payload,
                 Some(headers),
             )
             .await
             .map_err(Self::map_producer_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_core::constants::topics::TOPIC_MESSAGE_MAIN;
+    use flare_proto::common::MqEnvelope;
+    use flare_server_core::Context;
+    use flare_server_core::mq::producer::ProducerMessage;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    struct CapturedSend {
+        topic: String,
+        key: Option<String>,
+        payload: Vec<u8>,
+        headers: Option<HashMap<String, String>>,
+    }
+
+    #[derive(Default)]
+    struct CapturingProducer {
+        send: Mutex<Option<CapturedSend>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Producer for CapturingProducer {
+        async fn send(
+            &self,
+            _ctx: &Ctx,
+            topic: &str,
+            key: Option<&str>,
+            payload: Vec<u8>,
+            headers: Option<HashMap<String, String>>,
+        ) -> std::result::Result<(), ProducerError> {
+            *self.send.lock().expect("capture producer poisoned") = Some(CapturedSend {
+                topic: topic.to_string(),
+                key: key.map(ToString::to_string),
+                payload,
+                headers,
+            });
+            Ok(())
+        }
+
+        async fn send_batch(
+            &self,
+            _ctx: &Ctx,
+            _messages: Vec<ProducerMessage>,
+        ) -> std::result::Result<(), ProducerError> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "capturing-producer"
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_message_carries_context_and_timeline_in_outer_and_inner_headers() {
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let ctx: Ctx = Arc::new(
+            Context::with_request_id("req-message-publish-test")
+                .with_trace_id("trace-message-publish-test")
+                .with_tenant_id("tenant-a")
+                .with_user_id("sender-a"),
+        );
+        let message = Message {
+            server_id: "message-a".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            sender_id: "sender-a".to_string(),
+            conversation_seq: 42,
+            created_at: 1_700_000_000_000,
+            ..Message::default()
+        };
+
+        repo.publish_message(
+            &ctx,
+            message,
+            vec!["receiver-a".to_string()],
+            "conversation-a".to_string(),
+        )
+        .await
+        .expect("publish should succeed");
+
+        let captured = producer
+            .send
+            .lock()
+            .expect("capture producer poisoned")
+            .clone()
+            .expect("send should be captured");
+        assert_eq!(captured.topic, TOPIC_MESSAGE_MAIN);
+        assert_eq!(captured.key.as_deref(), Some("conversation-a"));
+
+        let outer_headers = captured.headers.expect("outer headers should be set");
+        assert_eq!(
+            outer_headers.get("x-tenant-id").map(String::as_str),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            outer_headers.get("x-trace-id").map(String::as_str),
+            Some("trace-message-publish-test")
+        );
+        assert!(outer_headers.contains_key("timeline"));
+        assert!(outer_headers.contains_key("x-envelope-id"));
+
+        let envelope = MqEnvelope::decode(captured.payload.as_slice())
+            .expect("payload should decode as MqEnvelope");
+        assert_eq!(envelope.conversation_id, "conversation-a");
+        assert_eq!(envelope.seq, 42);
+        assert_eq!(
+            envelope.headers.get("x-tenant-id").map(String::as_str),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            envelope.headers.get("timeline"),
+            outer_headers.get("timeline")
+        );
+        assert_eq!(
+            envelope.headers.get("x-envelope-id"),
+            outer_headers.get("x-envelope-id")
+        );
+    }
+
+    #[test]
+    fn transient_producer_errors_remain_retryable() {
+        let errors = [
+            ProducerError::Connection("nats disconnected".to_string()),
+            ProducerError::Timeout("publish ack timeout".to_string()),
+            ProducerError::Send("broker unavailable".to_string()),
+            ProducerError::Batch("batch publish failed".to_string()),
+        ];
+
+        for error in errors {
+            let mapped = MqPushRepository::map_producer_error(error);
+            assert_eq!(mapped.code(), Some(ErrorCode::ServiceUnavailable));
+            assert!(mapped.is_retryable());
+        }
+    }
+
+    #[test]
+    fn non_transient_producer_errors_remain_non_retryable() {
+        let serialization = MqPushRepository::map_producer_error(ProducerError::Serialization(
+            "bad payload".into(),
+        ));
+        assert_eq!(serialization.code(), Some(ErrorCode::SerializationError));
+        assert!(!serialization.is_retryable());
+
+        let configuration = MqPushRepository::map_producer_error(ProducerError::Configuration(
+            "missing broker url".into(),
+        ));
+        assert_eq!(configuration.code(), Some(ErrorCode::ConfigurationError));
+        assert!(!configuration.is_retryable());
     }
 }

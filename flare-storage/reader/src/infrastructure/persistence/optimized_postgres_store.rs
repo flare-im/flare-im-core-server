@@ -5,25 +5,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use flare_server_core::error::{AnyhowContext, Result};
 use serde_json::Value;
 use sqlx::Row;
 use tokio::time::Instant;
 use tracing::instrument;
 
-use crate::convert::{event_from_proto, message_from_proto, message_to_proto};
+use crate::convert::{
+    event_from_proto, event_type_to_proto_i32, message_from_proto, message_to_proto,
+};
 use crate::domain::model::{
-    ConversationMessageHead, Event, EventType, FilterExpression, Message, MessageUpdate,
-    ReactionItem, VisibilityStatus,
+    ConversationMessageHead, Event, EventType, FilterExpression, MarkEntry, Message,
+    MessageExportTaskDraft, MessageUpdate, MessageWriteLedgerEntry, MessageWriteLedgerQuery,
+    PinnedMessageInfo, ReactionItem, ReadListEntry, VisibilityStatus,
 };
 use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
-use flare_im_core::BurnStatus;
 use flare_im_core::Ctx;
+use flare_proto::common::ContentVisibility;
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
 // use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
@@ -34,6 +37,84 @@ impl PerformanceMetrics {
     pub fn record_cache_hit(&self, _cache_type: &str) {}
     pub fn record_cache_miss(&self, _cache_type: &str) {}
     pub fn record_query(&self, _query_type: &str, _duration_ms: u64) {}
+}
+
+fn tenant_id_from_ctx(ctx: &Ctx) -> &str {
+    ctx.tenant_id().unwrap_or("0")
+}
+
+fn timestamp_from_datetime(dt: Option<DateTime<Utc>>) -> Option<prost_types::Timestamp> {
+    dt.map(|dt| prost_types::Timestamp {
+        seconds: dt.timestamp(),
+        nanos: dt.timestamp_subsec_nanos() as i32,
+    })
+}
+
+fn event_type_from_operation_type(operation_type: &str) -> EventType {
+    match operation_type {
+        "OPERATION_TYPE_RECALL" | "recall" => EventType::MessageRecall,
+        "OPERATION_TYPE_EDIT" | "edit" => EventType::MessageEdit,
+        "OPERATION_TYPE_DELETE" | "delete" => EventType::MessageDelete,
+        "OPERATION_TYPE_READ" | "read" => EventType::ReadReceipt,
+        "OPERATION_TYPE_REACTION_ADD" | "OPERATION_TYPE_REACTION_REMOVE" | "reaction" => {
+            EventType::Reaction
+        }
+        "OPERATION_TYPE_PIN" | "pin" => EventType::Pin,
+        "OPERATION_TYPE_UNPIN" | "unpin" => EventType::Unpin,
+        "OPERATION_TYPE_MARK" | "mark" => EventType::Mark,
+        "OPERATION_TYPE_UNMARK" | "unmark" => EventType::Unmark,
+        _ => EventType::Custom,
+    }
+}
+
+fn domain_event_from_events_row(
+    row: &sqlx::postgres::PgRow,
+    conversation_id: &str,
+) -> Result<Event> {
+    let seq: i64 = row.try_get("seq").context("row seq")?;
+    let event_type: i32 = row.try_get("event_type").context("row event_type")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at").context("row created_at")?;
+    let operator_id: String = row
+        .try_get::<Option<String>, _>("operator_id")
+        .context("row operator_id")?
+        .unwrap_or_default();
+    let request_id: Option<String> = row.try_get("request_id").ok();
+    let event_seq: Option<i64> = row.try_get("event_seq").ok();
+    let payload: Vec<u8> = row
+        .try_get::<Option<Vec<u8>>, _>("payload")
+        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let proto_ev = match proto_event_from_events_row(
+        conversation_id,
+        seq,
+        event_type,
+        created_at,
+        operator_id,
+        request_id.clone(),
+        event_seq,
+        &payload,
+    ) {
+        Ok(ev) => ev,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                conversation_id = %conversation_id,
+                seq,
+                "proto_event_from_events_row failed; returning shell Event"
+            );
+            flare_proto::common::Event {
+                conversation_id: conversation_id.to_string(),
+                conversation_seq: seq as u64,
+                r#type: event_type,
+                created_at: created_at.timestamp_millis(),
+                event_id: format!("{conversation_id}:{seq}"),
+                request_id,
+                ..Default::default()
+            }
+        }
+    };
+    Ok(event_from_proto(&proto_ev))
 }
 
 /// 优化的 PostgreSQL 消息存储实现
@@ -59,17 +140,18 @@ impl OptimizedPostgresMessageStorageImpl {
 }
 
 fn apply_burn_query_visibility(message: &mut Message, include_placeholder: bool) -> bool {
-    match message.burn_status() {
-        BurnStatus::Burned | BurnStatus::HardDeleted => {
+    match message.content_visibility() {
+        ContentVisibility::Hidden | ContentVisibility::Redacted | ContentVisibility::Purged => {
             if !include_placeholder {
                 return false;
             }
-            message.content.clear();
+            message.content = None;
             message.offline_push_info = None;
             message.extensions.clear();
-            message
-                .extra
-                .insert("burn_placeholder".to_string(), "该消息已销毁".to_string());
+            message.extra.insert(
+                "retention_placeholder".to_string(),
+                "该消息已不可见".to_string(),
+            );
             true
         }
         _ => true,
@@ -106,49 +188,48 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx).to_string();
         let start = Instant::now();
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
-        let limit = limit.min(1000).max(1); // 限制范围 1-1000
+        let limit = limit.clamp(1, 1000);
 
         // L2 缓存策略：先查 Redis，未命中再查 TimescaleDB
-        if let Some(cache) = &self.cache {
-            if let Ok(Some(cached_messages)) = cache
-                .get_session_messages(conversation_id, start_ts, end_ts, limit)
+        if let Some(cache) = &self.cache
+            && let Ok(Some(cached_messages)) = cache
+                .get_session_messages(&tenant_id, conversation_id, start_ts, end_ts, limit)
                 .await
-            {
-                tracing::trace!(
-                    conversation_id = %conversation_id,
-                    cached_count = cached_messages.len(),
-                    "Cache hit: retrieved messages from Redis"
-                );
+        {
+            tracing::trace!(
+                conversation_id = %conversation_id,
+                cached_count = cached_messages.len(),
+                "Cache hit: retrieved messages from Redis"
+            );
 
-                // 转换 proto 类型的消息为领域模型类型
-                let domain_messages: Vec<Message> = cached_messages
-                    .into_iter()
-                    .map(|msg| message_from_proto(&msg))
-                    .collect();
+            // 转换 proto 类型的消息为领域模型类型
+            let domain_messages: Vec<Message> = cached_messages
+                .into_iter()
+                .map(|msg| message_from_proto(&msg))
+                .collect();
 
-                tracing::trace!(
-                    conversation_id = %conversation_id,
-                    cached_count = domain_messages.len(),
-                    "Cache hit: retrieved messages from Redis"
-                );
+            tracing::trace!(
+                conversation_id = %conversation_id,
+                cached_count = domain_messages.len(),
+                "Cache hit: retrieved messages from Redis"
+            );
 
-                // 记录缓存命中指标
-                if let Some(ref metrics) = self.metrics {
-                    metrics.record_cache_hit("redis");
-                }
-
-                let mut visible = Vec::with_capacity(domain_messages.len());
-                for mut message in domain_messages {
-                    if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
-                        visible.push(message);
-                    }
-                }
-                return Ok(visible);
+            // 记录缓存命中指标
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_cache_hit("redis");
             }
+
+            let mut visible = Vec::with_capacity(domain_messages.len());
+            for mut message in domain_messages {
+                if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                    visible.push(message);
+                }
+            }
+            return Ok(visible);
         }
 
         // 记录缓存未命中
@@ -160,7 +241,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let result = if let Some(uid) = user_id {
             sqlx::query(
                 r#"
-                SELECT 
+                SELECT
                     m.tenant_id, m.server_id, m.conversation_id,
                     CASE WHEN EXISTS (
                         SELECT 1 FROM message_visibility mv
@@ -234,18 +315,19 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
                     ), '[]'::jsonb) AS reactions_json
-                FROM messages m
-                WHERE m.conversation_id = $1 AND m.timestamp >= $2 AND m.timestamp <= $3
-                  AND NOT EXISTS (
-                      SELECT 1 FROM message_visibility mv
-                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                        AND mv.visibility_status IN (1, 2)
-                        AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $4))
-                  )
-                ORDER BY m.timestamp DESC, m.seq DESC NULLS LAST
-                LIMIT $5
-                "#,
+	                FROM messages m
+	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.timestamp >= $3 AND m.timestamp <= $4
+	                  AND NOT EXISTS (
+	                      SELECT 1 FROM message_visibility mv
+	                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+	                        AND mv.visibility_status IN (1, 2)
+	                        AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
+	                  )
+	                ORDER BY m.timestamp DESC, m.seq DESC NULLS LAST
+	                LIMIT $6
+	                "#,
             )
+            .bind(&tenant_id)
             .bind(conversation_id)
             .bind(start_ts)
             .bind(end_ts)
@@ -256,7 +338,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         } else {
             sqlx::query(
                 r#"
-                SELECT 
+                SELECT
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
@@ -271,12 +353,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json
-                FROM messages
-                WHERE conversation_id = $1 AND timestamp >= $2 AND timestamp <= $3
-                ORDER BY timestamp DESC, seq DESC NULLS LAST
-                LIMIT $4
-                "#,
+	                FROM messages
+	                WHERE tenant_id = $1 AND conversation_id = $2 AND timestamp >= $3 AND timestamp <= $4
+	                ORDER BY timestamp DESC, seq DESC NULLS LAST
+	                LIMIT $5
+	                "#,
             )
+            .bind(&tenant_id)
             .bind(conversation_id)
             .bind(start_ts)
             .bind(end_ts)
@@ -309,16 +392,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         if let Some(cache) = &self.cache {
             let cache_clone = std::sync::Arc::clone(cache);
             let messages_clone = messages.clone();
+            let tenant_id_clone = tenant_id.clone();
             let conversation_id_clone = conversation_id.to_string();
             tokio::spawn(async move {
                 // 转换领域模型消息为 proto 类型
-                let proto_messages: Vec<flare_proto::Message> = messages_clone
-                    .iter()
-                    .map(|msg| message_to_proto(msg))
-                    .collect();
+                let proto_messages: Vec<flare_proto::Message> =
+                    messages_clone.iter().map(message_to_proto).collect();
 
                 if let Err(e) = cache_clone
                     .cache_session_messages(
+                        &tenant_id_clone,
                         &conversation_id_clone,
                         start_ts,
                         end_ts,
@@ -348,15 +431,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
-        let _ = ctx; // 上下文用于日志追踪
-        let limit = limit.min(1000).max(1);
+        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let limit = limit.clamp(1, 1000);
 
         // 构建查询：基于 seq 查询（性能更好），支持多租户
         // 优化：使用预编译查询和索引优化
         let rows = if let Some(uid) = user_id {
             sqlx::query(
                 r#"
-                SELECT 
+                SELECT
                     m.tenant_id, m.server_id, m.conversation_id,
                     CASE WHEN EXISTS (
                         SELECT 1 FROM message_visibility mv
@@ -430,12 +513,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
                     ), '[]'::jsonb) AS reactions_json
-                FROM messages m
-                WHERE m.conversation_id = $1 AND m.seq > $2 AND ($3::BIGINT IS NULL OR m.seq < $3)
-                ORDER BY m.seq ASC
-                LIMIT $5
-                "#,
+	                FROM messages m
+	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > $3 AND ($4::BIGINT IS NULL OR m.seq < $4)
+	                ORDER BY m.seq ASC
+	                LIMIT $6
+	                "#,
             )
+            .bind(&tenant_id)
             .bind(conversation_id)
             .bind(after_seq)
             .bind(before_seq)
@@ -460,12 +544,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json
-                FROM messages
-                WHERE conversation_id = $1 AND seq > $2 AND ($3::BIGINT IS NULL OR seq < $3)
-                ORDER BY seq ASC
-                LIMIT $4
-                "#,
+	                FROM messages
+	                WHERE tenant_id = $1 AND conversation_id = $2 AND seq > $3 AND ($4::BIGINT IS NULL OR seq < $4)
+	                ORDER BY seq ASC
+	                LIMIT $5
+	                "#,
             )
+            .bind(&tenant_id)
             .bind(conversation_id)
             .bind(after_seq)
             .bind(before_seq)
@@ -488,12 +573,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
     #[instrument(skip(self), fields(message_id))]
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx).to_string();
         // 1. Query Database
         // Support querying by server_id or client_msg_id
         let row = sqlx::query(
             r#"
-            SELECT 
+            SELECT
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
@@ -507,12 +592,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     )
                     FROM message_reactions mr
                     WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
-                ), '[]'::jsonb) AS reactions_json
-            FROM messages
-            WHERE server_id = $1 OR client_msg_id = $1
-            LIMIT 1
-            "#,
+	                ), '[]'::jsonb) AS reactions_json
+	            FROM messages
+	            WHERE tenant_id = $1 AND (server_id = $2 OR client_msg_id = $2)
+	            LIMIT 1
+	            "#,
         )
+        .bind(&tenant_id)
         .bind(message_id)
         .fetch_optional(&self.base.pool)
         .await
@@ -526,11 +612,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 if let Some(cache) = &self.cache {
                     let cache_clone = std::sync::Arc::clone(cache);
                     let message_clone = message.clone();
+                    let tenant_id_clone = tenant_id.clone();
                     tokio::spawn(async move {
                         // 转换领域模型消息为 proto 类型
                         let proto_msg = message_to_proto(&message_clone);
 
-                        if let Err(e) = cache_clone.cache_message(&proto_msg).await {
+                        if let Err(e) = cache_clone
+                            .cache_message(&tenant_id_clone, &proto_msg)
+                            .await
+                        {
                             tracing::warn!(
                                 error = %e,
                                 "Failed to cache message to Redis (non-blocking)"
@@ -551,16 +641,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Option<DateTime<Utc>>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         // 直接查询消息的时间戳，避免加载完整的消息内容
         let row = sqlx::query(
             r#"
-            SELECT timestamp
-            FROM messages
-            WHERE server_id = $1
-            LIMIT 1
-            "#,
+	            SELECT timestamp
+	            FROM messages
+	            WHERE tenant_id = $1 AND server_id = $2
+	            LIMIT 1
+	            "#,
         )
+        .bind(tenant_id)
         .bind(message_id)
         .fetch_optional(&self.base.pool)
         .await
@@ -582,7 +673,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         message_id: &str,
         updates: MessageUpdate,
     ) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         // 使用 QueryBuilder 构建动态 UPDATE 语句
         let mut query = sqlx::QueryBuilder::new("UPDATE messages SET ");
         let mut has_updates = false;
@@ -590,12 +681,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         // 使用 separated 来添加逗号分隔的 SET 子句
         let mut separated = query.separated(", ");
 
-        if let Some(is_recalled) = updates.is_recalled {
-            if is_recalled {
-                separated.push("status = ");
-                separated.push_bind(6i32); // MessageStatus::Recalled
-                has_updates = true;
-            }
+        if let Some(is_recalled) = updates.is_recalled
+            && is_recalled
+        {
+            separated.push("status = ");
+            separated.push_bind(6i32); // MessageStatus::Recalled
+            has_updates = true;
         }
         if updates.recalled_at.is_some() {
             // init_v2 messages 无 recalled_at 列，忽略
@@ -651,7 +742,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         }
 
         // 添加 WHERE 子句
-        query.push(" WHERE server_id = ");
+        query.push(" WHERE tenant_id = ");
+        query.push_bind(tenant_id);
+        query.push(" AND server_id = ");
         query.push_bind(message_id);
 
         query
@@ -682,7 +775,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         user_id: &str,
         visibility: VisibilityStatus,
     ) -> Result<usize> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         if message_ids.is_empty() {
             return Ok(0);
         }
@@ -691,16 +784,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         let result = sqlx::query(
             r#"
-            INSERT INTO message_visibility (tenant_id, message_id, user_id, scope, visibility_status, changed_at)
-            SELECT m.tenant_id, m.server_id, $1, 1, $2, CURRENT_TIMESTAMP
-            FROM messages m
-            WHERE m.server_id = ANY($3)
-            ON CONFLICT (tenant_id, message_id, user_id, scope)
-            DO UPDATE SET visibility_status = EXCLUDED.visibility_status, changed_at = CURRENT_TIMESTAMP
-            "#,
+	            INSERT INTO message_visibility (tenant_id, message_id, user_id, scope, visibility_status, changed_at)
+	            SELECT m.tenant_id, m.server_id, $1, 1, $2, CURRENT_TIMESTAMP
+	            FROM messages m
+	            WHERE m.tenant_id = $3 AND m.server_id = ANY($4)
+	            ON CONFLICT (tenant_id, message_id, user_id, scope)
+	            DO UPDATE SET visibility_status = EXCLUDED.visibility_status, changed_at = CURRENT_TIMESTAMP
+	            "#,
         )
         .bind(user_id)
         .bind(vis_int)
+        .bind(tenant_id)
         .bind(message_ids)
         .execute(&self.base.pool)
         .await
@@ -718,14 +812,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<i64> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
 
         // 修复：使用独立的查询构建器，避免参数绑定冲突
         let query_builder =
-            sqlx::QueryBuilder::new("SELECT COUNT(*) FROM messages WHERE conversation_id = ");
+            sqlx::QueryBuilder::new("SELECT COUNT(*) FROM messages WHERE tenant_id = ");
         let mut query = query_builder;
+        query.push_bind(tenant_id);
+        query.push(" AND conversation_id = ");
         query.push_bind(conversation_id);
         query.push(" AND timestamp >= ");
         query.push_bind(start_ts);
@@ -748,7 +844,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .build()
             .fetch_one(&self.base.pool)
             .await
-            .and_then(|row| Ok(row.get::<i64, _>(0)))
+            .map(|row| row.get::<i64, _>(0))
             .context("Failed to count messages")?;
 
         Ok(count)
@@ -763,66 +859,132 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         end_time: Option<DateTime<Utc>>,
         limit: i32,
     ) -> Result<Vec<Message>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
-        let limit = limit.min(1000).max(1);
+        let limit = limit.clamp(1, 1000);
 
-        // 构建基础查询
         let mut query = sqlx::QueryBuilder::new(
             r#"
-            SELECT 
+            SELECT
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, source, seq, timestamp, conversation_type, message_type, content,
-                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
+                status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
+                COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'reaction_type', reaction_type,
+                        'user_id', user_id,
+                        'created_at', created_at
+                    ) ORDER BY created_at ASC)
+                    FROM message_reactions mr
+                    WHERE mr.tenant_id = messages.tenant_id
+                      AND mr.message_id = messages.server_id
+                ), '[]'::jsonb) AS reactions_json
             FROM messages
-            WHERE timestamp >= $1 AND timestamp <= $2
+            WHERE tenant_id =
             "#,
         );
+        query.push_bind(tenant_id);
+        query.push(" AND timestamp >= ");
         query.push_bind(start_ts);
+        query.push(" AND timestamp <= ");
         query.push_bind(end_ts);
 
-        let mut param_index = 3u32;
         for filter in filters {
-            if filter.field.is_empty() || filter.value.is_empty() {
+            let field = filter.field.trim();
+            let value = filter.value.trim();
+            if field.is_empty() || value.is_empty() {
                 continue;
             }
-            match filter.field.as_str() {
+            match field {
+                "tenant_id" => {
+                    if value != tenant_id {
+                        query.push(" AND 1 = 0");
+                    }
+                }
                 "conversation_id" => {
-                    query.push(format!(" AND conversation_id = ${}", param_index));
-                    query.push_bind(&filter.value);
-                    param_index += 1;
+                    query.push(" AND conversation_id = ");
+                    query.push_bind(value);
                 }
                 "sender_id" => {
-                    query.push(format!(" AND sender_id = ${}", param_index));
-                    query.push_bind(&filter.value);
-                    param_index += 1;
+                    query.push(" AND sender_id = ");
+                    query.push_bind(value);
+                }
+                "channel_id" => {
+                    query.push(" AND channel_id = ");
+                    query.push_bind(value);
+                }
+                "client_msg_id" => {
+                    query.push(" AND client_msg_id = ");
+                    query.push_bind(value);
+                }
+                "server_id" | "message_id" => {
+                    query.push(" AND server_id = ");
+                    query.push_bind(value);
                 }
                 "message_type" => {
-                    query.push(format!(" AND message_type = ${}", param_index));
-                    let v: i32 = filter.value.parse().unwrap_or(0);
-                    query.push_bind(v);
-                    param_index += 1;
+                    if let Ok(v) = value.parse::<i32>() {
+                        query.push(" AND message_type = ");
+                        query.push_bind(v);
+                    }
+                }
+                "conversation_type" => {
+                    if let Ok(v) = value.parse::<i32>() {
+                        query.push(" AND conversation_type = ");
+                        query.push_bind(v);
+                    }
+                }
+                "source" => {
+                    if let Ok(v) = value.parse::<i32>() {
+                        query.push(" AND source = ");
+                        query.push_bind(v);
+                    }
                 }
                 "status" => {
-                    query.push(format!(" AND status = ${}", param_index));
-                    let v: i32 = filter.value.parse().unwrap_or(0);
-                    query.push_bind(v);
-                    param_index += 1;
+                    if let Ok(v) = value.parse::<i32>() {
+                        query.push(" AND status = ");
+                        query.push_bind(v);
+                    }
                 }
                 "is_recalled" => {
-                    let val = filter.value.parse::<bool>().unwrap_or(false);
+                    let val = matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "true" | "1" | "yes" | "y"
+                    );
                     if val {
-                        query.push(format!(" AND status = ${}", param_index));
+                        query.push(" AND status = ");
                         query.push_bind(6i32);
                     } else {
-                        query.push(format!(" AND status != ${}", param_index));
+                        query.push(" AND status != ");
                         query.push_bind(6i32);
                     }
-                    param_index += 1;
+                }
+                "seq_after" | "after_seq" | "conversation_seq_after" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        query.push(" AND seq > ");
+                        query.push_bind(v);
+                    }
+                }
+                "seq_from" | "seq_ge" | "conversation_seq_from" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        query.push(" AND seq >= ");
+                        query.push_bind(v);
+                    }
+                }
+                "seq_before" | "before_seq" | "conversation_seq_before" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        query.push(" AND seq < ");
+                        query.push_bind(v);
+                    }
+                }
+                "seq_to" | "seq_le" | "conversation_seq_to" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        query.push(" AND seq <= ");
+                        query.push_bind(v);
+                    }
                 }
                 _ => {
-                    // 其他字段暂不支持，忽略
+                    tracing::trace!(field, "忽略未支持的消息搜索过滤字段");
                 }
             }
         }
@@ -852,7 +1014,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         attributes: HashMap<String, String>,
         tags: Vec<String>,
     ) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         // 更新 extra JSONB 中的 attributes 和 tags
         let mut extra_updates = serde_json::Map::new();
 
@@ -875,10 +1037,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         sqlx::query(
             r#"
-            UPDATE messages SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb WHERE server_id = $2
-            "#,
+	            UPDATE messages SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb
+	            WHERE tenant_id = $2 AND server_id = $3
+	            "#,
         )
         .bind(serde_json::to_value(&extra_updates)?)
+        .bind(tenant_id)
         .bind(message_id)
         .execute(&self.base.pool)
         .await
@@ -889,15 +1053,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
     #[instrument(skip(self))]
     async fn list_all_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         // 从 extra JSONB 中提取所有 tags
         let rows = sqlx::query(
             r#"
-            SELECT DISTINCT jsonb_array_elements_text(extra->'tags') as tag
-            FROM messages
-            WHERE extra->'tags' IS NOT NULL
-            "#,
+	            SELECT DISTINCT jsonb_array_elements_text(extra->'tags') as tag
+	            FROM messages
+	            WHERE tenant_id = $1 AND extra->'tags' IS NOT NULL
+	            "#,
         )
+        .bind(tenant_id)
         .fetch_all(&self.base.pool)
         .await
         .context("Failed to list tags")?;
@@ -916,45 +1081,159 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn query_message_operations(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
+        message_id: &str,
     ) -> Result<Vec<crate::domain::model::Event>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 从 message_operation_history 或事件表构建 Event 列表；当前与 proto 对齐返回 Event，先返回空
-        Ok(vec![])
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let rows = sqlx::query(
+            r#"
+            SELECT id, tenant_id, operation_type, operator_id, target_user_id,
+                   operation_data, timestamp, metadata
+            FROM message_operation_history
+            WHERE tenant_id = $1 AND message_id = $2
+            ORDER BY timestamp ASC, id ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query message operation history")?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row.try_get("id").context("operation id")?;
+            let tenant_id: String = row.try_get("tenant_id").context("operation tenant_id")?;
+            let operation_type: String = row.try_get("operation_type").context("operation type")?;
+            let operator_id: String = row
+                .try_get::<Option<String>, _>("operator_id")
+                .context("operation operator_id")?
+                .unwrap_or_default();
+            let timestamp: DateTime<Utc> =
+                row.try_get("timestamp").context("operation timestamp")?;
+            let operation_data: Option<Value> = row.try_get("operation_data").ok();
+            let metadata: Option<Value> = row.try_get("metadata").ok();
+            let payload = serde_json::json!({
+                "operation_type": operation_type,
+                "target_user_id": row.try_get::<Option<String>, _>("target_user_id").ok().flatten(),
+                "operation_data": operation_data,
+                "metadata": metadata,
+            });
+            out.push(Event {
+                tenant_id,
+                conversation_id: String::new(),
+                seq: id.max(0) as u64,
+                r#type: event_type_from_operation_type(&operation_type),
+                created_at: timestamp_from_datetime(Some(timestamp)),
+                operator_id,
+                event_seq: None,
+                request_id: None,
+                payload_bytes: Some(serde_json::to_vec(&payload)?),
+            });
+        }
+        Ok(out)
     }
 
     #[instrument(skip(self), fields(message_id))]
     async fn query_message_edit_history(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
+        message_id: &str,
     ) -> Result<Vec<crate::domain::model::EditHistoryEntry>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 实现编辑历史查询
-        Ok(vec![])
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let rows = sqlx::query(
+            r#"
+            SELECT edit_version, content, editor_id, edited_at, reason, show_edited_mark
+            FROM message_edit_history
+            WHERE tenant_id = $1 AND message_id = $2
+            ORDER BY edit_version ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query message edit history")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::domain::model::EditHistoryEntry {
+                    edit_version: row.try_get("edit_version").context("edit_version")?,
+                    content_bytes: row.try_get("content").context("edit content")?,
+                    edited_at: row.try_get("edited_at").ok(),
+                    editor_id: row.try_get("editor_id").context("editor_id")?,
+                    reason: row.try_get("reason").ok(),
+                    show_edited_mark: row.try_get("show_edited_mark").unwrap_or(true),
+                })
+            })
+            .collect()
     }
 
     #[instrument(skip(self), fields(message_id))]
     async fn query_message_read_records(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
+        message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReadListEntry>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 实现已读记录查询
-        Ok(vec![])
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id, read_at, burned_at
+            FROM message_read_records
+            WHERE tenant_id = $1 AND message_id = $2
+            ORDER BY read_at ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query message read records")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ReadListEntry {
+                    user_id: row.try_get("user_id").context("read user_id")?,
+                    read_at: row.try_get("read_at").ok(),
+                    burned_at: row.try_get("burned_at").ok(),
+                })
+            })
+            .collect()
     }
 
     #[instrument(skip(self), fields(message_id, user_id))]
     async fn query_message_visibility(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
-        _user_id: &str,
+        message_id: &str,
+        user_id: &str,
     ) -> Result<Option<crate::domain::model::VisibilityStatus>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 实现可见性查询
-        Ok(None)
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let row = sqlx::query(
+            r#"
+            SELECT visibility_status
+            FROM message_visibility
+            WHERE tenant_id = $1
+              AND message_id = $2
+              AND (scope = 2 OR (scope = 1 AND user_id = $3))
+            ORDER BY scope DESC, changed_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .bind(user_id)
+        .fetch_optional(&self.base.pool)
+        .await
+        .context("query message visibility")?;
+
+        Ok(row.and_then(
+            |row| match row.try_get::<i32, _>("visibility_status").ok()? {
+                0 => Some(VisibilityStatus::Visible),
+                1 => Some(VisibilityStatus::Hidden),
+                2 => Some(VisibilityStatus::Deleted),
+                _ => None,
+            },
+        ))
     }
 
     #[instrument(skip(self), fields(message_id))]
@@ -963,15 +1242,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReactionItem>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = tenant_id_from_ctx(ctx);
         let rows = sqlx::query(
             r#"
             SELECT emoji, user_ids, count, last_updated
             FROM message_reactions
-            WHERE message_id = $1
+            WHERE tenant_id = $1 AND message_id = $2
             ORDER BY last_updated DESC
             "#,
         )
+        .bind(tenant_id)
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
@@ -993,29 +1273,201 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(out)
     }
 
+    #[instrument(skip(self), fields(message_id))]
+    async fn query_message_marks(&self, ctx: &Ctx, message_id: &str) -> Result<Vec<MarkEntry>> {
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id, mark_type, color, marked_at
+            FROM marked_messages
+            WHERE tenant_id = $1 AND message_id = $2
+            ORDER BY marked_at DESC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query message marks")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(MarkEntry {
+                    user_id: row.try_get("user_id").context("mark user_id")?,
+                    mark_type: row.try_get("mark_type").context("mark_type")?,
+                    color: row.try_get("color").ok(),
+                    marked_at: row.try_get("marked_at").ok(),
+                })
+            })
+            .collect()
+    }
+
+    #[instrument(skip(self, draft), fields(task_id = %draft.task_id, conversation_id = %draft.conversation_id))]
+    async fn create_message_export_task(
+        &self,
+        ctx: &Ctx,
+        draft: MessageExportTaskDraft,
+    ) -> Result<String> {
+        let _ = ctx;
+        sqlx::query(
+            r#"
+            INSERT INTO message_export_tasks (
+                tenant_id, task_id, conversation_id, start_time, end_time, filters,
+                requested_by, request_id, trace_id, status, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, to_timestamp($4::double precision / 1000.0), to_timestamp($5::double precision / 1000.0), $6,
+                    $7, $8, $9, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (tenant_id, task_id) DO NOTHING
+            "#,
+        )
+        .bind(&draft.tenant_id)
+        .bind(&draft.task_id)
+        .bind(&draft.conversation_id)
+        .bind(draft.start_time)
+        .bind(draft.end_time)
+        .bind(&draft.filters)
+        .bind(&draft.requested_by)
+        .bind(&draft.request_id)
+        .bind(&draft.trace_id)
+        .execute(&self.base.pool)
+        .await
+        .context("create message export task")?;
+
+        Ok(draft.task_id)
+    }
+
+    #[instrument(skip(self, ctx, query), fields(tenant_id = %query.tenant_id))]
+    async fn query_message_write_ledger(
+        &self,
+        ctx: &Ctx,
+        query: MessageWriteLedgerQuery,
+    ) -> Result<(Vec<MessageWriteLedgerEntry>, bool)> {
+        let _ = ctx;
+        self.base.query_message_write_ledger(query).await
+    }
+
     #[instrument(skip(self), fields(conversation_id))]
     async fn query_pinned_messages(
         &self,
         ctx: &Ctx,
-        _conversation_id: &str,
+        conversation_id: &str,
     ) -> Result<Vec<crate::domain::model::PinnedMessageInfo>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 实现置顶消息查询
-        Ok(vec![])
+        let tenant_id = tenant_id_from_ctx(ctx);
+        let rows = sqlx::query(
+            r#"
+            SELECT message_id, pinned_by, pinned_at, expire_at, reason
+            FROM pinned_messages
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND (expire_at IS NULL OR expire_at > CURRENT_TIMESTAMP)
+            ORDER BY pinned_at DESC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query pinned messages")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(PinnedMessageInfo {
+                    message_id: row.try_get("message_id").context("pinned message_id")?,
+                    user_id: row.try_get("pinned_by").context("pinned_by")?,
+                    pinned_at: row.try_get("pinned_at").ok(),
+                    expire_at: row.try_get("expire_at").ok(),
+                    reason: row.try_get("reason").ok(),
+                })
+            })
+            .collect()
     }
 
-    #[instrument(skip(self, _event_types), fields(message_id, limit = _limit))]
+    #[instrument(skip(self, event_types), fields(message_id, limit))]
     async fn query_message_events(
         &self,
         ctx: &Ctx,
-        _message_id: &str,
-        _event_types: Option<&[EventType]>,
-        _limit: i32,
-        _offset: i64,
+        message_id: &str,
+        event_types: Option<&[EventType]>,
+        limit: i32,
+        offset: i64,
     ) -> Result<(Vec<Event>, bool)> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 从事件表按消息 ID 查询事件，支持类型过滤与分页
-        Ok((vec![], false))
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0);
+
+        let message_row = sqlx::query(
+            r#"
+            SELECT tenant_id, conversation_id, seq
+            FROM messages
+            WHERE tenant_id = $1
+              AND (server_id = $2 OR client_msg_id = $2)
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_optional(&self.base.pool)
+        .await
+        .context("query message coordinate for event chain")?;
+
+        let Some(message_row) = message_row else {
+            return Ok((Vec::new(), false));
+        };
+        let message_tenant_id: String = message_row
+            .try_get("tenant_id")
+            .context("message tenant_id")?;
+        let conversation_id: String = message_row
+            .try_get("conversation_id")
+            .context("message conversation_id")?;
+        let message_seq: Option<i64> = message_row.try_get("seq").context("message seq")?;
+        let Some(message_seq) = message_seq.filter(|seq| *seq > 0) else {
+            return Ok((Vec::new(), false));
+        };
+
+        let event_type_filter: Vec<i32> = event_types
+            .unwrap_or_default()
+            .iter()
+            .map(|event_type| event_type_to_proto_i32(*event_type))
+            .filter(|event_type| *event_type != 0)
+            .collect();
+        if event_types.is_some() && event_type_filter.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+
+        let mut b = sqlx::QueryBuilder::new(
+            "SELECT seq, event_type, created_at, operator_id, request_id, event_seq, payload FROM events WHERE tenant_id = ",
+        );
+        b.push_bind(&message_tenant_id);
+        b.push(" AND conversation_id = ");
+        b.push_bind(&conversation_id);
+        b.push(" AND (seq = ");
+        b.push_bind(message_seq);
+        b.push(" OR event_seq = ");
+        b.push_bind(message_seq);
+        b.push(")");
+        if !event_type_filter.is_empty() {
+            b.push(" AND event_type = ANY(");
+            b.push_bind(event_type_filter);
+            b.push(")");
+        }
+        b.push(" ORDER BY seq ASC LIMIT ");
+        b.push_bind(limit + 1);
+        b.push(" OFFSET ");
+        b.push_bind(offset);
+
+        let rows = b
+            .build()
+            .fetch_all(&self.base.pool)
+            .await
+            .context("query message event chain")?;
+
+        let has_more = rows.len() as i32 > limit;
+        let mut events = Vec::with_capacity(rows.len().min(limit as usize));
+        for row in rows.into_iter().take(limit as usize) {
+            events.push(domain_event_from_events_row(&row, &conversation_id)?);
+        }
+
+        Ok((events, has_more))
     }
 
     #[instrument(
@@ -1036,18 +1488,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let limit = limit.clamp(1, 500);
 
         let mut b = sqlx::QueryBuilder::new(
-            "SELECT seq, event_type, created_at, operator_id, request_id, event_seq, payload FROM events WHERE conversation_id = ",
+            "SELECT seq, event_type, created_at, operator_id, request_id, event_seq, payload FROM events WHERE tenant_id = ",
         );
+        b.push_bind(tenant_id);
+        b.push(" AND conversation_id = ");
         b.push_bind(conversation_id);
         b.push(" AND seq > ");
         b.push_bind(after_seq);
         if before_seq > 0 {
             b.push(" AND seq < ");
             b.push_bind(before_seq);
-        }
-        if !tenant_id.is_empty() {
-            b.push(" AND tenant_id = ");
-            b.push_bind(tenant_id);
         }
         if !event_type_filter.is_empty() {
             b.push(" AND event_type = ANY(");
@@ -1096,11 +1546,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     );
                     flare_proto::common::Event {
                         conversation_id: conversation_id.to_string(),
-                        seq: seq as u64,
+                        conversation_seq: seq as u64,
                         r#type: event_type,
-                        created_at: crate::convert::datetime_to_timestamp(Some(created_at)),
+                        created_at: created_at.timestamp_millis(),
                         event_id: format!("{conversation_id}:{seq}"),
-                        event_seq: event_seq.map(|v| v as u64),
                         request_id,
                         ..Default::default()
                     }
@@ -1115,13 +1564,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn get_conversation_max_seq(
         &self,
         ctx: &Ctx,
-        _tenant_id: &str,
+        tenant_id: &str,
         conversation_id: &str,
     ) -> Result<Option<i64>> {
         let _ = ctx;
         let row = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(seq) FROM messages WHERE conversation_id = $1",
+            "SELECT MAX(seq) FROM messages WHERE tenant_id = $1 AND conversation_id = $2",
         )
+        .bind(tenant_id)
         .bind(conversation_id)
         .fetch_one(&self.base.pool)
         .await
@@ -1135,16 +1585,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         conversation_id: &str,
     ) -> Result<Option<ConversationMessageHead>> {
-        let _ = ctx;
+        let tenant_id = tenant_id_from_ctx(ctx);
         let row = sqlx::query(
             r#"
             SELECT seq, server_id, timestamp
             FROM messages
-            WHERE conversation_id = $1
+            WHERE tenant_id = $1 AND conversation_id = $2
             ORDER BY seq DESC NULLS LAST
             LIMIT 1
             "#,
         )
+        .bind(tenant_id)
         .bind(conversation_id)
         .fetch_optional(&self.base.pool)
         .await
@@ -1167,20 +1618,43 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn get_sync_cursor(
         &self,
         ctx: &Ctx,
-        _tenant_id: &str,
-        _user_id: &str,
-        _conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        conversation_id: &str,
     ) -> Result<Option<crate::domain::model::SyncCursor>> {
-        let _ = ctx; // 上下文用于日志追踪
-        // TODO: 获取用户在某会话的同步游标
-        Ok(None)
+        let _ = ctx;
+        let row = sqlx::query(
+            r#"
+            SELECT user_id, conversation_id, last_synced_seq, last_synced_ts
+            FROM user_sync_cursor
+            WHERE tenant_id = $1 AND user_id = $2 AND conversation_id = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_optional(&self.base.pool)
+        .await
+        .context("get sync cursor")?;
+
+        Ok(row.map(|row| crate::domain::model::SyncCursor {
+            user_id: row
+                .try_get("user_id")
+                .unwrap_or_else(|_| user_id.to_string()),
+            conversation_id: row
+                .try_get("conversation_id")
+                .unwrap_or_else(|_| conversation_id.to_string()),
+            last_seq: row.try_get("last_synced_seq").unwrap_or_default(),
+            last_message_id: 0,
+            last_timestamp: row.try_get("last_synced_ts").unwrap_or_default(),
+        }))
     }
 
     #[instrument(skip(self), fields(tenant_id, user_id))]
     async fn get_sync_snapshot(
         &self,
         ctx: &Ctx,
-        _tenant_id: &str,
+        tenant_id: &str,
         _user_id: &str,
         conversation_ids: &[String],
         messages_per_conversation: i32,
@@ -1194,13 +1668,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let target_conversation_ids: Vec<String> = if conversation_ids.is_empty() {
             let rows = sqlx::query(
                 r#"
-                SELECT conversation_id
-                FROM messages
-                GROUP BY conversation_id
-                ORDER BY MAX(seq) DESC
-                LIMIT $1
-                "#,
+	                SELECT conversation_id
+	                FROM messages
+	                WHERE tenant_id = $1
+	                GROUP BY conversation_id
+	                ORDER BY MAX(seq) DESC
+	                LIMIT $2
+	                "#,
             )
+            .bind(tenant_id)
             .bind(limit)
             .fetch_all(&self.base.pool)
             .await
@@ -1218,7 +1694,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             // 查询会话内最新的消息
             let rows = sqlx::query(
                 r#"
-                SELECT 
+                SELECT
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
@@ -1233,12 +1709,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json
-                FROM messages
-                WHERE conversation_id = $1
-                ORDER BY seq DESC
-                LIMIT $2
-                "#,
+	                FROM messages
+	                WHERE tenant_id = $1 AND conversation_id = $2
+	                ORDER BY seq DESC
+	                LIMIT $3
+	                "#,
             )
+            .bind(tenant_id)
             .bind(conversation_id)
             .bind(limit)
             .fetch_all(&self.base.pool)
@@ -1253,7 +1730,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 if !apply_burn_query_visibility(&mut message, false) {
                     continue;
                 }
-                let seq_i64 = message.seq as i64;
+                let seq_i64 = message.conversation_seq as i64;
                 max_seq = max_seq.max(seq_i64);
                 messages.push(message);
             }
@@ -1271,14 +1748,38 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     async fn update_sync_cursor(
         &self,
         ctx: &Ctx,
-        _tenant_id: &str,
-        _user_id: &str,
-        _conversation_id: &str,
-        _last_synced_seq: i64,
-        _last_synced_ts: i64,
-        _device_id: Option<&str>,
+        tenant_id: &str,
+        user_id: &str,
+        conversation_id: &str,
+        last_synced_seq: i64,
+        last_synced_ts: i64,
+        device_id: Option<&str>,
     ) -> Result<()> {
-        // TODO: 更新用户在某会话的同步游标
+        let _ = ctx;
+        sqlx::query(
+            r#"
+            INSERT INTO user_sync_cursor (
+                tenant_id, user_id, conversation_id, last_synced_seq,
+                last_synced_ts, device_id, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+            ON CONFLICT (tenant_id, user_id, conversation_id)
+            DO UPDATE SET
+                last_synced_seq = EXCLUDED.last_synced_seq,
+                last_synced_ts = EXCLUDED.last_synced_ts,
+                device_id = EXCLUDED.device_id,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(conversation_id)
+        .bind(last_synced_seq)
+        .bind(last_synced_ts)
+        .bind(device_id)
+        .execute(&self.base.pool)
+        .await
+        .context("update sync cursor")?;
         Ok(())
     }
 }

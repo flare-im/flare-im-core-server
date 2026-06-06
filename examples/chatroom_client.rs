@@ -63,8 +63,9 @@ use chrono::{DateTime, Local, Utc};
 use flare_core::common::conversation::generate_single_chat_conversation_id;
 use flare_grpc_proto::access_gateway::PushMessageRequest;
 use flare_proto::common::{
-    Ack, AckType, ConversationAck, EventEnvelope, Message as ProtoMessage, MessageContent,
-    MessagePush, SendAck, ack::Payload as AckPayload, event::Payload as EventPayload,
+    Ack, ConversationAck, EventEnvelope, Message as ProtoMessage, MessageContent, MessagePush,
+    SendAck, ack::Payload as AckPayload, event::Payload as EventPayload,
+    send_ack::Result as SendAckResult,
 };
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -243,10 +244,7 @@ async fn main() -> Result<()> {
                         };
 
                         // 构造完整的Message对象，将recipient_id作为conversation_id
-                        let timestamp = prost_types::Timestamp {
-                            seconds: chrono::Utc::now().timestamp(),
-                            nanos: 0,
-                        };
+                        let created_at = chrono::Utc::now().timestamp_millis();
 
                         // 使用工具类生成单聊会话ID（格式：1-{hash}）；服务端会在首条消息时自行创建会话，客户端不调用创建会话接口
                         let conversation_id = generate_single_chat_conversation_id(&user_id, &recipient_id);
@@ -256,8 +254,6 @@ async fn main() -> Result<()> {
                         extra.insert("source".to_string(), "user".to_string());
                         extra.insert("conversation_type".to_string(), "single".to_string());
 
-                        let content_bytes = message_content.encode_to_vec();
-
                         // 单聊时 channel_id = 对方 user_id（proto 无 receiver_id 字段）
                         let msg = flare_proto::common::Message {
                             server_id: generate_message_id(),
@@ -265,13 +261,13 @@ async fn main() -> Result<()> {
                             client_msg_id: String::new(),
                             sender_id: user_id.clone(),
                             source: flare_proto::common::MessageSource::User as i32,
-                            seq: 0,
-                            timestamp: Some(timestamp.clone()),
+                            conversation_seq: 0,
+                            created_at,
                             conversation_type: flare_proto::common::ConversationType::Single as i32,
                             message_type: flare_proto::common::MessageType::Text as i32,
                             channel_id: recipient_id.clone(),
-                            content: content_bytes,
-                            extra,
+                            content: Some(message_content),
+                            attributes: extra,
                             ..Default::default()
                         };
 
@@ -456,14 +452,13 @@ async fn resolve_user_and_recipient_id() -> (String, String) {
     (user_id, recipient_id)
 }
 
-/// 格式化时间戳为可读格式（包含毫秒）
-fn format_timestamp(timestamp: &prost_types::Timestamp) -> String {
-    let utc_time = DateTime::<Utc>::from_timestamp(timestamp.seconds, timestamp.nanos as u32);
+/// 格式化 epoch millis 为可读格式（包含毫秒）
+fn format_timestamp_millis(timestamp_millis: i64) -> String {
+    let utc_time = DateTime::<Utc>::from_timestamp_millis(timestamp_millis);
     match utc_time {
         Some(utc) => {
             let local_time = utc.with_timezone(&Local);
-            // 格式：HH:MM:SS.mmm（包含毫秒）
-            let millis = timestamp.nanos / 1_000_000; // 将纳秒转换为毫秒
+            let millis = timestamp_millis.rem_euclid(1_000);
             format!("{}.{:03}", local_time.format("%H:%M:%S"), millis)
         }
         None => "未知时间".to_string(),
@@ -502,11 +497,7 @@ fn parse_message_content(content: &MessageContent) -> String {
             )
         }
         Some(flare_proto::common::message_content::Content::Card(card_content)) => {
-            // CardContent 包含用户信息，不是传统意义的卡片
-            format!(
-                "[名片] {} ({})",
-                card_content.nickname, card_content.user_id
-            )
+            format!("[卡片] {} ({})", card_content.title, card_content.id)
         }
         _ => "[无法解析的消息内容]".to_string(),
     }
@@ -560,9 +551,9 @@ fn collect_payload_messages(data: &[u8]) -> Vec<ProtoMessage> {
 fn parse_single_message(message: &ProtoMessage) -> Option<MessageDisplayInfo> {
     let is_recalled = message.status == flare_proto::common::MessageStatus::Recalled as i32;
     let receiver_id_hint = message
-        .extra
+        .attributes
         .get("receiver_id")
-        .or_else(|| message.extra.get("recipient_id"))
+        .or_else(|| message.attributes.get("recipient_id"))
         .cloned()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| message.channel_id.clone());
@@ -573,23 +564,20 @@ fn parse_single_message(message: &ProtoMessage) -> Option<MessageDisplayInfo> {
             receiver_id: receiver_id_hint,
             content: "[消息已撤回]".to_string(),
             message_type: "撤回".to_string(),
-            timestamp: message
-                .timestamp
-                .as_ref()
-                .map(|ts| format_timestamp(ts))
-                .unwrap_or_else(|| "未知时间".to_string()),
+            timestamp: if message.created_at > 0 {
+                format_timestamp_millis(message.created_at)
+            } else {
+                "未知时间".to_string()
+            },
             is_self: false, // 这个会在调用时设置
         });
     }
 
-    let content = if message.content.is_empty() {
-        "[空消息]".to_string()
-    } else {
-        match MessageContent::decode(message.content.as_slice()) {
-            Ok(msg_content) => parse_message_content(&msg_content),
-            Err(_) => format!("[无法解析的消息内容 ({} bytes)]", message.content.len()),
-        }
-    };
+    let content = message
+        .content
+        .as_ref()
+        .map(parse_message_content)
+        .unwrap_or_else(|| "[空消息]".to_string());
 
     let (type_name, _) = get_message_type_display(message.message_type);
 
@@ -600,11 +588,11 @@ fn parse_single_message(message: &ProtoMessage) -> Option<MessageDisplayInfo> {
         receiver_id: receiver_id_hint,
         content,
         message_type: type_name.to_string(),
-        timestamp: message
-            .timestamp
-            .as_ref()
-            .map(|ts| format_timestamp(ts))
-            .unwrap_or_else(|| "未知时间".to_string()),
+        timestamp: if message.created_at > 0 {
+            format_timestamp_millis(message.created_at)
+        } else {
+            "未知时间".to_string()
+        },
         is_self: false, // 这个会在调用时设置
     })
 }
@@ -799,16 +787,45 @@ impl ChatListener {
             }
         };
 
-        let success = send_ack.success;
-        let message_id = if send_ack.server_msg_id.is_empty() {
-            send_ack.client_msg_id.as_str()
-        } else {
-            send_ack.server_msg_id.as_str()
-        };
+        let (success, message_id, server_msg_id, error_code, error_message) =
+            match send_ack.result.as_ref() {
+                Some(SendAckResult::Accepted(accepted)) => {
+                    let message_id = if accepted.server_msg_id.is_empty() {
+                        send_ack.client_msg_id.clone()
+                    } else {
+                        accepted.server_msg_id.clone()
+                    };
+                    (
+                        true,
+                        message_id,
+                        (!accepted.server_msg_id.is_empty())
+                            .then(|| accepted.server_msg_id.clone()),
+                        String::new(),
+                        String::new(),
+                    )
+                }
+                Some(SendAckResult::Error(error)) => (
+                    false,
+                    send_ack.client_msg_id.clone(),
+                    None,
+                    error.reason.clone(),
+                    error.message.clone(),
+                ),
+                None => (
+                    false,
+                    send_ack.client_msg_id.clone(),
+                    None,
+                    "ACK_RESULT_MISSING".to_string(),
+                    "SendAck result is missing".to_string(),
+                ),
+            };
         let mut pending = self.pending_acks.lock().unwrap();
-        let sent_at = pending
-            .remove(&send_ack.client_msg_id)
-            .or_else(|| pending.remove(&send_ack.server_msg_id));
+        let mut sent_at = pending.remove(&send_ack.client_msg_id);
+        if sent_at.is_none() {
+            if let Some(server_msg_id) = server_msg_id.as_ref() {
+                sent_at = pending.remove(server_msg_id);
+            }
+        }
         if let Some(sent_at) = sent_at {
             let elapsed = sent_at.elapsed();
             if success {
@@ -820,8 +837,8 @@ impl ChatListener {
             } else {
                 warn!(
                     message_id = %message_id,
-                    error_code = send_ack.error_code,
-                    error_message = %send_ack.error_message,
+                    error_code = %error_code,
+                    error_message = %error_message,
                     "收到服务器ACK失败"
                 );
             }
@@ -832,7 +849,7 @@ impl ChatListener {
         Ok(None)
     }
 
-    /// 上行送达确认：`AckType::CONVERSTION` + `ConversationAck`（与 `common/ack.proto` 一致，不用 `send`）。
+    /// 上行送达确认：`Ack.payload=ConversationAck`（与 `common/ack.proto` 一致，不用 `send`）。
     async fn send_delivery_ack(&self, message_id: &str, sender_id: &str) -> Result<()> {
         let conversation_id = self
             .get_conversation_id_for_sender(sender_id)
@@ -841,13 +858,12 @@ impl ChatListener {
             conversation_id,
             server_msg_ids: vec![message_id.to_string()],
             last_delivered_seq: 0,
-            metadata: std::collections::HashMap::new(),
+            attributes: std::collections::HashMap::new(),
         };
 
         let ack = Ack {
-            r#type: AckType::Converstion as i32,
             ack_id: None,
-            at: None,
+            ack_at: Some(chrono::Utc::now().timestamp_millis()),
             payload: Some(AckPayload::Conversation(conv)),
         };
 

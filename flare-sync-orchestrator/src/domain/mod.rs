@@ -6,4 +6,4 @@ pub mod error;
 pub mod model;
 pub mod service;
 
-pub use error::SyncDomainError;
+pub use error::cursor_regression;

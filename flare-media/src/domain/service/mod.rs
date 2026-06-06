@@ -10,20 +10,31 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::model::{
-    DirectUploadSessionState, DirectUploadTransportKind, FILE_CATEGORY_METADATA_KEY,
-    FileAccessType, MediaAssetStatus, MediaDomainConfig, MediaFileMetadata, MediaReference,
-    MediaReferenceScope, MultipartChunkPayload, MultipartUploadInit, MultipartUploadSession,
-    PresignedUploadPartUrl, PresignedUrl, STORAGE_BUCKET_METADATA_KEY, STORAGE_PATH_METADATA_KEY,
-    UploadContext, UploadSession, UploadSessionStatus, UploadedPartRecord, infer_file_category,
+    DirectUploadSessionState, DirectUploadTransportKind, EXTERNAL_MEDIA_LIFECYCLE_SCOPE,
+    FILE_CATEGORY_METADATA_KEY, FileAccessType, MEDIA_LIFECYCLE_SCOPE_METADATA_KEY,
+    MESSAGE_MEDIA_LIFECYCLE_SCOPE, MediaAssetStatus, MediaDomainConfig, MediaFileMetadata,
+    MediaReference, MediaReferenceScope, MultipartChunkPayload, MultipartUploadInit,
+    MultipartUploadSession, PresignedUploadPartUrl, PresignedUrl, STORAGE_BUCKET_METADATA_KEY,
+    STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession, UploadSessionStatus,
+    UploadedPartRecord, infer_file_category,
 };
 use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
     UploadSessionStoreRef,
 };
-use crate::error::{ErrorCode, Result, map_context_error, map_infra_error};
+use flare_server_core::error::{ErrorCode, Result, map_context_error, map_infra_error};
 
 const DIRECT_SINGLE_PUT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
 const DIRECT_MULTIPART_MIN_PART_SIZE_BYTES: i64 = 8 * 1024 * 1024;
+
+type UploadContextData<'a> = (
+    String,
+    String,
+    HashMap<String, String>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
 
 pub struct MediaService {
     object_repo: Option<ObjectRepositoryRef>,
@@ -191,19 +202,19 @@ impl MediaService {
         let session_dir = self.ensure_session_dir(&chunk.upload_id).await?;
         let chunk_path = session_dir.join(format!("{:06}.part", chunk.chunk_index));
 
-        if let Ok(metadata) = fs::metadata(&chunk_path).await {
-            if metadata.len() as i64 == chunk_len {
-                // chunk already uploaded, refresh session expiry
-                session.expires_at =
-                    Utc::now() + Duration::seconds(self.config.chunk_ttl_seconds.max(60));
-                store.upsert_session(&session).await?;
-                return Ok(MultipartUploadSession {
-                    upload_id: session.upload_id.clone(),
-                    chunk_size: session.chunk_size,
-                    uploaded_size: session.uploaded_size,
-                    expires_at: session.expires_at,
-                });
-            }
+        if let Ok(metadata) = fs::metadata(&chunk_path).await
+            && metadata.len() as i64 == chunk_len
+        {
+            // chunk already uploaded, refresh session expiry
+            session.expires_at =
+                Utc::now() + Duration::seconds(self.config.chunk_ttl_seconds.max(60));
+            store.upsert_session(&session).await?;
+            return Ok(MultipartUploadSession {
+                upload_id: session.upload_id.clone(),
+                chunk_size: session.chunk_size,
+                uploaded_size: session.uploaded_size,
+                expires_at: session.expires_at,
+            });
         }
 
         let mut file = fs::File::create(&chunk_path).await.map_err(|e| {
@@ -803,6 +814,8 @@ impl MediaService {
         context
             .metadata
             .insert(FILE_CATEGORY_METADATA_KEY.to_string(), category.clone());
+        let message_managed = Self::is_message_lifecycle_context(&context);
+        Self::stamp_lifecycle_scope(&mut context.metadata, message_managed);
 
         let sha256 = self.compute_sha256(context.payload);
         tracing::trace!(
@@ -819,39 +832,55 @@ impl MediaService {
                 file_id = context.file_id,
                 "检查数据库中是否已存在相同哈希的文件"
             );
-            if let Some(mut existing) = store.load_by_hash(&sha256).await? {
+            if let Some(mut existing) = store.load_by_hash(ctx, &sha256).await? {
                 tracing::trace!(
                     file_id = context.file_id,
                     existing_file_id = existing.file_id,
                     "发现已存在的文件，使用去重机制"
                 );
-                if let Some(scope) = scope.as_ref() {
-                    tracing::trace!(file_id = context.file_id, "为已存在的文件创建引用");
-                    self.ensure_reference(ctx, &mut existing, &context, scope)
-                        .await?;
-                } else {
-                    tracing::trace!(file_id = context.file_id, "增加已存在文件的引用计数");
-                    existing.reference_count = existing.reference_count.saturating_add(1);
-                    existing.status = MediaAssetStatus::Active;
-                    existing.grace_expires_at = None;
-                    self.save_and_cache(&existing).await?;
-                }
-
                 existing
                     .metadata
                     .entry(FILE_CATEGORY_METADATA_KEY.to_string())
                     .or_insert_with(|| category.clone());
+                if Self::can_reuse_hash_match(&existing, message_managed) {
+                    if let Some(scope) = scope.as_ref() {
+                        tracing::trace!(file_id = context.file_id, "为已存在的文件创建引用");
+                        self.ensure_reference(ctx, &mut existing, &context, scope)
+                            .await?;
+                    } else {
+                        tracing::trace!(
+                            file_id = context.file_id,
+                            existing_file_id = existing.file_id,
+                            "复用非消息媒体去重结果，不变更引用生命周期"
+                        );
+                        if !Self::is_message_managed_asset(&existing) {
+                            existing.status = MediaAssetStatus::Active;
+                            existing.grace_expires_at = None;
+                            existing
+                                .metadata
+                                .entry(MEDIA_LIFECYCLE_SCOPE_METADATA_KEY.to_string())
+                                .or_insert_with(|| EXTERNAL_MEDIA_LIFECYCLE_SCOPE.to_string());
+                            self.save_and_cache(ctx, &existing).await?;
+                        }
+                    }
 
-                if let Some(cache) = &self.metadata_cache {
-                    cache.cache_metadata(&existing).await.ok();
+                    if let Some(cache) = &self.metadata_cache {
+                        cache.cache_metadata(ctx, &existing).await.ok();
+                    }
+
+                    tracing::trace!(
+                        file_id = context.file_id,
+                        existing_file_id = existing.file_id,
+                        "返回已存在的文件元数据"
+                    );
+                    return Ok(existing);
+                } else {
+                    tracing::trace!(
+                        file_id = context.file_id,
+                        existing_file_id = existing.file_id,
+                        "跳过待归档消息媒体的跨生命周期哈希复用"
+                    );
                 }
-
-                tracing::trace!(
-                    file_id = context.file_id,
-                    existing_file_id = existing.file_id,
-                    "返回已存在的文件元数据"
-                );
-                return Ok(existing);
             } else {
                 tracing::trace!(
                     file_id = context.file_id,
@@ -993,6 +1022,12 @@ impl MediaService {
             "生成文件URL"
         );
 
+        let (reference_count, status, grace_expires_at) = Self::initial_lifecycle_state(
+            message_managed,
+            self.reference_store.is_some(),
+            self.config.orphan_grace_seconds,
+        );
+
         let mut metadata = MediaFileMetadata {
             file_id: context.file_id.to_string(),
             file_name: context.file_name.to_string(),
@@ -1004,17 +1039,9 @@ impl MediaService {
             sha256: Some(sha256),
             metadata: context.metadata.clone(),
             uploaded_at: Utc::now(),
-            reference_count: if self.reference_store.is_some() { 0 } else { 1 },
-            status: if self.reference_store.is_some() {
-                MediaAssetStatus::Pending
-            } else {
-                MediaAssetStatus::Active
-            },
-            grace_expires_at: if self.reference_store.is_some() {
-                Some(Utc::now() + Duration::seconds(self.config.orphan_grace_seconds))
-            } else {
-                None
-            },
+            reference_count,
+            status,
+            grace_expires_at,
             access_type: FileAccessType::default(), // 默认使用私有访问类型
             storage_bucket: storage_bucket.clone(),
             storage_path: storage_path.clone(),
@@ -1022,7 +1049,7 @@ impl MediaService {
 
         tracing::trace!(file_id = context.file_id, "准备保存文件元数据");
 
-        self.save_and_cache(&metadata)
+        self.save_and_cache(ctx, &metadata)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "persist metadata"))?;
 
@@ -1055,16 +1082,9 @@ impl MediaService {
                 metadata.reference_count = metadata.reference_count.saturating_sub(1);
             }
 
-            if metadata.reference_count == 0 {
-                metadata.status = MediaAssetStatus::Pending;
-                metadata.grace_expires_at =
-                    Some(Utc::now() + Duration::seconds(self.config.orphan_grace_seconds));
-            } else {
-                metadata.status = MediaAssetStatus::Active;
-                metadata.grace_expires_at = None;
-            }
+            Self::apply_reference_lifecycle(&mut metadata, self.config.orphan_grace_seconds);
 
-            self.save_and_cache(&metadata).await.map_err(|e| {
+            self.save_and_cache(ctx, &metadata).await.map_err(|e| {
                 map_infra_error(
                     e,
                     ErrorCode::DatabaseError,
@@ -1095,30 +1115,30 @@ impl MediaService {
         }
 
         if let Some(store) = &self.metadata_store {
-            let _ = store.delete_metadata(file_id).await;
+            let _ = store.delete_metadata(ctx, file_id).await;
         }
 
         if let Some(cache) = &self.metadata_cache {
-            let _ = cache.invalidate(file_id).await;
+            let _ = cache.invalidate(ctx, file_id).await;
         }
 
         Ok(())
     }
 
     pub async fn get_metadata(&self, ctx: &Context, file_id: &str) -> Result<MediaFileMetadata> {
-        if let Some(cache) = &self.metadata_cache {
-            if let Some(metadata) = cache.get_cached_metadata(file_id).await? {
-                return Ok(metadata);
-            }
+        if let Some(cache) = &self.metadata_cache
+            && let Some(metadata) = cache.get_cached_metadata(ctx, file_id).await?
+        {
+            return Ok(metadata);
         }
 
-        if let Some(store) = &self.metadata_store {
-            if let Some(metadata) = store.load_metadata(ctx, file_id).await? {
-                if let Some(cache) = &self.metadata_cache {
-                    cache.cache_metadata(&metadata).await.ok();
-                }
-                return Ok(metadata);
+        if let Some(store) = &self.metadata_store
+            && let Some(metadata) = store.load_metadata(ctx, file_id).await?
+        {
+            if let Some(cache) = &self.metadata_cache {
+                cache.cache_metadata(ctx, &metadata).await.ok();
             }
+            return Ok(metadata);
         }
 
         Err(flare_server_core::flare_err_details!(
@@ -1186,20 +1206,19 @@ impl MediaService {
             if let Some(repo) = &self.object_repo {
                 match metadata.access_type {
                     FileAccessType::Public => {
-                        if url.is_empty() {
-                            if let Some(base) = repo.base_url() {
-                                url = Self::build_full_url(&base, &object_path);
-                            }
+                        if url.is_empty()
+                            && let Some(base) = repo.base_url()
+                        {
+                            url = Self::build_full_url(&base, &object_path);
                         }
-                        if cdn_url.is_empty() {
-                            if let Some(cdn_base) = self
+                        if cdn_url.is_empty()
+                            && let Some(cdn_base) = self
                                 .config
                                 .cdn_base_url
                                 .clone()
                                 .or_else(|| repo.cdn_base_url())
-                            {
-                                cdn_url = Self::build_full_url(&cdn_base, &object_path);
-                            }
+                        {
+                            cdn_url = Self::build_full_url(&cdn_base, &object_path);
                         }
                     }
                     FileAccessType::Private => {
@@ -1217,15 +1236,14 @@ impl MediaService {
                             url = Self::build_full_url(&base, &object_path);
                         }
 
-                        if cdn_url.is_empty() {
-                            if let Some(cdn_base) = self
+                        if cdn_url.is_empty()
+                            && let Some(cdn_base) = self
                                 .config
                                 .cdn_base_url
                                 .clone()
                                 .or_else(|| repo.cdn_base_url())
-                            {
-                                cdn_url = Self::build_full_url(&cdn_base, &object_path);
-                            }
+                        {
+                            cdn_url = Self::build_full_url(&cdn_base, &object_path);
                         }
                     }
                 }
@@ -1390,7 +1408,7 @@ impl MediaService {
         scope: MediaReferenceScope,
         metadata: HashMap<String, String>,
     ) -> Result<MediaFileMetadata> {
-        let _tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
         let mut file_metadata = self.get_metadata(ctx, file_id).await?;
 
         if let Some(reference_store) = &self.reference_store {
@@ -1408,7 +1426,8 @@ impl MediaService {
             }
 
             let reference = MediaReference {
-                reference_id: Uuid::new_v4().to_string(),
+                tenant_id: tenant_id.to_string(),
+                reference_id: Self::deterministic_reference_id(tenant_id, file_id, &scope),
                 file_id: file_id.to_string(),
                 namespace: scope.namespace.clone(),
                 owner_id: scope.owner_id.clone(),
@@ -1426,10 +1445,18 @@ impl MediaService {
             file_metadata.reference_count = file_metadata.reference_count.saturating_add(1);
         }
 
-        file_metadata.status = MediaAssetStatus::Active;
-        file_metadata.grace_expires_at = None;
+        Self::stamp_lifecycle_scope(
+            &mut file_metadata.metadata,
+            Self::is_message_lifecycle_value(&scope.namespace)
+                || scope
+                    .business_tag
+                    .as_deref()
+                    .map(Self::is_message_lifecycle_value)
+                    .unwrap_or(false),
+        );
+        Self::apply_reference_lifecycle(&mut file_metadata, self.config.orphan_grace_seconds);
 
-        self.save_and_cache(&file_metadata).await?;
+        self.save_and_cache(ctx, &file_metadata).await?;
 
         Ok(file_metadata)
     }
@@ -1445,7 +1472,7 @@ impl MediaService {
 
         if let Some(reference_store) = &self.reference_store {
             let removed = if let Some(reference_id) = reference_id {
-                reference_store.delete_reference(reference_id).await?
+                reference_store.delete_reference(ctx, reference_id).await?
             } else {
                 reference_store
                     .delete_any_reference(ctx, file_id)
@@ -1461,16 +1488,9 @@ impl MediaService {
             file_metadata.reference_count = file_metadata.reference_count.saturating_sub(1);
         }
 
-        if file_metadata.reference_count == 0 {
-            file_metadata.status = MediaAssetStatus::Pending;
-            file_metadata.grace_expires_at =
-                Some(Utc::now() + Duration::seconds(self.config.orphan_grace_seconds));
-        } else {
-            file_metadata.status = MediaAssetStatus::Active;
-            file_metadata.grace_expires_at = None;
-        }
+        Self::apply_reference_lifecycle(&mut file_metadata, self.config.orphan_grace_seconds);
 
-        self.save_and_cache(&file_metadata).await?;
+        self.save_and_cache(ctx, &file_metadata).await?;
 
         Ok(file_metadata)
     }
@@ -1503,6 +1523,14 @@ impl MediaService {
         })?;
 
         for asset in &expired {
+            if !Self::is_message_managed_asset(asset) {
+                tracing::trace!(
+                    file_id = asset.file_id,
+                    "跳过非消息生命周期媒体的自动归档清理"
+                );
+                continue;
+            }
+
             let storage_path = asset
                 .storage_path()
                 .map(|s| s.to_string())
@@ -1527,13 +1555,17 @@ impl MediaService {
                     .delete_all_references(ctx, &asset.file_id)
                     .await;
             }
-            let _ = store.delete_metadata(&asset.file_id).await;
+            let _ = store.delete_metadata(ctx, &asset.file_id).await;
             if let Some(cache) = &self.metadata_cache {
-                let _ = cache.invalidate(&asset.file_id).await;
+                let _ = cache.invalidate(ctx, &asset.file_id).await;
             }
         }
 
-        Ok(expired.into_iter().map(|asset| asset.file_id).collect())
+        Ok(expired
+            .into_iter()
+            .filter(Self::is_message_managed_asset)
+            .map(|asset| asset.file_id)
+            .collect())
     }
 
     fn compute_sha256(&self, payload: &[u8]) -> String {
@@ -1657,6 +1689,30 @@ impl MediaService {
                 .entry("head_tail_sha256".to_string())
                 .or_insert_with(|| head_tail_sha256.clone());
         }
+        let empty = [];
+        let scope_file_category = session
+            .metadata
+            .get(FILE_CATEGORY_METADATA_KEY)
+            .cloned()
+            .unwrap_or_else(|| {
+                infer_file_category(Some(session.file_type.as_str()), &session.mime_type)
+            });
+        let mut scope_context = UploadContext {
+            file_id,
+            file_name: &session.file_name,
+            mime_type: &session.mime_type,
+            file_size,
+            payload: &empty,
+            file_category: scope_file_category,
+            user_id: session.user_id.as_str(),
+            trace_id: session.trace_id.as_deref(),
+            namespace: session.namespace.as_deref(),
+            business_tag: session.business_tag.as_deref(),
+            metadata: metadata_map.clone(),
+        };
+        let message_managed = Self::is_message_lifecycle_context(&scope_context);
+        Self::stamp_lifecycle_scope(&mut metadata_map, message_managed);
+        scope_context.metadata = metadata_map.clone();
 
         let direct_base = self.object_repo.as_ref().and_then(|repo| repo.base_url());
         let cdn_base = self.config.cdn_base_url.clone().or_else(|| {
@@ -1670,6 +1726,12 @@ impl MediaService {
         let cdn_url = cdn_base
             .map(|base| Self::build_full_url(&base, object_key))
             .unwrap_or_default();
+
+        let (reference_count, status, grace_expires_at) = Self::initial_lifecycle_state(
+            message_managed,
+            self.reference_store.is_some(),
+            self.config.orphan_grace_seconds,
+        );
 
         let mut metadata = MediaFileMetadata {
             file_id: file_id.to_string(),
@@ -1685,46 +1747,20 @@ impl MediaService {
                 .or(session.head_tail_sha256.clone()),
             metadata: metadata_map,
             uploaded_at: Utc::now(),
-            reference_count: if self.reference_store.is_some() { 0 } else { 1 },
-            status: if self.reference_store.is_some() {
-                MediaAssetStatus::Pending
-            } else {
-                MediaAssetStatus::Active
-            },
-            grace_expires_at: if self.reference_store.is_some() {
-                Some(Utc::now() + Duration::seconds(self.config.orphan_grace_seconds))
-            } else {
-                None
-            },
+            reference_count,
+            status,
+            grace_expires_at,
             access_type: FileAccessType::default(),
             storage_bucket: Some(bucket.to_string()),
             storage_path: Some(object_key.to_string()),
         };
 
-        self.save_and_cache(&metadata).await?;
+        self.save_and_cache(ctx, &metadata).await?;
 
-        let empty = [];
-        let scope_context = UploadContext {
-            file_id,
-            file_name: &session.file_name,
-            mime_type: &session.mime_type,
-            file_size,
-            payload: &empty,
-            file_category: session
-                .metadata
-                .get(FILE_CATEGORY_METADATA_KEY)
-                .cloned()
-                .unwrap_or_else(|| {
-                    infer_file_category(Some(session.file_type.as_str()), &session.mime_type)
-                }),
-            user_id: session.user_id.as_str(),
-            trace_id: session.trace_id.as_deref(),
-            namespace: session.namespace.as_deref(),
-            business_tag: session.business_tag.as_deref(),
-            metadata: session.metadata.clone(),
-        };
-
-        if let Some(scope) = self.extract_reference_scope(&scope_context) {
+        if let (Some(scope), Some(_)) = (
+            self.extract_reference_scope(&scope_context),
+            self.reference_store.as_ref(),
+        ) {
             self.ensure_reference(ctx, &mut metadata, &scope_context, &scope)
                 .await?;
         }
@@ -1766,8 +1802,152 @@ impl MediaService {
         }
     }
 
+    fn normalized_metadata_value<'a>(
+        metadata: &'a HashMap<String, String>,
+        keys: &[&str],
+    ) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|key| metadata.get(*key))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn is_message_lifecycle_value(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            MESSAGE_MEDIA_LIFECYCLE_SCOPE | "messages" | "im_message" | "im-message"
+        )
+    }
+
+    fn is_message_lifecycle_context(context: &UploadContext<'_>) -> bool {
+        let scope = Self::normalized_metadata_value(
+            &context.metadata,
+            &[
+                MEDIA_LIFECYCLE_SCOPE_METADATA_KEY,
+                "lifecycle_scope",
+                "media_scope",
+                "media_usage",
+                "usage",
+            ],
+        );
+
+        scope.map(Self::is_message_lifecycle_value).unwrap_or(false)
+            || context
+                .namespace
+                .map(Self::is_message_lifecycle_value)
+                .unwrap_or(false)
+            || context
+                .business_tag
+                .map(Self::is_message_lifecycle_value)
+                .unwrap_or(false)
+            || context
+                .metadata
+                .get("namespace")
+                .map(|value| Self::is_message_lifecycle_value(value))
+                .unwrap_or(false)
+            || context
+                .metadata
+                .get("business_tag")
+                .map(|value| Self::is_message_lifecycle_value(value))
+                .unwrap_or(false)
+    }
+
+    fn is_message_managed_asset(metadata: &MediaFileMetadata) -> bool {
+        let lifecycle = Self::normalized_metadata_value(
+            &metadata.metadata,
+            &[
+                MEDIA_LIFECYCLE_SCOPE_METADATA_KEY,
+                "lifecycle_scope",
+                "media_scope",
+                "media_usage",
+                "usage",
+            ],
+        );
+
+        lifecycle
+            .map(Self::is_message_lifecycle_value)
+            .unwrap_or(false)
+            || metadata
+                .metadata
+                .get("namespace")
+                .map(|value| Self::is_message_lifecycle_value(value))
+                .unwrap_or(false)
+            || metadata
+                .metadata
+                .get("business_tag")
+                .map(|value| Self::is_message_lifecycle_value(value))
+                .unwrap_or(false)
+    }
+
+    fn stamp_lifecycle_scope(metadata: &mut HashMap<String, String>, message_managed: bool) {
+        if message_managed {
+            metadata.insert(
+                MEDIA_LIFECYCLE_SCOPE_METADATA_KEY.to_string(),
+                MESSAGE_MEDIA_LIFECYCLE_SCOPE.to_string(),
+            );
+        } else {
+            metadata
+                .entry(MEDIA_LIFECYCLE_SCOPE_METADATA_KEY.to_string())
+                .or_insert_with(|| EXTERNAL_MEDIA_LIFECYCLE_SCOPE.to_string());
+        }
+    }
+
+    fn initial_lifecycle_state(
+        message_managed: bool,
+        has_reference_store: bool,
+        orphan_grace_seconds: i64,
+    ) -> (u64, MediaAssetStatus, Option<chrono::DateTime<Utc>>) {
+        if message_managed && has_reference_store {
+            (
+                0,
+                MediaAssetStatus::Pending,
+                Some(Utc::now() + Duration::seconds(orphan_grace_seconds)),
+            )
+        } else {
+            (1, MediaAssetStatus::Active, None)
+        }
+    }
+
+    fn apply_reference_lifecycle(metadata: &mut MediaFileMetadata, orphan_grace_seconds: i64) {
+        if metadata.reference_count > 0 {
+            metadata.status = MediaAssetStatus::Active;
+            metadata.grace_expires_at = None;
+        } else if Self::is_message_managed_asset(metadata) {
+            metadata.status = MediaAssetStatus::Pending;
+            metadata.grace_expires_at = Some(Utc::now() + Duration::seconds(orphan_grace_seconds));
+        } else {
+            metadata.status = MediaAssetStatus::Active;
+            metadata.grace_expires_at = None;
+        }
+    }
+
+    fn can_reuse_hash_match(existing: &MediaFileMetadata, message_managed: bool) -> bool {
+        message_managed || !Self::is_message_managed_asset(existing) || existing.reference_count > 0
+    }
+
+    fn deterministic_reference_id(
+        tenant_id: &str,
+        file_id: &str,
+        scope: &MediaReferenceScope,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(tenant_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.namespace.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.owner_id.as_bytes());
+        hasher.update(b"\0");
+        if let Some(tag) = scope.business_tag.as_deref() {
+            hasher.update(tag.as_bytes());
+        }
+        let digest = format!("{:x}", hasher.finalize());
+        format!("ref_{}", &digest[..32])
+    }
+
     fn extract_reference_scope(&self, context: &UploadContext<'_>) -> Option<MediaReferenceScope> {
-        if context.user_id.is_empty() {
+        if context.user_id.is_empty() || !Self::is_message_lifecycle_context(context) {
             return None;
         }
 
@@ -1775,12 +1955,13 @@ impl MediaService {
             .namespace
             .map(|value| value.to_string())
             .or_else(|| context.metadata.get("namespace").cloned())
-            .unwrap_or_else(|| context.user_id.to_string());
+            .unwrap_or_else(|| MESSAGE_MEDIA_LIFECYCLE_SCOPE.to_string());
 
         let business_tag = context
             .business_tag
             .map(|value| value.to_string())
-            .or_else(|| context.metadata.get("business_tag").cloned());
+            .or_else(|| context.metadata.get("business_tag").cloned())
+            .or_else(|| Some(MESSAGE_MEDIA_LIFECYCLE_SCOPE.to_string()));
 
         Some(MediaReferenceScope {
             namespace,
@@ -1828,12 +2009,17 @@ impl MediaService {
             metadata.reference_count = metadata.reference_count.saturating_add(1);
             metadata.status = MediaAssetStatus::Active;
             metadata.grace_expires_at = None;
-            self.save_and_cache(metadata).await?;
+            self.save_and_cache(ctx, metadata).await?;
             return Ok(());
         };
 
         let reference = MediaReference {
-            reference_id: Uuid::new_v4().to_string(),
+            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            reference_id: Self::deterministic_reference_id(
+                ctx.tenant_id().unwrap_or("0"),
+                &metadata.file_id,
+                scope,
+            ),
             file_id: metadata.file_id.clone(),
             namespace: scope.namespace.clone(),
             owner_id: scope.owner_id.clone(),
@@ -1849,23 +2035,14 @@ impl MediaService {
                 .await?;
         }
 
-        metadata.status = if metadata.reference_count > 0 {
-            MediaAssetStatus::Active
-        } else {
-            MediaAssetStatus::Pending
-        };
-        metadata.grace_expires_at = if metadata.reference_count > 0 {
-            None
-        } else {
-            Some(Utc::now() + Duration::seconds(self.config.orphan_grace_seconds))
-        };
+        Self::apply_reference_lifecycle(metadata, self.config.orphan_grace_seconds);
 
-        self.save_and_cache(metadata).await?;
+        self.save_and_cache(ctx, metadata).await?;
 
         Ok(())
     }
 
-    async fn save_and_cache(&self, metadata: &MediaFileMetadata) -> Result<()> {
+    async fn save_and_cache(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
         if let Some(store) = &self.metadata_store {
             store
                 .save_metadata(metadata)
@@ -1874,7 +2051,7 @@ impl MediaService {
         }
 
         if let Some(cache) = &self.metadata_cache {
-            cache.cache_metadata(metadata).await.ok();
+            cache.cache_metadata(ctx, metadata).await.ok();
         }
 
         Ok(())
@@ -1887,14 +2064,7 @@ impl MediaService {
     pub fn prepare_upload_context_data<'a>(
         &self,
         metadata: &'a flare_grpc_proto::media::UploadFileMetadata,
-    ) -> (
-        String,
-        String,
-        HashMap<String, String>,
-        Option<&'a str>,
-        Option<&'a str>,
-        Option<&'a str>,
-    ) {
+    ) -> UploadContextData<'a> {
         let file_id = Uuid::new_v4().to_string();
 
         let mut extra_metadata = metadata.metadata.clone();
@@ -2002,5 +2172,126 @@ impl MediaService {
             },
             metadata: metadata_map,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn service() -> MediaService {
+        MediaService::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            MediaDomainConfig::new(
+                3600,
+                None,
+                60,
+                std::env::temp_dir().join("flare-media-service-tests"),
+                3600,
+                8 * 1024 * 1024,
+            ),
+        )
+    }
+
+    #[test]
+    fn default_user_upload_is_external_and_not_reference_managed() {
+        let service = service();
+        let payload = [];
+        let context = UploadContext {
+            file_id: "file-1",
+            file_name: "avatar.png",
+            mime_type: "image/png",
+            file_size: 0,
+            payload: &payload,
+            file_category: "image".to_string(),
+            user_id: "user-1",
+            trace_id: None,
+            namespace: None,
+            business_tag: None,
+            metadata: HashMap::new(),
+        };
+
+        assert!(!MediaService::is_message_lifecycle_context(&context));
+        assert!(service.extract_reference_scope(&context).is_none());
+
+        let (reference_count, status, grace_expires_at) =
+            MediaService::initial_lifecycle_state(false, true, 60);
+        assert_eq!(reference_count, 1);
+        assert_eq!(status, MediaAssetStatus::Active);
+        assert!(grace_expires_at.is_none());
+    }
+
+    #[test]
+    fn message_lifecycle_metadata_extracts_reference_scope() {
+        let service = service();
+        let payload = [];
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MEDIA_LIFECYCLE_SCOPE_METADATA_KEY.to_string(),
+            MESSAGE_MEDIA_LIFECYCLE_SCOPE.to_string(),
+        );
+        let context = UploadContext {
+            file_id: "file-1",
+            file_name: "message.png",
+            mime_type: "image/png",
+            file_size: 0,
+            payload: &payload,
+            file_category: "image".to_string(),
+            user_id: "user-1",
+            trace_id: None,
+            namespace: None,
+            business_tag: None,
+            metadata,
+        };
+
+        let scope = service
+            .extract_reference_scope(&context)
+            .expect("message media should create a reference scope");
+        assert_eq!(scope.namespace, MESSAGE_MEDIA_LIFECYCLE_SCOPE);
+        assert_eq!(
+            scope.business_tag.as_deref(),
+            Some(MESSAGE_MEDIA_LIFECYCLE_SCOPE)
+        );
+
+        let ref_id = MediaService::deterministic_reference_id("tenant-a", "file-1", &scope);
+        assert_eq!(
+            ref_id,
+            MediaService::deterministic_reference_id("tenant-a", "file-1", &scope)
+        );
+        assert_ne!(
+            ref_id,
+            MediaService::deterministic_reference_id("tenant-b", "file-1", &scope)
+        );
+    }
+
+    #[test]
+    fn zero_reference_lifecycle_archives_message_media_only() {
+        let mut external = MediaFileMetadata {
+            file_id: "external-file".to_string(),
+            status: MediaAssetStatus::Pending,
+            reference_count: 0,
+            ..Default::default()
+        };
+        MediaService::stamp_lifecycle_scope(&mut external.metadata, false);
+        MediaService::apply_reference_lifecycle(&mut external, 60);
+        assert_eq!(external.status, MediaAssetStatus::Active);
+        assert!(external.grace_expires_at.is_none());
+
+        let mut message = MediaFileMetadata {
+            file_id: "message-file".to_string(),
+            status: MediaAssetStatus::Active,
+            reference_count: 0,
+            ..Default::default()
+        };
+        MediaService::stamp_lifecycle_scope(&mut message.metadata, true);
+        MediaService::apply_reference_lifecycle(&mut message, 60);
+        assert_eq!(message.status, MediaAssetStatus::Pending);
+        assert!(message.grace_expires_at.is_some());
     }
 }

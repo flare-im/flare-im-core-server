@@ -12,6 +12,12 @@ pub struct DirectConversationRecipientResolver {
     id: String,
 }
 
+impl Default for DirectConversationRecipientResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DirectConversationRecipientResolver {
     pub fn new() -> Self {
         Self {

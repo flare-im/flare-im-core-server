@@ -7,5 +7,9 @@ use flare_proto::common::{Sync as ClientSync, SyncRes};
 #[async_trait]
 pub trait ISyncPort: Send + std::marker::Sync {
     /// 原样转发 `Sync`，返回下游 `SyncRes`（业务成败见 `SyncRes.status`，与 DATA 回包一致）。
-    async fn forward_sync(&self, tx: &Ctx, sync: ClientSync) -> anyhow::Result<SyncRes>;
+    async fn forward_sync(
+        &self,
+        tx: &Ctx,
+        sync: ClientSync,
+    ) -> flare_server_core::error::Result<SyncRes>;
 }

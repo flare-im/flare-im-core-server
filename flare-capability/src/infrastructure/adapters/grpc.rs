@@ -33,7 +33,7 @@ use crate::infrastructure::adapters::conversion::{
 // 导入服务发现相关模块
 use flare_server_core::{ServiceClient, ServiceDiscover};
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 
 /// gRPC Hook适配器
 #[allow(dead_code)]
@@ -154,7 +154,7 @@ impl GrpcHookAdapter {
             let mut client_guard = service_client.lock().await;
             let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
                 &self.service_name,
-                &mut *client_guard,
+                &mut client_guard,
             )
             .await
             .map_err(|e| {

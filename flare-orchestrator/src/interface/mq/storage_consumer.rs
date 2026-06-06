@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use flare_im_core::context_from_mq_metadata;
 use flare_proto::common::MqEnvelope;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -73,11 +74,15 @@ impl MessageHandler for StorageConsumerHandler {
             "Processing MqEnvelope from TOPIC_MESSAGE_MAIN"
         );
 
-        // 2. 从 headers 中重建上下文
-        let ctx = &message.context.ctx;
+        // 2. 从外层 MQ headers + 内层 MqEnvelope headers 中重建上下文。
+        let mut merged_headers = message.context.headers.clone();
+        for (key, value) in &envelope.headers {
+            merged_headers.insert(key.clone(), value.clone());
+        }
+        let ctx = context_from_mq_metadata(&merged_headers);
 
         // 3. 调用 StorageHandler 处理
-        match self.storage_handler.handle_envelope(ctx, envelope).await {
+        match self.storage_handler.handle_envelope(&ctx, envelope).await {
             Ok(()) => {
                 tracing::trace!(
                     topic = %message.context.topic,

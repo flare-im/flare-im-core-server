@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
+use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -7,12 +7,14 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use flare_core_gateway::{
-    config::Settings, infrastructure::grpc::GrpcClients, interface::http::create_router,
-};
+use flare_core_gateway::interface::http::create_public_router;
 use flare_core_runtime::ServiceRuntime;
-use flare_im_core::service_names::CORE_GATEWAY;
-use flare_server_core::TokenService;
+use flare_im_core::{
+    clients::GrpcClients,
+    gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
+    service_names::CORE_GATEWAY,
+};
+use flare_server_core::{TokenService, auth::build_token_validator};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +23,7 @@ async fn main() -> Result<()> {
     flare_im_core::tracing::init_tracing_from_config(Some(app_config.logging()));
 
     // gRPC/限流等仍走环境变量；HTTP 监听与仓库内 check_services.sh（50050）及 config/services/core_gateway.toml 对齐
-    let settings = Settings::from_env()?;
+    let settings = GatewaySettings::from_env_for(GatewayEnvScope::Core)?;
     let gateway_config = app_config.core_gateway_service();
     let address: SocketAddr = flare_im_core::ServiceHelper::parse_server_addr(
         app_config,
@@ -37,26 +39,37 @@ async fn main() -> Result<()> {
         media_service_url = %settings.grpc.media_service_url,
         message_service_url = %settings.grpc.message_service_url,
         conversation_service_url = %settings.grpc.conversation_service_url,
+        storage_reader_service_url = %settings.grpc.storage_reader_service_url,
         "Using downstream grpc endpoints"
     );
     let clients = Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
     info!("gRPC clients initialized");
 
     let token_service = Arc::new(TokenService::new(
-        gateway_config
-            .token_secret
-            .clone()
-            .unwrap_or_else(|| "insecure-secret".to_string()),
+        require_secure_token_secret(
+            "FLARE_CORE_GATEWAY_TOKEN_SECRET",
+            gateway_config.token_secret.as_deref(),
+            "services.core_gateway.token_secret",
+        )?,
         gateway_config
             .token_issuer
             .clone()
             .unwrap_or_else(|| "flare-im-core".to_string()),
         gateway_config.token_ttl_seconds.unwrap_or(3600),
     ));
+    let auth_validator = build_token_validator(
+        &settings.auth,
+        token_service.clone(),
+        &gateway_config.trusted_token_issuers,
+    )
+    .context("failed to initialize gateway auth validator")?;
+    info!(auth_mode = ?settings.auth.mode, "Gateway auth validator initialized");
 
     // 创建路由
-    let app = create_router(clients)
+    let app = create_public_router(clients)
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(axum::Extension(settings.clone()))
+        .layer(axum::Extension(auth_validator))
         .layer(axum::Extension(token_service))
         .layer(
             ServiceBuilder::new()
@@ -86,12 +99,12 @@ async fn main() -> Result<()> {
     );
 
     // 运行时启动（支持服务注册）
-    runtime
+    Ok(runtime
         .run_with_registration(|addr| {
             Box::pin(async move {
                 flare_im_core::discovery::register_runtime_service_only(CORE_GATEWAY, addr, None)
                     .await
             })
         })
-        .await
+        .await?)
 }

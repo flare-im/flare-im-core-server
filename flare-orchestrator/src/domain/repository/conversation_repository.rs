@@ -1,5 +1,5 @@
 use crate::domain::model::ConversationType;
-use crate::error::Result;
+use flare_server_core::error::Result;
 use std::future::Future;
 use std::pin::Pin;
 

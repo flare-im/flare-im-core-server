@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use anyhow::anyhow;
+use flare_server_core::error::Result;
+
 use redis::{AsyncCommands, aio::ConnectionManager};
 use serde_json::json;
 
@@ -31,7 +31,12 @@ impl RedisSignalPublisher {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .map_err(|e| anyhow!("failed to open redis connection: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to open redis connection: {}",
+                    e
+                ))
+            })
     }
 }
 
@@ -49,8 +54,12 @@ impl SignalPublisher for RedisSignalPublisher {
         use std::fmt::Write;
         let mut payload_hex = String::with_capacity(payload.len() * 2);
         for byte in payload {
-            write!(&mut payload_hex, "{:02x}", byte)
-                .map_err(|e| anyhow!("Failed to encode payload hex: {}", e))?;
+            write!(&mut payload_hex, "{:02x}", byte).map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "Failed to encode payload hex: {}",
+                    e
+                ))
+            })?;
         }
 
         let message = json!({
@@ -63,7 +72,12 @@ impl SignalPublisher for RedisSignalPublisher {
         let _: i64 = conn
             .publish(&channel, message.to_string())
             .await
-            .map_err(|e| anyhow!("failed to publish signal: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to publish signal: {}",
+                    e
+                ))
+            })?;
 
         Ok(())
     }

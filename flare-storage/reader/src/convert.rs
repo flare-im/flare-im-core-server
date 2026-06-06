@@ -5,6 +5,7 @@ use crate::domain::model::{
     EditHistoryEntry, Event, EventType, MarkEntry, ReactionItem, ReadListEntry, VisibilityStatus,
 };
 use chrono::{DateTime, Utc};
+use flare_im_core::utils::{millis_to_timestamp, timestamp_to_millis};
 use flare_proto::common::{EventType as ProtoEventType, MessageContent};
 use prost::Message as ProstMessage;
 
@@ -21,21 +22,32 @@ pub fn timestamp_to_datetime(ts: Option<prost_types::Timestamp>) -> Option<DateT
     ts.and_then(|ts| DateTime::from_timestamp(ts.seconds, ts.nanos as u32))
 }
 
+fn datetime_to_millis(dt: Option<DateTime<Utc>>) -> i64 {
+    dt.map(|dt| dt.timestamp_millis()).unwrap_or_default()
+}
+
+fn millis_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
+    if ms <= 0 {
+        return None;
+    }
+    DateTime::from_timestamp_millis(ms)
+}
+
 /// 统一从 flare-im-core 重导出
 pub use flare_im_core::message::{message_from_proto, message_to_proto};
 
 /// 从 proto Event 转为领域 Event（整条 event 序列化存于 payload_bytes；operator_id 由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
-    let r#type = event_type_from_i32(p.r#type);
+    let r#type = event_type_from_proto_i32(p.r#type);
     let payload_bytes = p.encode_to_vec();
     Event {
         tenant_id: String::new(),
         conversation_id: p.conversation_id.clone(),
-        seq: p.seq,
+        seq: p.conversation_seq,
         r#type,
-        created_at: p.created_at.clone(),
+        created_at: millis_to_timestamp(p.created_at),
         operator_id: String::new(),
-        event_seq: p.event_seq,
+        event_seq: None,
         request_id: p.request_id.clone(),
         payload_bytes: Some(payload_bytes),
     }
@@ -52,32 +64,63 @@ pub fn event_to_proto(e: &Event) -> Option<flare_proto::common::Event> {
 pub fn event_to_proto_or_default(e: &Event) -> flare_proto::common::Event {
     event_to_proto(e).unwrap_or_else(|| flare_proto::common::Event {
         conversation_id: e.conversation_id.clone(),
-        seq: e.seq,
-        r#type: e.r#type as i32,
-        created_at: e.created_at.clone(),
+        conversation_seq: e.seq,
+        r#type: event_type_to_proto_i32(e.r#type),
+        created_at: e
+            .created_at
+            .as_ref()
+            .and_then(timestamp_to_millis)
+            .unwrap_or_default(),
         event_id: format!("{}:{}", e.conversation_id, e.seq),
-        event_seq: e.event_seq,
         request_id: e.request_id.clone(),
         ..Default::default()
     })
 }
 
-fn event_type_from_i32(v: i32) -> EventType {
+pub fn event_type_from_proto_i32(v: i32) -> EventType {
     match ProtoEventType::try_from(v) {
         Ok(ProtoEventType::EventMessage) => EventType::Message,
         Ok(ProtoEventType::EventMessageRecall) => EventType::MessageRecall,
         Ok(ProtoEventType::EventMessageEdit) => EventType::MessageEdit,
         Ok(ProtoEventType::EventMessageDelete) => EventType::MessageDelete,
         Ok(ProtoEventType::EventReadReceipt) => EventType::ReadReceipt,
+        Ok(ProtoEventType::EventConversationUpdate) => EventType::ConversationUpdate,
+        Ok(ProtoEventType::EventConversationDelete) => EventType::ConversationDelete,
         Ok(ProtoEventType::EventReaction) => EventType::Reaction,
         Ok(ProtoEventType::EventPin) => EventType::Pin,
         Ok(ProtoEventType::EventUnpin) => EventType::Unpin,
         Ok(ProtoEventType::EventMark) => EventType::Mark,
         Ok(ProtoEventType::EventUnmark) => EventType::Unmark,
-        Ok(ProtoEventType::EventMessageBurnScheduled) => EventType::MessageBurnScheduled,
-        Ok(ProtoEventType::EventMessageBurned) => EventType::MessageBurned,
-        Ok(ProtoEventType::EventMessageHardDeleted) => EventType::MessageHardDeleted,
+        Ok(ProtoEventType::EventMessageRetentionScheduled) => EventType::MessageBurnScheduled,
+        Ok(ProtoEventType::EventMessageRetentionExpired) => EventType::MessageBurned,
+        Ok(ProtoEventType::EventMessageRetentionPurged) => EventType::MessageHardDeleted,
+        Ok(ProtoEventType::EventCustom) => EventType::Custom,
         _ => EventType::Unspecified,
+    }
+}
+
+pub fn event_type_to_proto_i32(v: EventType) -> i32 {
+    match v {
+        EventType::Message => ProtoEventType::EventMessage as i32,
+        EventType::MessageRecall => ProtoEventType::EventMessageRecall as i32,
+        EventType::MessageEdit => ProtoEventType::EventMessageEdit as i32,
+        EventType::MessageDelete => ProtoEventType::EventMessageDelete as i32,
+        EventType::ReadReceipt => ProtoEventType::EventReadReceipt as i32,
+        EventType::ConversationUpdate => ProtoEventType::EventConversationUpdate as i32,
+        EventType::ConversationDelete => ProtoEventType::EventConversationDelete as i32,
+        EventType::Reaction => ProtoEventType::EventReaction as i32,
+        EventType::Pin => ProtoEventType::EventPin as i32,
+        EventType::Unpin => ProtoEventType::EventUnpin as i32,
+        EventType::Mark => ProtoEventType::EventMark as i32,
+        EventType::Unmark => ProtoEventType::EventUnmark as i32,
+        EventType::MessageBurnScheduled => ProtoEventType::EventMessageRetentionScheduled as i32,
+        EventType::MessageBurned => ProtoEventType::EventMessageRetentionExpired as i32,
+        EventType::MessageHardDeleted => ProtoEventType::EventMessageRetentionPurged as i32,
+        EventType::Custom => ProtoEventType::EventCustom as i32,
+        EventType::Typing
+        | EventType::Presence
+        | EventType::CallSignal
+        | EventType::Unspecified => ProtoEventType::Unspecified as i32,
     }
 }
 
@@ -148,8 +191,8 @@ pub fn visibility_status_to_proto(v: VisibilityStatus) -> i32 {
 pub fn read_list_entry_from_proto(p: &flare_proto::common::MessageReadRecord) -> ReadListEntry {
     ReadListEntry {
         user_id: p.user_id.clone(),
-        read_at: timestamp_to_datetime(p.read_at.clone()),
-        burned_at: timestamp_to_datetime(p.burned_at.clone()),
+        read_at: millis_to_datetime(p.read_at),
+        burned_at: p.retention_expired_at.and_then(millis_to_datetime),
     }
 }
 
@@ -159,7 +202,7 @@ pub fn reaction_item_from_proto(p: &flare_proto::common::Reaction) -> ReactionIt
         emoji: p.emoji.clone(),
         user_ids: p.user_ids.clone(),
         count: p.count,
-        last_updated: timestamp_to_datetime(p.last_updated.clone()),
+        last_updated: millis_to_datetime(p.updated_at),
     }
 }
 
@@ -169,8 +212,8 @@ pub fn read_list_entry_to_common_proto(
 ) -> flare_proto::common::MessageReadRecord {
     flare_proto::common::MessageReadRecord {
         user_id: e.user_id.clone(),
-        read_at: datetime_to_timestamp(e.read_at),
-        burned_at: datetime_to_timestamp(e.burned_at),
+        read_at: datetime_to_millis(e.read_at),
+        retention_expired_at: e.burned_at.map(|dt| dt.timestamp_millis()),
     }
 }
 
@@ -180,8 +223,8 @@ pub fn reaction_item_to_common_proto(r: &ReactionItem) -> flare_proto::common::R
         emoji: r.emoji.clone(),
         user_ids: r.user_ids.clone(),
         count: r.count,
-        last_updated: datetime_to_timestamp(r.last_updated),
-        created_at: None,
+        updated_at: datetime_to_millis(r.last_updated),
+        created_at: 0,
     }
 }
 
@@ -212,5 +255,22 @@ pub fn filter_expression_to_proto(
         } else {
             vec![d.value.clone()]
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_type_to_proto_i32_uses_proto_database_values() {
+        assert_eq!(
+            event_type_to_proto_i32(EventType::Reaction),
+            ProtoEventType::EventReaction as i32
+        );
+        assert_eq!(
+            event_type_to_proto_i32(EventType::MessageBurnScheduled),
+            ProtoEventType::EventMessageRetentionScheduled as i32
+        );
     }
 }

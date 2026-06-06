@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use flare_server_core::eventbus::EventEnvelope;
 use flare_server_core::mq::consumer::MessageFetcher;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaMessageFetcher, KafkaProducerConfig};
@@ -100,7 +100,7 @@ impl ReadReceiptEventConsumer {
         let subject = config
             .jetstream_events_subject
             .as_deref()
-            .or_else(|| config.jetstream_operation_subject.as_deref())
+            .or(config.jetstream_operation_subject.as_deref())
             .unwrap_or(TOPIC_MESSAGE_EVENTS);
         let group = config
             .jetstream_group
@@ -136,7 +136,7 @@ impl ReadReceiptEventConsumer {
             other => {
                 return Err(ErrorBuilder::new(
                     ErrorCode::ConfigurationError,
-                    &format!("unsupported mq backend: {other}"),
+                    format!("unsupported mq backend: {other}"),
                 )
                 .build_error());
             }
@@ -169,10 +169,10 @@ impl ReadReceiptEventConsumer {
                     let ack = message.ack_handle.clone();
                     if let Err(e) = self.process_payload(&message.payload).await {
                         error!(error = %e, "Process ReadReceipt event failed");
-                        if let Some(ack) = ack {
-                            if let Err(err) = ack.nack().await {
-                                warn!(error = %err, "JetStream nack failed");
-                            }
+                        if let Some(ack) = ack
+                            && let Err(err) = ack.nack().await
+                        {
+                            warn!(error = %err, "JetStream nack failed");
                         }
                     } else if let Some(ack) = ack
                         && let Err(err) = ack.ack().await
@@ -214,7 +214,6 @@ impl ReadReceiptEventConsumer {
                         conversation_id = %conversation_id,
                         user_id = %user_id,
                         message_id_count = read.message_ids.len(),
-                        burn_after_read = read.burn_after_read.unwrap_or(false),
                         "ReadReceipt without positive read_seq does not advance conversation read cursor"
                     );
                     return Ok(());
@@ -250,7 +249,7 @@ impl ReadReceiptEventConsumer {
                     debug!("Message event with empty sender_id, skip");
                     return Ok(());
                 }
-                let seq = msg.seq as i64;
+                let seq = msg.conversation_seq as i64;
                 if seq <= 0 {
                     debug!(conversation_id = %conversation_id, seq, "Message event with invalid seq, skip");
                     return Ok(());
@@ -301,10 +300,10 @@ fn decode_message_event(raw: &[u8]) -> Result<Option<Event>> {
         }
         // EventEnvelope.payload 可能是 MqEnvelope(proto)，也可能是 Event(proto)
         if let Ok(mq) = MqEnvelope::decode(&*envelope.payload) {
-            if mq.payload_kind == MqPayloadKind::Event as i32 {
-                if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
-                    return Ok(matches_supported_event(&event).then_some(event));
-                }
+            if mq.payload_kind == MqPayloadKind::Event as i32
+                && let Some(mq_envelope::Payload::Event(event)) = mq.payload
+            {
+                return Ok(matches_supported_event(&event).then_some(event));
             }
             return Ok(None);
         }
@@ -457,7 +456,7 @@ impl ConversationEnsureEventConsumer {
             other => {
                 return Err(ErrorBuilder::new(
                     ErrorCode::ConfigurationError,
-                    &format!("unsupported mq backend: {other}"),
+                    format!("unsupported mq backend: {other}"),
                 )
                 .build_error());
             }
@@ -489,10 +488,10 @@ impl ConversationEnsureEventConsumer {
                     let ack = message.ack_handle.clone();
                     if let Err(e) = self.process_payload(&message.payload).await {
                         error!(error = %e, "Process ConversationEnsure event failed");
-                        if let Some(ack) = ack {
-                            if let Err(err) = ack.nack().await {
-                                warn!(error = %err, "JetStream nack failed");
-                            }
+                        if let Some(ack) = ack
+                            && let Err(err) = ack.nack().await
+                        {
+                            warn!(error = %err, "JetStream nack failed");
                         }
                     } else if let Some(ack) = ack
                         && let Err(err) = ack.ack().await

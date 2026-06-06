@@ -6,10 +6,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::domain::model::{HookTransportConfig, LoadBalanceStrategy};
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use crate::infrastructure::adapters::grpc::GrpcHookAdapter;
 use crate::infrastructure::adapters::local::LocalHookAdapter;
 use crate::infrastructure::adapters::webhook::WebhookHookAdapter;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 
 pub mod conversion;
 pub mod grpc;
@@ -22,6 +22,12 @@ pub struct HookAdapterFactory {
     /// 服务注册发现（可选，用于服务发现模式）
     /// 使用新的统一服务发现接口
     service_client: Option<Arc<Mutex<flare_server_core::ServiceClient>>>,
+}
+
+impl Default for HookAdapterFactory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HookAdapterFactory {

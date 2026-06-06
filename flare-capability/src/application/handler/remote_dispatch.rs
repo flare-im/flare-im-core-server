@@ -18,9 +18,15 @@ use crate::domain::capability::{
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 
-fn build_request_payload(req: &CapabilityDispatchCommand) -> anyhow::Result<prost_types::Any> {
+fn build_request_payload(
+    req: &CapabilityDispatchCommand,
+) -> flare_server_core::error::Result<prost_types::Any> {
     let payload_json = serde_json::to_string(req.payload.as_ref().unwrap_or(&Value::Null))
-        .map_err(|e| anyhow::anyhow!("serialize request payload_json: {e}"))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "serialize request payload_json: {e}"
+            ))
+        })?;
     Ok(prost_types::Any {
         type_url: "type.googleapis.com/flare.capability.v1.PayloadJson".to_string(),
         value: payload_json.into_bytes(),
@@ -46,7 +52,7 @@ async fn invoke_once(
     let payload = build_request_payload(req).map_err(|e| CapabilityError::System(e.to_string()))?;
     let channel = resolve_plugin_channel(endpoint.grpc_authority.as_str())
         .await
-        .map_err(|e| CapabilityError::System(e))?;
+        .map_err(CapabilityError::System)?;
     let mut client = ExtensionPluginClient::new(channel);
 
     let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());

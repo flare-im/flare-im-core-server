@@ -26,7 +26,7 @@ use crate::domain::builder::{
     build_pin_event, build_reaction_event, build_read_receipt_event, build_recall_event,
     build_unmark_event, build_unpin_event,
 };
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 消息操作处理器（编排层）
 pub struct MessageActionHandler {
@@ -168,11 +168,7 @@ impl MessageActionHandler {
         );
         if let Some(flare_proto::common::event::Payload::Read(read)) = event.payload.as_mut() {
             read.message_ids = cmd.message_ids.clone();
-            read.read_at = cmd.read_at.map(|t| prost_types::Timestamp {
-                seconds: t.timestamp(),
-                nanos: t.timestamp_subsec_nanos() as i32,
-            });
-            read.burn_after_read = Some(cmd.burn_after_read);
+            read.read_at = cmd.read_at.map(|t| t.timestamp_millis());
         }
 
         // 2. 调用 EventHandler 处理事件
@@ -188,7 +184,7 @@ impl MessageActionHandler {
     pub async fn read_burn_message(&self, ctx: &Ctx, cmd: ReadBurnMessageCommand) -> Result<i64> {
         if cmd.burn_after_read_seconds <= 0 {
             return Err(flare_server_core::flare_err!(
-                crate::error::ErrorCode::InvalidParameter,
+                flare_server_core::error::ErrorCode::InvalidParameter,
                 "burn_after_read_seconds must be positive"
             ));
         }

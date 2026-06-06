@@ -2,12 +2,12 @@
 //!
 //! 本模块提供基于 tonic 的 Online 服务客户端实现。
 
-use anyhow::Result;
 use flare_grpc_proto::signaling::online::{
     ListUserDevicesRequest, ListUserDevicesResponse,
     online_service_client::OnlineServiceClient as ProtoOnlineServiceClient,
 };
 use flare_server_core::context::{Context, ContextExt};
+use flare_server_core::error::{FlareError, Result};
 use tonic::transport::Channel;
 use tracing::instrument;
 
@@ -21,7 +21,13 @@ pub struct OnlineServiceClient {
 impl OnlineServiceClient {
     /// 直连 URI（测试或无注册中心）。
     pub async fn new(endpoint: String) -> Result<Self> {
-        let channel = Channel::from_shared(endpoint)?.connect().await?;
+        let channel = Channel::from_shared(endpoint.clone())
+            .map_err(|err| {
+                FlareError::system(format!("invalid online grpc uri {endpoint}: {err}"))
+            })?
+            .connect()
+            .await
+            .map_err(|err| FlareError::system(format!("connect online grpc {endpoint}: {err}")))?;
         Ok(Self::from_channel(channel))
     }
 
@@ -42,8 +48,9 @@ impl OnlineServiceClient {
         ctx: &Context,
         user_id: &str,
     ) -> Result<ListUserDevicesResponse> {
-        ctx.ensure_not_cancelled()
-            .map_err(|e| anyhow::anyhow!("Request cancelled: {}", e))?;
+        ctx.ensure_not_cancelled().map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("Request cancelled: {}", e))
+        })?;
         let request = tonic::Request::new(ListUserDevicesRequest {
             user_id: user_id.to_string(),
         });

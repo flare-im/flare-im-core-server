@@ -1,7 +1,9 @@
 //! `MessageSendService` gRPC 实现：发送、批量发送、系统消息、ExecuteEvent 等。
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use crate::application::commands::SendMessageOutcome;
 use crate::application::handlers::{EventHandler, MessageHandler};
 use flare_grpc_proto::message::message_send_service_server::MessageSendService;
 use flare_grpc_proto::message::{
@@ -9,6 +11,7 @@ use flare_grpc_proto::message::{
     SendAckRequest, SendAckResponse, SendCustomDataRequest, SendCustomDataResponse,
     SendMessageRequest, SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
 };
+use flare_im_core::metrics::MessageOrchestratorMetrics;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::require_ctx_from_request;
 use prost_types;
@@ -20,16 +23,19 @@ use tracing::{debug, instrument};
 pub struct MessageSendGrpcHandler {
     message_handler: Arc<MessageHandler>,
     execute_event_handler: Arc<EventHandler>,
+    metrics: Arc<MessageOrchestratorMetrics>,
 }
 
 impl MessageSendGrpcHandler {
     pub fn new(
         message_handler: Arc<MessageHandler>,
         execute_event_handler: Arc<EventHandler>,
+        metrics: Arc<MessageOrchestratorMetrics>,
     ) -> Self {
         Self {
             message_handler,
             execute_event_handler,
+            metrics,
         }
     }
 }
@@ -41,45 +47,46 @@ impl MessageSendService for MessageSendGrpcHandler {
         &self,
         request: Request<SendMessageRequest>,
     ) -> Result<Response<SendMessageResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let decode_start = Instant::now();
+        let ctx = match require_ctx_from_request(&request) {
+            Ok(ctx) => ctx,
+            Err(status) => {
+                self.metrics.observe_send_stage(
+                    "grpc_request_decode",
+                    "error",
+                    decode_start.elapsed(),
+                );
+                return Err(status);
+            }
+        };
 
         let req = request.into_inner();
-        let message = req
-            .message
-            .clone()
-            .ok_or_else(|| Status::invalid_argument("message required"))?;
+        let message = req.message.clone().ok_or_else(|| {
+            self.metrics
+                .observe_send_stage("grpc_request_decode", "error", decode_start.elapsed());
+            Status::invalid_argument("message required")
+        })?;
+        self.metrics
+            .observe_send_stage("grpc_request_decode", "success", decode_start.elapsed());
 
         let cmd = crate::application::commands::SendMessageCommand {
-            burn_enabled: message.burn_enabled,
-            burn_after_read_seconds: message.burn_after_read_seconds,
+            burn_enabled: false,
+            burn_after_read_seconds: None,
             message,
             conversation_id: req.conversation_id.clone(),
             sync: req.sync,
         };
 
         match self.message_handler.handle_send_message(&ctx, cmd).await {
-            Ok((message_id, seq)) => {
-                let now = chrono::Utc::now();
-                let timeline = Some(flare_proto::common::MessageTimeline {
-                    created_at: Some(prost_types::Timestamp {
-                        seconds: now.timestamp(),
-                        nanos: now.timestamp_subsec_nanos() as i32,
-                    }),
-                    persisted_at: None,
-                    delivered_at: None,
-                    read_at: None,
-                });
-
-                Ok(Response::new(SendMessageResponse {
-                    success: true,
-                    server_msg_id: message_id,
-                    seq,
-                    sent_at: Some(prost_types::Timestamp {
-                        seconds: now.timestamp(),
-                        nanos: now.timestamp_subsec_nanos() as i32,
-                    }),
-                    timeline,
-                }))
+            Ok(outcome) => {
+                let response_start = Instant::now();
+                let response = send_response_from_outcome(outcome);
+                self.metrics.observe_send_stage(
+                    "grpc_response_build",
+                    "success",
+                    response_start.elapsed(),
+                );
+                Ok(Response::new(response))
             }
             Err(err) => {
                 // 使用 IntoGrpc trait 将 FlareError 转换为包含 ErrorDetail 的 Status
@@ -93,24 +100,54 @@ impl MessageSendService for MessageSendGrpcHandler {
         &self,
         request: Request<BatchSendMessageRequest>,
     ) -> Result<Response<BatchSendMessageResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let decode_start = Instant::now();
+        let ctx = match require_ctx_from_request(&request) {
+            Ok(ctx) => ctx,
+            Err(status) => {
+                self.metrics.observe_send_stage(
+                    "grpc_batch_request_decode",
+                    "error",
+                    decode_start.elapsed(),
+                );
+                return Err(status);
+            }
+        };
         let req = request.into_inner();
+        if req.messages.len() > 100 {
+            self.metrics.observe_send_stage(
+                "grpc_batch_request_decode",
+                "error",
+                decode_start.elapsed(),
+            );
+            return Err(Status::invalid_argument(
+                "batch send supports at most 100 messages",
+            ));
+        }
 
-        // 构建批量发送命令
-        let messages: Vec<crate::application::commands::SendMessageCommand> = req
-            .messages
-            .into_iter()
-            .filter_map(|m| {
-                m.message
-                    .map(|msg| crate::application::commands::SendMessageCommand {
-                        burn_enabled: msg.burn_enabled,
-                        burn_after_read_seconds: msg.burn_after_read_seconds,
-                        message: msg,
-                        conversation_id: m.conversation_id,
-                        sync: m.sync,
-                    })
-            })
-            .collect();
+        // 构建批量发送命令；缺失 message 的请求显式进入 failures，不静默丢弃。
+        let mut messages = Vec::with_capacity(req.messages.len());
+        let mut failures = Vec::new();
+        for m in req.messages {
+            match m.message {
+                Some(msg) => messages.push(crate::application::commands::SendMessageCommand {
+                    burn_enabled: false,
+                    burn_after_read_seconds: None,
+                    message: msg,
+                    conversation_id: m.conversation_id,
+                    sync: m.sync,
+                }),
+                None => failures.push(FailedMessage {
+                    message_id: String::new(),
+                    code: 400,
+                    error_message: "message required".to_string(),
+                }),
+            }
+        }
+        self.metrics.observe_send_stage(
+            "grpc_batch_request_decode",
+            "success",
+            decode_start.elapsed(),
+        );
 
         // 调用 application 层的批量发送方法
         let results = self
@@ -120,29 +157,36 @@ impl MessageSendService for MessageSendGrpcHandler {
             .into_grpc()?;
 
         // 统计成功和失败数量，构建响应
-        let mut message_ids = Vec::new();
-        let mut failures = Vec::new();
+        let mut successes = Vec::new();
 
         for result in results {
             match result {
-                Ok((msg_id, _seq)) => message_ids.push(msg_id),
+                Ok(outcome) => successes.push(send_response_from_outcome(outcome)),
                 Err(e) => failures.push(FailedMessage {
                     message_id: String::new(),
-                    code: 1, // TODO: 使用实际的错误码
+                    code: e.code().map(|code| code.as_u32() as i32).unwrap_or(1),
                     error_message: e.to_string(),
                 }),
             }
         }
 
-        let success_count = message_ids.len() as i32;
+        let success_count = successes.len() as i32;
         let fail_count = failures.len() as i32;
 
-        Ok(Response::new(BatchSendMessageResponse {
+        let response_start = Instant::now();
+        let response = BatchSendMessageResponse {
             success_count,
             fail_count,
-            message_ids,
+            successes,
             failures,
-        }))
+        };
+        self.metrics.observe_send_stage(
+            "grpc_batch_response_build",
+            "success",
+            response_start.elapsed(),
+        );
+
+        Ok(Response::new(response))
     }
 
     #[instrument(skip(self, request))]
@@ -242,5 +286,45 @@ impl MessageSendService for MessageSendGrpcHandler {
             response_data: vec![], // 可选：下游返回的扩展载荷
             routed_endpoint: String::new(),
         }))
+    }
+}
+
+fn send_response_from_outcome(outcome: SendMessageOutcome) -> SendMessageResponse {
+    let now = chrono::Utc::now();
+    SendMessageResponse {
+        success: true,
+        server_msg_id: outcome.message_id,
+        conversation_seq: outcome.conversation_seq,
+        sent_at: Some(prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        }),
+        timeline: Some(flare_proto::common::MessageTimeline {
+            created_at: now.timestamp_millis(),
+            persisted_at: None,
+            delivered_at: None,
+            read_at: None,
+        }),
+        durability: outcome.durability as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_proto::common::SendAckDurability;
+
+    #[test]
+    fn send_response_preserves_ack_durability() {
+        let response = send_response_from_outcome(SendMessageOutcome {
+            message_id: "server-1".to_string(),
+            conversation_seq: 42,
+            durability: SendAckDurability::BrokerAccepted,
+        });
+
+        assert!(response.success);
+        assert_eq!(response.server_msg_id, "server-1");
+        assert_eq!(response.conversation_seq, 42);
+        assert_eq!(response.durability(), SendAckDurability::BrokerAccepted);
     }
 }

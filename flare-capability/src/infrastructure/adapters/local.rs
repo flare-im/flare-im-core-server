@@ -11,7 +11,7 @@ use flare_im_core::{
 };
 use flare_server_core::context::{Context, Ctx};
 
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 /// Local Plugin适配器
 pub struct LocalHookAdapter {

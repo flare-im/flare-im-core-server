@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use flare_grpc_proto::signaling::router::{RouteAckRequest, RouteOptions};
 use flare_im_core::Ctx;
 use flare_proto::common::ack::Payload as AckPayload;
-use flare_proto::common::{Ack, AckBatch, AckType, ConversationAck, PushAck};
+use flare_proto::common::{Ack, AckBatch, ConversationAck, PushAck, ReadAck};
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode as ServerErrorCode, Result};
 
@@ -51,9 +51,8 @@ impl RouterAckReportPort {
 impl IAckReportPort for RouterAckReportPort {
     async fn report_push_ack(&self, tx: &Ctx, ack: PushAck) -> Result<()> {
         let wrapped = Ack {
-            r#type: AckType::Push as i32,
             ack_id: ack.ack_id.clone(),
-            at: ack.ack_at,
+            ack_at: ack.ack_at,
             payload: Some(AckPayload::Push(ack)),
         };
         self.route_ack(tx, wrapped).await
@@ -61,19 +60,26 @@ impl IAckReportPort for RouterAckReportPort {
 
     async fn report_conversation_ack(&self, tx: &Ctx, ack: ConversationAck) -> Result<()> {
         let wrapped = Ack {
-            r#type: AckType::Converstion as i32,
             ack_id: None,
-            at: None,
+            ack_at: None,
             payload: Some(AckPayload::Conversation(ack)),
+        };
+        self.route_ack(tx, wrapped).await
+    }
+
+    async fn report_read_ack(&self, tx: &Ctx, ack: ReadAck) -> Result<()> {
+        let wrapped = Ack {
+            ack_id: ack.ack_id.clone(),
+            ack_at: None,
+            payload: Some(AckPayload::Read(ack)),
         };
         self.route_ack(tx, wrapped).await
     }
 
     async fn report_ack_batch(&self, tx: &Ctx, batch: AckBatch) -> Result<()> {
         let wrapped = Ack {
-            r#type: AckType::Batch as i32,
             ack_id: None,
-            at: None,
+            ack_at: None,
             payload: Some(AckPayload::Batch(batch)),
         };
         self.route_ack(tx, wrapped).await

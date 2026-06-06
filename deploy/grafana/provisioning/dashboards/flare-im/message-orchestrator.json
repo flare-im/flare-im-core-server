@@ -1,0 +1,135 @@
+{
+  "dashboard": {
+    "title": "消息编排服务监控",
+    "tags": ["flare-im", "message-orchestrator"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "消息发送总数",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(messages_sent_total[5m])) by (message_type, tenant_id)",
+            "legendFormat": "{{message_type}} - {{tenant_id}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "消息发送延迟 (P99)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P99 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P95 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P50 - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "延迟"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "WAL 写入延迟",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(wal_write_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P99"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(wal_write_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P95"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "JetStream 生产延迟",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(jetstream_produce_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P99"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(jetstream_produce_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P95"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "PreSend Hook 执行时间",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(pre_send_hook_duration_seconds_bucket[5m])) by (le, hook_name))",
+            "legendFormat": "P99 - {{hook_name}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "错误统计",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(wal_write_failure_total[5m]))",
+            "legendFormat": "WAL 写入失败"
+          },
+          {
+            "expr": "sum(rate(jetstream_produce_failure_total[5m])) by (tenant_id)",
+            "legendFormat": "JetStream 生产失败 - {{tenant_id}}"
+          },
+          {
+            "expr": "sum(rate(pre_send_hook_failure_total[5m])) by (hook_name, tenant_id)",
+            "legendFormat": "Hook 失败 - {{hook_name}} - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops"},
+          {"format": "short"}
+        ]
+      }
+    ]
+  }
+}
+

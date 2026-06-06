@@ -4,6 +4,7 @@
 //! 具体操作类型由事件 payload 中的字段定义
 
 /// 事件类型常量
+#[allow(clippy::module_inception)]
 pub mod types {
     /// 消息事件
     pub const MESSAGE: &str = "message";
@@ -24,8 +25,7 @@ pub mod types {
     pub const SYSTEM: &str = "system";
 }
 
-/// 辅助函数：判断事件类型
-
+// 辅助函数：判断事件类型。
 /// 检查是否为消息事件
 pub fn is_message_event(event_type: &str) -> bool {
     event_type == types::MESSAGE

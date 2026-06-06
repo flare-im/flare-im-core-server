@@ -2,9 +2,9 @@
 
 use crate::application::commands::BurnDueMessagesCommand;
 use crate::domain::builder::build_burned_event;
-use crate::error::Result;
 use flare_im_core::Ctx;
 use flare_proto::common::Event;
+use flare_server_core::error::Result;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -183,12 +183,14 @@ mod tests {
     impl BurnEventSink for FakeSink {
         async fn publish_burn_event(&self, _ctx: &Ctx, event: Event) -> Result<()> {
             let message_id = match event.payload.as_ref() {
-                Some(flare_proto::common::event::Payload::Burned(b)) => b.message_id.clone(),
+                Some(flare_proto::common::event::Payload::RetentionExpired(b)) => {
+                    b.server_msg_id.clone()
+                }
                 _ => String::new(),
             };
             if message_id == "fail" {
                 return Err(flare_server_core::flare_err!(
-                    crate::error::ErrorCode::InternalError,
+                    flare_server_core::error::ErrorCode::InternalError,
                     "simulated item failure"
                 ));
             }

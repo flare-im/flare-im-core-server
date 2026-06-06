@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use flare_im_core::error::Result;
+use flare_server_core::error::Result;
 
 use crate::application::queries::UserConnectionsQuery;
 use crate::domain::model::ConnectionInfo;

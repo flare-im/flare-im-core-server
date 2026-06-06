@@ -11,7 +11,7 @@ use flare_im_core::hooks::hook_context_data::get_hook_context_data;
 use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 
 /// WebHook适配器
 pub struct WebhookHookAdapter {
@@ -121,12 +121,10 @@ impl WebhookHookAdapter {
                 if let Some(updated_draft) = result.get("draft") {
                     if let Some(payload_base64) =
                         updated_draft.get("payload").and_then(|v| v.as_str())
-                    {
-                        if let Ok(payload) =
+                        && let Ok(payload) =
                             base64::engine::general_purpose::STANDARD.decode(payload_base64)
-                        {
-                            draft.payload = payload;
-                        }
+                    {
+                        draft.payload = payload;
                     }
                     if let Some(headers) = updated_draft.get("headers").and_then(|v| v.as_object())
                     {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use flare_proto::common::Message;
 
-use crate::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationBootstrapResult, ConversationParticipant,

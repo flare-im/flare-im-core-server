@@ -2,8 +2,8 @@
 //!
 //! 定义消息路由的抽象接口，遵循 DDD 的 Port 模式
 
-use anyhow::Result;
 use async_trait::async_trait;
+use flare_server_core::error::Result;
 
 use crate::domain::model::{RouteCommand, RoutedEndpoint};
 

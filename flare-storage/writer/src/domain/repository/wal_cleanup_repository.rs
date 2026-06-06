@@ -8,5 +8,5 @@
 use flare_im_core::Ctx;
 
 pub trait WalCleanupRepository: Send + Sync {
-    async fn remove(&self, ctx: &Ctx, message_id: &str) -> anyhow::Result<()>;
+    async fn remove(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<()>;
 }

@@ -5,6 +5,7 @@
 
 pub mod abstractions;
 pub mod ack;
+pub mod clients;
 pub mod config;
 pub mod constants;
 pub mod discovery;
@@ -19,6 +20,7 @@ pub mod metrics;
 pub mod service_names;
 pub mod tracing;
 pub mod utils;
+pub mod wal;
 
 // Re-export Ctx（与 flare-server-core 一致，统一使用 Arc<Context>）
 pub use flare_server_core::context::Ctx;
@@ -37,13 +39,13 @@ pub use ack::{
 };
 
 pub use config::{
-    AccessGatewayServiceConfig, CapabilityServiceConfig, ConfigManager, ConversationServiceConfig,
-    FlareAppConfig, JetStreamClusterConfig, KafkaClusterConfig, MediaServiceConfig,
-    MessageOrchestratorServiceConfig, MongoInstanceConfig, MqBackendConfig, ObjectStoreConfig,
-    PostgresInstanceConfig, RedisPoolConfig, ServiceEndpointConfig, ServiceRuntimeConfig,
-    SessionPolicyConfig, SignalingOnlineServiceConfig, SignalingRouteServiceConfig,
-    StorageReaderServiceConfig, StorageWriterServiceConfig, app_config, load_config,
-    load_config_with_validation,
+    AccessGatewayServiceConfig, AdminGatewayServiceConfig, CapabilityServiceConfig, ConfigManager,
+    ConversationServiceConfig, CoreGatewayServiceConfig, FlareAppConfig, JetStreamClusterConfig,
+    KafkaClusterConfig, MediaServiceConfig, MessageOrchestratorServiceConfig, MongoInstanceConfig,
+    MqBackendConfig, ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig,
+    ServiceEndpointConfig, ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
+    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig,
+    app_config, load_config, load_config_with_validation,
 };
 pub use discovery::{
     BackendType,
@@ -79,7 +81,7 @@ pub use discovery::{
     register_service_from_registry_config,
     register_service_only,
 };
-pub use gateway::{GatewayRouter, GatewayRouterConfig, GatewayRouterError, GatewayRouterTrait};
+pub use gateway::{GatewayRouter, GatewayRouterConfig, GatewayRouterTrait};
 pub use hooks::{
     ConversationLifecycleEvent, ConversationLifecycleEventKind, ConversationLifecycleHook,
     ConversationMemberChangeKind, ConversationMemberEvent, ConversationMemberHook, DeliveryEvent,
@@ -95,17 +97,13 @@ pub use instrumentation::{
     NoopBusinessProbeSink, SharedBusinessProbeSink,
 };
 pub use message::{
-    Attachment, BurnStatus, BurnTransitionError, Message as MessageDomain, message_from_proto,
+    Attachment, Message as MessageDomain, RetentionTransitionError, message_from_proto,
     message_to_proto,
 };
 pub use service_names::{get_service_name, service_name_env_var, validate_service_name};
 pub use tracing::init_tracing_from_config;
 pub use utils::ServiceHelper;
-pub use utils::error::{self};
-pub use utils::error::{
-    ErrorBuilder, ErrorCategory, ErrorCode, FlareError, FlareServerError, InfraResult,
-    InfraResultExt, LocalizedError, Result, map_infra_error,
-};
+pub use wal::wal_pending_index_key;
 
 // IM 跨服务领域类型（Gateway / Orchestrator / Signaling / Hook 等共用）
 pub use domain::{

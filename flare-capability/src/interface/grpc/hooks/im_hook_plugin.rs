@@ -1,6 +1,5 @@
 //! `HookPlugin` gRPC：IM 主链与周边事件（`flare.capability.v1.HookPlugin.Call`）。
 
-use crate::error::{ErrorBuilder, ErrorCode};
 use flare_grpc_proto::capability::hook_plugin_server::HookPlugin;
 use flare_grpc_proto::capability::{
     ConversationLifecycleHookRequest, ConversationLifecycleHookResponse,
@@ -16,6 +15,7 @@ use flare_grpc_proto::capability::{
     UserOfflineHookRequest, UserOfflineHookResponse, UserOnlineHookRequest, UserOnlineHookResponse,
 };
 use flare_server_core::error::Result as FlareResult;
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -234,7 +234,7 @@ impl ImHookPluginServer {
             },
             PreSendDecision::Reject { error } => {
                 let (deny_reason_code, deny_reason_message) = match error {
-                    flare_im_core::error::FlareError::Localized {
+                    flare_server_core::error::FlareError::Localized {
                         reason, details, ..
                     } => (reason, details.unwrap_or_default()),
                     other => ("HOOK_REJECTED".to_string(), other.to_string()),

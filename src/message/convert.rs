@@ -1,6 +1,7 @@
 //! Proto 与统一消息领域模型互转（与 common/message.proto 严格 1:1）
 
 use super::model::Message;
+use crate::utils::{millis_to_timestamp, timestamp_to_millis};
 
 /// 从 proto Message 转为领域 Message
 pub fn message_from_proto(p: &flare_proto::common::Message) -> Message {
@@ -10,23 +11,24 @@ pub fn message_from_proto(p: &flare_proto::common::Message) -> Message {
         client_msg_id: p.client_msg_id.clone(),
         sender_id: p.sender_id.clone(),
         source: p.source,
-        seq: p.seq,
-        timestamp: p.timestamp.clone(),
+        conversation_seq: p.conversation_seq,
+        timestamp: if p.created_at > 0 {
+            millis_to_timestamp(p.created_at)
+        } else {
+            None
+        },
         conversation_type: p.conversation_type,
         message_type: p.message_type,
+        message_seq: p.message_seq,
         channel_id: p.channel_id.clone(),
         sender_name: p.sender_name.clone(),
         sender_avatar: p.sender_avatar.clone(),
         content: p.content.clone(),
         status: p.status,
-        burn_enabled: p.burn_enabled,
-        burn_after_read_seconds: p.burn_after_read_seconds,
-        burn_status: p.burn_status,
-        first_read_at: p.first_read_at,
-        burn_at: p.burn_at,
-        burned_at: p.burned_at,
+        retention_policy: p.retention_policy.clone(),
+        retention_state: p.retention_state.clone(),
         offline_push_info: p.offline_push_info.clone(),
-        extra: p.extra.clone(),
+        extra: p.attributes.clone(),
         extensions: p.extensions.clone(),
     }
 }
@@ -39,24 +41,24 @@ pub fn message_to_proto(m: &Message) -> flare_proto::common::Message {
         client_msg_id: m.client_msg_id.clone(),
         sender_id: m.sender_id.clone(),
         source: m.source,
-        seq: m.seq,
-        timestamp: m.timestamp.clone(),
+        conversation_seq: m.conversation_seq,
+        created_at: m
+            .timestamp
+            .as_ref()
+            .and_then(timestamp_to_millis)
+            .unwrap_or_default(),
         conversation_type: m.conversation_type,
         message_type: m.message_type,
+        message_seq: m.message_seq,
         channel_id: m.channel_id.clone(),
         sender_name: m.sender_name.clone(),
         sender_avatar: m.sender_avatar.clone(),
         content: m.content.clone(),
         status: m.status,
-        burn_enabled: m.burn_enabled,
-        burn_after_read_seconds: m.burn_after_read_seconds,
-        burn_status: m.burn_status,
-        first_read_at: m.first_read_at,
-        burn_at: m.burn_at,
-        burned_at: m.burned_at,
+        retention_policy: m.retention_policy.clone(),
+        retention_state: m.retention_state.clone(),
         offline_push_info: m.offline_push_info.clone(),
-        extra: m.extra.clone(),
+        attributes: m.extra.clone(),
         extensions: m.extensions.clone(),
-        ..Default::default()
     }
 }

@@ -25,7 +25,6 @@ pub mod application;
 /// 进程组合根：依赖图与启动（原 `service` 模块）。
 pub mod composition;
 pub mod domain;
-pub mod error;
 pub mod infrastructure;
 pub mod interface;
 

@@ -4,15 +4,24 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use flare_im_core::message::Message;
 use flare_im_core::utils::datetime_to_timestamp;
+use flare_proto::common::{
+    ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionState,
+};
+use flare_server_core::error::{AnyhowContext, Result};
+use prost::Message as ProstMessage;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 
 use crate::config::StorageReaderConfig;
+use crate::domain::model::{MessageWriteLedgerEntry, MessageWriteLedgerQuery};
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
+
+const LEGACY_BURN_STATUS_BURN_PENDING: i32 = 3;
+const LEGACY_BURN_STATUS_BURNED: i32 = 4;
+const LEGACY_BURN_STATUS_HARD_DELETED: i32 = 5;
 
 #[derive(Clone)]
 /// PostgreSQL 消息存储基础结构
@@ -74,7 +83,7 @@ impl PostgresBaseStorage {
         Self::from_pool_and_cache(pool, cache).await.map(Some)
     }
 
-    /// 验证表结构是否存在，并创建必要的索引（如果不存在）
+    /// 验证表结构是否存在；schema 和索引统一由 `deploy/init.sql` 管理。
     pub async fn verify_schema(&self) -> Result<()> {
         // 检查 messages 表是否存在
         let exists: bool = sqlx::query_scalar(
@@ -91,8 +100,8 @@ impl PostgresBaseStorage {
         .context("Failed to check if messages table exists")?;
 
         if !exists {
-            return Err(anyhow::anyhow!(
-                "messages table does not exist. Please run init.sql or ensure Storage Writer has initialized the schema"
+            return Err(flare_server_core::error::FlareError::system(
+                "messages table does not exist. Please run deploy/init.sql".to_string(),
             ));
         }
 
@@ -216,55 +225,6 @@ impl PostgresBaseStorage {
             );
         }
 
-        // 创建必要的索引（如果不存在）以优化查询性能
-        self.ensure_indexes()
-            .await
-            .context("Failed to create indexes")?;
-
-        Ok(())
-    }
-
-    /// 确保必要索引存在（与 init_v2.sql 一致；init_v2 已建主键与唯一索引，此处仅补可选索引）
-    pub async fn ensure_indexes(&self) -> Result<()> {
-        let indexes: &[(&str, &str)] = &[
-            (
-                "idx_message_operation_history_tenant_message",
-                "CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_edit_history_tenant_message",
-                "CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message ON message_edit_history(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_read_records_tenant_message",
-                "CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message ON message_read_records(tenant_id, message_id)",
-            ),
-            (
-                "idx_message_visibility_tenant_user",
-                "CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id)",
-            ),
-            (
-                "idx_message_reactions_tenant_message",
-                "CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id)",
-            ),
-            (
-                "idx_pinned_messages_tenant_conversation",
-                "CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id)",
-            ),
-            (
-                "idx_marked_messages_tenant_user",
-                "CREATE INDEX IF NOT EXISTS idx_marked_messages_tenant_user ON marked_messages(tenant_id, user_id)",
-            ),
-        ];
-
-        for (name, sql) in indexes {
-            sqlx::query(sql)
-                .execute(&self.pool)
-                .await
-                .with_context(|| format!("Failed to create index: {}", name))?;
-        }
-
-        tracing::info!("All indexes verified/created successfully");
         Ok(())
     }
 
@@ -289,6 +249,108 @@ impl PostgresBaseStorage {
         Ok(())
     }
 
+    /// 查询消息写入账本。该账本由 Storage Writer 写入，Reader 只提供受限分页查询。
+    pub async fn query_message_write_ledger(
+        &self,
+        query: MessageWriteLedgerQuery,
+    ) -> Result<(Vec<MessageWriteLedgerEntry>, bool)> {
+        let limit = query.limit.clamp(1, 500);
+        let offset = query.offset.max(0);
+        let fetch_limit = limit + 1;
+
+        let mut builder = sqlx::QueryBuilder::<Postgres>::new(
+            r#"
+            SELECT
+                tenant_id,
+                server_id,
+                conversation_id,
+                seq,
+                write_state,
+                archive_persisted_at,
+                storage_persisted_at,
+                wal_cleaned_at,
+                ack_published_at,
+                failed_at,
+                last_error,
+                created_at,
+                updated_at
+            FROM message_write_ledger
+            WHERE tenant_id =
+            "#,
+        );
+        builder.push_bind(&query.tenant_id);
+
+        if let Some(server_id) = query.server_id.as_deref() {
+            builder.push(" AND server_id = ");
+            builder.push_bind(server_id);
+        }
+        if let Some(conversation_id) = query.conversation_id.as_deref() {
+            builder.push(" AND conversation_id = ");
+            builder.push_bind(conversation_id);
+        }
+        if let Some(write_state) = query.write_state.as_deref() {
+            builder.push(" AND write_state = ");
+            builder.push_bind(write_state);
+        }
+        if query.failed_only {
+            builder.push(" AND failed_at IS NOT NULL");
+        }
+        if let Some(updated_after) = query.updated_after {
+            builder.push(" AND updated_at >= ");
+            builder.push_bind(updated_after);
+        }
+        if let Some(updated_before) = query.updated_before {
+            builder.push(" AND updated_at <= ");
+            builder.push_bind(updated_before);
+        }
+
+        builder.push(" ORDER BY updated_at DESC, server_id DESC LIMIT ");
+        builder.push_bind(fetch_limit);
+        builder.push(" OFFSET ");
+        builder.push_bind(offset);
+
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to query message write ledger")?;
+
+        let has_more = rows.len() as i64 > limit;
+        let entries = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(|row| {
+                Ok(MessageWriteLedgerEntry {
+                    tenant_id: row.try_get("tenant_id").context("row tenant_id")?,
+                    server_id: row.try_get("server_id").context("row server_id")?,
+                    conversation_id: row
+                        .try_get("conversation_id")
+                        .context("row conversation_id")?,
+                    seq: row.try_get("seq").context("row seq")?,
+                    write_state: row.try_get("write_state").context("row write_state")?,
+                    archive_persisted_at: row
+                        .try_get("archive_persisted_at")
+                        .context("row archive_persisted_at")?,
+                    storage_persisted_at: row
+                        .try_get("storage_persisted_at")
+                        .context("row storage_persisted_at")?,
+                    wal_cleaned_at: row
+                        .try_get("wal_cleaned_at")
+                        .context("row wal_cleaned_at")?,
+                    ack_published_at: row
+                        .try_get("ack_published_at")
+                        .context("row ack_published_at")?,
+                    failed_at: row.try_get("failed_at").context("row failed_at")?,
+                    last_error: row.try_get("last_error").context("row last_error")?,
+                    created_at: row.try_get("created_at").context("row created_at")?,
+                    updated_at: row.try_get("updated_at").context("row updated_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok((entries, has_more))
+    }
+
     /// 从 init_v2 messages 行转换为 common/message.proto Message
     pub fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<Message> {
         let server_id: String = row.get("server_id");
@@ -305,8 +367,8 @@ impl PostgresBaseStorage {
         let message_type: i32 = row.get("message_type");
         let content: Option<Vec<u8>> = row.get("content");
         let status: i32 = row.get("status");
-        let burn_enabled: bool = row.try_get("burn_enabled").unwrap_or(false);
-        let burn_after_read_seconds: Option<i64> =
+        let _burn_enabled: bool = row.try_get("burn_enabled").unwrap_or(false);
+        let _burn_after_read_seconds: Option<i64> =
             row.try_get("burn_after_read_seconds").unwrap_or(None);
         let burn_status: i32 = row.try_get("burn_status").unwrap_or(0);
         let first_read_at: Option<i64> = row.try_get("first_read_at").unwrap_or(None);
@@ -318,22 +380,22 @@ impl PostgresBaseStorage {
         let reactions_json: Option<Value> = row.try_get("reactions_json").ok();
 
         let mut extra_map = HashMap::new();
-        if let Some(extra_value) = extra {
-            if let Ok(extra_obj) = from_value::<HashMap<String, Value>>(extra_value) {
-                for (k, v) in extra_obj {
-                    extra_map.insert(k, v.to_string().trim_matches('"').to_string());
-                }
+        if let Some(extra_value) = extra
+            && let Ok(extra_obj) = from_value::<HashMap<String, Value>>(extra_value)
+        {
+            for (k, v) in extra_obj {
+                extra_map.insert(k, v.to_string().trim_matches('"').to_string());
             }
         }
-        if let Some(rx) = reactions_json {
-            if !rx.is_null() {
-                let serialized = if let Some(s) = rx.as_str() {
-                    s.to_string()
-                } else {
-                    rx.to_string()
-                };
-                extra_map.insert("reactionsJson".to_string(), serialized);
-            }
+        if let Some(rx) = reactions_json
+            && !rx.is_null()
+        {
+            let serialized = if let Some(s) = rx.as_str() {
+                s.to_string()
+            } else {
+                rx.to_string()
+            };
+            extra_map.insert("reactionsJson".to_string(), serialized);
         }
 
         let offline_push_proto = offline_push_info.as_ref().and_then(|v| {
@@ -360,7 +422,6 @@ impl PostgresBaseStorage {
                     .and_then(|p| p.as_str())
                     .unwrap_or("")
                     .to_string(),
-                ..Default::default()
             })
         });
 
@@ -379,6 +440,12 @@ impl PostgresBaseStorage {
             })
             .unwrap_or_default();
 
+        let content = content
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| MessageContent::decode(bytes.as_slice()).ok());
+        let retention_state =
+            legacy_retention_state(burn_status, first_read_at, burn_at, burned_at);
+
         Ok(Message {
             server_id,
             conversation_id,
@@ -387,22 +454,51 @@ impl PostgresBaseStorage {
             sender_name: sender_name.unwrap_or_default(),
             sender_avatar: sender_avatar.unwrap_or_default(),
             source,
-            seq: seq as u64,
+            conversation_seq: seq as u64,
             timestamp: Some(datetime_to_timestamp(timestamp)),
             conversation_type,
             message_type,
+            message_seq: None,
             channel_id: channel_id.unwrap_or_default(),
-            content: content.unwrap_or_default(),
+            content,
             status,
-            burn_enabled,
-            burn_after_read_seconds,
-            burn_status,
-            first_read_at,
-            burn_at,
-            burned_at,
+            retention_policy: None,
+            retention_state,
             offline_push_info: offline_push_proto,
             extra: extra_map,
             extensions: extensions_map,
         })
     }
+}
+
+fn legacy_retention_state(
+    legacy_status: i32,
+    first_read_at: Option<i64>,
+    burn_at: Option<i64>,
+    burned_at: Option<i64>,
+) -> Option<MessageRetentionState> {
+    let lifecycle = match legacy_status {
+        LEGACY_BURN_STATUS_BURN_PENDING => MessageRetentionLifecycle::Scheduled,
+        LEGACY_BURN_STATUS_BURNED => MessageRetentionLifecycle::Expired,
+        LEGACY_BURN_STATUS_HARD_DELETED => MessageRetentionLifecycle::Purged,
+        _ => return None,
+    };
+    let content_visibility = match lifecycle {
+        MessageRetentionLifecycle::Purged => ContentVisibility::Purged,
+        MessageRetentionLifecycle::Expired => ContentVisibility::Redacted,
+        _ => ContentVisibility::Available,
+    };
+    Some(MessageRetentionState {
+        lifecycle: lifecycle as i32,
+        content_visibility: content_visibility as i32,
+        first_triggered_at: first_read_at,
+        expire_at: burn_at,
+        expired_at: burned_at,
+        purged_at: if lifecycle == MessageRetentionLifecycle::Purged {
+            burned_at
+        } else {
+            None
+        },
+        triggered_by_user_id: None,
+    })
 }

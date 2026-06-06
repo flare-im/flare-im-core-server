@@ -16,7 +16,8 @@ pub struct RejectCallCommand {
 
 #[async_trait]
 pub trait RejectCallHandlerPort: Send + Sync {
-    async fn handle(&self, cmd: RejectCallCommand) -> anyhow::Result<CallSession>;
+    async fn handle(&self, cmd: RejectCallCommand)
+    -> flare_server_core::error::Result<CallSession>;
 }
 
 pub struct RejectCallHandler {
@@ -31,12 +32,17 @@ impl RejectCallHandler {
 
 #[async_trait]
 impl RejectCallHandlerPort for RejectCallHandler {
-    async fn handle(&self, cmd: RejectCallCommand) -> anyhow::Result<CallSession> {
+    async fn handle(
+        &self,
+        cmd: RejectCallCommand,
+    ) -> flare_server_core::error::Result<CallSession> {
         let mut s = self
             .repo
             .find_by_id(&cmd.session_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("call session not found"))?;
+            .ok_or_else(|| {
+                flare_server_core::error::FlareError::system("call session not found".to_string())
+            })?;
         let _ev = s.reject(cmd.user_id, cmd.reason)?;
         self.repo.save(&s).await?;
         Ok(s)

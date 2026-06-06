@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use crate::domain::model::{HookConfig, HookConfigItem};
 use crate::infrastructure::config::ConfigWatcher;

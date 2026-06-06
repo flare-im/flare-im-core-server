@@ -16,6 +16,7 @@ impl PostgresCapabilityAuditLog {
         Self { pool }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_policy_event(
         &self,
         action: &str,

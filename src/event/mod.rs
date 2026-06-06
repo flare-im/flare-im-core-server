@@ -9,7 +9,8 @@ pub mod types;
 
 pub use main_queue_payload::{
     MqEnvelopeDecodeError, decode_mq_envelope, mq_envelope_for_main_queue_event,
-    mq_envelope_for_main_queue_message,
+    mq_envelope_for_main_queue_event_with_headers, mq_envelope_for_main_queue_message,
+    mq_envelope_for_main_queue_message_with_headers,
 };
 pub use topic_envelope::{
     CONVERSATION_UPDATE_TYPE_REMOVE, CONVERSATION_UPDATE_TYPE_SUMMARY,

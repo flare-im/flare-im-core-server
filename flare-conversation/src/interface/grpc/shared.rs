@@ -1,6 +1,6 @@
 //! Proto ↔ 领域模型转换（read / manage 共用）
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use flare_grpc_proto::conversation::{
     Conversation as ProtoConversation, ConversationPolicy as ProtoConversationPolicy,
     DevicePresence as ProtoDevicePresence,
@@ -12,17 +12,16 @@ use prost_types::Timestamp;
 
 use crate::domain::model::{
     Conversation, ConversationParticipant, ConversationPolicy, ConversationSummary, DevicePresence,
-    millis_to_datetime,
 };
 
 pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
-    let last_message_time = summary.last_message_time.and_then(timestamp_from_datetime);
+    let last_message_time = summary
+        .last_message_time
+        .as_ref()
+        .map(|dt| dt.timestamp_millis());
     // Sync 编排器用 `updated_at` 做会话列表排序与增量游标过滤，必须与「会话/成员变更时间」一致。
     // 仅填 last_message_time 会导致无最近消息预览时为空 → ts=0，增量同步在客户端游标非零时会误过滤掉整行。
-    let list_change_time = summary
-        .last_message_time
-        .or_else(|| summary.server_cursor_ts.and_then(millis_to_datetime));
-    let updated_at_for_sync = list_change_time.and_then(timestamp_from_datetime);
+    let updated_at_for_sync = last_message_time.or(summary.server_cursor_ts);
 
     let member_preview =
         if summary.conversation_type == crate::domain::model::ConversationType::Single {
@@ -37,7 +36,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
                     muted: p.muted,
                     pinned: p.pinned,
                     attributes: p.attributes,
-                    joined_at: None,
+                    joined_at: 0,
                 })
                 .collect()
         };
@@ -67,7 +66,6 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
         conversation_type: summary.conversation_type.as_int().to_string(),
-        business_type: summary.business_type.unwrap_or_default(),
         display_name,
         avatar_url: String::new(),
         last_message: Some(flare_proto::common::MessagePreview {
@@ -75,10 +73,10 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
             sender_id: summary.last_sender_id.unwrap_or_default(),
             r#type: summary.last_message_type.unwrap_or_default(),
             text: String::new(),
-            time: last_message_time,
+            created_at: last_message_time.unwrap_or_default(),
         }),
         unread_count,
-        max_seq,
+        max_conversation_seq: max_seq,
         last_read_seq: (summary.last_read_seq.max(0) as u64).max(visible_after_seq),
         is_muted: summary.is_muted,
         is_pinned: summary.is_pinned,
@@ -86,9 +84,9 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         is_archived: summary.is_archived,
         user_settings_version: summary.settings_version,
         draft: summary.draft.clone().unwrap_or_default(),
-        visible_after_seq,
-        updated_at: updated_at_for_sync.or(last_message_time),
-        created_at: None,
+        visible_after_conversation_seq: visible_after_seq,
+        updated_at: updated_at_for_sync.unwrap_or_default(),
+        created_at: 0,
         labels: Vec::new(),
         member_count: summary
             .metadata
@@ -98,7 +96,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         channel_id: summary.channel_id,
         participant_version: summary.participant_version,
         member_preview,
-        ext: summary.metadata,
+        attributes: summary.metadata,
     }
 }
 
@@ -129,10 +127,14 @@ pub fn proto_common_policy(policy: ConversationPolicy) -> flare_proto::common::C
         max_devices: policy.max_devices,
         allow_anonymous: policy.allow_anonymous,
         allow_history_sync: policy.allow_history_sync,
-        metadata: policy.metadata,
+        attributes: policy.metadata,
         allow_message_search: false,
         allow_file_transfer: true,
     }
+}
+
+pub fn millis_from_datetime(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp_millis()
 }
 
 pub fn timestamp_from_datetime(dt: DateTime<Utc>) -> Option<Timestamp> {
@@ -169,9 +171,7 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
         .unwrap_or_default();
     let announcement_updated_at = attrs
         .get("announcement_updated_at")
-        .and_then(|s| s.parse::<i64>().ok())
-        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
-        .and_then(timestamp_from_datetime);
+        .and_then(|s| s.parse::<i64>().ok());
 
     let member_count = conversation.participants.len() as i32;
     let channel_id = conversation.channel_id.clone();
@@ -179,7 +179,6 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
     ProtoConversationDetail {
         conversation_id: conversation.conversation_id,
         conversation_type: conversation.conversation_type.as_int().to_string(),
-        business_type: conversation.business_type,
         display_name,
         avatar_url,
         description,
@@ -190,11 +189,11 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
         lifecycle_state: conversation.lifecycle_state.as_proto(),
         policy: conversation.policy.map(proto_common_policy),
         presence: None,
-        created_at: timestamp_from_datetime(conversation.created_at),
-        updated_at: timestamp_from_datetime(conversation.updated_at),
+        created_at: millis_from_datetime(conversation.created_at),
+        updated_at: millis_from_datetime(conversation.updated_at),
         member_count,
         channel_id,
-        ext: conversation.attributes,
+        attributes: conversation.attributes,
     }
 }
 
@@ -205,7 +204,7 @@ pub fn participant_domain_to_proto(p: ConversationParticipant) -> ProtoConversat
         muted: p.muted,
         pinned: p.pinned,
         attributes: p.attributes,
-        joined_at: None,
+        joined_at: 0,
     }
 }
 
@@ -225,7 +224,7 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
                 muted: p.muted,
                 pinned: p.pinned,
                 attributes: p.attributes,
-                joined_at: None,
+                joined_at: 0,
             })
             .collect(),
         visibility: conversation.visibility.as_proto(),

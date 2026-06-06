@@ -3,7 +3,7 @@
 //! ## 核心职责
 //! 1. 处理来自 MQ 的 MqEnvelope 消息
 //! 2. 根据消息类型路由到对应的领域服务
-//! 3. 调用领域服务的 persistence_only 方法进行存储
+//! 3. 将持久消息/事件 fanout 到存储流与推送流
 //!
 //! ## 设计原则
 //! - 编排层：不包含业务逻辑，只负责流程编排
@@ -17,7 +17,7 @@ use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use tracing::instrument;
 
 use crate::domain::service::{EventDomainService, MessageDomainService};
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 存储处理器（编排层）
 pub struct StorageHandler {
@@ -43,7 +43,7 @@ impl StorageHandler {
     /// # 编排流程
     /// 1. 根据 payload_kind 判断消息类型
     /// 2. 提取对应的载荷（Message 或 Event）
-    /// 3. 调用领域服务的 persistence_only 方法进行存储
+    /// 3. 调用领域服务 fanout 到存储与推送专用 topic
     ///
     /// # 参数
     /// - `ctx`: 上下文
@@ -65,9 +65,9 @@ impl StorageHandler {
                 let message = match &envelope.payload {
                     Some(mq_envelope::Payload::Message(msg)) => msg.clone(),
                     _ => {
-                        return Err(
-                            anyhow::anyhow!("Message payload is missing in MqEnvelope").into()
-                        );
+                        return Err(flare_server_core::error::FlareError::system(
+                            "Message payload is missing in MqEnvelope".to_string(),
+                        ));
                     }
                 };
 
@@ -79,9 +79,9 @@ impl StorageHandler {
                     "Processing message from MqEnvelope"
                 );
 
-                // 调用消息领域服务的 persistence_only 方法
+                // 主流持久消息拆分为存储事件与实时推送事件。
                 self.message_domain_service
-                    .persistence_only(ctx, message, envelope.recipient_user_ids)
+                    .persist_and_push_with_recipients(ctx, message, envelope.recipient_user_ids)
                     .await?;
             }
             x if x == MqPayloadKind::Event as i32 => {
@@ -89,9 +89,9 @@ impl StorageHandler {
                 let event = match &envelope.payload {
                     Some(mq_envelope::Payload::Event(evt)) => evt.clone(),
                     _ => {
-                        return Err(
-                            anyhow::anyhow!("Event payload is missing in MqEnvelope").into()
-                        );
+                        return Err(flare_server_core::error::FlareError::system(
+                            "Event payload is missing in MqEnvelope".to_string(),
+                        ));
                     }
                 };
 
@@ -103,9 +103,9 @@ impl StorageHandler {
                     "Processing event from MqEnvelope"
                 );
 
-                // 调用事件领域服务的 persistence_only 方法
+                // 主流持久事件拆分为存储事件与实时推送事件。
                 self.event_domain_service
-                    .persistence_only(ctx, event)
+                    .persist_and_push_with_recipients(ctx, event, envelope.recipient_user_ids)
                     .await?;
             }
             _ => {

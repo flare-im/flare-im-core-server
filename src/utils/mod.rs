@@ -1,8 +1,7 @@
 //! 工具函数模块
 //!
-//! 提供错误类型与映射、时间戳转换、时间线提取、seq 操作、未读数计算、字符串/上下文等通用工具。
+//! 提供时间戳转换、时间线提取、seq 操作、未读数计算、字符串/上下文等通用工具。
 
-pub mod error;
 pub mod helpers;
 
 /// 非空会话 ID 作为 resolve 的 fallback（trim 后非空返回 `Some`），供无 StorageReader 时解析使用。
@@ -244,11 +243,12 @@ pub fn embed_timeline_in_extra_map(
 }
 
 /// 将时间线元数据嵌入到消息的 extra 字段中（proto Message）
+///
+/// Timeline 元数据改由 MqEnvelope headers / 写侧 `PreparedMessage.timeline` 承载，不再写入 Message。
 pub fn embed_timeline_in_extra(
-    message: &mut flare_proto::common::Message,
-    timeline: &TimelineMetadata,
+    _message: &mut flare_proto::common::Message,
+    _timeline: &TimelineMetadata,
 ) {
-    embed_timeline_in_extra_map(&mut message.extra, timeline);
 }
 
 /// 解析 i64 字符串
@@ -262,13 +262,13 @@ fn parse_i64(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()
 }
 
-/// 从消息的 extra 字段中提取 seq
+/// 从消息字段中提取 conversation_seq
 ///
 /// # 参数
 /// * `message` - 消息对象
 ///
 /// # 返回
-/// * `Option<i64>` - 如果消息包含 seq，返回 seq 值；否则返回 None
+/// * `Option<i64>` - 如果消息包含 conversation_seq，返回该值；否则返回 None
 ///
 /// # 示例
 /// ```
@@ -276,19 +276,20 @@ fn parse_i64(value: &str) -> Option<i64> {
 /// use flare_proto::common::Message;
 ///
 /// let mut message = Message::default();
-/// message.extra.insert("seq".to_string(), "100".to_string());
+/// message.conversation_seq = 100;
 ///
 /// let seq = extract_seq_from_message(&message);
 /// assert_eq!(seq, Some(100));
 /// ```
 pub fn extract_seq_from_message(message: &flare_proto::common::Message) -> Option<i64> {
-    message
-        .extra
-        .get("seq")
-        .and_then(|seq_str| seq_str.parse::<i64>().ok())
+    if message.conversation_seq == 0 {
+        None
+    } else {
+        Some(message.conversation_seq as i64)
+    }
 }
 
-/// 将 seq 嵌入到消息的 extra 字段中
+/// 将 conversation_seq 写入消息字段
 ///
 /// # 参数
 /// * `message` - 消息对象（可变引用）
@@ -302,10 +303,12 @@ pub fn extract_seq_from_message(message: &flare_proto::common::Message) -> Optio
 /// let mut message = Message::default();
 /// embed_seq_in_message(&mut message, 100);
 ///
-/// assert_eq!(message.extra.get("seq"), Some(&"100".to_string()));
+/// assert_eq!(message.conversation_seq, 100);
 /// ```
 pub fn embed_seq_in_message(message: &mut flare_proto::common::Message, seq: i64) {
-    message.extra.insert("seq".to_string(), seq.to_string());
+    if seq > 0 {
+        message.conversation_seq = seq as u64;
+    }
 }
 
 /// 从消息的 extra 字段中提取 seq（从 HashMap 直接提取）

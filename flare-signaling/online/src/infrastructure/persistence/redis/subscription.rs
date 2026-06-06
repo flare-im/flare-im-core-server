@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use anyhow::anyhow;
+use flare_server_core::error::Result;
+
 use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::config::OnlineConfig;
@@ -31,7 +31,12 @@ impl RedisSubscriptionRepository {
     async fn connection(&self) -> Result<ConnectionManager> {
         ConnectionManager::new(self.client.as_ref().clone())
             .await
-            .map_err(|e| anyhow!("failed to open redis connection: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to open redis connection: {}",
+                    e
+                ))
+            })
     }
 }
 
@@ -42,22 +47,25 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         let topic_key = self.topic_subscribers_key(&topic);
 
         // 保存用户的订阅
-        let _: () = conn
-            .hset(&user_key, &topic, "1")
-            .await
-            .map_err(|e| anyhow!("failed to add subscription: {}", e))?;
+        let _: () = conn.hset(&user_key, &topic, "1").await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to add subscription: {}",
+                e
+            ))
+        })?;
 
         // 添加到主题的订阅者列表
-        let _: () = conn
-            .sadd(&topic_key, &user_id)
-            .await
-            .map_err(|e| anyhow!("operation failed: {}", e))?;
+        let _: () = conn.sadd(&topic_key, &user_id).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
 
         // 设置过期时间
         let _: bool = conn
             .expire(&user_key, self.config.redis_ttl_seconds as i64)
             .await
-            .map_err(|e| anyhow!("operation failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
 
         Ok(())
     }
@@ -67,25 +75,31 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         ctx: &flare_server_core::context::Context,
         topics: &[String],
     ) -> Result<()> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow!("user_id is required in context"))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
 
         for topic in topics {
             // 从用户的订阅中移除
-            let _: i64 = conn
-                .hdel(&user_key, topic)
-                .await
-                .map_err(|e| anyhow!("failed to remove subscription: {}", e))?;
+            let _: i64 = conn.hdel(&user_key, topic).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to remove subscription: {}",
+                    e
+                ))
+            })?;
 
             // 从主题的订阅者列表中移除
             let topic_key = self.topic_subscribers_key(topic);
-            let _: i64 = conn
-                .srem(&topic_key, user_id)
-                .await
-                .map_err(|e| anyhow!("failed to remove subscriber: {}", e))?;
+            let _: i64 = conn.srem(&topic_key, user_id).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to remove subscriber: {}",
+                    e
+                ))
+            })?;
         }
 
         Ok(())
@@ -95,20 +109,29 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         &self,
         ctx: &flare_server_core::context::Context,
     ) -> Result<Vec<(String, HashMap<String, String>)>> {
-        let user_id = ctx
-            .user_id()
-            .ok_or_else(|| anyhow!("user_id is required in context"))?;
+        let user_id = ctx.user_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "user_id is required in context".to_string(),
+            )
+        })?;
         let mut conn = self.connection().await?;
         let user_key = self.subscription_key(user_id);
-        let subscriptions: HashMap<String, String> = conn
-            .hgetall(&user_key)
-            .await
-            .map_err(|e| anyhow!("failed to get subscriptions: {}", e))?;
+        let subscriptions: HashMap<String, String> =
+            conn.hgetall(&user_key).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to get subscriptions: {}",
+                    e
+                ))
+            })?;
 
         let mut result = Vec::new();
         for (topic, value_str) in subscriptions {
-            let value: serde_json::Value = serde_json::from_str(&value_str)
-                .map_err(|e| anyhow!("failed to parse subscription: {}", e))?;
+            let value: serde_json::Value = serde_json::from_str(&value_str).map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to parse subscription: {}",
+                    e
+                ))
+            })?;
 
             let params: HashMap<String, String> = value
                 .get("params")
@@ -124,10 +147,9 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
     async fn get_topic_subscribers(&self, topic: &str) -> Result<Vec<String>> {
         let mut conn = self.connection().await?;
         let topic_key = self.topic_subscribers_key(topic);
-        let subscribers: Vec<String> = conn
-            .smembers(&topic_key)
-            .await
-            .map_err(|e| anyhow!("operation failed: {}", e))?;
+        let subscribers: Vec<String> = conn.smembers(&topic_key).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
 
         Ok(subscribers)
     }

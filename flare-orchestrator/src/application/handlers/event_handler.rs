@@ -18,7 +18,7 @@ use tracing::instrument;
 
 use crate::application::extension::ExtensionOrchestrator;
 use crate::domain::{PersistenceMode, service::EventDomainService};
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 事件处理器（编排层）
 #[derive(Clone)]

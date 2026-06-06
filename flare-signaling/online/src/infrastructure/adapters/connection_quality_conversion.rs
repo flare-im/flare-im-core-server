@@ -13,7 +13,7 @@ impl From<ConnectionQuality> for ProtoConnectionQuality {
         Self {
             rtt_ms: domain.rtt_ms(),
             packet_loss_rate: domain.packet_loss_rate(),
-            last_measure_ts: domain.last_measure_ts().timestamp_millis(),
+            last_measured_at: domain.last_measure_ts().timestamp_millis(),
             network_type: domain.network_type().as_str().to_string(),
             signal_strength: domain.signal_strength().unwrap_or(0),
         }

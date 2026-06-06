@@ -1,4 +1,5 @@
-use crate::domain::SyncDomainError;
+use crate::domain::cursor_regression;
+use flare_server_core::error::FlareError;
 
 /// 用户在某会话的同步游标只允许单调前移；多端并发时取较大值合并，避免误报回退。
 pub fn merge_cursor_monotonic(previous_last_seq: Option<i64>, new_last_seq: i64) -> i64 {
@@ -12,14 +13,11 @@ pub fn merge_cursor_monotonic(previous_last_seq: Option<i64>, new_last_seq: i64)
 pub fn ensure_cursor_monotonic(
     previous_last_seq: Option<i64>,
     new_last_seq: i64,
-) -> Result<(), SyncDomainError> {
-    if let Some(p) = previous_last_seq {
-        if new_last_seq < p {
-            return Err(SyncDomainError::CursorRegression {
-                previous: p,
-                attempted: new_last_seq,
-            });
-        }
+) -> Result<(), FlareError> {
+    if let Some(p) = previous_last_seq
+        && new_last_seq < p
+    {
+        return Err(cursor_regression(p, new_last_seq));
     }
     Ok(())
 }

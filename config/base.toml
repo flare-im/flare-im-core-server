@@ -76,7 +76,8 @@ ttl_seconds = 86400
 #   2. config/environments/{FLARE_ENV}.toml 根级 [mq]（FLARE_ENV 未设时为 development）
 #   3. 本文件此处
 #
-# 可选：FLARE_MQ_ALLOW_KAFKA_FALLBACK=true|1|yes|on
+# 生产运行时 Kafka 与 JetStream 二选一，不做同链路双写。
+# allow_kafka_fallback 仅保留为迁移期显式开关，生产建议保持 false。
 default_backend = "nats"
 allow_kafka_fallback = false
 
@@ -101,7 +102,7 @@ stream_name = "FLARE_MESSAGE"
 subjects = ["flare.im.message.*", "flare.im.conversation.*"]
 options = { retention = "limits", storage = "file", max_age_seconds = "604800", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
 
-# Kafka 生产级推荐参数：默认不启用，仅在 mq.default_backend = "kafka" 或双写/审计场景使用。
+# Kafka 生产级推荐参数：仅在 mq.default_backend = "kafka" 时作为主 MQ 后端使用。
 [kafka.message]
 brokers = ["127.0.0.1:29092"]
 client_id = "flare-im-message"

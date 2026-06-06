@@ -12,7 +12,7 @@ use tracing::instrument;
 
 use crate::application::queries::GetOnlineStatusQuery;
 use crate::domain::model::OnlineStatusRecord;
-use crate::error::Result;
+use flare_server_core::error::Result;
 /// 在线状态查询处理器（查询侧）
 ///
 /// 直接调用基础设施层的仓储实现，不经过领域服务

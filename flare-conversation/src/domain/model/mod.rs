@@ -173,7 +173,7 @@ pub enum DeviceState {
 }
 
 impl DeviceState {
-    pub fn from_str(state: &str) -> Self {
+    pub fn from_persistence_value(state: &str) -> Self {
         match state {
             "online" => DeviceState::Online,
             "offline" => DeviceState::Offline,
@@ -220,7 +220,7 @@ pub struct MessageSyncResult {
 }
 
 pub fn millis_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
-    Some(Utc.timestamp_millis_opt(ms).single()?)
+    Utc.timestamp_millis_opt(ms).single()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,7 +265,7 @@ impl ConflictResolutionPolicy {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse_config_value(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "exclusive" => Some(Self::Exclusive),
             "platform-exclusive" | "platform_exclusive" => Some(Self::PlatformExclusive),
@@ -463,8 +463,10 @@ impl ConversationDomainConfig {
             max_bootstrap_conversations: Some(100),
         }
     }
+}
 
-    pub fn default() -> Self {
+impl Default for ConversationDomainConfig {
+    fn default() -> Self {
         Self {
             recent_message_limit: 20,
             max_bootstrap_conversations: Some(100),

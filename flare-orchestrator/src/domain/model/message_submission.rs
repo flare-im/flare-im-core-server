@@ -1,14 +1,8 @@
 use crate::domain::model::ConversationType;
-use crate::error::Result;
 use chrono::Utc;
-use flare_im_core::{
-    ErrorCode,
-    utils::{
-        TimelineMetadata, current_millis, datetime_to_timestamp, embed_timeline_in_extra,
-        normalize_tenant_id, timestamp_to_millis,
-    },
-};
+use flare_im_core::utils::{TimelineMetadata, current_millis, normalize_tenant_id};
 use flare_proto::common::Message;
+use flare_server_core::error::{ErrorCode, Result};
 use flare_server_core::flare_err;
 use uuid::Uuid;
 
@@ -36,9 +30,7 @@ impl MessageSubmission {
     /// 1. 填充默认值（server_id, client_msg_id, conversation_type, status, source）
     /// 2. 推断消息类型（MessageProfile）
     /// 3. 设置时间戳和 timeline 元数据
-    /// 4. 设置 tenant_id 和 shard_key
     pub fn prepare(mut request: Message, defaults: &MessageDefaults) -> Result<Self> {
-        // 1. 校验必填字段
         if request.conversation_id.is_empty() {
             return Err(flare_err!(
                 ErrorCode::BadRequest,
@@ -49,7 +41,6 @@ impl MessageSubmission {
             return Err(flare_err!(ErrorCode::BadRequest, "sender_id is required"));
         }
 
-        // 2. 生成或保留 server_id
         let client_provided_server_id = if !request.server_id.is_empty() {
             Some(request.server_id.clone())
         } else {
@@ -57,19 +48,16 @@ impl MessageSubmission {
         };
         request.server_id = Uuid::new_v4().to_string();
 
-        // 保存原始 server_id（如果有）
         if let Some(old_server_id) = client_provided_server_id {
             request
-                .extra
-                .insert("original_server_id".to_string(), old_server_id);
+                .extensions
+                .insert("original_server_id".to_string(), old_server_id.into_bytes());
         }
 
-        // 3. 填充 client_msg_id
         if request.client_msg_id.is_empty() {
             request.client_msg_id = request.server_id.clone();
         }
 
-        // 4. 填充默认值
         if request.source == 0 {
             request.source = match defaults.default_sender_type.as_str() {
                 "user" => 1,
@@ -86,68 +74,21 @@ impl MessageSubmission {
             request.status = 1;
         }
 
-        // 5. 推断消息类型
-        let profile = MessageProfile::ensure(&mut request);
+        let _profile = MessageProfile::ensure(&mut request);
 
-        // 6. 设置时间戳
-        if request.timestamp.is_none() {
-            request.timestamp = Some(datetime_to_timestamp(Utc::now()));
+        if request.created_at <= 0 {
+            request.created_at = Utc::now().timestamp_millis();
         }
 
-        // 7. 构建 timeline 元数据
         let ingestion_ts = current_millis();
-        let emit_ts = request.timestamp.as_ref().and_then(timestamp_to_millis);
+        let emit_ts = (request.created_at > 0).then_some(request.created_at);
         let timeline = TimelineMetadata {
             emit_ts,
             ingestion_ts,
             ..TimelineMetadata::default()
         };
-        embed_timeline_in_extra(&mut request, &timeline);
 
-        // 8. 设置 tenant_id（优先级：extra > defaults > 0）
-        let tenant_id = request
-            .extra
-            .get("x-tenant-id")
-            .or_else(|| request.extra.get("tenant_id"))
-            .cloned()
-            .or_else(|| defaults.default_tenant_id.clone())
-            .map(normalize_tenant_id)
-            .unwrap_or_else(|| "0".to_string());
-        request
-            .extra
-            .insert("tenant_id".to_string(), tenant_id.clone());
-        request.extra.insert("x-tenant-id".to_string(), tenant_id);
-
-        // 9. 设置 shard_key（默认为 conversation_id）
-        let shard_key = request
-            .extra
-            .get("shard_key")
-            .cloned()
-            .unwrap_or_else(|| request.conversation_id.clone());
-        request
-            .extra
-            .entry("shard_key".to_string())
-            .or_insert(shard_key);
-
-        // 10. 设置 business_type（如果 extra 中没有）
-        if request
-            .extra
-            .get("business_type")
-            .map_or(true, |v| v.is_empty())
-        {
-            request.extra.insert(
-                "business_type".to_string(),
-                defaults.default_business_type.clone(),
-            );
-        }
-
-        // 11. 设置 message_type_label（如果 extra 中没有）
-        if request.extra.get("message_type").is_none() {
-            request.extra.insert(
-                "message_type".to_string(),
-                profile.message_type_label().to_string(),
-            );
-        }
+        let _ = defaults.default_tenant_id.as_ref().map(normalize_tenant_id);
 
         let message_id = request.server_id.clone();
         Ok(Self {

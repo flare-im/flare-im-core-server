@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use flare_grpc_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
 use flare_im_core::Ctx;
 use flare_im_core::event::types::types;
-use flare_proto::common::PushTaskEnvelope;
+use flare_proto::PushTaskEnvelope;
+use flare_server_core::error::Result;
 use flare_server_core::eventbus::EventEnvelope;
 use flare_server_core::eventbus::EventPublisher;
 use flare_server_core::eventbus::MqEventBus;
@@ -27,18 +27,30 @@ pub struct PushProxyMqPublisher {
 impl PushProxyMqPublisher {
     pub async fn new(config: Arc<PushProxyConfig>) -> Result<Self> {
         let producer: Arc<dyn Producer> = match config.mq_backend.as_str() {
-            "kafka" => Arc::new(
-                KafkaProducerBuilder::new()
-                    .build(config.as_ref())
-                    .map_err(|e| anyhow::anyhow!("failed to build kafka producer: {}", e))?,
-            ),
+            "kafka" => Arc::new(KafkaProducerBuilder::new().build(config.as_ref()).map_err(
+                |e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to build kafka producer: {}",
+                        e
+                    ))
+                },
+            )?),
             "nats" | "jetstream" => Arc::new(
                 NatsProducerBuilder::new()
                     .build(config.as_ref())
                     .await
-                    .map_err(|e| anyhow::anyhow!("failed to build jetstream producer: {}", e))?,
+                    .map_err(|e| {
+                        flare_server_core::error::FlareError::system(format!(
+                            "failed to build jetstream producer: {}",
+                            e
+                        ))
+                    })?,
             ),
-            other => anyhow::bail!("unsupported mq backend: {}", other),
+            other => {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "unsupported mq backend: {other}"
+                )));
+            }
         };
         Ok(Self {
             config,
@@ -59,7 +71,9 @@ impl PushProxyMqPublisher {
         self.event_publisher
             .publish(ctx, &self.config.push_request_topic, &envelope)
             .await
-            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -80,7 +94,9 @@ impl PushProxyMqPublisher {
         self.event_publisher
             .publish(ctx, &self.config.push_request_topic, &envelope)
             .await
-            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -97,7 +113,9 @@ impl PushProxyMqPublisher {
         self.event_publisher
             .publish(ctx, &self.config.push_request_topic, &envelope)
             .await
-            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))?;
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -121,6 +139,8 @@ impl PushProxyMqPublisher {
         self.event_publisher
             .publish(ctx, topic, &envelope)
             .await
-            .map_err(|e| anyhow::anyhow!("event publish failed: {}", e))
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
+            })
     }
 }

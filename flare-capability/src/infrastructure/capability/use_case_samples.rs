@@ -21,7 +21,7 @@ async fn require_pre_send_allow(
     let pipeline = registry.pre_send().await;
     match pipeline.evaluate(ctx, &input).await? {
         GuardDecision::Allow => Ok(()),
-        GuardDecision::Reject(r) => Err(CapabilityError::Rejected(r)),
+        GuardDecision::Reject(r) => Err(CapabilityError::Rejected(Box::new(r))),
     }
 }
 
@@ -34,6 +34,7 @@ impl SendMessageUseCaseExample {
         Self { registry }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute(
         &self,
         ctx: &Ctx,
@@ -80,6 +81,7 @@ impl StartCallUseCaseExample {
         Self { registry }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute(
         &self,
         ctx: &Ctx,

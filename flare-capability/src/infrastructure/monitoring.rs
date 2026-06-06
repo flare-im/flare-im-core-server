@@ -150,7 +150,7 @@ impl AlertTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::SystemTime;
 
     fn create_test_result(name: &str, success: bool, latency_ms: u64) -> HookExecutionResult {
         HookExecutionResult {

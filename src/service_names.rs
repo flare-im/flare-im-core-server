@@ -87,6 +87,12 @@ pub mod service_names {
     /// 注册路径: `flare/flare-core-gateway`
     pub const CORE_GATEWAY: &str = "flare-core-gateway";
 
+    /// Admin Gateway 服务名
+    ///
+    /// 用于内网管理 API、审计查询、运维只读快照等管理面能力
+    /// 注册路径: `flare/flare-admin-gateway`
+    pub const ADMIN_GATEWAY: &str = "flare-admin-gateway";
+
     /// Orchestrator 服务名（消息编排，后续可扩展推送入队/ACK）
     ///
     /// 注册路径: `flare/flare-orchestrator`
@@ -147,6 +153,7 @@ pub fn validate_service_name(name: &str) -> bool {
             | service_names::PUSH_PROXY
             | service_names::ACCESS_GATEWAY
             | service_names::CORE_GATEWAY
+            | service_names::ADMIN_GATEWAY
             | service_names::ORCHESTRATOR
             | service_names::STORAGE_WRITER
             | service_names::STORAGE_READER

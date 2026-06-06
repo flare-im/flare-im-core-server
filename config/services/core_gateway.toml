@@ -9,9 +9,15 @@
 # default_svid = "svid.im"
 
 # JWT Token 配置
-token_secret = "insecure-secret"
+# token_secret 不应写入仓库。生产/联调用 FLARE_CORE_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
+
+# 联调默认业务登录 token 与 core issuer/secret 一致，无需额外 trusted issuer。
+# 若生产使用独立业务 JWT，可取消注释：
+# [[services.core_gateway.trusted_token_issuers]]
+# issuer = "business-auth"
+# secret = "set-via-secret-manager"
 
 # 跨地区网关路由配置
 # 支持多网关部署：通过服务发现自动发现所有 Access Gateway 实例
@@ -21,8 +27,8 @@ token_ttl_seconds = 3600
 address = "0.0.0.0"
 port = 50050
 
-# 下游 gRPC：默认 discovery:// 服务发现；本地无注册中心时用 *_STATIC_FALLBACK
-# 可通过环境变量覆盖：GRPC_*_SERVICE_URL / GRPC_*_STATIC_FALLBACK
+# 下游 gRPC：默认 discovery:// 服务发现；本地无注册中心时用 scoped *_STATIC_FALLBACK
+# 可通过环境变量覆盖：FLARE_CORE_GATEWAY_GRPC_*_SERVICE_URL / FLARE_CORE_GATEWAY_GRPC_*_STATIC_FALLBACK
 [services.core_gateway.grpc]
 message_service_url = "discovery://flare-orchestrator"
 conversation_service_url = "discovery://flare-conversation"

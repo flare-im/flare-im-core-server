@@ -6,14 +6,14 @@ use flare_im_core::abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAG
 use flare_im_core::hooks::hook_context_data::{HookContextData, set_hook_context_data};
 use flare_im_core::hooks::{MessageDraft, MessageRecord};
 use flare_im_core::utils::normalize_tenant_id;
-use flare_proto::common::Message;
+use flare_proto::common::{Message, MessageContent};
 use flare_server_core::context::{Context, Ctx};
 use flare_server_core::mq::nats::consumer::context_from_nats_headers;
 use prost::Message as _;
 use serde_json::json;
 
 use crate::domain::model::MessageSubmission;
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 #[allow(dead_code)]
 fn tenant_id_from_opt(tenant: Option<&str>, default: Option<&String>) -> String {
@@ -34,10 +34,16 @@ fn non_empty(value: String) -> Option<String> {
 
 fn extract_client_message_id(message: &Message) -> Option<String> {
     message
-        .extra
+        .attributes
         .get("client_message_id")
         .cloned()
         .filter(|id| !id.is_empty())
+}
+
+fn message_content_bytes(content: Option<&MessageContent>) -> Vec<u8> {
+    content
+        .map(|content| content.encode_to_vec())
+        .unwrap_or_default()
 }
 
 /// `Message.conversation_type` 整型 → Hook/SDK 约定小写标签（与 `flare.common.v1.ConversationType` 一致）
@@ -58,35 +64,42 @@ fn conversation_type_int_to_label(ty: i32) -> String {
 pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
     use flare_im_core::hooks::hook_context_data::{get_hook_context_data, set_hook_context_data};
     let mut hook_ctx = (**ctx).clone();
-    if hook_ctx.request_id().is_empty() {
-        if let Some(request_id) = request
-            .extra
+    if hook_ctx.request_id().is_empty()
+        && let Some(request_id) = request
+            .attributes
             .get("x-request-id")
             .filter(|id| !id.is_empty())
-        {
-            let mut new_ctx = Context::with_request_id(request_id.clone());
-            if let Some(tenant_id) = ctx.tenant_id() {
-                new_ctx = new_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
-            }
-            if let Some(user_id) = ctx.user_id() {
-                new_ctx = new_ctx.with_user_id(user_id.to_string());
-            }
-            hook_ctx = new_ctx;
+    {
+        let mut new_ctx = Context::with_request_id(request_id.clone());
+        if let Some(tenant_id) = ctx.tenant_id() {
+            new_ctx = new_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
         }
+        if let Some(user_id) = ctx.user_id() {
+            new_ctx = new_ctx.with_user_id(user_id);
+        }
+        hook_ctx = new_ctx;
     }
     let mut hook_data = get_hook_context_data(&hook_ctx)
         .cloned()
         .unwrap_or_default();
     hook_data.conversation_id = non_empty(request.conversation_id.clone());
     hook_data.tags = request
-        .extra
+        .attributes
         .get(EXTRA_KEY_TAGS)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
-    if let Some(trace_id) = request.extra.get("x-trace-id").filter(|s| !s.is_empty()) {
+    if let Some(trace_id) = request
+        .attributes
+        .get("x-trace-id")
+        .filter(|s| !s.is_empty())
+    {
         hook_ctx = hook_ctx.with_trace_id(trace_id.clone());
     }
-    if let Some(user_id) = request.extra.get("x-user-id").filter(|s| !s.is_empty()) {
+    if let Some(user_id) = request
+        .attributes
+        .get("x-user-id")
+        .filter(|s| !s.is_empty())
+    {
         hook_ctx = hook_ctx.with_user_id(user_id.clone());
     }
     hook_data.sender_id = non_empty(request.sender_id.clone());
@@ -120,9 +133,9 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
     Arc::new(set_hook_context_data(hook_ctx, hook_data))
 }
 
-/// 从 Message.extra 还原 Ctx（MQ 编解码）
+/// 从 Message.attributes 还原 Ctx（MQ 编解码）
 pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) -> Ctx {
-    let mut ctx = context_from_nats_headers(&request.extra);
+    let mut ctx = context_from_nats_headers(&request.attributes);
     if ctx.tenant_id().is_none() || ctx.tenant_id().map(|s| s.is_empty()).unwrap_or(true) {
         let mut c = (*ctx).clone();
         if let Some(t) = default_tenant {
@@ -135,23 +148,23 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
     let mut hook_data = HookContextData::new();
     hook_data.conversation_id = non_empty(request.conversation_id.clone());
     hook_data.tags = request
-        .extra
+        .attributes
         .get(EXTRA_KEY_TAGS)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
-    for (k, v) in &request.extra {
+    for (k, v) in &request.attributes {
         if k.as_str() != EXTRA_KEY_TAGS && !k.starts_with("x-") {
             hook_data.tags.insert(k.clone(), v.clone());
         }
     }
-    if let Some(tenant_id_val) = request.extra.get("x-tenant-id") {
+    if let Some(tenant_id_val) = request.attributes.get("x-tenant-id") {
         hook_data
             .attributes
             .entry("tenant_id".into())
             .or_insert(normalize_tenant_id(tenant_id_val));
     }
 
-    if !request.content.is_empty() {
+    if request.content.is_some() {
         hook_data.sender_id = non_empty(request.sender_id.clone());
         let conversation_type_str = conversation_type_int_to_label(request.conversation_type);
         hook_data.conversation_type = non_empty(conversation_type_str.clone());
@@ -167,7 +180,7 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
             .entry("business_type".into())
             .or_insert(
                 request
-                    .extra
+                    .attributes
                     .get("business_type")
                     .cloned()
                     .unwrap_or_default(),
@@ -200,7 +213,7 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
             .attributes
             .entry("message_type_label".into())
             .or_insert(message_type_label.to_string());
-        let sync = request.extra.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
+        let sync = request.attributes.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
         hook_data
             .attributes
             .entry("sync".into())
@@ -216,7 +229,7 @@ pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) ->
 }
 
 pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
-    let content_bytes = request.content.clone();
+    let content_bytes = message_content_bytes(request.content.as_ref());
     let mut draft = MessageDraft::new(content_bytes);
     let message_type_label = detect_message_type(request);
     if let Some(id) = non_empty(request.server_id.clone()) {
@@ -226,16 +239,16 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
         draft.set_conversation_id(conv);
     }
     draft.headers = request
-        .extra
+        .attributes
         .get(EXTRA_KEY_TAGS)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
-    let mut metadata = request.extra.clone();
+    let mut metadata = request.attributes.clone();
     metadata.remove(EXTRA_KEY_SYNC);
     metadata.remove(EXTRA_KEY_TAGS);
     metadata.entry("business_type".into()).or_insert(
         request
-            .extra
+            .attributes
             .get("business_type")
             .cloned()
             .unwrap_or_default(),
@@ -247,12 +260,8 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
     metadata
         .entry("message_type".into())
         .or_insert(message_type_label.to_string());
-    // content_type 从 MessageContent 推断（Message.content 为 bytes）
-    let decoded_content = if request.content.is_empty() {
-        None
-    } else {
-        flare_proto::common::MessageContent::decode(request.content.as_slice()).ok()
-    };
+    // content_type 从 typed MessageContent 推断。
+    let decoded_content = request.content.as_ref();
     let content_type_label = decoded_content
         .as_ref()
         .map(|c| match &c.content {
@@ -269,7 +278,8 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
             Some(flare_proto::common::message_content::Content::Forward(_)) => "forward",
             Some(flare_proto::common::message_content::Content::LinkCard(_)) => "link_card",
             Some(flare_proto::common::message_content::Content::Thread(_)) => "thread",
-            None | _ => "unspecified",
+            Some(_) => "unspecified",
+            None => "unspecified",
         })
         .unwrap_or("unspecified");
     metadata
@@ -301,19 +311,23 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
     }
     draft.metadata = metadata;
     draft.extra("conversation_id", json!(request.conversation_id));
-    let sync = request.extra.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
+    let sync = request.attributes.get(EXTRA_KEY_SYNC).map(|s| s.as_str()) == Some("true");
     draft.extra("sync", json!(sync));
     let request_id_value = request
-        .extra
+        .attributes
         .get("x-request-id")
         .cloned()
         .unwrap_or_default();
     let mut request_context_json = json!({ "request_id": request_id_value });
-    if let Some(trace_id) = request.extra.get("x-trace-id").filter(|s| !s.is_empty()) {
+    if let Some(trace_id) = request
+        .attributes
+        .get("x-trace-id")
+        .filter(|s| !s.is_empty())
+    {
         request_context_json["trace_id"] = json!(trace_id);
     }
     let mut attrs = serde_json::Map::new();
-    for (k, v) in &request.extra {
+    for (k, v) in &request.attributes {
         if k.as_str() != EXTRA_KEY_SYNC && k.as_str() != EXTRA_KEY_TAGS && !k.starts_with("x-") {
             attrs.insert(k.clone(), json!(v));
         }
@@ -322,14 +336,14 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
         request_context_json["attributes"] = json!(attrs);
     }
     draft.extra("request_context", request_context_json);
-    if let Some(tenant_id) = request.extra.get("x-tenant-id") {
+    if let Some(tenant_id) = request.attributes.get("x-tenant-id") {
         draft.extra(
             "tenant_context",
             json!({
                 "tenant_id": tenant_id,
-                "business_type": request.extra.get("business_type").unwrap_or(&"".to_string()),
-                "environment": request.extra.get("environment").unwrap_or(&"".to_string()),
-                "attributes": { "labels": {}, "custom_attributes": request.extra.clone() },
+                "business_type": request.attributes.get("business_type").unwrap_or(&"".to_string()),
+                "environment": request.attributes.get("environment").unwrap_or(&"".to_string()),
+                "attributes": { "labels": {}, "custom_attributes": request.attributes.clone() },
             }),
         );
     }
@@ -338,18 +352,20 @@ pub fn build_draft_from_request(request: &Message) -> Result<MessageDraft> {
 
 pub fn apply_draft_to_request(request: &mut Message, draft: &MessageDraft) {
     // PreSend Hook 可能改写 `draft.payload`；必须与 `common.Message.content` 同步，否则 WAL/推送仍带旧正文或空 body。
-    request.content = draft.payload.clone();
+    request.content = MessageContent::decode(draft.payload.as_slice()).ok();
     if let Some(conv) = draft.conversation_id.as_ref() {
         request.conversation_id = conv.clone();
     }
-    if let Some(tags_json) = serde_json::to_string(&draft.headers).ok() {
-        request.extra.insert(EXTRA_KEY_TAGS.to_string(), tags_json);
+    if let Ok(tags_json) = serde_json::to_string(&draft.headers) {
+        request
+            .attributes
+            .insert(EXTRA_KEY_TAGS.to_string(), tags_json);
     }
     if let Some(message_id) = &draft.message_id {
         request.server_id = message_id.clone();
     }
-    request.extra = draft.metadata.clone();
-    if let Some(label) = request.extra.get("message_type") {
+    request.attributes = draft.metadata.clone();
+    if let Some(label) = request.attributes.get("message_type") {
         use flare_proto::common::MessageType;
         request.message_type = match label.as_str() {
             "text" => MessageType::Text as i32,
@@ -366,28 +382,24 @@ pub fn apply_draft_to_request(request: &mut Message, draft: &MessageDraft) {
     }
     for (key, value) in &draft.extra {
         if let Ok(serialized) = serde_json::to_string(value) {
-            request.extra.insert(key.clone(), serialized);
+            request.attributes.insert(key.clone(), serialized);
         }
     }
 }
 
 pub fn build_message_record(_submission: &MessageSubmission, request: &Message) -> MessageRecord {
-    let mut metadata: HashMap<String, String> = request.extra.clone();
+    let mut metadata: HashMap<String, String> = request.attributes.clone();
     metadata.insert(
         "business_type".into(),
         request
-            .extra
+            .attributes
             .get("business_type")
             .cloned()
             .unwrap_or_default(),
     );
     let conversation_type_str = conversation_type_int_to_label(request.conversation_type);
     metadata.insert("conversation_type".into(), conversation_type_str.clone());
-    let decoded_msg_content = if !request.content.is_empty() {
-        flare_proto::common::MessageContent::decode(request.content.as_slice()).ok()
-    } else {
-        None
-    };
+    let decoded_msg_content = request.content.as_ref();
     let content_type = decoded_msg_content
         .as_ref()
         .map(|c| match &c.content {
@@ -405,7 +417,8 @@ pub fn build_message_record(_submission: &MessageSubmission, request: &Message) 
             Some(flare_proto::common::message_content::Content::Forward(_)) => "forward",
             Some(flare_proto::common::message_content::Content::Thread(_)) => "thread",
             Some(flare_proto::common::message_content::Content::LinkCard(_)) => "link_card",
-            None | _ => "application/unknown",
+            Some(_) => "application/unknown",
+            None => "application/unknown",
         })
         .unwrap_or("application/unknown");
     metadata.insert("content_type".into(), content_type.to_string());
@@ -416,7 +429,7 @@ pub fn build_message_record(_submission: &MessageSubmission, request: &Message) 
             .or_insert(client_msg_id);
     }
     let tags: HashMap<String, String> = request
-        .extra
+        .attributes
         .get(EXTRA_KEY_TAGS)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
@@ -452,7 +465,7 @@ pub fn merge_context(original: &Ctx, updated: Ctx) -> Ctx {
     // 合并 trace_id（如果 updated 没有）
     let mut merged_ctx = (*updated).clone();
     if merged_ctx.trace_id().is_empty() && !original.trace_id().is_empty() {
-        merged_ctx = merged_ctx.with_trace_id(original.trace_id().to_string());
+        merged_ctx = merged_ctx.with_trace_id(original.trace_id());
     }
 
     // 合并 tenant_id（如果 updated 没有）
@@ -460,12 +473,10 @@ pub fn merge_context(original: &Ctx, updated: Ctx) -> Ctx {
         .tenant_id()
         .map(|id| id.is_empty())
         .unwrap_or(true)
+        && let Some(tenant_id) = original.tenant_id()
+        && !tenant_id.is_empty()
     {
-        if let Some(tenant_id) = original.tenant_id() {
-            if !tenant_id.is_empty() {
-                merged_ctx = merged_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
-            }
-        }
+        merged_ctx = merged_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
     }
 
     // 合并 HookContextData
@@ -506,8 +517,8 @@ fn detect_message_type(message: &Message) -> &'static str {
     use flare_proto::common::MessageType;
     use std::convert::TryFrom;
 
-    // 优先从 extra 中获取 message_type 标签
-    if let Some(label) = message.extra.get("message_type") {
+    // 优先从 attributes 中获取 message_type 标签
+    if let Some(label) = message.attributes.get("message_type") {
         return match label.as_str() {
             "text" | "text/plain" => "text",
             "binary" => "binary",
@@ -538,22 +549,18 @@ fn detect_message_type(message: &Message) -> &'static str {
         Ok(MessageType::Card) => "card",
         Ok(MessageType::Custom) => "custom",
         Ok(MessageType::Notification) => "notification",
-        Ok(MessageType::MergeForward) => "forward",
+        Ok(MessageType::Forward) => "forward",
         Ok(MessageType::LinkCard) => "link_card",
-        Ok(MessageType::MiniProgram) => "mini_program",
         Ok(MessageType::Thread) => "thread",
-        Ok(MessageType::Poll) => "vote",
-        Ok(MessageType::Task) => "task",
-        Ok(MessageType::Schedule) => "schedule",
-        Ok(MessageType::Announcement) => "announcement",
+        Ok(MessageType::AppCard) => "app_card",
+        Ok(MessageType::RichText) => "rich_text",
+        Ok(MessageType::ImageGroup) => "image_group",
+        Ok(MessageType::Sticker) => "sticker",
+        Ok(MessageType::Emoji) => "emoji",
+        Ok(MessageType::Placeholder) => "placeholder",
         Ok(MessageType::System) => "system",
         Ok(_) | Err(_) => {
-            let decoded = if !message.content.is_empty() {
-                flare_proto::common::MessageContent::decode(message.content.as_slice()).ok()
-            } else {
-                None
-            };
-            if let Some(content) = decoded.as_ref() {
+            if let Some(content) = message.content.as_ref() {
                 match &content.content {
                     Some(flare_proto::common::message_content::Content::Text(_)) => "text",
                     Some(flare_proto::common::message_content::Content::Image(_)) => "image",
@@ -570,7 +577,8 @@ fn detect_message_type(message: &Message) -> &'static str {
                     Some(flare_proto::common::message_content::Content::Forward(_)) => "forward",
                     Some(flare_proto::common::message_content::Content::LinkCard(_)) => "link_card",
                     Some(flare_proto::common::message_content::Content::Thread(_)) => "thread",
-                    None | _ => "unknown",
+                    Some(_) => "unknown",
+                    None => "unknown",
                 }
             } else {
                 "unknown"

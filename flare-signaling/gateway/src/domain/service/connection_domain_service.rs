@@ -215,7 +215,7 @@ impl ConnectionDomainService {
             current_quality.map(|metrics| flare_proto::common::ConnectionQuality {
                 rtt_ms: metrics.rtt_ms,
                 packet_loss_rate: metrics.packet_loss_rate,
-                last_measure_ts: 0, // TODO: 填充正确的时间戳
+                last_measured_at: 0, // TODO: 填充正确的时间戳
                 network_type: metrics.network_type,
                 signal_strength: 0, // TODO: 填充正确的信号强度
             });

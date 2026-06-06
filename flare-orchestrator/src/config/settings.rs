@@ -3,6 +3,8 @@ use std::{collections::HashMap, env};
 
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::ORCHESTRATOR_MAIN_GROUP_DEFAULT;
+use flare_im_core::constants::topics::{TOPIC_MESSAGE_MAIN_DLQ, TOPIC_MESSAGE_MAIN_RETRY_5S};
+use flare_im_core::metrics::MetricsEndpointConfig;
 use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
@@ -28,7 +30,7 @@ pub enum SessionCreationMode {
 }
 
 impl SessionCreationMode {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_config_value(s: &str) -> Self {
         if s.eq_ignore_ascii_case("async") {
             Self::Async
         } else {
@@ -51,9 +53,17 @@ pub struct MessageOrchestratorConfig {
     pub kafka_brokers: Vec<String>,
     pub kafka_client_id: String,
     pub kafka_options: HashMap<String, String>,
+    pub message_dlq_topic: String,
+    pub message_retry_topic: String,
+    pub message_retry_delay_ms: u64,
     pub redis_url: Option<String>,
     pub wal_hash_key: Option<String>,
     pub wal_ttl_seconds: u64,
+    pub wal_replay_enabled: bool,
+    pub wal_replay_interval_ms: u64,
+    pub wal_replay_error_backoff_ms: u64,
+    pub wal_replay_batch_limit: usize,
+    pub wal_replay_claim_lease_ms: u64,
     pub default_tenant_id: Option<String>,
     pub default_business_type: String,
     pub default_conversation_type: i32,
@@ -103,6 +113,8 @@ pub struct MessageOrchestratorConfig {
     /// 若非空，须包含 `EVENT_CALL_SIGNAL` 的整型值（与 `flare_proto::common::EventType` 一致，当前为 `10`），
     /// 否则 [`crate::application::handlers::plugin::CallCapabilityBridge`] enrich 会被扩展路由跳过。
     pub extension_plugin_event_type_allowlist: Vec<i32>,
+    /// Prometheus 指标出口配置。
+    pub metrics: MetricsEndpointConfig,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
@@ -130,6 +142,14 @@ fn parse_csv_strings(raw: Option<String>) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn parse_bool(raw: Option<String>) -> Option<bool> {
+    raw.and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    })
 }
 
 fn kafka_brokers_from_env_or_profile(
@@ -259,6 +279,37 @@ impl MessageOrchestratorConfig {
             .as_ref()
             .map(|p| p.options.clone())
             .unwrap_or_default();
+        let message_dlq_topic = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_MESSAGE_DLQ_TOPIC",
+            "STORAGE_MESSAGE_DLQ_TOPIC",
+        )
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.message_dlq_topic.clone())
+        })
+        .unwrap_or_else(|| TOPIC_MESSAGE_MAIN_DLQ.to_string());
+        let message_retry_topic = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_MESSAGE_RETRY_TOPIC",
+            "STORAGE_MESSAGE_RETRY_TOPIC",
+        )
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.message_retry_topic.clone())
+        })
+        .unwrap_or_else(|| TOPIC_MESSAGE_MAIN_RETRY_5S.to_string());
+        let message_retry_delay_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_MESSAGE_RETRY_DELAY_MS",
+            "STORAGE_MESSAGE_RETRY_DELAY_MS",
+        )
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.message_retry_delay_ms)
+        })
+        .unwrap_or(5000);
 
         let redis_url = env_or_fallback("MESSAGE_ORCHESTRATOR_REDIS_URL", "STORAGE_REDIS_URL")
             .or_else(|| redis_profile.as_ref().map(|profile| profile.url.clone()));
@@ -288,6 +339,65 @@ impl MessageOrchestratorConfig {
                 .and_then(|profile| profile.ttl_seconds)
         })
         .unwrap_or(24 * 3600);
+
+        let wal_replay_enabled = parse_bool(env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_WAL_REPLAY_ENABLED",
+            "STORAGE_WAL_REPLAY_ENABLED",
+        ))
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.wal_replay_enabled)
+        })
+        .unwrap_or(wal_hash_key.is_some());
+
+        let wal_replay_interval_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_WAL_REPLAY_INTERVAL_MS",
+            "STORAGE_WAL_REPLAY_INTERVAL_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.wal_replay_interval_ms)
+        })
+        .unwrap_or(1000);
+
+        let wal_replay_error_backoff_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_WAL_REPLAY_ERROR_BACKOFF_MS",
+            "STORAGE_WAL_REPLAY_ERROR_BACKOFF_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.wal_replay_error_backoff_ms)
+        })
+        .unwrap_or(5000);
+
+        let wal_replay_batch_limit = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_WAL_REPLAY_BATCH_LIMIT",
+            "STORAGE_WAL_REPLAY_BATCH_LIMIT",
+        )
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.wal_replay_batch_limit)
+        })
+        .unwrap_or(256);
+
+        let wal_replay_claim_lease_ms = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_WAL_REPLAY_CLAIM_LEASE_MS",
+            "STORAGE_WAL_REPLAY_CLAIM_LEASE_MS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.wal_replay_claim_lease_ms)
+        })
+        .unwrap_or(30_000);
 
         let default_tenant_id = env_or_fallback(
             "MESSAGE_ORCHESTRATOR_DEFAULT_TENANT_ID",
@@ -350,7 +460,7 @@ impl MessageOrchestratorConfig {
             "MESSAGE_ORCHESTRATOR_SESSION_CREATION_MODE",
             "SESSION_CREATION_MODE",
         )
-        .map(|s| SessionCreationMode::from_str(&s))
+        .map(|s| SessionCreationMode::from_config_value(&s))
         .unwrap_or(SessionCreationMode::Async);
 
         // 从环境变量获取 server_id 和 svid
@@ -466,6 +576,51 @@ impl MessageOrchestratorConfig {
             "ORCHESTRATOR_EXTENSION_PLUGIN_EVENT_TYPE_ALLOWLIST",
         ));
 
+        let metrics_enabled = parse_bool(env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_METRICS_ENABLED",
+            "ORCHESTRATOR_METRICS_ENABLED",
+        ))
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.metrics_enabled)
+        })
+        .unwrap_or(true);
+        let metrics_address = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_METRICS_ADDRESS",
+            "ORCHESTRATOR_METRICS_ADDRESS",
+        )
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.metrics_address.clone())
+        })
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+        let metrics_port = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_METRICS_PORT",
+            "ORCHESTRATOR_METRICS_PORT",
+        )
+        .and_then(|value| value.parse::<u16>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.metrics_port)
+        })
+        .unwrap_or(19181);
+        let metrics_path = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_METRICS_PATH",
+            "ORCHESTRATOR_METRICS_PATH",
+        )
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.metrics_path.clone())
+        })
+        .unwrap_or_else(|| "/metrics".to_string());
+        let mut metrics =
+            MetricsEndpointConfig::new(metrics_address, metrics_port).with_path(metrics_path);
+        metrics.enabled = metrics_enabled;
+
         Self {
             mq_backend,
             jetstream_url,
@@ -478,9 +633,17 @@ impl MessageOrchestratorConfig {
             kafka_brokers,
             kafka_client_id,
             kafka_options,
+            message_dlq_topic,
+            message_retry_topic,
+            message_retry_delay_ms,
             redis_url,
             wal_hash_key,
             wal_ttl_seconds,
+            wal_replay_enabled,
+            wal_replay_interval_ms,
+            wal_replay_error_backoff_ms,
+            wal_replay_batch_limit,
+            wal_replay_claim_lease_ms,
             default_tenant_id,
             default_business_type,
             default_conversation_type,
@@ -506,6 +669,7 @@ impl MessageOrchestratorConfig {
             extension_tenant_allowlist,
             extension_hook_message_type_allowlist,
             extension_plugin_event_type_allowlist,
+            metrics,
         }
     }
 

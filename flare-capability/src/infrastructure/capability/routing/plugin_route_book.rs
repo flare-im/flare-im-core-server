@@ -113,10 +113,10 @@ impl PluginRouteBook {
         if !status.healthy {
             return false;
         }
-        if let Some(last) = status.last_checked_at {
-            if last.elapsed() > max_stale {
-                return false;
-            }
+        if let Some(last) = status.last_checked_at
+            && last.elapsed() > max_stale
+        {
+            return false;
         }
         true
     }

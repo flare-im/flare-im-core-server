@@ -9,11 +9,10 @@ use async_trait::async_trait;
 use flare_grpc_proto::message::SendMessageResponse;
 use flare_grpc_proto::signaling::router::{RouteMessageRequest, RouteOptions};
 use flare_im_core::Ctx;
-use flare_proto::common::{ErrorCode, Message, SendAck};
+use flare_proto::common::{ErrorCode, Message, SendAccepted, SendAck, SendAckDurability, send_ack};
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode as ServerErrorCode, Result};
 use prost::Message as ProstMessage;
-use prost_types::Timestamp;
 
 use crate::constants::DEFAULT_ROUTE_SVID;
 use crate::domain::ports::IMessageCommandPort;
@@ -97,33 +96,35 @@ impl IMessageCommandPort for RouterMessageCommandPort {
                 "SendMessageResponse.server_msg_id is empty".to_string(),
             ));
         }
-        if send_resp.seq == 0 {
+        if send_resp.conversation_seq == 0 {
             return Ok(send_ack_from_failure(
                 &message,
                 ErrorCode::Internal as i32,
-                "SendMessageResponse.seq is zero".to_string(),
+                "SendMessageResponse.conversation_seq is zero".to_string(),
+            ));
+        }
+        if send_resp.durability() == SendAckDurability::Unspecified {
+            return Ok(send_ack_from_failure(
+                &message,
+                ErrorCode::Internal as i32,
+                "SendMessageResponse.durability is unspecified".to_string(),
             ));
         }
 
         Ok(SendAck {
             client_msg_id: message.client_msg_id.clone(),
-            server_msg_id: send_resp.server_msg_id.trim().to_string(),
-            seq: send_resp.seq,
             conversation_id: message.conversation_id.clone(),
-            success: true,
-            error_code: ErrorCode::Ok as i32,
-            error_message: String::new(),
-            server_time: send_resp.sent_at.or_else(|| {
-                Some(Timestamp {
-                    seconds: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0),
-                    nanos: 0,
-                })
-            }),
             ack_id: None,
-            error_detail: None,
+            result: Some(send_ack::Result::Accepted(SendAccepted {
+                server_msg_id: send_resp.server_msg_id.trim().to_string(),
+                conversation_seq: send_resp.conversation_seq,
+                server_time: send_resp
+                    .sent_at
+                    .as_ref()
+                    .map(timestamp_to_millis)
+                    .unwrap_or_else(now_millis),
+                durability: send_resp.durability,
+            })),
         })
     }
 }
@@ -131,19 +132,24 @@ impl IMessageCommandPort for RouterMessageCommandPort {
 fn send_ack_from_failure(message: &Message, code: i32, msg: String) -> SendAck {
     SendAck {
         client_msg_id: message.client_msg_id.clone(),
-        server_msg_id: String::new(),
-        seq: 0,
         conversation_id: message.conversation_id.clone(),
-        success: false,
-        error_code: code,
-        error_message: msg.clone(),
-        server_time: None,
         ack_id: None,
-        error_detail: Some(flare_proto::common::ErrorDetail {
+        result: Some(send_ack::Result::Error(flare_proto::common::ErrorDetail {
             code,
             reason: "MESSAGE_SEND_FAILED".to_string(),
             message: msg,
             track: String::new(),
-        }),
+        })),
     }
+}
+
+fn timestamp_to_millis(ts: &prost_types::Timestamp) -> i64 {
+    ts.seconds.saturating_mul(1000) + (ts.nanos as i64 / 1_000_000)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
 }

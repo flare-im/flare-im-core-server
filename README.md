@@ -1,293 +1,202 @@
 # Flare IM Core
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
+[![Docs](https://img.shields.io/badge/docs-README-546E7A)](docs/README.md)
 
-> **IM 服务端通信核心层（Rust 工作区）** — 基于 Tonic、gRPC、JetStream、PostgreSQL 等组件的微服务集合，与 `flare-im` 单仓内 `flare-proto`、`flare-server-core`、`flare-im-core-sdk`（客户端 SDK）等协同演进。
+[![DDD/CQRS](https://img.shields.io/badge/Pattern-DDD%20%2B%20CQRS-9C27B0)](docs/01-architecture-overview.md)
+[![Event Driven](https://img.shields.io/badge/Event%20Driven-JetStream%20%7C%20Kafka-2196F3)](docs/01-architecture-overview.md)
+[![Reliability](https://img.shields.io/badge/Reliability-WAL%20%2B%20Ledger-4CAF50)](docs/02-message-reliability-and-low-latency.md)
+[![Sync](https://img.shields.io/badge/Sync-seq%20%2F%20cursor-FF9800)](docs/02-message-reliability-and-low-latency.md)
+[![gRPC](https://img.shields.io/badge/API-typed%20gRPC%20%2B%20Hook-E91E63)](docs/04-third-party-integration.md)
 
-Flare IM Core 提供接入、信令、消息编排、存储读写、会话同步、推送与媒资等能力；本地开发依赖 Docker Compose 拉起 Consul、Redis、JetStream、PostgreSQL 等基础设施。具体行为以本仓库源码与 `deploy/` 配置为准。
+Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编排、会话同步、在线状态、信令路由、存储读写、推送、媒资与能力扩展。它面向生产级 IM 场景设计，保持业务中立：用户、好友、群资料、业务权限和产品规则由业务系统或插件提供，Core 只消费清晰的身份、会话、成员、Hook 与能力合同。
 
-## 核心特性
 
-### 技术亮点
+## 核心亮点
 
-- **Rust 工作区**：统一 `edition = "2024"`、`rust-version = "1.94.0"`（见根 `Cargo.toml`）
-- **gRPC**：服务间 HTTP/2，接口定义见上级目录 `flare-proto` / `flare-grpc-proto`
-- **事件驱动**：JetStream 串联编排、存储写入与推送等链路
-- **存储**：PostgreSQL（含时序场景扩展能力，以实际库表与 `flare-storage` 为准）
-- **服务发现**：与 `flare-server-core` / `flare-im-core` 发现模块配合，本地 `deploy` 默认 Consul（亦可按配置对接 etcd 等后端）
+- 业务中立 IM Core：只承载消息、会话、seq、sync、push、presence、media、hook、capability 等通用能力。
+- DDD + CQRS：领域层维护不变量，Command 路径负责写入，Query/Projection 路径服务读模型。
+- 事件驱动：JetStream/Kafka 作为消息、存储、推送、会话事件的异步边界，避免接入层与存储层强耦合。
+- 面向不丢主链消息：持久消息经过服务端消息 ID、客户端幂等 ID、会话 seq、发送侧 WAL、broker ack、存储幂等、写入 ledger 与 ACK 发布。
+- 低延迟发送体验：发送 API 默认在 broker accepted 边界返回 ACK，存储与推送异步完成，客户端通过 durability 与后续 sync/ack 收敛。
+- 插件化能力：Hook、Capability、RTC/SFU、风控、审核、机器人等通过端口、gRPC/Webhook、本地能力或插件扩展，不成为 Core 的硬依赖；生产主链 Hook 推荐使用 gRPC transport。
+- 服务间 typed gRPC 优先：业务系统在可信内网调用消息、会话、媒体、在线状态等高频能力时，推荐使用 typed gRPC；HTTP/OpenAPI 主要作为外部三方、管理后台、低频后台和临时适配 facade。
+- 可观测与可运维：tracing、Prometheus、Grafana、Loki、Tempo、message write ledger、MQ retry/DLQ topic 为生产排障提供边界。
 
-### 容量与体验方向
-
-以下为产品与架构演进方向，**非固定 SLA**；线上指标以各自监控与压测为准。
-
-| 维度 | 方向 |
-|------|------|
-| 消息延迟 | 接入、路由、存储分段优化，目标低延迟 |
-| 并发连接 | 接入层与在线服务可水平扩展 |
-| 吞吐 | JetStream 解耦 + 存储批量写入 |
-| 可用性 | 多实例部署、健康检查与注册发现 |
-
----
-
-## 架构概览
-
-### 系统架构图（逻辑）
+## 架构总览
 
 ```mermaid
-graph TB
-    subgraph "客户端层"
-        Web[Web 客户端]
-        Mobile[移动客户端]
-        Desktop[桌面客户端]
-    end
+flowchart LR
+    SDK["IM SDK / 客户端"] --> SGW["flare-signaling/gateway<br/>长连接接入"]
+    ThirdParty["业务服务 / 后台 / 三方"] --> CGW["flare-core-gateway<br/>HTTP typed facade"]
+    Admin["管理后台 / 运维"] --> AGW["flare-admin-gateway<br/>Admin facade"]
 
-    subgraph "接入层"
-        CoreGW[flare-core-gateway<br/>统一业务网关]
-        SignalingGW[flare-signaling/gateway<br/>WebSocket/QUIC 接入]
-    end
+    SGW --> Route["flare-signaling/route<br/>路由"]
+    SGW --> Online["flare-signaling/online<br/>在线状态"]
+    CGW --> Orchestrator["flare-orchestrator<br/>消息与事件编排"]
+    CGW --> Conversation["flare-conversation<br/>会话读写"]
+    CGW --> Media["flare-media<br/>媒资"]
+    AGW --> StorageReader["flare-storage/reader<br/>查询与审计"]
 
-    subgraph "核心层"
-        Route[flare-signaling/route<br/>路由中枢]
-        Online[flare-signaling/online<br/>在线状态]
-        Orchestrator[flare-orchestrator<br/>消息编排]
-        SyncOrch[flare-sync-orchestrator<br/>同步编排]
-        Capability[flare-capability<br/>Hook + 能力扩展 DDD/CQRS]
-    end
-
-    subgraph "存储层"
-        StorageWriter[flare-storage/writer<br/>持久化消费者]
-        StorageReader[flare-storage/reader<br/>查询服务]
-        Conversation[flare-conversation<br/>会话与同步]
-    end
-
-    subgraph "推送层"
-        PushServer[flare-push/server<br/>推送调度]
-        PushWorker[flare-push/worker<br/>推送执行]
-        PushProxy[flare-push/proxy<br/>推送代理]
-    end
-
-    subgraph "辅助服务"
-        Media[flare-media<br/>媒资服务]
-    end
-
-    subgraph "基础设施（示例）"
-        Consul[Consul<br/>服务注册发现]
-        JetStream[JetStream<br/>消息队列]
-        Redis[Redis<br/>缓存]
-        PostgreSQL[(PostgreSQL<br/>主库)]
-        MinIO[(对象存储<br/>S3 兼容)]
-        Prometheus[Prometheus<br/>监控]
-    end
-
-    Web --> CoreGW
-    Mobile --> SignalingGW
-    Desktop --> SignalingGW
-
-    CoreGW --> Route
-    SignalingGW --> Route
-
-    Route --> Online
     Route --> Orchestrator
-    Route --> Capability
-
-    Orchestrator --> JetStream
-    JetStream --> StorageWriter
-    StorageWriter --> PostgreSQL
-    StorageReader --> PostgreSQL
-
-    JetStream --> PushServer
-    PushServer --> PushWorker
-
+    Orchestrator --> Capability["flare-capability<br/>Hook / 插件能力"]
+    Orchestrator --> MQMain["flare.im.message.main"]
+    MQMain --> OrchestratorFanout["主队列消费者<br/>拆分存储与推送"]
+    OrchestratorFanout --> MQStorage["flare.im.message.storage<br/>flare.im.message.events"]
+    OrchestratorFanout --> MQPush["flare.im.push.messages<br/>flare.im.push.events"]
+    MQStorage --> StorageWriter["flare-storage/writer"]
+    MQPush --> PushServer["flare-push/server"]
+    PushServer --> PushWorker["flare-push/worker"]
+    StorageWriter --> Postgres[("PostgreSQL / TimescaleDB")]
+    StorageWriter --> EventStream[("Durable Event Stream")]
+    StorageWriter --> Redis[("Redis hot cache / WAL / presence")]
+    Conversation --> Postgres
     Conversation --> Redis
-    Conversation --> PostgreSQL
     Online --> Redis
-
-    Media --> PostgreSQL
-
-    Route -.-> Consul
-    Online -.-> Consul
-    Conversation -.-> Consul
 ```
 
-### 微服务矩阵（工作区成员）
+### 工作区服务
 
-| 服务模块 | 角色定位 | 说明 |
-|----------|----------|------|
-| **flare-core-gateway** | 统一业务网关 | HTTP 接入、鉴权、路由到后端 gRPC |
-| **flare-signaling/gateway** | 信令接入 | WebSocket 等长连接 |
-| **flare-signaling/online** | 在线状态 | 登录登出、心跳、在线查询 |
-| **flare-signaling/route** | 路由 | 设备路由、推送策略等 |
-| **flare-orchestrator** | 消息编排 | 消息入队、与存储/推送协作 |
-| **flare-sync-orchestrator** | 同步编排 | 多端会话与同步相关编排（见 crate 内实现） |
-| **flare-capability** | Hook + 能力扩展 | Hook 引擎 gRPC；能力子系统按 DDD（`domain/capability` 端口）+ CQRS（`application/capability` 查询/分发）；默认集成进程内 SFU 的 `RtcCapability`、内存授权策略、与 SDK 对齐的能力管理 HTTP（`/capabilities/*`）。已移除旧 `plugin` 宿主与 outbox。 |
-| **flare-storage/writer** | 持久化 | JetStream 消费、写库 |
-| **flare-storage/reader** | 查询 | 消息查询、历史等 |
-| **flare-conversation** | 会话 | 会话元数据、光标与同步 |
-| **flare-push/proxy** | 推送代理 | 推送链路代理能力 |
-| **flare-push/server** | 推送调度 | 任务生成与 Worker 协调 |
-| **flare-push/worker** | 推送执行 | 实际下发与重试 |
-| **flare-media** | 媒资 | 上传与媒体相关能力 |
+| 服务 | 定位 |
+|------|------|
+| `flare-core-gateway` | 面向业务系统和第三方的 HTTP API，做协议适配、认证上下文、错误映射，不写 IM 状态。 |
+| `flare-admin-gateway` | 面向管理面和审计查询的 Admin API。 |
+| `flare-signaling/gateway` | 客户端长连接接入、上行 frame 转发、下行推送、连接质量。 |
+| `flare-signaling/route` | 设备路由、跨网关路由、推送策略。 |
+| `flare-signaling/online` | 在线状态、设备连接、presence 查询。 |
+| `flare-orchestrator` | 消息发送、事件执行、Hook、seq、WAL、会话确保、MQ fanout。 |
+| `flare-sync-orchestrator` | 基于 conversation seq/event stream 的同步编排。 |
+| `flare-storage/writer` | 消费存储 topic，完成幂等、归档、事件流、热缓存、ledger、ACK。 |
+| `flare-storage/reader` | 消息、事件、审计和历史读模型查询。 |
+| `flare-conversation` | 会话、参与者、游标、未读和会话同步读模型。 |
+| `flare-push/server` | 消费推送 topic，区分在线/离线推送任务。 |
+| `flare-push/worker` | 执行离线推送任务和重试。 |
+| `flare-push/proxy` | 推送代理与边界适配。 |
+| `flare-capability` | Hook、能力发现、授权、RTC/SFU 等扩展能力。 |
+| `flare-media` | 上传、对象存储、媒体处理、引用计数。 |
 
-> gRPC 服务名与 `.proto` 以 `flare-proto` / 各服务 `build.rs` 为准。
+## 持久消息发送链路
 
-### 与单仓其他目录的关系
+```mermaid
+sequenceDiagram
+    participant Client as Client or Gateway
+    participant O as flare-orchestrator
+    participant H as Hook / Capability
+    participant W as Redis WAL
+    participant MQ as JetStream or Kafka
+    participant SW as storage-writer
+    participant DB as PostgreSQL
+    participant P as push-server
 
-| 路径（相对 `flare-im` 根） | 说明 |
-|---------------------------|------|
-| `flare-proto` / `flare-grpc-proto` | 协议与生成代码 |
-| `flare-server-core` | 服务端运行时、发现、MQ 等公共能力 |
-| `flare-core` | 共享核心库 |
-| `flare-im-core-sdk` | 客户端 SDK（Rust / C FFI / 示例应用等） |
-
----
-
-## 技术栈（摘要）
-
-| 领域 | 选型 | 备注 |
-|------|------|------|
-| 语言 | Rust 1.94+ | 与工作区 `rust-version` 对齐 |
-| gRPC | Tonic 0.14 | HTTP/2 |
-| 异步 | Tokio | 各服务主运行时 |
-| 消息队列 | async-nats / JetStream | 以配置为准 |
-| 数据库 | SQLx + PostgreSQL | 各服务独立连接配置 |
-| 缓存 | Redis | 在线、会话等 |
-| 发现 | Consul（本地 compose）/ 可扩展 | 见 `flare-im-core` `discovery` 与 `doc/` |
-
----
-
-## 项目结构
-
-```
-flare-im-core/                    # 本 README 所在工作区根
-├── flare-core-gateway/
-├── flare-signaling/
-│   ├── gateway/
-│   ├── online/
-│   ├── route/
-│   └── common/
-├── flare-orchestrator/
-├── flare-sync-orchestrator/      # 同步编排服务
-├── flare-capability/             # Hook gRPC + 能力扩展（DDD/CQRS，HTTP `/capabilities/*`）
-├── flare-storage/
-│   ├── writer/
-│   └── reader/
-├── flare-conversation/
-├── flare-push/
-│   ├── proxy/
-│   ├── server/
-│   └── worker/
-├── flare-media/
-├── src/                          # 公共库 flare_im_core（配置、发现、领域端口等）
-├── deploy/                       # Docker Compose 与本地依赖
-├── doc/                          # 架构与流程文档
-├── benches/
-├── tests/
-├── Cargo.toml                    # workspace 定义
-└── README.md
+    Client->>O: SendMessage(client_msg_id, message)
+    O->>O: validate, infer type, allocate conversation_seq
+    O->>H: pre_send policy
+    H-->>O: allow / reject / enrich
+    O->>O: ensure conversation, decorate message
+    O->>W: append WAL when persistent
+    O->>MQ: publish to flare.im.message.main
+    MQ-->>O: broker accepted
+    O-->>Client: Send ACK durability=BrokerAccepted
+    O->>W: async cleanup WAL
+    MQ->>O: main queue consumer
+    O->>MQ: fanout storage topic and push topic
+    MQ->>SW: persist message/event
+    SW->>DB: archive + event stream + ledger
+    MQ->>P: online/offline push
 ```
 
----
+持久消息的成功 ACK 默认表示 broker accepted，而不是已经落库。调用方必须读取 `SendAckDurability`：
+
+| durability | 含义 | 适用场景 |
+|------------|------|----------|
+| `TRANSIENT_ACCEPTED` | 仅实时投递路径接受，不承诺离线/存储恢复。 | typing、临时通知、`persistent=false` 通知。 |
+| `WAL_ACCEPTED` | 已进入发送侧 WAL，可由恢复任务重放。 | 预留语义。 |
+| `BROKER_ACCEPTED` | 已被主消息队列接受，存储与推送可异步恢复。 | 当前持久消息默认成功边界。 |
+| `PERSISTED` | 已提交存储，可作为立即查询/同步水位。 | 同步持久发送目标，当前发送接口未默认实现。 |
+
+## 消息与通知规则
+
+Core 使用强类型 `MessageContent` 和 `Event` 表达稳定语义，`attributes`/`extensions` 只作为业务扩展。
+
+| 类别 | 示例 | 是否分配 seq | 是否写 WAL | 是否持久化 | 是否离线恢复 |
+|------|------|--------------|------------|------------|--------------|
+| 普通消息 | text、image、file、rich_text、custom | 是 | 是 | 是 | 是 |
+| 系统消息 | group.member_joined、member_removed | 是 | 是 | 是 | 是 |
+| 操作事件 | recall、edit、delete、read、reaction、pin、mark | 是 | 是 | 是 | 是 |
+| 持久通知 | `NotificationContent.persistent = true` | 是 | 是 | 是 | 是 |
+| 临时通知 | `NotificationContent.persistent = false` | 否或不作为历史水位 | 否 | 否 | 否 |
+| 临时状态 | typing、presence、system_event | 否 | 否 | 否 | 否 |
+
+更多细节见 [消息类型与通知持久化](docs/03-message-model-and-notification-persistence.md)。
+
+## 文档导航
+
+`docs/` 是新的主文档入口；旧的 `doc/` 暂时保留为历史设计材料和深度参考，本次未修改。
+
+| 文档 | 内容 |
+|------|------|
+| [docs/README.md](docs/README.md) | 文档索引、阅读顺序、目录边界。 |
+| [docs/01-architecture-overview.md](docs/01-architecture-overview.md) | 技术栈、架构分层、服务边界、topic 与存储。 |
+| [docs/02-message-reliability-and-low-latency.md](docs/02-message-reliability-and-low-latency.md) | 关键消息链路、0 可观测丢失目标、低延迟策略、失败恢复。 |
+| [docs/03-message-model-and-notification-persistence.md](docs/03-message-model-and-notification-persistence.md) | 消息类型、事件类型、通知是否持久化、retention 和扩展字段规范。 |
+| [docs/04-third-party-integration.md](docs/04-third-party-integration.md) | 第三方接入模式、HTTP/gRPC/SDK/Hook/Capability 用法。 |
+| [docs/05-business-system-examples.md](docs/05-business-system-examples.md) | 业务系统实现用户、好友、群、权限、会话与 Core 交互的示例。 |
+| [docs/06-testing-performance-and-operations.md](docs/06-testing-performance-and-operations.md) | 测试矩阵、压测入口、性能报告、观测与运维检查。 |
+
+## 技术栈
+
+| 领域 | 选型 |
+|------|------|
+| 语言与运行时 | Rust 2024 edition、Tokio |
+| RPC | Tonic gRPC、Protobuf (`flare-proto` / `flare-grpc-proto`) |
+| HTTP API | Axum、utoipa OpenAPI |
+| 业务系统接入 | gRPC Hook + typed gRPC；HTTP/OpenAPI 作为 facade |
+| MQ | NATS JetStream 默认，本地也拉起 Kafka；生产同链路二选一 |
+| 存储 | PostgreSQL / TimescaleDB、SQLx |
+| 缓存与状态 | Redis |
+| 对象存储 | S3 兼容存储，本地 RustFS |
+| 发现与配置 | Consul 默认，可扩展到 etcd/mesh |
+| 观测 | tracing、Prometheus、Grafana、Loki、Tempo |
 
 ## 快速开始
-
-### 业务接入文档（Hook / Social）
-
-第三方与 Social 域接入说明见 **[docs/integration/README.md](docs/integration/README.md)**（可同步至官网 `official/docs/integration/`）。
-
-### 环境要求
-
-- **Rust**：**1.94.0** 及以上（与 `[workspace.package]` 一致）
-- **Docker / Docker Compose**：用于 `deploy/docker-compose.yml`
-- **PostgreSQL、Redis、JetStream 等**：由 Compose 拉起或自行提供对等实例
-
-### 本地开发
-
-1. **进入工作区**（在 `flare-im` 单仓内）
-
-```bash
-cd flare-im/flare-im-core
-```
-
-2. **启动依赖**（示例）
 
 ```bash
 cd deploy
 docker compose up -d
+
+cd ..
+./scripts/start_server_core.sh
 ```
 
-3. **数据库初始化**  
-以 `deploy/db/` 与团队约定脚本为准（端口、库名见 compose 与环境变量）。
+业务中立模式使用 `config/hooks.core.toml`。如果要接入业务系统的好友/群权限校验，请先启动业务系统 Hook 服务，并将 `config/hooks.toml` 指向对应的业务系统 Hook 配置。生产环境推荐业务系统 Hook 使用 gRPC transport（`type = "grpc"`），高频服务间调用使用 typed gRPC。
 
-4. **构建**
-
-```bash
-cargo build
-```
-
-5. **运行示例二进制**（按需选择包名）
-
-```bash
-cargo run -p flare-signaling-online --bin flare-signaling-online
-cargo run -p flare-signaling-route --bin flare-signaling-route
-cargo run -p flare-orchestrator --bin flare-orchestrator
-cargo run -p flare-sync-orchestrator --bin flare-sync-orchestrator
-```
-
-具体监听端口与配置项见各服务 `config` 或 `deploy` 内示例。
-
-
-## 开发指南
-
-### 代码规范
-
-- `cargo fmt`、`cargo clippy`
-- gRPC / 错误模型与 `flare-proto`、`flare-server-core` 保持一致
-
-### 测试
+常用验证：
 
 ```bash
 cargo test --workspace
-# 单包示例
-cargo test -p flare-im-core --lib
+cargo run -p flare-im-core --example perf_message_send
 ```
 
-### 配置
+更多启动、测试、压测和排障见 [测试、性能与运维](docs/06-testing-performance-and-operations.md)。
 
-- 日志：`RUST_LOG`（如 `info`）
-- 注册中心、JetStream、数据库等以各服务加载的 TOML / 环境变量为准（参见 `doc/配置管理方案.md`）
+## 当前性能读数
 
----
+`doc/message_send_performance_report_2026-06-06.md` 记录了一次本地开发环境集成压测。该结果不是生产 SLA，但可作为链路健康参考：
 
-## 监控与运维（概要）
+| 场景 | 发送量 | 成功 | ACK 吞吐 | P95 ACK 延迟 | 存储丢失观测 |
+|------|--------|------|----------|--------------|--------------|
+| 单会话 64B | 1000 | 1000 | 318.46 ACK/s | 178.856 ms | 0 |
+| 多会话 64B | 3000 | 3000 | 179.45 ACK/s | 570.038 ms | 0 |
+| 多会话 1KB | 1000 | 1000 | 157.95 ACK/s | 1158.081 ms | 0 |
 
-- **指标**：各服务可暴露 Prometheus 指标（以实际 `metrics` 模块为准）
-- **日志**：`tracing` 结构化输出
-- **部署**：生产参数由运维与 `deploy` 目录外层的编排方案定义
+这次压测使用 dev build，并受到离线推送后端未配置导致的重投递影响。生产容量需要 release build、独立写路径/推送路径压测和连接池调优后重新确认。
 
----
+## 设计约束
 
-## 贡献指南
-
-1. 在功能分支开发，提交前通过 `fmt` / `clippy` / 相关测试  
-2. 协议变更需同步 `flare-proto` 并更新本文档或 `doc/` 中链接说明  
-3. Code Review 与 CI 策略以组织规范为准  
-
----
-
-## 许可证
-
-本仓库采用 [Apache License 2.0](LICENSE)。与 MIT 相比，再分发时需保留 [NOTICE](NOTICE) 中的版权与来源说明；建议在产品的「关于 / 开源许可」页面注明：
-
-> Includes software from Flare IM Core (https://github.com/flare-im/flare-im)
-
-依赖的 `flare-core`、`flare-server-core` 等基础库为 MIT，各自遵循其目录下的许可文件。
-
----
-
-## 联系
-
-技术交流：`flare1522@163.com`；缺陷与功能请求请走仓库 Issue / MR。
-
----
-
-文档版本与 `Cargo.toml` 中 `workspace.package.version` 对齐（当前 **0.1.0**）。
+- Core 不保存业务用户资料、好友关系或群资料。
+- Core 不把稳定协议语义重复写进 `metadata`、`attributes` 或 `extensions`。
+- 业务权限通过认证上下文、Hook、Capability、业务系统 Bridge 或业务服务实现。
+- 业务系统主链 Hook 推荐使用 gRPC transport；可信内网高频服务间调用推荐使用 typed gRPC。
+- 持久消息与临时消息的可靠性承诺必须分开描述。
+- 所有跨服务写路径优先采用 command -> domain -> event/MQ -> consumer/projection。

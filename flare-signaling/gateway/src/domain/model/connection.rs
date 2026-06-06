@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 use flare_core::common::device::DeviceInfo;
 use std::collections::HashMap;
+use std::fmt;
 
 /// 连接状态枚举
 ///
@@ -73,6 +74,12 @@ impl ConnectionQuality {
     /// 更新测量时间
     pub fn update_timestamp(&mut self) {
         self.last_measure_ts = Utc::now();
+    }
+}
+
+impl Default for ConnectionQuality {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -247,27 +254,42 @@ impl Connection {
 /// 领域错误
 ///
 /// 定义连接管理过程中的业务错误。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum DomainError {
     /// 状态转换错误
-    #[error("Invalid state: expected {expected:?}, actual {actual:?}")]
     InvalidState {
         expected: ConnectionState,
         actual: ConnectionState,
     },
 
     /// 连接已断开
-    #[error("Connection already disconnected")]
     AlreadyDisconnected,
 
     /// 连接未找到
-    #[error("Connection not found: {0}")]
     ConnectionNotFound(String),
 
     /// 认证失败
-    #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
 }
+
+impl fmt::Display for DomainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DomainError::InvalidState { expected, actual } => {
+                write!(f, "invalid state: expected {expected:?}, actual {actual:?}")
+            }
+            DomainError::AlreadyDisconnected => write!(f, "connection already disconnected"),
+            DomainError::ConnectionNotFound(connection_id) => {
+                write!(f, "connection not found: {connection_id}")
+            }
+            DomainError::AuthenticationFailed(reason) => {
+                write!(f, "authentication failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DomainError {}
 
 #[cfg(test)]
 mod tests {

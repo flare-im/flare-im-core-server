@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use flare_server_core::error::{AnyhowContext, FlareError, Result};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
@@ -41,9 +41,9 @@ pub struct HookConfigRow {
 }
 
 impl TryFrom<HookConfigRow> for HookConfigItem {
-    type Error = anyhow::Error;
+    type Error = FlareError;
 
-    fn try_from(row: HookConfigRow) -> Result<Self, Self::Error> {
+    fn try_from(row: HookConfigRow) -> std::result::Result<Self, Self::Error> {
         // 解析选择器配置
         let selector: HookSelectorConfig = serde_json::from_value(row.selector_config)
             .context("failed to deserialize selector config")?;
@@ -116,7 +116,12 @@ impl PostgresHookConfigRepository {
             .bind(tenant)
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch hook configs: {}", e))?
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to fetch hook configs: {}",
+                    e
+                ))
+            })?
         } else {
             sqlx::query_as::<_, HookConfigRow>(
                 r#"
@@ -128,7 +133,12 @@ impl PostgresHookConfigRepository {
             )
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch hook configs: {}", e))?
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "failed to fetch hook configs: {}",
+                    e
+                ))
+            })?
         };
 
         let mut config = HookConfig::default();
@@ -225,7 +235,12 @@ impl PostgresHookConfigRepository {
         .bind(created_by)
         .fetch_one(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to save hook config: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to save hook config: {}",
+                e
+            ))
+        })?;
 
         Ok(row.0)
     }
@@ -241,7 +256,12 @@ impl PostgresHookConfigRepository {
         .bind(hook_id)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to fetch hook config by id: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to fetch hook config by id: {}",
+                e
+            ))
+        })?;
 
         match row {
             Some(r) => {
@@ -272,7 +292,12 @@ impl PostgresHookConfigRepository {
         .bind(name)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to fetch hook config by name: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to fetch hook config by name: {}",
+                e
+            ))
+        })?;
 
         match row {
             Some(r) => {
@@ -332,7 +357,12 @@ impl PostgresHookConfigRepository {
         .bind(hook_id)
         .execute(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to update hook config: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to update hook config: {}",
+                e
+            ))
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -351,7 +381,12 @@ impl PostgresHookConfigRepository {
         .bind(hook_id)
         .execute(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to update hook enabled status: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to update hook enabled status: {}",
+                e
+            ))
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -376,7 +411,12 @@ impl PostgresHookConfigRepository {
         .bind(name)
         .execute(&*self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to delete hook config: {}", e))?;
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to delete hook config: {}",
+                e
+            ))
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -403,7 +443,12 @@ impl PostgresHookConfigRepository {
                 .bind(hook_type)
                 .fetch_all(&*self.pool)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to query hook configs: {}", e))?
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to query hook configs: {}",
+                        e
+                    ))
+                })?
             } else {
                 sqlx::query_as::<_, HookConfigRow>(
                     r#"
@@ -417,7 +462,12 @@ impl PostgresHookConfigRepository {
                 .bind(hook_type)
                 .fetch_all(&*self.pool)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to query hook configs: {}", e))?
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to query hook configs: {}",
+                        e
+                    ))
+                })?
             }
         } else {
             if enabled_only {
@@ -433,7 +483,12 @@ impl PostgresHookConfigRepository {
                 .bind(hook_type)
                 .fetch_all(&*self.pool)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to query hook configs: {}", e))?
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to query hook configs: {}",
+                        e
+                    ))
+                })?
             } else {
                 sqlx::query_as::<_, HookConfigRow>(
                     r#"
@@ -446,7 +501,12 @@ impl PostgresHookConfigRepository {
                 .bind(hook_type)
                 .fetch_all(&*self.pool)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to query hook configs: {}", e))?
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "failed to query hook configs: {}",
+                        e
+                    ))
+                })?
             }
         };
 

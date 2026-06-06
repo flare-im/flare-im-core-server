@@ -29,12 +29,11 @@
 
 use std::env;
 
-use anyhow::Result;
 use flare_grpc_proto::access_gateway::{
-    PushMessageRequest, PushMessageResponse, access_gateway_client::AccessGatewayClient,
+    PushMessageRequest, PushResponse, access_gateway_client::AccessGatewayClient,
 };
 use flare_proto::common::{
-    ContentType, Message, MessageContent, MessageSource, MessageStatus, MessageType, TextContent,
+    Message, MessageContent, MessageSource, MessageType, TextContent, message_content,
 };
 use flare_server_core::TokenService;
 use tonic::Request;
@@ -42,7 +41,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_thread_ids(true)
@@ -157,38 +156,31 @@ async fn main() -> Result<()> {
         conversation_id: conversation_id.clone(),
         client_msg_id: String::new(),
         sender_id: business_user_id.clone(),
-        receiver_id: String::new(),
-        seq: 0,
-        timestamp: Some(prost_types::Timestamp {
-            seconds: now.timestamp(),
-            nanos: 0,
-        }),
+        source: MessageSource::System as i32,
+        conversation_seq: 0,
+        created_at: now.timestamp_millis(),
+        conversation_type: flare_proto::common::ConversationType::Group as i32,
         message_type: MessageType::Text as i32,
-        content: vec![],
-        content_type: ContentType::PlainText as i32,
-        extra,
-        quote: None,
-        tags: std::collections::HashMap::new(),
-        offline_push: None,
-        priority: 0,
-        thread_root_id: None,
+        content: Some(MessageContent {
+            content: Some(message_content::Content::Text(TextContent {
+                text: message_content.clone(),
+                mentions: Vec::new(),
+            })),
+        }),
+        channel_id: conversation_id.clone(),
+        attributes: extra,
         ..Default::default()
     };
 
     // 构建 PushMessageRequest（直接使用 StorageMessage）
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert("source".to_string(), "business_push_client".to_string());
-
     let push_request = PushMessageRequest {
-        request_id: Uuid::new_v4().to_string(),
-        target_user_ids: if is_broadcast {
+        user_ids: if is_broadcast {
             vec![] // 空列表表示广播给所有在线用户
         } else {
             target_user_ids.clone()
         },
-        message: Some(message),
+        messages: vec![message],
         options: None,
-        metadata,
     };
 
     // 创建 gRPC 请求，添加认证头
@@ -205,46 +197,44 @@ async fn main() -> Result<()> {
     match client.push_message(request).await {
         Ok(response) => {
             let elapsed = start_time.elapsed();
-            let push_response: PushMessageResponse = response.into_inner();
+            let push_response: PushResponse = response.into_inner();
 
             info!(
                 elapsed_ms = elapsed.as_millis(),
-                success_count = push_response
-                    .statistics
+                pushed_device_count = push_response
+                    .result
                     .as_ref()
-                    .map(|s| s.success_count)
+                    .map(|s| s.pushed_device_count)
                     .unwrap_or(0),
-                failure_count = push_response
-                    .statistics
+                offline_pending_count = push_response
+                    .result
                     .as_ref()
-                    .map(|s| s.failure_count)
+                    .map(|s| s.offline_pending_count)
                     .unwrap_or(0),
                 "✅ 推送请求完成"
             );
 
-            if let Some(stats) = &push_response.statistics {
+            if let Some(stats) = &push_response.result {
                 println!();
                 println!("📊 推送统计:");
-                println!("  总用户数: {}", stats.total_users);
-                println!("  在线用户数: {}", stats.online_users);
-                println!("  离线用户数: {}", stats.offline_users);
-                println!("  成功推送: {} 用户", stats.success_count);
-                println!("  失败推送: {} 用户", stats.failure_count);
+                println!("  在线推送设备数: {}", stats.pushed_device_count);
+                println!("  离线待推送数: {}", stats.offline_pending_count);
+                println!("  window_id: {}", stats.window_id);
                 println!("  耗时: {}ms", elapsed.as_millis());
             }
 
             // 显示推送结果详情
-            if !push_response.results.is_empty() {
+            if !push_response.user_results.is_empty() {
                 println!();
                 println!("📋 推送结果详情:");
-                for result in &push_response.results {
+                for result in &push_response.user_results {
+                    let detail = result.result.as_ref();
                     println!(
-                        "  - {}: 成功 {} 连接, 失败 {} 连接",
-                        result.user_id, result.success_count, result.failure_count
+                        "  - {}: 在线设备 {}, 离线待推送 {}",
+                        result.user_id,
+                        detail.map(|r| r.pushed_device_count).unwrap_or(0),
+                        detail.map(|r| r.offline_pending_count).unwrap_or(0)
                     );
-                    if !result.error_message.is_empty() {
-                        println!("    错误: {}", result.error_message);
-                    }
                 }
             }
 

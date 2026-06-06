@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 
 use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
@@ -83,13 +83,12 @@ pub trait PresencePublisher: Send + Sync {
 }
 
 /// 在线状态监听接口
-
 pub trait PresenceWatcher: Send + Sync {
     /// 监听用户在线状态变化
     async fn watch_presence(
         &self,
         user_ids: &[String],
-    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<PresenceChangeEvent>>>;
+    ) -> Result<tokio::sync::mpsc::Receiver<flare_server_core::error::Result<PresenceChangeEvent>>>;
 }
 
 /// 在线状态变化事件

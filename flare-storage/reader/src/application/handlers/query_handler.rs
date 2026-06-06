@@ -4,9 +4,11 @@
 //! 因为查询是只读操作，不涉及业务逻辑，不需要经过领域层。
 
 use chrono::{DateTime, Utc};
-use flare_im_core::error::{ErrorCode, Result, map_infra_error};
 use flare_im_core::message::{Message, message_to_proto};
-use flare_im_core::utils::extract_seq_from_message;
+use flare_im_core::utils::{
+    extract_seq_from_message, require_tenant_id_from_context, require_user_id_from_context,
+};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -15,8 +17,18 @@ use crate::application::queries::{
     QueryMessagesQuery, SearchMessagesQuery,
 };
 use crate::convert::{datetime_to_timestamp, event_to_proto_or_default};
-use crate::domain::model::Event;
+use crate::domain::model::{Event, MessageWriteLedgerEntry, MessageWriteLedgerQuery};
 use crate::domain::repository::MessageStorage;
+
+fn required_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String> {
+    require_tenant_id_from_context(ctx)
+        .map_err(|msg| flare_server_core::flare_err!(ErrorCode::InvalidParameter, msg))
+}
+
+fn required_user_id(ctx: &flare_server_core::context::Ctx) -> Result<String> {
+    require_user_id_from_context(ctx)
+        .map_err(|msg| flare_server_core::flare_err!(ErrorCode::InvalidParameter, msg))
+}
 
 /// 查询结果结构
 #[derive(Debug, Clone)]
@@ -267,6 +279,25 @@ where
             })
     }
 
+    /// 查询消息写链路账本，供 admin/gRPC 运维面定位卡住或失败的写入。
+    #[instrument(skip(self, ctx, query), fields(tenant_id = %query.tenant_id))]
+    pub async fn handle_query_message_write_ledger(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        query: MessageWriteLedgerQuery,
+    ) -> Result<(Vec<MessageWriteLedgerEntry>, bool)> {
+        self.storage
+            .query_message_write_ledger(ctx, query)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to query message write ledger",
+                )
+            })
+    }
+
     /// 获取同步快照
     #[instrument(skip(self, ctx))]
     pub async fn get_sync_snapshot(
@@ -275,9 +306,16 @@ where
         conversation_ids: &[String],
         messages_per_conversation: i32,
     ) -> Result<Vec<(String, Vec<Message>, i64)>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = required_tenant_id(ctx)?;
+        let user_id = required_user_id(ctx)?;
         self.storage
-            .get_sync_snapshot(ctx, "", "", conversation_ids, messages_per_conversation)
+            .get_sync_snapshot(
+                ctx,
+                &tenant_id,
+                &user_id,
+                conversation_ids,
+                messages_per_conversation,
+            )
             .await
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync snapshot")
@@ -294,11 +332,11 @@ where
         before_seq: i64,
         limit: i32,
     ) -> Result<Vec<Event>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = required_tenant_id(ctx)?;
         self.storage
             .query_events(
                 ctx,
-                "",
+                &tenant_id,
                 conversation_id,
                 after_seq,
                 before_seq,
@@ -320,12 +358,13 @@ where
         limit: i32,
         event_type_filter: Vec<i32>,
     ) -> Result<(Vec<flare_proto::common::Event>, i64, bool, String)> {
+        let tenant_id = required_tenant_id(ctx)?;
         let want = limit.clamp(1, 500);
         let mut rows = self
             .storage
             .query_events(
                 ctx,
-                "",
+                &tenant_id,
                 conversation_id,
                 after_seq,
                 before_seq,
@@ -343,7 +382,7 @@ where
             rows.iter().map(event_to_proto_or_default).collect();
         let next_cursor = events
             .last()
-            .map(|e| format!("evt:{}", e.seq))
+            .map(|e| format!("evt:{}", e.conversation_seq))
             .unwrap_or_default();
         Ok((events, last_seq, has_more, next_cursor))
     }
@@ -373,9 +412,9 @@ where
         ctx: &flare_server_core::context::Ctx,
         conversation_id: &str,
     ) -> Result<Option<i64>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = required_tenant_id(ctx)?;
         self.storage
-            .get_conversation_max_seq(ctx, "", conversation_id)
+            .get_conversation_max_seq(ctx, &tenant_id, conversation_id)
             .await
             .map_err(|e| {
                 map_infra_error(
@@ -394,9 +433,9 @@ where
         user_id: &str,
         conversation_id: &str,
     ) -> Result<Option<crate::domain::model::SyncCursor>> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = required_tenant_id(ctx)?;
         self.storage
-            .get_sync_cursor(ctx, "", user_id, conversation_id)
+            .get_sync_cursor(ctx, &tenant_id, user_id, conversation_id)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get sync cursor"))
     }
@@ -411,11 +450,11 @@ where
         last_synced_seq: i64,
         last_synced_ts: i64,
     ) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = required_tenant_id(ctx)?;
         self.storage
             .update_sync_cursor(
                 ctx,
-                "",
+                &tenant_id,
                 user_id,
                 conversation_id,
                 last_synced_seq,
@@ -426,5 +465,281 @@ where
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to update sync cursor")
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::model::{
+        ConversationMessageHead, EditHistoryEntry, EventType, FilterExpression, MessageUpdate,
+        MessageWriteLedgerEntry, MessageWriteLedgerQuery, PinnedMessageInfo, ReactionItem,
+        ReadListEntry, SyncCursor, VisibilityStatus,
+    };
+    use async_trait::async_trait;
+    use flare_im_core::utils::Context;
+    use flare_server_core::error::Result as AnyhowResult;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingStorage {
+        seen_tenant_id: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl MessageStorage for RecordingStorage {
+        async fn query_messages(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _conversation_id: &str,
+            _user_id: Option<&str>,
+            _start_time: Option<DateTime<Utc>>,
+            _end_time: Option<DateTime<Utc>>,
+            _limit: i32,
+            _include_burned_placeholder: bool,
+        ) -> AnyhowResult<Vec<Message>> {
+            unimplemented!()
+        }
+
+        async fn query_messages_by_seq(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _conversation_id: &str,
+            _user_id: Option<&str>,
+            _after_seq: i64,
+            _before_seq: Option<i64>,
+            _limit: i32,
+            _include_burned_placeholder: bool,
+        ) -> AnyhowResult<Vec<Message>> {
+            unimplemented!()
+        }
+
+        async fn count_messages(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _conversation_id: &str,
+            _user_id: Option<&str>,
+            _start_time: Option<DateTime<Utc>>,
+            _end_time: Option<DateTime<Utc>>,
+        ) -> AnyhowResult<i64> {
+            unimplemented!()
+        }
+
+        async fn get_message(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Option<Message>> {
+            unimplemented!()
+        }
+
+        async fn get_message_timestamp(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Option<DateTime<Utc>>> {
+            unimplemented!()
+        }
+
+        async fn update_message(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+            _updates: MessageUpdate,
+        ) -> AnyhowResult<()> {
+            unimplemented!()
+        }
+
+        async fn batch_update_visibility(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_ids: &[String],
+            _user_id: &str,
+            _visibility: VisibilityStatus,
+        ) -> AnyhowResult<usize> {
+            unimplemented!()
+        }
+
+        async fn search_messages(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _filters: &[FilterExpression],
+            _start_time: Option<DateTime<Utc>>,
+            _end_time: Option<DateTime<Utc>>,
+            _limit: i32,
+        ) -> AnyhowResult<Vec<Message>> {
+            unimplemented!()
+        }
+
+        async fn update_message_attributes(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+            _attributes: HashMap<String, String>,
+            _tags: Vec<String>,
+        ) -> AnyhowResult<()> {
+            unimplemented!()
+        }
+
+        async fn list_all_tags(&self, _ctx: &flare_im_core::Ctx) -> AnyhowResult<Vec<String>> {
+            unimplemented!()
+        }
+
+        async fn query_message_operations(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Vec<Event>> {
+            unimplemented!()
+        }
+
+        async fn query_message_events(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+            _event_types: Option<&[EventType]>,
+            _limit: i32,
+            _offset: i64,
+        ) -> AnyhowResult<(Vec<Event>, bool)> {
+            unimplemented!()
+        }
+
+        async fn query_message_edit_history(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Vec<EditHistoryEntry>> {
+            unimplemented!()
+        }
+
+        async fn query_message_read_records(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Vec<ReadListEntry>> {
+            unimplemented!()
+        }
+
+        async fn query_message_visibility(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+            _user_id: &str,
+        ) -> AnyhowResult<Option<VisibilityStatus>> {
+            unimplemented!()
+        }
+
+        async fn query_message_reactions(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _message_id: &str,
+        ) -> AnyhowResult<Vec<ReactionItem>> {
+            unimplemented!()
+        }
+
+        async fn query_message_write_ledger(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _query: MessageWriteLedgerQuery,
+        ) -> AnyhowResult<(Vec<MessageWriteLedgerEntry>, bool)> {
+            unimplemented!()
+        }
+
+        async fn query_pinned_messages(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _conversation_id: &str,
+        ) -> AnyhowResult<Vec<PinnedMessageInfo>> {
+            unimplemented!()
+        }
+
+        async fn query_events(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            tenant_id: &str,
+            _conversation_id: &str,
+            _after_seq: i64,
+            _before_seq: i64,
+            _limit: i32,
+            _event_type_filter: Vec<i32>,
+        ) -> AnyhowResult<Vec<Event>> {
+            *self.seen_tenant_id.lock().expect("tenant mutex poisoned") =
+                Some(tenant_id.to_string());
+            Ok(vec![])
+        }
+
+        async fn get_conversation_max_seq(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+        ) -> AnyhowResult<Option<i64>> {
+            unimplemented!()
+        }
+
+        async fn get_conversation_message_head(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _conversation_id: &str,
+        ) -> AnyhowResult<Option<ConversationMessageHead>> {
+            unimplemented!()
+        }
+
+        async fn get_sync_cursor(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _tenant_id: &str,
+            _user_id: &str,
+            _conversation_id: &str,
+        ) -> AnyhowResult<Option<SyncCursor>> {
+            unimplemented!()
+        }
+
+        async fn get_sync_snapshot(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _tenant_id: &str,
+            _user_id: &str,
+            _conversation_ids: &[String],
+            _messages_per_conversation: i32,
+        ) -> AnyhowResult<Vec<(String, Vec<Message>, i64)>> {
+            unimplemented!()
+        }
+
+        async fn update_sync_cursor(
+            &self,
+            _ctx: &flare_im_core::Ctx,
+            _tenant_id: &str,
+            _user_id: &str,
+            _conversation_id: &str,
+            _last_synced_seq: i64,
+            _last_synced_ts: i64,
+            _device_id: Option<&str>,
+        ) -> AnyhowResult<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn query_conversation_events_page_passes_context_tenant_to_storage() {
+        let storage = Arc::new(RecordingStorage::default());
+        let seen_tenant = storage.seen_tenant_id.clone();
+        let handler = MessageStorageQueryHandler::new(storage);
+        let ctx: flare_im_core::Ctx =
+            Arc::new(Context::with_request_id("req-sync-events").with_tenant_id("tenant-a"));
+
+        handler
+            .query_conversation_events_page(&ctx, "conversation-a", 0, 0, 10, vec![])
+            .await
+            .expect("query should succeed");
+
+        assert_eq!(
+            seen_tenant
+                .lock()
+                .expect("tenant mutex poisoned")
+                .as_deref(),
+            Some("tenant-a")
+        );
     }
 }

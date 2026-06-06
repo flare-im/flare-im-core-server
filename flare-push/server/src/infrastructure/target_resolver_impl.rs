@@ -2,10 +2,10 @@
 //!
 //! Infrastructure 层实现，依赖在线状态仓储。
 
-use anyhow::Result;
 use async_trait::async_trait;
 use flare_im_core::Ctx;
 use flare_proto::common::{PushEnvelope, PushTargetType};
+use flare_server_core::error::Result;
 use std::sync::Arc;
 
 use crate::domain::model::DeviceInfo;
@@ -118,7 +118,7 @@ mod tests {
             envelope_id: "test-123".to_string(),
             tenant_id: "tenant-1".to_string(),
             trace_id: "trace-123".to_string(),
-            created_at_ms: 1234567890,
+            created_at: 1234567890,
             target_type: PushTargetType::Users as i32,
             target_user_ids: vec!["user-1".to_string(), "user-2".to_string()],
             target_device_ids: Vec::new(),

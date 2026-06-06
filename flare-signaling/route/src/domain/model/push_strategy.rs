@@ -7,11 +7,12 @@ use serde::{Deserialize, Serialize};
 /// 推送策略枚举
 ///
 /// 定义如何选择推送目标设备
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum PushStrategy {
     /// 所有在线设备
     AllDevices,
     /// 最优单设备（优先级+质量）
+    #[default]
     BestDevice,
     /// 活跃设备（排除 Low 优先级）
     ActiveDevices,
@@ -21,7 +22,7 @@ pub enum PushStrategy {
 
 impl PushStrategy {
     /// 从字符串解析
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "all_devices" | "all" => Some(PushStrategy::AllDevices),
             "best_device" | "best" => Some(PushStrategy::BestDevice),
@@ -39,12 +40,6 @@ impl PushStrategy {
             PushStrategy::ActiveDevices => "active_devices",
             PushStrategy::PrimaryDevice => "primary_device",
         }
-    }
-}
-
-impl Default for PushStrategy {
-    fn default() -> Self {
-        PushStrategy::BestDevice
     }
 }
 
@@ -66,38 +61,32 @@ mod tests {
     #[test]
     fn test_from_str() {
         assert_eq!(
-            PushStrategy::from_str("all_devices"),
+            PushStrategy::parse("all_devices"),
             Some(PushStrategy::AllDevices)
         );
+        assert_eq!(PushStrategy::parse("all"), Some(PushStrategy::AllDevices));
         assert_eq!(
-            PushStrategy::from_str("all"),
-            Some(PushStrategy::AllDevices)
-        );
-        assert_eq!(
-            PushStrategy::from_str("best_device"),
+            PushStrategy::parse("best_device"),
             Some(PushStrategy::BestDevice)
         );
+        assert_eq!(PushStrategy::parse("best"), Some(PushStrategy::BestDevice));
         assert_eq!(
-            PushStrategy::from_str("best"),
-            Some(PushStrategy::BestDevice)
-        );
-        assert_eq!(
-            PushStrategy::from_str("active_devices"),
+            PushStrategy::parse("active_devices"),
             Some(PushStrategy::ActiveDevices)
         );
         assert_eq!(
-            PushStrategy::from_str("active"),
+            PushStrategy::parse("active"),
             Some(PushStrategy::ActiveDevices)
         );
         assert_eq!(
-            PushStrategy::from_str("primary_device"),
+            PushStrategy::parse("primary_device"),
             Some(PushStrategy::PrimaryDevice)
         );
         assert_eq!(
-            PushStrategy::from_str("primary"),
+            PushStrategy::parse("primary"),
             Some(PushStrategy::PrimaryDevice)
         );
-        assert_eq!(PushStrategy::from_str("invalid"), None);
+        assert_eq!(PushStrategy::parse("invalid"), None);
     }
 
     #[test]

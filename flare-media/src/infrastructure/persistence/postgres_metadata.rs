@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::error::{ErrorCode, FlareError, Result, map_infra_error};
 use chrono::{DateTime, Utc};
 use flare_im_core::utils::normalize_tenant_id;
+use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool, Row};
@@ -109,6 +109,7 @@ impl MediaAssetRow {
 
 #[derive(Debug, FromRow)]
 struct MediaReferenceRow {
+    tenant_id: String,
     reference_id: String,
     file_id: String,
     namespace: String,
@@ -137,6 +138,7 @@ impl TryFrom<MediaReferenceRow> for MediaReference {
         };
 
         Ok(MediaReference {
+            tenant_id: normalize_tenant_id(row.tenant_id),
             reference_id: row.reference_id,
             file_id: row.file_id,
             namespace: row.namespace,
@@ -297,7 +299,12 @@ impl MediaMetadataStore for PostgresMetadataStore {
         }
     }
 
-    async fn load_by_hash(&self, sha256: &str) -> Result<Option<MediaFileMetadata>> {
+    async fn load_by_hash(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        sha256: &str,
+    ) -> Result<Option<MediaFileMetadata>> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
         let row = sqlx::query_as::<_, MediaAssetRow>(
             r#"
             SELECT
@@ -316,11 +323,16 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 grace_expires_at,
                 access_type
             FROM media_assets
-            WHERE sha256 = $1
-            ORDER BY uploaded_at DESC
+            WHERE tenant_id = $1
+              AND sha256 = $2
+              AND status <> 'soft_deleted'
+            ORDER BY
+                CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                uploaded_at DESC
             LIMIT 1
             "#,
         )
+        .bind(tenant_id)
         .bind(sha256)
         .fetch_optional(self.pool())
         .await
@@ -338,11 +350,14 @@ impl MediaMetadataStore for PostgresMetadataStore {
         }
     }
 
-    async fn delete_metadata(&self, file_id: &str) -> Result<()> {
-        // 注意：delete_metadata 方法签名中没有 tenant_id，但为了数据安全，应该添加
-        // 这里先使用子查询获取 tenant_id，或者需要修改方法签名
-        // 暂时保持向后兼容，但建议后续添加 tenant_id 参数
-        sqlx::query("DELETE FROM media_references WHERE file_id = $1")
+    async fn delete_metadata(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+    ) -> Result<()> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2")
+            .bind(tenant_id)
             .bind(file_id)
             .execute(self.pool())
             .await
@@ -354,7 +369,8 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 )
             })?;
 
-        sqlx::query("DELETE FROM media_assets WHERE file_id = $1")
+        sqlx::query("DELETE FROM media_assets WHERE tenant_id = $1 AND file_id = $2")
+            .bind(tenant_id)
             .bind(file_id)
             .execute(self.pool())
             .await
@@ -385,8 +401,18 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 access_type
             FROM media_assets
             WHERE reference_count = 0
+              AND status = 'pending'
               AND grace_expires_at IS NOT NULL
               AND grace_expires_at <= $1
+              AND (
+                    LOWER(COALESCE(metadata->>'media_lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'media_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'media_usage', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'usage', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'namespace', '')) IN ('message', 'messages', 'im_message', 'im-message')
+                 OR LOWER(COALESCE(metadata->>'business_tag', '')) IN ('message', 'messages', 'im_message', 'im-message')
+              )
             "#,
         )
         .bind(before)
@@ -405,21 +431,24 @@ impl MediaMetadataStore for PostgresMetadataStore {
 
     async fn update_status(
         &self,
+        ctx: &flare_server_core::context::Context,
         file_id: &str,
         status: MediaAssetStatus,
         grace_expires_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
         sqlx::query(
             r#"
             UPDATE media_assets
             SET status = $2,
                 grace_expires_at = $3
-            WHERE file_id = $1
+            WHERE tenant_id = $4 AND file_id = $1
             "#,
         )
         .bind(file_id)
         .bind(MediaAssetRow::status_to_str(status))
         .bind(grace_expires_at)
+        .bind(tenant_id)
         .execute(self.pool())
         .await
         .map_err(|e| {
@@ -439,30 +468,13 @@ impl MediaMetadataStore for PostgresMetadataStore {
 impl MediaReferenceStore for PostgresMetadataStore {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool> {
         let metadata_json = Self::metadata_to_json(&reference.metadata)?;
-
-        // 从 reference.metadata 中提取 tenant_id，如果没有则从 file_id 对应的 media_asset 中获取
-        let tenant_id = if let Some(tenant_id) = reference.metadata.get("tenant_id") {
-            tenant_id.clone()
-        } else {
-            // 从 media_assets 表中查询 tenant_id
-            let row = sqlx::query("SELECT tenant_id FROM media_assets WHERE file_id = $1 LIMIT 1")
-                .bind(&reference.file_id)
-                .fetch_optional(self.pool())
-                .await
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::DatabaseError,
-                        "failed to get tenant_id from media_assets",
-                    )
-                })?;
-
-            if let Some(row) = row {
-                normalize_tenant_id(row.get::<String, _>("tenant_id"))
-            } else {
-                "0".to_string()
-            }
-        };
+        let tenant_id = normalize_tenant_id(&reference.tenant_id);
+        if tenant_id.is_empty() {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "tenant_id is required for media reference"
+            ));
+        }
 
         let result = sqlx::query(
             r#"
@@ -503,18 +515,25 @@ impl MediaReferenceStore for PostgresMetadataStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn delete_reference(&self, reference_id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM media_references WHERE reference_id = $1")
-            .bind(reference_id)
-            .execute(self.pool())
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "failed to delete media reference",
-                )
-            })?;
+    async fn delete_reference(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        reference_id: &str,
+    ) -> Result<bool> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let result =
+            sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND reference_id = $2")
+                .bind(tenant_id)
+                .bind(reference_id)
+                .execute(self.pool())
+                .await
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        "failed to delete media reference",
+                    )
+                })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -582,6 +601,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         let rows = sqlx::query_as::<_, MediaReferenceRow>(
             r#"
             SELECT
+                tenant_id,
                 reference_id,
                 file_id,
                 namespace,

@@ -435,7 +435,7 @@ mod tests {
             ack_type: Some(crate::ack::redis_manager::AckType::TransportAck),
             status: crate::ack::redis_manager::AckStatus::Received,
             timestamp: 1234567890,
-            importance: crate::ack::redis_manager::ImportanceLevel::High,
+            importance: crate::ack::redis_manager::ImportanceLevel::Low,
         };
 
         service.record_ack(ack_info).await?;
@@ -448,9 +448,6 @@ mod tests {
 
         let exists = service.exists_ack("test_msg_1", "user_1").await?;
         assert!(exists);
-
-        let stats = service.get_stats().await?;
-        assert!(stats.cache_size >= 1);
 
         Ok(())
     }

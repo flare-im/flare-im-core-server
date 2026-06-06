@@ -1,7 +1,7 @@
 //! Hook 集成 **不变式**：在物化 [`crate::domain::model::HookExecutionPlan`] 之前校验配置，避免无效适配器创建。
 
 use crate::domain::model::{HookConfigItem, HookTransportConfig};
-use crate::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 
 /// 校验单条 Hook 配置是否可安全物化为执行计划（与传输类型相关的不变式）。
 pub fn validate_hook_item_for_materialization(item: &HookConfigItem) -> FlareResult<()> {
@@ -14,8 +14,8 @@ pub fn validate_hook_item_for_materialization(item: &HookConfigItem) -> FlareRes
             service_name,
             ..
         } => {
-            if endpoint.as_ref().map_or(true, |s| s.is_empty())
-                && service_name.as_ref().map_or(true, |s| s.is_empty())
+            if endpoint.as_ref().is_none_or(|s| s.is_empty())
+                && service_name.as_ref().is_none_or(|s| s.is_empty())
             {
                 return Err(
                     ErrorBuilder::new(

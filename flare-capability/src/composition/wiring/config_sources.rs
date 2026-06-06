@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use flare_server_core::error::{AnyhowContext, Result};
 use serde_json::json;
 
 use crate::infrastructure::config::ConfigWatcher;
@@ -36,7 +36,7 @@ pub(crate) fn log_capability_db_target(database_url: &str) {
             tracing::info!(
                 target = "flare_capability::db",
                 postgres_after_at = %host_db,
-                "flare-capability PostgreSQL target (credentials omitted); init_v2.sql must be applied to this host/database"
+                "flare-capability PostgreSQL target (credentials omitted); deploy/init.sql must be applied to this host/database"
             );
         }
         None => {
@@ -63,37 +63,37 @@ pub(crate) async fn prepare_config_sources(
     if let Some(ref endpoint) = config.config_center_endpoint {
         let mut config_loader = ConfigCenterLoader::new(endpoint.clone(), config.tenant_id.clone());
 
-        if endpoint.starts_with("consul://") {
-            if let Some(addr) = endpoint.strip_prefix("consul://") {
-                let parts: Vec<&str> = addr.split(':').collect();
-                if parts.len() == 2 {
-                    let host = parts[0];
-                    let port = parts[1];
-                    let mut backend_config = HashMap::new();
-                    backend_config.insert(
-                        "url".to_string(),
-                        json!(format!("http://{}:{}", host, port)),
-                    );
-                    let discovery_config = DiscoveryConfig {
-                        backend: BackendType::Consul,
-                        backend_config,
-                        namespace: None,
-                        version: None,
-                        tag_filters: vec![],
-                        load_balance: flare_server_core::LoadBalanceStrategy::RoundRobin,
-                        health_check: None,
-                        refresh_interval: Some(30),
-                    };
-                    if let Ok(consul) =
-                        flare_server_core::discovery::backend::consul::ConsulBackend::new(
-                            &discovery_config,
-                        )
-                        .await
-                    {
-                        let kv_backend: Arc<dyn KvBackend> = Arc::new(consul);
-                        let kv_store = Arc::new(KvStore::new(kv_backend));
-                        config_loader = config_loader.with_kv_store(kv_store);
-                    }
+        if endpoint.starts_with("consul://")
+            && let Some(addr) = endpoint.strip_prefix("consul://")
+        {
+            let parts: Vec<&str> = addr.split(':').collect();
+            if parts.len() == 2 {
+                let host = parts[0];
+                let port = parts[1];
+                let mut backend_config = HashMap::new();
+                backend_config.insert(
+                    "url".to_string(),
+                    json!(format!("http://{}:{}", host, port)),
+                );
+                let discovery_config = DiscoveryConfig {
+                    backend: BackendType::Consul,
+                    backend_config,
+                    namespace: None,
+                    version: None,
+                    tag_filters: vec![],
+                    load_balance: flare_server_core::LoadBalanceStrategy::RoundRobin,
+                    health_check: None,
+                    refresh_interval: Some(30),
+                };
+                if let Ok(consul) =
+                    flare_server_core::discovery::backend::consul::ConsulBackend::new(
+                        &discovery_config,
+                    )
+                    .await
+                {
+                    let kv_backend: Arc<dyn KvBackend> = Arc::new(consul);
+                    let kv_store = Arc::new(KvStore::new(kv_backend));
+                    config_loader = config_loader.with_kv_store(kv_store);
                 }
             }
         }

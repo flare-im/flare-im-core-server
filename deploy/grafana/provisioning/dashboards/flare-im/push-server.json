@@ -1,0 +1,127 @@
+{
+  "dashboard": {
+    "title": "推送服务监控",
+    "tags": ["flare-im", "push-server"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "推送任务处理总数",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(push_tasks_processed_total[5m])) by (message_type, tenant_id)",
+            "legendFormat": "{{message_type}} - {{tenant_id}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "推送成功率",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(online_push_success_total[5m])) by (gateway_id, tenant_id) / sum(rate(push_tasks_processed_total[5m])) by (gateway_id, tenant_id)",
+            "legendFormat": "{{gateway_id}} - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "成功率"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "推送延迟 (P99)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P99 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P95 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P50 - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "延迟"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "在线状态查询延迟",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(online_status_query_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P99"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(online_status_query_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P95"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "在线/离线推送统计",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(online_push_success_total[5m])) by (gateway_id)",
+            "legendFormat": "在线推送成功 - {{gateway_id}}"
+          },
+          {
+            "expr": "sum(rate(offline_push_tasks_created_total[5m])) by (tenant_id)",
+            "legendFormat": "离线推送任务创建 - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "推送失败统计",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(online_push_failure_total[5m])) by (gateway_id, error_type, tenant_id)",
+            "legendFormat": "{{gateway_id}} - {{error_type}} - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops"},
+          {"format": "short"}
+        ]
+      }
+    ]
+  }
+}
+

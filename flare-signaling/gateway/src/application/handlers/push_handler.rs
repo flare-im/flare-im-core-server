@@ -18,7 +18,7 @@ use crate::application::commands::{
     PushNotificationCommand,
 };
 use crate::domain::service::PushDomainService;
-use crate::error::{ErrorBuilder, Result};
+use flare_server_core::error::{ErrorBuilder, Result};
 
 fn push_result_at_now(
     pushed_device_count: i32,
@@ -95,7 +95,7 @@ impl PushHandler {
                     pushed_device_count: pushed,
                     offline_pending_count: offline,
                     window_id: window_id.clone(),
-                    at: Some(at.clone()),
+                    at: Some(at),
                 }),
             });
         }
@@ -158,7 +158,7 @@ impl PushHandler {
                     pushed_device_count: pushed,
                     offline_pending_count: offline,
                     window_id: window_id.clone(),
-                    at: Some(at.clone()),
+                    at: Some(at),
                 }),
             });
         }

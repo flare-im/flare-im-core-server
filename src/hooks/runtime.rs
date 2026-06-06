@@ -1,5 +1,5 @@
 use crate::Ctx;
-use crate::error::Result;
+use flare_server_core::error::Result;
 use std::sync::Arc;
 
 use super::registry::HookRegistry;

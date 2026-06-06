@@ -1,0 +1,107 @@
+{
+  "dashboard": {
+    "title": "存储写入服务监控",
+    "tags": ["flare-im", "storage-writer"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "消息持久化总数",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(messages_persisted_total[5m])) by (tenant_id)",
+            "legendFormat": "{{tenant_id}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "消息持久化延迟 (P99)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P99 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P95 - {{tenant_id}}"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
+            "legendFormat": "P50 - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "延迟"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "批量处理统计",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(batch_processing_duration_seconds[5m]))",
+            "legendFormat": "批量处理耗时"
+          },
+          {
+            "expr": "avg(batch_size)",
+            "legendFormat": "平均批量大小"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "数据库操作延迟",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(db_operation_duration_seconds_bucket[5m])) by (le, operation_type))",
+            "legendFormat": "P99 - {{operation_type}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "错误统计",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(persistence_failure_total[5m])) by (error_type, tenant_id)",
+            "legendFormat": "{{error_type}} - {{tenant_id}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops"},
+          {"format": "short"}
+        ]
+      }
+    ]
+  }
+}
+

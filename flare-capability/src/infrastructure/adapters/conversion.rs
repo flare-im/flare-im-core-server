@@ -82,7 +82,11 @@ pub fn proto_to_message_draft(proto: &HookMessageDraft) -> MessageDraft {
 /// 将 MessageRecord 转换为 HookMessageRecord
 pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
     // 将 MessageRecord 转换为 protobuf Message
-    let ts = system_time_to_timestamp(record.persisted_at);
+    let created_at = record
+        .persisted_at
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default();
     let proto_message = flare_proto::common::Message {
         server_id: record.message_id.clone(),
         conversation_id: record.conversation_id.clone(),
@@ -91,8 +95,8 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         sender_name: String::new(),
         sender_avatar: String::new(),
         source: 1,
-        seq: 0,
-        timestamp: Some(ts.clone()),
+        conversation_seq: 0,
+        created_at,
         conversation_type: record
             .conversation_type
             .as_deref()
@@ -104,10 +108,13 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
             })
             .unwrap_or(0),
         message_type: 0,
+        message_seq: None,
         channel_id: String::new(),
-        content: Vec::new(),
+        content: None,
         status: 1,
-        extra: std::collections::HashMap::new(),
+        retention_policy: None,
+        retention_state: None,
+        attributes: std::collections::HashMap::new(),
         extensions: std::collections::HashMap::new(),
         ..Default::default()
     };
@@ -158,7 +165,7 @@ pub fn proto_to_pre_send_decision(
         }
         PreSendDecision::Continue
     } else {
-        use flare_im_core::error::{ErrorBuilder, ErrorCode};
+        use flare_server_core::error::{ErrorBuilder, ErrorCode};
         let reason = if response.deny_reason_code.trim().is_empty() {
             "HOOK_REJECTED"
         } else {
@@ -181,7 +188,7 @@ pub fn proto_to_recall_decision(response: &RecallHookResponse) -> PreSendDecisio
     if response.allow {
         PreSendDecision::Continue
     } else {
-        use flare_im_core::error::ErrorCode;
+        use flare_server_core::error::ErrorCode;
         let error = flare_server_core::flare_err!(
             ErrorCode::PermissionDenied,
             "Hook rejected the recall request"

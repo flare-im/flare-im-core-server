@@ -5,7 +5,7 @@
 
 use flare_proto::common::Message;
 
-use crate::error::Result;
+use flare_server_core::error::Result;
 
 /// 消息装饰器端口：对 proto Message 做增强（如已读回执、@提及列表），返回装饰后的消息。
 pub trait MessageDecorator: Send + Sync {

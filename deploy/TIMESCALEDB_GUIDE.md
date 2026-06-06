@@ -1,217 +1,245 @@
 # TimescaleDB 使用指南
 
-> **版本**: 0.1.0  
-> **用途**: TimescaleDB 消息存储配置和使用说明
+> 版本: 0.1.0
+> 用途: 说明 `deploy/init.sql` 中消息主存储的 TimescaleDB 设计和维护方式
 
 ---
 
-## 📋 概述
+## 概述
 
-Flare IM 使用 **TimescaleDB** 作为消息存储数据库。TimescaleDB 是基于 PostgreSQL 的时序数据库，专门优化了时序数据的存储和查询性能。
-
----
-
-## 🎯 为什么使用 TimescaleDB
-
-### 优势
-
-1. **时序数据优化**: 专为时序数据设计，查询性能优异
-2. **自动分区**: 按时间自动分区，管理简单
-3. **压缩存储**: 自动压缩历史数据，节省存储空间
-4. **连续聚合**: 支持预聚合视图，加速统计查询
-5. **数据保留策略**: 自动清理过期数据
-6. **PostgreSQL 兼容**: 完全兼容 PostgreSQL，生态丰富
-
-### 适用场景
-
-- ✅ 消息存储（按时间查询）
-- ✅ 日志存储
-- ✅ 指标存储
-- ✅ 事件流数据
+Flare IM Core 使用 PostgreSQL + TimescaleDB 承载消息主存储。当前部署脚本以 [init.sql](./init.sql) 为唯一 schema 入口，`messages` 表被转换为 TimescaleDB Hypertable，用于优化按时间写入、会话消息查询、管理端检索和历史数据压缩。
 
 ---
 
-## 🏗️ 架构设计
+## 当前设计
 
-### 超表（Hypertable）
+### Hypertable
 
-消息表 `messages` 被转换为 TimescaleDB 超表：
+`messages` 表按 `created_at` 分区，而不是按业务消息时间 `timestamp` 分区：
 
 ```sql
--- 按时间分区，每个分区 1 天
-SELECT create_hypertable('messages', 'timestamp', 
-    chunk_time_interval => INTERVAL '1 day'
+SELECT create_hypertable(
+    'messages',
+    'created_at',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE
 );
 ```
 
-### 分区策略
+这样做的原因是 `created_at` 是数据库入库时间，适合作为稳定、单调、可控的写入分区键；`timestamp` 保留为业务时间，仍用于会话时间线、管理端筛选和展示。
 
-- **分区键**: `timestamp` (消息时间戳)
-- **分区间隔**: 1 天
-- **自动管理**: TimescaleDB 自动创建和管理分区
+### 主键与唯一性
+
+TimescaleDB 对 Hypertable 的唯一索引要求包含分区列，因此 `messages` 使用：
+
+```sql
+PRIMARY KEY (created_at, server_id)
+```
+
+消息全局幂等不依赖 Hypertable 唯一约束，而是由普通表 `message_write_ledger` 承载：
+
+```sql
+PRIMARY KEY (tenant_id, server_id)
+```
+
+这能避免 TimescaleDB 分区唯一索引限制影响消息写入链路，同时让恢复、补偿和管理端诊断都有明确账本。
 
 ---
 
-## 📊 数据模型
+## 核心表结构
 
-### 消息表结构
+`messages` 是消息聚合根，字段与 `common/message.proto` 和存储写入路径对齐，关键字段包括：
+
+- `tenant_id`: 租户隔离键
+- `server_id`: 服务端消息 ID
+- `conversation_id`: 会话 ID
+- `sender_id`: 发送者
+- `channel_id`: 路由频道
+- `seq`: 会话内主序
+- `timestamp`: 业务消息时间
+- `created_at`: 入库时间，也是 Hypertable 分区键
+- `message_type`: 消息类型
+- `status`: 消息状态
+- `content`: protobuf 编码后的消息体
+- `extra` / `extensions`: 扩展字段
+
+完整字段以 [init.sql](./init.sql) 为准。
+
+---
+
+## 查询索引
+
+当前 `init.sql` 为写入、同步、管理端查询和媒体生命周期保留了核心索引：
 
 ```sql
-CREATE TABLE messages (
-    id VARCHAR(255) PRIMARY KEY,
-    conversation_id VARCHAR(255) NOT NULL,
-    sender_id VARCHAR(255) NOT NULL,
-    receiver_ids JSONB,
-    content BYTEA,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    extra JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_seq
+    ON messages(tenant_id, conversation_id, seq);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_ts
+    ON messages(tenant_id, conversation_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_sender_client
+    ON messages(tenant_id, sender_id, client_msg_id)
+    WHERE client_msg_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_timestamp
+    ON messages(tenant_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_sender_timestamp
+    ON messages(tenant_id, sender_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_message_type_timestamp
+    ON messages(tenant_id, message_type, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_status_timestamp
+    ON messages(tenant_id, status, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_source_timestamp
+    ON messages(tenant_id, source, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_channel_timestamp
+    ON messages(tenant_id, channel_id, timestamp DESC)
+    WHERE channel_id IS NOT NULL;
+```
+
+索引设计原则：
+
+- IM 同步优先走 `(tenant_id, conversation_id, seq)`。
+- 会话时间线优先走 `(tenant_id, conversation_id, timestamp DESC)`。
+- 管理端多维检索优先走租户 + 筛选维度 + 时间倒序索引。
+- 写入幂等优先走 `message_write_ledger`，不把复杂唯一性压到 Hypertable。
+
+---
+
+## Columnstore / 压缩
+
+当前脚本启用 TimescaleDB columnstore，并按租户与会话分段：
+
+```sql
+ALTER TABLE messages SET (
+    timescaledb.enable_columnstore = true,
+    timescaledb.segmentby = 'tenant_id, conversation_id',
+    timescaledb.orderby = 'created_at DESC, server_id'
 );
 ```
 
-### 索引
+同时会尝试为 30 天前的消息增加 columnstore policy：
 
-- `idx_messages_conversation_id`: 会话ID索引
-- `idx_messages_timestamp`: 时间戳索引
-- `idx_messages_sender_id`: 发送者ID索引
-- `idx_messages_conversation_timestamp`: 会话+时间复合索引
+```sql
+CALL add_columnstore_policy('messages', after => INTERVAL '30 days');
+```
+
+`init.sql` 已兼容不支持 `add_columnstore_policy` 的 TimescaleDB 版本：如果函数不可用，会打印 notice 并跳过，不影响本地初始化。
 
 ---
 
-## 🔍 常用查询
+## 常用查询
 
-### 1. 查询会话消息（按时间范围）
+### 查询会话消息
 
 ```sql
--- 查询最近 7 天的消息
-SELECT * FROM messages
-WHERE conversation_id = 'conversation_123'
+SELECT *
+FROM messages
+WHERE tenant_id = '0'
+  AND conversation_id = 'conversation_123'
+  AND seq > 100
+ORDER BY seq ASC
+LIMIT 100;
+```
+
+### 管理端按时间查询
+
+```sql
+SELECT *
+FROM messages
+WHERE tenant_id = '0'
   AND timestamp >= NOW() - INTERVAL '7 days'
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 2. 统计消息数量
+### 管理端按发送者查询
 
 ```sql
--- 按小时统计消息数量
-SELECT 
-    time_bucket('1 hour', timestamp) AS hour,
-    COUNT(*) AS message_count
+SELECT *
 FROM messages
-WHERE timestamp >= NOW() - INTERVAL '24 hours'
-GROUP BY hour
-ORDER BY hour;
+WHERE tenant_id = '0'
+  AND sender_id = 'user_123'
+  AND timestamp >= NOW() - INTERVAL '7 days'
+ORDER BY timestamp DESC
+LIMIT 100;
 ```
 
-### 3. 使用连续聚合视图
+### 查询写入账本异常
 
 ```sql
--- 查询预聚合的统计数据
-SELECT * FROM messages_hourly_stats
-WHERE hour >= NOW() - INTERVAL '24 hours'
-ORDER BY hour DESC;
-```
-
----
-
-## ⚙️ 配置说明
-
-### 分区间隔
-
-当前配置为 **1 天**，适合中等规模的消息量。可根据实际需求调整：
-
-```sql
--- 调整为 1 小时（适合高并发场景）
-SELECT set_chunk_time_interval('messages', INTERVAL '1 hour');
-
--- 调整为 7 天（适合低并发场景）
-SELECT set_chunk_time_interval('messages', INTERVAL '7 days');
-```
-
-### 数据保留策略
-
-启用数据保留策略，自动清理过期数据：
-
-```sql
--- 保留最近 90 天的数据
-SELECT add_retention_policy('messages', INTERVAL '90 days');
-```
-
-### 压缩策略
-
-启用压缩策略，压缩历史数据：
-
-```sql
--- 压缩 7 天前的数据
-SELECT add_compression_policy('messages', INTERVAL '7 days');
+SELECT *
+FROM message_write_ledger
+WHERE tenant_id = '0'
+  AND failed_at IS NOT NULL
+ORDER BY updated_at DESC
+LIMIT 100;
 ```
 
 ---
 
-## 📈 性能优化
+## 维护操作
 
-### 1. 查询优化
-
-- ✅ 使用时间范围查询（利用分区裁剪）
-- ✅ 使用复合索引（conversation_id + timestamp）
-- ✅ 使用连续聚合视图（统计查询）
-
-### 2. 写入优化
-
-- ✅ 批量插入（减少事务开销）
-- ✅ 异步写入（通过 JetStream 削峰）
-- ✅ 连接池（复用数据库连接）
-
-### 3. 存储优化
-
-- ✅ 启用压缩（节省存储空间）
-- ✅ 设置保留策略（自动清理）
-- ✅ 定期 VACUUM（清理碎片）
-
----
-
-## 🔧 维护操作
-
-### 查看超表信息
+### 查看 Hypertable
 
 ```sql
--- 查看所有超表
-SELECT * FROM timescaledb_information.hypertables;
-
--- 查看分区信息
-SELECT * FROM timescaledb_information.chunks
+SELECT *
+FROM timescaledb_information.hypertables
 WHERE hypertable_name = 'messages';
 ```
 
-### 手动压缩
+### 查看 Chunk
 
 ```sql
--- 压缩指定时间范围的数据
+SELECT *
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'messages'
+ORDER BY range_start DESC;
+```
+
+### 调整分区间隔
+
+默认分区间隔为 1 天。高写入量场景可压到 6 小时或 1 小时，低写入量场景可扩大到 7 天：
+
+```sql
+SELECT set_chunk_time_interval('messages', INTERVAL '6 hours');
+```
+
+调整前应结合写入量、查询时间窗口、chunk 数量和压缩策略一起评估。
+
+### 手动压缩历史 Chunk
+
+```sql
 SELECT compress_chunk(chunk)
 FROM timescaledb_information.chunks
 WHERE hypertable_name = 'messages'
-  AND range_start < NOW() - INTERVAL '7 days';
+  AND range_start < NOW() - INTERVAL '30 days';
 ```
 
-### 手动删除分区
-
-```sql
--- 删除 90 天前的分区
-SELECT drop_chunks('messages', INTERVAL '90 days');
-```
+不同 TimescaleDB 版本对 compression / columnstore API 命名不同，本地以 `init.sql` 兼容逻辑为准。
 
 ---
 
-## 📚 相关文档
+## 后续扩展
 
-- [TimescaleDB 官方文档](https://docs.timescale.com/)
-- [TimescaleDB 最佳实践](https://docs.timescale.com/timescaledb/latest/how-to-guides/)
-- [PostgreSQL 文档](https://www.postgresql.org/docs/)
+连续聚合视图目前未在 `init.sql` 中默认创建。原因是当前核心优先保证消息写入、同步、管理端检索和压缩策略清晰；统计型视图建议在管理分析服务或独立迁移中按真实运营指标追加，例如按租户、会话类型、消息类型、小时级流量聚合。
+
+如需增加连续聚合，建议单独评估：
+
+- 聚合粒度是否会影响写入性能
+- 是否需要 tenant_id 维度隔离
+- 是否由管理端服务维护，而不是 IM Core 写入链路承担
+- 是否需要与 Prometheus 指标区分职责
 
 ---
 
-**文档维护**: Flare IM Architecture Team  
-**最后更新**: 2025-01-XX  
-**版本**: 0.1.0
+## 相关文件
 
+- [init.sql](./init.sql): 唯一数据库初始化入口
+- [docker-compose.yml](./docker-compose.yml): 本地 TimescaleDB 容器配置
+- [README.md](./README.md): deploy 目录整体说明

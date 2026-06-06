@@ -36,34 +36,37 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
+LOCAL_GATEWAY_TOKEN_SECRET_FILE="$LOGS_DIR/.dev-token-secret"
 
 cleanup_launchctl_dev_labels() {
     if ! command -v launchctl >/dev/null 2>&1; then
         return 0
     fi
 
-    local label
-    for label in \
-        flare-signaling-online-dev \
-        flare-signaling-route-dev \
-        flare-capability-dev \
-        flare-conversation-dev \
-        flare-message-orchestrator-dev \
-        flare-storage-writer-dev \
-        flare-storage-reader-dev \
-        flare-sync-orchestrator-dev \
-        flare-push-server-dev \
-        flare-push-worker-dev \
-        flare-media-dev \
-        flare-core-gateway-dev \
-        flare-access-gateway-dev \
-        flare-access-gateway-beijing-1-dev \
-        flare-access-gateway-shanghai-1-dev; do
-        launchctl remove "$label" >/dev/null 2>&1 || true
+    local label suffix
+    for suffix in debug release dev; do
+        for label in \
+            flare-signaling-online \
+            flare-signaling-route \
+            flare-capability \
+            flare-conversation \
+            flare-message-orchestrator \
+            flare-storage-writer \
+            flare-storage-reader \
+            flare-sync-orchestrator \
+            flare-push-server \
+            flare-push-worker \
+            flare-media \
+            flare-core-gateway \
+            flare-access-gateway \
+            flare-access-gateway-beijing-1 \
+            flare-access-gateway-shanghai-1; do
+            launchctl remove "$label-$suffix" >/dev/null 2>&1 || true
+        done
     done
 }
 
-echo -e "${YELLOW}🧹 清理本地 launchctl dev 残留任务...${NC}"
+echo -e "${YELLOW}🧹 清理本地 launchctl debug/release/dev 残留任务...${NC}"
 cleanup_launchctl_dev_labels
 echo -e "${GREEN}   ✓ 清理完成${NC}"
 echo ""
@@ -117,7 +120,7 @@ start_detached_process() {
     shift 2
 
     DETACHED_PID=""
-    if [ "${FLARE_USE_LAUNCHCTL:-1}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
+    if [ "${FLARE_USE_LAUNCHCTL:-0}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
         launchctl remove "$label" >/dev/null 2>&1 || true
         launchctl submit -l "$label" -o "$log_file" -e "$log_file" -- \
             /bin/sh -c 'cd "$1" && shift && exec "$@"' sh "$PROJECT_ROOT" "$@"
@@ -139,11 +142,54 @@ start_detached_process() {
     return 0
 }
 
+generate_local_token_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -base64 48 | tr -d '\n'
+        return 0
+    fi
+
+    if command -v uuidgen >/dev/null 2>&1; then
+        printf '%s%s\n' "$(uuidgen | tr -d '-')" "$(uuidgen | tr -d '-')"
+        return 0
+    fi
+
+    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64
+}
+
+ensure_local_gateway_token_secrets() {
+    if [ -n "${FLARE_CORE_GATEWAY_TOKEN_SECRET:-}" ] && [ -n "${ACCESS_GATEWAY_TOKEN_SECRET:-}" ]; then
+        return 0
+    fi
+
+    mkdir -p "$LOGS_DIR"
+    if [ ! -s "$LOCAL_GATEWAY_TOKEN_SECRET_FILE" ]; then
+        umask 077
+        generate_local_token_secret > "$LOCAL_GATEWAY_TOKEN_SECRET_FILE"
+    fi
+
+    local secret
+    secret="$(cat "$LOCAL_GATEWAY_TOKEN_SECRET_FILE")"
+    export FLARE_CORE_GATEWAY_TOKEN_SECRET="${FLARE_CORE_GATEWAY_TOKEN_SECRET:-$secret}"
+    export ACCESS_GATEWAY_TOKEN_SECRET="${ACCESS_GATEWAY_TOKEN_SECRET:-$secret}"
+    export FLARE_ADMIN_GATEWAY_TOKEN_SECRET="${FLARE_ADMIN_GATEWAY_TOKEN_SECRET:-$secret}"
+}
+
+FLARE_BUILD_PROFILE="${FLARE_BUILD_PROFILE:-debug}"
+case "$FLARE_BUILD_PROFILE" in
+    debug|release)
+        ;;
+    *)
+        echo -e "${RED}错误: FLARE_BUILD_PROFILE 只能是 debug 或 release，当前: $FLARE_BUILD_PROFILE${NC}"
+        exit 1
+        ;;
+esac
+
 # 解析 Cargo 实际产物目录：上层仓库 `.cargo/config.toml` 可能将 `target-dir` 指到仓库根的 `target/`，
-# 与 `flare-im-core/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 debug 目录。
-resolve_cargo_target_debug() {
+# 与 `flare-im-core/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 profile 目录。
+resolve_cargo_target_profile() {
+    local profile="$1"
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-        printf '%s/debug\n' "${CARGO_TARGET_DIR%/}"
+        printf '%s/%s\n' "${CARGO_TARGET_DIR%/}" "$profile"
         return 0
     fi
     local meta td
@@ -157,13 +203,44 @@ resolve_cargo_target_debug() {
             td=$(printf '%s' "$meta" | grep -o '"target_directory":"[^"]*"' | head -1 | sed 's/"target_directory":"//;s/"$//')
         fi
         if [ -n "$td" ]; then
-            printf '%s/debug\n' "$td"
+            printf '%s/%s\n' "$td" "$profile"
             return 0
         fi
     fi
-    printf '%s/target/debug\n' "$PROJECT_ROOT"
+    printf '%s/target/%s\n' "$PROJECT_ROOT" "$profile"
 }
-CARGO_TARGET_DEBUG="$(resolve_cargo_target_debug)"
+CARGO_TARGET_BIN_DIR="$(resolve_cargo_target_profile "$FLARE_BUILD_PROFILE")"
+CARGO_BUILD_ARGS=(build --all)
+if [ "$FLARE_BUILD_PROFILE" = "release" ]; then
+    CARGO_BUILD_ARGS+=(--release)
+fi
+
+# 启动脚本依赖的核心二进制（与 CORE_SERVICES + access-gateway 一致）
+REQUIRED_CORE_BINARIES=(
+    flare-signaling-online
+    flare-signaling-route
+    flare-capability
+    flare-conversation
+    flare-orchestrator
+    flare-storage-writer
+    flare-storage-reader
+    flare-sync-orchestrator
+    flare-push-server
+    flare-push-worker
+    flare-media
+    flare-core-gateway
+    flare-signaling-gateway
+)
+
+core_binaries_ready() {
+    local bin
+    for bin in "${REQUIRED_CORE_BINARIES[@]}"; do
+        if [ ! -x "$CARGO_TARGET_BIN_DIR/$bin" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
 
 echo -e "${YELLOW}🧹 清除之前的日志...${NC}"
 # 清除之前的日志
@@ -200,12 +277,16 @@ fi
 
 # 创建日志目录
 mkdir -p "$LOGS_DIR"
+ensure_local_gateway_token_secrets
+echo -e "${BLUE}🔐 本地网关 token secret 已准备: logs/.dev-token-secret（内容不会打印；本地客户端可将该文件内容作为 TOKEN_SECRET）${NC}"
+echo ""
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Flare IM Core 完整服务启动脚本${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}📁 日志目录: $LOGS_DIR${NC}"
 echo -e "${YELLOW}🚪 网关模式: $GATEWAY_MODE${NC}"
+echo -e "${YELLOW}📦 构建模式: $FLARE_BUILD_PROFILE${NC}"
 if [ -n "$VERBOSE_LOG_MODE" ]; then
     echo -e "${GREEN}🔧 日志: RUST_LOG=$RUST_LOG${NC}"
 else
@@ -272,7 +353,7 @@ check_required_service "Consul" "28500"
 
 echo ""
 echo -e "${YELLOW}💡 提示: 如需启动基础设施服务，请运行:${NC}"
-echo "   ${BLUE}cd deploy && docker-compose up -d consul redis postgres nats rustfs${NC}"
+echo "   ${BLUE}cd deploy && docker compose up -d consul redis postgres nats rustfs${NC}"
 echo ""
 
 if [ "$MISSING_INFRA" -ne 0 ]; then
@@ -331,7 +412,19 @@ for service in "${CORE_SERVICES[@]}"; do
     bin=$(service_binary_name "$service")
     pkill -f "target/debug/${bin}" 2>/dev/null || true
     pkill -f "/target/debug/${bin}" 2>/dev/null || true
-    pkill -f "${bin}" 2>/dev/null || true
+    pkill -f "target/release/${bin}" 2>/dev/null || true
+    pkill -f "/target/release/${bin}" 2>/dev/null || true
+done
+
+# 清理已知本地服务监听端口，避免 release/debug 切换或异常退出留下旧进程。
+# 仅覆盖本启动脚本管理的 core/access gateway 端口，不触碰中间件端口。
+STARTUP_LISTEN_PORTS=(
+    50050 50061 50062 50090 50110 50181
+    19181 19182
+    60051 60052 60060 60070 60071 60080 60081 60083 60084
+)
+for port in "${STARTUP_LISTEN_PORTS[@]}"; do
+    free_listen_port "$port"
 done
 
 # 停止默认的 access-gateway 实例（如果存在）
@@ -410,10 +503,27 @@ else
     exit 1
 fi
 
-if ! PROTOC="$PROTOC" cargo build --all > /dev/null 2>&1; then
-    echo -e "${RED}   ✗ 编译失败，请检查错误信息${NC}"
-    echo -e "${YELLOW}   运行 'PROTOC=$PROTOC cargo build --all' 查看详细错误${NC}"
-    exit 1
+BUILD_LOG="$LOGS_DIR/cargo-build.log"
+if [ "${FLARE_SKIP_BUILD:-0}" = "1" ] && core_binaries_ready; then
+    echo -e "${GREEN}   ↷ 跳过编译 (FLARE_SKIP_BUILD=1，二进制已在 $CARGO_TARGET_BIN_DIR)${NC}"
+elif [ "${FLARE_SKIP_BUILD:-0}" = "1" ]; then
+    echo -e "${YELLOW}   ⚠ FLARE_SKIP_BUILD=1 但部分二进制缺失，仍将执行 cargo build${NC}"
+fi
+
+if [ "${FLARE_SKIP_BUILD:-0}" != "1" ] || ! core_binaries_ready; then
+    cargo_build_cmd=(cargo "${CARGO_BUILD_ARGS[@]}")
+    if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+        cargo_build_cmd+=(--jobs "$CARGO_BUILD_JOBS")
+        echo -e "${BLUE}   并行编译: --jobs $CARGO_BUILD_JOBS${NC}"
+    fi
+    echo -e "${BLUE}   编译日志: $BUILD_LOG${NC}"
+    if ! PROTOC="$PROTOC" "${cargo_build_cmd[@]}" > "$BUILD_LOG" 2>&1; then
+        echo -e "${RED}   ✗ 编译失败，末尾输出:${NC}"
+        tail -n 40 "$BUILD_LOG" || true
+        echo -e "${YELLOW}   完整日志: $BUILD_LOG${NC}"
+        echo -e "${YELLOW}   或运行: PROTOC=$PROTOC ${cargo_build_cmd[*]}${NC}"
+        exit 1
+    fi
 fi
 echo -e "${GREEN}   ✓ 编译完成${NC}"
 echo ""
@@ -560,6 +670,9 @@ for service in "${CORE_SERVICES[@]}"; do
         "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
         "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
         "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+        "FLARE_CORE_GATEWAY_TOKEN_SECRET=$FLARE_CORE_GATEWAY_TOKEN_SECRET"
+        "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
+        "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
     )
     [ -n "${SIGNALING_ONLINE_SERVICE_HOST:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_HOST=$SIGNALING_ONLINE_SERVICE_HOST")
     [ -n "${SIGNALING_ONLINE_SERVICE_PORT:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_PORT=$SIGNALING_ONLINE_SERVICE_PORT")
@@ -577,7 +690,7 @@ for service in "${CORE_SERVICES[@]}"; do
     [ -n "${GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_MEDIA_STATIC_FALLBACK=$GRPC_MEDIA_STATIC_FALLBACK")
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）
-    start_detached_process "flare-$service-dev" "$LOGS_DIR/flare-$service.log" /usr/bin/env "${env_args[@]}" "$CARGO_TARGET_DEBUG/$BIN_NAME"
+    start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" /usr/bin/env "${env_args[@]}" "$CARGO_TARGET_BIN_DIR/$BIN_NAME"
     service_pid="$DETACHED_PID"
     
     # 清理环境变量
@@ -607,11 +720,19 @@ sleep 10
 check_process() {
     local service=$1
     local pid_file="$LOGS_DIR/flare-$service.pid"
+    local bin
+    bin=$(service_binary_name "$service")
     
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if ps -p "$pid" > /dev/null 2>&1; then
             echo -e "${GREEN}   ✓ $service 正在运行 (PID: $pid)${NC}"
+            return 0
+        elif pgrep -f "$CARGO_TARGET_BIN_DIR/$bin" > /dev/null 2>&1; then
+            local actual_pid
+            actual_pid=$(pgrep -f "$CARGO_TARGET_BIN_DIR/$bin" | head -1)
+            echo "$actual_pid" > "$pid_file"
+            echo -e "${GREEN}   ✓ $service 正在运行 (PID: $actual_pid)${NC}"
             return 0
         else
             echo -e "${RED}   ✗ $service 启动失败${NC}"
@@ -626,11 +747,16 @@ check_process() {
 
 echo ""
 echo -e "${GREEN}📊 核心服务状态检查:${NC}"
+CORE_START_FAILURES=0
 for service in "${CORE_SERVICES[@]}"; do
-    check_process "$service"
+    check_process "$service" || CORE_START_FAILURES=1
 done
 
 echo ""
+if [ "$CORE_START_FAILURES" -ne 0 ]; then
+    echo -e "${RED}❌ 核心服务未全部启动，已中止后续网关启动。${NC}"
+    exit 1
+fi
 echo -e "${GREEN}✅ 核心服务启动完成${NC}"
 echo ""
 
@@ -722,10 +848,13 @@ if [ "$GATEWAY_MODE" == "single" ]; then
         "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
         "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
         "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+        "FLARE_CORE_GATEWAY_TOKEN_SECRET=$FLARE_CORE_GATEWAY_TOKEN_SECRET"
+        "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
+        "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
         "PORT=$DEFAULT_WS_PORT"
         "GRPC_PORT=$DEFAULT_GRPC_PORT"
     )
-    start_detached_process "flare-access-gateway-dev" "$LOGS_DIR/flare-access-gateway.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_DEBUG/flare-signaling-gateway"
+    start_detached_process "flare-access-gateway-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway"
     gateway_pid="$DETACHED_PID"
     echo $gateway_pid > "$pid_file"
     sleep 3
@@ -736,6 +865,7 @@ if [ "$GATEWAY_MODE" == "single" ]; then
     else
         echo -e "${RED}      ✗ access-gateway 启动失败${NC}"
         echo -e "${YELLOW}     查看日志: tail -f $LOGS_DIR/flare-access-gateway.log${NC}"
+        exit 1
     fi
     
     echo ""
@@ -796,13 +926,16 @@ else
             "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
             "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
             "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
+            "FLARE_CORE_GATEWAY_TOKEN_SECRET=$FLARE_CORE_GATEWAY_TOKEN_SECRET"
+            "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
+            "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
             "GATEWAY_ID=$gateway_id"
             "GATEWAY_REGION=$region"
             "PORT=$ws_port"
             "GRPC_PORT=$grpc_port"
             "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
         )
-        start_detached_process "flare-access-gateway-$gateway_key-dev" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_DEBUG/flare-signaling-gateway"
+        start_detached_process "flare-access-gateway-$gateway_key-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway"
         gateway_pid="$DETACHED_PID"
         echo $gateway_pid > "$pid_file"
         sleep 3
@@ -813,6 +946,7 @@ else
         else
             echo -e "${RED}      ✗ $gateway_key 启动失败${NC}"
             echo -e "${YELLOW}     查看日志: tail -f $LOGS_DIR/flare-access-gateway-$gateway_key.log${NC}"
+            exit 1
         fi
         
         echo ""

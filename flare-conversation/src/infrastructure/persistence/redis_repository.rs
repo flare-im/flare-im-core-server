@@ -10,14 +10,14 @@ use crate::domain::model::{
     ConversationParticipantsPage, ConversationSort, ConversationSummary, ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
-use crate::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
     config: Arc<ConversationConfig>,
 }
 
-fn redis_not_supported(method: &str) -> crate::error::FlareError {
+fn redis_not_supported(method: &str) -> flare_server_core::error::FlareError {
     ErrorBuilder::new(
         ErrorCode::OperationNotSupported,
         format!(

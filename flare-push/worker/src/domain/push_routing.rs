@@ -34,7 +34,7 @@ pub fn select_push_targets(
     devices: &[DeviceInfo],
     user_id: &str,
     strategy: PushStrategy,
-) -> anyhow::Result<Vec<GatewayPushTarget>> {
+) -> flare_server_core::error::Result<Vec<GatewayPushTarget>> {
     let mut routes: Vec<(GatewayPushTarget, i32, f64)> = devices
         .iter()
         .map(|d| {

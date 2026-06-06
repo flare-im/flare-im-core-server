@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 use redis::AsyncCommands;
 
 use crate::config::PushProxyConfig;

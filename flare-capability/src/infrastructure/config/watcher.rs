@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use flare_server_core::error::Result;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 

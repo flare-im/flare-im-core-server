@@ -87,7 +87,7 @@ impl ServerEventHandler for LongConnectionHandler {
         self.handle_event_send(command, connection_id).await
     }
 
-    /// ACK：payload 为 Ack（PushAck/ConversationAck/AckBatch），上报并更新游标
+    /// ACK：payload 为 Ack（PushAck/ConversationAck/ReadAck/AckBatch），上报并更新游标
     #[instrument(skip(self), fields(connection_id, message_id = %command.message_id))]
     async fn handle_ack(
         &self,
@@ -267,7 +267,7 @@ impl LongConnectionHandler {
             Err(e) => Ok(Some(build_data_error_frame(
                 command.message_id.clone(),
                 "send_data_error",
-                &e.to_string(),
+                e.to_string(),
             ))),
         }
     }

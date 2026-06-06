@@ -1,9 +1,8 @@
-//! RTC 信令桥：把 `EVENT_CALL_SIGNAL` 与能力实例路由串起来（不替代 orchestrator enrich）。
+//! RTC 信令桥：把实时通话控制视图与能力实例路由串起来。
 
 use std::sync::Arc;
 
-use flare_proto::common::CallSignalEvent;
-
+use super::event::CallSignalRouteView;
 use super::router::{CallSignalRouter, CapabilityRouteHint};
 
 /// 网关侧桥接入口：保持 **薄** —— 业务 enrich 仍在 `flare-orchestrator::CallCapabilityBridge`。
@@ -19,16 +18,16 @@ impl CallSignalBridge {
     pub async fn on_uplink(
         &self,
         tenant_id: &str,
-        cs: &CallSignalEvent,
-    ) -> anyhow::Result<Option<CapabilityRouteHint>> {
-        self.router.route_uplink(tenant_id, cs).await
+        signal: &CallSignalRouteView,
+    ) -> flare_server_core::error::Result<Option<CapabilityRouteHint>> {
+        self.router.route_uplink(tenant_id, signal).await
     }
 
     pub async fn on_downlink(
         &self,
         tenant_id: &str,
-        cs: &CallSignalEvent,
-    ) -> anyhow::Result<Option<CapabilityRouteHint>> {
-        self.router.route_downlink(tenant_id, cs).await
+        signal: &CallSignalRouteView,
+    ) -> flare_server_core::error::Result<Option<CapabilityRouteHint>> {
+        self.router.route_downlink(tenant_id, signal).await
     }
 }

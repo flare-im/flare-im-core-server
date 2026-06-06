@@ -1,8 +1,12 @@
-use anyhow::Result;
 use base64::Engine;
 use flare_im_core::Ctx;
-use flare_im_core::message::BurnStatus;
 use flare_im_core::utils::normalize_tenant_id;
+use flare_proto::common::{
+    ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionPolicy,
+    MessageRetentionState, RetentionMode,
+};
+use flare_server_core::error::Result;
+use prost::Message as ProstMessage;
 use serde_json::to_value;
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 use tracing::instrument;
@@ -12,9 +16,17 @@ use crate::convert;
 
 use crate::config::StorageWriterConfig;
 use crate::domain::model::{Event, Message};
-use crate::domain::repository::ArchiveStoreRepository;
+use crate::domain::repository::{
+    ArchiveStoreRepository, MessageWriteLedgerRepository, MessageWriteStage,
+};
 
-/// 与 init_v2.sql messages 表结构对齐（无 receiver_id，与 common/message.proto 一致）
+const LEGACY_BURN_STATUS_INIT: i32 = 1;
+const LEGACY_BURN_STATUS_READ: i32 = 2;
+const LEGACY_BURN_STATUS_BURN_PENDING: i32 = 3;
+const LEGACY_BURN_STATUS_BURNED: i32 = 4;
+const LEGACY_BURN_STATUS_HARD_DELETED: i32 = 5;
+
+/// 与 deploy/init.sql messages 表结构对齐（无 receiver_id，与 common/message.proto 一致）
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
 struct MessageRow {
@@ -84,8 +96,6 @@ impl PostgresMessageStore {
             .connect(url)
             .await?;
 
-        Self::ensure_messages_schema(&pool).await?;
-
         let operation_store = operation_store::OperationStore::new(pool.clone());
 
         let store = Self {
@@ -94,33 +104,55 @@ impl PostgresMessageStore {
         };
         Ok(Some(store))
     }
+}
 
-    async fn ensure_messages_schema(pool: &Pool<Postgres>) -> Result<()> {
-        // Keep writer startup tolerant of existing dev/prod databases created
-        // before init_v2.sql gained burn-after-read and delivery timeline fields.
-        let statements = [
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS burn_enabled BOOLEAN NOT NULL DEFAULT FALSE",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS burn_after_read_seconds BIGINT",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS burn_status SMALLINT NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS first_read_at BIGINT",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS burn_at BIGINT",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS burned_at BIGINT",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS persisted_at TIMESTAMPTZ",
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_messages_burn_due
-                ON messages(tenant_id, burn_status, burn_at)
-                WHERE burn_status = 3 AND burn_at IS NOT NULL
-            "#,
-        ];
+impl MessageWriteLedgerRepository for PostgresMessageStore {
+    fn mark_stage<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        tenant_id: &'a str,
+        message_id: &'a str,
+        stage: MessageWriteStage,
+        error: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = ctx;
+            let timestamp_column = stage.timestamp_column();
+            let sql = format!(
+                r#"
+                UPDATE message_write_ledger
+                SET write_state = $3,
+                    {timestamp_column} = COALESCE({timestamp_column}, CURRENT_TIMESTAMP),
+                    last_error = $4::TEXT,
+                    failed_at = CASE
+                        WHEN $4::TEXT IS NULL THEN failed_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tenant_id = $1
+                  AND server_id = $2
+                "#
+            );
 
-        for statement in statements {
-            sqlx::query(statement).execute(pool).await.map_err(|err| {
-                anyhow::anyhow!("failed to ensure messages schema: {err}; sql={statement}")
-            })?;
-        }
+            let result = sqlx::query(&sql)
+                .bind(tenant_id)
+                .bind(message_id)
+                .bind(stage.as_str())
+                .bind(error)
+                .execute(&self.pool)
+                .await?;
 
-        Ok(())
+            if result.rows_affected() == 0 {
+                tracing::trace!(
+                    tenant_id = %tenant_id,
+                    message_id = %message_id,
+                    stage = %stage.as_str(),
+                    "Message write ledger stage skipped because row was not found"
+                );
+            }
+
+            Ok(())
+        })
     }
 }
 
@@ -150,7 +182,7 @@ impl PostgresMessageStore {
             "#,
         )
         .bind(tenant_id)
-        .bind(BurnStatus::BurnPending.as_i32())
+        .bind(LEGACY_BURN_STATUS_BURN_PENDING)
         .bind(now)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -186,7 +218,11 @@ impl PostgresMessageStore {
             .cloned()
             .unwrap_or_else(serde_json::Map::new);
 
-        let content: Vec<u8> = row.content.clone().unwrap_or_default();
+        let content = row
+            .content
+            .clone()
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| MessageContent::decode(bytes.as_slice()).ok());
 
         let timestamp = Some(prost_types::Timestamp {
             seconds: row.timestamp.timestamp(),
@@ -218,7 +254,6 @@ impl PostgresMessageStore {
                     .and_then(|p| p.as_str())
                     .unwrap_or("")
                     .to_string(),
-                ..Default::default()
             })
         });
 
@@ -252,26 +287,128 @@ impl PostgresMessageStore {
             sender_name: row.sender_name.unwrap_or_default(),
             sender_avatar: row.sender_avatar.unwrap_or_default(),
             source: row.source,
-            seq: row.seq as u64,
-            timestamp: timestamp.clone(),
+            conversation_seq: row.seq as u64,
+            timestamp,
             conversation_type: row.conversation_type,
             message_type: row.message_type,
+            message_seq: None,
             channel_id: row.channel_id.unwrap_or_default(),
             content,
             status: row.status,
-            burn_enabled: row.burn_enabled,
-            burn_after_read_seconds: row.burn_after_read_seconds,
-            burn_status: row.burn_status,
-            first_read_at: row.first_read_at,
-            burn_at: row.burn_at,
-            burned_at: row.burned_at,
+            retention_policy: None,
+            retention_state: legacy_retention_state(
+                row.burn_status,
+                row.first_read_at,
+                row.burn_at,
+                row.burned_at,
+            ),
             offline_push_info,
             extra,
             extensions,
-            ..Default::default()
         };
         Ok(Some(msg))
     }
+}
+
+fn legacy_retention_state(
+    legacy_status: i32,
+    first_read_at: Option<i64>,
+    burn_at: Option<i64>,
+    burned_at: Option<i64>,
+) -> Option<MessageRetentionState> {
+    let lifecycle = match legacy_status {
+        LEGACY_BURN_STATUS_BURN_PENDING => MessageRetentionLifecycle::Scheduled,
+        LEGACY_BURN_STATUS_BURNED => MessageRetentionLifecycle::Expired,
+        LEGACY_BURN_STATUS_HARD_DELETED => MessageRetentionLifecycle::Purged,
+        _ => return None,
+    };
+    let content_visibility = match lifecycle {
+        MessageRetentionLifecycle::Purged => ContentVisibility::Purged,
+        MessageRetentionLifecycle::Expired => ContentVisibility::Redacted,
+        _ => ContentVisibility::Available,
+    };
+    Some(MessageRetentionState {
+        lifecycle: lifecycle as i32,
+        content_visibility: content_visibility as i32,
+        first_triggered_at: first_read_at,
+        expire_at: burn_at,
+        expired_at: burned_at,
+        purged_at: if lifecycle == MessageRetentionLifecycle::Purged {
+            burned_at
+        } else {
+            None
+        },
+        triggered_by_user_id: None,
+    })
+}
+
+fn retention_mode(policy: &MessageRetentionPolicy) -> RetentionMode {
+    RetentionMode::try_from(policy.mode).unwrap_or(RetentionMode::Unspecified)
+}
+
+fn retention_lifecycle(state: &MessageRetentionState) -> MessageRetentionLifecycle {
+    MessageRetentionLifecycle::try_from(state.lifecycle)
+        .unwrap_or(MessageRetentionLifecycle::Unspecified)
+}
+
+fn retention_enabled(
+    policy: Option<&MessageRetentionPolicy>,
+    state: Option<&MessageRetentionState>,
+) -> bool {
+    let policy_enabled = policy
+        .map(|policy| {
+            !matches!(
+                retention_mode(policy),
+                RetentionMode::Unspecified | RetentionMode::None
+            )
+        })
+        .unwrap_or(false);
+    policy_enabled || state.is_some()
+}
+
+fn legacy_burn_status(state: Option<&MessageRetentionState>) -> i32 {
+    match state.map(retention_lifecycle) {
+        Some(MessageRetentionLifecycle::Scheduled) => LEGACY_BURN_STATUS_BURN_PENDING,
+        Some(MessageRetentionLifecycle::Expired) => LEGACY_BURN_STATUS_BURNED,
+        Some(MessageRetentionLifecycle::Purged) => LEGACY_BURN_STATUS_HARD_DELETED,
+        Some(MessageRetentionLifecycle::Active) => LEGACY_BURN_STATUS_READ,
+        _ => LEGACY_BURN_STATUS_INIT,
+    }
+}
+
+fn legacy_retention_columns(
+    message: &Message,
+) -> (
+    bool,
+    Option<i64>,
+    i32,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+) {
+    let policy = message.retention_policy.as_ref();
+    let state = message.retention_state.as_ref();
+    let first_triggered_at = state.and_then(|state| state.first_triggered_at);
+    let expire_at = state
+        .and_then(|state| state.expire_at)
+        .or_else(|| policy.and_then(|policy| policy.expire_at));
+    let expired_at = state.and_then(|state| state.expired_at.or(state.purged_at));
+    let expire_after_seconds = policy
+        .and_then(|policy| policy.expire_after_seconds)
+        .filter(|seconds| *seconds > 0);
+
+    (
+        retention_enabled(policy, state),
+        expire_after_seconds,
+        legacy_burn_status(state),
+        first_triggered_at,
+        expire_at,
+        expired_at,
+    )
+}
+
+fn message_content_bytes(content: Option<&MessageContent>) -> Option<Vec<u8>> {
+    content.map(|content| content.encode_to_vec())
 }
 
 fn offline_push_info_to_json(
@@ -321,31 +458,75 @@ fn resolve_tenant_id(
         .and_then(|value| value.as_str())
         .filter(|tenant_id| !tenant_id.trim().is_empty())
         .map(normalize_tenant_id)
-        .ok_or_else(|| anyhow::anyhow!("tenant_id is required for message {}", message_id))
+        .ok_or_else(|| {
+            flare_server_core::error::FlareError::system(format!(
+                "tenant_id is required for message {}",
+                message_id
+            ))
+        })
 }
 
 impl ArchiveStoreRepository for PostgresMessageStore {
-    #[instrument(skip(self, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
+    #[instrument(skip(self, ctx, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
     async fn store_archive(&self, ctx: &Ctx, message: &Message) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         use crate::infrastructure::persistence::helpers::*;
 
         let proto_msg = convert::message_to_proto(message);
         let created_at_dt = get_message_timestamp(&proto_msg);
-        let content_bytes = proto_msg.content.clone();
-        let extra_value = build_extra_value(&proto_msg)?;
-        let seq = i64::try_from(proto_msg.seq).map_err(|_| {
-            anyhow::anyhow!("invalid seq overflow for message {}", proto_msg.server_id)
+        let content_bytes = message_content_bytes(proto_msg.content.as_ref());
+        let extra_value = build_extra_value(&message.extra)?;
+        let seq = i64::try_from(proto_msg.conversation_seq).map_err(|_| {
+            flare_server_core::error::FlareError::system(format!(
+                "invalid seq overflow for message {}",
+                proto_msg.server_id
+            ))
         })?;
         if seq <= 0 {
-            return Err(anyhow::anyhow!(
+            return Err(flare_server_core::error::FlareError::system(format!(
                 "invalid seq={}, message must be assigned in orchestrator: {}",
-                seq,
-                proto_msg.server_id
-            ));
+                seq, proto_msg.server_id
+            )));
         }
 
         let tenant_id = resolve_tenant_id(ctx, &proto_msg.server_id, &extra_value)?;
+        let (burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at, burned_at) =
+            legacy_retention_columns(message);
+
+        let mut tx = self.pool.begin().await?;
+        let ledger_result = sqlx::query(
+            r#"
+            INSERT INTO message_write_ledger (
+                tenant_id, server_id, conversation_id, seq
+            )
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (tenant_id, server_id) DO NOTHING
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(&proto_msg.server_id)
+        .bind(&proto_msg.conversation_id)
+        .bind(seq)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| {
+            flare_server_core::error::FlareError::system(format!(
+                "insert message write ledger failed message_id={} conversation_id={} seq={}: {err}",
+                proto_msg.server_id, proto_msg.conversation_id, seq
+            ))
+        })?;
+
+        if ledger_result.rows_affected() == 0 {
+            tx.commit().await?;
+            tracing::trace!(
+                tenant_id = %tenant_id,
+                message_id = %proto_msg.server_id,
+                conversation_id = %proto_msg.conversation_id,
+                seq = seq,
+                "Message archive skipped by durable write ledger"
+            );
+            return Ok(());
+        }
 
         sqlx::query(
             r#"
@@ -364,8 +545,8 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .bind(&proto_msg.conversation_id)
         .bind(if proto_msg.client_msg_id.is_empty() { None::<String> } else { Some(proto_msg.client_msg_id.clone()) })
         .bind(&proto_msg.sender_id)
-        .bind(if proto_msg.sender_name.is_empty() { None::<String> } else { Some(proto_msg.sender_name.clone()) })
-        .bind(if proto_msg.sender_avatar.is_empty() { None::<String> } else { Some(proto_msg.sender_avatar.clone()) })
+        .bind(if message.sender_name.is_empty() { None::<String> } else { Some(message.sender_name.clone()) })
+        .bind(if message.sender_avatar.is_empty() { None::<String> } else { Some(message.sender_avatar.clone()) })
         .bind(if proto_msg.channel_id.is_empty() { None::<String> } else { Some(proto_msg.channel_id.clone()) })
         .bind(proto_msg.source)
         .bind(seq)
@@ -374,27 +555,51 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .bind(proto_msg.message_type)
         .bind(content_bytes)
         .bind(proto_msg.status)
-        .bind(proto_msg.burn_enabled)
-        .bind(proto_msg.burn_after_read_seconds)
-        .bind(proto_msg.burn_status)
-        .bind(proto_msg.first_read_at)
-        .bind(proto_msg.burn_at)
-        .bind(proto_msg.burned_at)
+        .bind(burn_enabled)
+        .bind(burn_after_read_seconds)
+        .bind(burn_status)
+        .bind(first_read_at)
+        .bind(burn_at)
+        .bind(burned_at)
         .bind(offline_push_info_to_json(proto_msg.offline_push_info.as_ref()))
         .bind(to_value(&extra_value)?)
         .bind(extensions_to_json(&proto_msg.extensions))
         .bind(created_at_dt)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|err| {
-            anyhow::anyhow!(
+            flare_server_core::error::FlareError::system(format!(
                 "insert message archive failed message_id={} conversation_id={} seq={}: {err}",
                 proto_msg.server_id,
                 proto_msg.conversation_id,
                 seq
-            )
+            ))
         })?;
 
+        sqlx::query(
+            r#"
+            UPDATE message_write_ledger
+            SET write_state = $3,
+                archive_persisted_at = COALESCE(archive_persisted_at, CURRENT_TIMESTAMP),
+                last_error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE tenant_id = $1
+              AND server_id = $2
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(&proto_msg.server_id)
+        .bind(MessageWriteStage::ArchivePersisted.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| {
+            flare_server_core::error::FlareError::system(format!(
+                "update message write ledger archive stage failed message_id={}: {err}",
+                proto_msg.server_id
+            ))
+        })?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -497,9 +702,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .bind(message_id)
         .bind(first_read_at)
         .bind(burn_at)
-        .bind(BurnStatus::BurnPending.as_i32())
-        .bind(BurnStatus::Init.as_i32())
-        .bind(BurnStatus::Read.as_i32())
+        .bind(LEGACY_BURN_STATUS_BURN_PENDING)
+        .bind(LEGACY_BURN_STATUS_INIT)
+        .bind(LEGACY_BURN_STATUS_READ)
         .execute(&self.pool)
         .await?;
 
@@ -559,9 +764,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .bind(tenant_id)
         .bind(message_id)
         .bind(first_read_at)
-        .bind(BurnStatus::BurnPending.as_i32())
-        .bind(BurnStatus::Init.as_i32())
-        .bind(BurnStatus::Read.as_i32())
+        .bind(LEGACY_BURN_STATUS_BURN_PENDING)
+        .bind(LEGACY_BURN_STATUS_INIT)
+        .bind(LEGACY_BURN_STATUS_READ)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -615,9 +820,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         )
         .bind(tenant_id)
         .bind(message_id)
-        .bind(BurnStatus::Burned.as_i32())
+        .bind(LEGACY_BURN_STATUS_BURNED)
         .bind(burned_at)
-        .bind(BurnStatus::BurnPending.as_i32())
+        .bind(LEGACY_BURN_STATUS_BURN_PENDING)
         .execute(&self.pool)
         .await?;
 
@@ -666,9 +871,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         )
         .bind(tenant_id)
         .bind(message_id)
-        .bind(BurnStatus::HardDeleted.as_i32())
-        .bind(BurnStatus::Burned.as_i32())
-        .bind(BurnStatus::BurnPending.as_i32())
+        .bind(LEGACY_BURN_STATUS_HARD_DELETED)
+        .bind(LEGACY_BURN_STATUS_BURNED)
+        .bind(LEGACY_BURN_STATUS_BURN_PENDING)
         .execute(&self.pool)
         .await?;
 
@@ -760,7 +965,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         let _ = ctx; // 上下文用于日志追踪
         let proto_event = convert::event_to_proto(event);
         if tenant_id.is_empty() {
-            return Err(anyhow::anyhow!("tenant_id is required"));
+            return Err(flare_server_core::error::FlareError::system(
+                "tenant_id is required".to_string(),
+            ));
         }
         self.operation_store
             .append_event(
@@ -789,7 +996,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
     /// 批量大小自适应：
     /// - 根据消息大小动态调整批量大小
     /// - 避免单次事务过大导致超时或内存问题
-    #[instrument(skip(self, messages), fields(batch_size = messages.len()))]
+    #[instrument(skip(self, ctx, messages), fields(batch_size = messages.len()))]
     async fn store_archive_batch(&self, ctx: &Ctx, messages: &[Message]) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         if messages.is_empty() {
@@ -808,7 +1015,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         let avg_message_size = messages
             .iter()
             .map(|m| {
-                let content_size = m.content.len();
+                let content_size = m.content.as_ref().map(|c| c.encoded_len()).unwrap_or(0);
                 let extra_size = serde_json::to_string(&m.extra).unwrap_or_default().len();
                 content_size + extra_size + 200
             })
@@ -861,6 +1068,7 @@ impl PostgresMessageStore {
     /// - 使用指数退避策略
     async fn store_archive_batch_values(&self, ctx: &Ctx, messages: &[Message]) -> Result<()> {
         use sqlx::QueryBuilder;
+        use std::collections::HashSet;
         use std::time::Duration;
 
         use crate::infrastructure::persistence::helpers::*;
@@ -870,18 +1078,28 @@ impl PostgresMessageStore {
             .map(|message| -> Result<_> {
                 let proto_msg = convert::message_to_proto(message);
                 let created_at_dt = get_message_timestamp(&proto_msg);
-                let extra_value = build_extra_value(&proto_msg)?;
-                let seq = i64::try_from(proto_msg.seq).map_err(|_| {
-                    anyhow::anyhow!("invalid seq overflow for message {}", proto_msg.server_id)
+                let extra_value = build_extra_value(&message.extra)?;
+                let seq = i64::try_from(proto_msg.conversation_seq).map_err(|_| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "invalid seq overflow for message {}",
+                        proto_msg.server_id
+                    ))
                 })?;
                 if seq <= 0 {
-                    return Err(anyhow::anyhow!(
+                    return Err(flare_server_core::error::FlareError::system(format!(
                         "invalid seq={}, message must be assigned in orchestrator: {}",
-                        seq,
-                        proto_msg.server_id
-                    ));
+                        seq, proto_msg.server_id
+                    )));
                 }
                 let tenant_id = resolve_tenant_id(ctx, &proto_msg.server_id, &extra_value)?;
+                let (
+                    burn_enabled,
+                    burn_after_read_seconds,
+                    burn_status,
+                    first_read_at,
+                    burn_at,
+                    burned_at,
+                ) = legacy_retention_columns(message);
 
                 Ok((
                     tenant_id,
@@ -893,15 +1111,15 @@ impl PostgresMessageStore {
                         Some(proto_msg.client_msg_id.clone())
                     },
                     proto_msg.sender_id.clone(),
-                    if proto_msg.sender_name.is_empty() {
+                    if message.sender_name.is_empty() {
                         None
                     } else {
-                        Some(proto_msg.sender_name.clone())
+                        Some(message.sender_name.clone())
                     },
-                    if proto_msg.sender_avatar.is_empty() {
+                    if message.sender_avatar.is_empty() {
                         None
                     } else {
-                        Some(proto_msg.sender_avatar.clone())
+                        Some(message.sender_avatar.clone())
                     },
                     if proto_msg.channel_id.is_empty() {
                         None
@@ -913,14 +1131,14 @@ impl PostgresMessageStore {
                     created_at_dt,
                     proto_msg.conversation_type,
                     proto_msg.message_type,
-                    proto_msg.content.clone(),
+                    message_content_bytes(proto_msg.content.as_ref()),
                     proto_msg.status,
-                    proto_msg.burn_enabled,
-                    proto_msg.burn_after_read_seconds,
-                    proto_msg.burn_status,
-                    proto_msg.first_read_at,
-                    proto_msg.burn_at,
-                    proto_msg.burned_at,
+                    burn_enabled,
+                    burn_after_read_seconds,
+                    burn_status,
+                    first_read_at,
+                    burn_at,
+                    burned_at,
                     offline_push_info_to_json(proto_msg.offline_push_info.as_ref()),
                     to_value(&extra_value).unwrap_or_default(),
                     extensions_to_json(&proto_msg.extensions),
@@ -931,14 +1149,14 @@ impl PostgresMessageStore {
 
         // 重试机制（最多 3 次）
         let max_retries = 3;
-        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_error: Option<flare_server_core::error::FlareError> = None;
 
         for attempt in 0..max_retries {
             // 使用事务确保原子性
             let mut tx = match self.pool.begin().await {
                 Ok(tx) => tx,
                 Err(e) => {
-                    last_error = Some(anyhow::Error::from(e));
+                    last_error = Some(flare_server_core::error::FlareError::from(e));
                     if attempt < max_retries - 1 {
                         // 指数退避：1s, 2s, 4s
                         let backoff = Duration::from_millis(1000 * (1 << attempt));
@@ -951,10 +1169,72 @@ impl PostgresMessageStore {
                         continue;
                     }
                     return Err(last_error.unwrap_or_else(|| {
-                        anyhow::anyhow!("Failed to begin transaction after retries")
+                        flare_server_core::error::FlareError::system(
+                            "Failed to begin transaction after retries".to_string(),
+                        )
                     }));
                 }
             };
+
+            let mut ledger_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"
+                INSERT INTO message_write_ledger (
+                    tenant_id, server_id, conversation_id, seq
+                )
+                "#,
+            );
+            ledger_builder.push_values(&prepared_data, |mut b, row| {
+                b.push_bind(&row.0); // tenant_id
+                b.push_bind(&row.1); // server_id
+                b.push_bind(&row.2); // conversation_id
+                b.push_bind(row.9); // seq
+            });
+            ledger_builder.push(
+                " ON CONFLICT (tenant_id, server_id) DO NOTHING RETURNING tenant_id, server_id",
+            );
+
+            let inserted_ledger_rows: Vec<(String, String)> = match ledger_builder
+                .build_query_as()
+                .fetch_all(&mut *tx)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    last_error = Some(flare_server_core::error::FlareError::from(e));
+                    let _ = tx.rollback().await;
+                    if attempt < max_retries - 1 {
+                        let backoff = Duration::from_millis(1000 * (1 << attempt));
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            backoff_ms = backoff.as_millis(),
+                            "Failed to insert message write ledger batch, retrying after backoff"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(last_error.unwrap_or_else(|| {
+                        flare_server_core::error::FlareError::system(
+                            "Failed to insert message write ledger batch after retries".to_string(),
+                        )
+                    }));
+                }
+            };
+
+            if inserted_ledger_rows.is_empty() {
+                tx.commit().await?;
+                tracing::trace!(
+                    batch_size = messages.len(),
+                    "All batch messages were skipped by durable write ledger"
+                );
+                return Ok(());
+            }
+
+            let inserted_keys: HashSet<(String, String)> =
+                inserted_ledger_rows.into_iter().collect();
+            let rows_to_insert: Vec<_> = prepared_data
+                .iter()
+                .filter(|row| inserted_keys.contains(&(row.0.clone(), row.1.clone())))
+                .collect();
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
@@ -967,7 +1247,8 @@ impl PostgresMessageStore {
                 "#,
             );
 
-            query_builder.push_values(&prepared_data, |mut b, row| {
+            query_builder.push_values(&rows_to_insert, |mut b, row| {
+                let row = *row;
                 b.push_bind(&row.0); // tenant_id
                 b.push_bind(&row.1); // server_id
                 b.push_bind(&row.2); // conversation_id
@@ -1000,19 +1281,45 @@ impl PostgresMessageStore {
             // 执行批量插入
             match query_builder.build().execute(&mut *tx).await {
                 Ok(_) => {
+                    for row in &rows_to_insert {
+                        sqlx::query(
+                            r#"
+                            UPDATE message_write_ledger
+                            SET write_state = $3,
+                                archive_persisted_at = COALESCE(archive_persisted_at, CURRENT_TIMESTAMP),
+                                last_error = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE tenant_id = $1
+                              AND server_id = $2
+                            "#,
+                        )
+                        .bind(&row.0)
+                        .bind(&row.1)
+                        .bind(MessageWriteStage::ArchivePersisted.as_str())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| {
+                            flare_server_core::error::FlareError::system(format!(
+                                "update message write ledger archive stage failed message_id={} attempt={}: {e}",
+                                row.1,
+                                attempt + 1
+                            ))
+                        })?;
+                    }
+
                     // 提交事务
                     match tx.commit().await {
                         Ok(_) => {
                             tracing::info!(
-                                batch_size = messages.len(),
+                                batch_size = rows_to_insert.len(),
                                 attempt = attempt + 1,
                                 "Successfully batch inserted {} messages into TimescaleDB using VALUES",
-                                messages.len()
+                                rows_to_insert.len()
                             );
                             return Ok(());
                         }
                         Err(e) => {
-                            last_error = Some(anyhow::Error::from(e));
+                            last_error = Some(flare_server_core::error::FlareError::from(e));
                             if attempt < max_retries - 1 {
                                 let backoff = Duration::from_millis(1000 * (1 << attempt));
                                 tracing::warn!(
@@ -1027,11 +1334,11 @@ impl PostgresMessageStore {
                     }
                 }
                 Err(e) => {
-                    last_error = Some(anyhow::anyhow!(
+                    last_error = Some(flare_server_core::error::FlareError::system(format!(
                         "batch insert message archive failed batch_size={} attempt={}: {e}",
                         messages.len(),
                         attempt + 1
-                    ));
+                    )));
                     // 回滚事务
                     let _ = tx.rollback().await;
                     if attempt < max_retries - 1 {
@@ -1049,13 +1356,13 @@ impl PostgresMessageStore {
         }
 
         // 所有重试都失败
-        Err(anyhow::anyhow!(
+        Err(flare_server_core::error::FlareError::system(format!(
             "Failed to batch insert {} messages after {} attempts: {}",
             messages.len(),
             max_retries,
             last_error
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "Unknown error".to_string())
-        ))
+        )))
     }
 }

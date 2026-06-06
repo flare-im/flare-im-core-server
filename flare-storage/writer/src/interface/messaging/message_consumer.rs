@@ -10,14 +10,18 @@
 //! - 上下文重建：从 MQ headers 中提取追踪信息
 //! - 委托给 Application 层：调用 MessagePersistenceCommandHandler 处理业务
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use flare_im_core::{Ctx, context_from_mq_metadata};
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
+use crate::application::commands::ProcessStoreMessageCommand;
 use crate::application::handlers::MessagePersistenceCommandHandler;
+use crate::domain::model::TenantContext;
 
 // 类型别名，简化泛型参数
 type IdempotencyRepo =
@@ -49,6 +53,13 @@ pub struct MessageCreatedHandler {
     persistence_handler: Arc<MessagePersistenceHandler>,
 }
 
+struct DecodedStoreMessage {
+    ctx: Ctx,
+    command: ProcessStoreMessageCommand,
+    envelope_id: String,
+    conversation_id: String,
+}
+
 impl MessageCreatedHandler {
     /// 创建新的消息创建消费者处理器
     ///
@@ -61,6 +72,85 @@ impl MessageCreatedHandler {
         Self {
             persistence_handler,
         }
+    }
+
+    fn decode_store_message(
+        message: &Message,
+    ) -> Result<Option<DecodedStoreMessage>, ConsumerError> {
+        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
+            tracing::error!(
+                error = %e,
+                topic = %message.context.topic,
+                "Failed to deserialize MqEnvelope"
+            );
+            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
+        })?;
+
+        tracing::trace!(
+            envelope_id = %envelope.envelope_id,
+            conversation_id = %envelope.conversation_id,
+            payload_kind = ?envelope.payload_kind,
+            seq = envelope.seq,
+            "Processing MqEnvelope from TOPIC_MESSAGE_CREATED"
+        );
+
+        if envelope.payload_kind != MqPayloadKind::Message as i32 {
+            tracing::warn!(
+                envelope_id = %envelope.envelope_id,
+                payload_kind = ?envelope.payload_kind,
+                "Unexpected payload_kind, expected MESSAGE, skipping"
+            );
+            return Ok(None);
+        }
+
+        let proto_message = match &envelope.payload {
+            Some(mq_envelope::Payload::Message(m)) => m,
+            _ => {
+                tracing::error!(
+                    envelope_id = %envelope.envelope_id,
+                    "Message payload is missing or not Message variant"
+                );
+                return Err(ConsumerError::Deserialization(
+                    "Message payload is missing or not Message variant".to_string(),
+                ));
+            }
+        };
+
+        let mut merged_headers = message.context.headers.clone();
+        for (key, value) in &envelope.headers {
+            merged_headers.insert(key.clone(), value.clone());
+        }
+        let ctx = context_from_mq_metadata(&merged_headers);
+
+        let mut command = crate::convert::message_command_from_proto(proto_message.clone());
+        for (key, value) in merged_headers {
+            command.metadata.insert(key, value);
+        }
+        if command.tenant.is_none()
+            && let Some(tenant_id) = ctx.tenant_id().filter(|tenant_id| !tenant_id.is_empty())
+        {
+            command.tenant = Some(TenantContext {
+                tenant_id: flare_im_core::utils::normalize_tenant_id(tenant_id),
+                user_id: ctx.user_id().map(ToString::to_string),
+            });
+        }
+
+        Ok(Some(DecodedStoreMessage {
+            ctx,
+            command,
+            envelope_id: envelope.envelope_id,
+            conversation_id: envelope.conversation_id,
+        }))
+    }
+
+    fn batch_group_key(decoded: &DecodedStoreMessage) -> String {
+        decoded
+            .command
+            .tenant
+            .as_ref()
+            .map(|tenant| tenant.tenant_id.clone())
+            .or_else(|| decoded.ctx.tenant_id().map(ToString::to_string))
+            .unwrap_or_else(|| "0".to_string())
     }
 }
 
@@ -82,62 +172,22 @@ impl MessageHandler for MessageCreatedHandler {
     /// # 返回
     /// - `Ok(MessageResult::Ack)`: 处理成功
     /// - `Err(ConsumerError)`: 处理失败
-    #[instrument(skip(self), fields(
+    #[instrument(skip(self, message), fields(
         topic = %message.context.topic,
         partition = message.context.partition,
         offset = message.context.offset,
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
-        // 1. 反序列化 MqEnvelope
-        let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
-            tracing::error!(
-                error = %e,
-                topic = %message.context.topic,
-                "Failed to deserialize MqEnvelope"
-            );
-            ConsumerError::Deserialization(format!("Failed to deserialize MqEnvelope: {}", e))
-        })?;
-
-        tracing::trace!(
-            envelope_id = %envelope.envelope_id,
-            conversation_id = %envelope.conversation_id,
-            payload_kind = ?envelope.payload_kind,
-            seq = envelope.seq,
-            "Processing MqEnvelope from TOPIC_MESSAGE_CREATED"
-        );
-
-        // 2. 验证 payload_kind
-        if envelope.payload_kind != MqPayloadKind::Message as i32 {
-            tracing::warn!(
-                envelope_id = %envelope.envelope_id,
-                payload_kind = ?envelope.payload_kind,
-                "Unexpected payload_kind, expected MESSAGE, skipping"
-            );
+        let Some(decoded) = Self::decode_store_message(&message)? else {
             return Ok(MessageResult::Ack);
-        }
-
-        // 3. 从 payload oneof 提取 Message
-        let proto_message = match &envelope.payload {
-            Some(mq_envelope::Payload::Message(m)) => m,
-            _ => {
-                tracing::error!(
-                    envelope_id = %envelope.envelope_id,
-                    "Message payload is missing or not Message variant"
-                );
-                return Err(ConsumerError::Deserialization(
-                    "Message payload is missing or not Message variant".to_string(),
-                ));
-            }
         };
 
-        // 4. 从 headers 中重建上下文
-        let ctx = &message.context.ctx;
-
-        // 5. 转换为命令
-        let cmd = crate::convert::message_command_from_proto(proto_message.clone());
-
         // 6. 调用 Application 层
-        match self.persistence_handler.handle(ctx, cmd).await {
+        match self
+            .persistence_handler
+            .handle(&decoded.ctx, decoded.command)
+            .await
+        {
             Ok(Some(result)) => {
                 tracing::trace!(
                     topic = %message.context.topic,
@@ -177,9 +227,73 @@ impl MessageHandler for MessageCreatedHandler {
         }
     }
 
+    #[instrument(skip(self, messages), fields(batch_size = messages.len()))]
+    async fn handle_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<MessageResult>, ConsumerError> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = vec![MessageResult::Ack; messages.len()];
+        let mut groups: BTreeMap<String, (Ctx, Vec<ProcessStoreMessageCommand>)> = BTreeMap::new();
+        let mut decoded_count = 0usize;
+
+        for (index, message) in messages.iter().enumerate() {
+            let Some(decoded) = Self::decode_store_message(message)? else {
+                results[index] = MessageResult::Ack;
+                continue;
+            };
+
+            tracing::trace!(
+                envelope_id = %decoded.envelope_id,
+                conversation_id = %decoded.conversation_id,
+                "Decoded message for batch persistence"
+            );
+
+            decoded_count += 1;
+            let key = Self::batch_group_key(&decoded);
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (decoded.ctx.clone(), Vec::new()));
+            entry.1.push(decoded.command);
+        }
+
+        for (tenant_id, (ctx, commands)) in groups {
+            let batch_size = commands.len();
+            self.persistence_handler
+                .handle_batch(&ctx, commands)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        tenant_id = %tenant_id,
+                        batch_size,
+                        "Failed to process message persistence batch"
+                    );
+                    ConsumerError::Handler(format!(
+                        "MessagePersistenceCommandHandler batch error: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        tracing::trace!(
+            decoded_count,
+            result_count = results.len(),
+            "Successfully processed message persistence batch"
+        );
+        Ok(results)
+    }
+
     /// 获取处理器名称
     fn name(&self) -> &str {
         "storage-message-created-handler"
+    }
+
+    fn supports_batch(&self) -> bool {
+        true
     }
 }
 

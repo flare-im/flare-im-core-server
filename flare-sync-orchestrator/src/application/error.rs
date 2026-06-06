@@ -1,7 +1,6 @@
 //! 同步编排错误：统一为 `FlareError`，gRPC 层经 `IntoGrpc` / `tonic::Status` 暴露给客户端。
 
-use crate::domain::SyncDomainError;
-use flare_im_core::error::{ErrorBuilder, ErrorCode, FlareError};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 
 // 重导出 infrastructure 层的错误转换函数
 pub use crate::infrastructure::grpc_error::flare_from_tonic_status;
@@ -41,22 +40,4 @@ pub fn require_same_user(
         );
     }
     Ok(())
-}
-
-impl From<SyncDomainError> for FlareError {
-    fn from(e: SyncDomainError) -> Self {
-        match e {
-            SyncDomainError::CursorRegression {
-                previous,
-                attempted,
-            } => ErrorBuilder::new(
-                ErrorCode::SyncCursorRegression,
-                "同步游标不可回退，请重新拉取快照后再上报",
-            )
-            .param("previous_seq", previous.to_string())
-            .param("attempted_seq", attempted.to_string())
-            .details("若多端并发，请以较大 last_seq 为准或触发全量同步".to_string())
-            .build_error(),
-        }
-    }
 }

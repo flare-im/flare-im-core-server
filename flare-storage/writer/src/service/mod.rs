@@ -1,7 +1,7 @@
 //! 服务模块 - 包含服务启动、注册和管理相关功能
 
-use anyhow::Result;
 use flare_im_core::service_names::STORAGE_WRITER;
+use flare_server_core::error::Result;
 use tracing::info;
 
 use flare_core_runtime::ServiceRuntime;
@@ -39,24 +39,79 @@ impl ApplicationBootstrap {
         let mut runtime = ServiceRuntime::mq_consumer()
             .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
 
-        let tasks = match context.config.mq_backend.as_str() {
-            "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
-                context.config.as_ref(),
-                context.consumer_config,
-                context.dispatcher.clone(),
-                "storage-kafka-consumer",
-            )
-            .map_err(|e| anyhow::anyhow!("create storage-writer kafka consumers: {}", e))?,
-            "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
-                context.config.as_ref(),
-                context.consumer_config,
-                context.dispatcher.clone(),
-                "storage-nats-consumer",
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("create storage-writer nats consumers: {}", e))?,
-            other => anyhow::bail!("unsupported mq backend: {}", other),
+        if context.config.metrics.enabled {
+            let metrics_config = context.config.metrics.clone();
+            runtime = runtime.add_spawn_with_shutdown(
+                "storage-writer-metrics",
+                move |shutdown_rx| async move {
+                    flare_im_core::metrics::serve_prometheus_metrics(metrics_config, shutdown_rx)
+                        .await
+                },
+            );
+        }
+
+        let mut tasks = match context.config.mq_backend.as_str() {
+            "kafka" => {
+                flare_server_core::mq::kafka::build_kafka_consumer_tasks_with_failure_publishers(
+                    context.config.as_ref(),
+                    context.consumer_config.clone(),
+                    context.dispatcher.clone(),
+                    "storage-kafka-consumer",
+                    context.failure_publishers.clone(),
+                )
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "create storage-writer kafka consumers: {}",
+                        e
+                    ))
+                })?
+            }
+            "nats" | "jetstream" => {
+                flare_server_core::mq::nats::build_nats_consumer_tasks_with_failure_publishers(
+                    context.config.as_ref(),
+                    context.consumer_config.clone(),
+                    context.dispatcher.clone(),
+                    "storage-nats-consumer",
+                    context.failure_publishers.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "create storage-writer nats consumers: {}",
+                        e
+                    ))
+                })?
+            }
+            other => {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "unsupported mq backend: {other}"
+                )));
+            }
         };
+
+        if context.config.mq_backend.as_str() == "kafka"
+            && let Some(dispatcher) = context.retry_forwarder_dispatcher.clone()
+        {
+            let retry_tasks =
+                flare_server_core::mq::kafka::build_kafka_consumer_tasks_with_failure_publishers(
+                    context.config.as_ref(),
+                    context
+                        .consumer_config
+                        .clone()
+                        .with_ordered(false)
+                        .with_batch_size(1),
+                    dispatcher,
+                    "storage-retry-forwarder",
+                    context.failure_publishers.clone(),
+                )
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "create storage-writer kafka retry-forwarder consumers: {}",
+                        e
+                    ))
+                })?;
+            tasks.extend(retry_tasks);
+        }
 
         for task in tasks {
             runtime = runtime.add_task(Box::new(task));
@@ -65,5 +120,6 @@ impl ApplicationBootstrap {
         flare_im_core::health::attach_runtime_health_checks(runtime, STORAGE_WRITER)
             .run()
             .await
+            .map_err(flare_server_core::error::FlareError::from)
     }
 }

@@ -1,5 +1,3 @@
-pub mod call_signal_enrichment_service;
-pub mod call_signal_notice_message_builder;
 pub mod conversation_ensure_service;
 pub mod event_domain_service;
 pub mod hook_execution_service;
@@ -8,7 +6,6 @@ pub mod message_temporary_service;
 pub mod sequence_allocator;
 pub mod validation_strategy;
 
-pub use call_signal_enrichment_service::CallSignalEnrichmentService;
 pub use conversation_ensure_service::{
     ConversationEnsureRequest, ConversationEnsureService, ConversationEventPublisher,
     build_conversation_ensure_request_from_event, build_conversation_ensure_request_from_message,
