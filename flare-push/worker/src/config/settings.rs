@@ -5,6 +5,7 @@ use std::{collections::HashMap, env};
 use flare_im_core::config::FlareAppConfig;
 use flare_im_core::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
 use flare_im_core::constants::topics::{TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE};
+use flare_im_core::metrics::MetricsEndpointConfig;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -31,6 +32,9 @@ pub struct PushWorkerConfig {
     pub online_service_endpoint: String,
     /// 无注册中心时 Access Gateway gRPC 直连地址（与 `GatewayRouterConfig.static_fallback_endpoint` 一致）
     pub access_gateway_static_endpoint: Option<String>,
+    /// 未配置离线推送提供者时的有界本地 parking 容量。
+    pub offline_parking_capacity: usize,
+    pub metrics: MetricsEndpointConfig,
 }
 
 /// 与 `signaling-online` 监听地址对齐：优先读 app 中 `[services.signaling_online.server]`，否则本地默认 50061。
@@ -127,6 +131,30 @@ impl PushWorkerConfig {
             .unwrap_or_else(|| default_signaling_online_grpc_endpoint(app));
 
         let access_gateway_static_endpoint = env::var("ACCESS_GATEWAY_GRPC_ENDPOINT").ok();
+        let offline_parking_capacity = env::var("PUSH_WORKER_OFFLINE_PARKING_CAPACITY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .or(service.offline_parking_capacity)
+            .unwrap_or(4096);
+        let metrics_enabled = parse_bool_env("PUSH_WORKER_METRICS_ENABLED")
+            .or(service.metrics_enabled)
+            .unwrap_or(true);
+        let metrics_address = env::var("PUSH_WORKER_METRICS_ADDRESS")
+            .ok()
+            .or_else(|| service.metrics_address.clone())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let metrics_port = env::var("PUSH_WORKER_METRICS_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .or(service.metrics_port)
+            .unwrap_or(19186);
+        let metrics_path = env::var("PUSH_WORKER_METRICS_PATH")
+            .ok()
+            .or_else(|| service.metrics_path.clone())
+            .unwrap_or_else(|| "/metrics".to_string());
+        let mut metrics =
+            MetricsEndpointConfig::new(metrics_address, metrics_port).with_path(metrics_path);
+        metrics.enabled = metrics_enabled;
 
         Self {
             mq_backend,
@@ -144,8 +172,20 @@ impl PushWorkerConfig {
             push_dlq_topic,
             online_service_endpoint,
             access_gateway_static_endpoint,
+            offline_parking_capacity,
+            metrics,
         }
     }
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Some(true),
+            "0" | "false" | "off" | "no" => Some(false),
+            _ => None,
+        })
 }
 
 impl NatsConsumerConfig for PushWorkerConfig {

@@ -44,12 +44,14 @@ impl MessageOperationCommandHandler {
         let start = Instant::now();
         let event = command.event;
 
-        self.event_service
-            .process_event(ctx, &event)
-            .await
-            .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
-            })?;
+        if let Err(e) = self.event_service.process_event(ctx, &event).await {
+            self.metrics.record_storage_persist("event", "error");
+            return Err(map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Database operation failed",
+            ));
+        }
 
         let message_id = event_handlers::primary_message_id_for_metrics(&event);
 
@@ -61,6 +63,7 @@ impl MessageOperationCommandHandler {
             .messages_persisted_total
             .with_label_values(&["event"])
             .inc();
+        self.metrics.record_storage_persist("event", "success");
 
         Ok(PersistenceResult {
             conversation_id: event.conversation_id,

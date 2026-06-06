@@ -143,6 +143,50 @@ options = { "delivery.timeout.ms" = "15000", "retries" = "2147483647" }
 [postgres.media]
 url = "postgres://flare:flare123@localhost:25432/flare2"
 max_connections = 20
+min_connections = 2
+acquire_timeout_seconds = 10
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
+[postgres.storage_writer]
+url = "postgres://flare:flare123@localhost:25432/flare2"
+max_connections = 64
+min_connections = 12
+acquire_timeout_seconds = 5
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
+[postgres.storage_reader]
+url = "postgres://flare:flare123@localhost:25432/flare2"
+max_connections = 32
+min_connections = 6
+acquire_timeout_seconds = 5
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
+[postgres.conversation]
+url = "postgres://flare:flare123@localhost:25432/flare2"
+max_connections = 32
+min_connections = 6
+acquire_timeout_seconds = 5
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
+[postgres.media_metadata]
+url = "postgres://flare:flare123@localhost:25432/flare2"
+max_connections = 16
+min_connections = 2
+acquire_timeout_seconds = 10
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
+[postgres.capability]
+url = "postgres://flare:flare123@localhost:25432/flare2"
+max_connections = 12
+min_connections = 2
+acquire_timeout_seconds = 10
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
 
 [mongodb.primary]
 url = "mongodb://localhost:27017"

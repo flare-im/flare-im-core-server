@@ -12,6 +12,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::{Config, RegistryConfig, ServerConfig, ServiceConfig};
 use flare_server_core::error::{AnyhowContext, Result};
@@ -155,6 +156,43 @@ pub struct PostgresInstanceConfig {
     /// 最小连接数
     #[serde(default)]
     pub min_connections: Option<u32>,
+    /// 获取连接超时（秒）
+    #[serde(default)]
+    pub acquire_timeout_seconds: Option<u64>,
+    /// 空闲连接超时（秒）
+    #[serde(default)]
+    pub idle_timeout_seconds: Option<u64>,
+    /// 连接最大生命周期（秒）
+    #[serde(default)]
+    pub max_lifetime_seconds: Option<u64>,
+}
+
+impl PostgresInstanceConfig {
+    pub fn max_connections_or(&self, default: u32) -> u32 {
+        self.max_connections.unwrap_or(default).max(1)
+    }
+
+    pub fn min_connections_or(&self, default: u32) -> u32 {
+        self.min_connections
+            .unwrap_or(default)
+            .min(self.max_connections_or(default.max(1)))
+    }
+
+    pub fn acquire_timeout_or(&self, default_seconds: u64) -> Duration {
+        Duration::from_secs(
+            self.acquire_timeout_seconds
+                .unwrap_or(default_seconds)
+                .max(1),
+        )
+    }
+
+    pub fn idle_timeout_or(&self, default_seconds: u64) -> Duration {
+        Duration::from_secs(self.idle_timeout_seconds.unwrap_or(default_seconds).max(1))
+    }
+
+    pub fn max_lifetime_or(&self, default_seconds: u64) -> Duration {
+        Duration::from_secs(self.max_lifetime_seconds.unwrap_or(default_seconds).max(1))
+    }
 }
 
 /// MongoDB 实例配置
@@ -513,6 +551,21 @@ pub struct PushWorkerServiceConfig {
     /// 离线提供者
     #[serde(default)]
     pub offline_provider: Option<String>,
+    /// 未配置离线推送提供者时的有界本地 parking 容量
+    #[serde(default)]
+    pub offline_parking_capacity: Option<usize>,
+    /// Prometheus 指标出口开关
+    #[serde(default)]
+    pub metrics_enabled: Option<bool>,
+    /// Prometheus 指标监听地址
+    #[serde(default)]
+    pub metrics_address: Option<String>,
+    /// Prometheus 指标监听端口
+    #[serde(default)]
+    pub metrics_port: Option<u16>,
+    /// Prometheus 指标路径
+    #[serde(default)]
+    pub metrics_path: Option<String>,
     /// Hook 配置
     #[serde(default)]
     pub hook_config: Option<String>,
@@ -581,6 +634,12 @@ pub struct MessageOrchestratorServiceConfig {
     /// Conversation 服务类型（用于自动创建 conversation，如果配置了 registry，会自动发现）
     #[serde(default)]
     pub conversation_service_type: Option<String>,
+    /// 高频单聊 conversation ensure 缓存容量
+    #[serde(default)]
+    pub conversation_ensure_cache_capacity: Option<u64>,
+    /// 高频单聊 conversation ensure 缓存 TTL（秒）
+    #[serde(default)]
+    pub conversation_ensure_cache_ttl_seconds: Option<u64>,
     /// Prometheus 指标出口开关
     #[serde(default)]
     pub metrics_enabled: Option<bool>,

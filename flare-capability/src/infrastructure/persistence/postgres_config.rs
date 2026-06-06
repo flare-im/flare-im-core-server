@@ -91,8 +91,28 @@ impl PostgresHookConfigRepository {
 
     /// 创建数据库连接池
     pub async fn new(database_url: &str) -> Result<Self> {
+        Self::new_with_pool_profile(database_url, DEFAULT_MAX_CONNECTIONS, 2, 10, 300, 1800).await
+    }
+
+    /// 创建数据库连接池（显式 pool profile）。
+    pub async fn new_with_pool_profile(
+        database_url: &str,
+        max_connections: u32,
+        min_connections: u32,
+        acquire_timeout_seconds: u64,
+        idle_timeout_seconds: u64,
+        max_lifetime_seconds: u64,
+    ) -> Result<Self> {
+        let max_connections = max_connections.max(1);
+        let min_connections = min_connections.min(max_connections);
         let pool = PgPoolOptions::new()
-            .max_connections(DEFAULT_MAX_CONNECTIONS)
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .acquire_timeout(std::time::Duration::from_secs(
+                acquire_timeout_seconds.max(1),
+            ))
+            .idle_timeout(std::time::Duration::from_secs(idle_timeout_seconds.max(1)))
+            .max_lifetime(std::time::Duration::from_secs(max_lifetime_seconds.max(1)))
             .connect(database_url)
             .await
             .context("failed to create database connection pool")?;

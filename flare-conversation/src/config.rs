@@ -13,6 +13,11 @@ pub struct ConversationConfig {
     pub mq_backend: String,
     pub redis_url: String,
     pub postgres_url: Option<String>,
+    pub postgres_max_connections: u32,
+    pub postgres_min_connections: u32,
+    pub postgres_acquire_timeout_seconds: u64,
+    pub postgres_idle_timeout_seconds: u64,
+    pub postgres_max_lifetime_seconds: u64,
     pub conversation_state_prefix: String,
     pub conversation_unread_prefix: String,
     pub user_cursor_prefix: String,
@@ -58,14 +63,39 @@ impl ConversationConfig {
             })
             .unwrap_or_else(|| "redis://127.0.0.1:6379/0".to_string());
 
-        let postgres_url = env::var("CONVERSATION_POSTGRES_URL").ok().or_else(|| {
-            if let Some(postgres_name) = &service_config.postgres {
-                app.postgres_profile(postgres_name)
-                    .map(|profile| profile.url.clone())
-            } else {
-                None
-            }
-        });
+        let postgres_profile = service_config
+            .postgres
+            .as_deref()
+            .and_then(|name| app.postgres_profile(name));
+        let postgres_url = env::var("CONVERSATION_POSTGRES_URL")
+            .ok()
+            .or_else(|| postgres_profile.map(|profile| profile.url.clone()));
+        let postgres_max_connections = env::var("CONVERSATION_POSTGRES_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.max_connections))
+            .unwrap_or(24);
+        let postgres_min_connections = env::var("CONVERSATION_POSTGRES_MIN_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.min_connections))
+            .unwrap_or(4);
+        let postgres_acquire_timeout_seconds =
+            env::var("CONVERSATION_POSTGRES_ACQUIRE_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| postgres_profile.and_then(|profile| profile.acquire_timeout_seconds))
+                .unwrap_or(10);
+        let postgres_idle_timeout_seconds = env::var("CONVERSATION_POSTGRES_IDLE_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.idle_timeout_seconds))
+            .unwrap_or(300);
+        let postgres_max_lifetime_seconds = env::var("CONVERSATION_POSTGRES_MAX_LIFETIME_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.max_lifetime_seconds))
+            .unwrap_or(1800);
 
         let conversation_state_prefix = env::var("CONVERSATION_STATE_PREFIX")
             .ok()
@@ -223,6 +253,11 @@ impl ConversationConfig {
             mq_backend,
             redis_url,
             postgres_url,
+            postgres_max_connections,
+            postgres_min_connections,
+            postgres_acquire_timeout_seconds,
+            postgres_idle_timeout_seconds,
+            postgres_max_lifetime_seconds,
             conversation_state_prefix,
             conversation_unread_prefix,
             user_cursor_prefix,

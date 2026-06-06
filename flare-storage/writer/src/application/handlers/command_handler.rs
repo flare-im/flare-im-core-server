@@ -84,22 +84,24 @@ where
         let message_id = prepared.message_id.clone();
         let conversation_id = prepared.conversation_id.clone();
         let db_start = Instant::now();
-        let result = self
-            .domain_service
-            .ensure_consistency(ctx, prepared)
-            .await
-            .map_err(|e| {
+        let result = match self.domain_service.ensure_consistency(ctx, prepared).await {
+            Ok(result) => result,
+            Err(e) => {
+                self.metrics.record_storage_persist("message", "error");
                 tracing::error!(
                     error = %e,
                     message_id = %message_id,
                     conversation_id = %conversation_id,
                     "Failed to ensure message consistency"
                 );
-                e
-            })?;
+                return Err(e);
+            }
+        };
 
         if result.deduplicated {
             self.metrics.messages_duplicate_total.inc();
+            self.metrics
+                .record_storage_persist("message", "deduplicated");
             tracing::trace!(
                 message_id = %result.message_id,
                 "Message is duplicate, skipping persistence"
@@ -117,6 +119,7 @@ where
                 .messages_persisted_total
                 .with_label_values(&[tenant_id.as_str()])
                 .inc();
+            self.metrics.record_storage_persist("message", "success");
 
             tracing::trace!(
                 message_id = %result.message_id,
@@ -161,18 +164,23 @@ where
         }
 
         let db_start = Instant::now();
-        let results = self
+        let results = match self
             .domain_service
             .ensure_batch_consistency(ctx, prepared_messages)
             .await
-            .map_err(|e| {
+        {
+            Ok(results) => results,
+            Err(e) => {
+                self.metrics.record_storage_persist("batch", "error");
                 tracing::error!(error = %e, "Failed to ensure batch message consistency");
-                e
-            })?;
+                return Err(e);
+            }
+        };
 
         let deduplicated_count = results.iter().filter(|result| result.deduplicated).count();
         for _ in 0..deduplicated_count {
             self.metrics.messages_duplicate_total.inc();
+            self.metrics.record_storage_persist("batch", "deduplicated");
         }
 
         let persisted_count = results.len().saturating_sub(deduplicated_count);
@@ -189,6 +197,9 @@ where
                 .messages_persisted_total
                 .with_label_values(&["batch"])
                 .inc_by(persisted_count as u64);
+            for _ in 0..persisted_count {
+                self.metrics.record_storage_persist("batch", "success");
+            }
 
             tracing::trace!(
                 batch_size = persisted_count,

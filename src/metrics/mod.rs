@@ -144,6 +144,10 @@ pub struct StorageWriterMetrics {
     pub messages_duplicate_total: IntCounter,
     /// 批量处理大小
     pub batch_size: Histogram,
+    /// 存储持久化一等结果指标。
+    pub storage_persist_total: IntCounterVec,
+    /// 写入账本状态迁移指标。
+    pub ledger_transition_total: IntCounterVec,
 }
 
 impl StorageWriterMetrics {
@@ -196,6 +200,24 @@ impl StorageWriterMetrics {
         )
         .expect("Failed to create batch_size metric");
 
+        let storage_persist_total = IntCounterVec::new(
+            Opts::new(
+                "storage_writer_persist_total",
+                "Total number of storage persist attempts by path and result",
+            ),
+            &["path", "result"],
+        )
+        .expect("Failed to create storage_writer_persist_total metric");
+
+        let ledger_transition_total = IntCounterVec::new(
+            Opts::new(
+                "storage_writer_ledger_transition_total",
+                "Total number of message write ledger transitions by stage and result",
+            ),
+            &["stage", "result"],
+        )
+        .expect("Failed to create storage_writer_ledger_transition_total metric");
+
         // 注册指标，忽略重复注册错误（在基准测试中可能会重复创建）
         let _ = REGISTRY.register(Box::new(messages_persisted_total.clone()));
         let _ = REGISTRY.register(Box::new(messages_persisted_duration_seconds.clone()));
@@ -203,6 +225,8 @@ impl StorageWriterMetrics {
         let _ = REGISTRY.register(Box::new(redis_update_duration_seconds.clone()));
         let _ = REGISTRY.register(Box::new(messages_duplicate_total.clone()));
         let _ = REGISTRY.register(Box::new(batch_size.clone()));
+        let _ = REGISTRY.register(Box::new(storage_persist_total.clone()));
+        let _ = REGISTRY.register(Box::new(ledger_transition_total.clone()));
 
         Self {
             messages_persisted_total,
@@ -211,11 +235,62 @@ impl StorageWriterMetrics {
             redis_update_duration_seconds,
             messages_duplicate_total,
             batch_size,
+            storage_persist_total,
+            ledger_transition_total,
         }
+    }
+
+    pub fn record_storage_persist(&self, path: &str, result: &str) {
+        self.storage_persist_total
+            .with_label_values(&[path, result])
+            .inc();
+    }
+
+    pub fn record_ledger_transition(&self, stage: &str, result: &str) {
+        self.ledger_transition_total
+            .with_label_values(&[stage, result])
+            .inc();
     }
 }
 
 impl Default for StorageWriterMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Push Worker 指标。
+pub struct PushWorkerMetrics {
+    /// 离线推送重投递/降级处置计数。
+    pub offline_redelivery_total: IntCounterVec,
+}
+
+impl PushWorkerMetrics {
+    pub fn new() -> Self {
+        let offline_redelivery_total = IntCounterVec::new(
+            Opts::new(
+                "push_worker_offline_redelivery_total",
+                "Total number of offline push redelivery prevention actions",
+            ),
+            &["reason", "action"],
+        )
+        .expect("Failed to create push_worker_offline_redelivery_total metric");
+
+        let _ = REGISTRY.register(Box::new(offline_redelivery_total.clone()));
+
+        Self {
+            offline_redelivery_total,
+        }
+    }
+
+    pub fn record_offline_redelivery(&self, reason: &str, action: &str) {
+        self.offline_redelivery_total
+            .with_label_values(&[reason, action])
+            .inc();
+    }
+}
+
+impl Default for PushWorkerMetrics {
     fn default() -> Self {
         Self::new()
     }

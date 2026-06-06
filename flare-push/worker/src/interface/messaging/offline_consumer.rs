@@ -8,10 +8,12 @@
 //! - Interface 层：负责 MQ 消息的接收和反序列化
 //! - 上下文重建：从 MQ headers 中提取追踪信息
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flare_im_core::Ctx;
+use flare_im_core::metrics::PushWorkerMetrics;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::FlareError;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
@@ -19,6 +21,62 @@ use prost::Message as _;
 use tracing::instrument;
 
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
+
+#[cfg(test)]
+const DEFAULT_OFFLINE_PARKING_CAPACITY: usize = 4096;
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct ParkedOfflinePush {
+    tenant_id: String,
+    user_id: String,
+    message_id: String,
+    conversation_id: String,
+    payload_len: usize,
+    parked_at_ms: i64,
+}
+
+struct OfflineParkingLot {
+    capacity: usize,
+    queue: Mutex<VecDeque<ParkedOfflinePush>>,
+}
+
+impl OfflineParkingLot {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            queue: Mutex::new(VecDeque::with_capacity(capacity.min(1024))),
+        }
+    }
+
+    fn park(&self, envelope: &PushTaskEnvelope, payload_len: usize) -> bool {
+        let Ok(mut queue) = self.queue.lock() else {
+            return false;
+        };
+        if queue.len() >= self.capacity {
+            return false;
+        }
+        queue.push_back(ParkedOfflinePush {
+            tenant_id: envelope.tenant_id.clone(),
+            user_id: envelope.user_id.clone(),
+            message_id: envelope.message_id.clone(),
+            conversation_id: envelope.conversation_id.clone(),
+            payload_len,
+            parked_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or_default(),
+        });
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default()
+    }
+}
 
 #[async_trait::async_trait]
 pub trait OfflinePushExecutor: Send + Sync {
@@ -30,20 +88,35 @@ pub struct OfflinePushHandler {
     #[allow(dead_code)]
     dlq: Option<Arc<DlqPublisher>>,
     delivery: Option<Arc<dyn OfflinePushExecutor>>,
+    parking_lot: Arc<OfflineParkingLot>,
+    metrics: Arc<PushWorkerMetrics>,
 }
 
 impl OfflinePushHandler {
-    pub fn new(dlq: Arc<DlqPublisher>) -> Self {
+    pub fn new(
+        dlq: Arc<DlqPublisher>,
+        parking_capacity: usize,
+        metrics: Arc<PushWorkerMetrics>,
+    ) -> Self {
         Self {
             dlq: Some(dlq),
             delivery: None,
+            parking_lot: Arc::new(OfflineParkingLot::new(parking_capacity)),
+            metrics,
         }
     }
 
-    pub fn with_delivery(dlq: Arc<DlqPublisher>, delivery: Arc<dyn OfflinePushExecutor>) -> Self {
+    pub fn with_delivery(
+        dlq: Arc<DlqPublisher>,
+        delivery: Arc<dyn OfflinePushExecutor>,
+        parking_capacity: usize,
+        metrics: Arc<PushWorkerMetrics>,
+    ) -> Self {
         Self {
             dlq: Some(dlq),
             delivery: Some(delivery),
+            parking_lot: Arc::new(OfflineParkingLot::new(parking_capacity)),
+            metrics,
         }
     }
 
@@ -52,6 +125,8 @@ impl OfflinePushHandler {
         Self {
             dlq: None,
             delivery: None,
+            parking_lot: Arc::new(OfflineParkingLot::new(DEFAULT_OFFLINE_PARKING_CAPACITY)),
+            metrics: Arc::new(PushWorkerMetrics::new()),
         }
     }
 
@@ -112,9 +187,39 @@ impl MessageHandler for OfflinePushHandler {
                 tenant_id = %envelope.tenant_id,
                 message_id = %envelope.message_id,
                 conversation_id = %envelope.conversation_id,
-                "offline push delivery backend is not configured; nacking to preserve task"
+                "offline push delivery backend is not configured; parking or DLQ then acking"
             );
-            return Ok(MessageResult::Nack);
+            if let Some(dlq) = &self.dlq {
+                dlq.publish(
+                    ctx,
+                    Some(&envelope.conversation_id),
+                    message.payload.clone(),
+                )
+                .await
+                .map_err(|e| ConsumerError::DeadLetter(e.to_string()))?;
+                self.metrics
+                    .record_offline_redelivery("backend_unconfigured", "dlq_ack");
+                return Ok(MessageResult::Ack);
+            }
+
+            if self.parking_lot.park(&envelope, message.payload.len()) {
+                self.metrics
+                    .record_offline_redelivery("backend_unconfigured", "park_ack");
+                tracing::debug!(
+                    parked_len = self.parking_lot.len(),
+                    message_id = %envelope.message_id,
+                    "offline push task parked because delivery backend is not configured"
+                );
+            } else {
+                self.metrics
+                    .record_offline_redelivery("backend_unconfigured", "parking_full_ack");
+                tracing::error!(
+                    capacity = self.parking_lot.capacity,
+                    message_id = %envelope.message_id,
+                    "offline push parking lot is full; acking to prevent redelivery storm"
+                );
+            }
+            return Ok(MessageResult::Ack);
         };
 
         match delivery.deliver(ctx, &envelope).await {
@@ -161,8 +266,12 @@ impl MessageHandler for OfflinePushHandler {
 pub struct OfflinePushConsumerFactory;
 
 impl OfflinePushConsumerFactory {
-    pub fn create_handler(dlq: Arc<DlqPublisher>) -> Arc<dyn MessageHandler> {
-        Arc::new(OfflinePushHandler::new(dlq))
+    pub fn create_handler(
+        dlq: Arc<DlqPublisher>,
+        parking_capacity: usize,
+        metrics: Arc<PushWorkerMetrics>,
+    ) -> Arc<dyn MessageHandler> {
+        Arc::new(OfflinePushHandler::new(dlq, parking_capacity, metrics))
     }
 
     pub fn topic() -> &'static str {
@@ -206,11 +315,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_offline_task_is_not_acked_without_delivery_backend() {
+    async fn valid_offline_task_is_parked_without_delivery_backend() {
         let handler = OfflinePushHandler::without_dlq_for_test();
 
         let result = handler.handle(task_message()).await.expect("handle");
 
-        assert_eq!(result, MessageResult::Nack);
+        assert_eq!(result, MessageResult::Ack);
+        assert_eq!(handler.parking_lot.len(), 1);
     }
 }

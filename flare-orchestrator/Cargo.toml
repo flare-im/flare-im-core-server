@@ -21,6 +21,7 @@ flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 futures = { workspace = true }
+moka = { workspace = true }
 rand = { workspace = true }
 redis = { workspace = true }
 tokio = { workspace = true }
@@ -39,4 +40,3 @@ flare-im-core = { path = "..", features = ["tracing"] }
 [features]
 default = []
 tracing = []
-

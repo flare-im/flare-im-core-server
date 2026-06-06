@@ -126,7 +126,8 @@ pub async fn initialize(
             wal_cleanup_repo,
             Some(ack_publisher),
         )
-        .with_write_ledger_repo(Some(write_ledger_repo)),
+        .with_write_ledger_repo(Some(write_ledger_repo))
+        .with_metrics(Some(metrics.clone())),
     );
 
     let event_service: Arc<EventApplicationServiceType> = Arc::new(EventApplicationService::new(

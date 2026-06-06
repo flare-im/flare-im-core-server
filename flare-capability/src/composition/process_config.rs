@@ -11,6 +11,16 @@ pub struct CapabilityServiceConfig {
     pub runtime_config_file: Option<std::path::PathBuf>,
     /// 数据库 URL（可选，最高优先级，用于动态 API 配置）
     pub database_url: Option<String>,
+    /// PostgreSQL 最大连接数
+    pub postgres_max_connections: u32,
+    /// PostgreSQL 最小连接数
+    pub postgres_min_connections: u32,
+    /// PostgreSQL 获取连接超时（秒）
+    pub postgres_acquire_timeout_seconds: u64,
+    /// PostgreSQL 空闲连接超时（秒）
+    pub postgres_idle_timeout_seconds: u64,
+    /// PostgreSQL 连接最大生命周期（秒）
+    pub postgres_max_lifetime_seconds: u64,
     /// 配置中心端点（可选，`etcd://` / `consul://`）
     pub config_center_endpoint: Option<String>,
     /// 租户 ID（可选，用于多租户场景）
@@ -27,6 +37,11 @@ impl Default for CapabilityServiceConfig {
             config_file: Some(std::path::PathBuf::from("config/hooks.toml")),
             runtime_config_file: Some(std::path::PathBuf::from("config/services/capability.toml")),
             database_url: None,
+            postgres_max_connections: 10,
+            postgres_min_connections: 2,
+            postgres_acquire_timeout_seconds: 10,
+            postgres_idle_timeout_seconds: 300,
+            postgres_max_lifetime_seconds: 1800,
             config_center_endpoint: None,
             tenant_id: None,
             execution_mode: crate::domain::model::ExecutionMode::Sequential,

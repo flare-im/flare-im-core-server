@@ -1,8 +1,8 @@
 # Flare Capability（Hook + Capability gRPC）
-# 与 storage 共用 base.toml [postgres.media]（flare2）；可用 DATABASE_URL 覆盖
+# 与 storage 共用同一数据库，但使用独立 pool profile；可用 DATABASE_URL 覆盖
 
 [services.capability]
-postgres = "media"
+postgres = "capability"
 
 [services.capability.server]
 address = "0.0.0.0"

@@ -74,6 +74,10 @@ pub struct MessageOrchestratorConfig {
     pub conversation_service_type: Option<String>,
     /// 会话生成模式：sync（默认，同步 gRPC）| async（发布 conversation.ensure 事件）
     pub session_creation_mode: SessionCreationMode,
+    /// 高频单聊 conversation ensure 缓存容量。
+    pub conversation_ensure_cache_capacity: u64,
+    /// 高频单聊 conversation ensure 缓存 TTL（秒）。
+    pub conversation_ensure_cache_ttl_seconds: u64,
     /// 服务器 ID（用于服务注册，标识服务实例）
     pub server_id: Option<String>,
     /// 业务系统标识符（SVID），用于服务发现时的过滤
@@ -463,6 +467,29 @@ impl MessageOrchestratorConfig {
         .map(|s| SessionCreationMode::from_config_value(&s))
         .unwrap_or(SessionCreationMode::Async);
 
+        let conversation_ensure_cache_capacity = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_CONVERSATION_ENSURE_CACHE_CAPACITY",
+            "CONVERSATION_ENSURE_CACHE_CAPACITY",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.conversation_ensure_cache_capacity)
+        })
+        .unwrap_or(100_000);
+        let conversation_ensure_cache_ttl_seconds = env_or_fallback(
+            "MESSAGE_ORCHESTRATOR_CONVERSATION_ENSURE_CACHE_TTL_SECONDS",
+            "CONVERSATION_ENSURE_CACHE_TTL_SECONDS",
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            service_config
+                .as_ref()
+                .and_then(|service| service.conversation_ensure_cache_ttl_seconds)
+        })
+        .unwrap_or(30);
+
         // 从环境变量获取 server_id 和 svid
         let server_id = env_or_fallback("MESSAGE_ORCHESTRATOR_SERVER_ID", "SERVER_ID");
 
@@ -653,6 +680,8 @@ impl MessageOrchestratorConfig {
             hook_config_dir,
             conversation_service_type,
             session_creation_mode,
+            conversation_ensure_cache_capacity,
+            conversation_ensure_cache_ttl_seconds,
             server_id,
             svid,
             capability_hooks_auto,

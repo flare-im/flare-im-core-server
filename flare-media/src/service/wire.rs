@@ -67,9 +67,9 @@ async fn build_media_service(config: &MediaConfig) -> Result<Arc<MediaService>> 
         build_object_store(config.object_store.as_ref()).await?;
 
     let (metadata_store, reference_store): (Option<MetadataStoreRef>, Option<ReferenceStoreRef>) =
-        match config.postgres_url() {
-            Some(url) => {
-                let store = PostgresMetadataStore::new(url).await?;
+        match config.postgres.as_ref() {
+            Some(postgres) => {
+                let store = PostgresMetadataStore::from_config(postgres).await?;
                 let metadata_store: MetadataStoreRef = Arc::new(store.clone());
                 let reference_store: ReferenceStoreRef = Arc::new(store.clone());
                 (Some(metadata_store), Some(reference_store))

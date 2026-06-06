@@ -3,8 +3,10 @@
 //! 类似 Go 的 Wire 框架，提供简单的依赖构建方法
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use sqlx::postgres::PgPoolOptions;
 
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
@@ -57,11 +59,31 @@ pub async fn initialize(
 
     // 3. 创建 PostgreSQL 连接池（可选）
     let postgres_pool = if let Some(ref postgres_url) = conversation_config.postgres_url {
-        Arc::new(sqlx::PgPool::connect(postgres_url).await.map_err(|e| {
-            ErrorBuilder::new(ErrorCode::DatabaseError, "Failed to connect to PostgreSQL")
-                .details(e.to_string())
-                .build_error()
-        })?)
+        let max_connections = conversation_config.postgres_max_connections.max(1);
+        let min_connections = conversation_config
+            .postgres_min_connections
+            .min(max_connections);
+        Arc::new(
+            PgPoolOptions::new()
+                .max_connections(max_connections)
+                .min_connections(min_connections)
+                .acquire_timeout(Duration::from_secs(
+                    conversation_config.postgres_acquire_timeout_seconds.max(1),
+                ))
+                .idle_timeout(Duration::from_secs(
+                    conversation_config.postgres_idle_timeout_seconds.max(1),
+                ))
+                .max_lifetime(Duration::from_secs(
+                    conversation_config.postgres_max_lifetime_seconds.max(1),
+                ))
+                .connect(postgres_url)
+                .await
+                .map_err(|e| {
+                    ErrorBuilder::new(ErrorCode::DatabaseError, "Failed to connect to PostgreSQL")
+                        .details(e.to_string())
+                        .build_error()
+                })?,
+        )
     } else {
         return Err(ErrorBuilder::new(
             ErrorCode::InvalidParameter,

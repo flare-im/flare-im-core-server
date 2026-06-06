@@ -14,9 +14,9 @@ jetstream = "message"
 operation_subject = "flare.im.message.events"
 consumer_group = "conversation-read-receipt"
 
-# PostgreSQL 配置（可选，用于会话元数据存储）：引用 base.toml 中的 postgres.media
+# PostgreSQL 配置（可选，用于会话元数据存储）：引用 base.toml 中的 postgres.conversation
 # 如果未配置，将只使用 Redis（仅支持状态和光标操作）
-postgres = "media"
+postgres = "conversation"
 
 # Redis Key 前缀配置
 conversation_state_prefix = "storage:conversation:state"
@@ -42,4 +42,3 @@ allow_history_sync = true  # 是否允许历史同步
 [services.conversation.server]
 address = "0.0.0.0"
 port = 50090
-

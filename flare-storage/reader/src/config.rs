@@ -24,6 +24,10 @@ impl StorageReaderConfig {
     pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service_config = app.storage_reader_service();
         let postgres_profile_name = service_config.postgres.as_deref();
+        let selected_postgres_profile = postgres_profile_name
+            .and_then(|name| app.postgres_profile(name))
+            .or_else(|| app.postgres_profile("media"))
+            .or_else(|| app.postgres_profile("primary"));
 
         // 解析 Redis 配置引用（可选）
         let redis_url = env::var("STORAGE_REDIS_URL").ok().or_else(|| {
@@ -68,36 +72,31 @@ impl StorageReaderConfig {
         let postgres_max_connections = env::var("STORAGE_POSTGRES_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .or_else(|| {
-                postgres_profile_name
-                    .and_then(|name| app.postgres_profile(name))
-                    .and_then(|p| p.max_connections)
-            })
+            .or_else(|| selected_postgres_profile.and_then(|p| p.max_connections))
             .unwrap_or(20);
 
         let postgres_min_connections = env::var("STORAGE_POSTGRES_MIN_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .or_else(|| {
-                postgres_profile_name
-                    .and_then(|name| app.postgres_profile(name))
-                    .and_then(|p| p.min_connections)
-            })
+            .or_else(|| selected_postgres_profile.and_then(|p| p.min_connections))
             .unwrap_or(5);
 
         let postgres_acquire_timeout_seconds = env::var("STORAGE_POSTGRES_ACQUIRE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| selected_postgres_profile.and_then(|p| p.acquire_timeout_seconds))
             .unwrap_or(30);
 
         let postgres_idle_timeout_seconds = env::var("STORAGE_POSTGRES_IDLE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| selected_postgres_profile.and_then(|p| p.idle_timeout_seconds))
             .unwrap_or(600); // 10 minutes
 
         let postgres_max_lifetime_seconds = env::var("STORAGE_POSTGRES_MAX_LIFETIME_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| selected_postgres_profile.and_then(|p| p.max_lifetime_seconds))
             .unwrap_or(1800); // 30 minutes
 
         // Redis 缓存配置

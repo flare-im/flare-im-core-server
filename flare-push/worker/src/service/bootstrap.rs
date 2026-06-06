@@ -22,6 +22,17 @@ impl ApplicationBootstrap {
         let mut runtime = ServiceRuntime::mq_consumer()
             .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
 
+        if context.config.metrics.enabled {
+            let metrics_config = context.config.metrics.clone();
+            runtime = runtime.add_spawn_with_shutdown(
+                "push-worker-metrics",
+                move |shutdown_rx| async move {
+                    flare_im_core::metrics::serve_prometheus_metrics(metrics_config, shutdown_rx)
+                        .await
+                },
+            );
+        }
+
         let tasks = match context.config.mq_backend.as_str() {
             "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
                 context.config.as_ref(),

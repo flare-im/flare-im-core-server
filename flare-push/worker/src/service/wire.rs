@@ -7,6 +7,7 @@ use flare_server_core::error::Result;
 use flare_im_core::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
 };
+use flare_im_core::metrics::PushWorkerMetrics;
 use flare_im_core::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::TopicDispatcher;
@@ -32,6 +33,7 @@ pub async fn initialize(
 
     // 1. 创建 DLQ 发布器
     let dlq = Arc::new(DlqPublisher::new(config.clone()).await?);
+    let metrics = Arc::new(PushWorkerMetrics::new());
 
     // 2. 创建 Online 服务客户端
     let online_service = get_service_name(SIGNALING_ONLINE);
@@ -66,7 +68,8 @@ pub async fn initialize(
 
     // 5. 创建 MessageHandler（直接实现，无适配器）
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
-    let offline_handler = OfflinePushConsumerFactory::create_handler(dlq);
+    let offline_handler =
+        OfflinePushConsumerFactory::create_handler(dlq, config.offline_parking_capacity, metrics);
 
     // 6. 配置 ConsumerConfig
     let consumer_cfg = ConsumerConfig::default()

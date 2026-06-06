@@ -10,9 +10,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_im_core::Ctx;
 use flare_server_core::context::Context;
+use moka::future::Cache;
 
 use crate::config::SessionCreationMode;
 use crate::domain::repository::ConversationClient;
@@ -32,6 +34,8 @@ pub struct ConversationEnsureService {
     session_creation_mode: SessionCreationMode,
     /// 事件发布器（用于异步模式）
     event_publisher: Option<Arc<dyn ConversationEventPublisher>>,
+    /// 高频单聊 ensure 成功缓存，避免每条单聊消息都打 Conversation 服务或 MQ。
+    ensure_cache: Option<Cache<String, ()>>,
 }
 
 /// 会话事件发布器（用于异步模式）
@@ -68,10 +72,37 @@ impl ConversationEnsureService {
         session_creation_mode: SessionCreationMode,
         event_publisher: Option<Arc<dyn ConversationEventPublisher>>,
     ) -> Self {
+        Self::with_cache(
+            conversation_repository,
+            session_creation_mode,
+            event_publisher,
+            100_000,
+            Duration::from_secs(30),
+        )
+    }
+
+    pub fn with_cache(
+        conversation_repository: Option<Arc<ConversationClient>>,
+        session_creation_mode: SessionCreationMode,
+        event_publisher: Option<Arc<dyn ConversationEventPublisher>>,
+        cache_capacity: u64,
+        cache_ttl: Duration,
+    ) -> Self {
+        let ensure_cache = if cache_capacity == 0 || cache_ttl.is_zero() {
+            None
+        } else {
+            Some(
+                Cache::builder()
+                    .max_capacity(cache_capacity)
+                    .time_to_live(cache_ttl)
+                    .build(),
+            )
+        };
         Self {
             conversation_repository,
             session_creation_mode,
             event_publisher,
+            ensure_cache,
         }
     }
 
@@ -88,10 +119,48 @@ impl ConversationEnsureService {
         ctx: &Ctx,
         request: &ConversationEnsureRequest,
     ) -> Result<()> {
-        match self.session_creation_mode {
-            SessionCreationMode::Sync => self.ensure_conversation_sync(ctx, request).await,
-            SessionCreationMode::Async => self.ensure_conversation_async(ctx, request).await,
+        let cache_key = self.cache_key(request);
+        if let (Some(cache), Some(key)) = (&self.ensure_cache, cache_key.as_ref())
+            && cache.get(key).await.is_some()
+        {
+            tracing::trace!(
+                conversation_id = %request.conversation_id,
+                "Conversation ensure skipped by single-chat hot cache"
+            );
+            return Ok(());
         }
+
+        let ensured = match self.session_creation_mode {
+            SessionCreationMode::Sync => self.ensure_conversation_sync(ctx, request).await?,
+            SessionCreationMode::Async => self.ensure_conversation_async(ctx, request).await?,
+        };
+        if ensured && let (Some(cache), Some(key)) = (&self.ensure_cache, cache_key) {
+            cache.insert(key, ()).await;
+        }
+        Ok(())
+    }
+
+    fn cache_key(&self, request: &ConversationEnsureRequest) -> Option<String> {
+        if request.conversation_type != flare_proto::common::ConversationType::Single as i32 {
+            return None;
+        }
+        if request.conversation_id.trim().is_empty() || request.participants.len() < 2 {
+            return None;
+        }
+        let mut participants = request.participants.clone();
+        participants.retain(|id| !id.trim().is_empty());
+        participants.sort();
+        participants.dedup();
+        if participants.len() < 2 {
+            return None;
+        }
+        Some(format!(
+            "{}|{}|{}|{}",
+            request.tenant_id,
+            request.conversation_id,
+            request.business_type,
+            participants.join(",")
+        ))
     }
 
     /// 同步模式：调用 Conversation 服务
@@ -99,13 +168,13 @@ impl ConversationEnsureService {
         &self,
         ctx: &Ctx,
         request: &ConversationEnsureRequest,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(conversation_repo) = &self.conversation_repository else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Conversation repository not configured, skip sync ensure"
             );
-            return Ok(());
+            return Ok(false);
         };
 
         // 构建上下文
@@ -150,7 +219,7 @@ impl ConversationEnsureService {
                     conversation_id = %request.conversation_id,
                     "Conversation ensured (sync)"
                 );
-                Ok(())
+                Ok(true)
             }
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -159,7 +228,7 @@ impl ConversationEnsureService {
                     "Failed to ensure conversation (sync), Storage Writer will use UPSERT as fallback"
                 );
                 // 不返回错误，允许消息继续发送
-                Ok(())
+                Ok(false)
             }
             Err(_) => {
                 tracing::warn!(
@@ -167,7 +236,7 @@ impl ConversationEnsureService {
                     "Timeout ensuring conversation (2s), Storage Writer will use UPSERT as fallback"
                 );
                 // 不返回错误，允许消息继续发送
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -177,13 +246,13 @@ impl ConversationEnsureService {
         &self,
         _ctx: &Ctx,
         request: &ConversationEnsureRequest,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(publisher) = &self.event_publisher else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Event publisher not configured, skip async ensure"
             );
-            return Ok(());
+            return Ok(false);
         };
 
         if let Err(e) = publisher
@@ -202,14 +271,14 @@ impl ConversationEnsureService {
                 conversation_id = %request.conversation_id,
                 "Failed to publish conversation.ensure event (async), Conversation service may create on demand"
             );
+            Ok(false)
         } else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Published conversation.ensure event (async)"
             );
+            Ok(true)
         }
-
-        Ok(())
     }
 }
 

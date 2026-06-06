@@ -193,39 +193,41 @@ impl StorageWriterConfig {
             .or_else(|| redis_url.as_ref().map(|_| "storage:wal:buffer".to_string()));
 
         // 解析 PostgreSQL 配置引用（可选）
-        let postgres_url = env::var("STORAGE_POSTGRES_URL").ok().or_else(|| {
-            if let Some(postgres_name) = &service_config.postgres {
-                app.postgres_profile(postgres_name)
-                    .map(|profile| profile.url.clone())
-            } else {
-                None
-            }
-        });
+        let postgres_profile_name = service_config.postgres.as_deref();
+        let postgres_profile = postgres_profile_name.and_then(|name| app.postgres_profile(name));
+        let postgres_url = env::var("STORAGE_POSTGRES_URL")
+            .ok()
+            .or_else(|| postgres_profile.map(|profile| profile.url.clone()));
 
         // PostgreSQL 连接池配置（优化性能）
         let postgres_max_connections = env::var("STORAGE_POSTGRES_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.max_connections))
             .unwrap_or(50); // 默认 50 个连接（适合高并发写入）
 
         let postgres_min_connections = env::var("STORAGE_POSTGRES_MIN_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.min_connections))
             .unwrap_or(10); // 默认保持 10 个最小连接
 
         let postgres_acquire_timeout_seconds = env::var("STORAGE_POSTGRES_ACQUIRE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.acquire_timeout_seconds))
             .unwrap_or(30); // 默认 30 秒获取连接超时
 
         let postgres_idle_timeout_seconds = env::var("STORAGE_POSTGRES_IDLE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.idle_timeout_seconds))
             .unwrap_or(600); // 默认 10 分钟空闲超时
 
         let postgres_max_lifetime_seconds = env::var("STORAGE_POSTGRES_MAX_LIFETIME_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| postgres_profile.and_then(|profile| profile.max_lifetime_seconds))
             .unwrap_or(3600); // 默认 1 小时连接最大生命周期
 
         let media_service_endpoint = env::var("MEDIA_SERVICE_ENDPOINT").ok();

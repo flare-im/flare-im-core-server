@@ -103,9 +103,16 @@ pub(crate) async fn prepare_config_sources(
 
     let hook_config_repository = if let Some(ref database_url) = config.database_url {
         let repository = Arc::new(
-            PostgresHookConfigRepository::new(database_url)
-                .await
-                .context("Failed to create database config repository")?,
+            PostgresHookConfigRepository::new_with_pool_profile(
+                database_url,
+                config.postgres_max_connections,
+                config.postgres_min_connections,
+                config.postgres_acquire_timeout_seconds,
+                config.postgres_idle_timeout_seconds,
+                config.postgres_max_lifetime_seconds,
+            )
+            .await
+            .context("Failed to create database config repository")?,
         );
 
         log_capability_db_target(database_url);

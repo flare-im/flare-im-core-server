@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use flare_im_core::Ctx;
+use flare_im_core::metrics::StorageWriterMetrics;
 use flare_im_core::utils::{current_millis, extract_timeline_from_extra, normalize_tenant_id};
 use flare_proto::common::RetentionMode;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
@@ -42,6 +43,7 @@ where
     wal_cleanup_repo: Option<Arc<W>>,
     ack_publisher: Option<Arc<P>>,
     write_ledger_repo: Option<Arc<dyn MessageWriteLedgerRepository>>,
+    metrics: Option<Arc<StorageWriterMetrics>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,7 @@ where
             wal_cleanup_repo,
             ack_publisher,
             write_ledger_repo: None,
+            metrics: None,
         }
     }
 
@@ -93,6 +96,11 @@ where
         write_ledger_repo: Option<Arc<dyn MessageWriteLedgerRepository>>,
     ) -> Self {
         self.write_ledger_repo = write_ledger_repo;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: Option<Arc<StorageWriterMetrics>>) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -309,6 +317,9 @@ where
             .mark_stage(ctx, tenant_id, message_id, stage, error)
             .await
         {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_ledger_transition(stage.as_str(), "error");
+            }
             warn!(
                 error = ?err,
                 tenant_id = %tenant_id,
@@ -316,6 +327,8 @@ where
                 stage = %stage.as_str(),
                 "Message write ledger stage update failed"
             );
+        } else if let Some(metrics) = &self.metrics {
+            metrics.record_ledger_transition(stage.as_str(), "success");
         }
     }
 

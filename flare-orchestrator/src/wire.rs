@@ -149,10 +149,12 @@ pub async fn initialize(
         config.default_tenant_id.clone(),
     ));
 
-    let conversation_ensure_service = Arc::new(ConversationEnsureService::new(
+    let conversation_ensure_service = Arc::new(ConversationEnsureService::with_cache(
         Some(conversation_repository.clone()),
         config.session_creation_mode,
         Some(MqConversationEnsurePublisher::new(mq_producer)),
+        config.conversation_ensure_cache_capacity,
+        std::time::Duration::from_secs(config.conversation_ensure_cache_ttl_seconds),
     ));
 
     let call_capability_bridge: Option<Arc<CallCapabilityBridge>> = if config

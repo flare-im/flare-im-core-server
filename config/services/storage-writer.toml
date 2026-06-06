@@ -13,7 +13,7 @@ message_retry_topic = "flare.im.message.storage.retry.5s"
 message_retry_delay_ms = 5000
 
 # PostgreSQL 配置（可选，用于归档）
-postgres = "media"
+postgres = "storage_writer"
 
 # Redis 配置（WAL 存储）：引用 base.toml 中的 redis.message_wal
 wal_store = "message_wal"

@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use flare_im_core::config::PostgresInstanceConfig;
 use flare_im_core::utils::normalize_tenant_id;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use serde_json::Value;
@@ -158,8 +159,39 @@ pub struct PostgresMetadataStore {
 
 impl PostgresMetadataStore {
     pub async fn new(config: &str) -> Result<Self> {
+        Self::connect(config, DEFAULT_MAX_CONNECTIONS, 2, 10, 300, 1800).await
+    }
+
+    pub async fn from_config(config: &PostgresInstanceConfig) -> Result<Self> {
+        Self::connect(
+            &config.url,
+            config.max_connections_or(DEFAULT_MAX_CONNECTIONS),
+            config.min_connections_or(2),
+            config.acquire_timeout_seconds.unwrap_or(10),
+            config.idle_timeout_seconds.unwrap_or(300),
+            config.max_lifetime_seconds.unwrap_or(1800),
+        )
+        .await
+    }
+
+    async fn connect(
+        config: &str,
+        max_connections: u32,
+        min_connections: u32,
+        acquire_timeout_seconds: u64,
+        idle_timeout_seconds: u64,
+        max_lifetime_seconds: u64,
+    ) -> Result<Self> {
+        let max_connections = max_connections.max(1);
+        let min_connections = min_connections.min(max_connections);
         let pool = PgPoolOptions::new()
-            .max_connections(DEFAULT_MAX_CONNECTIONS)
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .acquire_timeout(std::time::Duration::from_secs(
+                acquire_timeout_seconds.max(1),
+            ))
+            .idle_timeout(std::time::Duration::from_secs(idle_timeout_seconds.max(1)))
+            .max_lifetime(std::time::Duration::from_secs(max_lifetime_seconds.max(1)))
             .connect(config)
             .await
             .map_err(|e| {
