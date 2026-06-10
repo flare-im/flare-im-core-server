@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::{
-    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
+    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest, PushOptions,
     PushNotificationRequest,
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
@@ -32,6 +32,12 @@ pub struct OnlinePushHandler {
     dlq: Arc<DlqPublisher>,
 }
 
+struct BatchEntry {
+    index: usize,
+    message: Message,
+    envelope: PushTaskEnvelope,
+}
+
 impl OnlinePushHandler {
     pub fn new(gateway_push: Arc<GatewayPushExecutor>, dlq: Arc<DlqPublisher>) -> Self {
         Self { gateway_push, dlq }
@@ -42,6 +48,65 @@ impl OnlinePushHandler {
             .map_err(|e| ConsumerError::Deserialization(format!("PushTaskEnvelope: {}", e)))
     }
 
+    fn payload_kind(envelope: &PushTaskEnvelope) -> PushTaskPayloadKind {
+        PushTaskPayloadKind::try_from(envelope.payload_kind)
+            .unwrap_or(PushTaskPayloadKind::Unspecified)
+    }
+
+    fn decode_push_message_request(
+        envelope: &PushTaskEnvelope,
+    ) -> Result<PushMessageRequest, FlareError> {
+        PushMessageRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("decode PushMessageRequest: {}", e)
+            )
+        })
+    }
+
+    fn build_message_group(
+        entries: &[BatchEntry],
+        start: usize,
+    ) -> Option<(usize, PushMessageRequest)> {
+        let first = &entries[start].envelope;
+        if Self::payload_kind(first) != PushTaskPayloadKind::Message {
+            return None;
+        }
+
+        let mut request = match Self::decode_push_message_request(first) {
+            Ok(request) => request,
+            Err(_) => return None,
+        };
+        let user_id = first.user_id.clone();
+        let options: Option<PushOptions> = request.options.clone();
+        request.user_ids = vec![user_id.clone()];
+
+        let mut end = start + 1;
+        while end < entries.len() {
+            let envelope = &entries[end].envelope;
+            if envelope.user_id != user_id || Self::payload_kind(envelope) != PushTaskPayloadKind::Message
+            {
+                break;
+            }
+
+            let next = match Self::decode_push_message_request(envelope) {
+                Ok(next) => next,
+                Err(_) => break,
+            };
+            if next.options != options {
+                break;
+            }
+            request.messages.extend(next.messages);
+            end += 1;
+        }
+
+        if end == start + 1 {
+            return None;
+        }
+
+        Some((end, request))
+    }
+
     async fn route_by_payload_kind(
         &self,
         ctx: &flare_server_core::context::Ctx,
@@ -49,18 +114,9 @@ impl OnlinePushHandler {
         user_id: &str,
         strategy: PushStrategy,
     ) -> Result<(), FlareError> {
-        let kind = PushTaskPayloadKind::try_from(envelope.payload_kind)
-            .unwrap_or(PushTaskPayloadKind::Unspecified);
-
-        match kind {
+        match Self::payload_kind(envelope) {
             PushTaskPayloadKind::Message => {
-                let req =
-                    PushMessageRequest::decode(envelope.push_payload.as_slice()).map_err(|e| {
-                        flare_err!(
-                            ErrorCode::InvalidParameter,
-                            format!("decode PushMessageRequest: {}", e)
-                        )
-                    })?;
+                let req = Self::decode_push_message_request(envelope)?;
                 self.gateway_push
                     .push_message(ctx, user_id, strategy, req)
                     .await
@@ -119,6 +175,87 @@ impl OnlinePushHandler {
             )),
         }
     }
+
+    async fn apply_route_result(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        envelope: &PushTaskEnvelope,
+        payload: &[u8],
+        result: Result<(), FlareError>,
+    ) -> std::result::Result<MessageResult, ConsumerError> {
+        match result {
+            Ok(()) => Ok(MessageResult::Ack),
+            Err(e) => {
+                if e.is_retryable() {
+                    tracing::warn!(
+                        error = %e,
+                        user_id = %envelope.user_id,
+                        message_id = %envelope.message_id,
+                        "Push failed with retryable error, nacking for broker redelivery"
+                    );
+                    return Ok(MessageResult::Nack);
+                }
+
+                tracing::error!(
+                    error = %e,
+                    user_id = %envelope.user_id,
+                    message_id = %envelope.message_id,
+                    "Push failed with non-retryable error, sending to DLQ"
+                );
+                if let Err(dlq_err) = self
+                    .dlq
+                    .publish(ctx, Some(&envelope.conversation_id), payload.to_vec())
+                    .await
+                {
+                    return Err(ConsumerError::DeadLetter(dlq_err.to_string()));
+                }
+                Ok(MessageResult::Ack)
+            }
+        }
+    }
+
+    async fn apply_group_route_result(
+        &self,
+        entries: &[BatchEntry],
+        result: Result<(), FlareError>,
+    ) -> std::result::Result<MessageResult, ConsumerError> {
+        match result {
+            Ok(()) => Ok(MessageResult::Ack),
+            Err(e) if e.is_retryable() => {
+                let first = &entries[0].envelope;
+                tracing::warn!(
+                    error = %e,
+                    user_id = %first.user_id,
+                    batch_size = entries.len(),
+                    "Batched push failed with retryable error, nacking for broker redelivery"
+                );
+                Ok(MessageResult::Nack)
+            }
+            Err(e) => {
+                let first = &entries[0].envelope;
+                tracing::error!(
+                    error = %e,
+                    user_id = %first.user_id,
+                    batch_size = entries.len(),
+                    "Batched push failed with non-retryable error, sending entries to DLQ"
+                );
+                for entry in entries {
+                    if let Err(dlq_err) = self
+                        .dlq
+                        .publish(
+                            &entry.message.context.ctx,
+                            Some(&entry.envelope.conversation_id),
+                            entry.message.payload.clone(),
+                        )
+                        .await
+                    {
+                        return Err(ConsumerError::DeadLetter(dlq_err.to_string()));
+                    }
+                }
+                Ok(MessageResult::Ack)
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -151,44 +288,151 @@ impl MessageHandler for OnlinePushHandler {
             .route_by_payload_kind(ctx, &envelope, user_id, strategy)
             .await;
 
-        // 4. 处理结果
-        match result {
-            Ok(()) => Ok(MessageResult::Ack),
-            Err(e) => {
-                if e.is_retryable() {
-                    tracing::warn!(
-                        error = %e,
-                        user_id = %envelope.user_id,
-                        message_id = %envelope.message_id,
-                        "Push failed with retryable error, nacking for broker redelivery"
-                    );
-                    return Ok(MessageResult::Nack);
-                }
+        self.apply_route_result(ctx, &envelope, &message.payload, result)
+            .await
+    }
 
-                tracing::error!(
-                    error = %e,
-                    user_id = %envelope.user_id,
-                    message_id = %envelope.message_id,
-                    "Push failed with non-retryable error, sending to DLQ"
-                );
-                if let Err(dlq_err) = self
-                    .dlq
-                    .publish(
-                        ctx,
-                        Some(&envelope.conversation_id),
-                        message.payload.clone(),
-                    )
-                    .await
-                {
-                    return Err(ConsumerError::DeadLetter(dlq_err.to_string()));
-                }
-                Ok(MessageResult::Ack)
-            }
+    async fn handle_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> std::result::Result<Vec<MessageResult>, ConsumerError> {
+        let mut entries = Vec::with_capacity(messages.len());
+        for (index, message) in messages.into_iter().enumerate() {
+            let envelope = Self::decode_task_envelope(&message)?;
+            entries.push(BatchEntry {
+                index,
+                message,
+                envelope,
+            });
         }
+
+        let mut results = vec![MessageResult::Nack; entries.len()];
+        let mut offset = 0usize;
+        while offset < entries.len() {
+            if let Some((end, request)) = Self::build_message_group(&entries, offset) {
+                let group = &entries[offset..end];
+                let first = &group[0];
+                let result = self
+                    .gateway_push
+                    .push_message(
+                        &first.message.context.ctx,
+                        &first.envelope.user_id,
+                        PushStrategy::AllDevices,
+                        request,
+                    )
+                    .await;
+                let route_result = self.apply_group_route_result(group, result).await?;
+                for entry in group {
+                    results[entry.index] = route_result.clone();
+                }
+                offset = end;
+                continue;
+            }
+
+            let entry = &entries[offset];
+            let result = self
+                .route_by_payload_kind(
+                    &entry.message.context.ctx,
+                    &entry.envelope,
+                    &entry.envelope.user_id,
+                    PushStrategy::AllDevices,
+                )
+                .await;
+            results[entry.index] = self
+                .apply_route_result(
+                    &entry.message.context.ctx,
+                    &entry.envelope,
+                    &entry.message.payload,
+                    result,
+                )
+                .await?;
+            offset += 1;
+        }
+
+        Ok(results)
+    }
+
+    fn supports_batch(&self) -> bool {
+        true
     }
 
     fn name(&self) -> &str {
         "push-online-handler"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_proto::common::Message as ProtoMessage;
+    use flare_server_core::Context;
+    use flare_server_core::mq::consumer::{ContentType, MessageContext};
+
+    fn batch_entry(index: usize, user_id: &str, server_id: &str) -> BatchEntry {
+        let request = PushMessageRequest {
+            user_ids: vec![user_id.to_string()],
+            messages: vec![ProtoMessage {
+                server_id: server_id.to_string(),
+                conversation_id: "conv-1".to_string(),
+                ..Default::default()
+            }],
+            options: None,
+        };
+        let envelope = PushTaskEnvelope {
+            user_id: user_id.to_string(),
+            message_id: server_id.to_string(),
+            conversation_id: "conv-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            priority: 5,
+            expire_at: None,
+            push_payload: request.encode_to_vec(),
+            headers: Default::default(),
+            payload_kind: PushTaskPayloadKind::Message as i32,
+        };
+        let ctx = Arc::new(Context::with_request_id(format!("req-{server_id}")));
+        let message = Message::new(
+            envelope.encode_to_vec(),
+            ContentType::Protobuf,
+            MessageContext::new(ctx, "push.online".to_string()).with_key(user_id.to_string()),
+        );
+        BatchEntry {
+            index,
+            message,
+            envelope,
+        }
+    }
+
+    #[test]
+    fn build_message_group_merges_contiguous_same_user_messages_in_order() {
+        let entries = vec![
+            batch_entry(0, "bob", "m1"),
+            batch_entry(1, "bob", "m2"),
+            batch_entry(2, "alice", "m3"),
+        ];
+
+        let (end, request) = OnlinePushHandler::build_message_group(&entries, 0)
+            .expect("first two bob messages should merge");
+
+        assert_eq!(end, 2);
+        assert_eq!(request.user_ids, vec!["bob".to_string()]);
+        let server_ids = request
+            .messages
+            .into_iter()
+            .map(|message| message.server_id)
+            .collect::<Vec<_>>();
+        assert_eq!(server_ids, vec!["m1".to_string(), "m2".to_string()]);
+    }
+
+    #[test]
+    fn build_message_group_does_not_cross_user_boundary() {
+        let entries = vec![
+            batch_entry(0, "bob", "m1"),
+            batch_entry(1, "alice", "m2"),
+        ];
+
+        let group = OnlinePushHandler::build_message_group(&entries, 0);
+
+        assert!(group.is_none());
     }
 }
 

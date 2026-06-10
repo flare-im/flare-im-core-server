@@ -149,28 +149,27 @@ impl ConnectionObserver for Observer {
             }
             ConnectionEvent::Message(data) => {
                 let parser = MessageParser::protobuf();
-                if let Ok(frame) = parser.parse(data) {
-                    if let Some(cmd) = &frame.command {
-                        if let Some(Type::Payload(msg)) = &cmd.r#type {
-                            if msg.r#type != MsgType::Message as i32 {
-                                return;
-                            }
-                            match flare_proto::common::Message::decode(msg.payload.as_slice()) {
-                                Ok(message) => {
-                                    let sender = message.sender_id;
-                                    let text = match message.content.and_then(|c| c.content) {
-                                        Some(
-                                            flare_proto::common::message_content::Content::Text(t),
-                                        ) => t.text,
-                                        _ => String::from_utf8_lossy(&msg.payload).to_string(),
-                                    };
-                                    println!("\n[{}] {}", sender, text);
+                if let Ok(frame) = parser.parse(data)
+                    && let Some(cmd) = &frame.command
+                    && let Some(Type::Payload(msg)) = &cmd.r#type
+                {
+                    if msg.r#type != MsgType::Message as i32 {
+                        return;
+                    }
+                    match flare_proto::common::Message::decode(msg.payload.as_slice()) {
+                        Ok(message) => {
+                            let sender = message.sender_id;
+                            let text = match message.content.and_then(|c| c.content) {
+                                Some(flare_proto::common::message_content::Content::Text(t)) => {
+                                    t.text
                                 }
-                                Err(_) => {
-                                    let text = String::from_utf8_lossy(&msg.payload).to_string();
-                                    println!("\n[?] {}", text);
-                                }
-                            }
+                                _ => String::from_utf8_lossy(&msg.payload).to_string(),
+                            };
+                            println!("\n[{}] {}", sender, text);
+                        }
+                        Err(_) => {
+                            let text = String::from_utf8_lossy(&msg.payload).to_string();
+                            println!("\n[?] {}", text);
                         }
                     }
                 }

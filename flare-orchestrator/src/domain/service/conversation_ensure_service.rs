@@ -5,7 +5,6 @@
 //! ## 设计
 //! - 支持同步（gRPC）和异步（事件）两种模式
 //! - 幂等性保证：多次调用不会重复创建
-//! - 降级策略：失败后由 Storage Writer 兜底
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,14 +18,13 @@ use moka::future::Cache;
 use crate::config::SessionCreationMode;
 use crate::domain::repository::ConversationClient;
 use crate::infrastructure::rpc::ConversationRpcClient;
-use flare_server_core::error::Result;
+use flare_server_core::error::{FlareError, Result};
 
 /// 会话生成服务
 ///
 /// ## 职责
 /// 1. 确保会话存在（不存在则创建）
 /// 2. 支持同步/异步两种模式
-/// 3. 提供降级策略
 pub struct ConversationEnsureService {
     /// 会话仓储（可选，用于同步模式）
     conversation_repository: Option<Arc<ConversationClient>>,
@@ -112,8 +110,6 @@ impl ConversationEnsureService {
     /// - Sync: 同步调用 Conversation 服务，强一致
     /// - Async: 发布 conversation.ensure 事件，最终一致
     ///
-    /// ## 降级
-    /// 失败后不阻塞消息发送，由 Storage Writer 兜底创建
     pub async fn ensure_conversation(
         &self,
         ctx: &Ctx,
@@ -172,9 +168,11 @@ impl ConversationEnsureService {
         let Some(conversation_repo) = &self.conversation_repository else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,
-                "Conversation repository not configured, skip sync ensure"
+                "Conversation repository not configured, cannot sync ensure"
             );
-            return Ok(false);
+            return Err(FlareError::system(
+                "conversation repository not configured for sync ensure",
+            ));
         };
 
         // 构建上下文
@@ -225,18 +223,19 @@ impl ConversationEnsureService {
                 tracing::warn!(
                     error = %e,
                     conversation_id = %request.conversation_id,
-                    "Failed to ensure conversation (sync), Storage Writer will use UPSERT as fallback"
+                    "Failed to ensure conversation (sync), block message send"
                 );
-                // 不返回错误，允许消息继续发送
-                Ok(false)
+                Err(e)
             }
             Err(_) => {
                 tracing::warn!(
                     conversation_id = %request.conversation_id,
-                    "Timeout ensuring conversation (2s), Storage Writer will use UPSERT as fallback"
+                    "Timeout ensuring conversation (2s), block message send"
                 );
-                // 不返回错误，允许消息继续发送
-                Ok(false)
+                Err(FlareError::system(format!(
+                    "timeout ensuring conversation {}",
+                    request.conversation_id
+                )))
             }
         }
     }
@@ -269,9 +268,9 @@ impl ConversationEnsureService {
             tracing::warn!(
                 error = %e,
                 conversation_id = %request.conversation_id,
-                "Failed to publish conversation.ensure event (async), Conversation service may create on demand"
+                "Failed to publish conversation.ensure event (async), block message send"
             );
-            Ok(false)
+            Err(e)
         } else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,

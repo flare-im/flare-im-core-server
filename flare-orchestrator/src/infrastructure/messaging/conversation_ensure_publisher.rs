@@ -15,6 +15,7 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 #[derive(Serialize)]
 struct ConversationEnsurePayload {
+    tenant_id: String,
     conversation_type: i32,
     business_type: String,
     participants: Vec<String>,
@@ -43,6 +44,7 @@ impl ConversationEventPublisher for MqConversationEnsurePublisher {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let payload = ConversationEnsurePayload {
+                tenant_id: tenant_id.to_string(),
                 conversation_type,
                 business_type: business_type.to_string(),
                 participants,

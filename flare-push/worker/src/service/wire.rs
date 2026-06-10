@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use flare_server_core::error::Result;
+use flare_server_core::mq::NatsConsumerConfig;
 
 use flare_im_core::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
@@ -74,6 +75,8 @@ pub async fn initialize(
     // 6. 配置 ConsumerConfig
     let consumer_cfg = ConsumerConfig::default()
         .with_concurrency(128)
+        .with_batch_size(config.batch_size())
+        .with_batch_timeout_ms(config.batch_timeout_ms())
         .with_ordered(true);
 
     // 7. 注册到 Dispatcher

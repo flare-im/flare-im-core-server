@@ -530,10 +530,10 @@ fn collect_payload_messages(data: &[u8]) -> Vec<ProtoMessage> {
             return v;
         }
     }
-    if let Ok(req) = PushMessageRequest::decode(data) {
-        if !req.messages.is_empty() {
-            return req.messages;
-        }
+    if let Ok(req) = PushMessageRequest::decode(data)
+        && !req.messages.is_empty()
+    {
+        return req.messages;
     }
     if let Ok(envelope) = EventEnvelope::decode(data) {
         let v = messages_from_event_envelope(envelope);
@@ -730,13 +730,12 @@ impl MessageListener for ChatListener {
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
 
-                    if !is_from_self {
-                        if let Err(e) = self
+                    if !is_from_self
+                        && let Err(e) = self
                             .send_delivery_ack(&display_info.id, &display_info.sender_id)
                             .await
-                        {
-                            warn!(error = %e, message_id = %display_info.id, "送达 ACK 发送失败");
-                        }
+                    {
+                        warn!(error = %e, message_id = %display_info.id, "送达 ACK 发送失败");
                     }
                 }
             } else {
@@ -821,10 +820,10 @@ impl ChatListener {
             };
         let mut pending = self.pending_acks.lock().unwrap();
         let mut sent_at = pending.remove(&send_ack.client_msg_id);
-        if sent_at.is_none() {
-            if let Some(server_msg_id) = server_msg_id.as_ref() {
-                sent_at = pending.remove(server_msg_id);
-            }
+        if sent_at.is_none()
+            && let Some(server_msg_id) = server_msg_id.as_ref()
+        {
+            sent_at = pending.remove(server_msg_id);
         }
         if let Some(sent_at) = sent_at {
             let elapsed = sent_at.elapsed();

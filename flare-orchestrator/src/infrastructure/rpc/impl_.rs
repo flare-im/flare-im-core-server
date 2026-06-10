@@ -8,7 +8,8 @@ use crate::domain::model::ConversationType;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    CreateConversationRequest, ListConversationParticipantsRequest, MarkConversationAsReadRequest,
+    CreateConversationRequest, ListConversationParticipantsRequest, ManageParticipantsRequest,
+    MarkConversationAsReadRequest,
 };
 use flare_proto::common::ConversationParticipant;
 use flare_server_core::client::set_context_metadata;
@@ -77,20 +78,22 @@ impl ConversationRpcClient for ConversationClient {
         let mut attributes = std::collections::HashMap::new();
         attributes.insert("conversation_id".to_string(), conversation_id.clone());
 
+        let participant_protos: Vec<_> = participants
+            .into_iter()
+            .map(|p| ConversationParticipant {
+                user_id: p,
+                roles: vec![],
+                muted: false,
+                pinned: false,
+                attributes: std::collections::HashMap::new(),
+                joined_at: 0,
+            })
+            .collect();
+
         let request = CreateConversationRequest {
             conversation_type: conversation_type_proto,
             business_type: business_type.clone(),
-            participants: participants
-                .into_iter()
-                .map(|p| ConversationParticipant {
-                    user_id: p,
-                    roles: vec![],
-                    muted: false,
-                    pinned: false,
-                    attributes: std::collections::HashMap::new(),
-                    joined_at: 0,
-                })
-                .collect(),
+            participants: participant_protos.clone(),
             attributes,
             visibility: 0, // SessionVisibility::SessionVisibilityPrivate
             channel_id: stored_channel_id.clone(),
@@ -133,9 +136,29 @@ impl ConversationRpcClient for ConversationClient {
                     Ok(())
                 }
                 Err(e) => {
-                    // 如果会话已存在，可能会返回错误，这里我们忽略该错误
+                    // 如果会话已存在，仍然要补齐参与者。历史脏数据或并发创建可能留下
+                    // 只有发送方的 conversation_participants，直接忽略会导致收件人无法同步会话。
                     if e.code() == tonic::Code::AlreadyExists {
-                        debug!(conversation_id = %conversation_id, "Conversation already exists, skipping creation");
+                        debug!(conversation_id = %conversation_id, "Conversation already exists, repairing participants");
+                        let repair_request = ManageParticipantsRequest {
+                            conversation_id: conversation_id.clone(),
+                            to_add: participant_protos,
+                            to_remove: vec![],
+                            role_updates: vec![],
+                        };
+                        let mut grpc_request = tonic::Request::new(repair_request);
+                        set_context_metadata(&mut grpc_request, ctx);
+                        client.manage_participants(grpc_request).await.map_err(|e| {
+                            warn!(
+                                error = %e,
+                                conversation_id = %conversation_id,
+                                "Failed to repair conversation participants"
+                            );
+                            FlareError::system(format!(
+                                "Failed to repair conversation participants: {}",
+                                e
+                            ))
+                        })?;
                         Ok(())
                     } else {
                         warn!(

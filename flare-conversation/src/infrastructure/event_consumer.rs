@@ -338,6 +338,8 @@ fn matches_supported_event(event: &Event) -> bool {
 
 #[derive(serde::Deserialize)]
 struct ConversationEnsurePayload {
+    #[serde(default)]
+    tenant_id: String,
     conversation_type: i32,
     business_type: String,
     participants: Vec<String>,
@@ -531,7 +533,11 @@ impl ConversationEnsureEventConsumer {
             return Ok(());
         }
 
-        let tenant_id = "0";
+        let tenant_id = if ensure_payload.tenant_id.trim().is_empty() {
+            "0"
+        } else {
+            ensure_payload.tenant_id.trim()
+        };
 
         let participants: Vec<ConversationParticipant> = ensure_payload
             .participants
