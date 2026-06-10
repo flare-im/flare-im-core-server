@@ -32,7 +32,7 @@ use crate::domain::PersistenceMode;
 use crate::domain::service::{
     ConversationEnsureService, MessageDomainService, build_conversation_ensure_request_from_message,
 };
-use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
 const MAX_BATCH_SEND_CONCURRENCY: usize = 32;
 const MAX_BACKGROUND_WAL_CLEANUP_CONCURRENCY: usize = 128;
@@ -65,6 +65,27 @@ impl MessageHandler {
             metrics,
             wal_cleanup_permits: Arc::new(Semaphore::new(MAX_BACKGROUND_WAL_CLEANUP_CONCURRENCY)),
         }
+    }
+
+    fn validate_send_ack_message_id(message_id: &str) -> Result<&str> {
+        let message_id = message_id.trim();
+        if message_id.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "send_ack message_id is required",
+            )
+            .build_error());
+        }
+        Ok(message_id)
+    }
+
+    fn unsupported_send_ack_error(message_id: &str) -> FlareError {
+        ErrorBuilder::new(
+            ErrorCode::OperationNotSupported,
+            "send_ack durable state update is not implemented",
+        )
+        .param("message_id", message_id)
+        .build_error()
     }
 
     async fn measure_stage<T, F>(&self, stage: &'static str, future: F) -> Result<T>
@@ -375,8 +396,9 @@ impl MessageHandler {
 
     #[instrument(skip(self, ctx))]
     pub async fn send_ack(&self, ctx: &Ctx, message_id: &str) -> Result<()> {
-        let _ = (ctx, message_id);
-        Ok(())
+        let message_id = Self::validate_send_ack_message_id(message_id)?;
+        let _ = ctx;
+        Err(Self::unsupported_send_ack_error(message_id))
     }
 
     #[instrument(skip(self, ctx))]
@@ -426,5 +448,26 @@ fn durability_label(durability: &SendAckDurability) -> &'static str {
         SendAckDurability::BrokerAccepted => "broker_accepted",
         SendAckDurability::Persisted => "persisted",
         SendAckDurability::TransientAccepted => "transient_accepted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_ack_rejects_empty_message_id() {
+        let err = MessageHandler::validate_send_ack_message_id("  ").unwrap_err();
+
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter));
+        assert!(err.reason().contains("message_id"));
+    }
+
+    #[test]
+    fn send_ack_without_durable_ack_store_is_explicitly_unsupported() {
+        let err = MessageHandler::unsupported_send_ack_error("msg-1");
+
+        assert_eq!(err.code(), Some(ErrorCode::OperationNotSupported));
+        assert!(err.reason().contains("send_ack"));
     }
 }

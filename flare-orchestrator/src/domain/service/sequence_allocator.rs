@@ -52,7 +52,7 @@ use tracing::{debug, warn};
 ///
 /// - `redis_client`: Redis 客户端（用于 INCR 原子操作）
 /// - `batch_size`: 预分配批次大小（默认 100，高频场景可调整到 500-1000）
-/// - `key_ttl_seconds`: Redis key 过期时间（默认 7 天，避免 key 堆积）
+/// - Redis key 不设置过期时间：持久会话的 seq 高水位必须长期保留，避免空闲后从 1 重启。
 #[derive(Clone)]
 pub struct SequenceAllocator {
     /// Redis 客户端（保留用于健康检查等场景）
@@ -61,8 +61,6 @@ pub struct SequenceAllocator {
     connection_manager: ConnectionManager,
     /// 预分配批次大小（减少 Redis 调用频率）
     batch_size: u64,
-    /// Redis key TTL（秒）
-    key_ttl_seconds: i64,
 }
 
 impl SequenceAllocator {
@@ -89,8 +87,19 @@ impl SequenceAllocator {
             _redis_client: redis_client, // 添加下划线前缀表示保留但暂时未使用
             connection_manager,
             batch_size,
-            key_ttl_seconds: 7 * 24 * 3600, // 7 天
         })
+    }
+
+    fn build_allocate_seq_pipeline(key: &str) -> redis::Pipeline {
+        let mut pipe = redis::pipe();
+        pipe.atomic().cmd("INCR").arg(key);
+        pipe
+    }
+
+    fn build_allocate_batch_pipeline(key: &str, batch_size: u64) -> redis::Pipeline {
+        let mut pipe = redis::pipe();
+        pipe.atomic().cmd("INCRBY").arg(key).arg(batch_size);
+        pipe
     }
 
     /// 为消息分配 session_seq（同步模式）
@@ -130,16 +139,8 @@ impl SequenceAllocator {
         // 获取 Redis 连接
         let mut conn = self.connection_manager.clone();
 
-        // 执行原子递增并刷新 TTL（避免 key 永久存在）。
-        // 注意：即使 key 过期，下次重新开始也不影响顺序性
-        // 因为会话关闭后，seq 从 1 重新开始是合理的
-        let (seq, _): (u64, ()) = redis::pipe()
-            .atomic()
-            .cmd("INCR")
-            .arg(&key)
-            .cmd("EXPIRE")
-            .arg(&key)
-            .arg(self.key_ttl_seconds)
+        // 执行原子递增。持久会话的 seq 是同步和排序高水位，不能设置 TTL。
+        let (seq,): (u64,) = Self::build_allocate_seq_pipeline(&key)
             .query_async(&mut conn)
             .await
             .context("Failed to allocate sequence in Redis")?;
@@ -203,15 +204,8 @@ impl SequenceAllocator {
 
         let mut conn = self.connection_manager.clone();
 
-        // 一次性递增 batch_size（如 100）并刷新 TTL。
-        let (end_seq, _): (u64, ()) = redis::pipe()
-            .atomic()
-            .cmd("INCRBY")
-            .arg(&key)
-            .arg(self.batch_size)
-            .cmd("EXPIRE")
-            .arg(&key)
-            .arg(self.key_ttl_seconds)
+        // 一次性递增 batch_size（如 100）。持久会话的 seq 高水位不能设置 TTL。
+        let (end_seq,): (u64,) = Self::build_allocate_batch_pipeline(&key, self.batch_size)
             .query_async(&mut conn)
             .await
             .with_context(|| "Failed to allocate batch sequence in Redis")?;
@@ -344,8 +338,38 @@ impl SequenceAllocator {
 mod tests {
     use super::*;
 
+    fn packed_contains(packed: &[u8], needle: &[u8]) -> bool {
+        packed.windows(needle.len()).any(|window| window == needle)
+    }
+
+    #[test]
+    fn allocate_seq_pipeline_keeps_persistent_high_water() {
+        let packed = SequenceAllocator::build_allocate_seq_pipeline("seq:tenant:conversation")
+            .get_packed_pipeline();
+
+        assert!(packed_contains(&packed, b"INCR"));
+        assert!(
+            !packed_contains(&packed, b"EXPIRE"),
+            "persistent conversation sequence keys must not expire"
+        );
+    }
+
+    #[test]
+    fn allocate_batch_pipeline_keeps_persistent_high_water() {
+        let packed =
+            SequenceAllocator::build_allocate_batch_pipeline("seq:tenant:conversation", 100)
+                .get_packed_pipeline();
+
+        assert!(packed_contains(&packed, b"INCRBY"));
+        assert!(
+            !packed_contains(&packed, b"EXPIRE"),
+            "persistent conversation sequence keys must not expire"
+        );
+    }
+
     /// 测试：单次分配序列号
     #[tokio::test]
+    #[ignore = "requires a local Redis instance"]
     async fn test_allocate_seq() {
         // 注意：需要本地运行 Redis（127.0.0.1:6379）
         let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
@@ -378,6 +402,7 @@ mod tests {
 
     /// 测试：批量预分配
     #[tokio::test]
+    #[ignore = "requires a local Redis instance"]
     async fn test_allocate_batch() {
         let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
         let allocator = SequenceAllocator::new(Arc::new(redis_client), 10)
@@ -414,6 +439,7 @@ mod tests {
 
     /// 测试：健康检查
     #[tokio::test]
+    #[ignore = "requires a local Redis instance"]
     async fn test_health_check() {
         let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
         let allocator = SequenceAllocator::new(Arc::new(redis_client), 100)

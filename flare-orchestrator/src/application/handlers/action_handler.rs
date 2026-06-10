@@ -26,7 +26,7 @@ use crate::domain::builder::{
     build_pin_event, build_reaction_event, build_read_receipt_event, build_recall_event,
     build_unmark_event, build_unpin_event,
 };
-use flare_server_core::error::Result;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
 /// 消息操作处理器（编排层）
 pub struct MessageActionHandler {
@@ -37,6 +37,14 @@ pub struct MessageActionHandler {
 impl MessageActionHandler {
     pub fn new(event_handler: Arc<EventHandler>) -> Self {
         Self { event_handler }
+    }
+
+    fn unsupported_read_operation_error(operation: &'static str) -> FlareError {
+        ErrorBuilder::new(
+            ErrorCode::OperationNotSupported,
+            format!("{operation} durable read model update is not implemented"),
+        )
+        .build_error()
     }
 
     /// 撤回消息
@@ -414,12 +422,10 @@ impl MessageActionHandler {
     /// - 优化性能，减少数据库查询次数
     #[instrument(skip(self, ctx))]
     pub async fn batch_mark_message_read(&self, ctx: &Ctx, message_ids: Vec<String>) -> Result<()> {
-        // TODO: 实现批量标记已读
-        // 1. 批量查询消息信息
-        // 2. 批量构建已读回执事件
-        // 3. 批量处理事件
         let _ = (ctx, message_ids);
-        Ok(())
+        Err(Self::unsupported_read_operation_error(
+            "batch_mark_message_read",
+        ))
     }
 
     /// 标记直到某条消息已读
@@ -429,12 +435,10 @@ impl MessageActionHandler {
     /// - 批量标记为已读
     #[instrument(skip(self, ctx))]
     pub async fn mark_messages_read_until(&self, ctx: &Ctx, message_id: &str) -> Result<()> {
-        // TODO: 实现标记直到某条消息已读
-        // 1. 查询消息的 seq
-        // 2. 查询该会话中 seq 小于该消息的所有未读消息
-        // 3. 批量标记为已读
         let _ = (ctx, message_id);
-        Ok(())
+        Err(Self::unsupported_read_operation_error(
+            "mark_messages_read_until",
+        ))
     }
 
     /// 标记会话已读
@@ -443,12 +447,10 @@ impl MessageActionHandler {
     /// - 将该会话的所有消息标记为已读
     #[instrument(skip(self, ctx))]
     pub async fn mark_conversation_read(&self, ctx: &Ctx, conversation_id: &str) -> Result<()> {
-        // TODO: 实现标记会话已读
-        // 1. 查询会话中所有未读消息
-        // 2. 批量标记为已读
-        // 3. 更新会话的未读计数
         let _ = (ctx, conversation_id);
-        Ok(())
+        Err(Self::unsupported_read_operation_error(
+            "mark_conversation_read",
+        ))
     }
 
     /// 标记所有会话已读
@@ -457,11 +459,23 @@ impl MessageActionHandler {
     /// - 将用户所有会话的消息标记为已读
     #[instrument(skip(self, ctx))]
     pub async fn mark_all_conversations_read(&self, ctx: &Ctx, user_id: &str) -> Result<()> {
-        // TODO: 实现标记所有会话已读
-        // 1. 查询用户所有会话
-        // 2. 批量标记所有会话为已读
-        // 3. 清空用户的总未读计数
         let _ = (ctx, user_id);
-        Ok(())
+        Err(Self::unsupported_read_operation_error(
+            "mark_all_conversations_read",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_server_core::error::ErrorCode;
+
+    #[test]
+    fn unsupported_read_model_update_uses_operation_not_supported() {
+        let err = MessageActionHandler::unsupported_read_operation_error("mark_conversation_read");
+
+        assert_eq!(err.code(), Some(ErrorCode::OperationNotSupported));
+        assert!(err.reason().contains("mark_conversation_read"));
     }
 }

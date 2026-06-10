@@ -763,21 +763,34 @@ where
             "update_sync_cursor (命令)"
         );
 
-        let prev = self
-            .cursor_cache
-            .previous_last_seq(user_id, &cursor.conversation_id)
-            .await;
-        let merged_seq = crate::domain::service::merge_cursor_monotonic(
-            prev,
-            cursor.last_conversation_seq as i64,
-        ) as u64;
-        let prev_read_seq = self
+        let previous_cursor = self
             .cursor_cache
             .get(user_id, &cursor.conversation_id)
-            .await
-            .map(|c| c.last_read_seq)
-            .unwrap_or(0);
-        let merged_read_seq = cursor.last_read_seq.max(prev_read_seq);
+            .await;
+        let merged_seq = crate::domain::service::merge_cursor_monotonic(
+            previous_cursor
+                .as_ref()
+                .map(|cursor| cursor.last_conversation_seq as i64),
+            cursor.last_conversation_seq as i64,
+        ) as u64;
+        let merged_read_seq = cursor.last_read_seq.max(
+            previous_cursor
+                .as_ref()
+                .map(|cursor| cursor.last_read_seq)
+                .unwrap_or(0),
+        );
+        let merged_message_seq = cursor.last_message_seq.max(
+            previous_cursor
+                .as_ref()
+                .map(|cursor| cursor.last_message_seq)
+                .unwrap_or(0),
+        );
+        let merged_sync_at = cursor.last_sync_at.max(
+            previous_cursor
+                .as_ref()
+                .map(|cursor| cursor.last_sync_at)
+                .unwrap_or(0),
+        );
 
         self.infra
             .update_read_cursor(
@@ -794,9 +807,9 @@ where
             device_id: cursor.device_id.clone(),
             conversation_id: cursor.conversation_id.clone(),
             last_conversation_seq: merged_seq,
-            last_sync_at: cursor.last_sync_at,
+            last_sync_at: merged_sync_at,
             last_read_seq: merged_read_seq,
-            last_message_seq: cursor.last_message_seq,
+            last_message_seq: merged_message_seq,
         };
         self.cursor_cache.put(user_id, out.clone()).await;
 
@@ -1420,5 +1433,103 @@ mod tests {
         let cursor = response.cursor.expect("cursor");
         assert_eq!(cursor.conversation_id, "__conversations__");
         assert_eq!(cursor.last_conversation_seq, 1_778_673_857_000);
+    }
+
+    #[tokio::test]
+    async fn update_sync_cursor_persists_cursor_and_updates_cache() {
+        let infra = Arc::new(MockInfra::default());
+        let cache = Arc::new(MemorySyncCursorCache::new());
+        let handler = SyncOrchestrationHandler::new(infra.clone(), cache.clone());
+
+        let response = handler
+            .update_sync_cursor_sync(
+                &ctx(),
+                "22",
+                UpdateSyncCursorSync {
+                    cursor: Some(MultiDeviceCursor {
+                        device_id: "sdk-22".to_string(),
+                        conversation_id: "c1".to_string(),
+                        last_conversation_seq: 42,
+                        last_sync_at: 1_000,
+                        last_read_seq: 40,
+                        last_message_seq: 42,
+                    }),
+                },
+            )
+            .await
+            .expect("update cursor");
+
+        let cursor = response.cursor.expect("cursor");
+        assert_eq!(cursor.conversation_id, "c1");
+        assert_eq!(cursor.last_conversation_seq, 42);
+        assert_eq!(cursor.last_read_seq, 40);
+        assert_eq!(cursor.last_message_seq, 42);
+
+        let updates = infra.updates.lock().expect("updates lock");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].conversation_id, "c1");
+        assert_eq!(updates[0].message_ts, 42);
+        assert_eq!(updates[0].device_id, "sdk-22");
+        drop(updates);
+
+        let cached = cache.get("22", "c1").await.expect("cached cursor");
+        assert_eq!(cached.last_conversation_seq, 42);
+        assert_eq!(cached.last_read_seq, 40);
+    }
+
+    #[tokio::test]
+    async fn update_sync_cursor_keeps_high_water_for_stale_device_report() {
+        let infra = Arc::new(MockInfra::default());
+        let cache = Arc::new(MemorySyncCursorCache::new());
+        cache
+            .put(
+                "22",
+                MultiDeviceCursor {
+                    device_id: "sdk-new".to_string(),
+                    conversation_id: "c1".to_string(),
+                    last_conversation_seq: 120,
+                    last_sync_at: 2_000,
+                    last_read_seq: 118,
+                    last_message_seq: 121,
+                },
+            )
+            .await;
+        let handler = SyncOrchestrationHandler::new(infra.clone(), cache.clone());
+
+        let response = handler
+            .update_sync_cursor_sync(
+                &ctx(),
+                "22",
+                UpdateSyncCursorSync {
+                    cursor: Some(MultiDeviceCursor {
+                        device_id: "sdk-old".to_string(),
+                        conversation_id: "c1".to_string(),
+                        last_conversation_seq: 90,
+                        last_sync_at: 1_000,
+                        last_read_seq: 80,
+                        last_message_seq: 91,
+                    }),
+                },
+            )
+            .await
+            .expect("update cursor");
+
+        let cursor = response.cursor.expect("cursor");
+        assert_eq!(cursor.last_conversation_seq, 120);
+        assert_eq!(cursor.last_read_seq, 118);
+        assert_eq!(cursor.last_message_seq, 121);
+        assert_eq!(cursor.last_sync_at, 2_000);
+
+        let updates = infra.updates.lock().expect("updates lock");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].conversation_id, "c1");
+        assert_eq!(updates[0].message_ts, 120);
+        drop(updates);
+
+        let cached = cache.get("22", "c1").await.expect("cached cursor");
+        assert_eq!(cached.last_conversation_seq, 120);
+        assert_eq!(cached.last_read_seq, 118);
+        assert_eq!(cached.last_message_seq, 121);
+        assert_eq!(cached.last_sync_at, 2_000);
     }
 }

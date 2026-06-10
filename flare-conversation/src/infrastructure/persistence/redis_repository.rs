@@ -12,6 +12,24 @@ use crate::domain::model::{
 use crate::domain::repository::ConversationRepository;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
 
+const HSET_CURSOR_MAX_SCRIPT: &str = r#"
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+local next = tonumber(ARGV[2])
+if next == nil then
+  return redis.error_reply('invalid cursor value')
+end
+if current == false then
+  redis.call('HSET', KEYS[1], ARGV[1], next)
+  return next
+end
+local current_num = tonumber(current)
+if current_num == nil or next > current_num then
+  redis.call('HSET', KEYS[1], ARGV[1], next)
+  return next
+end
+return current_num
+"#;
+
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
     config: Arc<ConversationConfig>,
@@ -55,6 +73,23 @@ impl RedisConversationRepository {
 
     fn user_cursor_key(&self, user_id: &str) -> String {
         format!("{}:{}", self.config.user_cursor_prefix, user_id)
+    }
+
+    async fn hset_cursor_max(
+        conn: &mut ConnectionManager,
+        cursor_key: &str,
+        conversation_id: &str,
+        sync_seq: i64,
+        operation: &'static str,
+    ) -> Result<()> {
+        let _: i64 = redis::Script::new(HSET_CURSOR_MAX_SCRIPT)
+            .key(cursor_key)
+            .arg(conversation_id)
+            .arg(sync_seq)
+            .invoke_async(conn)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, operation))?;
+        Ok(())
     }
 }
 
@@ -170,10 +205,14 @@ impl ConversationRepository for RedisConversationRepository {
         let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
         let cursor_key = self.user_cursor_key(&user_id);
-        let _: () = conn
-            .hset(cursor_key, conversation_id, sync_seq)
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hset cursor"))?;
+        Self::hset_cursor_max(
+            &mut conn,
+            &cursor_key,
+            conversation_id,
+            sync_seq,
+            "redis max cursor update",
+        )
+        .await?;
         Ok(())
     }
 
@@ -241,12 +280,14 @@ impl ConversationRepository for RedisConversationRepository {
         let mut conn = self.connection().await?;
         let cursor_key = self.user_cursor_key(&user_id);
         for (conversation_id, ts) in cursors {
-            let _: () = conn
-                .hset(&cursor_key, conversation_id, *ts)
-                .await
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "redis hset batch ack")
-                })?;
+            Self::hset_cursor_max(
+                &mut conn,
+                &cursor_key,
+                conversation_id,
+                *ts,
+                "redis max cursor batch ack",
+            )
+            .await?;
         }
         Ok(())
     }
