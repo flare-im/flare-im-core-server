@@ -16,7 +16,7 @@ fn aggregate_profile_crate_is_a_workspace_member() {
     );
     assert!(
         root.join("flare-im-all/src/main.rs").is_file(),
-        "flare-im-all must expose a thin operator-facing binary"
+        "flare-im-all must expose an operator-facing binary"
     );
 }
 
@@ -73,6 +73,131 @@ fn aggregate_profile_covers_all_runtime_services_once() {
         assert!(
             count >= 2,
             "{service} must be imported and included in ALL_RUNTIME_SERVICES"
+        );
+    }
+}
+
+#[test]
+fn aggregate_profile_has_embedded_runner_contract() {
+    let root = workspace_root();
+    let lib = fs::read_to_string(root.join("flare-im-all/src/lib.rs")).expect("read profile lib");
+    let embedded =
+        fs::read_to_string(root.join("flare-im-all/src/embedded.rs")).expect("read embedded");
+    let main = fs::read_to_string(root.join("flare-im-all/src/main.rs")).expect("read main");
+
+    for required in [
+        "pub mod embedded;",
+        "pub const ALL_RUNTIME_SERVICES: [ServiceSpec; 16]",
+    ] {
+        assert!(
+            lib.contains(required),
+            "flare-im-all lib must expose embedded profile contract: {required}"
+        );
+    }
+
+    for required in [
+        "pub const EMBEDDED_SERVICE_RUNNERS: [EmbeddedServiceRunner; 16]",
+        "LocalSet",
+        "ChannelSignal",
+        "run_embedded_dev",
+        "run_embedded_standard_group",
+    ] {
+        assert!(
+            embedded.contains(required),
+            "flare-im-all embedded runner must contain {required}"
+        );
+    }
+
+    for required in [
+        "flare-im-all run dev",
+        "flare-im-all run standard <edge|core|data>",
+    ] {
+        assert!(
+            main.contains(required),
+            "flare-im-all CLI help must advertise {required}"
+        );
+    }
+}
+
+#[test]
+fn runtime_services_expose_embedded_shutdown_entrypoints() {
+    let root = workspace_root();
+
+    for path in [
+        "flare-api-gateway/src/service.rs",
+        "flare-admin-gateway/src/service.rs",
+        "flare-signaling/gateway/src/service/bootstrap.rs",
+        "flare-signaling/online/src/service/bootstrap.rs",
+        "flare-signaling/route/src/service/bootstrap.rs",
+        "flare-storage/reader/src/service/mod.rs",
+        "flare-storage/writer/src/service/mod.rs",
+        "flare-conversation/src/service/mod.rs",
+        "flare-sync-orchestrator/src/service/mod.rs",
+        "flare-media/src/service/bootstrap.rs",
+        "flare-push/proxy/src/service/bootstrap.rs",
+        "flare-push/server/src/service/bootstrap.rs",
+        "flare-push/worker/src/service/bootstrap.rs",
+        "flare-message-ingest/src/bootstrap.rs",
+        "flare-orchestrator/src/bootstrap.rs",
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("read service bootstrap");
+        assert!(
+            source.contains("run_with_shutdown_signals"),
+            "{path} must expose run_with_shutdown_signals for flare-im-all"
+        );
+    }
+
+    let capability = fs::read_to_string(root.join("flare-capability/src/composition/bootstrap.rs"))
+        .expect("read capability bootstrap");
+    assert!(
+        capability.contains("run_from_env_with_shutdown_signals"),
+        "capability must expose env-based embedded shutdown entrypoint"
+    );
+}
+
+#[test]
+fn embedded_ready_services_do_not_hardwire_process_registration_signals() {
+    let root = workspace_root();
+
+    for path in [
+        "flare-api-gateway/src/service.rs",
+        "flare-admin-gateway/src/service.rs",
+        "flare-signaling/gateway/src/service/startup.rs",
+        "flare-signaling/online/src/service/bootstrap.rs",
+        "flare-signaling/route/src/service/bootstrap.rs",
+        "flare-storage/reader/src/service/mod.rs",
+        "flare-conversation/src/service/mod.rs",
+        "flare-sync-orchestrator/src/service/mod.rs",
+        "flare-media/src/service/bootstrap.rs",
+        "flare-push/proxy/src/service/bootstrap.rs",
+        "flare-message-ingest/src/bootstrap.rs",
+        "flare-orchestrator/src/bootstrap.rs",
+        "flare-capability/src/composition/bootstrap.rs",
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("read registered bootstrap");
+        assert!(
+            source.contains("run_with_registration_and_signals"),
+            "{path} must pass embedded shutdown signals into registered runtime"
+        );
+        assert!(
+            !source.contains(".run_with_registration("),
+            "{path} must not hardwire process-level registration shutdown signals"
+        );
+    }
+
+    for path in [
+        "flare-push/server/src/service/bootstrap.rs",
+        "flare-push/worker/src/service/bootstrap.rs",
+        "flare-storage/writer/src/service/mod.rs",
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("read background bootstrap");
+        assert!(
+            source.contains("run_with_signals"),
+            "{path} must pass embedded shutdown signals into background runtime"
+        );
+        assert!(
+            !source.contains(".run()"),
+            "{path} must not hardwire process-level background shutdown signals"
         );
     }
 }

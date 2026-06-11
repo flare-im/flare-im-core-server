@@ -18,6 +18,25 @@ pub async fn start_services(
     gateway_id: String,
     region: Option<String>,
 ) -> Result<()> {
+    start_services_with_signals(
+        context,
+        port_config,
+        address,
+        gateway_id,
+        region,
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn start_services_with_signals(
+    context: ApplicationContext,
+    port_config: PortConfig,
+    address: String,
+    gateway_id: String,
+    region: Option<String>,
+    signals: flare_im_service_kit::RuntimeShutdownSignals,
+) -> Result<()> {
     use flare_core_runtime::RuntimeConfig;
     use flare_grpc_proto::access_gateway::access_gateway_server::AccessGatewayServer;
     use flare_im_contracts::service_names::ACCESS_GATEWAY;
@@ -128,28 +147,31 @@ pub async fn start_services(
     let region_for_reg = region.clone();
 
     runtime
-        .run_with_registration(move |addr| {
-            let gateway_id_clone = gateway_id_for_reg.clone();
-            let region_clone = region_for_reg.clone();
+        .run_with_registration_and_signals(
+            move |addr| {
+                let gateway_id_clone = gateway_id_for_reg.clone();
+                let region_clone = region_for_reg.clone();
 
-            Box::pin(async move {
-                let registry = flare_im_service_kit::discovery::register_runtime_service_only(
-                    ACCESS_GATEWAY,
-                    addr,
-                    Some(gateway_id_clone.clone()),
-                )
-                .await?;
+                Box::pin(async move {
+                    let registry = flare_im_service_kit::discovery::register_runtime_service_only(
+                        ACCESS_GATEWAY,
+                        addr,
+                        Some(gateway_id_clone.clone()),
+                    )
+                    .await?;
 
-                if registry.is_some() {
-                    info!(
-                        "✅ Service registered: {} (instance_id={}, region={:?})",
-                        ACCESS_GATEWAY, gateway_id_clone, region_clone
-                    );
-                }
+                    if registry.is_some() {
+                        info!(
+                            "✅ Service registered: {} (instance_id={}, region={:?})",
+                            ACCESS_GATEWAY, gateway_id_clone, region_clone
+                        );
+                    }
 
-                Ok(registry)
-            })
-        })
+                    Ok(registry)
+                })
+            },
+            signals,
+        )
         .await?;
 
     Ok(())

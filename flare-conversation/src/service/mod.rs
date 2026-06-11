@@ -12,6 +12,12 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> flare_server_core::error::Result<()> {
+        Self::run_with_shutdown_signals(Vec::new()).await
+    }
+
+    pub async fn run_with_shutdown_signals(
+        signals: flare_im_service_kit::RuntimeShutdownSignals,
+    ) -> flare_server_core::error::Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.conversation_service();
         let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
@@ -31,13 +37,14 @@ impl ApplicationBootstrap {
         info!("ApplicationBootstrap created successfully");
 
         // 运行服务
-        Self::run_with_context(context, runtime_plan).await
+        Self::run_with_context(context, runtime_plan, signals).await
     }
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: ApplicationContext,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        signals: flare_im_service_kit::RuntimeShutdownSignals,
     ) -> flare_server_core::error::Result<()> {
         use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageServiceServer;
         use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
@@ -112,16 +119,19 @@ impl ApplicationBootstrap {
 
         // 运行服务（带服务注册）
         runtime
-            .run_with_registration(|addr| {
-                Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
-                        &service_name,
-                        addr,
-                        None,
-                    )
-                    .await
-                })
-            })
+            .run_with_registration_and_signals(
+                |addr| {
+                    Box::pin(async move {
+                        flare_im_service_kit::discovery::register_runtime_service_only(
+                            &service_name,
+                            addr,
+                            None,
+                        )
+                        .await
+                    })
+                },
+                signals,
+            )
             .await
             .map_err(|e| {
                 flare_server_core::error::FlareError::system(format!("runtime error: {}", e))

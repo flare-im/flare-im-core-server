@@ -14,6 +14,12 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
+        Self::run_with_shutdown_signals(Vec::new()).await
+    }
+
+    pub async fn run_with_shutdown_signals(
+        signals: flare_im_service_kit::RuntimeShutdownSignals,
+    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.orchestrator_service();
         let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
@@ -31,13 +37,14 @@ impl ApplicationBootstrap {
 
         info!("ApplicationBootstrap created successfully");
 
-        Self::run_with_context(context, runtime_plan).await
+        Self::run_with_context(context, runtime_plan, signals).await
     }
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: wire::ApplicationContext,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        signals: flare_im_service_kit::RuntimeShutdownSignals,
     ) -> Result<()> {
         use flare_grpc_proto::message::message_action_service_server::MessageActionServiceServer;
         use flare_grpc_proto::message::message_event_service_server::MessageEventServiceServer;
@@ -200,19 +207,22 @@ impl ApplicationBootstrap {
         let metadata_clone = Some(metadata);
 
         service_runtime
-            .run_with_registration(move |addr| {
-                let metadata = metadata_clone.clone();
-                let service_name = service_name.clone();
-                Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
-                        &service_name,
-                        addr,
-                        None,
-                        metadata,
-                    )
-                    .await
-                })
-            })
+            .run_with_registration_and_signals(
+                move |addr| {
+                    let metadata = metadata_clone.clone();
+                    let service_name = service_name.clone();
+                    Box::pin(async move {
+                        flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
+                            &service_name,
+                            addr,
+                            None,
+                            metadata,
+                        )
+                        .await
+                    })
+                },
+                signals,
+            )
             .await
             .map_err(|e| {
                 flare_server_core::error::FlareError::system(format!("runtime error: {}", e))

@@ -45,8 +45,9 @@ pub use gateway_auth::{
     extract_bearer_token, header_value, inject_principal,
 };
 pub use runtime::{
-    ImServiceRuntimePlan, background_service_runtime, build_background_service_runtime,
-    build_service_runtime_plan, load_app_config_from_env, resolve_config_path,
+    ImServiceRuntimePlan, RuntimeShutdownSignals, background_service_runtime,
+    build_background_service_runtime, build_service_runtime_plan, load_app_config_from_env,
+    resolve_config_path,
 };
 pub use service_helper::ServiceHelper;
 pub use tracing::init_tracing_from_config;

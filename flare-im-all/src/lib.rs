@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod embedded;
+
 use flare_im_contracts::service_names::{
     ACCESS_GATEWAY, ADMIN_GATEWAY, API_GATEWAY, CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST,
     ORCHESTRATOR, PUSH_PROXY, PUSH_SERVER, PUSH_WORKER, SIGNALING_ONLINE, SIGNALING_ROUTE,
@@ -121,7 +123,7 @@ impl ServiceSpec {
             binary,
             workspace_member,
             group,
-            embedded_readiness: EmbeddedReadiness::NeedsShutdownAdapter,
+            embedded_readiness: EmbeddedReadiness::BootstrapEntrypointExposed,
         }
     }
 }

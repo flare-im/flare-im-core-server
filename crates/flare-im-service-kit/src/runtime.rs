@@ -12,6 +12,9 @@ use flare_server_core::error::{AnyhowContext, Result};
 
 use crate::config::{FlareAppConfig, ServiceEndpointConfig, ServiceRuntimeConfig};
 
+/// Shutdown signal list accepted by embedded service runners.
+pub type RuntimeShutdownSignals = Vec<Box<dyn flare_core_runtime::signal::ShutdownSignal>>;
+
 /// Resolved runtime startup contract for one service process.
 #[derive(Debug, Clone)]
 pub struct ImServiceRuntimePlan {

@@ -2,7 +2,8 @@ use flare_im_all::{
     DeploymentProfile, RuntimeUnit, StandardGroup, profile_units, standard_group_unit,
 };
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let mut args = std::env::args().skip(1);
     let Some(first) = args.next() else {
         print_plan(
@@ -14,6 +15,11 @@ fn main() {
 
     if matches!(first.as_str(), "-h" | "--help" | "help") {
         print_usage();
+        return;
+    }
+
+    if first == "run" {
+        run_command(args.collect()).await;
         return;
     }
 
@@ -37,12 +43,11 @@ fn main() {
 
 fn print_usage() {
     println!("Usage: flare-im-all [dev|standard|full] [edge|core|data]");
+    println!("       flare-im-all run dev");
+    println!("       flare-im-all run standard <edge|core|data>");
     println!("Default: flare-im-all dev");
     println!();
-    println!("This first-stage binary prints the deployment profile plan.");
-    println!(
-        "Embedded service runners will be enabled after each service accepts an injected shutdown signal."
-    );
+    println!("Without `run`, the command prints the deployment profile plan.");
 }
 
 fn print_plan(profile: DeploymentProfile, units: Vec<RuntimeUnit>) {
@@ -63,5 +68,44 @@ fn print_plan(profile: DeploymentProfile, units: Vec<RuntimeUnit>) {
                 service.embedded_readiness.as_str()
             );
         }
+    }
+}
+
+async fn run_command(args: Vec<String>) {
+    let Some(profile_arg) = args.first() else {
+        eprintln!("missing profile for `run`");
+        print_usage();
+        std::process::exit(2);
+    };
+
+    let Some(profile) = DeploymentProfile::parse(profile_arg) else {
+        eprintln!("unknown deployment profile: {profile_arg}");
+        print_usage();
+        std::process::exit(2);
+    };
+
+    let result = match profile {
+        DeploymentProfile::Dev => flare_im_all::embedded::run_embedded_dev().await,
+        DeploymentProfile::Standard => {
+            let Some(group_arg) = args.get(1) else {
+                eprintln!("`run standard` requires one of: edge, core, data");
+                print_usage();
+                std::process::exit(2);
+            };
+            let Some(group) = StandardGroup::parse(group_arg) else {
+                eprintln!("unknown standard group: {group_arg}");
+                print_usage();
+                std::process::exit(2);
+            };
+            flare_im_all::embedded::run_embedded_standard_group(group).await
+        }
+        DeploymentProfile::Full => Err(flare_server_core::error::FlareError::system(
+            "full profile uses independent service processes; run each service binary directly",
+        )),
+    };
+
+    if let Err(error) = result {
+        eprintln!("flare-im-all run failed: {error}");
+        std::process::exit(1);
     }
 }

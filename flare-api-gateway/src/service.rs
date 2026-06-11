@@ -20,6 +20,12 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
+        Self::run_with_shutdown_signals(Vec::new()).await
+    }
+
+    pub async fn run_with_shutdown_signals(
+        signals: flare_im_service_kit::RuntimeShutdownSignals,
+    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_config(Some("config"));
         flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
 
@@ -98,16 +104,19 @@ impl ApplicationBootstrap {
         );
 
         Ok(runtime
-            .run_with_registration(|addr| {
-                Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
-                        API_GATEWAY,
-                        addr,
-                        None,
-                    )
-                    .await
-                })
-            })
+            .run_with_registration_and_signals(
+                |addr| {
+                    Box::pin(async move {
+                        flare_im_service_kit::discovery::register_runtime_service_only(
+                            API_GATEWAY,
+                            addr,
+                            None,
+                        )
+                        .await
+                    })
+                },
+                signals,
+            )
             .await?)
     }
 }
