@@ -26,7 +26,7 @@ impl PersistenceMode {
     /// 判断是否应该仅推送（不持久化）
     ///
     /// # 参数
-    /// - `is_temporary`: 消息/事件是否为临时类型（由 MessageProfile 或 EventType 判断）
+    /// - `is_temporary`: 消息/事件是否为临时类型（由摄入或事件分类逻辑判断）
     ///
     /// # 返回
     /// - `true`: 仅推送，不持久化

@@ -15,7 +15,7 @@ pub struct ApplicationContext {
 
 /// 从应用配置构建应用上下文
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushProxyConfig::from_app_config(app_config));
     let publisher = Arc::new(PushProxyMqPublisher::new(config.clone()).await?);

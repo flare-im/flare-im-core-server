@@ -4,7 +4,7 @@
 //! - 写入前调用 `is_new` / `is_new_by_client_msg_id`，若已存在则跳过或返回 Duplicate ack。
 //! - 典型实现：Redis 等 KV 存储，key 为 message_id，TTL 与业务保留策略一致。
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 
 pub trait MessageIdempotencyRepository: Send + Sync {
     /// 检查消息ID是否为新消息（基于服务端消息ID）

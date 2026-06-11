@@ -32,3 +32,6 @@ config/overrides/local.toml
 # 日志目录
 logs/
 *.pid
+
+# 本地开发证书(用 flare-core 的 rcgen 自生成,勿提交)
+certs/

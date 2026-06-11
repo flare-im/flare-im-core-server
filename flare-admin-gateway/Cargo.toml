@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 flare-core-runtime = { workspace = true }
-flare-im-core = { path = "..", features = ["discovery"] }
+flare-im-service-kit = { workspace = true }
 flare-core-base = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-proto = { workspace = true }

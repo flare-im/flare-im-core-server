@@ -19,7 +19,7 @@ pub struct ApplicationContext {
 }
 
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushServerConfig::from_app_config(app_config));
 

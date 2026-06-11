@@ -42,7 +42,7 @@ pub struct ApplicationContext {
 /// # 返回
 /// * `ApplicationContext` - 构建好的应用上下文
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载在线服务配置
     let online_config = Arc::new(OnlineConfig::from_app_config(app_config).map_err(|e| {

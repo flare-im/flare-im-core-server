@@ -12,8 +12,8 @@ chunk_upload_dir = "./data/media/chunks"
 chunk_ttl_seconds = 172800
 max_chunk_size_bytes = 52428800
 local_storage_dir = "./data/media"
-# 本地文件回退统一走 flare-core-gateway 代理，避免客户端直连宿主机文件服务。
-# 默认开发端口与 flare-core-gateway 当前配置保持一致：50050。
+# 本地文件回退统一走 flare-api-gateway 代理，避免客户端直连宿主机文件服务。
+# 默认开发端口与 flare-api-gateway 当前配置保持一致：50050。
 local_base_url = "http://127.0.0.1:50050/api/v1/medias/files"
 # 开发环境不要在服务层强制覆盖 cdn_base_url。
 # 否则对象存储失败回退到本地文件系统时，仍会把 RustFS 地址回写给客户端。

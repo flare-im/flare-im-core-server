@@ -13,14 +13,14 @@ use flare_grpc_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
 };
-use flare_im_core::ServiceClient;
-use flare_im_core::service_names::{SIGNALING_ONLINE, get_service_name};
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::service_names::{SIGNALING_ONLINE, get_service_name};
+use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::ServiceClient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 
 use crate::constants::METADATA_KEY_TENANT_ID;
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;
@@ -72,7 +72,7 @@ impl ConnectionRepository {
 
         let mut service_client_guard = self.service_client.lock().await;
         if service_client_guard.is_none() {
-            let discover = flare_im_core::discovery::create_discover(&self.service_name)
+            let discover = flare_im_service_kit::discovery::create_discover(&self.service_name)
                 .await
                 .map_err(|e| {
                     ErrorBuilder::new(
@@ -100,7 +100,7 @@ impl ConnectionRepository {
                 "Service client not initialized".to_string(),
             )
         })?;
-        let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+        let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
             &self.service_name,
             service_client,
         )

@@ -1,0 +1,9 @@
+[package]
+name = "flare-im-arch-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Workspace 级架构守卫测试（错误处理边界等）"
+
+[lib]
+path = "src/lib.rs"

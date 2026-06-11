@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use flare_im_core::message::Message;
-use flare_im_core::utils::datetime_to_timestamp;
+use flare_im_contracts::message::Message;
+use flare_im_contracts::utils::datetime_to_timestamp;
 use flare_proto::common::{
     ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionState,
 };

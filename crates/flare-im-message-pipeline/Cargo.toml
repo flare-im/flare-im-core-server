@@ -1,0 +1,22 @@
+[package]
+name = "flare-im-message-pipeline"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+flare-grpc-proto = { workspace = true }
+flare-im-contracts = { workspace = true }
+flare-im-hooks = { workspace = true }
+flare-im-service-kit = { workspace = true }
+flare-proto = { workspace = true }
+flare-server-core = { workspace = true, features = ["proto", "nats", "kafka"] }
+prost = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

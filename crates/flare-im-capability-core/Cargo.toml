@@ -1,0 +1,18 @@
+[package]
+name = "flare-im-capability-core"
+version.workspace = true
+edition.workspace = true
+description = "Business-neutral capability contracts shared by Flare IM services and plugins"
+
+[lib]
+name = "flare_im_capability_core"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+flare-core-base = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }

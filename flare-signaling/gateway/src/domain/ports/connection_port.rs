@@ -9,7 +9,7 @@ use flare_grpc_proto::signaling::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
 };
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 

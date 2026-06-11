@@ -6,7 +6,7 @@ use crate::domain::model::MessageSyncResult;
 use crate::domain::repository::MessageProvider;
 use flare_grpc_proto::storage::QueryMessagesRequest;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
-use flare_im_core::ServiceClient;
+use flare_im_service_kit::ServiceClient;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
@@ -62,7 +62,7 @@ impl StorageReaderClient {
                 .build_error());
             }
 
-            let discover = flare_im_core::discovery::create_discover(&self.service_name)
+            let discover = flare_im_service_kit::discovery::create_discover(&self.service_name)
                 .await
                 .map_err(|e| {
                     map_infra_error(e, ErrorCode::ServiceUnavailable, "create service discover")
@@ -92,7 +92,7 @@ impl StorageReaderClient {
             )
             .build_error()
         })?;
-        let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+        let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
             &self.service_name,
             service_client,
         )
@@ -138,7 +138,7 @@ impl StorageReaderClient {
     fn last_seq(messages: &[flare_proto::common::Message]) -> Option<i64> {
         messages
             .last()
-            .and_then(flare_im_core::utils::extract_seq_from_message)
+            .and_then(flare_im_contracts::utils::extract_seq_from_message)
     }
 
     fn map_response(resp: flare_grpc_proto::storage::QueryMessagesResponse) -> MessageSyncResult {
@@ -216,7 +216,7 @@ impl MessageProvider for StorageReaderClient {
                 let mut service_client_guard = service_client.lock().await;
 
                 let channel: Channel = if let Some(service_client) = service_client_guard.as_mut() {
-                    match flare_im_core::discovery::get_discovered_channel_with_timeout(
+                    match flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
                         &storage_service_name,
                         service_client,
                     )

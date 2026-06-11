@@ -51,6 +51,7 @@ SERVICES=(
     "signaling-route:50062"
     "capability:"  # gRPC 端口见应用配置；此处仅检查 pid 进程
     "conversation:50090"
+    "message-ingest:50182"
     "message-orchestrator:50181"
     "storage-writer:"  # 无端口（JetStream 消费者）
     "storage-reader:60083"

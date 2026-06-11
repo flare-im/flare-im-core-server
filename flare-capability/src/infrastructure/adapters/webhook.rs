@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use base64::Engine;
 use reqwest::Client;
 
-use flare_im_core::hooks::hook_context_data::get_hook_context_data;
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
+use flare_im_hooks::hooks::hook_context_data::get_hook_context_data;
+use flare_im_hooks::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};

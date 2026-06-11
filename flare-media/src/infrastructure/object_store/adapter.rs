@@ -2,7 +2,7 @@ use flare_server_core::error::Result;
 
 use super::s3::S3ObjectStore;
 use crate::domain::repository::ObjectRepositoryRef;
-use flare_im_core::config::ObjectStoreConfig;
+use flare_im_service_kit::config::ObjectStoreConfig;
 
 pub async fn build_object_store(
     profile: Option<&ObjectStoreConfig>,

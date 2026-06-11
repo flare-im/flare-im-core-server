@@ -7,7 +7,7 @@ use futures_util::future::join_all;
 use std::sync::Arc;
 
 use crate::domain::model::HookExecutionPlan;
-use flare_im_core::{
+use flare_im_hooks::{
     DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
@@ -228,7 +228,7 @@ impl HookOrchestrationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_core::{HookErrorPolicy, HookKind, HookMetadata};
+    use flare_im_hooks::{HookErrorPolicy, HookKind, HookMetadata};
     use std::sync::Arc;
     use std::time::Duration;
 

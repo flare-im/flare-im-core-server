@@ -10,6 +10,7 @@
 4. [第三方接入与使用说明](04-third-party-integration.md)
 5. [业务系统接入示例](05-business-system-examples.md)
 6. [测试、性能与运维](06-testing-performance-and-operations.md)
+7. [Core 架构优化落地方案](07-core-architecture-optimization-roadmap.md)
 
 ## 文档分类
 
@@ -21,6 +22,7 @@
 | 接入 | [04-third-party-integration.md](04-third-party-integration.md) | 业务服务、客户端 SDK、HTTP API、内部 gRPC、Hook、Capability 应该怎么接。 |
 | 示例 | [05-business-system-examples.md](05-business-system-examples.md) | 业务系统如何实现用户、好友、群、成员与权限，并与 Core 交互。 |
 | 测试运维 | [06-testing-performance-and-operations.md](06-testing-performance-and-operations.md) | 如何启动、测试、压测、看指标、看 ledger、定位丢消息或延迟问题。 |
+| 落地方案 | [07-core-architecture-optimization-roadmap.md](07-core-architecture-optimization-roadmap.md) | 网关边界、message-ingest、PostgreSQL/TimescaleDB、统一鉴权如何分阶段落地。 |
 
 ## 接入协议推荐
 
@@ -30,7 +32,7 @@
 
 - `docs/`：当前主文档，保持结构化、可维护、面向实现和接入。
 - `doc/`：旧设计记录、历史方案、临时报告、drawio 和深度讨论材料，后续可以逐步迁移。
-- 各 crate 内 README/设计文档：保留模块局部细节，例如 `flare-core-gateway/GATEWAY_SPEC.md`、`flare-orchestrator/docs/*`。
+- 各 crate 内 README/设计文档：保留模块局部细节，例如 `flare-api-gateway/GATEWAY_SPEC.md`、`flare-orchestrator/docs/*`。
 
 ## 写作约定
 

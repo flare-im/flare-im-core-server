@@ -14,7 +14,7 @@ use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 use crate::domain::model::{ObjectStat, UploadContext, UploadedPartRecord};
 use crate::domain::repository::MediaObjectRepository;
-use flare_im_core::config::ObjectStoreConfig;
+use flare_im_service_kit::config::ObjectStoreConfig;
 
 #[derive(Clone)]
 pub struct S3ObjectStore {

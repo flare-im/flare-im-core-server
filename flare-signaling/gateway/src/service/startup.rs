@@ -18,8 +18,9 @@ pub async fn start_services(
     gateway_id: String,
     region: Option<String>,
 ) -> Result<()> {
-    use flare_core_runtime::{RuntimeConfig, ServiceRuntime};
+    use flare_core_runtime::RuntimeConfig;
     use flare_grpc_proto::access_gateway::access_gateway_server::AccessGatewayServer;
+    use flare_im_contracts::service_names::ACCESS_GATEWAY;
     use flare_server_core::middleware::ContextLayer;
     use tonic::transport::Server;
 
@@ -59,69 +60,68 @@ pub async fn start_services(
     let config = RuntimeConfig::default().with_shutdown_timeout(std::time::Duration::from_secs(10));
 
     // 创建 ServiceRuntime（使用简化模式 + 服务注册）
-    let runtime = flare_im_core::health::attach_runtime_health_checks(
-        ServiceRuntime::new("access-gateway")
-            .with_address(grpc_addr)
-            .with_config(config)
-            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
-            // gRPC 服务任务
-            .add_spawn_with_shutdown("grpc-server", move |shutdown_rx| {
-                let handler = context.grpc_services.access_gateway_handler.clone();
-                let addr = grpc_addr;
+    let runtime = flare_im_service_kit::ImServiceRuntimePlan {
+        service_name: ACCESS_GATEWAY.to_string(),
+        address: grpc_addr,
+    }
+    .service_runtime()
+    .with_config(config)
+    // gRPC 服务任务
+    .add_spawn_with_shutdown("grpc-server", move |shutdown_rx| {
+        let handler = context.grpc_services.access_gateway_handler.clone();
+        let addr = grpc_addr;
 
-                async move {
-                    info!("🚀 Starting gRPC server on {}", addr);
+        async move {
+            info!("🚀 Starting gRPC server on {}", addr);
 
-                    let service = ContextLayer::new()
-                        .allow_missing()
-                        .layer(AccessGatewayServer::new((*handler).clone()));
+            let service = ContextLayer::new()
+                .allow_missing()
+                .layer(AccessGatewayServer::new((*handler).clone()));
 
-                    let result = Server::builder()
-                        .add_service(service)
-                        .serve_with_shutdown(addr, async {
-                            let _ = shutdown_rx.await;
-                            info!("gRPC server shutdown signal received");
-                        })
-                        .await;
-
-                    match result {
-                        Ok(_) => {
-                            info!("gRPC server stopped gracefully");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            error!(error = %e, "gRPC server failed");
-                            Err(format!("gRPC server error: {}", e).into())
-                        }
-                    }
-                }
-            })
-            // 长连接服务器任务
-            .add_spawn_with_shutdown("long-conn-server", move |shutdown_rx| {
-                let server = context.long_connection_server.clone();
-
-                async move {
-                    info!("✅ Long connection server is running");
-
-                    // 等待 shutdown 信号
+            let result = Server::builder()
+                .add_service(service)
+                .serve_with_shutdown(addr, async {
                     let _ = shutdown_rx.await;
-                    info!("Long connection server shutdown signal received");
+                    info!("gRPC server shutdown signal received");
+                })
+                .await;
 
-                    // 停止服务器
-                    if let Some(s) = server.lock().await.take() {
-                        info!("Stopping long connection server...");
-                        if let Err(e) = s.stop().await {
-                            error!(error = %e, "Failed to stop long connection server");
-                        } else {
-                            info!("Long connection server stopped gracefully");
-                        }
-                    }
-
+            match result {
+                Ok(_) => {
+                    info!("gRPC server stopped gracefully");
                     Ok(())
                 }
-            }),
-        "access-gateway",
-    );
+                Err(e) => {
+                    error!(error = %e, "gRPC server failed");
+                    Err(format!("gRPC server error: {}", e).into())
+                }
+            }
+        }
+    })
+    // 长连接服务器任务
+    .add_spawn_with_shutdown("long-conn-server", move |shutdown_rx| {
+        let server = context.long_connection_server.clone();
+
+        async move {
+            info!("✅ Long connection server is running");
+
+            // 等待 shutdown 信号
+            let _ = shutdown_rx.await;
+            info!("Long connection server shutdown signal received");
+
+            // 停止服务器
+            if let Some(s) = server.lock().await.take() {
+                info!("Stopping long connection server...");
+                if let Err(e) = s.stop().await {
+                    error!(error = %e, "Failed to stop long connection server");
+                } else {
+                    info!("Long connection server stopped gracefully");
+                }
+            }
+
+            Ok(())
+        }
+    });
 
     // 运行服务（带服务注册）
     let gateway_id_for_reg = gateway_id.clone();
@@ -133,8 +133,7 @@ pub async fn start_services(
             let region_clone = region_for_reg.clone();
 
             Box::pin(async move {
-                use flare_im_core::service_names::ACCESS_GATEWAY;
-                let registry = flare_im_core::discovery::register_runtime_service_only(
+                let registry = flare_im_service_kit::discovery::register_runtime_service_only(
                     ACCESS_GATEWAY,
                     addr,
                     Some(gateway_id_clone.clone()),

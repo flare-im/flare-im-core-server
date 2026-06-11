@@ -4,8 +4,8 @@
 //! 因为查询是只读操作，不涉及业务逻辑，不需要经过领域层。
 
 use chrono::{DateTime, Utc};
-use flare_im_core::message::{Message, message_to_proto};
-use flare_im_core::utils::{
+use flare_im_contracts::message::{Message, message_to_proto};
+use flare_im_contracts::utils::{
     extract_seq_from_message, require_tenant_id_from_context, require_user_id_from_context,
 };
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
@@ -477,7 +477,7 @@ mod tests {
         ReadListEntry, SyncCursor, VisibilityStatus,
     };
     use async_trait::async_trait;
-    use flare_im_core::utils::Context;
+    use flare_im_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -491,7 +491,7 @@ mod tests {
     impl MessageStorage for RecordingStorage {
         async fn query_messages(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _conversation_id: &str,
             _user_id: Option<&str>,
             _start_time: Option<DateTime<Utc>>,
@@ -504,7 +504,7 @@ mod tests {
 
         async fn query_messages_by_seq(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _conversation_id: &str,
             _user_id: Option<&str>,
             _after_seq: i64,
@@ -517,7 +517,7 @@ mod tests {
 
         async fn count_messages(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _conversation_id: &str,
             _user_id: Option<&str>,
             _start_time: Option<DateTime<Utc>>,
@@ -528,7 +528,7 @@ mod tests {
 
         async fn get_message(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Option<Message>> {
             unimplemented!()
@@ -536,7 +536,7 @@ mod tests {
 
         async fn get_message_timestamp(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Option<DateTime<Utc>>> {
             unimplemented!()
@@ -544,7 +544,7 @@ mod tests {
 
         async fn update_message(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
             _updates: MessageUpdate,
         ) -> AnyhowResult<()> {
@@ -553,7 +553,7 @@ mod tests {
 
         async fn batch_update_visibility(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_ids: &[String],
             _user_id: &str,
             _visibility: VisibilityStatus,
@@ -563,7 +563,7 @@ mod tests {
 
         async fn search_messages(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _filters: &[FilterExpression],
             _start_time: Option<DateTime<Utc>>,
             _end_time: Option<DateTime<Utc>>,
@@ -574,7 +574,7 @@ mod tests {
 
         async fn update_message_attributes(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
             _attributes: HashMap<String, String>,
             _tags: Vec<String>,
@@ -582,13 +582,13 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_all_tags(&self, _ctx: &flare_im_core::Ctx) -> AnyhowResult<Vec<String>> {
+        async fn list_all_tags(&self, _ctx: &flare_im_contracts::Ctx) -> AnyhowResult<Vec<String>> {
             unimplemented!()
         }
 
         async fn query_message_operations(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Vec<Event>> {
             unimplemented!()
@@ -596,7 +596,7 @@ mod tests {
 
         async fn query_message_events(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
             _event_types: Option<&[EventType]>,
             _limit: i32,
@@ -607,7 +607,7 @@ mod tests {
 
         async fn query_message_edit_history(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Vec<EditHistoryEntry>> {
             unimplemented!()
@@ -615,7 +615,7 @@ mod tests {
 
         async fn query_message_read_records(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Vec<ReadListEntry>> {
             unimplemented!()
@@ -623,7 +623,7 @@ mod tests {
 
         async fn query_message_visibility(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
             _user_id: &str,
         ) -> AnyhowResult<Option<VisibilityStatus>> {
@@ -632,7 +632,7 @@ mod tests {
 
         async fn query_message_reactions(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _message_id: &str,
         ) -> AnyhowResult<Vec<ReactionItem>> {
             unimplemented!()
@@ -640,7 +640,7 @@ mod tests {
 
         async fn query_message_write_ledger(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _query: MessageWriteLedgerQuery,
         ) -> AnyhowResult<(Vec<MessageWriteLedgerEntry>, bool)> {
             unimplemented!()
@@ -648,7 +648,7 @@ mod tests {
 
         async fn query_pinned_messages(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _conversation_id: &str,
         ) -> AnyhowResult<Vec<PinnedMessageInfo>> {
             unimplemented!()
@@ -656,7 +656,7 @@ mod tests {
 
         async fn query_events(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             tenant_id: &str,
             _conversation_id: &str,
             _after_seq: i64,
@@ -671,7 +671,7 @@ mod tests {
 
         async fn get_conversation_max_seq(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _tenant_id: &str,
             _conversation_id: &str,
         ) -> AnyhowResult<Option<i64>> {
@@ -680,7 +680,7 @@ mod tests {
 
         async fn get_conversation_message_head(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _conversation_id: &str,
         ) -> AnyhowResult<Option<ConversationMessageHead>> {
             unimplemented!()
@@ -688,7 +688,7 @@ mod tests {
 
         async fn get_sync_cursor(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _tenant_id: &str,
             _user_id: &str,
             _conversation_id: &str,
@@ -698,7 +698,7 @@ mod tests {
 
         async fn get_sync_snapshot(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _tenant_id: &str,
             _user_id: &str,
             _conversation_ids: &[String],
@@ -709,7 +709,7 @@ mod tests {
 
         async fn update_sync_cursor(
             &self,
-            _ctx: &flare_im_core::Ctx,
+            _ctx: &flare_im_contracts::Ctx,
             _tenant_id: &str,
             _user_id: &str,
             _conversation_id: &str,
@@ -726,7 +726,7 @@ mod tests {
         let storage = Arc::new(RecordingStorage::default());
         let seen_tenant = storage.seen_tenant_id.clone();
         let handler = MessageStorageQueryHandler::new(storage);
-        let ctx: flare_im_core::Ctx =
+        let ctx: flare_im_contracts::Ctx =
             Arc::new(Context::with_request_id("req-sync-events").with_tenant_id("tenant-a"));
 
         handler

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::error::AnyhowContext as _;
 use sqlx::{FromRow, PgPool};
 

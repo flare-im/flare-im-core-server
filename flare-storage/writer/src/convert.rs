@@ -7,14 +7,14 @@ use crate::domain::model::{
     EventType, HardDeletedPayload, MarkPayload, PinPayload, ReactionPayload, ReadPayload,
     RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
 };
-use flare_im_core::Ctx;
-use flare_im_core::utils::{millis_to_timestamp, normalize_tenant_id, timestamp_to_millis};
+use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::{millis_to_timestamp, normalize_tenant_id, timestamp_to_millis};
 use flare_proto::common;
 use flare_proto::common::message_content::Content;
 use prost::Message as ProstMessage;
 
 /// 统一从 flare-im-core 重导出，供本 crate 其他处使用
-pub use flare_im_core::message::{message_from_proto, message_to_proto};
+pub use flare_im_contracts::message::{message_from_proto, message_to_proto};
 
 /// 从 proto Event 转为领域 Event（common::Event 无 tenant_id/operator_id，由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
@@ -403,7 +403,7 @@ pub enum TopicEventDispatch {
 pub fn dispatch_topic_event_envelope(
     env: &flare_proto::common::TopicEventEnvelope,
 ) -> TopicEventDispatch {
-    use flare_im_core::event::EVENT_TYPE_MESSAGE_CREATED;
+    use flare_im_contracts::event::EVENT_TYPE_MESSAGE_CREATED;
     let event = match &env.event {
         Some(ev) => ev,
         None => return TopicEventDispatch::Unsupported,
@@ -442,12 +442,12 @@ pub fn command_from_message_envelope(
         );
     }
     msg.attributes.insert(
-        flare_im_core::abstractions::storage_payload::EXTRA_KEY_SYNC.to_string(),
+        flare_im_contracts::abstractions::storage_payload::EXTRA_KEY_SYNC.to_string(),
         envelope.sync.to_string(),
     );
     if let Ok(tags_json) = serde_json::to_string(&envelope.attributes) {
         msg.attributes.insert(
-            flare_im_core::abstractions::storage_payload::EXTRA_KEY_TAGS.to_string(),
+            flare_im_contracts::abstractions::storage_payload::EXTRA_KEY_TAGS.to_string(),
             tags_json,
         );
     }
@@ -463,7 +463,7 @@ pub fn message_command_from_proto(
 ) -> crate::application::commands::ProcessStoreMessageCommand {
     use crate::application::commands::ProcessStoreMessageCommand;
     let payload =
-        flare_im_core::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
+        flare_im_contracts::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
     let message = payload.message.as_ref().map(message_from_proto);
     let tenant = payload
         .metadata

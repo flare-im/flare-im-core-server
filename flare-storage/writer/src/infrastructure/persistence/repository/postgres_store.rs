@@ -1,6 +1,6 @@
 use base64::Engine;
-use flare_im_core::Ctx;
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_proto::common::{
     ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionPolicy,
     MessageRetentionState, RetentionMode,

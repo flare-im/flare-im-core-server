@@ -1,9 +1,9 @@
 //! Push Proxy 配置:gRPC 监听地址与 JetStream Topic(以设计文档为准)
 
-use flare_im_core::config::FlareAppConfig;
-use flare_im_core::constants::topics::{
+use flare_im_contracts::constants::topics::{
     TOPIC_PUSH_MESSAGES, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
+use flare_im_service_kit::config::FlareAppConfig;
 use flare_server_core::mq::kafka::KafkaProducerConfig;
 use flare_server_core::mq::nats::{NatsProducerConfig, NatsStreamSpec, default_stream_specs};
 use std::{collections::HashMap, env};

@@ -7,7 +7,7 @@ use flare_grpc_proto::conversation::{
     ListConversationParticipantsResponse, UpdateConversationUserSettingsRequest,
     UpdateConversationUserSettingsResponse, UpdateCursorRequest,
 };
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::Message;
 use flare_proto::common::{Event, MultiDeviceCursor};
 use flare_server_core::error::FlareError;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 use prost::Message as _;
 use redis::{AsyncCommands, aio::ConnectionManager};
@@ -57,9 +57,9 @@ impl HotCacheRepository for RedisHotCacheRepository {
         }
 
         // 从 attributes 中提取 ingestion_ts，如果没有则使用当前时间
-        let ingestion_ts = flare_im_core::utils::extract_timeline_from_extra(
+        let ingestion_ts = flare_im_contracts::utils::extract_timeline_from_extra(
             &message.attributes,
-            flare_im_core::utils::current_millis(),
+            flare_im_contracts::utils::current_millis(),
         )
         .ingestion_ts;
         let score = ingestion_ts as f64;
@@ -132,9 +132,9 @@ impl HotCacheRepository for RedisHotCacheRepository {
             }
 
             // 收集索引更新（按会话分组）
-            let ingestion_ts = flare_im_core::utils::extract_timeline_from_extra(
+            let ingestion_ts = flare_im_contracts::utils::extract_timeline_from_extra(
                 &message.attributes,
-                flare_im_core::utils::current_millis(),
+                flare_im_contracts::utils::current_millis(),
             )
             .ingestion_ts;
             let score = ingestion_ts as f64;

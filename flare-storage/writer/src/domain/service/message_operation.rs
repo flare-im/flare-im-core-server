@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::domain::model::Event;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::instrument;
@@ -93,7 +93,7 @@ where
 mod tests {
     use super::*;
     use crate::domain::model::{EventPayload, EventType, RecallPayload};
-    use flare_im_core::utils::Context;
+    use flare_im_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
 
     struct NoopArchiveRepository;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use flare_grpc_proto::signaling::online::GetOnlineStatusRequest;
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{FlareError, Result};
 use tonic::transport::Channel;
 

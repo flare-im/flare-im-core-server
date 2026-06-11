@@ -14,8 +14,8 @@ use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServi
 use flare_grpc_proto::storage::{
     GetConversationMessageHeadRequest, QueryConversationEventsRequest, QueryMessagesBySeqRequest,
 };
-use flare_im_core::Ctx;
-use flare_im_core::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
+use flare_im_contracts::Ctx;
+use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
 use flare_proto::Message;
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
@@ -36,8 +36,8 @@ pub struct GrpcSyncAdapters;
 
 impl GrpcSyncAdapters {
     async fn create_channel(service_name: &str) -> Result<Channel, FlareError> {
-        let fallback = flare_im_core::discovery::default_static_grpc_fallback(service_name);
-        flare_im_core::discovery::connect_grpc_channel_with_fallback(service_name, fallback)
+        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
+        flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(service_name, fallback)
             .await
             .map_err(|e| discovery_unavailable(service_name, e))
     }

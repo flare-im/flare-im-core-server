@@ -3,8 +3,7 @@
 //! - ReadReceipt：消费 TOPIC_MESSAGE_EVENTS（与 Orchestrator `publish_domain_event` 对齐）
 //! - ConversationEnsure：消费 TOPIC_CONVERSATION_ENSURE（与 Orchestrator `publish_conversation_ensure` 对齐）
 //!
-//! 注意：当前主链路投递为 **protobuf MqEnvelope**（`payload_kind=Event`）；
-//! 迁移后仅接受 protobuf MqEnvelope 与当前 JSON EventEnvelope 事件信封。
+//! 注意：事件 topic 仅接受 **protobuf MqEnvelope**（`payload_kind=Event`）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,22 +12,22 @@ use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
-use flare_server_core::eventbus::EventEnvelope;
 use flare_server_core::mq::consumer::MessageFetcher;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaMessageFetcher, KafkaProducerConfig};
 use flare_server_core::mq::nats::{NatsConsumerConfig, NatsMessageFetcher, NatsStreamSpec};
 use prost::Message as _;
 use tracing::{debug, error, info, warn};
 
-use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
-use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
-use flare_im_core::event::{
-    EVENT_TYPE_OPERATION_CONVERSATION_ENSURE, EVENT_TYPE_OPERATION_READ_RECEIPT,
-};
+use flare_im_contracts::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
+use flare_im_contracts::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{ConversationParticipant, ConversationType, ConversationVisibility};
 use crate::domain::service::DefaultConversationDomainService;
+
+const CONVERSATION_ENSURE_NAMESPACE: &str = "flare.core";
+const CONVERSATION_ENSURE_EVENT_NAME: &str = "conversation.ensure";
+const CONVERSATION_ENSURE_EVENT_VERSION: &str = "1";
 
 /// JetStream 消费者配置（实现 NatsConsumerConfig）
 struct ReadReceiptConsumerConfig {
@@ -282,45 +281,59 @@ fn read_seq_for_conversation_cursor(read_seq: u64) -> Option<i64> {
 }
 
 fn decode_message_event(raw: &[u8]) -> Result<Option<Event>> {
-    // 优先：当前链路是 protobuf MqEnvelope（topic=flare.im.message.events）
-    if let Ok(mq) = MqEnvelope::decode(raw) {
-        if mq.payload_kind != MqPayloadKind::Event as i32 {
-            return Ok(None);
-        }
-        if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
-            return Ok(matches_supported_event(&event).then_some(event));
-        }
+    let mq = MqEnvelope::decode(raw)
+        .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "decode MqEnvelope"))?;
+
+    if mq.payload_kind != MqPayloadKind::Event as i32 {
         return Ok(None);
     }
-
-    // 兼容：旧链路 JSON EventEnvelope
-    if let Ok(envelope) = serde_json::from_slice::<EventEnvelope>(raw) {
-        if envelope.event_type != EVENT_TYPE_OPERATION_READ_RECEIPT {
-            return Ok(None);
-        }
-        // EventEnvelope.payload 可能是 MqEnvelope(proto)，也可能是 Event(proto)
-        if let Ok(mq) = MqEnvelope::decode(&*envelope.payload) {
-            if mq.payload_kind == MqPayloadKind::Event as i32
-                && let Some(mq_envelope::Payload::Event(event)) = mq.payload
-            {
-                return Ok(matches_supported_event(&event).then_some(event));
-            }
-            return Ok(None);
-        }
-        if let Ok(event) = Event::decode(&*envelope.payload) {
-            return Ok(matches_supported_event(&event).then_some(event));
-        }
-        return Ok(None);
-    }
-
-    // 兼容：某些链路可能直接把 Event(proto) 作为 JetStream payload 投递，而非 EventEnvelope(JSON)。
-    if let Ok(event) = Event::decode(raw) {
+    if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
         return Ok(matches_supported_event(&event).then_some(event));
     }
 
-    // 该 topic 可能混入非 ReadReceipt 业务消息；无法识别时直接跳过，避免误报错误刷屏。
-    debug!("Skip jetstream payload: unsupported format for conversation event consumer");
     Ok(None)
+}
+
+fn decode_conversation_ensure(raw: &[u8]) -> Result<Option<(String, ConversationEnsurePayload)>> {
+    let mq = MqEnvelope::decode(raw).map_err(|e| {
+        map_infra_error(
+            e,
+            ErrorCode::DeserializationError,
+            "decode ConversationEnsure MqEnvelope",
+        )
+    })?;
+
+    if mq.payload_kind != MqPayloadKind::Event as i32 {
+        return Ok(None);
+    }
+
+    let Some(mq_envelope::Payload::Event(event)) = mq.payload else {
+        return Ok(None);
+    };
+    if event.r#type != EventType::EventCustom as i32 {
+        return Ok(None);
+    }
+
+    let conversation_id = if event.conversation_id.trim().is_empty() {
+        mq.conversation_id
+    } else {
+        event.conversation_id.clone()
+    };
+
+    let Some(Payload::Custom(custom)) = event.payload else {
+        return Ok(None);
+    };
+    if custom.namespace != CONVERSATION_ENSURE_NAMESPACE
+        || custom.name != CONVERSATION_ENSURE_EVENT_NAME
+        || custom.version != CONVERSATION_ENSURE_EVENT_VERSION
+    {
+        return Ok(None);
+    }
+
+    let ensure_payload: ConversationEnsurePayload = serde_json::from_slice(&custom.payload)
+        .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "parse ensure"))?;
+
+    Ok(Some((conversation_id, ensure_payload)))
 }
 
 fn matches_supported_event(event: &Event) -> bool {
@@ -336,7 +349,7 @@ fn matches_supported_event(event: &Event) -> bool {
 // ConversationEnsure 消费者（Orchestrator 异步会话创建）
 // -----------------------------------------------------------------------------
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct ConversationEnsurePayload {
     #[serde(default)]
     tenant_id: String,
@@ -511,32 +524,19 @@ impl ConversationEnsureEventConsumer {
     }
 
     async fn process_payload(&self, raw: &[u8]) -> Result<()> {
-        let envelope: EventEnvelope = serde_json::from_slice(raw).map_err(|e| {
-            map_infra_error(
-                e,
-                ErrorCode::DeserializationError,
-                "parse EventEnvelope JSON",
-            )
-        })?;
-
-        if envelope.event_type != EVENT_TYPE_OPERATION_CONVERSATION_ENSURE {
+        let Some((conversation_id, ensure_payload)) = decode_conversation_ensure(raw)? else {
             return Ok(());
-        }
+        };
 
-        let ensure_payload: ConversationEnsurePayload =
-            serde_json::from_slice(&envelope.payload)
-                .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "parse ensure"))?;
-
-        let conversation_id = envelope.partition_key.as_str();
         if conversation_id.is_empty() {
-            debug!("ConversationEnsure with empty partition_key, skip");
+            debug!("ConversationEnsure with empty conversation_id, skip");
             return Ok(());
         }
 
         let tenant_id = if ensure_payload.tenant_id.trim().is_empty() {
-            "0"
+            "0".to_string()
         } else {
-            ensure_payload.tenant_id.trim()
+            ensure_payload.tenant_id.trim().to_string()
         };
 
         let participants: Vec<ConversationParticipant> = ensure_payload
@@ -552,7 +552,7 @@ impl ConversationEnsureEventConsumer {
             .collect();
 
         let mut attributes = HashMap::new();
-        attributes.insert("conversation_id".to_string(), conversation_id.to_string());
+        attributes.insert("conversation_id".to_string(), conversation_id.clone());
 
         let ctx = Context::root().with_tenant_id(tenant_id);
 
@@ -578,7 +578,19 @@ impl ConversationEnsureEventConsumer {
 
 #[cfg(test)]
 mod tests {
-    use super::read_seq_for_conversation_cursor;
+    use std::collections::HashMap;
+
+    use flare_proto::common::{
+        CustomEvent, Event, EventType, MqEnvelope, MqPayloadKind, ReadReceiptEvent, event,
+        mq_envelope,
+    };
+    use prost::Message as _;
+
+    use super::{
+        CONVERSATION_ENSURE_EVENT_NAME, CONVERSATION_ENSURE_EVENT_VERSION,
+        CONVERSATION_ENSURE_NAMESPACE, ConversationEnsurePayload, decode_conversation_ensure,
+        decode_message_event, read_seq_for_conversation_cursor,
+    };
 
     #[test]
     fn zero_read_seq_does_not_advance_conversation_cursor() {
@@ -588,5 +600,101 @@ mod tests {
     #[test]
     fn positive_read_seq_advances_conversation_cursor() {
         assert_eq!(read_seq_for_conversation_cursor(42), Some(42));
+    }
+
+    #[test]
+    fn decode_message_event_accepts_mq_envelope_event() {
+        let raw = encode_event_envelope(read_receipt_event());
+
+        let event = decode_message_event(&raw)
+            .expect("decode")
+            .expect("supported event");
+
+        assert_eq!(event.conversation_id, "conv-1");
+        assert_eq!(event.r#type, EventType::EventReadReceipt as i32);
+    }
+
+    #[test]
+    fn decode_message_event_does_not_accept_direct_event_payload() {
+        let raw = read_receipt_event().encode_to_vec();
+
+        let accepted = decode_message_event(&raw).ok().flatten();
+
+        assert!(accepted.is_none());
+    }
+
+    #[test]
+    fn decode_conversation_ensure_accepts_custom_event_envelope() {
+        let payload = ConversationEnsurePayload {
+            tenant_id: "tenant-a".to_string(),
+            conversation_type: 2,
+            business_type: "team".to_string(),
+            participants: vec!["u1".to_string(), "u2".to_string()],
+            channel_id: "channel-1".to_string(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).expect("payload");
+        let event = Event {
+            conversation_id: "conv-ensure".to_string(),
+            conversation_seq: 0,
+            r#type: EventType::EventCustom as i32,
+            created_at: 100,
+            event_id: "event-1".to_string(),
+            request_id: Some("request-1".to_string()),
+            payload: Some(event::Payload::Custom(CustomEvent {
+                namespace: CONVERSATION_ENSURE_NAMESPACE.to_string(),
+                name: CONVERSATION_ENSURE_EVENT_NAME.to_string(),
+                version: CONVERSATION_ENSURE_EVENT_VERSION.to_string(),
+                payload: payload_bytes,
+                attributes: HashMap::new(),
+            })),
+        };
+        let raw = encode_event_envelope(event);
+
+        let (conversation_id, decoded) = decode_conversation_ensure(&raw)
+            .expect("decode")
+            .expect("ensure event");
+
+        assert_eq!(conversation_id, "conv-ensure");
+        assert_eq!(decoded.tenant_id, "tenant-a");
+        assert_eq!(decoded.conversation_type, 2);
+        assert_eq!(decoded.business_type, "team");
+        assert_eq!(decoded.participants, vec!["u1", "u2"]);
+        assert_eq!(decoded.channel_id, "channel-1");
+    }
+
+    fn read_receipt_event() -> Event {
+        Event {
+            conversation_id: "conv-1".to_string(),
+            conversation_seq: 42,
+            r#type: EventType::EventReadReceipt as i32,
+            created_at: 100,
+            event_id: "event-read-1".to_string(),
+            request_id: None,
+            payload: Some(event::Payload::Read(ReadReceiptEvent {
+                conversation_id: "conv-1".to_string(),
+                read_seq: 42,
+                user_id: "u1".to_string(),
+                message_ids: Vec::new(),
+                read_at: None,
+            })),
+        }
+    }
+
+    fn encode_event_envelope(event: Event) -> Vec<u8> {
+        let conversation_id = event.conversation_id.clone();
+        let seq = event.conversation_seq;
+        MqEnvelope {
+            envelope_id: "envelope-1".to_string(),
+            recipient_user_ids: Vec::new(),
+            conversation_id,
+            seq,
+            produced_at: 100,
+            payload_kind: MqPayloadKind::Event as i32,
+            headers: HashMap::new(),
+            push_only: false,
+            persistence_only: false,
+            payload: Some(mq_envelope::Payload::Event(event)),
+        }
+        .encode_to_vec()
     }
 }

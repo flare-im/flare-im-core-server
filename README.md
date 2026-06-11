@@ -28,19 +28,22 @@ Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编�
 ```mermaid
 flowchart LR
     SDK["IM SDK / 客户端"] --> SGW["flare-signaling/gateway<br/>长连接接入"]
-    ThirdParty["业务服务 / 后台 / 三方"] --> CGW["flare-core-gateway<br/>HTTP typed facade"]
+    ThirdParty["业务服务 / 后台 / 三方"] --> CGW["flare-api-gateway<br/>HTTP typed facade"]
     Admin["管理后台 / 运维"] --> AGW["flare-admin-gateway<br/>Admin facade"]
 
     SGW --> Route["flare-signaling/route<br/>路由"]
     SGW --> Online["flare-signaling/online<br/>在线状态"]
-    CGW --> Orchestrator["flare-orchestrator<br/>消息与事件编排"]
+    CGW -- "send" --> Ingest["flare-message-ingest<br/>消息摄入"]
+    CGW -- "actions/events" --> Orchestrator["flare-orchestrator<br/>事件与主流 fanout"]
     CGW --> Conversation["flare-conversation<br/>会话读写"]
     CGW --> Media["flare-media<br/>媒资"]
     AGW --> StorageReader["flare-storage/reader<br/>查询与审计"]
 
-    Route --> Orchestrator
-    Orchestrator --> Capability["flare-capability<br/>Hook / 插件能力"]
-    Orchestrator --> MQMain["flare.im.message.main"]
+    Route -- "send frame" --> Ingest
+    Route -- "event/action frame" --> Orchestrator
+    Ingest --> Capability["flare-capability<br/>Hook / 插件能力"]
+    Orchestrator --> Capability
+    Ingest --> MQMain["flare.im.message.main"]
     MQMain --> OrchestratorFanout["主队列消费者<br/>拆分存储与推送"]
     OrchestratorFanout --> MQStorage["flare.im.message.storage<br/>flare.im.message.events"]
     OrchestratorFanout --> MQPush["flare.im.push.messages<br/>flare.im.push.events"]
@@ -55,24 +58,27 @@ flowchart LR
     Online --> Redis
 ```
 
-### 工作区服务
+### 工作区服务与模块
 
-| 服务 | 定位 |
+| 服务/模块 | 定位 |
 |------|------|
-| `flare-core-gateway` | 面向业务系统和第三方的 HTTP API，做协议适配、认证上下文、错误映射，不写 IM 状态。 |
+| `flare-api-gateway` | 面向业务系统和第三方的 HTTP API，做协议适配、认证上下文、错误映射，不写 IM 状态。 |
 | `flare-admin-gateway` | 面向管理面和审计查询的 Admin API。 |
 | `flare-signaling/gateway` | 客户端长连接接入、上行 frame 转发、下行推送、连接质量。 |
 | `flare-signaling/route` | 设备路由、跨网关路由、推送策略。 |
 | `flare-signaling/online` | 在线状态、设备连接、presence 查询。 |
-| `flare-orchestrator` | 消息发送、事件执行、Hook、seq、WAL、会话确保、MQ fanout。 |
+| `flare-message-ingest` | 上行消息发送入口，负责发送校验、Pre/PostSend Hook、seq、WAL、会话确保与写入主消息流。 |
+| `flare-orchestrator` | 主消息流 fanout、消息操作事件执行、RTC/capability 事件 enrich。 |
 | `flare-sync-orchestrator` | 基于 conversation seq/event stream 的同步编排。 |
 | `flare-storage/writer` | 消费存储 topic，完成幂等、归档、事件流、热缓存、ledger、ACK。 |
 | `flare-storage/reader` | 消息、事件、审计和历史读模型查询。 |
 | `flare-conversation` | 会话、参与者、游标、未读和会话同步读模型。 |
+| `flare-call` | 通话会话生命周期、业务 FSM 和 CQRS 命令处理；不承载长连接路由或媒体/SFU 控制。 |
 | `flare-push/server` | 消费推送 topic，区分在线/离线推送任务。 |
 | `flare-push/worker` | 执行离线推送任务和重试。 |
 | `flare-push/proxy` | 推送代理与边界适配。 |
 | `flare-capability` | Hook、能力发现、授权、RTC/SFU 等扩展能力。 |
+| `flare-im-capability-core` | 能力/插件共享契约：dispatch DTO、guard/resolver/RTC 端口、extension operation handler；不包含服务运行时。 |
 | `flare-media` | 上传、对象存储、媒体处理、引用计数。 |
 
 ## 持久消息发送链路
@@ -80,6 +86,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant Client as Client or Gateway
+    participant I as flare-message-ingest
     participant O as flare-orchestrator
     participant H as Hook / Capability
     participant W as Redis WAL
@@ -88,16 +95,16 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant P as push-server
 
-    Client->>O: SendMessage(client_msg_id, message)
-    O->>O: validate, infer type, allocate conversation_seq
-    O->>H: pre_send policy
-    H-->>O: allow / reject / enrich
-    O->>O: ensure conversation, decorate message
-    O->>W: append WAL when persistent
-    O->>MQ: publish to flare.im.message.main
-    MQ-->>O: broker accepted
-    O-->>Client: Send ACK durability=BrokerAccepted
-    O->>W: async cleanup WAL
+    Client->>I: SendMessage(client_msg_id, message)
+    I->>I: validate, infer type, allocate conversation_seq
+    I->>H: pre_send policy
+    H-->>I: allow / reject / enrich
+    I->>I: ensure conversation, decorate message
+    I->>W: append WAL when persistent
+    I->>MQ: publish to flare.im.message.main
+    MQ-->>I: broker accepted
+    I-->>Client: Send ACK durability=BrokerAccepted
+    I->>W: async cleanup WAL
     MQ->>O: main queue consumer
     O->>MQ: fanout storage topic and push topic
     MQ->>SW: persist message/event

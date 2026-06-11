@@ -1,5 +1,5 @@
 # Storage Writer 服务配置（事件总线：消费消息流 + 操作事件流）
-# JetStream 使用 base.toml 中 [jetstream.message]；Subject 与 flare_im_core::constants::topics 对齐
+# JetStream 使用 base.toml 中 [jetstream.message]；Subject 与 flare_im_contracts::constants::topics 对齐
 
 [services.storage_writer]
 

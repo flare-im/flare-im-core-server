@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use flare_im_core::context_from_mq_metadata;
+use flare_im_contracts::context_from_mq_metadata;
 use flare_proto::common::MqEnvelope;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;

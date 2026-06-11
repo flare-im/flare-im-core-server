@@ -18,7 +18,8 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["nats", "kafka", "proto", "grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
-flare-im-core = { path = ".." }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
 prost = "0.14"
 redis = { workspace = true }
 serde = { workspace = true }
@@ -34,7 +35,6 @@ prost-types = { workspace = true }
 flare-core = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
-log = { workspace = true }
 sqlx = { workspace = true }
 ulid = { workspace = true }
 
@@ -44,4 +44,3 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-

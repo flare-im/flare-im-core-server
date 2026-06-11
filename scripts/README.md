@@ -65,6 +65,22 @@ cargo run --example chatroom_client -- user1
 cargo run --example chatroom_client -- user2
 ```
 
+### 4. 验证消息收发读链路
+
+启动 Core 后，用烟测脚本发送一条单聊文本消息，确认 `messages` 与 `message_write_ledger` 已收敛，并通过 storage-reader 读回该消息：
+
+```bash
+./scripts/smoke_message_flow.sh
+```
+
+脚本默认检查：
+- `flare-message-ingest` `MessageSendService/SendMessage`：`127.0.0.1:50182`
+- `flare-storage-reader` `StorageReaderService/QueryMessagesBySeq`：`127.0.0.1:60083`
+- PostgreSQL / TimescaleDB：`postgres://flare:flare123@localhost:25432/flare2`
+- 可靠性边界：`SEND_ACK_DURABILITY_BROKER_ACCEPTED`
+- 持久化账本终态：`message_write_ledger.write_state = ack_published`
+- 读模型返回刚发送的 `server_msg_id`
+
 ---
 
 ## 脚本说明
@@ -84,6 +100,7 @@ cargo run --example chatroom_client -- user2
 | `check_services.sh` | 检查服务状态 | 验证服务是否正常运行 |
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
 | `migrate_db.sh` | 数据库迁移 | 初始化数据库表结构 |
+| `smoke_message_flow.sh` | 消息流烟测 | 发送一条消息，检查落库、ledger，并通过读侧读回 |
 
 ---
 
@@ -103,17 +120,22 @@ cargo run --example chatroom_client -- user2
 - 检查服务启动状态
 
 **服务启动顺序**：
-1. `signaling-online` - 在线状态服务（端口 50051）
+1. `signaling-online` - 在线状态服务（端口 50061）
 2. `signaling-route` - 路由目录服务（端口 50062）
 3. `capability`（`flare-capability`）- Hook 与能力插件（gRPC 端口见应用 `config`）
 4. `conversation` - 会话管理服务（端口 50090）
-5. `message-orchestrator` - 消息编排服务（端口 50181）
-6. `storage-writer` - 消息持久化服务（JetStream 消费者，不注册到服务注册中心）
-7. `push-server` - 消息推送服务（端口 50091，JetStream 消费者，不注册到服务注册中心）
-8. `access-gateway` - 客户端接入网关（默认实例，端口 60051）
-9. `core-gateway` - 业务系统统一入口（端口 50050）
-10. `access-gateway-beijing-1` - 北京网关实例（端口 60051）
-11. `access-gateway-shanghai-1` - 上海网关实例（端口 60052）
+5. `message-ingest` - 消息摄入服务（端口 50182）
+6. `message-orchestrator` - 消息编排服务（端口 50181）
+7. `storage-writer` - 消息持久化服务（JetStream 消费者，不注册到服务注册中心）
+8. `storage-reader` - 消息读模型服务（端口 60083）
+9. `sync-orchestrator` - 同步编排服务（端口 60084）
+10. `push-server` - 消息推送服务（JetStream 消费者，不注册到服务注册中心）
+11. `push-worker` - 推送 worker（JetStream 消费者，不注册到服务注册中心）
+12. `media` - 媒体服务（端口 60081）
+13. `access-gateway` - 客户端接入网关（默认实例，端口 60051）
+14. `core-gateway` - 业务系统统一入口（端口 50050）
+15. `access-gateway-beijing-1` - 北京网关实例（端口 60051）
+16. `access-gateway-shanghai-1` - 上海网关实例（端口 60052）
 
 **日志位置**：
 - 所有服务日志保存在 `/tmp/flare-<service-name>.log`
@@ -252,11 +274,15 @@ cargo run --example business_push_client
 ps aux | grep flare-
 
 # 检查端口是否监听
-lsof -i :50051  # signaling-online
+lsof -i :50061  # signaling-online
 lsof -i :50062  # signaling-route
 lsof -i :50110  # flare-capability（若配置为该端口）
 lsof -i :50090  # conversation
+lsof -i :50182  # message-ingest
 lsof -i :50181  # message-orchestrator
+lsof -i :60083  # storage-reader
+lsof -i :60084  # sync-orchestrator
+lsof -i :60081  # media
 lsof -i :50091  # push-server
 lsof -i :60051  # access-gateway
 lsof -i :50050  # core-gateway
@@ -265,10 +291,25 @@ lsof -i :50050  # core-gateway
 redis-cli -h localhost -p 26379 ping
 
 # 检查 PostgreSQL 连接
-psql -h localhost -p 25432 -U flare -d flare -c "SELECT 1;"
+psql -h localhost -p 25432 -U flare -d flare2 -c "SELECT 1;"
 
 # 检查 JetStream
 jetstream-broker-api-versions --bootstrap-server localhost:29092
+```
+
+### 消息流烟测
+
+```bash
+./scripts/smoke_message_flow.sh
+```
+
+可覆盖默认 endpoint：
+
+```bash
+SMOKE_MESSAGE_INGEST_ENDPOINT=127.0.0.1:50182 \
+SMOKE_STORAGE_READER_ENDPOINT=127.0.0.1:60083 \
+SMOKE_POSTGRES_URL=postgres://flare:flare123@localhost:25432/flare2 \
+./scripts/smoke_message_flow.sh
 ```
 
 ---
@@ -415,7 +456,7 @@ tail -f /tmp/flare-signaling-online.log
 tail -f /tmp/flare-message-orchestrator.log
 tail -f /tmp/flare-push-server.log
 tail -f /tmp/flare-access-gateway.log
-tail -f /tmp/flare-core-gateway.log
+tail -f /tmp/flare-api-gateway.log
 ```
 
 ### 过滤日志内容

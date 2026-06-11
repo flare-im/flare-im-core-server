@@ -2,7 +2,7 @@
 
 use flare_core_base::context::Ctx;
 use flare_grpc_proto::capability::HookInvocationContext;
-use flare_im_core::MessageDraft;
+use flare_im_hooks::MessageDraft;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{

@@ -3,7 +3,7 @@
 //! 与 [`crate::domain::ports::IConnectionPort`] 分离：前者专注「谁在连」，后者专注登录/心跳等在线 RPC。
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 use crate::domain::model::ConnectionInfo;

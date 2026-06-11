@@ -44,7 +44,7 @@ flowchart LR
 | 能力 | 推荐方式 | 典型入口 |
 |------|----------|----------|
 | 发信前权限、黑名单、禁言、风控 | gRPC Hook | `PreSend` Hook，`transport.type = "grpc"` |
-| 发送系统消息、业务卡片、业务事件 | typed gRPC | `MessageSendService.SendSystemMessage` / `SendMessage` / `ExecuteEvent` |
+| 发送系统消息、业务卡片、业务事件 | typed gRPC | `MessageSendService.SendSystemMessage` / `SendMessage` / `MessageEventService.ExecuteEvent` |
 | 撤回、编辑、删除、已读、reaction | typed gRPC | `MessageActionService` |
 | 创建会话、同步群成员、更新参与者版本 | typed gRPC | `ConversationManageService` |
 | 查询会话、成员、在线状态、媒体引用 | typed gRPC 或 HTTP facade | 高频可信内网用 typed gRPC，外部/后台用 gateway HTTP |
@@ -238,7 +238,7 @@ sequenceDiagram
     Biz->>Biz: update group_members and member_version
     Biz->>Conv: typed gRPC ManageParticipants(to_add)
     Biz->>Msg: typed gRPC SendSystemMessage(group.member_invited)
-    Biz->>Msg: typed gRPC ExecuteEvent(EVENT_CONVERSATION_UPDATE)
+    Biz->>Msg: typed gRPC MessageEventService.ExecuteEvent(EVENT_CONVERSATION_UPDATE)
 ```
 
 业务系统负责审批、邀请权限、成员上限。Core 负责成员投影、系统消息、同步和推送。

@@ -1,8 +1,8 @@
 //! 完整的ACK处理示例
 //! 展示ACK模块的所有功能集成使用
 
-use flare_im_core::ack::metrics::{AckMetrics, PerformanceConfig};
-use flare_im_core::ack::{
+use flare_im_ack::ack::metrics::{AckMetrics, PerformanceConfig};
+use flare_im_ack::ack::{
     AckModule, AckModuleStats, AckServiceConfig, AckStatus, AckStatusInfo, AckType, ImportanceLevel,
 };
 use prometheus::Registry;

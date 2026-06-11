@@ -1,6 +1,6 @@
 //! 消息路由处理器（CQRS 写侧 - 命令）
 //!
-//! 负责「发送消息」的路由编排：流控 → 转发至 Orchestrator SendMessage。
+//! 负责「发送消息」的路由编排：流控 → 转发至 Message Ingest 的 `MessageSendService.SendMessage`。
 //! 与 `EventRoutingHandler` / `AckRoutingHandler` / `DataRoutingHandler` 分离。
 
 use std::sync::Arc;

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_core::server::connection::ConnectionManagerTrait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::context::Context;
 use flare_server_core::error::Result;
 

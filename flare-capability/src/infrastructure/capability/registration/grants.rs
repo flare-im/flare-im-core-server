@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 
 use crate::domain::capability::{
     CapabilityError, CapabilityPolicyBackend, Result, UserCapabilityGrant,

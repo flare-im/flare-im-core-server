@@ -2,13 +2,13 @@
 
 use std::{collections::HashMap, env};
 
-use flare_im_core::config::{FlareAppConfig, ServiceEndpointConfig};
-use flare_im_core::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
-use flare_im_core::constants::topics::{
+use flare_im_contracts::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
+use flare_im_contracts::constants::topics::{
     TOPIC_PUSH_DLQ, TOPIC_PUSH_ENVELOPE, TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
     TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::config::{FlareAppConfig, ServiceEndpointConfig};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,

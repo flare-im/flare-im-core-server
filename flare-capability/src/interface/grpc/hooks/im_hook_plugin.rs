@@ -29,7 +29,7 @@ use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
 };
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, evaluate_pre_send_guards};
-use flare_im_core::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
+use flare_im_hooks::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 /// IM `HookPlugin` gRPC 适配器（接口层 → 应用命令 / 编排）。

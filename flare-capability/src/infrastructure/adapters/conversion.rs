@@ -10,7 +10,7 @@ use flare_grpc_proto::capability::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
 };
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
+use flare_im_hooks::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
 /// 将 flare_server_core::Context 转换为 HookInvocationContext

@@ -34,7 +34,7 @@ pub struct ApplicationContext {
 /// 注意：由于 Rust 2024 原生 async fn 不支持 dyn 兼容性，
 /// 我们使用泛型 + 具体类型的方式，在编译期确定实现
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载会话配置
     let conversation_config = Arc::new(ConversationConfig::from_app_config(app_config).map_err(
@@ -108,22 +108,23 @@ pub async fn initialize(
 
     // 6. 创建消息提供者（可选）
     let message_provider: Option<Arc<StorageReaderClient>> = {
-        use flare_im_core::service_names::{STORAGE_READER, get_service_name};
+        use flare_im_contracts::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
 
         // 创建 Storage Reader 服务发现
-        let storage_discover = flare_im_core::discovery::create_discover(&storage_reader_service)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(
-                    ErrorCode::NetworkError,
-                    format!(
-                        "Failed to create storage reader service discover for {}: {}",
-                        storage_reader_service, e
-                    ),
-                )
-                .build_error()
-            })?;
+        let storage_discover =
+            flare_im_service_kit::discovery::create_discover(&storage_reader_service)
+                .await
+                .map_err(|e| {
+                    ErrorBuilder::new(
+                        ErrorCode::NetworkError,
+                        format!(
+                            "Failed to create storage reader service discover for {}: {}",
+                            storage_reader_service, e
+                        ),
+                    )
+                    .build_error()
+                })?;
 
         let provider = if let Some(discover) = storage_discover {
             let service_client = flare_server_core::discovery::ServiceClient::new(discover);

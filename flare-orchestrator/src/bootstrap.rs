@@ -1,12 +1,9 @@
 //! 应用启动器 - 负责依赖注入和服务启动
 
-use std::{net::SocketAddr, time::Duration};
-
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::info;
 
-use flare_core_runtime::ServiceRuntime;
-use flare_im_core::service_names::ORCHESTRATOR;
+use flare_im_contracts::service_names::ORCHESTRATOR;
 use flare_server_core::mq::NatsConsumerConfig;
 
 use super::wire;
@@ -17,35 +14,16 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        use flare_im_core::{ServiceHelper, load_config};
-
-        // 初始化 OpenTelemetry 追踪
-        #[cfg(feature = "tracing")]
-        {
-            let otlp_endpoint = std::env::var("OTLP_ENDPOINT").ok();
-            if let Err(e) =
-                flare_im_core::tracing::init_tracing(ORCHESTRATOR, otlp_endpoint.as_deref())
-            {
-                tracing::error!(error = %e, "Failed to initialize OpenTelemetry tracing");
-            } else {
-                info!("✅ OpenTelemetry tracing initialized");
-            }
-        }
-
-        // 加载应用配置
-        let app_config = load_config(Some("config"));
+        let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.orchestrator_service();
-
-        info!("Parsing server address...");
-        let address: SocketAddr =
-            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, ORCHESTRATOR)
-                .map_err(|e| {
-                    flare_server_core::error::FlareError::system(format!(
-                        "invalid orchestrator server address: {}",
-                        e
-                    ))
-                })?;
-        info!(address = %address, "Server address parsed successfully");
+        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+            app_config,
+            &service_config.runtime,
+            ORCHESTRATOR,
+            "MESSAGE_ORCHESTRATOR",
+            50181,
+        )?;
+        info!(address = %runtime_plan.address, "Server address parsed successfully");
 
         let context = wire::initialize(app_config)
             .await
@@ -53,34 +31,28 @@ impl ApplicationBootstrap {
 
         info!("ApplicationBootstrap created successfully");
 
-        Self::run_with_context(context, address).await
+        Self::run_with_context(context, runtime_plan).await
     }
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: wire::ApplicationContext,
-        address: SocketAddr,
+        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
         use flare_grpc_proto::message::message_action_service_server::MessageActionServiceServer;
-        use flare_grpc_proto::message::message_send_service_server::MessageSendServiceServer;
+        use flare_grpc_proto::message::message_event_service_server::MessageEventServiceServer;
         use tonic::transport::Server;
 
-        let send_grpc = context.message_send_grpc.clone();
+        let address = runtime_plan.address;
+        let service_name = runtime_plan.service_name.clone();
         let action_grpc = context.message_action_grpc.clone();
+        let event_execute_grpc = context.message_event_execute_grpc.clone();
 
         let consumer_config = context.consumer_config.clone();
         let main_queue_dispatcher = context.main_queue_dispatcher.clone();
         let failure_publishers = context.failure_publishers.clone();
         let retry_forwarder_dispatcher = context.retry_forwarder_dispatcher.clone();
         let orchestrator_mq_config = context.config.clone();
-        let wal_replay_handler = context.wal_replay_handler.clone();
-        let wal_replay_enabled = orchestrator_mq_config.wal_replay_enabled;
-        let wal_replay_interval_ms = orchestrator_mq_config.wal_replay_interval_ms.max(100);
-        let wal_replay_error_backoff_ms =
-            orchestrator_mq_config.wal_replay_error_backoff_ms.max(100);
-        let wal_replay_batch_limit = orchestrator_mq_config.wal_replay_batch_limit;
-        let wal_replay_claim_lease_ms = orchestrator_mq_config.wal_replay_claim_lease_ms.max(1000);
-
         let topics = main_queue_dispatcher.topics();
         if topics.is_empty() {
             return Err(flare_server_core::error::FlareError::system(
@@ -161,22 +133,21 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let mut service_runtime = ServiceRuntime::new(ORCHESTRATOR)
-            .with_address(address)
-            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+        let mut service_runtime = runtime_plan
+            .service_runtime()
             .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
                 use flare_server_core::middleware::ContextLayer;
 
-                let send_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(MessageSendServiceServer::new(send_grpc));
                 let action_service = ContextLayer::new()
                     .allow_missing()
                     .layer(MessageActionServiceServer::new(action_grpc));
+                let event_execute_service = ContextLayer::new()
+                    .allow_missing()
+                    .layer(MessageEventServiceServer::new(event_execute_grpc));
 
                 Server::builder()
-                    .add_service(send_service)
                     .add_service(action_service)
+                    .add_service(event_execute_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;
                     })
@@ -202,90 +173,18 @@ impl ApplicationBootstrap {
             service_runtime = service_runtime.add_spawn_with_shutdown(
                 "orchestrator-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_core::metrics::serve_prometheus_metrics(metrics_config, shutdown_rx)
-                        .await
+                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                        metrics_config,
+                        shutdown_rx,
+                    )
+                    .await
                 },
-            );
-        }
-
-        if wal_replay_enabled && wal_replay_batch_limit > 0 {
-            service_runtime = service_runtime.add_spawn_with_shutdown(
-                "orchestrator-wal-replay",
-                move |mut shutdown_rx| async move {
-                    let mut ticker =
-                        tokio::time::interval(Duration::from_millis(wal_replay_interval_ms));
-                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-                    tracing::info!(
-                        interval_ms = wal_replay_interval_ms,
-                        error_backoff_ms = wal_replay_error_backoff_ms,
-                        batch_limit = wal_replay_batch_limit,
-                        claim_lease_ms = wal_replay_claim_lease_ms,
-                        "Starting orchestrator WAL replay loop"
-                    );
-
-                    loop {
-                        tokio::select! {
-                            _ = &mut shutdown_rx => {
-                                tracing::info!("Stopping orchestrator WAL replay loop");
-                                break;
-                            }
-                            _ = ticker.tick() => {
-                                match wal_replay_handler.replay_once(wal_replay_batch_limit).await {
-                                    Ok(report) => {
-                                        if report.scanned > 0 {
-                                            tracing::info!(
-                                                scanned = report.scanned,
-                                                replayed = report.replayed,
-                                                failed = report.failed,
-                                                skipped = report.skipped,
-                                                "WAL replay cycle completed"
-                                            );
-                                        } else {
-                                            tracing::trace!("WAL replay cycle completed with no pending messages");
-                                        }
-                                    }
-                                    Err(error) => {
-                                        tracing::error!(
-                                            error = %error,
-                                            backoff_ms = wal_replay_error_backoff_ms,
-                                            "WAL replay cycle failed; backing off"
-                                        );
-
-                                        let backoff = tokio::time::sleep(Duration::from_millis(
-                                            wal_replay_error_backoff_ms,
-                                        ));
-                                        tokio::pin!(backoff);
-                                        tokio::select! {
-                                            _ = &mut shutdown_rx => {
-                                                tracing::info!("Stopping orchestrator WAL replay loop");
-                                                break;
-                                            }
-                                            _ = &mut backoff => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-                },
-            );
-        } else {
-            tracing::info!(
-                enabled = wal_replay_enabled,
-                batch_limit = wal_replay_batch_limit,
-                "Orchestrator WAL replay loop disabled"
             );
         }
 
         for task in mq_tasks {
             service_runtime = service_runtime.add_task(Box::new(task));
         }
-
-        let runtime =
-            flare_im_core::health::attach_runtime_health_checks(service_runtime, ORCHESTRATOR);
 
         let config = context.config.clone();
         let mut metadata: std::collections::HashMap<String, String> =
@@ -300,12 +199,13 @@ impl ApplicationBootstrap {
 
         let metadata_clone = Some(metadata);
 
-        runtime
+        service_runtime
             .run_with_registration(move |addr| {
                 let metadata = metadata_clone.clone();
+                let service_name = service_name.clone();
                 Box::pin(async move {
-                    flare_im_core::discovery::register_runtime_service_only_with_metadata(
-                        ORCHESTRATOR,
+                    flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
+                        &service_name,
                         addr,
                         None,
                         metadata,

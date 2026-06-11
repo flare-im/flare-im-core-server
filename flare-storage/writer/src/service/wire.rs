@@ -20,7 +20,7 @@ use crate::infrastructure::persistence::repository::redis_idempotency::RedisIdem
 use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
 use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
-use flare_im_core::metrics::StorageWriterMetrics;
+use flare_im_service_kit::metrics::StorageWriterMetrics;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
 use flare_server_core::mq::consumer::{
@@ -59,6 +59,33 @@ type MessagePersistenceHandler = MessagePersistenceCommandHandler<
 
 type EventApplicationServiceType = EventApplicationService<ArchiveRepo, EventStreamRepo>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StorageFailurePolicy {
+    retry_topic_enabled: bool,
+    dead_letter_enabled: bool,
+    retry_forwarder_enabled: bool,
+}
+
+fn storage_failure_policy_for_backend(backend: &str) -> StorageFailurePolicy {
+    match backend {
+        "kafka" => StorageFailurePolicy {
+            retry_topic_enabled: true,
+            dead_letter_enabled: true,
+            retry_forwarder_enabled: true,
+        },
+        "nats" | "jetstream" => StorageFailurePolicy {
+            retry_topic_enabled: false,
+            dead_letter_enabled: true,
+            retry_forwarder_enabled: false,
+        },
+        _ => StorageFailurePolicy {
+            retry_topic_enabled: false,
+            dead_letter_enabled: false,
+            retry_forwarder_enabled: false,
+        },
+    }
+}
+
 pub struct ApplicationContext {
     pub config: Arc<StorageWriterConfig>,
     pub consumer_config: ConsumerConfig,
@@ -68,7 +95,7 @@ pub struct ApplicationContext {
 }
 
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(
         StorageWriterConfig::from_app_config(app_config)
@@ -233,31 +260,34 @@ fn build_failure_publishers(
     config: &StorageWriterConfig,
     producer: Arc<dyn Producer>,
 ) -> ConsumerFailurePublishers {
-    let dlq = Arc::new(ProducerDeadLetterPublisher::new(
-        producer.clone(),
-        FailureTopic::fixed(config.message_dlq_topic.clone()),
-    ));
+    let policy = storage_failure_policy_for_backend(config.mq_backend.as_str());
+    let mut publishers = ConsumerFailurePublishers::new();
 
-    match config.mq_backend.as_str() {
-        "kafka" => ConsumerFailurePublishers::new()
-            .with_retry(Arc::new(
-                ProducerRetryPublisher::new(
-                    producer,
-                    FailureTopic::fixed(config.message_retry_topic.clone()),
-                )
-                .with_not_before_delay(Duration::from_millis(config.message_retry_delay_ms.max(1))),
-            ))
-            .with_dead_letter(dlq),
-        "nats" | "jetstream" => ConsumerFailurePublishers::new().with_dead_letter(dlq),
-        _ => ConsumerFailurePublishers::new(),
+    if policy.retry_topic_enabled {
+        publishers = publishers.with_retry(Arc::new(
+            ProducerRetryPublisher::new(
+                producer.clone(),
+                FailureTopic::fixed(config.message_retry_topic.clone()),
+            )
+            .with_not_before_delay(Duration::from_millis(config.message_retry_delay_ms.max(1))),
+        ));
     }
+
+    if policy.dead_letter_enabled {
+        publishers = publishers.with_dead_letter(Arc::new(ProducerDeadLetterPublisher::new(
+            producer,
+            FailureTopic::fixed(config.message_dlq_topic.clone()),
+        )));
+    }
+
+    publishers
 }
 
 fn build_retry_forwarder_dispatcher(
     config: &StorageWriterConfig,
     producer: Arc<dyn Producer>,
 ) -> Result<Option<Arc<dyn Dispatcher>>> {
-    if config.mq_backend.as_str() != "kafka" {
+    if !storage_failure_policy_for_backend(config.mq_backend.as_str()).retry_forwarder_enabled {
         return Ok(None);
     }
 
@@ -286,4 +316,29 @@ fn build_redis_client(config: &Arc<StorageWriterConfig>) -> Option<Arc<redis::Cl
                 None
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kafka_failure_policy_uses_retry_topic_dlq_and_retry_forwarder() {
+        let policy = storage_failure_policy_for_backend("kafka");
+
+        assert!(policy.retry_topic_enabled);
+        assert!(policy.dead_letter_enabled);
+        assert!(policy.retry_forwarder_enabled);
+    }
+
+    #[test]
+    fn nats_failure_policy_uses_native_retry_and_dlq_without_retry_forwarder() {
+        for backend in ["nats", "jetstream"] {
+            let policy = storage_failure_policy_for_backend(backend);
+
+            assert!(!policy.retry_topic_enabled);
+            assert!(policy.dead_letter_enabled);
+            assert!(!policy.retry_forwarder_enabled);
+        }
+    }
 }

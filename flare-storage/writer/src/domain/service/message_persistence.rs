@@ -4,15 +4,15 @@
 
 use std::sync::Arc;
 
-use flare_im_core::Ctx;
-use flare_im_core::metrics::StorageWriterMetrics;
-use flare_im_core::utils::{current_millis, extract_timeline_from_extra, normalize_tenant_id};
+use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::{current_millis, extract_timeline_from_extra, normalize_tenant_id};
+use flare_im_service_kit::metrics::StorageWriterMetrics;
 use flare_proto::common::RetentionMode;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::{instrument, warn};
 
-use flare_im_core::utils::datetime_to_timestamp;
+use flare_im_contracts::utils::datetime_to_timestamp;
 
 use crate::domain::events::{AckEvent, AckStatus};
 use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, PreparedMessage};
@@ -682,8 +682,8 @@ mod tests {
         MessageIdempotencyRepository, MessageWriteLedgerRepository, MessageWriteStage,
         WalCleanupRepository,
     };
-    use flare_im_core::message::Message;
-    use flare_im_core::utils::{Context, TimelineMetadata};
+    use flare_im_contracts::message::Message;
+    use flare_im_contracts::utils::{Context, TimelineMetadata};
     use flare_server_core::error::Result as AnyhowResult;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

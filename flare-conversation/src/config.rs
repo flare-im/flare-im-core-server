@@ -1,6 +1,6 @@
-use flare_im_core::config::FlareAppConfig;
-use flare_im_core::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
-use flare_im_core::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_im_contracts::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
+use flare_im_contracts::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_im_service_kit::config::FlareAppConfig;
 use flare_server_core::error::Result;
 use flare_server_core::mq::nats::{NatsStreamSpec, default_stream_specs};
 use std::collections::HashMap;

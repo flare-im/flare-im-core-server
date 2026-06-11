@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use flare_im_core::{
+use flare_im_hooks::{
     DeliveryEvent, DeliveryHook, MessageDraft, MessageRecord, PostSendHook, PreSendDecision,
     PreSendHook, RecallEvent, RecallHook,
 };

@@ -2,7 +2,8 @@
 //!
 //! ## 核心职责
 //! 1. 消费 TOPIC_PUSH_OFFLINE 中的 PushTaskEnvelope 消息
-//! 2. 处理离线推送逻辑（当前为占位实现）
+//! 2. 经 `OfflinePushExecutor`（默认 Redis Stream outbox）持久化/投递；
+//!    未配置 executor 时回退 DLQ/parking
 //!
 //! ## 设计原则
 //! - Interface 层：负责 MQ 消息的接收和反序列化
@@ -12,8 +13,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flare_im_core::Ctx;
-use flare_im_core::metrics::PushWorkerMetrics;
+use flare_im_contracts::Ctx;
+use flare_im_service_kit::metrics::PushWorkerMetrics;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::FlareError;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
@@ -274,12 +275,26 @@ impl OfflinePushConsumerFactory {
         Arc::new(OfflinePushHandler::new(dlq, parking_capacity, metrics))
     }
 
+    pub fn create_handler_with_delivery(
+        dlq: Arc<DlqPublisher>,
+        delivery: Arc<dyn OfflinePushExecutor>,
+        parking_capacity: usize,
+        metrics: Arc<PushWorkerMetrics>,
+    ) -> Arc<dyn MessageHandler> {
+        Arc::new(OfflinePushHandler::with_delivery(
+            dlq,
+            delivery,
+            parking_capacity,
+            metrics,
+        ))
+    }
+
     pub fn topic() -> &'static str {
-        flare_im_core::constants::topics::TOPIC_PUSH_OFFLINE
+        flare_im_contracts::constants::topics::TOPIC_PUSH_OFFLINE
     }
 
     pub fn consumer_group() -> &'static str {
-        flare_im_core::constants::groups::PUSH_WORKER_GROUP_DEFAULT
+        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }
 
@@ -322,5 +337,44 @@ mod tests {
 
         assert_eq!(result, MessageResult::Ack);
         assert_eq!(handler.parking_lot.len(), 1);
+    }
+
+    struct RecordingExecutor {
+        delivered: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OfflinePushExecutor for RecordingExecutor {
+        async fn deliver(
+            &self,
+            _ctx: &Ctx,
+            _envelope: &PushTaskEnvelope,
+        ) -> Result<(), FlareError> {
+            self.delivered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_offline_task_goes_through_delivery_backend() {
+        let delivery = Arc::new(RecordingExecutor {
+            delivered: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let handler = OfflinePushHandler {
+            dlq: None,
+            delivery: Some(delivery.clone()),
+            parking_lot: Arc::new(OfflineParkingLot::new(DEFAULT_OFFLINE_PARKING_CAPACITY)),
+            metrics: Arc::new(PushWorkerMetrics::new()),
+        };
+
+        let result = handler.handle(task_message()).await.expect("handle");
+
+        assert_eq!(result, MessageResult::Ack);
+        assert_eq!(
+            delivery.delivered.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(handler.parking_lot.len(), 0);
     }
 }

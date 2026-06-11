@@ -1,6 +1,6 @@
 //! 事件路由处理器（CQRS 写侧 - 命令）
 //!
-//! 负责操作事件（撤回/编辑/标记等）的路由编排：流控 → 转发至 Orchestrator ExecuteEvent。
+//! 负责操作事件（撤回/编辑/标记等）的路由编排：流控 → 转发至 MessageEventService.ExecuteEvent。
 //! 与 message_event_flow 一致：经 Route 顺序/流控/权限后再到 Orchestrator。
 
 use std::sync::Arc;
@@ -89,7 +89,7 @@ fn validate_delete_scope(ctx: &Context, event: &Event) -> Result<()> {
 /// 事件路由处理器（Command 侧）
 ///
 /// 职责：
-/// - 编排事件路由流程（流控 → 转发 ExecuteEvent）
+/// - 编排事件路由流程（流控 → 转发 MessageEventService.ExecuteEvent）
 /// - 与 MessageRoutingHandler 分离，符合 CQRS 下命令分线
 pub struct EventRoutingHandler {
     message_forwarder: Arc<MessageForwarder>,

@@ -2,12 +2,8 @@
 //!
 //! 解析监听地址、调用 [`super::wiring::initialize`] 装配依赖，并注册 **gRPC + 运行时**。
 
-use std::net::SocketAddr;
-
-use flare_core_runtime::ServiceRuntime;
-use flare_im_core::ServiceHelper;
-use flare_im_core::service_names::CAPABILITY;
-use flare_server_core::error::{AnyhowContext, Result};
+use flare_im_contracts::service_names::CAPABILITY;
+use flare_server_core::error::Result;
 use tracing::info;
 
 use super::process_config::CapabilityServiceConfig;
@@ -19,25 +15,31 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run(config: CapabilityServiceConfig) -> Result<()> {
-        use flare_im_core::load_config;
-
-        let app_config = load_config(Some("config"));
-
+        let app_config = flare_im_service_kit::load_app_config_from_env();
         let cap_service = app_config.capability_service();
-        let address =
-            ServiceHelper::parse_server_addr(app_config, &cap_service.runtime, CAPABILITY)
-                .context("invalid flare-capability server address")?;
-        info!(address = %address, "Server address parsed successfully");
+        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+            app_config,
+            &cap_service.runtime,
+            CAPABILITY,
+            "CAPABILITY",
+            50110,
+        )?;
+        info!(address = %runtime_plan.address, "Server address parsed successfully");
 
         let context = wiring::initialize(config).await?;
         info!("ApplicationBootstrap created successfully");
 
-        Self::run_with_context(context, address).await
+        Self::run_with_context(context, runtime_plan).await
     }
 
-    async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
+    async fn run_with_context(
+        context: ApplicationContext,
+        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+    ) -> Result<()> {
         use tonic::transport::Server;
 
+        let address = runtime_plan.address;
+        let service_name = runtime_plan.service_name.clone();
         info!(
             address = %address,
             port = %address.port(),
@@ -49,9 +51,8 @@ impl ApplicationBootstrap {
         let capability_grpc = context.capability_grpc;
         let extension_router = context.extension_router;
 
-        let runtime = ServiceRuntime::new(CAPABILITY)
-            .with_address(address)
-            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
+        let runtime = runtime_plan
+            .service_runtime()
             .add_spawn_with_shutdown("flare-capability-grpc", move |shutdown_rx| async move {
                 use flare_server_core::middleware::ContextLayer;
 
@@ -93,13 +94,15 @@ impl ApplicationBootstrap {
                     .map_err(|e| format!("gRPC server error: {}", e).into())
             });
 
-        let runtime = flare_im_core::health::attach_runtime_health_checks(runtime, CAPABILITY);
-
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_core::discovery::register_runtime_service_only(CAPABILITY, addr, None)
-                        .await
+                    flare_im_service_kit::discovery::register_runtime_service_only(
+                        &service_name,
+                        addr,
+                        None,
+                    )
+                    .await
                 })
             })
             .await

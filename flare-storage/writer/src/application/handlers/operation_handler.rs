@@ -1,7 +1,7 @@
 //! 领域事件命令处理器：将 Event 应用到存储（撤回/编辑/删除/已读/反应/置顶/标记）
 
-use flare_im_core::Ctx;
-use flare_im_core::metrics::StorageWriterMetrics;
+use flare_im_contracts::Ctx;
+use flare_im_service_kit::metrics::StorageWriterMetrics;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use std::sync::Arc;
 use std::time::Instant;

@@ -9,7 +9,7 @@ use super::registry::DynCapabilityRegistry;
 use super::selector::DynCapabilitySelector;
 use crate::domain::capability::Result as CapResult;
 
-/// RTC 插件编排器（FSM 在 conversation 域；此处只做 **能力面** 协调）。
+/// RTC 插件编排器（FSM 在 `flare-call`；此处只做 **能力面** 协调）。
 #[derive(Clone)]
 pub struct CapabilityManager {
     registry: DynCapabilityRegistry,

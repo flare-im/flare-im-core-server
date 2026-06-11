@@ -47,7 +47,7 @@ flare_im_activate_hooks_profile() {
     ln -sfn "hooks.${profile}.toml" "$link"
 
     export FLARE_HOOKS_PROFILE="$profile"
-    export MESSAGE_ORCHESTRATOR_HOOKS_CONFIG="$link"
+    export MESSAGE_INGEST_HOOKS_CONFIG="$link"
     export STORAGE_HOOKS_CONFIG="$link"
     export CONFIG_FILE="$link"
 

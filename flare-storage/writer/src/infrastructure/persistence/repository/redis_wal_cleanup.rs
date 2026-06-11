@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use flare_im_core::Ctx;
-use flare_im_core::wal_pending_index_key;
+use flare_im_contracts::Ctx;
+use flare_im_contracts::wal_pending_index_key;
 use flare_server_core::error::Result;
 use redis::aio::ConnectionManager;
 use tracing::instrument;

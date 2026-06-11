@@ -1,6 +1,6 @@
 //! 领域事件 Payload 处理器（策略式分发）- 使用领域 Event，不依赖 proto
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 use crate::domain::model::{Event, EventPayload};
@@ -112,7 +112,7 @@ where
 mod tests {
     use super::*;
     use crate::domain::model::EventType;
-    use flare_im_core::utils::Context;
+    use flare_im_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::sync::Arc;
 

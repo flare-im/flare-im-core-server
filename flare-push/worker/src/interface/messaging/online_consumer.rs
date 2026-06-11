@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::{
-    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest, PushOptions,
-    PushNotificationRequest,
+    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
+    PushNotificationRequest, PushOptions,
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind};
@@ -84,7 +84,8 @@ impl OnlinePushHandler {
         let mut end = start + 1;
         while end < entries.len() {
             let envelope = &entries[end].envelope;
-            if envelope.user_id != user_id || Self::payload_kind(envelope) != PushTaskPayloadKind::Message
+            if envelope.user_id != user_id
+                || Self::payload_kind(envelope) != PushTaskPayloadKind::Message
             {
                 break;
             }
@@ -425,10 +426,7 @@ mod tests {
 
     #[test]
     fn build_message_group_does_not_cross_user_boundary() {
-        let entries = vec![
-            batch_entry(0, "bob", "m1"),
-            batch_entry(1, "alice", "m2"),
-        ];
+        let entries = vec![batch_entry(0, "bob", "m1"), batch_entry(1, "alice", "m2")];
 
         let group = OnlinePushHandler::build_message_group(&entries, 0);
 
@@ -448,10 +446,10 @@ impl OnlinePushConsumerFactory {
     }
 
     pub fn topic() -> &'static str {
-        flare_im_core::constants::topics::TOPIC_PUSH_ONLINE
+        flare_im_contracts::constants::topics::TOPIC_PUSH_ONLINE
     }
 
     pub fn consumer_group() -> &'static str {
-        flare_im_core::constants::groups::PUSH_WORKER_GROUP_DEFAULT
+        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }

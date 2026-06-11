@@ -1,0 +1,16 @@
+[package]
+name = "flare-call"
+version.workspace = true
+edition.workspace = true
+description = "Business-neutral call lifecycle domain and CQRS command handlers for Flare IM"
+
+[lib]
+name = "flare_call"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+flare-server-core = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }

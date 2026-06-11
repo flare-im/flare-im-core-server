@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use flare_im_core::{
+use flare_im_hooks::{
     DeliveryEvent, HookGroup, HookMetadata, MessageDraft, MessageRecord, PreSendDecision,
     PreSendHook, RecallEvent,
 };
@@ -308,14 +308,14 @@ impl HookExecutionPlan {
     /// * `config` - Hook配置项
     /// * `hook_type` - Hook类型（pre_send, post_send, delivery, recall等），用于设置HookKind
     pub fn from_hook_config(config: HookConfigItem, hook_type: &str) -> Self {
-        use flare_im_core::HookErrorPolicy;
+        use flare_im_hooks::HookErrorPolicy;
         let error_policy = match config.error_policy.as_str() {
             "fail_fast" => HookErrorPolicy::FailFast,
             "retry" => HookErrorPolicy::Retry,
             "ignore" => HookErrorPolicy::Ignore,
             _ => HookErrorPolicy::FailFast,
         };
-        use flare_im_core::HookKind;
+        use flare_im_hooks::HookKind;
         // 根据hook_type字符串设置HookKind（只支持核心的4种类型，其他类型使用默认值）
         let kind = match hook_type {
             "pre_send" | "push_pre_send" => HookKind::PreSend,
@@ -641,13 +641,13 @@ mod tests {
         assert_eq!(plan.timeout(), Duration::from_millis(1000));
 
         let plan = HookExecutionPlan::from_hook_config(config.clone(), "post_send");
-        assert_eq!(plan.metadata().kind, flare_im_core::HookKind::PostSend);
+        assert_eq!(plan.metadata().kind, flare_im_hooks::HookKind::PostSend);
 
         let plan = HookExecutionPlan::from_hook_config(config.clone(), "delivery");
-        assert_eq!(plan.metadata().kind, flare_im_core::HookKind::Delivery);
+        assert_eq!(plan.metadata().kind, flare_im_hooks::HookKind::Delivery);
 
         let plan = HookExecutionPlan::from_hook_config(config, "recall");
-        assert_eq!(plan.metadata().kind, flare_im_core::HookKind::Recall);
+        assert_eq!(plan.metadata().kind, flare_im_hooks::HookKind::Recall);
     }
 
     #[test]

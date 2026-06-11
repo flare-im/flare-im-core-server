@@ -1,6 +1,6 @@
 //! 事件流写入（init_v2：event_type INT，payload BYTEA 单列）
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::event::Payload;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use sqlx::{Pool, Postgres, QueryBuilder, Row};

@@ -7,10 +7,10 @@ use flare_grpc_proto::access_gateway::{
     PushNotificationRequest,
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
-use flare_im_core::gateway::{GatewayRouter, GatewayRouterTrait};
+use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,

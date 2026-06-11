@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
-use flare_im_core::Ctx;
-use flare_im_core::event::types::types;
+use flare_im_contracts::Ctx;
+use flare_im_contracts::event::types::types;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::error::Result;
 use flare_server_core::eventbus::EventEnvelope;

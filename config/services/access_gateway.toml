@@ -1,7 +1,7 @@
 # Signaling Gateway 服务配置（原 Access Gateway，位于 flare-signaling/gateway）
 
 [services.access_gateway]
-# token_secret 不应写入仓库。生产/联调用 ACCESS_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
+# core_jwt 模式下 token_secret 不应写入仓库。生产/联调用 ACCESS_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
 token_store = "token_store"
@@ -14,9 +14,8 @@ conversation_store_ttl_seconds = 3600
 # issuer = "flare-social"
 # secret = "set-via-secret-manager"
 
-# Route 服务配置（可选，用于通过 Route 服务路由消息）
-# 默认不使用 Route 服务，保持向后兼容
-# use_route_service = false
+# Route 服务配置（生产推荐开启，用于 SVID 路由）
+# use_route_service = true
 # route_service = "signaling-route"
 # default_svid = "svid.im"
 
@@ -28,6 +27,15 @@ conversation_store_ttl_seconds = 3600
 compression_algorithm = "gzip"  # 可选值: none, gzip, zstd（默认: none）
 enable_encryption = false  # 是否启用加密（默认: false）
 encryption_key = "01234567890123456789012345678901"  # 32字节密钥或64字符hex字符串（请在生产环境中修改为安全的密钥）
+
+[services.access_gateway.auth]
+# 可选值: core_jwt, http_hook
+mode = "core_jwt"
+hook_timeout_ms = 800
+hook_secret_header = "x-flare-auth-hook-secret"
+# http_hook 模式启用：
+# hook_url = "http://flare-auth-sidecar:8080/internal/auth/validate"
+# hook_secret = "set-via-secret-manager"
 
 [services.access_gateway.server]
 address = "0.0.0.0"

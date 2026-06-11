@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::error::Result;
 use flare_server_core::mq::kafka::KafkaProducerBuilder;

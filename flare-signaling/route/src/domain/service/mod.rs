@@ -1,9 +1,9 @@
 //! 领域服务与上下文
 //!
 //! 当前仅保留 RouteContext（流控/路由上下文），供 MessageRoutingHandler / EventRoutingHandler 使用。
-//! 与 flare_im_core 的 ConversationId / UserId 对齐，便于跨 BC 一致。
+//! 与 flare_im_contracts 的 ConversationId / UserId 对齐，便于跨 BC 一致。
 
-use flare_im_core::{ConversationId, UserId};
+use flare_im_contracts::{ConversationId, UserId};
 
 /// 路由上下文值对象（流控、追踪等）
 #[derive(Debug, Clone, Default)]

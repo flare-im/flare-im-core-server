@@ -2,7 +2,7 @@
 //!
 //! 从连接信息中提取上下文（租户ID、用户ID等）并设置到 Context，与 flare_server_core::context 对齐。
 
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::context::{ActorContext, ActorType, Context};
 use std::collections::HashMap;
 use uuid::Uuid;

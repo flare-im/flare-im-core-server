@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::sync::sync_service_server::SyncService;
-use flare_im_core::utils::require_user_id_from_context;
+use flare_im_contracts::utils::require_user_id_from_context;
 use flare_proto::common::{Sync, SyncRes};
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::extract_ctx_from_request_opt;

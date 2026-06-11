@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{
     ErrorCode as ProtoErrorCode, ErrorDetail, PushDelivered, PushEnvelope, PushFailed, PushResult,
     push_result,

@@ -14,7 +14,7 @@ pub struct PluginDiscoveryEndpoint {
     pub tenant_id: String,
     pub plugin_id: String,
     pub capability_id: String,
-    /// 注册中心服务名，如 `flare-strom-sfu`（与 [`flare_im_core::service_names::STROM_SFU`] 对齐）。
+    /// 注册中心服务名，如 `flare-strom-sfu`（与 [`flare_im_contracts::service_names::STROM_SFU`] 对齐）。
     pub service_name: String,
     #[serde(default)]
     pub labels: std::collections::HashMap<String, String>,

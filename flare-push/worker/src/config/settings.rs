@@ -2,10 +2,12 @@
 
 use std::{collections::HashMap, env};
 
-use flare_im_core::config::FlareAppConfig;
-use flare_im_core::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
-use flare_im_core::constants::topics::{TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE};
-use flare_im_core::metrics::MetricsEndpointConfig;
+use flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
+use flare_im_contracts::constants::topics::{
+    TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+};
+use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_service_kit::metrics::MetricsEndpointConfig;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -34,6 +36,12 @@ pub struct PushWorkerConfig {
     pub access_gateway_static_endpoint: Option<String>,
     /// 未配置离线推送提供者时的有界本地 parking 容量。
     pub offline_parking_capacity: usize,
+    /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
+    pub offline_outbox_redis_url: Option<String>,
+    /// 离线推送 outbox Stream key
+    pub offline_outbox_stream: String,
+    /// 离线推送 outbox Stream MAXLEN（~ 近似裁剪）
+    pub offline_outbox_maxlen: usize,
     pub metrics: MetricsEndpointConfig,
 }
 
@@ -136,6 +144,18 @@ impl PushWorkerConfig {
             .and_then(|value| value.parse::<usize>().ok())
             .or(service.offline_parking_capacity)
             .unwrap_or(4096);
+        let offline_outbox_redis_url = resolve_offline_outbox_redis_url(
+            env::var("PUSH_WORKER_OFFLINE_REDIS_URL").ok(),
+            app.redis_profile("push").map(|profile| profile.url.clone()),
+        );
+        let offline_outbox_stream = env::var("PUSH_WORKER_OFFLINE_OUTBOX_STREAM")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "flare:im:push:offline:outbox".to_string());
+        let offline_outbox_maxlen = env::var("PUSH_WORKER_OFFLINE_OUTBOX_MAXLEN")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(100_000);
         let metrics_enabled = parse_bool_env("PUSH_WORKER_METRICS_ENABLED")
             .or(service.metrics_enabled)
             .unwrap_or(true);
@@ -173,6 +193,9 @@ impl PushWorkerConfig {
             online_service_endpoint,
             access_gateway_static_endpoint,
             offline_parking_capacity,
+            offline_outbox_redis_url,
+            offline_outbox_stream,
+            offline_outbox_maxlen,
             metrics,
         }
     }
@@ -186,6 +209,18 @@ fn parse_bool_env(name: &str) -> Option<bool> {
             "0" | "false" | "off" | "no" => Some(false),
             _ => None,
         })
+}
+
+fn resolve_offline_outbox_redis_url(
+    env_value: Option<String>,
+    redis_profile_url: Option<String>,
+) -> Option<String> {
+    match env_value.as_deref().map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("off") => None,
+        Some(value) if value.eq_ignore_ascii_case("disabled") => None,
+        Some(value) if !value.is_empty() => Some(value.to_string()),
+        _ => Some(redis_profile_url.unwrap_or_else(|| "redis://127.0.0.1:6379".to_string())),
+    }
 }
 
 impl NatsConsumerConfig for PushWorkerConfig {
@@ -249,5 +284,49 @@ impl KafkaProducerConfig for PushWorkerConfig {
 impl KafkaConsumerConfig for PushWorkerConfig {
     fn kafka_consumer_group(&self) -> &str {
         &self.consumer_group
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_offline_outbox_redis_url;
+
+    #[test]
+    fn offline_outbox_defaults_to_push_redis_profile() {
+        let url = resolve_offline_outbox_redis_url(
+            None,
+            Some("redis://push-redis.internal:6379".to_string()),
+        );
+
+        assert_eq!(url.as_deref(), Some("redis://push-redis.internal:6379"));
+    }
+
+    #[test]
+    fn offline_outbox_uses_local_redis_when_profile_is_absent() {
+        let url = resolve_offline_outbox_redis_url(None, None);
+
+        assert_eq!(url.as_deref(), Some("redis://127.0.0.1:6379"));
+    }
+
+    #[test]
+    fn offline_outbox_can_be_disabled_explicitly() {
+        assert_eq!(
+            resolve_offline_outbox_redis_url(Some("off".to_string()), None),
+            None
+        );
+        assert_eq!(
+            resolve_offline_outbox_redis_url(Some(" disabled ".to_string()), None),
+            None
+        );
+    }
+
+    #[test]
+    fn offline_outbox_env_url_overrides_profile() {
+        let url = resolve_offline_outbox_redis_url(
+            Some("redis://override:6379".to_string()),
+            Some("redis://profile:6379".to_string()),
+        );
+
+        assert_eq!(url.as_deref(), Some("redis://override:6379"));
     }
 }

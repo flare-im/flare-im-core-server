@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use flare_grpc_proto::conversation::MarkConversationAsReadRequest;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
-use flare_im_core::config::FlareAppConfig;
+use flare_im_service_kit::config::FlareAppConfig;
 use flare_proto::common::Ack;
 use flare_proto::common::ack::Payload as AckPayload;
 use flare_proto::common::{ConversationAck, PushAck, ReadAck};
@@ -51,9 +51,9 @@ impl AckToPushProxyForwarder {
             return Ok(client.clone());
         }
 
-        let channel = flare_im_core::discovery::connect_grpc_channel_from_app_config(
+        let channel = flare_im_service_kit::discovery::connect_grpc_channel_from_app_config(
             &self.app_config,
-            flare_im_core::service_names::CONVERSATION,
+            flare_im_contracts::service_names::CONVERSATION,
             CONVERSATION_STATIC_FALLBACK,
         )
         .await?;

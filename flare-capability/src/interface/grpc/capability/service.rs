@@ -19,7 +19,7 @@ use flare_grpc_proto::capability::{
 };
 use flare_grpc_proto::sfu_control::HealthCheckRequest;
 use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 

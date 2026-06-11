@@ -7,7 +7,7 @@ use flare_grpc_proto::signaling::online::{
     DeviceConflictStrategy, GetOnlineStatusResponse, HeartbeatResponse, LoginRequest,
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
-use flare_im_core::ConnectionEvent;
+use flare_im_contracts::ConnectionEvent;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;

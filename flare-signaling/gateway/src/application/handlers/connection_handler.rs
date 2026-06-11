@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use crate::domain::ports::IConnectionPort;
-use flare_im_core::Ctx;
-use flare_im_core::abstractions::state::{ConnectionState, ConnectionStateNotifier};
+use flare_im_contracts::Ctx;
+use flare_im_contracts::abstractions::state::{ConnectionState, ConnectionStateNotifier};
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -25,7 +25,7 @@ struct OnlineSession {
 /// 连接管理处理器：仅编排会话领域服务与指标，连接查询由 QueryHandler / PushDomainService 使用 ConnectionQuery 独立完成。
 pub struct ConnectionHandler {
     session_domain_service: Arc<ConnectionDomainService>,
-    metrics: Arc<flare_im_core::metrics::AccessGatewayMetrics>,
+    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
     /// State 模式：连接状态通知，默认 Noop，可注入实现与 Online 打通
     state_notifier: Arc<dyn ConnectionStateNotifier>,
     connection_port: Arc<dyn IConnectionPort>,
@@ -35,7 +35,7 @@ pub struct ConnectionHandler {
 impl ConnectionHandler {
     pub fn new(
         session_domain_service: Arc<ConnectionDomainService>,
-        metrics: Arc<flare_im_core::metrics::AccessGatewayMetrics>,
+        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
         state_notifier: Arc<dyn ConnectionStateNotifier>,
         connection_port: Arc<dyn IConnectionPort>,
     ) -> Self {

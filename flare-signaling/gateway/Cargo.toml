@@ -16,7 +16,8 @@ flare-server-core = { workspace = true, features = ["discovery", "auth"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-core = { path = "../..", features = ["discovery"] }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -37,5 +38,3 @@ tokio-stream = { workspace = true }
 base64 = { workspace = true }
 
 [lints.rust]
-# 允许 tracing feature（用于条件编译）
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tracing"))'] }

@@ -1,7 +1,7 @@
 //! 同步出站端口：网关 **不解析** `Sync.kind` / `payload`，仅透传至下游（如 sync-orchestrator `ExecuteSync`）。
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{Sync as ClientSync, SyncRes};
 
 #[async_trait]

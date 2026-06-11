@@ -8,7 +8,7 @@
 //! - 设备列表推送：直接返回设备列表
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::PushEnvelope;
 use flare_server_core::error::Result;
 

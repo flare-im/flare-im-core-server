@@ -1,4 +1,4 @@
-use flare_im_core::tracing::init_tracing_from_config;
+use flare_im_service_kit::tracing::init_tracing_from_config;
 use flare_server_core::error::Result;
 
 #[tokio::main]

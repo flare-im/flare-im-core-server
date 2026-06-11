@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use flare_core::common::error::Result;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 
 #[async_trait]
 pub trait IContextResolver: Send + Sync {

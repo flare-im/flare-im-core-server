@@ -147,9 +147,9 @@ impl ConnectionQualityService {
             return None;
         }
 
-        // 按质量等级降序、RTT升序排序
+        // 按质量等级降序、RTT升序排序；`total_cmp` 避免异常浮点值触发 panic。
         devices.sort_by(|a, b| match b.quality_level.cmp(&a.quality_level) {
-            std::cmp::Ordering::Equal => a.rtt_avg_ms.partial_cmp(&b.rtt_avg_ms).unwrap(),
+            std::cmp::Ordering::Equal => a.rtt_avg_ms.total_cmp(&b.rtt_avg_ms),
             other => other,
         });
 
@@ -174,5 +174,60 @@ impl ConnectionQualityService {
 impl Default for ConnectionQualityService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn select_best_device_handles_non_finite_rtt_without_panicking() {
+        let service = ConnectionQualityService::new();
+        let mut metrics = service.metrics.write().await;
+        metrics.insert(
+            "conn-nan".to_string(),
+            ConnectionQualityMetrics {
+                connection_id: "conn-nan".to_string(),
+                user_id: "user-1".to_string(),
+                device_id: "device-nan".to_string(),
+                rtt_ms: 0,
+                rtt_avg_ms: f64::NAN,
+                rtt_min_ms: 0,
+                rtt_max_ms: 0,
+                packet_loss_rate: 0.0,
+                packets_sent: 0,
+                packets_lost: 0,
+                network_type: "unknown".to_string(),
+                last_update: Instant::now(),
+                quality_level: QualityLevel::Good,
+            },
+        );
+        metrics.insert(
+            "conn-normal".to_string(),
+            ConnectionQualityMetrics {
+                connection_id: "conn-normal".to_string(),
+                user_id: "user-1".to_string(),
+                device_id: "device-normal".to_string(),
+                rtt_ms: 42,
+                rtt_avg_ms: 42.0,
+                rtt_min_ms: 42,
+                rtt_max_ms: 42,
+                packet_loss_rate: 0.0,
+                packets_sent: 0,
+                packets_lost: 0,
+                network_type: "unknown".to_string(),
+                last_update: Instant::now(),
+                quality_level: QualityLevel::Good,
+            },
+        );
+        drop(metrics);
+
+        let selected = service
+            .select_best_device("user-1")
+            .await
+            .expect("device should be selected");
+
+        assert_eq!(selected.device_id, "device-normal");
     }
 }

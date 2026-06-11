@@ -33,6 +33,14 @@ cd flare-im-core
 ./scripts/start_server_core.sh
 ```
 
+验证消息收发读链路：
+
+```bash
+./scripts/smoke_message_flow.sh
+```
+
+该烟测通过 `flare-message-ingest` 的 `MessageSendService/SendMessage` 发送一条文本消息，等待 PostgreSQL / TimescaleDB 中的 `messages` 与 `message_write_ledger` 收敛到 `ack_published`，再通过 `flare-storage-reader` 的 `StorageReaderService/QueryMessagesBySeq` 读回刚发送的 `server_msg_id`。
+
 接入业务系统 Hook：
 
 ```bash
@@ -49,19 +57,20 @@ cd flare-im-core
 2. `flare-signaling-route`
 3. `flare-capability`
 4. `flare-conversation`
-5. `flare-orchestrator`
-6. `flare-storage-writer`
-7. `flare-storage-reader`
-8. `flare-push-server`
-9. `flare-push-worker`
-10. `flare-signaling-gateway`
-11. `flare-core-gateway`
-12. `flare-admin-gateway`
+5. `flare-message-ingest`
+6. `flare-orchestrator`
+7. `flare-storage-writer`
+8. `flare-storage-reader`
+9. `flare-push-server`
+10. `flare-push-worker`
+11. `flare-signaling-gateway`
+12. `flare-api-gateway`
+13. `flare-admin-gateway`
 
 原因：
 
 - online/route 为接入层提供路由和在线状态。
-- conversation/orchestrator/storage/push 是消息主链。
+- message-ingest/orchestrator/storage/push 是消息主链；conversation 只承担会话边界与成员关系，不再作为消息发送入口。
 - gateway 最后启动，避免代理到尚未注册的下游。
 
 ## 测试矩阵
@@ -79,26 +88,39 @@ cd flare-im-core
 
 ```bash
 cargo test --workspace
-cargo test -p flare-im-core --lib
 cargo test -p flare-orchestrator
 cargo test -p flare-storage-writer
+cargo test -p flare-im-service-kit --test startup_contract
+./scripts/smoke_message_flow.sh
 ```
 
 针对真实中间件的测试需要先启动 Docker Compose，并按测试说明准备环境变量。
 
-## 消息发送压测
+## 消息收发读链路烟测
 
-压测入口：
+启动 Core 后执行：
 
 ```bash
-cargo run -p flare-im-core --example perf_message_send
+./scripts/smoke_message_flow.sh
 ```
+
+该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
+
+- `flare-message-ingest` gRPC send entrypoint。
+- `SEND_ACK_DURABILITY_BROKER_ACCEPTED`。
+- `messages` 落库。
+- `message_write_ledger.write_state = ack_published`。
+- `flare-storage-reader` gRPC read model readback。
+
+## 消息发送压测入口状态
+
+当前仓库根目录是 virtual workspace，`examples/perf_message_send.rs` 尚未挂到具体 package 下，因此不能作为标准 `cargo run --example` 入口。正式压测入口落到 package 后，再恢复并固化对应命令。
 
 环境变量：
 
 | 变量 | 默认值 | 含义 |
 |------|--------|------|
-| `PERF_ENDPOINT` | `http://127.0.0.1:50181` | `MessageSendService` endpoint。 |
+| `PERF_ENDPOINT` | `http://127.0.0.1:50182` | `flare-message-ingest` `MessageSendService` endpoint。 |
 | `PERF_TOTAL` | `1000` | 发送总量。 |
 | `PERF_CONCURRENCY` | `32` | 并发数。 |
 | `PERF_PAIRS` | `64` | 用户对数量。 |
@@ -106,24 +128,16 @@ cargo run -p flare-im-core --example perf_message_send
 | `PERF_PAYLOAD_BYTES` | `64` | 文本 payload 大小。 |
 | `PERF_METRICS_ENABLED` | `true` | 是否读取 Prometheus metrics。 |
 | `PERF_STORAGE_WAIT_TIMEOUT_MS` | `10000` | 等待 storage metrics 收敛时间。 |
-| `PERF_ORCHESTRATOR_METRICS_ENDPOINT` | `http://127.0.0.1:19181/metrics` | orchestrator metrics。 |
+| `PERF_ORCHESTRATOR_METRICS_ENDPOINT` | `http://127.0.0.1:19180/metrics` | message ingest send metrics。 |
 | `PERF_STORAGE_WRITER_METRICS_ENDPOINT` | `http://127.0.0.1:19182/metrics` | storage writer metrics。 |
 
-示例：
-
-```bash
-PERF_TOTAL=3000 \
-PERF_CONCURRENCY=64 \
-PERF_PAIRS=128 \
-PERF_PAYLOAD_BYTES=64 \
-cargo run -p flare-im-core --example perf_message_send
-```
+这些变量记录旧压测入口的目标 contract。重新启用前，需要先把压测程序挂到具体 package，并把运行命令纳入测试或脚本契约。
 
 ## 当前性能报告
 
 `../doc/message_send_performance_report_2026-06-06.md` 记录了一次本地 dev build 集成压测。该报告覆盖：
 
-- `flare-orchestrator` `MessageSendService`
+- `flare-message-ingest` `MessageSendService`
 - Redis WAL
 - NATS JetStream fanout
 - `flare-storage-writer`
@@ -153,6 +167,7 @@ cargo run -p flare-im-core --example perf_message_send
 只启动：
 
 - conversation
+- message-ingest
 - orchestrator
 - storage-writer
 - PostgreSQL

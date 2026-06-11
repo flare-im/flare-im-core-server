@@ -22,7 +22,7 @@
 //! 具体数值以 `flare_core::common::protocol::payload_command::Type` 为准。
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 /// 推送端口：仅描述「如何把载荷送到连接/用户」，由基础设施适配 `ServerHandle`。

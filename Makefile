@@ -83,7 +83,7 @@ run-access-gateway:
 	$(CARGO) run -p flare-signaling-gateway --bin flare-signaling-gateway
 
 run-core-gateway:
-	$(CARGO) run -p flare-core-gateway --bin flare-core-gateway
+	$(CARGO) run -p flare-api-gateway --bin flare-api-gateway
 
 run-signaling-online:
 	$(CARGO) run -p flare-signaling-online --bin flare-signaling-online

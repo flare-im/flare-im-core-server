@@ -9,7 +9,7 @@
 | 接入方 | 推荐入口 | 用途 | 说明 |
 |--------|----------|------|------|
 | 终端客户端 | `flare-signaling/gateway` + IM SDK | 实时收发、重连、ACK、sync | 推荐给 App/Web/Desktop。 |
-| 业务服务端 | typed gRPC 优先，`flare-core-gateway` HTTP API 作为 facade | 服务端发消息、查会话、媒体、presence | 高频可信内网调用用 typed gRPC；外部、后台和低频任务用 HTTP/OpenAPI。 |
+| 业务服务端 | typed gRPC 优先，`flare-api-gateway` HTTP API 作为 facade | 服务端发消息、查会话、媒体、presence | 高频可信内网调用用 typed gRPC；外部、后台和低频任务用 HTTP/OpenAPI。 |
 | 管理后台 | `flare-admin-gateway` Admin API | 审计、查询、导出、强制操作 | 需要 Admin token/scope 和审计原因。 |
 | 内部可信服务 | 内部 typed gRPC | 高性能低开销调用 | 只在内网、mTLS/service token、版本受控时使用。 |
 | 业务规则扩展 | gRPC Hook / Capability | 风控、权限、审核、RTC、机器人 | 主链 Hook 推荐 gRPC，避免 HTTP 序列化和连接管理放大尾延迟。 |
@@ -19,11 +19,11 @@
 
 | 场景 | 推荐协议 | 推荐服务/入口 | 说明 |
 |------|----------|---------------|------|
-| 高频服务端发消息、系统消息、业务事件 | typed gRPC | `MessageSendService` / `MessageActionService` | 可信内网低开销调用，metadata 明确透传租户、用户和 trace。 |
-| 好友、群、成员变更同步到 Core | typed gRPC | `ConversationManageService` / `MessageSendService.ExecuteEvent` | 业务系统 Bridge 推荐直接调用 typed gRPC。 |
+| 高频服务端发消息、系统消息、业务事件 | typed gRPC | `MessageSendService` / `MessageEventService` / `MessageActionService` | 可信内网低开销调用，metadata 明确透传租户、用户和 trace。 |
+| 好友、群、成员变更同步到 Core | typed gRPC | `ConversationManageService` / `MessageEventService.ExecuteEvent` | 业务系统 Bridge 推荐直接调用 typed gRPC。 |
 | 发信前权限、风控、黑名单、禁言校验 | gRPC Hook | `PreSend` Hook | 主链门禁必须短超时、fail-fast，并通过服务发现或固定 endpoint 管理。 |
 | 发送后审计、BI、送达分析 | gRPC Hook 或 MQ consumer | `PostSend` / `Delivery` Hook | 旁路能力可 ignore/retry，避免拖慢主链 ACK。 |
-| 外部三方、开放平台、业务后台低频操作 | HTTP/OpenAPI | `flare-core-gateway` | 稳定公开合同、易鉴权、易文档化。 |
+| 外部三方、开放平台、业务后台低频操作 | HTTP/OpenAPI | `flare-api-gateway` | 稳定公开合同、易鉴权、易文档化。 |
 | 管理审计、导出、强制操作 | HTTP Admin facade | `flare-admin-gateway` | 需要 Admin scope、审计原因、分页和限流。 |
 
 ## 身份与上下文
@@ -60,13 +60,14 @@ x-app-id: app-1
 
 ## HTTP API
 
-`flare-core-gateway` 当前暴露公共 API 前缀 `/api/v1`。
+`flare-api-gateway` 当前暴露公共 API 前缀 `/api/v1`。
 
 HTTP API 是公开 facade，不是生产主链高频调用的首选。业务系统和 Core 在同一可信网络内时，推荐直接使用 typed gRPC；HTTP 更适合开放平台、后台、机器人、管理面、低频任务和跨语言快速接入。
 
 | API | 用途 |
 |-----|------|
 | `POST /api/v1/messages/send` | 服务端/机器人/业务后台发送消息。 |
+| `POST /api/v1/messages/events/custom` | 服务端/业务后台提交自定义业务事件，转为 `MessageEventService.ExecuteEvent(EVENT_CUSTOM)`。 |
 | `POST /api/v1/messages/recall` | 撤回消息。 |
 | `POST /api/v1/messages/read` | 标记消息已读。 |
 | `GET /api/v1/conversations` | 会话列表。 |
@@ -120,6 +121,32 @@ curl -X POST "http://127.0.0.1:50050/api/v1/messages/send" \
 }
 ```
 
+### HTTP 自定义事件
+
+HTTP facade 只开放 `EVENT_CUSTOM` 的薄封装，适合低频业务状态变更；撤回、已读、reaction 等稳定操作优先使用对应 typed gRPC 或专门 HTTP action API。
+
+```bash
+curl -X POST "http://127.0.0.1:50050/api/v1/messages/events/custom" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "x-tenant-id: tenant-1" \
+  -H "x-request-id: req-10002" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "conversation_id": "group:g100",
+    "namespace": "mall",
+    "name": "order_paid",
+    "version": "v1",
+    "payload": {
+      "order_id": "order-9",
+      "amount": 19900
+    },
+    "attributes": {
+      "source": "order-service"
+    },
+    "svid": "mall-service"
+  }'
+```
+
 ### 查询会话
 
 ```bash
@@ -150,7 +177,8 @@ curl "http://127.0.0.1:50050/api/v1/presence/users/alice" \
 
 | 服务 | 用途 |
 |------|------|
-| `MessageSendService` | `SendMessage`、`BatchSendMessage`、`SendSystemMessage`、`ExecuteEvent`、`SendAck`、`SendCustomData`。 |
+| `MessageSendService` | `SendMessage`、`BatchSendMessage`、`SendSystemMessage`、`SendAck`、`SendCustomData`。 |
+| `MessageEventService` | `ExecuteEvent`。 |
 | `MessageActionService` | 撤回、编辑、删除、已读、reaction、pin、mark。 |
 | `ConversationReadService` | 会话列表、详情、成员分页。 |
 | `ConversationManageService` | 创建/更新/删除会话、成员管理、强制同步。 |

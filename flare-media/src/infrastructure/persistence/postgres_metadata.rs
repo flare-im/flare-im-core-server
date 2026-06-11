@@ -3,8 +3,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use flare_im_core::config::PostgresInstanceConfig;
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::config::PostgresInstanceConfig;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;

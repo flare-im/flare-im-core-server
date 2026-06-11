@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

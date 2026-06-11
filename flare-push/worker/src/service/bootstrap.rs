@@ -1,5 +1,4 @@
-use flare_core_runtime::ServiceRuntime;
-use flare_im_core::service_names::PUSH_WORKER;
+use flare_im_contracts::service_names::PUSH_WORKER;
 use flare_server_core::error::Result;
 use tracing::info;
 
@@ -9,26 +8,41 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        use flare_im_core::load_config;
-
-        let app_config = load_config(Some("./config"));
+        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let service_config = app_config.push_worker_service();
+        let runtime = flare_im_service_kit::build_background_service_runtime(
+            app_config,
+            &service_config.runtime,
+            PUSH_WORKER,
+        );
         let ctx = wire::initialize(app_config).await?;
-        Self::run_with_context(ctx).await
+        Self::run_with_runtime(ctx, runtime).await
     }
 
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        info!("Starting Push Worker (push-online/push-offline) via ServiceRuntime...");
+        Self::run_with_runtime(
+            context,
+            flare_im_service_kit::background_service_runtime(PUSH_WORKER),
+        )
+        .await
+    }
 
-        let mut runtime = ServiceRuntime::mq_consumer()
-            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
+    async fn run_with_runtime(
+        context: ApplicationContext,
+        mut runtime: flare_core_runtime::ServiceRuntime,
+    ) -> Result<()> {
+        info!("Starting Push Worker (push-online/push-offline) via ServiceRuntime...");
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();
             runtime = runtime.add_spawn_with_shutdown(
                 "push-worker-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_core::metrics::serve_prometheus_metrics(metrics_config, shutdown_rx)
-                        .await
+                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                        metrics_config,
+                        shutdown_rx,
+                    )
+                    .await
                 },
             );
         }
@@ -70,7 +84,7 @@ impl ApplicationBootstrap {
             runtime = runtime.add_task(Box::new(task));
         }
 
-        flare_im_core::health::attach_runtime_health_checks(runtime, PUSH_WORKER)
+        runtime
             .run()
             .await
             .map_err(flare_server_core::error::FlareError::from)

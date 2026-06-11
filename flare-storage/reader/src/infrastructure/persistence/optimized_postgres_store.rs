@@ -25,7 +25,7 @@ use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::ContentVisibility;
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换

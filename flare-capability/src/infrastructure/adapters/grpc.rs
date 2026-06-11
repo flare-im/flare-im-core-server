@@ -20,7 +20,7 @@ use flare_grpc_proto::capability::{
     PostSendHookResponse, PreSendHookRequest, PreSendHookResponse, RecallHookRequest,
     RecallHookResponse,
 };
-use flare_im_core::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
+use flare_im_hooks::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
 
@@ -152,7 +152,7 @@ impl GrpcHookAdapter {
         if let Some(service_client) = &self.service_client {
             // 使用 ServiceClient 获取 Channel（已包含负载均衡）
             let mut client_guard = service_client.lock().await;
-            let channel = flare_im_core::discovery::get_discovered_channel_with_timeout(
+            let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
                 &self.service_name,
                 &mut client_guard,
             )

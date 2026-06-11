@@ -96,6 +96,8 @@ fn retention_state(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_recall_event;
+///
 /// let event = build_recall_event("conv-123", "msg-456", Some("发错了"));
 /// ```
 pub fn build_recall_event(
@@ -129,6 +131,9 @@ pub fn build_recall_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_edit_event;
+///
+/// let new_content = Vec::new();
 /// let event = build_edit_event("conv-123", "msg-456", new_content, 1);
 /// ```
 pub fn build_edit_event(
@@ -163,6 +168,9 @@ pub fn build_edit_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_delete_event;
+/// use flare_proto::common::DeleteType;
+///
 /// let event = build_delete_event("conv-123", "msg-456", DeleteType::Soft);
 /// ```
 pub fn build_delete_event(
@@ -197,6 +205,8 @@ pub fn build_delete_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_read_receipt_event;
+///
 /// let event = build_read_receipt_event("conv-123", "user-456", 100);
 /// ```
 pub fn build_read_receipt_event(conversation_id: &str, user_id: &str, read_seq: u64) -> Event {
@@ -332,6 +342,9 @@ pub fn build_hard_deleted_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_reaction_event;
+/// use flare_proto::common::ReactionAction;
+///
 /// let event = build_reaction_event("conv-123", "msg-456", "user-789", "👍", ReactionAction::Add);
 /// ```
 pub fn build_reaction_event(
@@ -366,6 +379,8 @@ pub fn build_reaction_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_pin_event;
+///
 /// let event = build_pin_event("conv-123", "msg-456", "user-789");
 /// ```
 pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &str) -> Event {
@@ -393,6 +408,8 @@ pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &s
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_unpin_event;
+///
 /// let event = build_unpin_event("conv-123", "msg-456");
 /// ```
 pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
@@ -419,6 +436,9 @@ pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_mark_event;
+/// use flare_proto::common::MarkType;
+///
 /// let event = build_mark_event("conv-123", "msg-456", "user-789", MarkType::Important);
 /// ```
 pub fn build_mark_event(
@@ -453,6 +473,9 @@ pub fn build_mark_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_unmark_event;
+/// use flare_proto::common::MarkType;
+///
 /// let event = build_unmark_event("conv-123", "msg-456", "user-789", MarkType::Important);
 /// ```
 pub fn build_unmark_event(
@@ -486,6 +509,8 @@ pub fn build_unmark_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::build_custom_event;
+///
 /// let event = build_custom_event("conv-123", "myapp", "custom_action", vec![1, 2, 3]);
 /// ```
 pub fn build_custom_event(
@@ -521,6 +546,9 @@ pub fn build_custom_event(
 ///
 /// # 示例
 /// ```rust
+/// use flare_orchestrator::domain::EventBuilder;
+/// use flare_proto::common::EventType;
+///
 /// let event = EventBuilder::new(EventType::EventMessageRecall)
 ///     .conversation_id("conv-123")
 ///     .with_recall_payload("msg-456", Some("发错了"))

@@ -19,7 +19,7 @@ where
     let expire_at = pin
         .expire_at
         .as_ref()
-        .and_then(flare_im_core::utils::timestamp_to_datetime);
+        .and_then(flare_im_contracts::utils::timestamp_to_datetime);
     ctx.repo
         .pin_message(
             ctx.ctx,

@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-业务进程内执行 PreSend 等 Hook 请使用 `flare_im_core::hooks::HookDispatcher`（与编排器同进程），本二进制主要负责 Hook 扩展 gRPC 与能力插件运行时。
+业务进程内执行 PreSend 等 Hook 请使用 `flare_im_hooks::HookDispatcher`（与编排器同进程），本二进制主要负责 Hook 扩展 gRPC 与能力插件运行时。
 
 ### 数据库配置管理
 

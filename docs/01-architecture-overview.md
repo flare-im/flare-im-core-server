@@ -29,7 +29,7 @@
 flowchart TB
     subgraph "接入层"
         SGW["flare-signaling/gateway<br/>长连接接入"]
-        CGW["flare-core-gateway<br/>三方 HTTP API"]
+        CGW["flare-api-gateway<br/>三方 HTTP API"]
         AGW["flare-admin-gateway<br/>管理 API"]
     end
 
@@ -39,7 +39,8 @@ flowchart TB
     end
 
     subgraph "编排层"
-        Orchestrator["flare-orchestrator<br/>message/event command path"]
+        Ingest["flare-message-ingest<br/>message ingest command path"]
+        Orchestrator["flare-orchestrator<br/>event command / main fanout"]
         Sync["flare-sync-orchestrator<br/>sync command/query path"]
         Capability["flare-capability<br/>hook / extension / rtc"]
     end
@@ -59,15 +60,22 @@ flowchart TB
 
     SGW --> Route
     SGW --> Online
-    CGW --> Orchestrator
+    CGW -- "send" --> Ingest
+    CGW -- "actions/events" --> Orchestrator
     CGW --> Conversation
     CGW --> Media
     AGW --> Reader
-    Route --> Orchestrator
+    Route -- "send frame" --> Ingest
+    Route -- "event/action frame" --> Orchestrator
+    Ingest --> Capability
+    Ingest --> Conversation
+    Ingest --> MQMain["flare.im.message.main"]
+    MQMain --> Orchestrator
     Orchestrator --> Capability
-    Orchestrator --> Conversation
-    Orchestrator --> Writer
-    Orchestrator --> PushServer
+    Orchestrator --> MQStorage["storage/events topics"]
+    Orchestrator --> MQPush["push topics"]
+    MQStorage --> Writer
+    MQPush --> PushServer
     Sync --> Reader
     Sync --> Conversation
     Writer --> Reader
@@ -75,17 +83,36 @@ flowchart TB
     PushProxy --> PushServer
 ```
 
+## 接入与连接边界
+
+客户端推荐只建立一条主长连接到 `flare-signaling/gateway`。这条连接由 `flare-core` 承载 frame、心跳、认证和传输协商，在连接内部用 typed frame / command 逻辑多路复用：
+
+- 消息上行：`flare-signaling/gateway` 将 send frame 转发到 `flare-signaling/route`，再进入 `flare-message-ingest`。
+- ACK / read / sync：在同一条长连接上承载对应 frame，服务端再转发到 route、conversation 或 sync-orchestrator。
+- call / SFU 信令：`flare-call` 拥有通话会话生命周期和业务 FSM，`flare-capability` / 插件负责 RTC/SFU 资源编排，gateway 只做连接侧路由提示；真实音视频媒体流不进入 IM 消息主链。
+- 能力/插件契约：`flare-im-capability-core` 是共享 contract 来源；`flare-capability` 只负责运行时注册、授权、路由和 gRPC 服务实现。
+- 下行推送：push-server 通过 route/online 找到连接所在 gateway，由同一条长连接下发。
+
+`flare-api-gateway` 不作为客户端长连接入口；它是业务系统、三方系统和低频后台调用 Core typed API 的 HTTP facade。`flare-admin-gateway` 只服务管理面、审计和运维查询。若未来需要 HTTP/2 或 QUIC multiplexed stream，应优先保持同一个客户端接入网关进程，并在 transport 内隔离逻辑 stream，而不是让 core/signaling/admin 三个网关同时暴露客户端 WebSocket。
+
+鉴权统一由 `flare-server-core::auth::TokenValidator` 负责，网关只做传输适配：
+
+- HTTP 网关使用 shared `gateway_auth` 注入 `user_id`、`tenant_id`、`device_id`、`app_id`。
+- 长连接网关在 AUTH frame 阶段复用同一套 token validator，并把认证主体写入连接 metadata。
+- JWT、本地 Core token、可信 issuer、外部 SSO/Hook 的选择属于 auth provider 配置，不属于每个 gateway 的私有实现。
+
 ## 写路径
 
 持久消息写路径遵循：
 
 ```text
-Command -> Application Handler -> Domain Service -> WAL -> MQ -> Consumer -> Storage/Projection -> ACK
+Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fanout -> Storage/Projection/Push
 ```
 
 关键原则：
 
-- `flare-orchestrator` 不直接写消息表，先通过 WAL 和 MQ 建立可恢复边界。
+- `flare-message-ingest` 是上行消息真源入口，负责校验、Hook、seq、conversation ensure、WAL 和写入主消息流。
+- `flare-orchestrator` 不再承担上行消息发送，只消费 `TOPIC_MESSAGE_MAIN` 并做存储/推送 fanout；消息操作事件仍由 orchestrator 编排。
 - `TOPIC_MESSAGE_MAIN` 是持久消息/事件的主入口。
 - 主队列消费者把持久消息拆分到 `TOPIC_MESSAGE_CREATED` 和 `TOPIC_PUSH_MESSAGES`。
 - `flare-storage/writer` 消费存储 topic，完成幂等、归档、事件流、热缓存、ledger 和 ACK。
@@ -97,6 +124,7 @@ Command -> Application Handler -> Domain Service -> WAL -> MQ -> Consumer -> Sto
 
 - 历史消息和审计查询走 `flare-storage/reader`。
 - 会话列表、成员、未读、游标走 `flare-conversation`。
+- 通话会话生命周期和业务状态机走 `flare-call`，媒体控制面仍由 capability/plugin 承担。
 - 多端同步走 `flare-sync-orchestrator`，基于 conversation seq 和 event stream 收敛。
 - 在线状态走 `flare-signaling/online`。
 - 媒体文件、引用、对象 ACL 走 `flare-media`。
@@ -105,7 +133,7 @@ Command -> Application Handler -> Domain Service -> WAL -> MQ -> Consumer -> Sto
 
 | topic | 生产者 | 消费者 | 语义 |
 |------|--------|--------|------|
-| `flare.im.message.main` | `flare-orchestrator` | `flare-orchestrator` main consumer | 持久消息/事件主输入。 |
+| `flare.im.message.main` | `flare-message-ingest` / event action path | `flare-orchestrator` main consumer | 持久消息/事件主输入。 |
 | `flare.im.message.storage` | main consumer | `flare-storage/writer` | 消息创建持久化。 |
 | `flare.im.message.events` | main consumer / action path | `flare-storage/writer`、`flare-conversation` | 操作事件、会话事件、已读等。 |
 | `flare.im.push.messages` | main consumer / push-only path | `flare-push/server` | 消息实时投递。 |
@@ -140,15 +168,15 @@ Command -> Application Handler -> Domain Service -> WAL -> MQ -> Consumer -> Sto
 ## DDD/CQRS 落点
 
 - Domain Model：消息类别、持久化模式、会话类型、事件类型、retention、seq。
-- Domain Service：消息校验、seq 分配、WAL 写入、push/persist fanout、事件校验、Capability enrich。
-- Repository Port：WAL、Recipient、Push、Storage、Idempotency、Ledger、AckPublisher。
+- Domain Service：ingest 负责消息校验、seq 分配、WAL 写入；orchestrator 负责 push/persist fanout、事件校验、Capability enrich。
+- Repository Port：WAL、Recipient、Push、Storage、Idempotency、Ledger、AckPublisher 按服务边界归属。
 - Application Handler：gRPC/HTTP/MQ 命令编排，控制流程但不塞业务规则。
 - Infrastructure Adapter：Redis、PostgreSQL、MQ、gRPC client、Webhook、object store。
 
 ## 关键边界
 
 - Gateway 只做协议适配、身份上下文、限流、错误映射和 typed proxy。
-- Orchestrator 是发送和操作事件的写路径中心，但不拥有用户/好友/群业务数据。
+- Orchestrator 是主消息流 fanout 和操作事件写路径中心，但不接收 `SendMessage`，也不拥有用户/好友/群业务数据。
 - Storage Writer 是持久化一致性中心，但不负责路由和实时推送。
 - Conversation 是会话读模型中心，不决定好友/群业务关系。
 - Capability/Hook 是扩展点，不应成为每个消息都必须依赖的业务单体。

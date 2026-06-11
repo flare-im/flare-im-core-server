@@ -14,46 +14,59 @@ use crate::infrastructure::ports::{
     RouterMessageCommandPort, SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
 };
 use crate::interface::link::LongConnectionHandler;
-use flare_server_core::auth::{RedisTokenStore, TokenService};
+use flare_server_core::auth::{
+    AuthProviderMode, RedisTokenStore, TokenService, build_core_jwt_token_validator,
+    build_http_hook_token_validator,
+};
+
+type SharedAuthenticator = Arc<dyn flare_core::server::auth::Authenticator + Send + Sync>;
 
 /// 构建认证器
 pub async fn build_authenticator(
     config: &AccessGatewayConfig,
-) -> Arc<dyn flare_core::server::auth::Authenticator + Send + Sync> {
+) -> flare_server_core::error::Result<SharedAuthenticator> {
     use tracing::warn;
 
-    let mut token_service = TokenService::new(
-        config.token_secret.clone(),
-        config.token_issuer.clone(),
-        config.token_ttl_seconds,
-    );
+    let token_validator = match config.auth_provider.mode {
+        AuthProviderMode::CoreJwt => {
+            let token_secret = config.token_secret.as_deref().ok_or_else(|| {
+                flare_server_core::error::FlareError::system(
+                    "access-gateway token secret is required when auth.mode=core_jwt",
+                )
+            })?;
+            let mut token_service = TokenService::new(
+                token_secret.to_string(),
+                config.token_issuer.clone(),
+                config.token_ttl_seconds,
+            );
 
-    if let Some(store_url) = &config.token_store_redis_url {
-        match RedisTokenStore::new(store_url) {
-            Ok(store) => {
-                token_service = token_service.with_store(Arc::new(store));
+            if let Some(store_url) = &config.token_store_redis_url {
+                match RedisTokenStore::new(store_url) {
+                    Ok(store) => {
+                        token_service = token_service.with_store(Arc::new(store));
+                    }
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            "Failed to initialize token store, proceeding without revocation support"
+                        );
+                    }
+                }
             }
-            Err(err) => {
-                warn!(
-                    ?err,
-                    "Failed to initialize token store, proceeding without revocation support"
-                );
-            }
+
+            build_core_jwt_token_validator(Arc::new(token_service), &config.trusted_token_issuers)
         }
+        AuthProviderMode::HttpHook => build_http_hook_token_validator(&config.auth_provider),
     }
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "failed to initialize access-gateway auth validator: {err}"
+        ))
+    })?;
 
-    let trusted: Vec<(String, String)> = config
-        .trusted_token_issuers
-        .iter()
-        .map(|t| (t.secret.clone(), t.issuer.clone()))
-        .collect();
-
-    Arc::new(
-        crate::application::handlers::AuthHandler::with_trusted_issuers(
-            Arc::new(token_service),
-            &trusted,
-        ),
-    )
+    Ok(Arc::new(crate::application::handlers::AuthHandler::new(
+        token_validator,
+    )))
 }
 
 /// 构建长连接上行处理器

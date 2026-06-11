@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_im_core::context_from_mq_metadata;
+use flare_im_contracts::context_from_mq_metadata;
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -184,7 +184,7 @@ impl MessageEventsConsumerFactory {
     /// # 返回
     /// - `&'static str`: 主题名称
     pub fn topic() -> &'static str {
-        flare_im_core::constants::topics::TOPIC_MESSAGE_EVENTS
+        flare_im_contracts::constants::topics::TOPIC_MESSAGE_EVENTS
     }
 
     /// 获取消费者组名称
@@ -192,6 +192,6 @@ impl MessageEventsConsumerFactory {
     /// # 返回
     /// - `&'static str`: 消费者组名称
     pub fn consumer_group() -> &'static str {
-        flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT
+        flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT
     }
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 use crate::infrastructure::config::CapabilityRuntimeConfig;

@@ -1,5 +1,5 @@
 # Message Orchestrator 服务配置（事件总线：消息流、操作事件流、推送流）
-# JetStream 使用 base.toml 中 [jetstream.message]；Subject 与 flare_im_core::constants::topics 对齐
+# JetStream 使用 base.toml 中 [jetstream.message]；Subject 与 flare_im_contracts::constants::topics 对齐
 
 [services.message_orchestrator]
 jetstream = "message"
@@ -10,18 +10,9 @@ push_subject = "flare.im.push.messages"
 message_dlq_topic = "flare.im.message.main.dlq"
 message_retry_topic = "flare.im.message.main.retry.5s"
 message_retry_delay_ms = 5000
-wal_store = "message_wal"
-wal_hash_key = "flare:message:wal"
-wal_ttl_seconds = 86400
-wal_replay_enabled = true
-wal_replay_interval_ms = 1000
-wal_replay_error_backoff_ms = 5000
-wal_replay_batch_limit = 256
-wal_replay_claim_lease_ms = 30000
+redis_store = "message_wal"
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
-conversation_ensure_cache_capacity = 100000
-conversation_ensure_cache_ttl_seconds = 30
 metrics_enabled = true
 metrics_address = "0.0.0.0"
 metrics_port = 19181

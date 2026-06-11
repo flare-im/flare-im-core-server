@@ -10,7 +10,7 @@ use flare_core::common::protocol::{
     payload_command::Type as PayloadType,
 };
 use flare_core::server::handle::ServerHandle;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tracing::{debug, info};

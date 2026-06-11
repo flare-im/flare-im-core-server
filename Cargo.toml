@@ -1,8 +1,16 @@
 [workspace]
 members = [
+    # IM shared crates - explicit dependency boundaries
+    "crates/flare-im-contracts",
+    "crates/flare-im-service-kit",
+    "crates/flare-im-message-pipeline",
+    "crates/flare-im-seq",
+    "crates/flare-im-ack",
+    "crates/flare-im-hooks",
+    "crates/flare-im-capability-core",
     
     # 通信核心层 - 统一网关
-    "flare-core-gateway",
+    "flare-api-gateway",
     "flare-admin-gateway",
     
     # 通信核心层 - 信令系统
@@ -18,16 +26,21 @@ members = [
     # 通信核心层 - 存储系统
     "flare-storage/writer",
     "flare-storage/reader",
+    "flare-call",
     "flare-conversation",
     "flare-sync-orchestrator",
 
+    "flare-message-ingest",
     "flare-orchestrator",
     
     # Hook 引擎 + 能力插件（capability）
     "flare-capability",
-    
+
     # 媒体服务
     "flare-media",
+
+    # 架构守卫测试
+    "arch-tests",
 ]
 
 resolver = "2"
@@ -43,10 +56,8 @@ license = "Apache-2.0"
 # 错误处理
 anyhow = "1.0"
 
-# Base64 & BSON/Mongo 支持
+# Base64 支持
 base64 = "0.22"
-bson = { version = "3.0", features = ["chrono-0_4"] }
-mongodb = { version = "2.8", features = ["tokio-runtime"] }
 
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
@@ -78,7 +89,6 @@ jsonwebtoken = { version = "10.2", default-features = false, features = ["rust_c
 bytes = "1"
 async-trait = "0.1"
 thiserror = "2.0"
-log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -109,7 +119,17 @@ flare-core = { path = "../flare-core" }
 # Flare Server Core (启用 proto feature 以使用错误转换函数)
 flare-server-core = { path = "../flare-server-core", features = ["proto", "grpc", "http"] }
 flare-core-base = { path = "../flare-server-core/flare-core-base" }
+flare-core-messaging = { path = "../flare-server-core/flare-core-messaging" }
 flare-core-runtime = { path = "../flare-server-core/flare-core-runtime" }
+
+# Flare IM shared crates
+flare-im-contracts = { path = "crates/flare-im-contracts" }
+flare-im-service-kit = { path = "crates/flare-im-service-kit" }
+flare-im-message-pipeline = { path = "crates/flare-im-message-pipeline" }
+flare-im-seq = { path = "crates/flare-im-seq" }
+flare-im-ack = { path = "crates/flare-im-ack" }
+flare-im-hooks = { path = "crates/flare-im-hooks" }
+flare-im-capability-core = { path = "crates/flare-im-capability-core" }
 
 # Flare Proto
 flare-proto = { path = "../flare-proto" }
@@ -135,74 +155,3 @@ tokio-test = "0.4"
 parking_lot = "0.12"
 image = "0.24"
 moka = { version = "0.12", features = ["future"] }
-
-[package]
-name = "flare-im-core"
-version.workspace = true
-edition.workspace = true
-
-[lib]
-name = "flare_im_core"
-path = "src/lib.rs"
-
-[dependencies]
-axum = { workspace = true }
-flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
-flare-core-base = { workspace = true }
-flare-core-runtime = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-serde = { workspace = true }
-toml = { workspace = true }
-uuid = { workspace = true }
-anyhow = { workspace = true }
-once_cell = { workspace = true }
-tonic = { workspace = true }
-prost = { workspace = true }
-flare-proto = { workspace = true }
-flare-grpc-proto = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-async-trait = { workspace = true }
-reqwest = { workspace = true }
-base64 = { workspace = true }
-rand = { workspace = true }
-etcd-client = { workspace = true }
-prost-types = { workspace = true }
-chrono = { workspace = true }
-flare-core = { workspace = true }
-prometheus = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-ulid = { workspace = true }
-# ACK模块依赖
-dashmap = "6.0"
-redis = { workspace = true }
-sqlx = { workspace = true }
-zstd = "0.13"
-dotenvy = "0.15"
-
-# OpenTelemetry 分布式追踪（可选功能）
-opentelemetry = { version = "0.28", optional = true }
-opentelemetry-otlp = { version = "0.28", optional = true }
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.28", optional = true }
-tracing-opentelemetry = { version = "0.29", optional = true }
-[features]
-default = []
-tracing = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk", "tracing-opentelemetry"]
-discovery = []  # 服务发现功能（默认启用，但可以通过 feature 控制）
-
-[lints.rust]
-# 允许 tracing feature（用于条件编译）
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tracing"))'] }
-async_fn_in_trait = "allow"
-ambiguous_glob_reexports = "allow"
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-prost = "0.14"
-redis = { workspace = true }
-sqlx = { workspace = true }

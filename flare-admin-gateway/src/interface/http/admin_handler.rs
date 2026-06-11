@@ -24,7 +24,7 @@ use crate::application::admin_messages::{
     build_storage_message_export_request, build_storage_search_request,
     build_storage_write_ledger_request,
 };
-use flare_im_core::{clients::GrpcClients, gateway::GatewaySettings};
+use flare_im_service_kit::{clients::GrpcClients, gateway::GatewaySettings};
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -103,12 +103,14 @@ pub struct AdminServerConfigSnapshot {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminGrpcConfigSnapshot {
     pub media_service_url: String,
-    pub message_service_url: String,
+    pub message_ingest_service_url: String,
+    pub message_orchestrator_service_url: String,
     pub conversation_service_url: String,
     pub online_service_url: String,
     pub storage_reader_service_url: String,
     pub media_static_fallback: Option<String>,
-    pub message_static_fallback: Option<String>,
+    pub message_ingest_static_fallback: Option<String>,
+    pub message_orchestrator_static_fallback: Option<String>,
     pub conversation_static_fallback: Option<String>,
     pub online_static_fallback: Option<String>,
     pub storage_reader_static_fallback: Option<String>,
@@ -452,7 +454,7 @@ fn build_gateway_health() -> AdminGatewayHealthResponse {
         boundary: "internal_admin_api_only_no_admin_console".to_string(),
         admin_api_version: "v1".to_string(),
         route_count: build_gateway_routes().routes.len(),
-        upstream_count: 5,
+        upstream_count: 6,
     }
 }
 
@@ -468,9 +470,16 @@ fn build_gateway_upstreams(settings: &GatewaySettings) -> AdminGatewayUpstreamsR
                 grpc.request_timeout_secs,
             ),
             gateway_upstream(
+                "message-ingest",
+                &grpc.message_ingest_service_url,
+                &grpc.message_ingest_static_fallback,
+                grpc.connect_timeout_secs,
+                grpc.request_timeout_secs,
+            ),
+            gateway_upstream(
                 "message-orchestrator",
-                &grpc.message_service_url,
-                &grpc.message_static_fallback,
+                &grpc.message_orchestrator_service_url,
+                &grpc.message_orchestrator_static_fallback,
                 grpc.connect_timeout_secs,
                 grpc.request_timeout_secs,
             ),
@@ -665,12 +674,21 @@ fn build_gateway_config_snapshot(settings: &GatewaySettings) -> AdminGatewayConf
         },
         grpc: AdminGrpcConfigSnapshot {
             media_service_url: settings.grpc.media_service_url.clone(),
-            message_service_url: settings.grpc.message_service_url.clone(),
+            message_ingest_service_url: settings.grpc.message_ingest_service_url.clone(),
+            message_orchestrator_service_url: settings
+                .grpc
+                .message_orchestrator_service_url
+                .clone(),
             conversation_service_url: settings.grpc.conversation_service_url.clone(),
             online_service_url: settings.grpc.online_service_url.clone(),
             storage_reader_service_url: settings.grpc.storage_reader_service_url.clone(),
             media_static_fallback: optional_string(&settings.grpc.media_static_fallback),
-            message_static_fallback: optional_string(&settings.grpc.message_static_fallback),
+            message_ingest_static_fallback: optional_string(
+                &settings.grpc.message_ingest_static_fallback,
+            ),
+            message_orchestrator_static_fallback: optional_string(
+                &settings.grpc.message_orchestrator_static_fallback,
+            ),
             conversation_static_fallback: optional_string(
                 &settings.grpc.conversation_static_fallback,
             ),
@@ -726,7 +744,7 @@ fn optional_string(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_core::gateway::{
+    use flare_im_service_kit::gateway::{
         GatewayGrpcConfig, GatewaySettings, RateLimitConfig, ServerConfig, TracingConfig,
     };
     use flare_server_core::auth::{AuthProviderConfig, AuthProviderMode};
@@ -762,7 +780,14 @@ mod tests {
 
         let response = build_gateway_upstreams(&settings);
 
-        assert_eq!(response.upstreams.len(), 5);
+        assert_eq!(response.upstreams.len(), 6);
+        assert!(
+            response
+                .upstreams
+                .iter()
+                .any(|upstream| upstream.name == "message-ingest"
+                    && upstream.route == "discovery://flare-message-ingest")
+        );
         assert!(
             response
                 .upstreams
@@ -815,12 +840,14 @@ mod tests {
             },
             grpc: GatewayGrpcConfig {
                 media_service_url: "discovery://flare-media".to_string(),
-                message_service_url: "discovery://flare-orchestrator".to_string(),
+                message_ingest_service_url: "discovery://flare-message-ingest".to_string(),
+                message_orchestrator_service_url: "discovery://flare-orchestrator".to_string(),
                 conversation_service_url: "discovery://flare-conversation".to_string(),
                 online_service_url: "discovery://flare-signaling-online".to_string(),
                 storage_reader_service_url: "discovery://flare-storage-reader".to_string(),
                 media_static_fallback: "http://127.0.0.1:60081".to_string(),
-                message_static_fallback: "http://127.0.0.1:50181".to_string(),
+                message_ingest_static_fallback: "http://127.0.0.1:50182".to_string(),
+                message_orchestrator_static_fallback: "http://127.0.0.1:50181".to_string(),
                 conversation_static_fallback: "http://127.0.0.1:50090".to_string(),
                 online_static_fallback: "http://127.0.0.1:50061".to_string(),
                 storage_reader_static_fallback: "http://127.0.0.1:60083".to_string(),

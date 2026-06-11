@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::signaling::router::{RouteDataRequest, RouteOptions};
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::CustomData;
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode as ServerErrorCode, Result};

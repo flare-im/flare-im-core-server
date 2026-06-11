@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{PushEnvelope, PushResult};
 use flare_server_core::error::Result;
 use tracing::{debug, instrument};

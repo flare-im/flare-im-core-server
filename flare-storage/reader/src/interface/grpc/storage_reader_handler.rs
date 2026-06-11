@@ -22,7 +22,7 @@ use crate::domain::model::{
     MessageWriteLedgerQuery,
 };
 use crate::domain::repository::MessageStorage;
-use flare_im_core::utils::extract_seq_from_message;
+use flare_im_contracts::utils::extract_seq_from_message;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 
 #[derive(Clone)]
@@ -113,7 +113,7 @@ fn optional_ledger_timestamp(
 }
 
 fn message_write_ledger_query(
-    ctx: &flare_im_core::Ctx,
+    ctx: &flare_im_contracts::Ctx,
     req: QueryMessageWriteLedgerRequest,
 ) -> Result<MessageWriteLedgerQuery, Status> {
     let context_tenant_id = ctx
@@ -207,7 +207,7 @@ fn message_write_ledger_entry_to_proto(
 }
 
 fn message_export_task_draft(
-    ctx: &flare_im_core::Ctx,
+    ctx: &flare_im_contracts::Ctx,
     req: ExportMessagesRequest,
 ) -> Result<MessageExportTaskDraft, Status> {
     let tenant_id = ctx

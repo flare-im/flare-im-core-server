@@ -1,7 +1,7 @@
 //! 事件流仓储（Port）- 使用领域 Event，不依赖 proto
 
 use crate::domain::model::Event;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 pub trait EventStreamRepository: Send + Sync {

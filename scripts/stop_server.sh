@@ -41,7 +41,7 @@ cleanup_launchctl_dev_labels() {
             flare-push-server \
             flare-push-worker \
             flare-media \
-            flare-core-gateway \
+            flare-api-gateway \
             flare-access-gateway \
             flare-access-gateway-beijing-1 \
             flare-access-gateway-shanghai-1; do

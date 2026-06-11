@@ -81,7 +81,7 @@ ttl_seconds = 86400
 default_backend = "nats"
 allow_kafka_fallback = false
 
-# JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_core::constants::topics
+# JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_contracts::constants::topics
 [jetstream.push]
 url = "nats://127.0.0.1:24222"
 client_id = "flare-im"
@@ -187,10 +187,6 @@ min_connections = 2
 acquire_timeout_seconds = 10
 idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
-
-[mongodb.primary]
-url = "mongodb://localhost:27017"
-database = "flare"
 
 # 对象存储配置 - 简化为单一配置，通过环境变量或部署时配置选择具体后端
 # 默认使用 rusFS 对象存储配置

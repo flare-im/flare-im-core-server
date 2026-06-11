@@ -8,7 +8,7 @@ use utoipa::OpenApi;
 
 use super::admin_auth_middleware::admin_auth_middleware;
 use super::admin_handler;
-use flare_im_core::clients::GrpcClients;
+use flare_im_service_kit::clients::GrpcClients;
 
 #[allow(dead_code)]
 #[derive(OpenApi)]

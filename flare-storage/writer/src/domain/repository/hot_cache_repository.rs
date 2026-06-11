@@ -1,7 +1,7 @@
 //! 热数据缓存仓储（Port）- 使用领域 Message，不依赖 proto
 
 use crate::domain::model::Message;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 
 pub trait HotCacheRepository: Send + Sync {
     async fn store_hot(&self, ctx: &Ctx, message: &Message)

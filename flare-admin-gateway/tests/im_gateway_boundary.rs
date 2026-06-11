@@ -1,4 +1,4 @@
-use flare_im_core::gateway::{GatewayEnvScope, GatewaySettings};
+use flare_im_service_kit::gateway::{GatewayEnvScope, GatewaySettings};
 use flare_server_core::{
     context::Ctx,
     http::{ContextFromHeaders, HttpApiError},
@@ -11,8 +11,8 @@ fn gateway_shared_contracts_live_in_im_core_and_server_core() {
     let error_type = std::any::type_name::<HttpApiError>();
     let ctx_type = std::any::type_name::<Ctx>();
 
-    assert!(settings_type.starts_with("flare_im_core::gateway::"));
-    assert!(scope_type.starts_with("flare_im_core::gateway::"));
+    assert!(settings_type.starts_with("flare_im_service_kit::gateway::"));
+    assert!(scope_type.starts_with("flare_im_service_kit::gateway::"));
     assert!(error_type.starts_with("flare_core_transport::http::"));
     assert!(ctx_type.starts_with("alloc::sync::Arc<flare_core_base::context::core::Context>"));
 }

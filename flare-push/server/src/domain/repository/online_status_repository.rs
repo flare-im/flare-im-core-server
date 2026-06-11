@@ -7,7 +7,7 @@
 //! - Infrastructure 层提供具体实现（查询 Redis）
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 use crate::domain::model::DeviceInfo;

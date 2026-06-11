@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 全链路通话日志诊断：
-# - orchestrator: CallSignal invite/accept/renegotiate/ice/hangup 时序、transport 完整性
+# - signaling/capability: CallSignal invite/accept/renegotiate/ice/hangup 时序、transport 完整性
 # - capability: rtc.call.* 调度、SFU 房间/成员事件（按时间窗）
 #
 # 用法:
@@ -88,7 +88,6 @@ suspicious_ips = Counter()
 room_ids = Counter()
 ws_bases = Counter()
 conversations = Counter()
-degraded_count = 0
 reneg_offer = 0
 reneg_answer = 0
 
@@ -117,8 +116,6 @@ with orch_path.open("r", errors="ignore") as f:
         else:
             transport_non_none_by_signal[signal] += 1
 
-        if "flare_rtc_enrich" in line and "degraded" in line:
-            degraded_count += 1
         if signal == "Renegotiate":
             if ext_offer_re.search(line):
                 reneg_offer += 1
@@ -221,7 +218,6 @@ print("[Orchestrator]")
 print(f"- raw_call_lines:            {raw_lines}")
 print(f"- dedup_call_events:         {len(timeline)}")
 print(f"- conversations:             {', '.join(conversations.keys()) if conversations else '(none)'}")
-print(f"- sfu_enrich_degraded_ext:   {degraded_count}")
 print()
 
 if signal_counts:
@@ -298,7 +294,7 @@ total_none = sum(transport_none_by_signal.values())
 if raw_lines > 0:
     if total_transport_observed > 0 and total_none / total_transport_observed > 0.8:
         reasons.append(
-            "CallSignal transport 大量为 None：优先检查 MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE 是否开启。"
+            "CallSignal transport 大量为 None：优先检查 signaling gateway 的 capability route hint、capability 服务与媒体插件健康状态。"
         )
     if signal_counts.get("Renegotiate", 0) == 0:
         reasons.append("缺少 Renegotiate（SDP）事件：优先检查客户端 onCallSignal 分发与 p2pWebRtc 协商触发。")

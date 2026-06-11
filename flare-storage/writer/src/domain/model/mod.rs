@@ -12,7 +12,7 @@ pub use event::{
 };
 pub use message::{Attachment, Message};
 
-use flare_im_core::utils::TimelineMetadata;
+use flare_im_contracts::utils::TimelineMetadata;
 
 #[derive(Debug, Clone)]
 pub struct PreparedMessage {

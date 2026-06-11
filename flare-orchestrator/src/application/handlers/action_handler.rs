@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{DeleteType as ProtoDeleteType, MarkType, ReactionAction};
 use tracing::instrument;
 

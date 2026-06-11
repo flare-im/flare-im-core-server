@@ -1,5 +1,5 @@
-use flare_im_core::config::FlareAppConfig;
-use flare_im_core::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::config::FlareAppConfig;
 use flare_server_core::error::Result;
 use std::env;
 
@@ -28,7 +28,9 @@ impl RouteConfig {
                 "svid.im".to_string(),
                 env::var("BUSINESS_SERVICE_IM_ENDPOINT")
                     .or_else(|_| env::var("ORCHESTRATOR_SERVICE"))
-                    .unwrap_or_else(|_| flare_im_core::service_names::ORCHESTRATOR.to_string()),
+                    .unwrap_or_else(|_| {
+                        flare_im_contracts::service_names::ORCHESTRATOR.to_string()
+                    }),
             ),
             (
                 "svid.customer".to_string(),
@@ -47,7 +49,7 @@ impl RouteConfig {
             default_services: if default.is_empty() {
                 vec![(
                     "svid.im".to_string(),
-                    flare_im_core::service_names::ORCHESTRATOR.to_string(),
+                    flare_im_contracts::service_names::ORCHESTRATOR.to_string(),
                 )]
             } else {
                 default

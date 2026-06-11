@@ -17,9 +17,8 @@ flare-server-core = { workspace = true, features = ["nats", "kafka"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-core = { path = "../..", features = ["tracing"] }
-mongodb = { workspace = true }
-bson = { workspace = true }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

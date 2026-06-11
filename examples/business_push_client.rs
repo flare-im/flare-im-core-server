@@ -1,6 +1,6 @@
 //! # 业务系统推送消息示例
 //!
-//! 这是一个业务系统接入示例，演示如何通过 `flare-core-gateway` 给所有在线用户推送消息。
+//! 这是一个业务系统接入示例，演示如何通过 `flare-api-gateway` 给所有在线用户推送消息。
 //! 所有消息都发送到同一个聊天室（conversation_id: "chatroom"），只支持文本消息。
 //!
 //! ## 使用方法
@@ -21,7 +21,7 @@
 //!
 //! ## 工作原理
 //!
-//! 1. **连接 Core Gateway**：业务系统通过 gRPC 连接到 `flare-core-gateway`
+//! 1. **连接 Core Gateway**：业务系统通过 gRPC 连接到 `flare-api-gateway`
 //! 2. **查询在线状态**：Core Gateway 查询 `signaling-online` 获取用户在线状态和网关信息
 //! 3. **跨地区路由**：根据用户的 `gateway_id`，路由到对应的 `access-gateway`
 //! 4. **推送消息**：Access Gateway 通过长连接推送消息给客户端

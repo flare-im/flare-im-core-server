@@ -50,6 +50,7 @@ cleanup_launchctl_dev_labels() {
             flare-signaling-route \
             flare-capability \
             flare-conversation \
+            flare-message-ingest \
             flare-message-orchestrator \
             flare-storage-writer \
             flare-storage-reader \
@@ -57,7 +58,7 @@ cleanup_launchctl_dev_labels() {
             flare-push-server \
             flare-push-worker \
             flare-media \
-            flare-core-gateway \
+            flare-api-gateway \
             flare-access-gateway \
             flare-access-gateway-beijing-1 \
             flare-access-gateway-shanghai-1; do
@@ -221,6 +222,7 @@ REQUIRED_CORE_BINARIES=(
     flare-signaling-route
     flare-capability
     flare-conversation
+    flare-message-ingest
     flare-orchestrator
     flare-storage-writer
     flare-storage-reader
@@ -228,7 +230,7 @@ REQUIRED_CORE_BINARIES=(
     flare-push-server
     flare-push-worker
     flare-media
-    flare-core-gateway
+    flare-api-gateway
     flare-signaling-gateway
 )
 
@@ -381,6 +383,7 @@ CORE_SERVICES=(
     "signaling-route"
     "capability"
     "conversation"
+    "message-ingest"
     "message-orchestrator"
     "storage-writer"
     "storage-reader"
@@ -533,15 +536,16 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 
 # 定义服务启动顺序（按照依赖关系排序）
 # 1. 基础服务：signaling-online（在线状态服务）、signaling-route（路由目录服务）
-# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_core::service_names::CAPABILITY；包与二进制名均为 flare-capability）
+# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_contracts::service_names::CAPABILITY；包与二进制名均为 flare-capability）
 # 3. 会话服务：conversation（会话管理服务）
-# 4. 消息编排：message-orchestrator（消息编排服务）
-# 5. 存储服务：storage-writer（消息持久化）、storage-reader（消息查询）
-# 6. 同步编排：sync-orchestrator（统一 SyncService 入口）
-# 7. 推送服务：push-server（推送服务）、push-worker（推送工作器）
-# 8. 媒资服务：media（媒资服务）
-# 9. 核心网关：core-gateway（业务系统统一入口）
-# 10. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
+# 4. 消息摄入：message-ingest（发送 gRPC、seq、WAL、Pre/PostSend Hook）
+# 5. 消息编排：message-orchestrator（主消息流 fanout、消息操作事件）
+# 6. 存储服务：storage-writer（消息持久化）、storage-reader（消息查询）
+# 7. 同步编排：sync-orchestrator（统一 SyncService 入口）
+# 8. 推送服务：push-server（推送服务）、push-worker（推送工作器）
+# 9. 媒资服务：media（媒资服务）
+# 10. 核心网关：core-gateway（业务系统统一入口）
+# 11. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
 
 # 启动服务（后台运行）
 for service in "${CORE_SERVICES[@]}"; do
@@ -589,12 +593,14 @@ for service in "${CORE_SERVICES[@]}"; do
             BIN_NAME="flare-conversation"
             ENV_VARS=""
             ;;
+        "message-ingest")
+            PACKAGE="flare-message-ingest"
+            BIN_NAME="flare-message-ingest"
+            ENV_VARS=""
+            ;;
         "message-orchestrator")
             PACKAGE="flare-orchestrator"
             BIN_NAME="flare-orchestrator"
-            # RTC bridge 懒连接 capability，不阻塞启动；媒体后端需单独启动 strom-sfu。
-            export MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE="${MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE:-1}"
-            export MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI="${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-http://127.0.0.1:50110}"
             ENV_VARS=""
             ;;
         "storage-writer")
@@ -633,17 +639,20 @@ for service in "${CORE_SERVICES[@]}"; do
             ENV_VARS=""
             ;;
         "core-gateway")
-            PACKAGE="flare-core-gateway"
-            BIN_NAME="flare-core-gateway"
+            PACKAGE="flare-api-gateway"
+            BIN_NAME="flare-api-gateway"
+            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-50182}
             MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-50181}
             CONVERSATION_PORT=${CONVERSATION_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/conversation.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             CONVERSATION_PORT=${CONVERSATION_PORT:-50090}
             MEDIA_PORT=${MEDIA_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/media.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             MEDIA_PORT=${MEDIA_PORT:-60081}
-            export GRPC_MESSAGE_STATIC_FALLBACK="${GRPC_MESSAGE_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_ORCH_PORT}}"
-            export GRPC_CONVERSATION_STATIC_FALLBACK="${GRPC_CONVERSATION_STATIC_FALLBACK:-http://127.0.0.1:${CONVERSATION_PORT}}"
-            export GRPC_MEDIA_STATIC_FALLBACK="${GRPC_MEDIA_STATIC_FALLBACK:-http://127.0.0.1:${MEDIA_PORT}}"
+            export FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK="${FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_INGEST_PORT}}"
+            export FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK="${FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_ORCH_PORT}}"
+            export FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK="${FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK:-http://127.0.0.1:${CONVERSATION_PORT}}"
+            export FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK="${FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK:-http://127.0.0.1:${MEDIA_PORT}}"
             ENV_VARS="set"
             ;;
         *)
@@ -655,8 +664,12 @@ for service in "${CORE_SERVICES[@]}"; do
     # 设置 PID 文件路径
     pid_file="$LOGS_DIR/flare-$service.pid"
     
-    # message-orchestrator：启动前确保 50181 未被残留进程占用
-    if [ "$service" = "message-orchestrator" ]; then
+    # message-ingest/message-orchestrator：启动前确保端口未被残留进程占用
+    if [ "$service" = "message-ingest" ]; then
+        ingest_port=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        ingest_port=${ingest_port:-50182}
+        free_listen_port "$ingest_port"
+    elif [ "$service" = "message-orchestrator" ]; then
         orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
         orch_port=${orch_port:-50181}
         free_listen_port "$orch_port"
@@ -680,14 +693,13 @@ for service in "${CORE_SERVICES[@]}"; do
     [ -n "${SIGNALING_ROUTE_SERVICE_HOST:-}" ] && env_args+=("SIGNALING_ROUTE_SERVICE_HOST=$SIGNALING_ROUTE_SERVICE_HOST")
     [ -n "${SIGNALING_ROUTE_SERVICE_PORT:-}" ] && env_args+=("SIGNALING_ROUTE_SERVICE_PORT=$SIGNALING_ROUTE_SERVICE_PORT")
     [ -n "${ROUTE_SERVICE_ENDPOINT:-}" ] && env_args+=("ROUTE_SERVICE_ENDPOINT=$ROUTE_SERVICE_ENDPOINT")
-    [ -n "${MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE:-}" ] && env_args+=("MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE=$MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE")
-    [ -n "${MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI:-}" ] && env_args+=("MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI=$MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI")
     [ -n "${SYNC_ORCHESTRATOR_HOST:-}" ] && env_args+=("SYNC_ORCHESTRATOR_HOST=$SYNC_ORCHESTRATOR_HOST")
     [ -n "${SYNC_ORCHESTRATOR_PORT:-}" ] && env_args+=("SYNC_ORCHESTRATOR_PORT=$SYNC_ORCHESTRATOR_PORT")
     [ -n "${ACCESS_GATEWAY_GRPC_ENDPOINT:-}" ] && env_args+=("ACCESS_GATEWAY_GRPC_ENDPOINT=$ACCESS_GATEWAY_GRPC_ENDPOINT")
-    [ -n "${GRPC_MESSAGE_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_MESSAGE_STATIC_FALLBACK=$GRPC_MESSAGE_STATIC_FALLBACK")
-    [ -n "${GRPC_CONVERSATION_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_CONVERSATION_STATIC_FALLBACK=$GRPC_CONVERSATION_STATIC_FALLBACK")
-    [ -n "${GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("GRPC_MEDIA_STATIC_FALLBACK=$GRPC_MEDIA_STATIC_FALLBACK")
+    [ -n "${FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK=$FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK")
+    [ -n "${FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK=$FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK")
+    [ -n "${FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK=$FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK")
+    [ -n "${FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK=$FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK")
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）
     start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" /usr/bin/env "${env_args[@]}" "$CARGO_TARGET_BIN_DIR/$BIN_NAME"
@@ -698,14 +710,12 @@ for service in "${CORE_SERVICES[@]}"; do
         unset SIGNALING_ONLINE_SERVICE_HOST SIGNALING_ONLINE_SERVICE_PORT ONLINE_SERVICE_ENDPOINT
     elif [ "$service" = "signaling-route" ]; then
         unset SIGNALING_ROUTE_SERVICE_HOST SIGNALING_ROUTE_SERVICE_PORT ROUTE_SERVICE_ENDPOINT
-    elif [ "$service" = "message-orchestrator" ]; then
-        unset MESSAGE_ORCHESTRATOR_CAPABILITY_RTC_BRIDGE MESSAGE_ORCHESTRATOR_CAPABILITY_GRPC_URI
     elif [ "$service" = "sync-orchestrator" ]; then
         unset SYNC_ORCHESTRATOR_HOST SYNC_ORCHESTRATOR_PORT
     elif [ "$service" = "push-worker" ]; then
         unset ACCESS_GATEWAY_GRPC_ENDPOINT
     elif [ "$service" = "core-gateway" ]; then
-        unset GRPC_MESSAGE_STATIC_FALLBACK GRPC_CONVERSATION_STATIC_FALLBACK GRPC_MEDIA_STATIC_FALLBACK
+        unset FLARE_CORE_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK FLARE_CORE_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK FLARE_CORE_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK FLARE_CORE_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK
     fi
     echo $service_pid > "$pid_file"
     sleep 3

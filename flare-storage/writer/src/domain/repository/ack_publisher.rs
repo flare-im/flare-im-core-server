@@ -6,7 +6,7 @@
 //!
 //! 典型实现：MQ（如 MqAckPublisher），消费端为网关或推送服务。
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 use crate::domain::events::AckEvent;

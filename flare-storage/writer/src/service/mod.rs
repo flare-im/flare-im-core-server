@@ -1,10 +1,8 @@
 //! 服务模块 - 包含服务启动、注册和管理相关功能
 
-use flare_im_core::service_names::STORAGE_WRITER;
+use flare_im_contracts::service_names::STORAGE_WRITER;
 use flare_server_core::error::Result;
 use tracing::info;
-
-use flare_core_runtime::ServiceRuntime;
 
 mod wire;
 
@@ -16,10 +14,13 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        use flare_im_core::load_config;
-
-        // 加载应用配置
-        let app_config = load_config(Some("config"));
+        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let service_config = app_config.storage_writer_service();
+        let runtime = flare_im_service_kit::build_background_service_runtime(
+            app_config,
+            &service_config.runtime,
+            STORAGE_WRITER,
+        );
 
         // 使用 Wire 风格的依赖注入构建应用上下文
         let context = self::wire::initialize(app_config).await?;
@@ -27,25 +28,36 @@ impl ApplicationBootstrap {
         info!("ApplicationBootstrap created successfully");
 
         // 运行服务
-        Self::run_with_context(context).await
+        Self::run_with_runtime(context, runtime).await
     }
 
     /// 运行服务（带应用上下文）
     ///
     /// 使用 ServiceRuntime 管理消费者生命周期，支持优雅停机
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
-        info!(backend = %context.config.mq_backend, "Starting Storage Writer (MQ consumer via ServiceRuntime)");
+        Self::run_with_runtime(
+            context,
+            flare_im_service_kit::background_service_runtime(STORAGE_WRITER),
+        )
+        .await
+    }
 
-        let mut runtime = ServiceRuntime::mq_consumer()
-            .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown);
+    async fn run_with_runtime(
+        context: ApplicationContext,
+        mut runtime: flare_core_runtime::ServiceRuntime,
+    ) -> Result<()> {
+        info!(backend = %context.config.mq_backend, "Starting Storage Writer (MQ consumer via ServiceRuntime)");
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();
             runtime = runtime.add_spawn_with_shutdown(
                 "storage-writer-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_core::metrics::serve_prometheus_metrics(metrics_config, shutdown_rx)
-                        .await
+                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                        metrics_config,
+                        shutdown_rx,
+                    )
+                    .await
                 },
             );
         }
@@ -117,7 +129,7 @@ impl ApplicationBootstrap {
             runtime = runtime.add_task(Box::new(task));
         }
 
-        flare_im_core::health::attach_runtime_health_checks(runtime, STORAGE_WRITER)
+        runtime
             .run()
             .await
             .map_err(flare_server_core::error::FlareError::from)

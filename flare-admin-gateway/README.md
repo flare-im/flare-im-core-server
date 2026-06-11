@@ -6,7 +6,7 @@
 
 | 服务 | 暴露面 | 主要职责 |
 |------|--------|----------|
-| `flare-core-gateway` | public/third-party HTTP API | 消息、会话、在线、媒体等业务接入 API |
+| `flare-api-gateway` | public/third-party HTTP API | 消息、会话、在线、媒体等业务接入 API |
 | `flare-admin-gateway` | internal Admin HTTP API | 管理查询、导出任务、网关运维快照、能力发现 |
 | 业务管理后台 | 业务侧 | UI、角色、审批、菜单、管理员生命周期 |
 

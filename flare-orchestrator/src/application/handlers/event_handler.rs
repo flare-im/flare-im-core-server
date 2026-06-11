@@ -12,11 +12,10 @@
 
 use std::sync::Arc;
 
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{Event, EventType};
 use tracing::instrument;
 
-use crate::application::extension::ExtensionOrchestrator;
 use crate::domain::{PersistenceMode, service::EventDomainService};
 use flare_server_core::error::Result;
 
@@ -25,18 +24,12 @@ use flare_server_core::error::Result;
 pub struct EventHandler {
     /// 事件领域服务
     event_domain_service: Arc<EventDomainService>,
-    /// 扩展编排器（统一 Hook / Plugin 扩展策略）
-    extension_orchestrator: Arc<ExtensionOrchestrator>,
 }
 
 impl EventHandler {
-    pub fn new(
-        event_domain_service: Arc<EventDomainService>,
-        extension_orchestrator: Arc<ExtensionOrchestrator>,
-    ) -> Self {
+    pub fn new(event_domain_service: Arc<EventDomainService>) -> Self {
         Self {
             event_domain_service,
-            extension_orchestrator,
         }
     }
 
@@ -127,11 +120,9 @@ impl EventHandler {
     /// 处理通用事件
     ///
     /// # 编排流程
-    /// 1. 校验事件（含 `EVENT_CALL_SIGNAL` RTC 前置条件）
-    /// 2. 通话信令：`ExtensionOrchestrator::enrich_event_before_persist` → `CallCapabilityBridge` →
-    ///    `flare-capability` `Dispatch` 对齐媒体扩展后端（仅 `EVENT_CALL_SIGNAL`；失败则按策略降级并在 `ext` 写入 `flare_rtc_enrich`）
-    /// 3. 分配序列号
-    /// 4. 推送事件
+    /// 1. 校验事件
+    /// 2. 分配序列号
+    /// 3. 推送事件
     ///
     /// # 参数
     /// - `ctx`: 上下文
@@ -147,29 +138,19 @@ impl EventHandler {
         event_id = %event.event_id,
         conversation_id = %event.conversation_id,
     ))]
-    async fn handle_general_event(
-        &self,
-        ctx: &Ctx,
-        tenant_id: &str,
-        mut event: Event,
-    ) -> Result<()> {
-        // 1. 校验事件（避免无效信令仍命中媒体能力分发）
+    async fn handle_general_event(&self, ctx: &Ctx, tenant_id: &str, event: Event) -> Result<()> {
+        // 1. 校验事件
         self.event_domain_service
             .validate_event(ctx, tenant_id, &event)
             .await?;
 
-        // 2. 通话信令：经 `flare-capability` enrich 后再落库/推送
-        self.extension_orchestrator
-            .enrich_event_before_persist(ctx, tenant_id, &mut event)
-            .await?;
-
-        // 3. 分配序列号
+        // 2. 分配序列号
         let event_with_seq = self
             .event_domain_service
             .allocate_seq(ctx, tenant_id, event)
             .await?;
 
-        // 4. 推送事件
+        // 3. 推送事件
         self.event_domain_service
             .push_event(ctx, event_with_seq.clone(), PersistenceMode::Auto)
             .await?;

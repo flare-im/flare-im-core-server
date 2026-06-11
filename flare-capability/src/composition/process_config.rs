@@ -1,6 +1,6 @@
 //! 进程级 **启动配置**（Composition Root 输入 DTO，非领域模型）。
 //!
-//! 与 `flare_im_core::config::CapabilityServiceConfig`（全局应用配置中的片段）区分：此处仅描述 **flare-capability 二进制** 的本地覆盖项。
+//! 与 `flare_im_service_kit::config::CapabilityServiceConfig`（全局应用配置中的片段）区分：此处仅描述 **flare-capability 二进制** 的本地覆盖项。
 
 /// `flare-capability` 进程启动配置（Hook 配置源、执行模式等）。
 #[derive(Debug, Clone)]

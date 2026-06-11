@@ -1,12 +1,9 @@
 //! 应用启动器 - 负责依赖注入和服务启动
 
-use std::net::SocketAddr;
-
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_core_runtime::ServiceRuntime;
-use flare_im_core::service_names::SIGNALING_ONLINE;
+use flare_im_contracts::service_names::SIGNALING_ONLINE;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 应用启动器
@@ -15,23 +12,16 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        use flare_im_core::{ServiceHelper, load_config};
-
-        // 加载应用配置
-        let app_config = load_config(Some("./config"));
+        let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.signaling_online_service();
-
-        info!("Parsing server address...");
-        let address: SocketAddr =
-            ServiceHelper::parse_server_addr(app_config, &service_config.runtime, SIGNALING_ONLINE)
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::InvalidParameter,
-                        "invalid signaling online server address",
-                    )
-                })?;
-        info!(address = %address, "Server address parsed successfully");
+        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+            app_config,
+            &service_config.runtime,
+            SIGNALING_ONLINE,
+            "SIGNALING_ONLINE",
+            50061,
+        )?;
+        info!(address = %runtime_plan.address, "Server address parsed successfully");
 
         // 使用 Wire 风格的依赖注入构建应用上下文
         let context = wire::initialize(app_config).await?;
@@ -39,14 +29,19 @@ impl ApplicationBootstrap {
         info!("ApplicationBootstrap created successfully");
 
         // 运行服务
-        Self::run_with_context(context, address).await
+        Self::run_with_context(context, runtime_plan).await
     }
 
     /// 运行服务（带应用上下文）
-    async fn run_with_context(context: ApplicationContext, address: SocketAddr) -> Result<()> {
+    async fn run_with_context(
+        context: ApplicationContext,
+        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+    ) -> Result<()> {
         use flare_grpc_proto::signaling::online::online_service_server::OnlineServiceServer;
         use tonic::transport::Server;
 
+        let address = runtime_plan.address;
+        let service_name = runtime_plan.service_name.clone();
         let online_handler = context.online_handler.clone();
 
         info!(
@@ -55,39 +50,33 @@ impl ApplicationBootstrap {
             "Starting Signaling Online gRPC service..."
         );
 
-        // 使用 ServiceRuntime 管理服务生命周期
         let address_clone = address;
-        let runtime = flare_im_core::health::attach_runtime_health_checks(
-            ServiceRuntime::new(SIGNALING_ONLINE)
-                .with_address(address)
-                .with_health_failure_action(
-                    flare_core_runtime::HealthFailureAction::GracefulShutdown,
-                )
-                .add_spawn_with_shutdown("signaling-online-grpc", move |shutdown_rx| async move {
-                    // 使用 ContextLayer 包裹 Service
-                    use flare_server_core::middleware::ContextLayer;
+        let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
+            "signaling-online-grpc",
+            move |shutdown_rx| async move {
+                // 使用 ContextLayer 包裹 Service
+                use flare_server_core::middleware::ContextLayer;
 
-                    let online_service = ContextLayer::new()
-                        .allow_missing()
-                        .layer(OnlineServiceServer::new(online_handler));
+                let online_service = ContextLayer::new()
+                    .allow_missing()
+                    .layer(OnlineServiceServer::new(online_handler));
 
-                    Server::builder()
-                        .add_service(online_service)
-                        .serve_with_shutdown(address_clone, async {
-                            let _ = shutdown_rx.await;
-                        })
-                        .await
-                        .map_err(|e| format!("gRPC server error: {}", e).into())
-                }),
-            SIGNALING_ONLINE,
+                Server::builder()
+                    .add_service(online_service)
+                    .serve_with_shutdown(address_clone, async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .map_err(|e| format!("gRPC server error: {}", e).into())
+            },
         );
 
         // 运行服务（带服务注册）
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_core::discovery::register_runtime_service_only(
-                        SIGNALING_ONLINE,
+                    flare_im_service_kit::discovery::register_runtime_service_only(
+                        &service_name,
                         addr,
                         None,
                     )

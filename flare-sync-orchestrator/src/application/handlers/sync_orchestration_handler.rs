@@ -8,7 +8,7 @@ use std::sync::Arc;
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ListConversationParticipantsRequest, UpdateCursorRequest,
 };
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::Message;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::sync_res::Payload as SyncResPayload;

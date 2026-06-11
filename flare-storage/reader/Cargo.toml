@@ -17,7 +17,8 @@ flare-server-core = { workspace = true, features = ["grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-core = { path = "../.." }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -30,7 +31,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 prost-types = { workspace = true }
 prost = { workspace = true }
-log = { workspace = true }
+# sqlx ConnectOptions::log_statements 的参数类型来自 log crate，仅此一处使用
+log = "0.4"
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json"] }
 redis = { workspace = true }
 base64 = { workspace = true }

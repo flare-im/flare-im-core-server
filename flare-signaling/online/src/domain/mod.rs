@@ -1,7 +1,7 @@
 //! 领域层模块
 //!
 //! 与 flare-storage 一致：model、repository、service；online 扩展 aggregate、event、value_object。
-//! connection_event_publisher 与 flare_im_core Connection BC 对齐，可选发布 ConnectionEvent。
+//! connection_event_publisher 与 flare_im_contracts Connection BC 对齐，可选发布 ConnectionEvent。
 
 pub mod aggregate;
 pub mod connection_event_publisher;

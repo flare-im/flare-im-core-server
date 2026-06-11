@@ -3,7 +3,7 @@
 //! Infrastructure 层实现，依赖在线状态仓储。
 
 use async_trait::async_trait;
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{PushEnvelope, PushTargetType};
 use flare_server_core::error::Result;
 use std::sync::Arc;

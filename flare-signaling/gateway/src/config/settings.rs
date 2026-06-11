@@ -3,10 +3,14 @@
 //! 连接与稳定性相关项（max_connections、heartbeat、auth_timeout、send_timeout）对接 flare-core
 //! ServerConfig，便于扩容连接数与调优消息收发稳定性；可通过环境变量覆盖。
 
-use flare_im_core::config::{FlareAppConfig, RedisPoolConfig, TrustedTokenIssuerConfig};
-use flare_im_core::gateway::require_secure_token_secret;
-use flare_im_core::utils::normalize_tenant_id;
-use flare_server_core::error::Result;
+use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::config::{
+    AccessGatewayServiceConfig, AuthProviderConfig, FlareAppConfig, RedisPoolConfig,
+    TrustedTokenIssuerConfig,
+};
+use flare_im_service_kit::gateway::require_secure_token_secret;
+use flare_server_core::auth::AuthProviderMode;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
 #[derive(Debug, Clone)]
 pub struct AccessGatewayConfig {
@@ -17,7 +21,8 @@ pub struct AccessGatewayConfig {
     pub default_svid: String,      // 默认 SVID（新增，默认 "svid.im"）
     pub use_route_service: bool,   // 是否使用 Route 服务（新增，默认 true）
     pub default_tenant_id: String, // 默认租户ID（新增，默认 "0"）
-    pub token_secret: String,
+    pub auth_provider: AuthProviderConfig,
+    pub token_secret: Option<String>,
     pub token_issuer: String,
     pub token_ttl_seconds: u64,
     pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
@@ -74,8 +79,7 @@ impl AccessGatewayConfig {
             .clone()
             .unwrap_or_else(|| "push-server".to_string());
 
-        // Route 服务配置（新增）
-        // Route 服务配置（新增）
+        // Route 服务配置
         let route_service = service.route_service.clone();
 
         // 默认 SVID（新增）
@@ -102,11 +106,15 @@ impl AccessGatewayConfig {
             service.use_route_service
         };
 
-        let token_secret = require_secure_token_secret(
-            "ACCESS_GATEWAY_TOKEN_SECRET",
-            service.token_secret.as_deref(),
-            "services.access_gateway.token_secret",
-        )?;
+        let auth_provider = resolve_auth_provider(&service)?;
+        let token_secret = match auth_provider.mode {
+            AuthProviderMode::CoreJwt => Some(require_secure_token_secret(
+                "ACCESS_GATEWAY_TOKEN_SECRET",
+                service.token_secret.as_deref(),
+                "services.access_gateway.token_secret",
+            )?),
+            AuthProviderMode::HttpHook => None,
+        };
 
         let token_issuer = service
             .token_issuer
@@ -180,6 +188,7 @@ impl AccessGatewayConfig {
             default_svid,
             use_route_service,
             default_tenant_id,
+            auth_provider,
             token_secret,
             token_issuer,
             token_ttl_seconds,
@@ -199,4 +208,68 @@ impl AccessGatewayConfig {
             send_timeout_secs,
         })
     }
+}
+
+fn resolve_auth_provider(service: &AccessGatewayServiceConfig) -> Result<AuthProviderConfig> {
+    let mut auth = service.auth.clone();
+
+    if let Ok(mode) = std::env::var("ACCESS_GATEWAY_AUTH_MODE") {
+        auth.mode = mode
+            .parse::<AuthProviderMode>()
+            .map_err(|err| config_error(format!("invalid ACCESS_GATEWAY_AUTH_MODE: {err}")))?;
+    }
+    if let Ok(hook_url) = std::env::var("ACCESS_GATEWAY_AUTH_HOOK_URL") {
+        auth.hook_url = non_empty(hook_url);
+    }
+    if let Ok(timeout_ms) = std::env::var("ACCESS_GATEWAY_AUTH_HOOK_TIMEOUT_MS") {
+        auth.hook_timeout_ms = timeout_ms.parse::<u64>().map_err(|err| {
+            config_error(format!(
+                "invalid ACCESS_GATEWAY_AUTH_HOOK_TIMEOUT_MS: {err}"
+            ))
+        })?;
+    }
+    if let Ok(secret_header) = std::env::var("ACCESS_GATEWAY_AUTH_HOOK_SECRET_HEADER") {
+        auth.hook_secret_header = secret_header.trim().to_string();
+    }
+    if let Ok(secret) = std::env::var("ACCESS_GATEWAY_AUTH_HOOK_SECRET") {
+        auth.hook_secret = non_empty(secret);
+    }
+
+    if auth.mode == AuthProviderMode::HttpHook {
+        let hook_url = auth.hook_url.as_deref().ok_or_else(|| {
+            config_error(
+                "services.access_gateway.auth.hook_url is required when auth.mode=http_hook",
+            )
+        })?;
+        if !(hook_url.starts_with("http://") || hook_url.starts_with("https://")) {
+            return Err(config_error(
+                "services.access_gateway.auth.hook_url must be http:// or https://",
+            ));
+        }
+        if auth.hook_timeout_ms == 0 {
+            return Err(config_error(
+                "services.access_gateway.auth.hook_timeout_ms cannot be 0",
+            ));
+        }
+        if auth.hook_secret_header.trim().is_empty() {
+            return Err(config_error(
+                "services.access_gateway.auth.hook_secret_header cannot be empty",
+            ));
+        }
+    }
+
+    Ok(auth)
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn config_error(reason: impl Into<String>) -> FlareError {
+    ErrorBuilder::new(ErrorCode::ConfigurationError, reason).build_error()
 }

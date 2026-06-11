@@ -8,8 +8,6 @@
 //! - 默认值：合理的默认值，减少样板代码
 
 pub mod event_builder;
-pub mod hook_builder;
-pub mod push_envelope_builder;
 
 pub use event_builder::{
     EventBuilder, build_burn_scheduled_event, build_burned_event, build_custom_event,
@@ -17,9 +15,8 @@ pub use event_builder::{
     build_read_receipt_event, build_recall_event, build_unmark_event, build_unpin_event,
 };
 
-pub use hook_builder::*;
-
-pub use push_envelope_builder::{
+pub use flare_im_message_pipeline::hook::builder::*;
+pub use flare_im_message_pipeline::{
     PushEnvelopeBuilder, build_ack_push, build_custom_push, build_notification_push,
     build_system_push,
 };

@@ -5,11 +5,11 @@ use std::sync::Arc;
 use flare_server_core::error::Result;
 use flare_server_core::mq::NatsConsumerConfig;
 
-use flare_im_core::discovery::{
+use flare_im_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
+use flare_im_service_kit::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
 };
-use flare_im_core::metrics::PushWorkerMetrics;
-use flare_im_core::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
+use flare_im_service_kit::metrics::PushWorkerMetrics;
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
@@ -17,6 +17,7 @@ use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use crate::application::GatewayPushExecutor;
 use crate::config::PushWorkerConfig;
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
+use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
 use crate::infrastructure::rpc::OnlineServiceClient;
 use crate::interface::messaging::offline_consumer::OfflinePushConsumerFactory;
 use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
@@ -28,7 +29,7 @@ pub struct ApplicationContext {
 }
 
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config));
 
@@ -69,8 +70,54 @@ pub async fn initialize(
 
     // 5. 创建 MessageHandler（直接实现，无适配器）
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
-    let offline_handler =
-        OfflinePushConsumerFactory::create_handler(dlq, config.offline_parking_capacity, metrics);
+
+    // 5.1 离线推送 outbox（厂商通道接入前的持久化暂存）；
+    //     连接失败/显式禁用时回退 DLQ/parking 路径并告警。
+    let offline_handler = match config.offline_outbox_redis_url.as_deref() {
+        Some(redis_url) => {
+            match RedisOfflineOutbox::connect(
+                redis_url,
+                config.offline_outbox_stream.clone(),
+                config.offline_outbox_maxlen,
+            )
+            .await
+            {
+                Ok(outbox) => {
+                    tracing::info!(
+                        stream = %config.offline_outbox_stream,
+                        maxlen = config.offline_outbox_maxlen,
+                        "offline push outbox enabled (Redis Stream)"
+                    );
+                    OfflinePushConsumerFactory::create_handler_with_delivery(
+                        dlq,
+                        Arc::new(outbox),
+                        config.offline_parking_capacity,
+                        metrics,
+                    )
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        redis = %redis_url,
+                        "offline push outbox unavailable; falling back to DLQ/parking path"
+                    );
+                    OfflinePushConsumerFactory::create_handler(
+                        dlq,
+                        config.offline_parking_capacity,
+                        metrics,
+                    )
+                }
+            }
+        }
+        None => {
+            tracing::warn!("offline push outbox disabled by config; tasks will go to DLQ/parking");
+            OfflinePushConsumerFactory::create_handler(
+                dlq,
+                config.offline_parking_capacity,
+                metrics,
+            )
+        }
+    };
 
     // 6. 配置 ConsumerConfig
     let consumer_cfg = ConsumerConfig::default()

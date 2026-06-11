@@ -9,7 +9,7 @@ use tracing::info;
 
 use flare_admin_gateway::interface::http::create_admin_router;
 use flare_core_runtime::ServiceRuntime;
-use flare_im_core::{
+use flare_im_service_kit::{
     CoreGatewayServiceConfig,
     clients::GrpcClients,
     gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
@@ -19,13 +19,13 @@ use flare_server_core::{TokenService, auth::build_token_validator};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let app_config = flare_im_core::load_config(Some("config"));
-    flare_im_core::tracing::init_tracing_from_config(Some(app_config.logging()));
+    let app_config = flare_im_service_kit::load_config(Some("config"));
+    flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
 
     let settings = GatewaySettings::from_env_for(GatewayEnvScope::Admin)?;
     let admin_config = app_config.admin_gateway_service();
     let core_config = app_config.core_gateway_service();
-    let address: SocketAddr = flare_im_core::ServiceHelper::parse_server_addr(
+    let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
         app_config,
         &admin_config.runtime,
         ADMIN_GATEWAY,
@@ -36,7 +36,8 @@ async fn main() -> Result<()> {
     info!("Connecting Admin Gateway to downstream gRPC services...");
     info!(
         storage_reader_service_url = %settings.grpc.storage_reader_service_url,
-        message_service_url = %settings.grpc.message_service_url,
+        message_ingest_service_url = %settings.grpc.message_ingest_service_url,
+        message_orchestrator_service_url = %settings.grpc.message_orchestrator_service_url,
         conversation_service_url = %settings.grpc.conversation_service_url,
         media_service_url = %settings.grpc.media_service_url,
         "Using downstream grpc endpoints for admin typed facade"
@@ -84,7 +85,7 @@ async fn main() -> Result<()> {
                 .layer(CorsLayer::permissive()),
         );
 
-    let runtime = flare_im_core::health::attach_runtime_health_checks(
+    let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
         ServiceRuntime::new(ADMIN_GATEWAY)
             .with_address(address)
             .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
@@ -105,17 +106,21 @@ async fn main() -> Result<()> {
     Ok(runtime
         .run_with_registration(|addr| {
             Box::pin(async move {
-                flare_im_core::discovery::register_runtime_service_only(ADMIN_GATEWAY, addr, None)
-                    .await
+                flare_im_service_kit::discovery::register_runtime_service_only(
+                    ADMIN_GATEWAY,
+                    addr,
+                    None,
+                )
+                .await
             })
         })
         .await?)
 }
 
 fn trusted_admin_issuers(
-    admin_config: &flare_im_core::AdminGatewayServiceConfig,
+    admin_config: &flare_im_service_kit::AdminGatewayServiceConfig,
     core_config: &CoreGatewayServiceConfig,
-) -> Vec<flare_im_core::config::TrustedTokenIssuerConfig> {
+) -> Vec<flare_im_service_kit::config::TrustedTokenIssuerConfig> {
     if admin_config.trusted_token_issuers.is_empty() {
         core_config.trusted_token_issuers.clone()
     } else {

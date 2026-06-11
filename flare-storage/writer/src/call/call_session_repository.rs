@@ -1,7 +1,7 @@
 //! 通话会话持久化（写侧）：trait + PostgreSQL 骨架实现。
 //!
-//! **说明**：行模型定义在本 crate，避免 `flare-storage-writer` → `flare-conversation` 环依赖；
-//! 字段与 `flare_conversation::domain::call::CallSession` 对齐，由应用层映射。
+//! **说明**：行模型定义在本 crate，避免 `flare-storage-writer` → `flare-call` 环依赖；
+//! 字段与 `flare_call::domain::CallSession` 对齐，由应用层映射。
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

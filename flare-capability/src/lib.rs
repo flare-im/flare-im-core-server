@@ -19,7 +19,7 @@
 //!
 //! **RTC 插件编排**实现位于 [`infrastructure::rtc`](crate::infrastructure::rtc)，crate 根再导出为 [`rtc`](crate::rtc) 以保持稳定路径。
 //!
-//! 编排器经 `flare_im_core::hooks` 的 gRPC 客户端调用本进程 **`HookPlugin`**；Hook 配置 CRUD 经 **`CapabilityService.Administer`**。
+//! 编排器经 `flare_im_hooks::hooks` 的 gRPC 客户端调用本进程 **`HookPlugin`**；Hook 配置 CRUD 经 **`CapabilityService.Administer`**。
 
 pub mod application;
 /// 进程组合根：依赖图与启动（原 `service` 模块）。
@@ -27,6 +27,8 @@ pub mod composition;
 pub mod domain;
 pub mod infrastructure;
 pub mod interface;
+
+pub use flare_im_capability_core as capability_core;
 
 /// RTC 插件编排（与 [`crate::infrastructure::rtc`] 同一模块，便于对外 `flare_capability::rtc::*`）。
 pub use infrastructure::rtc;

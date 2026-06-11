@@ -13,7 +13,10 @@ name = "flare-capability"
 path = "cmd/main.rs"
 
 [dependencies]
-flare-im-core = { path = ".." }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
+flare-im-hooks = { workspace = true }
+flare-im-capability-core = { workspace = true }
 flare-core-base = { path = "../../flare-server-core/flare-core-base" }
 # NOTE: 能力侧仅保留远端媒体控制 gRPC 适配；核心不内嵌具体媒体后端实现。
 flare-proto = { workspace = true }

@@ -1,7 +1,7 @@
 //! 命令处理器（编排层）- 轻量级，只负责编排领域服务
 
-use flare_im_core::Ctx;
-use flare_im_core::metrics::StorageWriterMetrics;
+use flare_im_contracts::Ctx;
+use flare_im_service_kit::metrics::StorageWriterMetrics;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use std::sync::Arc;
 use std::time::Instant;
@@ -222,8 +222,8 @@ mod tests {
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
         MessageIdempotencyRepository, WalCleanupRepository,
     };
-    use flare_im_core::message::Message;
-    use flare_im_core::utils::Context;
+    use flare_im_contracts::message::Message;
+    use flare_im_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

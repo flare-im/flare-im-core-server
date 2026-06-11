@@ -10,7 +10,7 @@ use crate::domain::capability::CapabilityError;
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 
 /// 从 metadata 取 `Ctx`；缺失时生成带新 `request_id` 的上下文（与 `ContextLayer::allow_missing` 配合）。
-pub fn ctx_allow_missing<T>(req: &Request<T>) -> flare_im_core::Ctx {
+pub fn ctx_allow_missing<T>(req: &Request<T>) -> flare_im_contracts::Ctx {
     flare_server_core::middleware::get_context(req)
         .cloned()
         .unwrap_or_else(|| {

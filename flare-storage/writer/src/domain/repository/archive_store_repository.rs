@@ -1,7 +1,7 @@
 //! 归档存储仓储（Port）- 使用领域类型，不依赖 proto
 
 use crate::domain::model::{Event, Message};
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 
 #[allow(clippy::too_many_arguments)]

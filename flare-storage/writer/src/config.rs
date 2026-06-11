@@ -3,12 +3,12 @@
 //! **架构落地**：消费 **TOPIC_MESSAGE_EVENTS**（统一事件流），
 //! 与 Orchestrator 单事件流对齐，处理 message.created 和 operation.* 事件。
 
-use flare_im_core::config::FlareAppConfig;
-use flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT;
-use flare_im_core::constants::topics::{
+use flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT;
+use flare_im_contracts::constants::topics::{
     TOPIC_MESSAGE_MAIN_DLQ, TOPIC_MESSAGE_STORAGE_RETRY_5S, TOPIC_PUSH_ACKS,
 };
-use flare_im_core::metrics::MetricsEndpointConfig;
+use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_service_kit::metrics::MetricsEndpointConfig;
 use flare_server_core::error::Result;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{

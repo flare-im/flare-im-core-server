@@ -13,3 +13,8 @@ metrics_enabled = true
 metrics_address = "0.0.0.0"
 metrics_port = 19186
 metrics_path = "/metrics"
+
+# 离线推送 outbox（Redis Stream 持久化暂存，厂商通道接入前不丢任务）:
+#   PUSH_WORKER_OFFLINE_REDIS_URL      默认取 [redis.push] profile 或 redis://127.0.0.1:6379；设为 off 禁用
+#   PUSH_WORKER_OFFLINE_OUTBOX_STREAM  默认 flare:im:push:offline:outbox
+#   PUSH_WORKER_OFFLINE_OUTBOX_MAXLEN  默认 100000（MAXLEN ~ 近似裁剪）

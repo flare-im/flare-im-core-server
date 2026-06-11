@@ -1,0 +1,23 @@
+[package]
+name = "flare-im-ack"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "flare_im_ack"
+path = "src/lib.rs"
+
+[dependencies]
+dashmap = "6.0"
+prometheus = { workspace = true }
+redis = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zstd = "0.13"
+
+[lints.rust]
+async_fn_in_trait = "allow"
+

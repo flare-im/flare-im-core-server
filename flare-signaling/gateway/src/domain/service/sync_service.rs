@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use flare_core::common::error::{FlareError, Result};
-use flare_im_core::Ctx;
+use flare_im_contracts::Ctx;
 use flare_proto::common::{Sync, SyncRes};
 
 use crate::domain::ports::ISyncPort;

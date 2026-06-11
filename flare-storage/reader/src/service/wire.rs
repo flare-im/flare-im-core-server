@@ -36,7 +36,7 @@ where
 /// # 返回
 /// * `ApplicationContext` - 构建好的应用上下文
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext<MessageStorageType>> {
     // 1. 加载存储读取器配置
     let config = Arc::new(

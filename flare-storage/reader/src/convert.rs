@@ -1,11 +1,11 @@
 //! Proto 与领域模型互转（**仅用于 interface 层**，application/domain/infrastructure 不依赖 proto）
-//! Message 与 proto 互转统一使用 flare_im_core::message
+//! Message 与 proto 互转统一使用 flare_im_contracts::message
 
 use crate::domain::model::{
     EditHistoryEntry, Event, EventType, MarkEntry, ReactionItem, ReadListEntry, VisibilityStatus,
 };
 use chrono::{DateTime, Utc};
-use flare_im_core::utils::{millis_to_timestamp, timestamp_to_millis};
+use flare_im_contracts::utils::{millis_to_timestamp, timestamp_to_millis};
 use flare_proto::common::{EventType as ProtoEventType, MessageContent};
 use prost::Message as ProstMessage;
 
@@ -34,7 +34,7 @@ fn millis_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
 }
 
 /// 统一从 flare-im-core 重导出
-pub use flare_im_core::message::{message_from_proto, message_to_proto};
+pub use flare_im_contracts::message::{message_from_proto, message_to_proto};
 
 /// 从 proto Event 转为领域 Event（整条 event 序列化存于 payload_bytes；operator_id 由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_im_core::{Ctx, context_from_mq_metadata};
+use flare_im_contracts::{Ctx, context_from_mq_metadata};
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -130,7 +130,7 @@ impl MessageCreatedHandler {
             && let Some(tenant_id) = ctx.tenant_id().filter(|tenant_id| !tenant_id.is_empty())
         {
             command.tenant = Some(TenantContext {
-                tenant_id: flare_im_core::utils::normalize_tenant_id(tenant_id),
+                tenant_id: flare_im_contracts::utils::normalize_tenant_id(tenant_id),
                 user_id: ctx.user_id().map(ToString::to_string),
             });
         }
@@ -321,7 +321,7 @@ impl MessageCreatedConsumerFactory {
     /// # 返回
     /// - `&'static str`: 主题名称
     pub fn topic() -> &'static str {
-        flare_im_core::constants::topics::TOPIC_MESSAGE_CREATED
+        flare_im_contracts::constants::topics::TOPIC_MESSAGE_CREATED
     }
 
     /// 获取消费者组名称
@@ -329,6 +329,6 @@ impl MessageCreatedConsumerFactory {
     /// # 返回
     /// - `&'static str`: 消费者组名称
     pub fn consumer_group() -> &'static str {
-        flare_im_core::constants::groups::STORAGE_GROUP_DEFAULT
+        flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT
     }
 }

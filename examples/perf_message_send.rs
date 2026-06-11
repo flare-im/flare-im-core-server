@@ -5,7 +5,7 @@
 //! durability should be verified through `message_write_ledger` after the run.
 //!
 //! Environment:
-//! - `PERF_ENDPOINT`, default `http://127.0.0.1:50181`
+//! - `PERF_ENDPOINT`, default `http://127.0.0.1:50182`
 //! - `PERF_TOTAL`, default `1000`
 //! - `PERF_CONCURRENCY`, default `32`
 //! - `PERF_PAIRS`, default `64`
@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
 impl Config {
     fn from_env() -> Self {
         Self {
-            endpoint: env_string("PERF_ENDPOINT", "http://127.0.0.1:50181"),
+            endpoint: env_string("PERF_ENDPOINT", "http://127.0.0.1:50182"),
             total: env_usize("PERF_TOTAL", 1000),
             concurrency: env_usize("PERF_CONCURRENCY", 32),
             pairs: env_usize("PERF_PAIRS", 64),
@@ -201,7 +201,7 @@ impl Config {
             storage_wait_timeout_ms: env_u64("PERF_STORAGE_WAIT_TIMEOUT_MS", 10_000),
             orchestrator_metrics_endpoint: env_string(
                 "PERF_ORCHESTRATOR_METRICS_ENDPOINT",
-                "http://127.0.0.1:19181/metrics",
+                "http://127.0.0.1:19180/metrics",
             ),
             storage_writer_metrics_endpoint: env_string(
                 "PERF_STORAGE_WRITER_METRICS_ENDPOINT",

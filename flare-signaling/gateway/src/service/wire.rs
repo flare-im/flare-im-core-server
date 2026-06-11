@@ -23,7 +23,7 @@ use crate::service::builder::{
     build_authenticator, build_long_connection_handler, build_long_connection_server,
 };
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
-use flare_im_core::metrics::AccessGatewayMetrics;
+use flare_im_service_kit::metrics::AccessGatewayMetrics;
 use flare_server_core::Config;
 use flare_server_core::error::Result;
 use tokio::sync::Mutex;
@@ -48,7 +48,7 @@ pub struct ApplicationContext {
 ///
 /// 按照 Wire 风格的依赖顺序构建所有组件
 pub async fn initialize(
-    app_config: &flare_im_core::config::FlareAppConfig,
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
     runtime_config: &Config,
     port_config: PortConfig,
 ) -> Result<ApplicationContext> {
@@ -100,7 +100,7 @@ pub async fn initialize(
     let connection_handler_app = Arc::new(ConnectionHandler::new(
         session_domain_service.clone(),
         metrics.clone(),
-        Arc::new(flare_im_core::abstractions::state::NoopConnectionStateNotifier),
+        Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
         connection_port.clone(),
     ));
 
@@ -126,7 +126,7 @@ pub async fn initialize(
     let push_domain_service = Arc::new(PushDomainService::new(push_port, connection_query.clone()));
 
     // 11. 认证器
-    let authenticator = build_authenticator(&access_config).await;
+    let authenticator = build_authenticator(&access_config).await?;
 
     // 12. 长连接服务器
     debug!(ws_port = %port_config.ws_port, quic_port = %port_config.quic_port, "Building long connection server");

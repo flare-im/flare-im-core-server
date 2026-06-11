@@ -15,7 +15,8 @@ flare-server-core = { workspace = true, features = ["nats", "kafka", "grpc"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-core = { path = "../..", features = ["tracing"] }
+flare-im-contracts = { workspace = true }
+flare-im-service-kit = { workspace = true }
 flare-core = { path = "../../../flare-core" }
 tokio = { workspace = true }
 tonic = { workspace = true }

@@ -1,0 +1,51 @@
+[package]
+name = "flare-im-service-kit"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "flare_im_service_kit"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+dashmap = "6.0"
+dotenvy = "0.15"
+etcd-client = { workspace = true }
+flare-core = { workspace = true }
+flare-core-base = { workspace = true }
+flare-core-runtime = { workspace = true }
+flare-grpc-proto = { workspace = true }
+flare-im-contracts = { path = "../flare-im-contracts" }
+flare-proto = { workspace = true }
+flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
+hex = { workspace = true }
+once_cell = { workspace = true }
+prometheus = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ulid = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = []
+discovery = []
+
+[lints.rust]
+async_fn_in_trait = "allow"
+ambiguous_glob_reexports = "allow"

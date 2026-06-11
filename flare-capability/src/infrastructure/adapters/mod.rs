@@ -69,7 +69,7 @@ impl HookAdapterFactory {
                     .cloned()
                 {
                     if let Some(discover) =
-                        flare_im_core::discovery::create_discover(service_name.as_str())
+                        flare_im_service_kit::discovery::create_discover(service_name.as_str())
                             .await
                             .map_err(|e| {
                                 map_infra_error(
@@ -186,30 +186,30 @@ pub trait HookAdapter: Send + Sync {
     async fn pre_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        draft: &mut flare_im_core::MessageDraft,
-    ) -> Result<flare_im_core::PreSendDecision>;
+        draft: &mut flare_im_hooks::MessageDraft,
+    ) -> Result<flare_im_hooks::PreSendDecision>;
 
     /// 执行PostSend Hook
     async fn post_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        record: &flare_im_core::MessageRecord,
-        draft: &flare_im_core::MessageDraft,
+        record: &flare_im_hooks::MessageRecord,
+        draft: &flare_im_hooks::MessageDraft,
     ) -> Result<()>;
 
     /// 执行Delivery Hook
     async fn delivery(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::DeliveryEvent,
+        event: &flare_im_hooks::DeliveryEvent,
     ) -> Result<()>;
 
     /// 执行Recall Hook
     async fn recall(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::RecallEvent,
-    ) -> Result<flare_im_core::PreSendDecision>;
+        event: &flare_im_hooks::RecallEvent,
+    ) -> Result<flare_im_hooks::PreSendDecision>;
 }
 
 #[async_trait::async_trait]
@@ -217,15 +217,15 @@ impl HookAdapter for GrpcHookAdapter {
     async fn pre_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        draft: &mut flare_im_core::MessageDraft,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        draft: &mut flare_im_hooks::MessageDraft,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         GrpcHookAdapter::pre_send(self, ctx, draft).await
     }
     async fn post_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        record: &flare_im_core::MessageRecord,
-        draft: &flare_im_core::MessageDraft,
+        record: &flare_im_hooks::MessageRecord,
+        draft: &flare_im_hooks::MessageDraft,
     ) -> Result<()> {
         GrpcHookAdapter::post_send(self, ctx, record, draft).await
     }
@@ -233,7 +233,7 @@ impl HookAdapter for GrpcHookAdapter {
     async fn delivery(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::DeliveryEvent,
+        event: &flare_im_hooks::DeliveryEvent,
     ) -> Result<()> {
         GrpcHookAdapter::delivery(self, ctx, event).await
     }
@@ -241,8 +241,8 @@ impl HookAdapter for GrpcHookAdapter {
     async fn recall(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::RecallEvent,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        event: &flare_im_hooks::RecallEvent,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         GrpcHookAdapter::recall(self, ctx, event).await
     }
 }
@@ -252,16 +252,16 @@ impl HookAdapter for WebhookHookAdapter {
     async fn pre_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        draft: &mut flare_im_core::MessageDraft,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        draft: &mut flare_im_hooks::MessageDraft,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         WebhookHookAdapter::pre_send(self, ctx, draft).await
     }
 
     async fn post_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        record: &flare_im_core::MessageRecord,
-        draft: &flare_im_core::MessageDraft,
+        record: &flare_im_hooks::MessageRecord,
+        draft: &flare_im_hooks::MessageDraft,
     ) -> Result<()> {
         WebhookHookAdapter::post_send(self, ctx, record, draft).await
     }
@@ -269,7 +269,7 @@ impl HookAdapter for WebhookHookAdapter {
     async fn delivery(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::DeliveryEvent,
+        event: &flare_im_hooks::DeliveryEvent,
     ) -> Result<()> {
         WebhookHookAdapter::delivery(self, ctx, event).await
     }
@@ -277,8 +277,8 @@ impl HookAdapter for WebhookHookAdapter {
     async fn recall(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::RecallEvent,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        event: &flare_im_hooks::RecallEvent,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         WebhookHookAdapter::recall(self, ctx, event).await
     }
 }
@@ -287,16 +287,16 @@ impl HookAdapter for LocalHookAdapter {
     async fn pre_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        draft: &mut flare_im_core::MessageDraft,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        draft: &mut flare_im_hooks::MessageDraft,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         LocalHookAdapter::pre_send(self, "", ctx, draft).await
     }
 
     async fn post_send(
         &self,
         ctx: &flare_server_core::context::Context,
-        record: &flare_im_core::MessageRecord,
-        draft: &flare_im_core::MessageDraft,
+        record: &flare_im_hooks::MessageRecord,
+        draft: &flare_im_hooks::MessageDraft,
     ) -> Result<()> {
         LocalHookAdapter::post_send(self, "", ctx, record, draft).await
     }
@@ -304,7 +304,7 @@ impl HookAdapter for LocalHookAdapter {
     async fn delivery(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::DeliveryEvent,
+        event: &flare_im_hooks::DeliveryEvent,
     ) -> Result<()> {
         LocalHookAdapter::delivery(self, "", ctx, event).await
     }
@@ -312,8 +312,8 @@ impl HookAdapter for LocalHookAdapter {
     async fn recall(
         &self,
         ctx: &flare_server_core::context::Context,
-        event: &flare_im_core::RecallEvent,
-    ) -> Result<flare_im_core::PreSendDecision> {
+        event: &flare_im_hooks::RecallEvent,
+    ) -> Result<flare_im_hooks::PreSendDecision> {
         LocalHookAdapter::recall(self, "", ctx, event).await
     }
 }

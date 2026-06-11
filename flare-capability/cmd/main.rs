@@ -4,7 +4,7 @@
 
 use flare_capability::composition::{ApplicationBootstrap, CapabilityServiceConfig};
 use flare_capability::domain::model::ExecutionMode;
-use flare_im_core::{load_config, tracing::init_tracing_from_config};
+use flare_im_service_kit::{load_config, tracing::init_tracing_from_config};
 use flare_server_core::error::Result;
 
 #[tokio::main]
