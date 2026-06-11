@@ -641,9 +641,9 @@ for service in "${CORE_SERVICES[@]}"; do
         "api-gateway")
             PACKAGE="flare-api-gateway"
             BIN_NAME="flare-api-gateway"
-            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-50182}
-            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-50181}
             CONVERSATION_PORT=${CONVERSATION_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/conversation.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
             CONVERSATION_PORT=${CONVERSATION_PORT:-50090}
@@ -666,11 +666,11 @@ for service in "${CORE_SERVICES[@]}"; do
     
     # message-ingest/message-orchestrator：启动前确保端口未被残留进程占用
     if [ "$service" = "message-ingest" ]; then
-        ingest_port=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        ingest_port=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
         ingest_port=${ingest_port:-50182}
         free_listen_port "$ingest_port"
     elif [ "$service" = "message-orchestrator" ]; then
-        orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message_orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
         orch_port=${orch_port:-50181}
         free_listen_port "$orch_port"
     fi

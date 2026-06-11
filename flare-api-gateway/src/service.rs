@@ -20,12 +20,6 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        Self::run_with_shutdown_signals(Vec::new()).await
-    }
-
-    pub async fn run_with_shutdown_signals(
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
-    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_config(Some("config"));
         flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
 
@@ -36,7 +30,7 @@ impl ApplicationBootstrap {
             &gateway_config.runtime,
             API_GATEWAY,
         )
-        .context("invalid api-gateway listen address (check config/services/api_gateway.toml)")?;
+        .context("invalid api-gateway listen address (check config/services/api-gateway.toml)")?;
         info!(address = %address, "HTTP listen address resolved");
 
         info!("Connecting to gRPC services...");
@@ -104,19 +98,16 @@ impl ApplicationBootstrap {
         );
 
         Ok(runtime
-            .run_with_registration_and_signals(
-                |addr| {
-                    Box::pin(async move {
-                        flare_im_service_kit::discovery::register_runtime_service_only(
-                            API_GATEWAY,
-                            addr,
-                            None,
-                        )
-                        .await
-                    })
-                },
-                signals,
-            )
+            .run_with_registration(|addr| {
+                Box::pin(async move {
+                    flare_im_service_kit::discovery::register_runtime_service_only(
+                        API_GATEWAY,
+                        addr,
+                        None,
+                    )
+                    .await
+                })
+            })
             .await?)
     }
 }

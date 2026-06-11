@@ -15,7 +15,6 @@ fn extracted_core_crates_have_runtime_owners() {
         "flare-push/worker/Cargo.toml",
         "flare-storage/writer/Cargo.toml",
         "flare-storage/reader/Cargo.toml",
-        "flare-call/Cargo.toml",
         "flare-conversation/Cargo.toml",
         "flare-sync-orchestrator/Cargo.toml",
         "flare-message-ingest/Cargo.toml",

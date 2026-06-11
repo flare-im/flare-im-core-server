@@ -1,5 +1,6 @@
 const CARGO_TOML: &str = include_str!("../Cargo.toml");
 const MAIN_RS: &str = include_str!("../src/main.rs");
+const SERVICE_RS: &str = include_str!("../src/service.rs");
 const ROUTER_RS: &str = include_str!("../src/interface/http/router.rs");
 const MESSAGE_HANDLER_RS: &str = include_str!("../src/interface/http/message_handler.rs");
 
@@ -7,16 +8,17 @@ const MESSAGE_HANDLER_RS: &str = include_str!("../src/interface/http/message_han
 fn crate_surface_and_runtime_service_contract_are_api_gateway() {
     assert!(CARGO_TOML.contains("name = \"flare-api-gateway\""));
     assert!(CARGO_TOML.contains("name = \"flare_api_gateway\""));
-    assert!(MAIN_RS.contains("use flare_api_gateway::interface::http::create_public_router;"));
+    assert!(MAIN_RS.contains("flare_api_gateway::ApplicationBootstrap::run().await"));
 
-    assert!(MAIN_RS.contains("GatewayEnvScope::Api"));
-    assert!(MAIN_RS.contains("API_GATEWAY"));
-    assert!(MAIN_RS.contains("config/services/api_gateway.toml"));
+    assert!(SERVICE_RS.contains("create_public_router"));
+    assert!(SERVICE_RS.contains("GatewayEnvScope::Api"));
+    assert!(SERVICE_RS.contains("API_GATEWAY"));
+    assert!(SERVICE_RS.contains("config/services/api-gateway.toml"));
 
     let old_service_const = ["CORE", "GATEWAY"].join("_");
     let old_config_path = ["config/services/core", "gateway.toml"].join("_");
-    assert!(!MAIN_RS.contains(&old_service_const));
-    assert!(!MAIN_RS.contains(&old_config_path));
+    assert!(!SERVICE_RS.contains(&old_service_const));
+    assert!(!SERVICE_RS.contains(&old_config_path));
 }
 
 #[test]

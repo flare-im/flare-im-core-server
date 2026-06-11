@@ -8,12 +8,6 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        Self::run_with_shutdown_signals(Vec::new()).await
-    }
-
-    pub async fn run_with_shutdown_signals(
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
-    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.push_server_service();
         let runtime = flare_im_service_kit::build_background_service_runtime(
@@ -22,14 +16,13 @@ impl ApplicationBootstrap {
             PUSH_SERVER,
         );
         let ctx = wire::initialize(app_config).await?;
-        Self::run_with_runtime(ctx, runtime, signals).await
+        Self::run_with_runtime(ctx, runtime).await
     }
 
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
         Self::run_with_runtime(
             context,
             flare_im_service_kit::background_service_runtime(PUSH_SERVER),
-            Vec::new(),
         )
         .await
     }
@@ -37,7 +30,6 @@ impl ApplicationBootstrap {
     async fn run_with_runtime(
         context: ApplicationContext,
         mut runtime: flare_core_runtime::ServiceRuntime,
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
     ) -> Result<()> {
         info!(
             "Starting Push Server (push-request -> push-online/push-offline) via ServiceRuntime..."
@@ -81,7 +73,7 @@ impl ApplicationBootstrap {
         }
 
         runtime
-            .run_with_signals(signals)
+            .run()
             .await
             .map_err(flare_server_core::error::FlareError::from)
     }

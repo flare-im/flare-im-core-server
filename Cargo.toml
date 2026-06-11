@@ -8,6 +8,7 @@ members = [
     "crates/flare-im-ack",
     "crates/flare-im-hooks",
     "crates/flare-im-capability-core",
+    "crates/flare-call",
     
     # 通信核心层 - 统一网关
     "flare-api-gateway",
@@ -26,7 +27,6 @@ members = [
     # 通信核心层 - 存储系统
     "flare-storage/writer",
     "flare-storage/reader",
-    "flare-call",
     "flare-conversation",
     "flare-sync-orchestrator",
 
@@ -38,9 +38,6 @@ members = [
 
     # 媒体服务
     "flare-media",
-
-    # 聚合部署 profile 入口
-    "flare-im-all",
 
     # 架构守卫测试
     "arch-tests",
@@ -133,7 +130,7 @@ flare-im-seq = { path = "crates/flare-im-seq" }
 flare-im-ack = { path = "crates/flare-im-ack" }
 flare-im-hooks = { path = "crates/flare-im-hooks" }
 flare-im-capability-core = { path = "crates/flare-im-capability-core" }
-flare-call = { path = "flare-call" }
+flare-call = { path = "crates/flare-call" }
 
 # Flare Proto
 flare-proto = { path = "../flare-proto" }

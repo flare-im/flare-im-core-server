@@ -28,7 +28,7 @@ POST /api/v1/admin/messages/write-ledger/query
 POST /api/v1/admin/messages/export
 ```
 
-本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin_gateway.toml`。
+本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin-gateway.toml`。
 
 ## 认证
 

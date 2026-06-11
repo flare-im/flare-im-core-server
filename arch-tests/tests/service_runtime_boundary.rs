@@ -219,7 +219,7 @@ fn push_proxy_has_typed_service_config() {
     let config_model =
         fs::read_to_string(root.join("crates/flare-im-service-kit/src/config/mod.rs"))
             .expect("read service-kit config model");
-    let config_file = root.join("config/services/push_proxy.toml");
+    let config_file = root.join("config/services/push-proxy.toml");
 
     assert!(
         config_model.contains("PushProxyServiceConfig"),
@@ -235,7 +235,7 @@ fn push_proxy_has_typed_service_config() {
     );
     assert!(
         config_file.is_file(),
-        "push proxy should be configured through config/services/push_proxy.toml"
+        "push proxy should be configured through config/services/push-proxy.toml"
     );
 }
 

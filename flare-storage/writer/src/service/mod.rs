@@ -14,12 +14,6 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        Self::run_with_shutdown_signals(Vec::new()).await
-    }
-
-    pub async fn run_with_shutdown_signals(
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
-    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.storage_writer_service();
         let runtime = flare_im_service_kit::build_background_service_runtime(
@@ -34,7 +28,7 @@ impl ApplicationBootstrap {
         info!("ApplicationBootstrap created successfully");
 
         // 运行服务
-        Self::run_with_runtime(context, runtime, signals).await
+        Self::run_with_runtime(context, runtime).await
     }
 
     /// 运行服务（带应用上下文）
@@ -44,7 +38,6 @@ impl ApplicationBootstrap {
         Self::run_with_runtime(
             context,
             flare_im_service_kit::background_service_runtime(STORAGE_WRITER),
-            Vec::new(),
         )
         .await
     }
@@ -52,7 +45,6 @@ impl ApplicationBootstrap {
     async fn run_with_runtime(
         context: ApplicationContext,
         mut runtime: flare_core_runtime::ServiceRuntime,
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
     ) -> Result<()> {
         info!(backend = %context.config.mq_backend, "Starting Storage Writer (MQ consumer via ServiceRuntime)");
 
@@ -138,7 +130,7 @@ impl ApplicationBootstrap {
         }
 
         runtime
-            .run_with_signals(signals)
+            .run()
             .await
             .map_err(flare_server_core::error::FlareError::from)
     }

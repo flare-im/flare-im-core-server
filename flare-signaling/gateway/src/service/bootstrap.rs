@@ -1,7 +1,7 @@
 //! 应用启动器 - 负责依赖注入和服务启动
 
 use crate::config::PortConfig;
-use crate::service::startup::start_services_with_signals;
+use crate::service::startup::start_services;
 use flare_im_contracts::service_names::ACCESS_GATEWAY;
 use flare_im_service_kit::FlareAppConfig;
 use flare_server_core::error::Result;
@@ -15,12 +15,6 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        Self::run_with_shutdown_signals(Vec::new()).await
-    }
-
-    pub async fn run_with_shutdown_signals(
-        signals: flare_im_service_kit::RuntimeShutdownSignals,
-    ) -> Result<()> {
         let config_path = flare_im_service_kit::resolve_config_path();
         info!(config_path = %config_path, "Loading configuration");
         let app_config = flare_im_service_kit::load_app_config_from_env();
@@ -56,13 +50,12 @@ impl ApplicationBootstrap {
         let region = context.region.clone();
 
         // 使用 startup 模块启动服务（会打印详细的启动信息）
-        start_services_with_signals(
+        start_services(
             context,
             port_config,
             runtime_config.server.address.clone(),
             gateway_id,
             region,
-            signals,
         )
         .await
     }

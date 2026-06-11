@@ -6,10 +6,10 @@ fn call_lifecycle_is_owned_by_flare_call_not_conversation() {
     let root = workspace_root();
 
     for required in [
-        "flare-call/src/domain/call_session.rs",
-        "flare-call/src/domain/event.rs",
-        "flare-call/src/domain/repository.rs",
-        "flare-call/src/application/call/start_call_handler.rs",
+        "crates/flare-call/src/domain/call_session.rs",
+        "crates/flare-call/src/domain/event.rs",
+        "crates/flare-call/src/domain/repository.rs",
+        "crates/flare-call/src/application/call/start_call_handler.rs",
     ] {
         assert!(
             root.join(required).is_file(),

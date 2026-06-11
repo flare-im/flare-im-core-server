@@ -15,7 +15,7 @@ fn api_gateway_runtime_identity_is_consistent() {
     for required in [
         "GatewayEnvScope::Api",
         "service_names::API_GATEWAY",
-        "config/services/api_gateway.toml",
+        "config/services/api-gateway.toml",
         "FLARE_API_GATEWAY_TOKEN_SECRET",
         "services.api_gateway.token_secret",
     ] {
@@ -33,8 +33,8 @@ fn api_gateway_runtime_identity_is_consistent() {
     );
 
     assert!(
-        root.join("config/services/api_gateway.toml").is_file(),
-        "api-gateway config file must be named api_gateway.toml"
+        root.join("config/services/api-gateway.toml").is_file(),
+        "api-gateway config file must be named api-gateway.toml"
     );
 
     let start_script =
