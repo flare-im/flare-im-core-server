@@ -10,8 +10,8 @@ fn api_gateway_runtime_identity_is_consistent() {
             .expect("read service names");
     assert!(service_names.contains("pub const API_GATEWAY: &str = \"flare-api-gateway\""));
 
-    let main_rs =
-        fs::read_to_string(root.join("flare-api-gateway/src/main.rs")).expect("read main");
+    let service_rs =
+        fs::read_to_string(root.join("flare-api-gateway/src/service.rs")).expect("read service");
     for required in [
         "GatewayEnvScope::Api",
         "service_names::API_GATEWAY",
@@ -20,10 +20,17 @@ fn api_gateway_runtime_identity_is_consistent() {
         "services.api_gateway.token_secret",
     ] {
         assert!(
-            main_rs.contains(required),
-            "api-gateway main must use runtime identity `{required}`"
+            service_rs.contains(required),
+            "api-gateway service bootstrap must use runtime identity `{required}`"
         );
     }
+
+    let main_rs =
+        fs::read_to_string(root.join("flare-api-gateway/src/main.rs")).expect("read main");
+    assert!(
+        main_rs.contains("flare_api_gateway::ApplicationBootstrap::run().await"),
+        "api-gateway main must stay a thin process wrapper around ApplicationBootstrap"
+    );
 
     assert!(
         root.join("config/services/api_gateway.toml").is_file(),
@@ -58,6 +65,7 @@ fn api_gateway_runtime_identity_is_consistent() {
 
     for (label, content) in [
         ("service_names.rs", service_names.as_str()),
+        ("flare-api-gateway/src/service.rs", service_rs.as_str()),
         ("flare-api-gateway/src/main.rs", main_rs.as_str()),
         ("scripts/start_server.sh", start_script.as_str()),
     ] {

@@ -39,6 +39,9 @@ members = [
     # 媒体服务
     "flare-media",
 
+    # 聚合部署 profile 入口
+    "flare-im-all",
+
     # 架构守卫测试
     "arch-tests",
 ]

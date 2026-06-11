@@ -1,0 +1,15 @@
+[package]
+name = "flare-im-all"
+version.workspace = true
+edition.workspace = true
+description = "Aggregated deployment profile planner for Flare IM Core"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "flare-im-all"
+path = "src/main.rs"
+
+[dependencies]
+flare-im-contracts = { workspace = true }
