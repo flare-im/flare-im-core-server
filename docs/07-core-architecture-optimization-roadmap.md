@@ -12,6 +12,7 @@
 - send path 已增加架构契约测试，要求 conversation 不承载 send/seq，api-gateway 与 signaling route 的消息发送入口收敛到 `flare-message-ingest`。
 - `flare-storage` 文档已明确 PostgreSQL / TimescaleDB 是唯一 durable storage database family；MongoDB 不再作为 Core 存储路径。
 - `flare-storage/writer` 已抽出 MQ backend failure policy：Kafka 使用 retry topic + DLQ + retry-forwarder，NATS/JetStream 使用 broker-native retry/NACK + DLQ，并由 lib 测试覆盖 ledger ACK failure/retry。
+- `flare-im-service-kit` 仍是 6.6K LoC 的共享运行时 God crate，当前同时承载 config、downstream clients、service discovery、gateway auth、runtime bootstrap、health、metrics 和 tracing；需要作为下一轮治理目标拆分。
 
 ## 1. 架构方向
 
@@ -50,6 +51,7 @@ flowchart LR
 - `flare-storage/writer` 异步消费 MQ，使用 PostgreSQL / TimescaleDB 持久化消息、事件和 ledger。
 - MongoDB 不再出现在 Core 持久化路径中；Redis 不是主存储，只做热状态和短期恢复辅助。
 - 鉴权统一由 `flare-server-core::auth::TokenValidator` 抽象负责，HTTP 和长连接网关只做传输适配。
+- 共享服务脚手架必须从 `flare-im-service-kit` 的宽口径工具箱收敛为小 crate 组合，避免所有服务因为一个 kit 同时依赖 discovery、HTTP auth、metrics、client pool 和 config 解析。
 
 ## 2. 取舍分析
 
@@ -119,6 +121,28 @@ flowchart LR
 | `flare-orchestrator` | MQ main 消费、storage/push fanout、操作事件执行、capability enrich | 客户端协议适配、conversation metadata 事务 |
 | `flare-storage/writer` | 消息归档、事件流、ledger、热缓存、ACK、retry/DLQ | 路由、实时推送、业务权限 |
 | `flare-storage/reader` | 历史消息、事件、ledger、审计查询 | 写入主链、状态变更 |
+| `flare-im-service-kit` | 短期过渡 facade，仅保留当前服务启动所需 re-export | 长期拥有 clients/discovery/auth/runtime/metrics 多类关切 |
+
+### `flare-im-service-kit` 拆分目标
+
+当前 `crates/flare-im-service-kit/src` 约 6.6K 行，模块边界如下：
+
+| 关切 | 当前位置 | 目标归属 |
+|------|----------|----------|
+| 服务运行时计划、配置路径、统一启动 | `runtime.rs`, `health.rs`, `tracing/` | `flare-im-runtime-kit` |
+| 全局配置解析、服务配置 DTO、配置管理 | `config/` | `flare-im-config` |
+| 服务发现、通道解析、注册中心适配 | `discovery/`, `service_helper.rs` | `flare-im-discovery-kit` |
+| 下游 typed gRPC clients | `clients/` | `flare-im-grpc-clients` |
+| HTTP gateway settings、principal 注入、auth middleware helper | `gateway/`, `gateway_auth.rs` | `flare-im-gateway-auth` |
+| Prometheus 指标对象 | `metrics/` | `flare-im-metrics` |
+
+拆分原则：
+
+- 先抽叶子模块，再抽共享底座：`metrics/tracing/gateway_auth` → `discovery` → `clients` → `config` → `runtime`。
+- 新 crate 只暴露一类稳定关切，服务按需依赖，不再通过一个 kit 间接得到全套能力。
+- 不保留长期兼容 re-export。迁移期间可以在同一个 PR 内改完所有 workspace member，旧模块随后删除。
+- 每次抽取都补一条 arch-test：禁止业务服务通过旧 `flare-im-service-kit` 路径访问已经迁出的关切。
+- 拆分完成的退出条件是 `flare-im-service-kit` 删除，或仅保留少于 300 行的 workspace-internal facade 并列入删除计划。
 
 ### 消息写入边界
 
@@ -197,6 +221,16 @@ MQ：
 - 删除旧文档、旧配置名和历史 prototype 描述。
 - 对 SDK 和平台包确认 ACK durability、sync convergence、pending state 的语义一致。
 
+### Phase 5: `flare-im-service-kit` 拆分
+
+- 建立新 crate：`flare-im-config`、`flare-im-discovery-kit`、`flare-im-grpc-clients`、`flare-im-gateway-auth`、`flare-im-runtime-kit`、`flare-im-metrics`。
+- 先迁移无业务状态的 leaf modules：metrics、tracing、gateway auth helper；迁移后更新所有 gateway/import 路径并删除旧模块。
+- 迁移 discovery/channel resolver，要求 capability、media、gateway、storage 等服务只依赖 discovery kit，不再把 config/client/runtime 一并拉入。
+- 迁移 typed gRPC clients，`flare-api-gateway` 与 `flare-admin-gateway` 只依赖 client crate 和 gateway-auth，不依赖 runtime kit。
+- 迁移 `FlareAppConfig` 与 service config DTO 到 config crate；runtime kit 只消费 config crate，不反向持有 discovery/client/auth。
+- 最后迁移 `build_service_runtime_plan`、`ImServiceRuntimePlan`、health/tracing glue 到 runtime kit，并删除旧 `flare-im-service-kit` 宽口径 facade。
+- 验收：arch-tests 禁止新代码从 `flare-im-service-kit::{clients,discovery,gateway_auth,gateway,metrics}` 导入；workspace check 全绿；服务启动脚本仍按统一 runtime plan 启动。
+
 ## 5. 扩展性
 
 - MQ 后端保持 JetStream/Kafka 二选一，同一环境不要双跑同一链路。
@@ -204,6 +238,7 @@ MQ：
 - auth provider 可以从库内 `TokenValidator` 扩展为 sidecar/mesh ext-authz，但 gateway principal contract 不变。
 - capability、RTC/SFU、审核、风控、机器人只通过 Hook/Capability 接入，不成为 Core 必需依赖。
 - TimescaleDB 可按租户规模引入 retention/compression policy 和归档导出 worker。
+- shared runtime helpers 可按 crate 粒度演进，例如只替换 discovery backend 或 gateway auth provider，不迫使所有服务重编译/重依赖整套 kit。
 
 ## 6. 瓶颈与风险
 
@@ -215,3 +250,4 @@ MQ：
 | Hook 慢或不可用 | 发送链路尾延迟和失败率上升 | 主链 Hook 短超时、fail-fast、旁路 Hook async retry。 |
 | auth provider 不统一 | SSO/JWT 改造需要多处改代码 | 所有 gateway 只依赖 `TokenValidator` 和 principal contract。 |
 | 旧 payload 分支重新出现 | 消费者逻辑复杂、误解析、排障困难 | contract/test 固化 protobuf `MqEnvelope` 入口，禁止恢复 JSON/direct payload 分支。 |
+| `flare-im-service-kit` 继续膨胀 | 所有服务共享一个高耦合依赖面，改 discovery/auth/config 会牵动全仓 | 按 Phase 5 拆成小 crate，并用 arch-tests 禁止回流。 |
