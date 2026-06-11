@@ -104,7 +104,7 @@ where
         self
     }
 
-    /// 准备消息（从 MessageEnvelope / TopicEventEnvelope 解析后的命令）
+    /// 准备消息（从 MqEnvelope 解析后的命令）
     pub fn prepare_message(
         &self,
         request: crate::application::commands::ProcessStoreMessageCommand,

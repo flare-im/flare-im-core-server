@@ -1,7 +1,6 @@
 //! Proto 与领域模型互转（仅用于 interface 与 infrastructure 边界，application/domain 不依赖 proto）
-//! 与 event_bus / topic_envelope.proto 对齐：MessageEnvelope、TopicEventEnvelope 解析入口统一在此。
+//! 与 event_bus / topic_envelope.proto 对齐：MQ payload 解析入口统一在此。
 
-use crate::application::commands::ProcessStoreMessageCommand;
 use crate::domain::model::{
     BurnScheduledPayload, BurnedPayload, DeletePayload, EditPayload, Event, EventPayload,
     EventType, HardDeletedPayload, MarkPayload, PinPayload, ReactionPayload, ReadPayload,
@@ -386,75 +385,6 @@ pub fn content_bytes_to_text(bytes: &[u8]) -> Option<String> {
         Content::Text(t) => Some(t.text),
         _ => None,
     }
-}
-
-/// TopicEventEnvelope 分发结果（与 event_bus EVENT_TYPE_* 对应）
-#[derive(Debug)]
-pub enum TopicEventDispatch {
-    /// message.created → 持久化
-    MessageCreated(Box<ProcessStoreMessageCommand>),
-    /// operation.* → 操作落库
-    Operation(Box<Event>),
-    /// 忽略
-    Unsupported,
-}
-
-/// 从 TopicEventEnvelope 分发为持久化命令或领域事件（供 event_bus / operation 消费者共用）
-pub fn dispatch_topic_event_envelope(
-    env: &flare_proto::common::TopicEventEnvelope,
-) -> TopicEventDispatch {
-    use flare_im_contracts::event::EVENT_TYPE_MESSAGE_CREATED;
-    let event = match &env.event {
-        Some(ev) => ev,
-        None => return TopicEventDispatch::Unsupported,
-    };
-    if env.event_type == EVENT_TYPE_MESSAGE_CREATED
-        && let Some(flare_proto::common::event::Payload::Message(mut m)) = event.payload.clone()
-    {
-        if !env.tenant_id.is_empty() {
-            m.attributes.insert(
-                "x-tenant-id".to_string(),
-                normalize_tenant_id(&env.tenant_id),
-            );
-        }
-        return TopicEventDispatch::MessageCreated(Box::new(message_command_from_proto(m)));
-    }
-    if env.event_type.starts_with("operation.") {
-        let mut domain_event = event_from_proto(event);
-        domain_event.tenant_id = normalize_tenant_id(&env.tenant_id);
-        return TopicEventDispatch::Operation(Box::new(domain_event));
-    }
-    TopicEventDispatch::Unsupported
-}
-
-/// 从 proto MessageEnvelope 构建应用层命令（envelope 内为 common.Message）
-pub fn command_from_message_envelope(
-    envelope: &flare_proto::common::MessageEnvelope,
-) -> crate::application::commands::ProcessStoreMessageCommand {
-    let mut msg = envelope.message.clone().unwrap_or_default();
-    if msg.conversation_id.is_empty() {
-        msg.conversation_id = envelope.conversation_id.clone();
-    }
-    if !envelope.tenant_id.is_empty() {
-        msg.attributes.insert(
-            "x-tenant-id".to_string(),
-            normalize_tenant_id(&envelope.tenant_id),
-        );
-    }
-    msg.attributes.insert(
-        flare_im_contracts::abstractions::storage_payload::EXTRA_KEY_SYNC.to_string(),
-        envelope.sync.to_string(),
-    );
-    if let Ok(tags_json) = serde_json::to_string(&envelope.attributes) {
-        msg.attributes.insert(
-            flare_im_contracts::abstractions::storage_payload::EXTRA_KEY_TAGS.to_string(),
-            tags_json,
-        );
-    }
-    for (k, v) in &envelope.headers {
-        msg.attributes.insert(k.clone(), v.clone());
-    }
-    message_command_from_proto(msg)
 }
 
 /// 从 common.Message 构建应用层命令（envelope 在 extra：__sync、__tags、metadata）

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::domain::model::{Message, RequestContext, TenantContext};
 
-/// 存储消息命令（从 MessageEnvelope / TopicEventEnvelope 解析后进入应用层）
+/// 存储消息命令（从 MqEnvelope 解析后进入应用层）
 #[derive(Debug, Clone)]
 pub struct ProcessStoreMessageCommand {
     pub conversation_id: String,

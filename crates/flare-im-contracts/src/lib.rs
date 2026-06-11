@@ -20,10 +20,6 @@ pub use domain::{
     MessageId, MultiDeviceSyncResult, OperationResult, ReactionAction, SendAckResult,
     SendMessageCommand, Seq, SyncQueryHandler, SyncResult, UserId,
 };
-pub use event::{
-    EventBusPublishError, ImTopicEventPublisher, encode_topic_event_envelope,
-    publish_proto_as_server_event_envelope, to_event_envelope,
-};
 pub use instrumentation::{
     BusinessProbeDelivery, BusinessProbeEvent, BusinessProbeKind, BusinessProbeSink,
     NoopBusinessProbeSink, SharedBusinessProbeSink,

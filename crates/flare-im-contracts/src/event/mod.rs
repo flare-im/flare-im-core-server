@@ -19,10 +19,7 @@ pub use topic_envelope::{
     EVENT_TYPE_OPERATION_EDITED, EVENT_TYPE_OPERATION_MARK, EVENT_TYPE_OPERATION_PIN,
     EVENT_TYPE_OPERATION_REACTION, EVENT_TYPE_OPERATION_READ_RECEIPT,
     EVENT_TYPE_OPERATION_RECALLED, EVENT_TYPE_OPERATION_UNMARK, EVENT_TYPE_OPERATION_UNPIN,
-    EventBusPublishError, ImTopicEventPublisher, conversation_update_envelope,
-    encode_topic_event_envelope, event_type_str_from_proto_event, message_envelope_from_message,
-    message_to_topic_event_envelope, publish_proto_as_server_event_envelope, to_event_envelope,
-    topic_event_envelope_from_event,
+    conversation_update_envelope, event_type_str_from_proto_event,
 };
 pub use types::{
     is_ack_event, is_custom_event, is_event, is_message_event, is_notification_event,
