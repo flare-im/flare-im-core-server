@@ -3,6 +3,7 @@
 pub mod clients;
 pub mod config;
 pub mod discovery;
+pub mod env_registry;
 pub mod gateway;
 pub mod gateway_auth;
 pub mod health;

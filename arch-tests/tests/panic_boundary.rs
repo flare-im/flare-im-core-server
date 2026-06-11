@@ -6,7 +6,11 @@ fn critical_runtime_paths_do_not_use_unwrap_or_expect_in_production_code() {
     let root = workspace_root();
     let mut violations = Vec::new();
 
-    for source_root in ["flare-signaling/gateway/src", "flare-storage/writer/src"] {
+    for source_root in [
+        "flare-signaling/gateway/src",
+        "flare-storage/writer/src",
+        "flare-message-ingest/src",
+    ] {
         for file in rust_sources(&root.join(source_root)) {
             let relative = file.strip_prefix(&root).unwrap_or(&file);
             let content = fs::read_to_string(&file).expect("read rust source");
