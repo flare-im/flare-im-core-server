@@ -5,7 +5,7 @@
 # Admin Gateway 是独立管理面入口，不提供管理后台页面。
 # 生产建议部署在内网、VPN、mTLS 或 service mesh policy 后面。
 
-# JWT Token 配置。未配置时启动入口会回退到 core_gateway 的 token_* 配置。
+# JWT Token 配置。未配置时启动入口会回退到 api_gateway 的 token_* 配置。
 # token_secret 不应写入仓库。生产/联调用 FLARE_ADMIN_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600

@@ -94,7 +94,7 @@ CORE_SERVICES=(
     "push-server"
     "push-worker"
     "media"
-    "core-gateway"
+    "api-gateway"
 )
 
 # 定义多网关配置（与 start_server.sh 保持一致，使用普通数组兼容 bash 3.x）

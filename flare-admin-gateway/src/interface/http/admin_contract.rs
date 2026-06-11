@@ -40,8 +40,6 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
         required_scopes: vec![
             "admin_gateway:admin".to_string(),
             "admin_gateway:admin:*".to_string(),
-            "core_gateway:admin".to_string(),
-            "core_gateway:admin:*".to_string(),
         ],
         required_headers: AdminRequiredHeaders {
             tenant_header: keys::TENANT_ID.to_string(),

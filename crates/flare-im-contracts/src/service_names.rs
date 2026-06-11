@@ -81,13 +81,11 @@ pub mod service_names {
     /// 注册路径: `flare/flare-signaling-gateway`
     pub const ACCESS_GATEWAY: &str = "flare-signaling-gateway";
 
-    /// Core/API Gateway 运行期服务名。
+    /// API Gateway 服务名。
     ///
-    /// 这里保留历史 service id，避免打断服务发现、配置键、监控和环境变量契约。
-    ///
-    /// 用于统一网关、API 网关等功能
-    /// 注册路径: `flare/flare-core-gateway`
-    pub const CORE_GATEWAY: &str = "flare-core-gateway";
+    /// 用于业务系统和三方 HTTP facade。
+    /// 注册路径: `flare/flare-api-gateway`
+    pub const API_GATEWAY: &str = "flare-api-gateway";
 
     /// Admin Gateway 服务名
     ///
@@ -159,7 +157,7 @@ pub fn validate_service_name(name: &str) -> bool {
             | service_names::PUSH_WORKER
             | service_names::PUSH_PROXY
             | service_names::ACCESS_GATEWAY
-            | service_names::CORE_GATEWAY
+            | service_names::API_GATEWAY
             | service_names::ADMIN_GATEWAY
             | service_names::MESSAGE_INGEST
             | service_names::ORCHESTRATOR

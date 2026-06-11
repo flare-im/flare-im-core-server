@@ -78,7 +78,7 @@ REST 命名规则：
 - 请求体中的 `user_id` 只能作为业务参数，不能覆盖认证身份。
 - 管理面 API 必须校验下沉认证 provider 返回的 Admin scope；业务管理员、角色和审批由业务系统自行实现。
 - 服务间调用使用 mTLS 或内网服务 token，不能复用普通用户 JWT。
-- 当前 `core_jwt` claims 不携带 scopes，因此默认不能访问 Admin API；业务端应通过 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `core_gateway:admin` / `core_gateway:admin:*`。
+- 当前 `core_jwt` claims 不携带 scopes，因此默认不能访问 Admin API；业务端应通过 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `admin_gateway:admin` / `admin_gateway:admin:*`。
 - Admin 写操作必须透传 `x-actor-id`、`x-audit-reason` 和 `x-request-id` / `Idempotency-Key`，并由下游服务记录审计事件。
 - 不建议配置 `ADMIN_SECRET` 直接放行 Gateway Admin API；密钥应放在业务 auth provider、hook secret、JWT issuer 或 mTLS 层。
 - Admin 接入前可调用 `GET /api/v1/admin/capabilities` 发现所需 scope、header、安全边界和当前可用 endpoint。

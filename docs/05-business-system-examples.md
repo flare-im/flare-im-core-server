@@ -18,7 +18,7 @@
 ```mermaid
 flowchart LR
     App["业务 App / IM SDK"] --> SGW["signaling gateway"]
-    BFF["业务 BFF"] --> CGW["core gateway"]
+    BFF["业务 BFF"] --> CGW["api-gateway"]
     Business["业务系统"] --> Hook["gRPC pre_send hook"]
     Business --> Bridge["typed gRPC business-im bridge"]
     Hook --> Orchestrator["flare-orchestrator"]

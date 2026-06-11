@@ -9,7 +9,7 @@
 - `flare-signaling/gateway` 已使用 `flare-server-core::auth::TokenValidator` 作为长连接认证边界，并校验 token device_id 与连接 device_id。
 - `AccessGatewayServiceConfig` 已增加一等 `auth` provider 配置，支持 `core_jwt` 与 `http_hook`；`http_hook` 模式不再要求 Core JWT secret。
 - `conversation.ensure` 已改为 protobuf `MqEnvelope(EventCustom)` 投递，conversation consumer 不再解析旧 JSON `EventEnvelope` 或 direct protobuf `Event` payload。
-- send path 已增加架构契约测试，要求 conversation 不承载 send/seq，core-gateway 与 signaling route 的消息发送入口收敛到 `flare-message-ingest`。
+- send path 已增加架构契约测试，要求 conversation 不承载 send/seq，api-gateway 与 signaling route 的消息发送入口收敛到 `flare-message-ingest`。
 - `flare-storage` 文档已明确 PostgreSQL / TimescaleDB 是唯一 durable storage database family；MongoDB 不再作为 Core 存储路径。
 - `flare-storage/writer` 已抽出 MQ backend failure policy：Kafka 使用 retry topic + DLQ + retry-forwarder，NATS/JetStream 使用 broker-native retry/NACK + DLQ，并由 lib 测试覆盖 ledger ACK failure/retry。
 
@@ -181,7 +181,7 @@ MQ：
 ### Phase 2: send path 收敛验证
 
 - 已增加架构契约测试，禁止 conversation 新增 send/seq 职责。
-- core-gateway `message/send` 与 signaling route `forward_message` 已通过契约测试守住 `flare-message-ingest` 边界。
+- api-gateway `message/send` 与 signaling route `forward_message` 已通过契约测试守住 `flare-message-ingest` 边界。
 - 后续业务 typed gRPC 若新增发送入口，必须复用 `message_ingest_send` / MessageIngest route，不得直连 conversation 或 orchestrator send path。
 
 ### Phase 3: PostgreSQL / TimescaleDB 强化

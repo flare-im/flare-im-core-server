@@ -328,9 +328,9 @@ pub struct AccessGatewayServiceConfig {
     pub encryption_key: Option<String>,
 }
 
-/// 核心网关服务配置（业务系统统一入口）
+/// API Gateway 服务配置（业务系统和三方 HTTP facade）
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct CoreGatewayServiceConfig {
+pub struct ApiGatewayServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
@@ -370,7 +370,7 @@ pub struct CoreGatewayServiceConfig {
     /// JWT Token 过期时间（秒）
     #[serde(default)]
     pub token_ttl_seconds: Option<u64>,
-    /// 额外信任的 JWT 发行方（如业务系统登录 token，用于 Core Gateway 鉴权）
+    /// 额外信任的 JWT 发行方（如业务系统登录 token，用于 API Gateway 鉴权）
     #[serde(default)]
     pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
 }
@@ -381,10 +381,10 @@ pub struct AdminGatewayServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// JWT Token 密钥。未配置时可由启动入口回退到 core_gateway 配置。
+    /// JWT Token 密钥。未配置时可由启动入口回退到 api_gateway 配置。
     #[serde(default)]
     pub token_secret: Option<String>,
-    /// JWT Token 发行方。未配置时可由启动入口回退到 core_gateway 配置。
+    /// JWT Token 发行方。未配置时可由启动入口回退到 api_gateway 配置。
     #[serde(default)]
     pub token_issuer: Option<String>,
     /// JWT Token 过期时间（秒）
@@ -1003,9 +1003,9 @@ impl FlareAppConfig {
         self.services.access_gateway.clone().unwrap_or_default()
     }
 
-    /// 获取核心网关服务配置
-    pub fn core_gateway_service(&self) -> CoreGatewayServiceConfig {
-        self.services.core_gateway.clone().unwrap_or_default()
+    /// 获取 API Gateway 服务配置
+    pub fn api_gateway_service(&self) -> ApiGatewayServiceConfig {
+        self.services.api_gateway.clone().unwrap_or_default()
     }
 
     /// 获取管理网关服务配置
@@ -1681,9 +1681,9 @@ pub struct ServicesConfig {
     /// 接入网关服务配置
     #[serde(default, rename = "access_gateway")]
     pub access_gateway: Option<AccessGatewayServiceConfig>,
-    /// 核心网关服务配置（业务系统统一入口）
-    #[serde(default, rename = "core_gateway")]
-    pub core_gateway: Option<CoreGatewayServiceConfig>,
+    /// API Gateway 服务配置（业务系统和三方 HTTP facade）
+    #[serde(default, rename = "api_gateway")]
+    pub api_gateway: Option<ApiGatewayServiceConfig>,
     /// 管理网关服务配置（内网管理 API 入口）
     #[serde(default, rename = "admin_gateway")]
     pub admin_gateway: Option<AdminGatewayServiceConfig>,

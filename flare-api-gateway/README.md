@@ -83,14 +83,14 @@ Admin API 已拆分到独立内网服务 `flare-admin-gateway`；三方 HTTP API
 
 ## 认证接入点
 
-Core Gateway 默认使用 `core_jwt` 模式委托共享 auth provider 校验 token。配置来自 `config/services/core_gateway.toml` 的 `token_secret`、`token_issuer`、`token_ttl_seconds`，并支持 `trusted_token_issuers` 信任业务系统签发的 JWT。Gateway 不提供 token 签发、刷新、撤销或存储 API。业务系统需要完全自定义登录态时，可设置：
+API Gateway 默认使用 `core_jwt` 模式委托共享 auth provider 校验 token。配置来自 `config/services/api_gateway.toml` 的 `token_secret`、`token_issuer`、`token_ttl_seconds`，并支持 `trusted_token_issuers` 信任业务系统签发的 JWT。Gateway 不提供 token 签发、刷新、撤销或存储 API。业务系统需要完全自定义登录态时，可设置：
 
 ```bash
-FLARE_CORE_GATEWAY_AUTH_MODE=http_hook
-FLARE_CORE_GATEWAY_AUTH_HOOK_URL=http://127.0.0.1:8088/internal/auth/validate
-FLARE_CORE_GATEWAY_AUTH_HOOK_TIMEOUT_MS=800
-FLARE_CORE_GATEWAY_AUTH_HOOK_SECRET=change-me
-FLARE_CORE_GATEWAY_AUTH_HOOK_SECRET_HEADER=x-flare-auth-hook-secret
+FLARE_API_GATEWAY_AUTH_MODE=http_hook
+FLARE_API_GATEWAY_AUTH_HOOK_URL=http://127.0.0.1:8088/internal/auth/validate
+FLARE_API_GATEWAY_AUTH_HOOK_TIMEOUT_MS=800
+FLARE_API_GATEWAY_AUTH_HOOK_SECRET=change-me
+FLARE_API_GATEWAY_AUTH_HOOK_SECRET_HEADER=x-flare-auth-hook-secret
 ```
 
 Hook 请求体：
@@ -124,7 +124,7 @@ Hook 成功响应：
 
 Hook 返回 `401`/`403` 或 `{"active": false}` 时，Gateway 对客户端返回 `401`；Hook 不可达、超时、返回非 2xx 或响应合同不完整时，Gateway 返回 `503`，避免把业务认证系统故障误判为用户凭证错误。
 
-Admin API 不再由 `flare-api-gateway` public 进程承载，统一由 `flare-admin-gateway` 独立内网进程提供。业务端需要管理能力时，应由业务认证系统通过 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `admin_gateway:admin` / `admin_gateway:admin:*` scope；开发迁移期兼容 `core_gateway:admin` / `core_gateway:admin:*`。密钥配置可以用于业务认证系统内部，例如 hook secret、业务 JWT issuer secret 或 mTLS，不建议在 Gateway 配置 `ADMIN_SECRET` 直接放行。
+Admin API 不再由 `flare-api-gateway` public 进程承载，统一由 `flare-admin-gateway` 独立内网进程提供。业务端需要管理能力时，应由业务认证系统通过 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `admin_gateway:admin` / `admin_gateway:admin:*` scope。密钥配置可以用于业务认证系统内部，例如 hook secret、业务 JWT issuer secret 或 mTLS，不建议在 Gateway 配置 `ADMIN_SECRET` 直接放行。
 
 Admin 认证检查：
 

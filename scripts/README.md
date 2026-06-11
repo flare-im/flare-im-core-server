@@ -133,7 +133,7 @@ cargo run --example chatroom_client -- user2
 11. `push-worker` - 推送 worker（JetStream 消费者，不注册到服务注册中心）
 12. `media` - 媒体服务（端口 60081）
 13. `access-gateway` - 客户端接入网关（默认实例，端口 60051）
-14. `core-gateway` - 业务系统统一入口（端口 50050）
+14. `api-gateway` - 业务系统统一入口（端口 50050）
 15. `access-gateway-beijing-1` - 北京网关实例（端口 60051）
 16. `access-gateway-shanghai-1` - 上海网关实例（端口 60052）
 
@@ -231,7 +231,7 @@ cargo run --example chatroom_client -- user2
 ### 业务系统推送消息
 
 ```bash
-# 通过 Core Gateway 推送消息给所有在线用户
+# 通过 API Gateway 推送消息给所有在线用户
 cargo run --example business_push_client
 
 # 推送给指定用户
@@ -245,7 +245,7 @@ cargo run --example business_push_client
 
 **环境变量说明**：
 - `NEGOTIATION_HOST` - 网关地址（格式：`host:port`）
-- `GATEWAY_ENDPOINT` - Core Gateway 地址（默认：`http://localhost:50050`）
+- `GATEWAY_ENDPOINT` - API Gateway 地址（默认：`http://localhost:50050`）
 - `MESSAGE_CONTENT` - 消息内容
 - `USER_IDS` - 目标用户ID列表（逗号分隔，为空则推送给所有在线用户）
 - `TOKEN_SECRET` - JWT Token 密钥；必须显式提供并与网关签名密钥一致，或直接提供 `TOKEN`
@@ -285,7 +285,7 @@ lsof -i :60084  # sync-orchestrator
 lsof -i :60081  # media
 lsof -i :50091  # push-server
 lsof -i :60051  # access-gateway
-lsof -i :50050  # core-gateway
+lsof -i :50050  # api-gateway
 
 # 检查 Redis 连接
 redis-cli -h localhost -p 26379 ping
@@ -435,7 +435,7 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare2"
 | push-server | 50091 | 消息推送服务 gRPC |
 | access-gateway | 60051 | 客户端接入网关（WebSocket/QUIC） |
 | access-gateway-grpc | 60053 | 客户端接入网关 gRPC（port + 2） |
-| core-gateway | 50050 | 业务系统统一入口 gRPC |
+| api-gateway | 50050 | 业务系统统一入口 gRPC |
 | Redis | 26379 | Redis 服务 |
 | PostgreSQL | 25432 | PostgreSQL 服务 |
 | JetStream | 29092 | JetStream 服务（外部端口） |
@@ -492,7 +492,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `NEGOTIATION_HOST` | 网关地址（格式：`host:port`） | `localhost:60051` |
-| `GATEWAY_ENDPOINT` | Core Gateway 地址 | `http://localhost:50050` |
+| `GATEWAY_ENDPOINT` | API Gateway 地址 | `http://localhost:50050` |
 | `MESSAGE_CONTENT` | 消息内容 | `Hello from business system` |
 | `USER_IDS` | 目标用户ID列表（逗号分隔） | 空（推送给所有在线用户） |
 | `TOKEN_SECRET` | JWT Token 密钥 | 必须显式提供，或直接提供 `TOKEN` |
@@ -554,7 +554,7 @@ cargo run --example business_push_client
 # 1. 确保所有服务已启动
 ./scripts/check_services.sh
 
-# 2. 通过 Core Gateway 推送消息给所有在线用户
+# 2. 通过 API Gateway 推送消息给所有在线用户
 cargo run --example business_push_client
 
 # 3. 推送给指定用户
@@ -562,7 +562,7 @@ USER_IDS=user1,user2 \
 MESSAGE_CONTENT="Custom message" \
 cargo run --example business_push_client
 
-# 4. 使用自定义 Core Gateway 地址
+# 4. 使用自定义 API Gateway 地址
 GATEWAY_ENDPOINT=http://localhost:50050 \
 cargo run --example business_push_client
 ```

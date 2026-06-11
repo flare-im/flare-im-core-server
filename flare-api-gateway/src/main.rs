@@ -12,7 +12,7 @@ use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
     clients::GrpcClients,
     gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
-    service_names::CORE_GATEWAY,
+    service_names::API_GATEWAY,
 };
 use flare_server_core::{TokenService, auth::build_token_validator};
 
@@ -22,16 +22,14 @@ async fn main() -> Result<()> {
     let app_config = flare_im_service_kit::load_config(Some("config"));
     flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
 
-    // gRPC/限流等仍走已有 CORE_GATEWAY 运行期契约；HTTP 监听与
-    // check_services.sh（50050）及 config/services/core_gateway.toml 对齐。
-    let settings = GatewaySettings::from_env_for(GatewayEnvScope::Core)?;
-    let gateway_config = app_config.core_gateway_service();
+    let settings = GatewaySettings::from_env_for(GatewayEnvScope::Api)?;
+    let gateway_config = app_config.api_gateway_service();
     let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
         app_config,
         &gateway_config.runtime,
-        CORE_GATEWAY,
+        API_GATEWAY,
     )
-    .context("invalid api-gateway listen address (check config/services/core_gateway.toml)")?;
+    .context("invalid api-gateway listen address (check config/services/api_gateway.toml)")?;
     info!(address = %address, "HTTP listen address resolved");
 
     // 初始化 gRPC 客户端
@@ -49,9 +47,9 @@ async fn main() -> Result<()> {
 
     let token_service = Arc::new(TokenService::new(
         require_secure_token_secret(
-            "FLARE_CORE_GATEWAY_TOKEN_SECRET",
+            "FLARE_API_GATEWAY_TOKEN_SECRET",
             gateway_config.token_secret.as_deref(),
-            "services.core_gateway.token_secret",
+            "services.api_gateway.token_secret",
         )?,
         gateway_config
             .token_issuer
@@ -83,7 +81,7 @@ async fn main() -> Result<()> {
 
     // 使用 ServiceRuntime 管理 HTTP 服务
     let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
-        ServiceRuntime::new(CORE_GATEWAY)
+        ServiceRuntime::new(API_GATEWAY)
             .with_address(address)
             .with_health_failure_action(flare_core_runtime::HealthFailureAction::GracefulShutdown)
             .add_spawn_with_shutdown("gateway-http", move |shutdown_rx| async move {
@@ -97,7 +95,7 @@ async fn main() -> Result<()> {
                     .await
                     .map_err(|e| e.into())
             }),
-        CORE_GATEWAY,
+        API_GATEWAY,
     );
 
     // 运行时启动（支持服务注册）
@@ -105,7 +103,7 @@ async fn main() -> Result<()> {
         .run_with_registration(|addr| {
             Box::pin(async move {
                 flare_im_service_kit::discovery::register_runtime_service_only(
-                    CORE_GATEWAY,
+                    API_GATEWAY,
                     addr,
                     None,
                 )

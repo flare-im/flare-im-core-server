@@ -3,11 +3,11 @@
 //! 根据gateway_id路由到对应的Access Gateway，支持单地区/多地区自适应部署。
 //!
 //! 位于 `flare-im-core/src/gateway/router.rs`（IM 核心共享库），
-//! 被 Push Server、Push Worker 和 Core Gateway 复用。
+//! 被 Push Server、Push Worker 和 API Gateway 复用。
 //!
 //! ## 使用流程
 //!
-//! 1. **查询在线状态**：调用方（Push Server/Core Gateway）先查询 Signaling Online 服务获取用户的 `gateway_id`
+//! 1. **查询在线状态**：调用方（Push Server/API Gateway）先查询 Signaling Online 服务获取用户的 `gateway_id`
 //! 2. **路由推送**：调用 Gateway Router 的 `route_push_message` 方法，传入 `gateway_id` 和推送请求
 //! 3. **服务发现**：Gateway Router 通过服务发现获取对应 `gateway_id` 的 Access Gateway 地址
 //! 4. **推送消息**：Gateway Router 调用 Access Gateway 的 `PushMessage` 接口推送消息

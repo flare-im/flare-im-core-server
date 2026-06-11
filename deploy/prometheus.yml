@@ -63,11 +63,11 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 15s
 
-  - job_name: 'core-gateway'
+  - job_name: 'api-gateway'
     static_configs:
-      - targets: ['core-gateway:9091']
+      - targets: ['api-gateway:9091']
         labels:
-          service: 'core-gateway'
+          service: 'api-gateway'
     metrics_path: '/metrics'
     scrape_interval: 15s
 
@@ -94,4 +94,3 @@ scrape_configs:
   - job_name: 'loki'
     static_configs:
       - targets: ['loki:3100']
-

@@ -10,7 +10,7 @@ use tracing::info;
 use flare_admin_gateway::interface::http::create_admin_router;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
-    CoreGatewayServiceConfig,
+    ApiGatewayServiceConfig,
     clients::GrpcClients,
     gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
     service_names::ADMIN_GATEWAY,
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     let settings = GatewaySettings::from_env_for(GatewayEnvScope::Admin)?;
     let admin_config = app_config.admin_gateway_service();
-    let core_config = app_config.core_gateway_service();
+    let api_config = app_config.api_gateway_service();
     let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
         app_config,
         &admin_config.runtime,
@@ -51,20 +51,20 @@ async fn main() -> Result<()> {
             admin_config
                 .token_secret
                 .as_deref()
-                .or(core_config.token_secret.as_deref()),
+                .or(api_config.token_secret.as_deref()),
             "services.admin_gateway.token_secret",
         )?,
         admin_config
             .token_issuer
             .clone()
-            .or_else(|| core_config.token_issuer.clone())
+            .or_else(|| api_config.token_issuer.clone())
             .unwrap_or_else(|| "flare-im-core".to_string()),
         admin_config
             .token_ttl_seconds
-            .or(core_config.token_ttl_seconds)
+            .or(api_config.token_ttl_seconds)
             .unwrap_or(3600),
     ));
-    let trusted_issuers = trusted_admin_issuers(&admin_config, &core_config);
+    let trusted_issuers = trusted_admin_issuers(&admin_config, &api_config);
     let auth_validator =
         build_token_validator(&settings.auth, token_service.clone(), &trusted_issuers)
             .context("failed to initialize admin-gateway auth validator")?;
@@ -119,10 +119,10 @@ async fn main() -> Result<()> {
 
 fn trusted_admin_issuers(
     admin_config: &flare_im_service_kit::AdminGatewayServiceConfig,
-    core_config: &CoreGatewayServiceConfig,
+    api_config: &ApiGatewayServiceConfig,
 ) -> Vec<flare_im_service_kit::config::TrustedTokenIssuerConfig> {
     if admin_config.trusted_token_issuers.is_empty() {
-        core_config.trusted_token_issuers.clone()
+        api_config.trusted_token_issuers.clone()
     } else {
         admin_config.trusted_token_issuers.clone()
     }

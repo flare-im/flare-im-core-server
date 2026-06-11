@@ -1,8 +1,8 @@
 //! gRPC 接口层。
 //!
 //! `flare-api-gateway` 默认面向三方暴露 HTTP/OpenAPI。需要高性能可信接入时，
-//! 这里应实现版本化 gRPC facade，例如 `flare.core_gateway.v1.CoreGatewayPublicService`
-//! 和 `CoreGatewayAdminService`。
+//! 这里应实现版本化 gRPC facade，例如 `flare.api_gateway.v1.ApiGatewayPublicService`
+//! 和 `ApiGatewayAdminService`。
 //!
 //! 设计约束：
 //! - 不直接暴露内部所有 gRPC service。

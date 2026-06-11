@@ -59,7 +59,7 @@ SERVICES=(
     "push-server:"  # 无端口（JetStream 消费者）
     "push-worker:"  # 无端口（JetStream 消费者）
     "media:60081"
-    "core-gateway:50050"
+    "api-gateway:50050"
 )
 
 # Access Gateway 不在此脚本中检查

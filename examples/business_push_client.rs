@@ -21,8 +21,8 @@
 //!
 //! ## 工作原理
 //!
-//! 1. **连接 Core Gateway**：业务系统通过 gRPC 连接到 `flare-api-gateway`
-//! 2. **查询在线状态**：Core Gateway 查询 `signaling-online` 获取用户在线状态和网关信息
+//! 1. **连接 API Gateway**：业务系统通过 gRPC 连接到 `flare-api-gateway`
+//! 2. **查询在线状态**：API Gateway 查询 `signaling-online` 获取用户在线状态和网关信息
 //! 3. **跨地区路由**：根据用户的 `gateway_id`，路由到对应的 `access-gateway`
 //! 4. **推送消息**：Access Gateway 通过长连接推送消息给客户端
 //! 5. **消息持久化**：消息会通过 Message Orchestrator 持久化到数据库
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     // 从环境变量获取配置
     // 注意：生产环境应该使用服务发现，这里仅用于示例
     let gateway_endpoint =
-        env::var("CORE_GATEWAY_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:50050".to_string());
+        env::var("API_GATEWAY_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:50050".to_string());
 
     let message_content = env::args()
         .nth(1)
@@ -89,35 +89,35 @@ async fn main() -> anyhow::Result<()> {
     });
 
     if token.is_empty() {
-        error!("❌ Token 为空，无法连接 Core Gateway");
+        error!("❌ Token 为空，无法连接 API Gateway");
         return Err(anyhow::anyhow!("Token is required"));
     }
 
-    // 连接到 Core Gateway
-    info!("📡 连接到 Core Gateway: {}", gateway_endpoint);
+    // 连接到 API Gateway
+    info!("📡 连接到 API Gateway: {}", gateway_endpoint);
     let mut client = match AccessGatewayClient::connect(gateway_endpoint.clone()).await {
         Ok(client) => {
-            info!("✅ 已连接到 Core Gateway");
+            info!("✅ 已连接到 API Gateway");
             client
         }
         Err(e) => {
             error!(
                 error = %e,
                 endpoint = %gateway_endpoint,
-                "❌ 连接 Core Gateway 失败"
+                "❌ 连接 API Gateway 失败"
             );
             eprintln!();
             eprintln!("💡 提示：");
-            eprintln!("   1. 确保 Core Gateway 服务已启动：");
+            eprintln!("   1. 确保 API Gateway 服务已启动：");
             eprintln!("      ./scripts/start_server.sh [single|multi]");
             eprintln!("   2. 检查服务端口是否正确（默认: 50050）");
             eprintln!("   3. 可以通过环境变量指定其他地址：");
             eprintln!(
-                "      CORE_GATEWAY_ENDPOINT=http://localhost:50050 cargo run --example business_push_client"
+                "      API_GATEWAY_ENDPOINT=http://localhost:50050 cargo run --example business_push_client"
             );
             eprintln!();
             return Err(anyhow::anyhow!(
-                "Failed to connect to Core Gateway at {}: {}",
+                "Failed to connect to API Gateway at {}: {}",
                 gateway_endpoint,
                 e
             ));

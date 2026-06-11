@@ -52,13 +52,6 @@ admin_gateway:admin
 admin_gateway:admin:*
 ```
 
-开发迁移期仍兼容：
-
-```text
-core_gateway:admin
-core_gateway:admin:*
-```
-
 Admin 写操作必须携带：
 
 ```http

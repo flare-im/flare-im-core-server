@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-`flare-api-gateway` 的代理层要成为 Core HTTP/API Gateway 与内部 gRPC 服务之间的稳定边界。它不是简单转发器，而是统一处理：
+`flare-api-gateway` 的代理层要成为 API Gateway 与内部 gRPC 服务之间的稳定边界。它不是简单转发器，而是统一处理：
 
 - Rust 类型安全的 HTTP DTO 到 gRPC Request 转换。
 - `Ctx`、认证身份、租户、trace、request_id 透传。
@@ -85,12 +85,12 @@ Generic Proxy 适合：
 
 | facade | 目标用户 | 能力 |
 |--------|----------|------|
-| `CoreGatewayPublicService` | 可信业务服务、机器人、BFF | 发消息、撤回、会话查询、媒体查询、在线查询 |
-| `CoreGatewayAdminService` | 管理后台、运维工具 | 消息查询/导出、设备管理、能力管理、审计查询 |
+| `ApiGatewayPublicService` | 可信业务服务、机器人、BFF | 发消息、撤回、会话查询、媒体查询、在线查询 |
+| `ApiGatewayAdminService` | 管理后台、运维工具 | 消息查询/导出、设备管理、能力管理、审计查询 |
 
 Facade 规则：
 
-- 使用公开 proto 包名，例如 `flare.core_gateway.v1`。
+- 使用公开 proto 包名，例如 `flare.api_gateway.v1`。
 - 只暴露可长期承诺的字段和错误，不直接透出所有内部 proto。
 - metadata 与 HTTP header 保持同名语义：`x-tenant-id`、`x-user-id`、`x-actor-id`、`x-request-id`、`x-trace-id`。
 - Admin facade 必须有 service token/mTLS、allowlist、审计和限流。
@@ -232,11 +232,11 @@ Admin API 必须先以 typed HTTP proxy 落地，再按需要暴露 gRPC facade�
 
 | Admin 能力 | HTTP 前缀 | gRPC facade | 下游 |
 |------------|-----------|-------------|------|
-| 消息查询/导出 | `/api/v1/admin/messages` | `CoreGatewayAdminService.QueryMessages/ExportMessages` | `StorageReaderService` |
-| 会话管理 | `/api/v1/admin/conversations` | `CoreGatewayAdminService.GetConversationDetail/ManageParticipants` | `ConversationReadService` / `ConversationManageService` |
-| 媒体管理 | `/api/v1/admin/media` | `CoreGatewayAdminService.GetFileInfo/DeleteFile` | `MediaService` |
-| 在线设备 | `/api/v1/admin/presence` | `CoreGatewayAdminService.ListUserDevices/KickDevice` | `OnlineService` |
-| 能力插件 | `/api/v1/admin/capabilities` | `CoreGatewayAdminService.ListCapabilities/GrantUserCapability` | `CapabilityService` |
+| 消息查询/导出 | `/api/v1/admin/messages` | `ApiGatewayAdminService.QueryMessages/ExportMessages` | `StorageReaderService` |
+| 会话管理 | `/api/v1/admin/conversations` | `ApiGatewayAdminService.GetConversationDetail/ManageParticipants` | `ConversationReadService` / `ConversationManageService` |
+| 媒体管理 | `/api/v1/admin/media` | `ApiGatewayAdminService.GetFileInfo/DeleteFile` | `MediaService` |
+| 在线设备 | `/api/v1/admin/presence` | `ApiGatewayAdminService.ListUserDevices/KickDevice` | `OnlineService` |
+| 能力插件 | `/api/v1/admin/capabilities` | `ApiGatewayAdminService.ListCapabilities/GrantUserCapability` | `CapabilityService` |
 
 ## 10. Rust 实现要求
 

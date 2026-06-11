@@ -20,9 +20,9 @@ pub use flare_server_core::{Config, RegistryConfig, ServerConfig, ServiceConfig}
 
 pub use clients::GrpcClients;
 pub use config::{
-    AccessGatewayServiceConfig, AdminGatewayServiceConfig, CapabilityServiceConfig, ConfigManager,
-    ConversationServiceConfig, CoreGatewayServiceConfig, FlareAppConfig, JetStreamClusterConfig,
-    KafkaClusterConfig, MediaServiceConfig, MessageIngestServiceConfig,
+    AccessGatewayServiceConfig, AdminGatewayServiceConfig, ApiGatewayServiceConfig,
+    CapabilityServiceConfig, ConfigManager, ConversationServiceConfig, FlareAppConfig,
+    JetStreamClusterConfig, KafkaClusterConfig, MediaServiceConfig, MessageIngestServiceConfig,
     MessageOrchestratorServiceConfig, MqBackendConfig, ObjectStoreConfig, PostgresInstanceConfig,
     PushProxyServiceConfig, RedisPoolConfig, ServiceEndpointConfig, ServiceRuntimeConfig,
     SessionPolicyConfig, SignalingOnlineServiceConfig, SignalingRouteServiceConfig,

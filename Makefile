@@ -74,7 +74,7 @@ stop:
 
 # Service launch helpers ----------------------------------------------------
 
-.PHONY: run-access-gateway run-core-gateway run-signaling-online run-signaling-route \
+.PHONY: run-access-gateway run-api-gateway run-signaling-online run-signaling-route \
 	run-push-server run-push-worker \
 	run-message-orchestrator run-storage-writer run-storage-reader \
 	run-media run-session
@@ -82,7 +82,7 @@ stop:
 run-access-gateway:
 	$(CARGO) run -p flare-signaling-gateway --bin flare-signaling-gateway
 
-run-core-gateway:
+run-api-gateway:
 	$(CARGO) run -p flare-api-gateway --bin flare-api-gateway
 
 run-signaling-online:

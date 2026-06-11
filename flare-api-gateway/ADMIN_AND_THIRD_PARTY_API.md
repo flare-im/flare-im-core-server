@@ -28,7 +28,7 @@ Gateway 可以做边界级认证，但不能拥有 token 生命周期，不能�
 
 | 密钥用途 | 推荐位置 | Gateway 行为 |
 |----------|----------|--------------|
-| Core Gateway 调用业务 auth hook | `FLARE_CORE_GATEWAY_AUTH_HOOK_SECRET` | Core Gateway 发送给 hook，证明调用方是 Core Gateway |
+| API Gateway 调用业务 auth hook | `FLARE_API_GATEWAY_AUTH_HOOK_SECRET` | API Gateway 发送给 hook，证明调用方是 API Gateway |
 | Admin Gateway 调用业务 auth hook | `FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET` | Admin Gateway 发送给 hook，证明调用方是 Admin Gateway |
 | 业务系统签发 JWT | 业务认证系统或 `trusted_token_issuers` | Provider 校验后返回 principal |
 | 服务间 mTLS / service token | 网格、反向代理、业务 auth provider | Gateway 只消费认证结果 |
@@ -69,14 +69,12 @@ Admin API 需要 provider 返回以下任一 scope：
 
 - `admin_gateway:admin`
 - `admin_gateway:admin:*`
-- `core_gateway:admin`
-- `core_gateway:admin:*`
 - `gateway:admin`
 - `flare:admin`
 - `admin:*`
 - `admin`
 
-当前 `core_jwt` claims 不携带 scopes，因此默认不能访问 Admin API。业务端需要管理能力时，应使用 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `admin_gateway:*` 管理 scope；`core_gateway:*` 是开发期迁移别名。
+当前 `core_jwt` claims 不携带 scopes，因此默认不能访问 Admin API。业务端需要管理能力时，应使用 `http_hook` 或共享 `flare-server-core::auth` provider 返回 `admin_gateway:*` 管理 scope。
 
 ### 3.2 入站 Admin
 
@@ -315,7 +313,7 @@ Capability 管理不应该写死某个插件类型，SFU、机器人、风控、
 未来可以在 `flare-api-gateway/src/interface/grpc` 暴露一个轻量 facade：
 
 ```proto
-service CoreGatewayPublicService {
+service ApiGatewayPublicService {
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
   rpc RecallMessage(RecallMessageRequest) returns (RecallMessageResponse);
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
@@ -324,7 +322,7 @@ service CoreGatewayPublicService {
   rpc GetUserPresence(GetUserPresenceRequest) returns (GetUserPresenceResponse);
 }
 
-service CoreGatewayAdminService {
+service ApiGatewayAdminService {
   rpc QueryMessages(QueryMessagesRequest) returns (QueryMessagesResponse);
   rpc ExportMessages(ExportMessagesRequest) returns (ExportMessagesResponse);
   rpc ListUserDevices(ListUserDevicesRequest) returns (ListUserDevicesResponse);
@@ -335,7 +333,7 @@ service CoreGatewayAdminService {
 
 Facade 规则：
 
-- 使用公开 proto 包名和明确版本，例如 `flare.core_gateway.v1`。
+- 使用公开 proto 包名和明确版本，例如 `flare.api_gateway.v1`。
 - 不直接复用所有内部 proto，只暴露可承诺稳定的子集。
 - metadata 与 HTTP header 语义保持一致。
 - Admin service 必须有独立权限、审计和 allowlist。
@@ -351,7 +349,7 @@ grpcurl \
   -H 'x-request-id: request-1' \
   -H 'x-trace-id: trace-1' \
   127.0.0.1:50050 \
-  flare.core_gateway.v1.CoreGatewayAdminService/QueryMessages
+  flare.api_gateway.v1.ApiGatewayAdminService/QueryMessages
 ```
 
 ## 7. 错误、限流和审计

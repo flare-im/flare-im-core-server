@@ -15,29 +15,28 @@ use crate::service_names::{
 /// 在生产部署中误共享认证、端口或下游路由配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayEnvScope {
-    Core,
+    Api,
     Admin,
 }
 
 impl GatewayEnvScope {
     pub fn env_prefix(self) -> &'static str {
         match self {
-            Self::Core => "FLARE_CORE_GATEWAY",
+            Self::Api => "FLARE_API_GATEWAY",
             Self::Admin => "FLARE_ADMIN_GATEWAY",
         }
     }
 
     fn default_port(self) -> &'static str {
         match self {
-            Self::Core => "50050",
+            Self::Api => "50050",
             Self::Admin => "50051",
         }
     }
 
     fn default_tracing_service_name(self) -> &'static str {
         match self {
-            // Runtime service id is intentionally stable even though the crate is `flare-api-gateway`.
-            Self::Core => "flare-core-gateway",
+            Self::Api => "flare-api-gateway",
             Self::Admin => "flare-admin-gateway",
         }
     }
@@ -94,9 +93,9 @@ pub struct TracingConfig {
 }
 
 impl GatewaySettings {
-    /// 从 Core Gateway 环境变量加载配置。
+    /// 从 API Gateway 环境变量加载配置。
     pub fn from_env() -> Result<Self> {
-        Self::from_env_for(GatewayEnvScope::Core)
+        Self::from_env_for(GatewayEnvScope::Api)
     }
 
     /// 从指定 Gateway 作用域的环境变量加载配置。
@@ -426,7 +425,7 @@ mod tests {
     fn gateway_env_scope_uses_service_specific_prefixes() {
         let env = HashMap::from([
             (
-                "FLARE_CORE_GATEWAY_SERVER_PORT".to_string(),
+                "FLARE_API_GATEWAY_SERVER_PORT".to_string(),
                 "51050".to_string(),
             ),
             (
@@ -442,7 +441,7 @@ mod tests {
                 "https://admin-auth.example.com/validate".to_string(),
             ),
             (
-                "FLARE_CORE_GATEWAY_AUTH_MODE".to_string(),
+                "FLARE_API_GATEWAY_AUTH_MODE".to_string(),
                 "core_jwt".to_string(),
             ),
         ]);
@@ -450,9 +449,9 @@ mod tests {
         let admin =
             GatewaySettings::from_env_source(GatewayEnvScope::Admin, |key| env.get(key).cloned())
                 .expect("admin settings");
-        let core =
-            GatewaySettings::from_env_source(GatewayEnvScope::Core, |key| env.get(key).cloned())
-                .expect("core settings");
+        let api =
+            GatewaySettings::from_env_source(GatewayEnvScope::Api, |key| env.get(key).cloned())
+                .expect("api settings");
 
         assert_eq!(admin.server.port, 51051);
         assert_eq!(admin.auth.mode, AuthProviderMode::HttpHook);
@@ -462,9 +461,9 @@ mod tests {
         );
         assert_eq!(admin.tracing.service_name, "flare-admin-gateway");
 
-        assert_eq!(core.server.port, 51050);
-        assert_eq!(core.auth.mode, AuthProviderMode::CoreJwt);
-        assert_eq!(core.auth.hook_url, None);
-        assert_eq!(core.tracing.service_name, "flare-core-gateway");
+        assert_eq!(api.server.port, 51050);
+        assert_eq!(api.auth.mode, AuthProviderMode::CoreJwt);
+        assert_eq!(api.auth.hook_url, None);
+        assert_eq!(api.tracing.service_name, "flare-api-gateway");
     }
 }

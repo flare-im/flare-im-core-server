@@ -8,7 +8,7 @@ use axum::{
 use flare_im_service_kit::gateway_auth::{auth_error_response, authenticate_http_request};
 use flare_server_core::TokenValidator;
 
-const GATEWAY_NAME: &str = "core-gateway";
+const GATEWAY_NAME: &str = "api-gateway";
 
 pub async fn gateway_auth_middleware(
     Extension(validator): Extension<Arc<dyn TokenValidator>>,
