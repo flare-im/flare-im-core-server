@@ -36,6 +36,48 @@ fn call_lifecycle_is_owned_by_flare_call_not_conversation() {
     );
 }
 
+#[test]
+fn call_lifecycle_is_wired_into_gateway_runtime() {
+    let root = workspace_root();
+
+    let gateway_manifest = fs::read_to_string(root.join("flare-signaling/gateway/Cargo.toml"))
+        .expect("read gateway manifest");
+    assert!(
+        gateway_manifest.contains("flare-call = { workspace = true }"),
+        "flare-signaling-gateway must depend on flare-call so call lifecycle is not a runtime orphan"
+    );
+
+    let bridge = fs::read_to_string(root.join("flare-signaling/gateway/src/call_signal/bridge.rs"))
+        .expect("read gateway call bridge");
+    for required in [
+        "flare_call::application::call",
+        "StartCallHandler",
+        "AcceptCallHandler",
+        "RejectCallHandler",
+        "HangupCallHandler",
+        "CancelCallHandler",
+        "StartCallCommand",
+    ] {
+        assert!(
+            bridge.contains(required),
+            "gateway call signal bridge must invoke flare-call command handlers; missing `{required}`"
+        );
+    }
+
+    let wire = fs::read_to_string(root.join("flare-signaling/gateway/src/service/wire.rs"))
+        .expect("read gateway wire");
+    for required in [
+        "pub call_signal_bridge: Arc<CallSignalBridge>",
+        "CallSignalBridge::new",
+        "InMemoryCallSessionRepository",
+    ] {
+        assert!(
+            wire.contains(required),
+            "gateway runtime context must expose a wired call bridge; missing `{required}`"
+        );
+    }
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

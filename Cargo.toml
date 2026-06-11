@@ -130,6 +130,7 @@ flare-im-seq = { path = "crates/flare-im-seq" }
 flare-im-ack = { path = "crates/flare-im-ack" }
 flare-im-hooks = { path = "crates/flare-im-hooks" }
 flare-im-capability-core = { path = "crates/flare-im-capability-core" }
+flare-call = { path = "flare-call" }
 
 # Flare Proto
 flare-proto = { path = "../flare-proto" }

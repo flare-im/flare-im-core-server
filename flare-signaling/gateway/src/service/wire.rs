@@ -28,6 +28,10 @@ use flare_server_core::Config;
 use flare_server_core::error::Result;
 use tokio::sync::Mutex;
 
+use crate::call_signal::{
+    CallBindingLookup, CallSignalBridge, CallSignalRouter, InMemoryCallSessionRepository,
+};
+
 /// gRPC 服务集合
 pub struct GrpcServices {
     pub access_gateway_handler: Arc<AccessGatewayHandler>,
@@ -40,6 +44,7 @@ pub struct ApplicationContext {
         Arc<tokio::sync::Mutex<Option<flare_core::server::builder::flare::FlareServer>>>,
     pub grpc_services: GrpcServices,
     pub push_domain_service: Arc<PushDomainService>,
+    pub call_signal_bridge: Arc<CallSignalBridge>,
     pub gateway_id: String,
     pub region: Option<String>,
 }
@@ -125,10 +130,18 @@ pub async fn initialize(
     // 10. 推送领域服务
     let push_domain_service = Arc::new(PushDomainService::new(push_port, connection_query.clone()));
 
-    // 11. 认证器
+    // 11. 通话信令生命周期桥：gateway runtime -> flare-call FSM -> capability route hint。
+    let call_session_repository = Arc::new(InMemoryCallSessionRepository::default());
+    let call_binding_lookup: Arc<dyn CallBindingLookup> = call_session_repository.clone();
+    let call_signal_bridge = Arc::new(CallSignalBridge::new(
+        Arc::new(CallSignalRouter::new(call_binding_lookup)),
+        call_session_repository,
+    ));
+
+    // 12. 认证器
     let authenticator = build_authenticator(&access_config).await?;
 
-    // 12. 长连接服务器
+    // 13. 长连接服务器
     debug!(ws_port = %port_config.ws_port, quic_port = %port_config.quic_port, "Building long connection server");
     let long_connection_server = build_long_connection_server(
         runtime_config,
@@ -145,7 +158,7 @@ pub async fn initialize(
 
     info!("Long connection server built successfully");
 
-    // 13. gRPC 处理器
+    // 14. gRPC 处理器
     debug!("Building gRPC handlers");
     let access_gateway_grpc_handler = Arc::new(AccessGatewayHandler::new(
         Arc::new(PushHandler::new(push_domain_service.clone())),
@@ -153,7 +166,7 @@ pub async fn initialize(
     ));
     debug!("gRPC handlers built successfully");
 
-    // 14. gRPC 地址
+    // 15. gRPC 地址
     let grpc_addr = format!(
         "{}:{}",
         runtime_config.server.address, port_config.grpc_port
@@ -169,6 +182,7 @@ pub async fn initialize(
             grpc_addr,
         },
         push_domain_service: push_domain_service.clone(),
+        call_signal_bridge,
         gateway_id,
         region,
     })
