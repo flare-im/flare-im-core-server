@@ -36,14 +36,30 @@ pub struct PushEventCommand {
     pub user_ids: Vec<String>,
     pub events: Vec<Event>,
     pub options: Option<PushOptions>,
+    pub conversation_id: String,
+    pub max_conversation_seq: u64,
+    pub delivery_mode: i32,
+    pub inline_events_truncated: bool,
 }
 
 impl PushEventCommand {
-    pub fn new(user_ids: Vec<String>, events: Vec<Event>, options: Option<PushOptions>) -> Self {
+    pub fn new(
+        user_ids: Vec<String>,
+        events: Vec<Event>,
+        options: Option<PushOptions>,
+        conversation_id: String,
+        max_conversation_seq: u64,
+        delivery_mode: i32,
+        inline_events_truncated: bool,
+    ) -> Self {
         Self {
             user_ids,
             events,
             options,
+            conversation_id,
+            max_conversation_seq,
+            delivery_mode,
+            inline_events_truncated,
         }
     }
 }

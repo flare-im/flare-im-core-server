@@ -20,7 +20,7 @@ impl ApplicationBootstrap {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
 
-        let config = capability_config_from_env(&app_config);
+        let config = capability_config_from_env(app_config);
         info!(
             config_file = ?config.config_file,
             runtime_config_file = ?config.runtime_config_file,

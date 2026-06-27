@@ -12,7 +12,9 @@ pub struct AdminCapabilitiesResponse {
     pub required_scopes: Vec<String>,
     pub required_headers: AdminRequiredHeaders,
     pub endpoints: Vec<AdminEndpointDescriptor>,
-    pub business_owned: Vec<String>,
+    pub organization_policy: AdminOrganizationPolicyDescriptor,
+    pub data_residency_policy: AdminDataResidencyPolicyDescriptor,
+    pub retention_legal_policy: AdminRetentionLegalPolicyDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -31,6 +33,73 @@ pub struct AdminEndpointDescriptor {
     pub scope: String,
     pub write: bool,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnterprisePolicyStatus {
+    CoreGuardrailsAvailable,
+    ExternalPolicyRequired,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AdminOrganizationPolicyDescriptor {
+    pub status: EnterprisePolicyStatus,
+    pub authority: EnterprisePolicyAuthority,
+    pub required_role_sources: Vec<OrganizationRoleSource>,
+    pub protected_operations: Vec<EnterpriseProtectedOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AdminDataResidencyPolicyDescriptor {
+    pub status: EnterprisePolicyStatus,
+    pub authority: EnterprisePolicyAuthority,
+    pub tenant_routing_key: String,
+    pub protected_operations: Vec<EnterpriseProtectedOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AdminRetentionLegalPolicyDescriptor {
+    pub status: EnterprisePolicyStatus,
+    pub authority: EnterprisePolicyAuthority,
+    pub enforcement_anchors: Vec<RetentionEnforcementAnchor>,
+    pub protected_operations: Vec<EnterpriseProtectedOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnterprisePolicyAuthority {
+    BusinessAdminIdentityProvider,
+    TenantRegionPolicyProvider,
+    EnterpriseRetentionPolicyProvider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationRoleSource {
+    OperatorIdentityLifecycle,
+    BusinessRolesAndApprovalFlows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnterpriseProtectedOperation {
+    AdminMessageExport,
+    CapabilityPolicyMutation,
+    TenantPolicyMutation,
+    MessageStorageQuery,
+    MessageExport,
+    MediaObjectAccess,
+    MessageRecall,
+    RetentionPurge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionEnforcementAnchor {
+    MessageRetentionEvents,
+    ComplianceHooks,
+    CapabilityAuditLog,
 }
 
 pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
@@ -79,11 +148,43 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
                 status: "available".to_string(),
             },
         ],
-        business_owned: vec![
-            "admin_console_and_backend".to_string(),
-            "business_roles_and_approval_flows".to_string(),
-            "operator_identity_lifecycle".to_string(),
-        ],
+        organization_policy: AdminOrganizationPolicyDescriptor {
+            status: EnterprisePolicyStatus::ExternalPolicyRequired,
+            authority: EnterprisePolicyAuthority::BusinessAdminIdentityProvider,
+            required_role_sources: vec![
+                OrganizationRoleSource::OperatorIdentityLifecycle,
+                OrganizationRoleSource::BusinessRolesAndApprovalFlows,
+            ],
+            protected_operations: vec![
+                EnterpriseProtectedOperation::AdminMessageExport,
+                EnterpriseProtectedOperation::CapabilityPolicyMutation,
+                EnterpriseProtectedOperation::TenantPolicyMutation,
+            ],
+        },
+        data_residency_policy: AdminDataResidencyPolicyDescriptor {
+            status: EnterprisePolicyStatus::ExternalPolicyRequired,
+            authority: EnterprisePolicyAuthority::TenantRegionPolicyProvider,
+            tenant_routing_key: keys::TENANT_ID.to_string(),
+            protected_operations: vec![
+                EnterpriseProtectedOperation::MessageStorageQuery,
+                EnterpriseProtectedOperation::MessageExport,
+                EnterpriseProtectedOperation::MediaObjectAccess,
+            ],
+        },
+        retention_legal_policy: AdminRetentionLegalPolicyDescriptor {
+            status: EnterprisePolicyStatus::CoreGuardrailsAvailable,
+            authority: EnterprisePolicyAuthority::EnterpriseRetentionPolicyProvider,
+            enforcement_anchors: vec![
+                RetentionEnforcementAnchor::MessageRetentionEvents,
+                RetentionEnforcementAnchor::ComplianceHooks,
+                RetentionEnforcementAnchor::CapabilityAuditLog,
+            ],
+            protected_operations: vec![
+                EnterpriseProtectedOperation::MessageRecall,
+                EnterpriseProtectedOperation::MessageExport,
+                EnterpriseProtectedOperation::RetentionPurge,
+            ],
+        },
     }
 }
 

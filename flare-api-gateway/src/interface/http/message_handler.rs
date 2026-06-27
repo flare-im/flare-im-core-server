@@ -6,13 +6,10 @@ use std::sync::Arc;
 use tracing::{debug, instrument};
 
 use crate::application::dto::{
-    ExecuteCustomEventHttpRequest, ExecuteCustomEventHttpResponse, MarkReadHttpRequest,
-    MarkReadHttpResponse, RecallMessageHttpRequest, RecallMessageHttpResponse,
-    SendMessageHttpRequest, SendMessageHttpResponse,
+    ExecuteCustomEventHttpRequest, ExecuteCustomEventHttpResponse, RecallMessageHttpRequest,
+    RecallMessageHttpResponse, SendMessageHttpRequest, SendMessageHttpResponse,
 };
-use flare_grpc_proto::message::{
-    ExecuteEventRequest, MarkMessageReadRequest, RecallMessageRequest, SendMessageRequest,
-};
+use flare_grpc_proto::message::{ExecuteEventRequest, RecallMessageRequest, SendMessageRequest};
 use flare_im_service_kit::clients::GrpcClients;
 use flare_proto::common::{
     CustomContent, CustomEvent, Event, EventType, Message, MessageContent, MessageSource,
@@ -339,46 +336,4 @@ mod tests {
         assert_eq!(localized.reason, "INVALID_MESSAGE_EVENT");
         assert_eq!(localized.details.as_deref(), Some("namespace is required"));
     }
-}
-
-/// 标记消息已读
-#[utoipa::path(
-    post,
-    path = "/api/v1/messages/read",
-    tag = "Message",
-    request_body = MarkReadHttpRequest,
-    responses(
-        (status = 200, description = "成功", body = ApiResponse<MarkReadHttpResponse>),
-        (status = 400, description = "参数错误"),
-    ),
-)]
-#[instrument(skip(headers, clients))]
-pub async fn mark_message_read(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Json(req): Json<MarkReadHttpRequest>,
-) -> Result<Json<ApiResponse<MarkReadHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
-    debug!(
-        trace_id = %ctx.trace_id(),
-        conversation_id = %req.conversation_id,
-        message_id = %req.message_id,
-        "Marking message as read"
-    );
-
-    let grpc_req = MarkMessageReadRequest {
-        message_id: req.message_id,
-        read_at: None,
-        conversation_id: req.conversation_id,
-    };
-    let mut action_client = clients.message_action.lock().await;
-    let grpc_res = action_client
-        .mark_message_read_with_ctx(&ctx, grpc_req)
-        .await
-        .map_err(|err| GatewayError::internal("MESSAGE_MARK_READ_FAILED", err.to_string()))?;
-    let response = MarkReadHttpResponse {
-        success: grpc_res.success,
-    };
-
-    Ok(Json(ApiResponse::success(response)))
 }

@@ -53,6 +53,8 @@ pub enum VisibilityStatus {
 pub struct PinnedMessageInfo {
     pub message_id: String,
     pub user_id: String,
+    pub scope: i32,
+    pub owner_user_id: String,
     pub pinned_at: Option<DateTime<Utc>>,
     pub expire_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,

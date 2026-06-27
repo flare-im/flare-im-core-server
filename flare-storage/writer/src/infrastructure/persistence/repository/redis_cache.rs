@@ -11,9 +11,12 @@ use tracing::instrument;
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::HotCacheRepository;
 
+const DEFAULT_TENANT_ID: &str = "0";
+
 pub struct RedisHotCacheRepository {
     client: Arc<redis::Client>,
     ttl_seconds: u64,
+    tail_limit: usize,
     // 注意：redis-rs 的 ConnectionManager 内部已实现连接池，无需手动管理
 }
 
@@ -22,6 +25,7 @@ impl RedisHotCacheRepository {
         Self {
             client,
             ttl_seconds: config.redis_hot_ttl_seconds,
+            tail_limit: config.redis_hot_tail_limit.max(1),
         }
     }
 
@@ -31,20 +35,33 @@ impl RedisHotCacheRepository {
         // 直接创建即可，底层会自动复用连接
         Ok(ConnectionManager::new(self.client.as_ref().clone()).await?)
     }
+
+    fn tenant_id(ctx: &Ctx) -> String {
+        ctx.tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .unwrap_or(DEFAULT_TENANT_ID)
+            .to_string()
+    }
+
+    fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
+        format!("cache:msg:{tenant_id}:{conversation_id}:{message_id}")
+    }
+
+    fn tail_key(tenant_id: &str, conversation_id: &str) -> String {
+        format!("cache:tail:{tenant_id}:{conversation_id}")
+    }
 }
 
 impl HotCacheRepository for RedisHotCacheRepository {
     #[instrument(skip(self, ctx, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
     async fn store_hot(&self, ctx: &Ctx, message: &crate::domain::model::Message) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = Self::tenant_id(ctx);
         let message = crate::convert::message_to_proto(message);
         let mut conn = self.get_connection().await?;
 
-        let message_key = format!(
-            "cache:msg:{}:{}",
-            message.conversation_id, message.server_id
-        );
-        let index_key = format!("cache:session:{}:index", message.conversation_id);
+        let message_key =
+            Self::message_key(&tenant_id, &message.conversation_id, &message.server_id);
+        let tail_key = Self::tail_key(&tenant_id, &message.conversation_id);
 
         // 将 Message 编码为 protobuf bytes，然后 base64 编码存储
         let mut buf = Vec::new();
@@ -56,19 +73,20 @@ impl HotCacheRepository for RedisHotCacheRepository {
             let _: () = conn.expire(&message_key, ttl).await?;
         }
 
-        // 从 attributes 中提取 ingestion_ts，如果没有则使用当前时间
-        let ingestion_ts = flare_im_contracts::utils::extract_timeline_from_extra(
-            &message.attributes,
-            flare_im_contracts::utils::current_millis(),
-        )
-        .ingestion_ts;
-        let score = ingestion_ts as f64;
+        let score = message.conversation_seq as f64;
         let _: () = conn
-            .zadd(index_key.clone(), message.server_id.clone(), score)
+            .zadd(tail_key.clone(), message.server_id.clone(), score)
+            .await?;
+        let trim_stop = -((self.tail_limit as i64) + 1);
+        let _: () = redis::cmd("ZREMRANGEBYRANK")
+            .arg(&tail_key)
+            .arg(0)
+            .arg(trim_stop)
+            .query_async(&mut conn)
             .await?;
         if self.ttl_seconds > 0 {
             let ttl: i64 = self.ttl_seconds.try_into()?;
-            let _: () = conn.expire(index_key, ttl).await?;
+            let _: () = conn.expire(tail_key, ttl).await?;
         }
 
         Ok(())
@@ -84,7 +102,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
         ctx: &Ctx,
         messages: &[crate::domain::model::Message],
     ) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        let tenant_id = Self::tenant_id(ctx);
         if messages.is_empty() {
             return Ok(());
         }
@@ -98,7 +116,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
 
         // 使用真正的 Redis Pipeline 批量执行
         // 按会话分组，优化索引更新
-        let mut session_indices: std::collections::HashMap<String, Vec<(String, f64)>> =
+        let mut tail_indices: std::collections::HashMap<String, Vec<(String, f64)>> =
             std::collections::HashMap::new();
 
         // 构建 Pipeline
@@ -113,10 +131,8 @@ impl HotCacheRepository for RedisHotCacheRepository {
 
         // 准备所有命令
         for message in messages {
-            let message_key = format!(
-                "cache:msg:{}:{}",
-                message.conversation_id, message.server_id
-            );
+            let message_key =
+                Self::message_key(&tenant_id, &message.conversation_id, &message.server_id);
 
             // 编码消息
             let mut buf = Vec::new();
@@ -131,14 +147,8 @@ impl HotCacheRepository for RedisHotCacheRepository {
                 pipe.cmd("EXPIRE").arg(&message_key).arg(ttl);
             }
 
-            // 收集索引更新（按会话分组）
-            let ingestion_ts = flare_im_contracts::utils::extract_timeline_from_extra(
-                &message.attributes,
-                flare_im_contracts::utils::current_millis(),
-            )
-            .ingestion_ts;
-            let score = ingestion_ts as f64;
-            session_indices
+            let score = message.conversation_seq as f64;
+            tail_indices
                 .entry(message.conversation_id.clone())
                 .or_default()
                 .push((message.server_id.clone(), score));
@@ -148,8 +158,8 @@ impl HotCacheRepository for RedisHotCacheRepository {
         let _: Vec<redis::Value> = pipe.query_async(&mut conn).await?;
 
         // 批量更新索引（按会话分组，使用 Pipeline）
-        for (conversation_id, items) in session_indices {
-            let index_key = format!("cache:session:{}:index", conversation_id);
+        for (conversation_id, items) in tail_indices {
+            let tail_key = Self::tail_key(&tenant_id, &conversation_id);
 
             // 构建 ZADD Pipeline（支持多成员）
             let mut zadd_pipe = redis::pipe();
@@ -159,14 +169,21 @@ impl HotCacheRepository for RedisHotCacheRepository {
             for (message_id, score) in items {
                 zadd_pipe
                     .cmd("ZADD")
-                    .arg(&index_key)
+                    .arg(&tail_key)
                     .arg(score)
                     .arg(&message_id);
             }
 
+            let trim_stop = -((self.tail_limit as i64) + 1);
+            zadd_pipe
+                .cmd("ZREMRANGEBYRANK")
+                .arg(&tail_key)
+                .arg(0)
+                .arg(trim_stop);
+
             // 添加 EXPIRE 命令（如果有 TTL）
             if ttl > 0 {
-                zadd_pipe.cmd("EXPIRE").arg(&index_key).arg(ttl);
+                zadd_pipe.cmd("EXPIRE").arg(&tail_key).arg(ttl);
             }
 
             // 执行 ZADD Pipeline
@@ -180,5 +197,22 @@ impl HotCacheRepository for RedisHotCacheRepository {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_cache_keys_are_tenant_scoped() {
+        assert_eq!(
+            RedisHotCacheRepository::message_key("tenant-a", "conv-a", "msg-a"),
+            "cache:msg:tenant-a:conv-a:msg-a"
+        );
+        assert_eq!(
+            RedisHotCacheRepository::tail_key("tenant-a", "conv-a"),
+            "cache:tail:tenant-a:conv-a"
+        );
     }
 }

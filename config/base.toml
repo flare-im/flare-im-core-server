@@ -66,9 +66,14 @@ url = "redis://localhost:26379/4"
 namespace = "flare:message:wal"
 ttl_seconds = 86400
 
+[redis.push]
+url = "redis://localhost:26379/5"
+namespace = "flare:push"
+ttl_seconds = 86400
+
 [mq]
 # 手动选择默认 MQ 实现（全小写）：
-#   - "nats" / "jetstream"：NATS JetStream（二者等价）
+#   - "nats"：NATS JetStream
 #   - "kafka"：Kafka（需配置下方 [kafka.message] / [kafka.push] 等；各二进制 wire 是否已接 Kafka 以代码为准）
 #
 # 覆盖优先级（高 → 低）：
@@ -77,9 +82,7 @@ ttl_seconds = 86400
 #   3. 本文件此处
 #
 # 生产运行时 Kafka 与 JetStream 二选一，不做同链路双写。
-# allow_kafka_fallback 仅保留为迁移期显式开关，生产建议保持 false。
 default_backend = "nats"
-allow_kafka_fallback = false
 
 # JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_contracts::constants::topics
 [jetstream.push]

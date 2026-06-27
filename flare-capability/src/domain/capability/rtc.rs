@@ -1,4 +1,4 @@
-//! Compatibility facade for RTC capability DTO contracts.
+//! Domain facade for RTC capability DTO contracts.
 
 pub use flare_im_capability_core::{
     AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,

@@ -6,6 +6,8 @@ use prost::Message as ProstMessage;
 use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, Row};
 
+const MESSAGE_PIN_SCOPE_SELF: i32 = 1;
+
 /// init_v2: messages.status 为 INT（MessageStatus 枚举值）
 fn fsm_state_to_status_int(fsm_state: &str) -> i32 {
     match fsm_state.to_uppercase().as_str() {
@@ -313,16 +315,22 @@ impl OperationStore {
         message_id: &str,
         conversation_id: &str,
         user_id: &str,
+        scope: i32,
         pin: bool,
         expire_at: Option<chrono::DateTime<chrono::Utc>>,
         reason: Option<&str>,
     ) -> Result<()> {
+        let owner_user_id = if scope == MESSAGE_PIN_SCOPE_SELF {
+            user_id
+        } else {
+            ""
+        };
         if pin {
             sqlx::query(
                 r#"
-                INSERT INTO pinned_messages (tenant_id, message_id, conversation_id, pinned_by, pinned_at, expire_at, reason)
-                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5, $6)
-                ON CONFLICT (tenant_id, conversation_id, message_id)
+                INSERT INTO pinned_messages (tenant_id, message_id, conversation_id, pinned_by, scope, owner_user_id, pinned_at, expire_at, reason)
+                VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, $7, $8)
+                ON CONFLICT (tenant_id, conversation_id, message_id, scope, owner_user_id)
                 DO UPDATE SET pinned_by = EXCLUDED.pinned_by, pinned_at = EXCLUDED.pinned_at, expire_at = EXCLUDED.expire_at, reason = EXCLUDED.reason
                 "#,
             )
@@ -330,15 +338,19 @@ impl OperationStore {
             .bind(message_id)
             .bind(conversation_id)
             .bind(user_id)
+            .bind(scope)
+            .bind(owner_user_id)
             .bind(expire_at)
             .bind(reason)
             .execute(&self.pool)
             .await?;
         } else {
-            sqlx::query(r#"DELETE FROM pinned_messages WHERE tenant_id = $1 AND message_id = $2 AND conversation_id = $3"#)
+            sqlx::query(r#"DELETE FROM pinned_messages WHERE tenant_id = $1 AND message_id = $2 AND conversation_id = $3 AND scope = $4 AND owner_user_id = $5"#)
                 .bind(tenant_id)
                 .bind(message_id)
                 .bind(conversation_id)
+                .bind(scope)
+                .bind(owner_user_id)
                 .execute(&self.pool)
                 .await?;
         }

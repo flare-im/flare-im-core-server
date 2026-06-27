@@ -28,6 +28,10 @@ pub struct MessageOrchestratorConfig {
     pub message_retry_topic: String,
     pub message_retry_delay_ms: u64,
     pub redis_url: Option<String>,
+    pub user_sync_index_max_changes_per_user: usize,
+    pub user_sync_index_ttl_seconds: u64,
+    pub large_conversation_push_threshold: usize,
+    pub inline_message_push_enabled: bool,
     pub default_tenant_id: Option<String>,
     pub conversation_service_type: Option<String>,
     /// 服务器 ID（用于服务注册，标识服务实例）
@@ -215,6 +219,46 @@ impl MessageOrchestratorConfig {
             .ok()
             .or_else(|| redis_profile.as_ref().map(|profile| profile.url.clone()));
 
+        let user_sync_index_max_changes_per_user =
+            env::var("MESSAGE_ORCHESTRATOR_USER_SYNC_INDEX_MAX_CHANGES_PER_USER")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.user_sync_index_max_changes_per_user)
+                })
+                .unwrap_or(1000)
+                .max(1);
+        let user_sync_index_ttl_seconds =
+            env::var("MESSAGE_ORCHESTRATOR_USER_SYNC_INDEX_TTL_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.user_sync_index_ttl_seconds)
+                })
+                .unwrap_or(7 * 24 * 60 * 60);
+        let large_conversation_push_threshold =
+            env::var("MESSAGE_ORCHESTRATOR_LARGE_CONVERSATION_PUSH_THRESHOLD")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.large_conversation_push_threshold)
+                })
+                .unwrap_or(500);
+        let inline_message_push_enabled =
+            parse_bool(env::var("MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED").ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.inline_message_push_enabled)
+                })
+                .unwrap_or(true);
+
         let default_tenant_id = env::var("MESSAGE_ORCHESTRATOR_DEFAULT_TENANT_ID")
             .ok()
             .map(normalize_tenant_id);
@@ -292,6 +336,10 @@ impl MessageOrchestratorConfig {
             message_retry_topic,
             message_retry_delay_ms,
             redis_url,
+            user_sync_index_max_changes_per_user,
+            user_sync_index_ttl_seconds,
+            large_conversation_push_threshold,
+            inline_message_push_enabled,
             default_tenant_id,
             conversation_service_type,
             server_id,

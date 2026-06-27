@@ -77,11 +77,6 @@ pub trait ConversationRepository: Send + Sync {
         limit: i32,
         include_removed: bool,
     ) -> Result<ConversationParticipantsPage>;
-    async fn batch_acknowledge(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        cursors: &[(String, i64)],
-    ) -> Result<()>;
     async fn search_conversations(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -113,13 +108,6 @@ pub trait ConversationRepository: Send + Sync {
         seq: i64,
         status: i32,
     ) -> Result<()>;
-
-    /// 获取会话当前 last_message_seq（用于「标记已读」未传 seq 时解析为已读位置）
-    async fn get_last_message_seq(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        conversation_id: &str,
-    ) -> Result<Option<i64>>;
 
     async fn get_unread_count(
         &self,

@@ -362,6 +362,26 @@ impl MessageHandler for OnlinePushHandler {
     }
 }
 
+/// 在线推送消费者工厂
+pub struct OnlinePushConsumerFactory;
+
+impl OnlinePushConsumerFactory {
+    pub fn create_handler(
+        gateway_push: Arc<GatewayPushExecutor>,
+        dlq: Arc<DlqPublisher>,
+    ) -> Arc<dyn MessageHandler> {
+        Arc::new(OnlinePushHandler::new(gateway_push, dlq))
+    }
+
+    pub fn topic() -> &'static str {
+        flare_im_contracts::constants::topics::TOPIC_PUSH_ONLINE
+    }
+
+    pub fn consumer_group() -> &'static str {
+        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,25 +451,5 @@ mod tests {
         let group = OnlinePushHandler::build_message_group(&entries, 0);
 
         assert!(group.is_none());
-    }
-}
-
-/// 在线推送消费者工厂
-pub struct OnlinePushConsumerFactory;
-
-impl OnlinePushConsumerFactory {
-    pub fn create_handler(
-        gateway_push: Arc<GatewayPushExecutor>,
-        dlq: Arc<DlqPublisher>,
-    ) -> Arc<dyn MessageHandler> {
-        Arc::new(OnlinePushHandler::new(gateway_push, dlq))
-    }
-
-    pub fn topic() -> &'static str {
-        flare_im_contracts::constants::topics::TOPIC_PUSH_ONLINE
-    }
-
-    pub fn consumer_group() -> &'static str {
-        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }

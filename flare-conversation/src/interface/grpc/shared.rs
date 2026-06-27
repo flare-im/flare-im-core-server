@@ -65,14 +65,14 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
 
     ProtoConversationSummary {
         conversation_id: summary.conversation_id,
-        conversation_type: summary.conversation_type.as_int().to_string(),
+        conversation_type: summary.conversation_type.as_str().to_string(),
         display_name,
         avatar_url: String::new(),
         last_message: Some(flare_proto::common::MessagePreview {
             message_id: summary.last_message_id.unwrap_or_default(),
             sender_id: summary.last_sender_id.unwrap_or_default(),
             r#type: summary.last_message_type.unwrap_or_default(),
-            text: String::new(),
+            text: summary.last_message_preview.unwrap_or_default(),
             created_at: last_message_time.unwrap_or_default(),
         }),
         unread_count,
@@ -178,7 +178,7 @@ pub fn domain_to_conversation_detail(conversation: Conversation) -> ProtoConvers
 
     ProtoConversationDetail {
         conversation_id: conversation.conversation_id,
-        conversation_type: conversation.conversation_type.as_int().to_string(),
+        conversation_type: conversation.conversation_type.as_str().to_string(),
         display_name,
         avatar_url,
         description,
@@ -232,5 +232,92 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
         created_at: Some(timestamp_from_datetime(conversation.created_at).unwrap_or_default()),
         updated_at: Some(timestamp_from_datetime(conversation.updated_at).unwrap_or_default()),
         policy: conversation.policy.map(proto_common_policy),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{domain_to_conversation_detail, proto_summary};
+    use crate::domain::model::{
+        Conversation, ConversationLifecycleState, ConversationSummary, ConversationType,
+        ConversationVisibility,
+    };
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    #[test]
+    fn proto_summary_emits_canonical_conversation_type_name() {
+        let proto = proto_summary(ConversationSummary {
+            conversation_id: "c1".to_string(),
+            conversation_type: ConversationType::Single,
+            ..test_summary()
+        });
+
+        assert_eq!(proto.conversation_type, "single");
+    }
+
+    #[test]
+    fn proto_summary_emits_last_message_preview_text() {
+        let proto = proto_summary(ConversationSummary {
+            conversation_id: "c1".to_string(),
+            last_message_id: Some("m1".to_string()),
+            last_message_preview: Some("hello preview".to_string()),
+            ..test_summary()
+        });
+
+        let last_message = proto.last_message.expect("last message preview");
+        assert_eq!(last_message.message_id, "m1");
+        assert_eq!(last_message.text, "hello preview");
+    }
+
+    #[test]
+    fn conversation_detail_emits_canonical_conversation_type_name() {
+        let now = Utc::now();
+        let proto = domain_to_conversation_detail(Conversation {
+            tenant_id: "0".to_string(),
+            conversation_id: "c1".to_string(),
+            conversation_type: ConversationType::Channel,
+            business_type: String::new(),
+            channel_id: "channel-1".to_string(),
+            display_name: None,
+            attributes: HashMap::new(),
+            participants: Vec::new(),
+            visibility: ConversationVisibility::Private,
+            lifecycle_state: ConversationLifecycleState::Active,
+            policy: None,
+            created_at: now,
+            updated_at: now,
+        });
+
+        assert_eq!(proto.conversation_type, "channel");
+    }
+
+    fn test_summary() -> ConversationSummary {
+        ConversationSummary {
+            conversation_id: String::new(),
+            conversation_type: ConversationType::Unspecified,
+            business_type: None,
+            last_message_id: None,
+            last_message_time: None,
+            last_sender_id: None,
+            last_message_type: None,
+            last_content_type: None,
+            last_message_preview: None,
+            unread_count: 0,
+            last_read_seq: 0,
+            metadata: HashMap::new(),
+            server_cursor_ts: None,
+            display_name: None,
+            last_message_seq: None,
+            channel_id: String::new(),
+            participant_version: 0,
+            member_preview: Vec::new(),
+            is_muted: false,
+            is_pinned: false,
+            is_archived: false,
+            settings_version: 0,
+            draft: None,
+            visible_after_seq: 0,
+        }
     }
 }

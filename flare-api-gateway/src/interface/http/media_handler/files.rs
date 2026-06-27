@@ -8,7 +8,9 @@ use futures::StreamExt;
 use std::{collections::HashMap, sync::Arc};
 use tracing::{debug, instrument};
 
-use crate::application::dto::{FileInfoHttpResponse, GetFileUrlHttpResponse};
+use crate::application::dto::{
+    FileInfoHttpResponse, GetFileUrlHttpRequest as GetFileUrlHttpRequestDto, GetFileUrlHttpResponse,
+};
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
 use flare_server_core::{
@@ -30,13 +32,13 @@ use flare_server_core::{
 pub async fn get_file_url(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
-    Json(req): Json<GetFileUrlRequest>,
+    Json(req): Json<GetFileUrlHttpRequestDto>,
 ) -> Result<Json<ApiResponse<GetFileUrlHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.get_file_url(req).await?;
+    let grpc_res = media_client.get_file_url(req.into()).await?;
     Ok(Json(ApiResponse::success(GetFileUrlHttpResponse::from(
         grpc_res,
     ))))

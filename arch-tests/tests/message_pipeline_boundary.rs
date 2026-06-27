@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn message_send_path_is_owned_by_message_ingest_not_orchestrator() {
@@ -125,7 +125,7 @@ fn workspace_root_does_not_contain_uncompiled_placeholder_tests() {
     );
 }
 
-fn read(root: &PathBuf, relative: &str) -> String {
+fn read(root: &Path, relative: &str) -> String {
     fs::read_to_string(root.join(relative)).unwrap_or_else(|err| {
         panic!("read {relative}: {err}");
     })

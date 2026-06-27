@@ -114,9 +114,9 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 - `flare-message-ingest` 是上行消息真源入口，负责校验、Hook、seq、conversation ensure、WAL 和写入主消息流。
 - `flare-orchestrator` 不再承担上行消息发送，只消费 `TOPIC_MESSAGE_MAIN` 并做存储/推送 fanout；消息操作事件仍由 orchestrator 编排。
 - `TOPIC_MESSAGE_MAIN` 是持久消息/事件的主入口。
-- 主队列消费者把持久消息拆分到 `TOPIC_MESSAGE_CREATED` 和 `TOPIC_PUSH_MESSAGES`。
+- 主队列消费者把持久消息拆分到 `TOPIC_MESSAGE_CREATED` 和 `TOPIC_PUSH_EVENTS`；小会话使用 inline `EVENT_MESSAGE`，大群或泄压阀关闭时使用 recipient-less ping。
 - `flare-storage/writer` 消费存储 topic，完成幂等、归档、事件流、热缓存、ledger 和 ACK。
-- `flare-push/server` 消费推送 topic，按在线状态拆分在线投递和离线任务。
+- `flare-push/server` 消费推送 topic，按在线状态拆分在线投递和离线任务；大群 pure ping 在解析成员前按 `(tenant_id, conversation_id)` 合并水位，只投在线用户，离线靠 user_version/sync 兜底。
 
 ## 读路径
 
@@ -136,8 +136,8 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 | `flare.im.message.main` | `flare-message-ingest` / event action path | `flare-orchestrator` main consumer | 持久消息/事件主输入。 |
 | `flare.im.message.storage` | main consumer | `flare-storage/writer` | 消息创建持久化。 |
 | `flare.im.message.events` | main consumer / action path | `flare-storage/writer`、`flare-conversation` | 操作事件、会话事件、已读等。 |
-| `flare.im.push.messages` | main consumer / push-only path | `flare-push/server` | 消息实时投递。 |
-| `flare.im.push.events` | main consumer / push-only path | `flare-push/server` | 事件实时投递。 |
+| `flare.im.push.messages` | push-only/direct path | `flare-push/server` | 非持久或直接消息推送入口；持久会话消息不再依赖该 topic。 |
+| `flare.im.push.events` | main consumer / push-only path | `flare-push/server` | 统一会话投递原语：`PING_WITH_INLINE` / `PING` / 操作事件实时投递。 |
 | `flare.im.push.envelope` | orchestrator / push proxy | `flare-push/server` | ACK、通知、CustomData、系统推送信封。 |
 | `flare.im.push.online` | `flare-push/server` | online push executor | 在线投递任务。 |
 | `flare.im.push.offline` | `flare-push/server` | `flare-push/worker` | 离线推送任务。 |

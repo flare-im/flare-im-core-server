@@ -27,6 +27,7 @@ use crate::application::handlers::{MessageIngestHandler, WalReplayHandler};
 use crate::config::MessageIngestConfig;
 use crate::domain::service::{
     ConversationEnsureService, HookExecutionService, MessageIngestService,
+    MessageIngestServiceOptions,
 };
 use crate::infrastructure::messaging::conversation_ensure_publisher::MqConversationEnsurePublisher;
 use crate::infrastructure::persistence::redis_wal::RedisWalRepository;
@@ -89,8 +90,7 @@ pub async fn initialize(
         wal_repository.clone(),
         Arc::new(sequence_allocator),
         config.defaults(),
-        None,
-        None,
+        MessageIngestServiceOptions::new(config.large_conversation_materialize_threshold),
     ));
 
     let wal_replay_handler = Arc::new(WalReplayHandler::new(
@@ -177,7 +177,7 @@ async fn build_mq_producer(
             })?;
             Ok(Arc::new(producer))
         }
-        "nats" | "jetstream" => {
+        "nats" => {
             let producer = NatsProducer::new(config).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
                     "failed to create JetStream producer: {}",

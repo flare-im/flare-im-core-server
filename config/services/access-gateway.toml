@@ -5,8 +5,6 @@
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
 token_store = "token_store"
-conversation_store = "conversation_store"
-conversation_store_ttl_seconds = 3600
 
 # 联调默认 Social [auth] 已与上方主 issuer/secret 一致，无需额外 trusted issuer。
 # 若生产仍使用独立 Social JWT（issuer=flare-social），可取消注释：
@@ -27,6 +25,13 @@ conversation_store_ttl_seconds = 3600
 compression_algorithm = "gzip"  # 可选值: none, gzip, zstd（默认: none）
 enable_encryption = false  # 是否启用加密（默认: false）
 encryption_key = "01234567890123456789012345678901"  # 32字节密钥或64字符hex字符串（请在生产环境中修改为安全的密钥）
+
+# Sync 拉取限流（tenant + user 双令牌桶，防登录风暴叠加大群 ping 拉取风暴）
+# sync_pull_rate_limit_enabled = true
+# sync_pull_user_requests_per_second = 20
+# sync_pull_user_burst = 60
+# sync_pull_tenant_requests_per_second = 2000
+# sync_pull_tenant_burst = 5000
 
 [services.access_gateway.auth]
 # 可选值: core_jwt, http_hook

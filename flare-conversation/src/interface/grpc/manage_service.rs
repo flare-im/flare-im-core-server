@@ -2,12 +2,11 @@
 
 use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageService;
 use flare_grpc_proto::conversation::{
-    BatchAcknowledgeRequest, CreateConversationRequest, CreateConversationResponse,
-    DeleteConversationRequest, ForceConversationSyncRequest, ManageParticipantsRequest,
-    ManageParticipantsResponse, MarkConversationAsReadRequest, SearchConversationsRequest,
-    SearchConversationsResponse, UpdateConversationRequest, UpdateConversationResponse,
-    UpdateConversationUserSettingsRequest, UpdateConversationUserSettingsResponse,
-    UpdateCursorRequest, UpdatePresenceRequest,
+    CreateConversationRequest, CreateConversationResponse, DeleteConversationRequest,
+    ForceConversationSyncRequest, ManageParticipantsRequest, ManageParticipantsResponse,
+    MarkConversationAsReadRequest, SearchConversationsRequest, SearchConversationsResponse,
+    UpdateConversationRequest, UpdateConversationResponse, UpdateConversationUserSettingsRequest,
+    UpdateConversationUserSettingsResponse, UpdateCursorRequest, UpdatePresenceRequest,
 };
 use flare_proto::common::DeviceState as ProtoDeviceState;
 use flare_server_core::error::grpc::IntoGrpc;
@@ -15,10 +14,9 @@ use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
 use crate::application::commands::{
-    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
-    ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
-    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
-    UpdatePresenceCommand,
+    CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand,
+    UpdateConversationUserSettingsCommand, UpdateCursorCommand, UpdatePresenceCommand,
 };
 use crate::application::queries::SearchConversationsQuery;
 use crate::domain::model::{
@@ -168,24 +166,6 @@ impl ConversationManageService for ConversationGrpcHandler {
         }))
     }
 
-    async fn batch_acknowledge(
-        &self,
-        request: Request<BatchAcknowledgeRequest>,
-    ) -> Result<Response<()>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
-        let req = request.into_inner();
-        let cursors: Vec<(String, i64)> = req
-            .cursors
-            .into_iter()
-            .map(|c| (c.conversation_id, c.message_ts))
-            .collect();
-        self.command_handler
-            .handle_batch_acknowledge(&ctx, BatchAcknowledgeCommand { cursors })
-            .await
-            .into_grpc()?;
-        Ok(Response::new(()))
-    }
-
     async fn search_conversations(
         &self,
         request: Request<SearchConversationsRequest>,
@@ -239,7 +219,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 &ctx,
                 UpdateCursorCommand {
                     conversation_id: req.conversation_id.clone(),
-                    sync_seq: req.message_ts,
+                    sync_seq: req.sync_seq,
                 },
             )
             .await

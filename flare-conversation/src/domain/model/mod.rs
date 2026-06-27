@@ -18,6 +18,8 @@ use flare_proto::common::{
 /// - SYSTEM = 4 (CID 前缀 4)
 /// - CUSTOMER = 5 (CID 前缀 5)
 /// - TEMP = 6 (CID 前缀 6)
+/// - CHANNEL = 7 (CID 前缀 7，订阅者模型)
+/// - BROADCAST = 8 (CID 前缀 8，订阅者模型)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationType {
     Unspecified = 0,
@@ -27,6 +29,8 @@ pub enum ConversationType {
     System = 4,
     Customer = 5,
     Temp = 6,
+    Channel = 7,
+    Broadcast = 8,
 }
 
 impl ConversationType {
@@ -39,6 +43,8 @@ impl ConversationType {
             Some(ProtoConversationType::System) => Self::System,
             Some(ProtoConversationType::Customer) => Self::Customer,
             Some(ProtoConversationType::Temp) => Self::Temp,
+            Some(ProtoConversationType::Channel) => Self::Channel,
+            Some(ProtoConversationType::Broadcast) => Self::Broadcast,
             _ => Self::Unspecified,
         }
     }
@@ -53,21 +59,23 @@ impl ConversationType {
             ConversationType::System => ProtoConversationType::System as i32,
             ConversationType::Customer => ProtoConversationType::Customer as i32,
             ConversationType::Temp => ProtoConversationType::Temp as i32,
+            ConversationType::Channel => ProtoConversationType::Channel as i32,
+            ConversationType::Broadcast => ProtoConversationType::Broadcast as i32,
         }
     }
 
-    /// 从持久化/缓存中的字符串解析（兼容数字字符串与英文别名）
+    /// 从持久化/缓存中的字符串解析；只接受当前 canonical wire name。
     pub fn from_db_str(s: &str) -> Self {
-        if let Ok(i) = s.trim().parse::<i32>() {
-            return Self::from_int(i);
-        }
         match s.trim().to_ascii_lowercase().as_str() {
+            "unspecified" => Self::Unspecified,
             "single" => Self::Single,
             "group" => Self::Group,
             "ai" => Self::Ai,
             "system" => Self::System,
             "customer" => Self::Customer,
             "temp" => Self::Temp,
+            "channel" => Self::Channel,
+            "broadcast" => Self::Broadcast,
             _ => Self::Unspecified,
         }
     }
@@ -89,6 +97,8 @@ impl ConversationType {
             4 => Self::System,
             5 => Self::Customer,
             6 => Self::Temp,
+            7 => Self::Channel,
+            8 => Self::Broadcast,
             _ => Self::Unspecified,
         }
     }
@@ -96,6 +106,20 @@ impl ConversationType {
     /// 转换为数据库 INT 值
     pub fn as_int(&self) -> i32 {
         *self as i32
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConversationType::Unspecified => "unspecified",
+            ConversationType::Single => "single",
+            ConversationType::Group => "group",
+            ConversationType::Ai => "ai",
+            ConversationType::System => "system",
+            ConversationType::Customer => "customer",
+            ConversationType::Temp => "temp",
+            ConversationType::Channel => "channel",
+            ConversationType::Broadcast => "broadcast",
+        }
     }
 }
 
@@ -109,6 +133,7 @@ pub struct ConversationSummary {
     pub last_sender_id: Option<String>,
     pub last_message_type: Option<i32>,
     pub last_content_type: Option<String>,
+    pub last_message_preview: Option<String>,
     pub unread_count: i32,
     pub last_read_seq: i64,
     pub metadata: HashMap<String, String>,
@@ -471,5 +496,30 @@ impl Default for ConversationDomainConfig {
             recent_message_limit: 20,
             max_bootstrap_conversations: Some(100),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConversationType;
+
+    #[test]
+    fn conversation_type_db_string_accepts_only_canonical_names() {
+        assert_eq!(
+            ConversationType::from_db_str("single"),
+            ConversationType::Single
+        );
+        assert_eq!(
+            ConversationType::from_db_str("channel"),
+            ConversationType::Channel
+        );
+        assert_eq!(
+            ConversationType::from_db_str("1"),
+            ConversationType::Unspecified
+        );
+        assert_eq!(
+            ConversationType::from_db_str("conversation_type_single"),
+            ConversationType::Unspecified
+        );
     }
 }

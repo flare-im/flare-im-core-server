@@ -23,7 +23,7 @@ use tracing::instrument;
 
 use crate::domain::model::{MessageDefaults, MessageSubmission};
 use crate::domain::repository::{
-    PushRepository, RecipientRepository, WalRepository, WalRepositoryItem,
+    PushRepository, RecipientRepository, WalRepository, WalRepositoryItem, needs_member_lookup,
 };
 use crate::domain::{MessageProfile, PersistenceMode};
 use flare_im_message_pipeline::MqPushRepository;
@@ -48,6 +48,24 @@ pub struct MessageIngestService {
     message_decorator: Arc<dyn MessageDecorator>,
     /// 消息校验策略
     validation_strategy: Arc<dyn MessageValidationStrategy>,
+    /// 大群持久消息收件人物化阈值；超过后主链路只携带会话级版本信号。
+    large_conversation_materialize_threshold: usize,
+}
+
+pub struct MessageIngestServiceOptions {
+    pub large_conversation_materialize_threshold: usize,
+    pub message_decorator: Option<Arc<dyn MessageDecorator>>,
+    pub validation_strategy: Option<Arc<dyn MessageValidationStrategy>>,
+}
+
+impl MessageIngestServiceOptions {
+    pub fn new(large_conversation_materialize_threshold: usize) -> Self {
+        Self {
+            large_conversation_materialize_threshold,
+            message_decorator: None,
+            validation_strategy: None,
+        }
+    }
 }
 
 impl MessageIngestService {
@@ -57,8 +75,7 @@ impl MessageIngestService {
         wal_repository: Arc<WalRepositoryItem>,
         sequence_allocator: Arc<SequenceAllocator>,
         defaults: MessageDefaults,
-        message_decorator: Option<Arc<dyn MessageDecorator>>,
-        validation_strategy: Option<Arc<dyn MessageValidationStrategy>>,
+        options: MessageIngestServiceOptions,
     ) -> Self {
         Self {
             push_repository,
@@ -66,10 +83,14 @@ impl MessageIngestService {
             wal_repository,
             sequence_allocator,
             defaults,
-            message_decorator: message_decorator.unwrap_or_else(|| Arc::new(NoopMessageDecorator)),
-            validation_strategy: validation_strategy.unwrap_or_else(|| {
+            message_decorator: options
+                .message_decorator
+                .unwrap_or_else(|| Arc::new(NoopMessageDecorator)),
+            validation_strategy: options.validation_strategy.unwrap_or_else(|| {
                 Arc::new(CompositeMessageValidationStrategy::default_composite())
             }),
+            large_conversation_materialize_threshold: options
+                .large_conversation_materialize_threshold,
         }
     }
 
@@ -295,6 +316,43 @@ impl MessageIngestService {
             })
     }
 
+    async fn resolve_persistent_message_recipients(
+        &self,
+        ctx: &Ctx,
+        message: &Message,
+    ) -> Result<(Vec<String>, bool)> {
+        use crate::domain::model::ConversationType;
+
+        let conversation_type = ConversationType::from_proto(message.conversation_type);
+        if needs_member_lookup(conversation_type)
+            && self.large_conversation_materialize_threshold > 0
+        {
+            let member_count = self
+                .recipient_repository
+                .get_conversation_member_count(ctx, &message.conversation_id)
+                .await
+                .map_err(|e| {
+                    flare_err!(
+                        ErrorCode::InternalError,
+                        &format!("Failed to get conversation member count: {}", e)
+                    )
+                })?;
+            if member_count > self.large_conversation_materialize_threshold {
+                tracing::info!(
+                    conversation_id = %message.conversation_id,
+                    member_count,
+                    threshold = self.large_conversation_materialize_threshold,
+                    "Large conversation message skips recipient materialization"
+                );
+                return Ok((Vec::new(), true));
+            }
+        }
+
+        self.get_recipient_user_ids(ctx, message)
+            .await
+            .map(|recipients| (recipients, false))
+    }
+
     fn normalize_single_chat_routing(
         &self,
         mut message: Message,
@@ -467,16 +525,20 @@ impl MessageIngestService {
             return self.push_only(ctx, submission.message.clone()).await;
         }
 
-        let recipient_user_ids = self
-            .get_recipient_user_ids(ctx, &submission.message)
+        let (recipient_user_ids, large_conversation) = self
+            .resolve_persistent_message_recipients(ctx, &submission.message)
             .await?;
-        let message =
-            self.normalize_single_chat_routing(submission.message.clone(), &recipient_user_ids);
+        let message = if large_conversation {
+            submission.message.clone()
+        } else {
+            self.normalize_single_chat_routing(submission.message.clone(), &recipient_user_ids)
+        };
         tracing::trace!(
             conversation_id = %message.conversation_id,
             message_id = %submission.message_id,
             message_type = profile.message_type_label(),
             persistence_mode = ?persistence_mode,
+            large_conversation,
             "Publishing message (persistence + push)"
         );
 
@@ -486,6 +548,7 @@ impl MessageIngestService {
                 message.clone(),
                 recipient_user_ids,
                 message.conversation_id.clone(),
+                large_conversation,
             )
             .await
     }

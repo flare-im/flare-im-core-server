@@ -23,6 +23,7 @@ conversation_state_prefix = "storage:conversation:state"
 conversation_unread_prefix = "storage:conversation:unread"
 user_cursor_prefix = "storage:user:cursor"
 presence_prefix = "presence:user"
+large_conversation_precise_unread_threshold = 500
 
 # 消息存储服务配置（可选）
 # 如果配置了，将启用消息同步功能

@@ -73,7 +73,7 @@ fn storage_failure_policy_for_backend(backend: &str) -> StorageFailurePolicy {
             dead_letter_enabled: true,
             retry_forwarder_enabled: true,
         },
-        "nats" | "jetstream" => StorageFailurePolicy {
+        "nats" => StorageFailurePolicy {
             retry_topic_enabled: false,
             dead_letter_enabled: true,
             retry_forwarder_enabled: false,
@@ -239,14 +239,12 @@ async fn build_mq_producer(config: &Arc<StorageWriterConfig>) -> Result<Arc<dyn 
                 e
             ))
         })?),
-        "nats" | "jetstream" => {
-            Arc::new(NatsProducer::new(config.as_ref()).await.map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "Failed to create JetStream producer: {}",
-                    e
-                ))
-            })?)
-        }
+        "nats" => Arc::new(NatsProducer::new(config.as_ref()).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "Failed to create JetStream producer: {}",
+                e
+            ))
+        })?),
         other => {
             return Err(flare_server_core::error::FlareError::system(format!(
                 "unsupported mq backend: {other}"
@@ -333,12 +331,14 @@ mod tests {
 
     #[test]
     fn nats_failure_policy_uses_native_retry_and_dlq_without_retry_forwarder() {
-        for backend in ["nats", "jetstream"] {
-            let policy = storage_failure_policy_for_backend(backend);
+        let policy = storage_failure_policy_for_backend("nats");
+        assert!(!policy.retry_topic_enabled);
+        assert!(policy.dead_letter_enabled);
+        assert!(!policy.retry_forwarder_enabled);
 
-            assert!(!policy.retry_topic_enabled);
-            assert!(policy.dead_letter_enabled);
-            assert!(!policy.retry_forwarder_enabled);
-        }
+        let policy = storage_failure_policy_for_backend("jetstream");
+        assert!(!policy.retry_topic_enabled);
+        assert!(!policy.dead_letter_enabled);
+        assert!(!policy.retry_forwarder_enabled);
     }
 }

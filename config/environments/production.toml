@@ -1,4 +1,6 @@
-# 生产环境配置示例
+# 生产环境覆盖示例。
+# 仅支持 root [mq] 与 [object_storage.*]；完整服务覆盖请使用 config/overrides/*.toml。
+# `${VAR}` 会在加载时展开，缺失则配置加载失败。
 
 [object_storage.default]
 profile_type = "s3"

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn service_config_files_are_kebab_case_and_indexed() {
     let root = workspace_root();
     let services_dir = root.join("config/services");
-    let readme = fs::read_to_string(services_dir.join("README.md")).expect("read services index");
+    let readme = fs::read_to_string(root.join("config/README.md")).expect("read config readme");
 
     let expected = [
         ("access-gateway.toml", "[services.access_gateway]"),
@@ -58,7 +58,7 @@ fn service_config_files_are_kebab_case_and_indexed() {
         );
         assert!(
             readme.contains(file_name) && readme.contains(table_header),
-            "config/services/README.md must index {file_name} and {table_header}"
+            "config/README.md must index {file_name} and {table_header}"
         );
     }
 }
@@ -84,8 +84,8 @@ fn config_root_documents_all_merge_layers() {
 
     for dir in ["shared", "services", "overrides", "environments"] {
         assert!(
-            root.join("config").join(dir).join("README.md").is_file(),
-            "config/{dir}/README.md must explain that layer"
+            !root.join("config").join(dir).join("README.md").exists(),
+            "config/{dir}/README.md must not exist; keep config docs centralized in config/README.md"
         );
     }
 }
@@ -131,6 +131,94 @@ fn directory_loader_order_matches_documented_configuration_layers() {
             readme.contains(&format!("{layer}/*.toml")),
             "config README must document {layer} merge layer"
         );
+    }
+}
+
+#[test]
+fn committed_service_configs_do_not_advertise_dead_toml_keys() {
+    let root = workspace_root();
+    let config_dir = root.join("config");
+    let forbidden = [
+        (
+            "conversation_store =",
+            "use token_store/session_store typed fields or remove the old key",
+        ),
+        (
+            "conversation_store_ttl_seconds",
+            "use session_store_ttl_seconds only after it is consumed by the service",
+        ),
+        (
+            "upload_conversation_store",
+            "media config must use upload_session_store",
+        ),
+        (
+            "[services.api_gateway.grpc]",
+            "gateway downstream routes are env-scoped until typed config is wired",
+        ),
+        (
+            "[services.admin_gateway.grpc]",
+            "gateway downstream routes are env-scoped until typed config is wired",
+        ),
+        (
+            "max_poll_records",
+            "push-server batch tuning is not read from FlareAppConfig",
+        ),
+        (
+            "gateway_router_connection_pool_size",
+            "push-server gateway router tuning is not read from FlareAppConfig",
+        ),
+        (
+            "ack_timeout_seconds",
+            "push-server ACK timeout tuning is not read from FlareAppConfig",
+        ),
+    ];
+
+    for path in toml_files_under(&config_dir) {
+        let content = fs::read_to_string(&path).expect("read config toml");
+        for (needle, reason) in forbidden {
+            assert!(
+                !content.contains(needle),
+                "{} contains dead config key `{needle}`: {reason}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn config_readme_documents_environment_scope_and_placeholder_expansion() {
+    let root = workspace_root();
+    let readme = fs::read_to_string(root.join("config/README.md")).expect("read config readme");
+
+    for required in [
+        "only merges root `[mq]` and `[object_storage.*]`",
+        "overrides/*.toml",
+        "${ENV_VAR}",
+        "Missing variables fail config loading",
+    ] {
+        assert!(
+            readme.contains(required),
+            "config/README.md must document environment scope detail: {required}"
+        );
+    }
+}
+
+fn toml_files_under(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_toml_files(dir, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_toml_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read config dir") {
+        let entry = entry.expect("read config dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_toml_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "toml") {
+            out.push(path);
+        }
     }
 }
 

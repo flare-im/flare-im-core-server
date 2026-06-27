@@ -1,9 +1,9 @@
-//! 基础设施：MQ 生产者（任务 Topic、ACK Topic）、推送执行器
+//! 基础设施：MQ 生产者（任务 Topic、ACK Topic）、设备 token registry、任务状态存储
 
+mod device_token_registry;
 mod mq_publisher;
-mod push_executor_impl;
 mod state_store;
 
+pub use device_token_registry::RedisDeviceTokenRegistry;
 pub use mq_publisher::PushProxyMqPublisher;
-pub use push_executor_impl::{DeviceInfo, FlareCoreClient, PushExecutor, PushExecutorImpl};
 pub use state_store::RedisStateStore;

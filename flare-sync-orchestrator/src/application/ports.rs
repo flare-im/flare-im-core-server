@@ -22,7 +22,7 @@ pub trait ConversationSyncPort: Send + Sync {
         req: ConversationBootstrapRequest,
     ) -> Result<ConversationBootstrapResponse, FlareError>;
 
-    async fn update_read_cursor(
+    async fn update_sync_cursor(
         &self,
         ctx: &Ctx,
         req: UpdateCursorRequest,
@@ -87,6 +87,26 @@ pub trait ConversationEventReadPort: Send + Sync {
         event_types: &[i32],
         include_deleted: bool,
     ) -> Result<QueryEventsPage, FlareError>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationVersionChange {
+    pub conversation_id: String,
+    pub version: u64,
+    pub max_conversation_seq: u64,
+    pub updated_at_ms: i64,
+}
+
+/// 用户可见会话摘要版本索引读侧。
+///
+/// 写侧由消息/事件编排负责；同步编排只根据客户端已知版本查询差异，
+/// 用于大群 notify+pull 下的摘要修复提示。
+pub trait ConversationVersionIndexPort: Send + Sync {
+    async fn diff_known_conversation_versions(
+        &self,
+        ctx: &Ctx,
+        known: &[(String, u64)],
+    ) -> Result<Vec<ConversationVersionChange>, FlareError>;
 }
 
 #[derive(Debug, Clone, Default)]

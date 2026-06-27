@@ -39,6 +39,7 @@ pub struct StorageWriterConfig {
     pub fetch_max_wait_ms: u64,
     pub redis_url: Option<String>,
     pub redis_hot_ttl_seconds: u64,
+    pub redis_hot_tail_limit: usize,
     pub redis_idempotency_ttl_seconds: u64,
     pub wal_hash_key: Option<String>,
     pub postgres_url: Option<String>,
@@ -182,6 +183,13 @@ impl StorageWriterConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(7 * 24 * 3600);
 
+        let redis_hot_tail_limit = env::var("STORAGE_REDIS_HOT_TAIL_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .or(service_config.redis_hot_tail_limit)
+            .unwrap_or(50)
+            .max(1);
+
         let redis_idempotency_ttl_seconds = env::var("STORAGE_REDIS_IDEMPOTENCY_TTL_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -276,6 +284,7 @@ impl StorageWriterConfig {
             fetch_max_wait_ms,
             redis_url,
             redis_hot_ttl_seconds,
+            redis_hot_tail_limit,
             redis_idempotency_ttl_seconds,
             wal_hash_key,
             postgres_url,

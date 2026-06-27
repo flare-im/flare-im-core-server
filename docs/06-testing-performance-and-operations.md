@@ -271,12 +271,17 @@ GROUP BY write_state;
 - Rust release build 可用，未因未使用的 MQ 后端依赖阻断。
 - PostgreSQL 总连接池小于 `max_connections`，并为每个服务设置明确 pool size。
 - JetStream/Kafka durable、retry、DLQ 配置确认。
+- `flare-dlq-replay` dry-run 与受控重放演练通过，DLQ replay headers 可在链路追踪中检索。
 - offline push backend 已配置，或 push-worker 对不可投递任务有 park/DLQ 策略。
+- `MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED` 泄压阀在预发验证过：关闭 inline 后客户端可通过 sync 收敛。
+- Push Server `online_status_backend=redis` 与 `grpc` fallback 均完成连通性验证。
+- Push Server `event_ping_coalesce_window_ms` 在预发压测验证过：10 万人大群连发消息不会按消息数重复分页扫描成员，trailing ping 携带最高 conversation seq。
 - 主链业务 Hook 使用 gRPC transport，并有短超时、熔断和明确 error policy。
 - 业务系统到 Core 的高频服务间调用使用 typed gRPC，HTTP/OpenAPI 只作为外部、管理或低频 facade。
 - message write ledger、MQ lag、DLQ、WAL pending、send stage metrics 接入 Dashboard。
 - Admin Gateway 查询接口有分页、limit、时间范围和审计。
 - 压测分离写路径和推送路径，端到端压测不替代分层基线。
+- 大群压测必须单独验证 recipient-less ping、Push Server pre-pagination coalescing、Push Worker ping debounce、pull rate-limit、热缓存命中率和大群未读近似策略。
 
 ## 建议后续优化
 

@@ -13,9 +13,17 @@ use crate::infrastructure::capability::CapabilityExtensionRegistry;
 
 fn conversation_kind_from_label(label: &str) -> ConversationKind {
     match label.trim().to_ascii_lowercase().as_str() {
-        "single" | "direct" | "1" => ConversationKind::Direct,
-        "group" | "2" => ConversationKind::Group,
-        other if !other.is_empty() && other != "unspecified" && other != "unknown" => {
+        "single" => ConversationKind::Direct,
+        "group" => ConversationKind::Group,
+        other if other.chars().all(|c| c.is_ascii_digit()) => {
+            ConversationKind::Custom("unknown".to_string())
+        }
+        other
+            if !other.is_empty()
+                && other != "unspecified"
+                && other != "unknown"
+                && !other.starts_with("conversation_type_") =>
+        {
             ConversationKind::Custom(other.to_string())
         }
         _ => ConversationKind::Custom("unknown".to_string()),
@@ -156,4 +164,34 @@ pub async fn evaluate_pre_send_guards(
     let input = build_pre_send_evaluate_input(hook_context, draft);
     let pipeline = registry.pre_send().await;
     pipeline.evaluate(ctx, &input).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conversation_kind_from_label;
+    use crate::domain::capability::ConversationKind;
+
+    #[test]
+    fn conversation_kind_from_label_accepts_only_canonical_conversation_type_names() {
+        assert_eq!(
+            conversation_kind_from_label("single"),
+            ConversationKind::Direct
+        );
+        assert_eq!(
+            conversation_kind_from_label("group"),
+            ConversationKind::Group
+        );
+        assert_eq!(
+            conversation_kind_from_label("1"),
+            ConversationKind::Custom("unknown".to_string())
+        );
+        assert_eq!(
+            conversation_kind_from_label("direct"),
+            ConversationKind::Custom("direct".to_string())
+        );
+        assert_eq!(
+            conversation_kind_from_label("conversation_type_single"),
+            ConversationKind::Custom("unknown".to_string())
+        );
+    }
 }

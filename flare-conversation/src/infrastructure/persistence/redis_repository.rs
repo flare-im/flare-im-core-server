@@ -160,6 +160,7 @@ impl ConversationRepository for RedisConversationRepository {
                     .get("last_message_type")
                     .and_then(|v| v.parse::<i32>().ok()),
                 last_content_type: state.get("last_content_type").cloned(),
+                last_message_preview: state.get("last_message_preview").cloned(),
                 unread_count: unread,
                 last_read_seq: 0,
                 metadata: HashMap::new(),
@@ -271,27 +272,6 @@ impl ConversationRepository for RedisConversationRepository {
         Err(redis_not_supported("list_conversation_participants"))
     }
 
-    async fn batch_acknowledge(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        cursors: &[(String, i64)],
-    ) -> Result<()> {
-        let user_id = require_user_id(ctx)?;
-        let mut conn = self.connection().await?;
-        let cursor_key = self.user_cursor_key(&user_id);
-        for (conversation_id, ts) in cursors {
-            Self::hset_cursor_max(
-                &mut conn,
-                &cursor_key,
-                conversation_id,
-                *ts,
-                "redis max cursor batch ack",
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     async fn search_conversations(
         &self,
         _ctx: &flare_server_core::context::Context,
@@ -329,14 +309,6 @@ impl ConversationRepository for RedisConversationRepository {
         _status: i32,
     ) -> Result<()> {
         Err(redis_not_supported("apply_message_event"))
-    }
-
-    async fn get_last_message_seq(
-        &self,
-        _ctx: &flare_server_core::context::Context,
-        _conversation_id: &str,
-    ) -> Result<Option<i64>> {
-        Err(redis_not_supported("get_last_message_seq"))
     }
 
     async fn get_unread_count(

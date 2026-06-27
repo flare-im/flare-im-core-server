@@ -12,7 +12,7 @@ pub use flare_im_message_pipeline::{
     MessageSizeValidationStrategy, MessageTemporaryService, MessageValidationStrategy,
     TemporaryMessageType, ValidationContext, ValidationResult,
 };
-pub use message_ingest_service::MessageIngestService;
+pub use message_ingest_service::{MessageIngestService, MessageIngestServiceOptions};
 
 // Re-export shared hook builders.
 pub use flare_im_message_pipeline::hook::builder::*;

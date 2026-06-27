@@ -38,7 +38,6 @@
 |------|------|------|------|
 | `/api/v1/messages/send` | POST | HTTP 发消息，内部转 `SendMessage` | 必须 |
 | `/api/v1/messages/recall` | POST | 撤回消息 | 必须 |
-| `/api/v1/messages/read` | POST | 标记已读 | 必须 |
 | `/api/v1/conversations` | GET | 会话列表/摘要 | 必须 |
 | `/api/v1/conversations/participants` | GET | 分页读取会话参与者 | 必须 |
 | `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用 | 管理权限 |

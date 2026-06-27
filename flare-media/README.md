@@ -66,7 +66,7 @@ metadata_cache = "media_metadata"
 object_store = "default"
 redis_ttl_seconds = 3600
 orphan_grace_seconds = 86400
-upload_conversation_store = "upload_conversations"
+upload_session_store = "upload_conversations"
 chunk_upload_dir = "./data/media/chunks"
 chunk_ttl_seconds = 172800
 max_chunk_size_bytes = 52428800
@@ -79,7 +79,7 @@ cdn_base_url = "http://localhost:50092/files"
 - `metadata_cache`：Redis 别名，缓存热数据与上传中的瞬态信息。
 - `object_store`：对象存储配置名（MinIO/S3），存放媒资文件与派生物。
 - `orphan_grace_seconds`：上传完成但尚未建立引用的宽限期（秒），超时后将进入回收任务。
-- `upload_conversation_store`：分片上传会话信息保存位置（Redis profile）。
+- `upload_session_store`：分片上传会话信息保存位置（Redis profile）。
 - `chunk_upload_dir`：分片数据暂存目录，最终合并后自动清理。
 - `chunk_ttl_seconds`：分片会话存活时间，超过 TTL 会自动过期并清理临时文件。
 - `max_chunk_size_bytes`：单个分片的最大尺寸（默认 50MB）。

@@ -79,6 +79,10 @@ impl RedisMessageCache {
         )
     }
 
+    fn tail_key(tenant_id: &str, conversation_id: &str) -> String {
+        format!("cache:tail:{tenant_id}:{conversation_id}")
+    }
+
     /// 缓存单条消息
     pub async fn cache_message(&self, tenant_id: &str, message: &Message) -> Result<()> {
         let mut conn = self.get_connection().await?;
@@ -204,6 +208,69 @@ impl RedisMessageCache {
         }
 
         Ok(result)
+    }
+
+    /// 从会话尾部热缓存按 seq 范围读取消息。
+    pub async fn get_tail_messages_by_seq(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        after_seq: i64,
+        before_seq: Option<i64>,
+        limit: i32,
+    ) -> Result<Option<Vec<Message>>> {
+        let limit = limit.clamp(1, 1000);
+        let tail_key = Self::tail_key(tenant_id, conversation_id);
+        let min = format!("({after_seq}");
+        let max = before_seq
+            .map(|seq| format!("({seq}"))
+            .unwrap_or_else(|| "+inf".to_string());
+
+        let mut conn = self.get_connection().await?;
+        let oldest_tail: Vec<(String, f64)> = redis::cmd("ZRANGE")
+            .arg(&tail_key)
+            .arg(0)
+            .arg(0)
+            .arg("WITHSCORES")
+            .query_async(&mut conn)
+            .await?;
+        let Some((_, oldest_seq)) = oldest_tail.first() else {
+            return Ok(None);
+        };
+        if after_seq < (*oldest_seq as i64).saturating_sub(1) {
+            return Ok(None);
+        }
+
+        let message_ids: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+            .arg(&tail_key)
+            .arg(min)
+            .arg(max)
+            .arg("LIMIT")
+            .arg(0)
+            .arg(limit)
+            .query_async(&mut conn)
+            .await?;
+
+        if message_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let cached_messages = self
+            .get_messages_batch(tenant_id, conversation_id, &message_ids)
+            .await?;
+        if cached_messages.len() != message_ids.len() {
+            return Ok(None);
+        }
+
+        let mut messages = Vec::with_capacity(message_ids.len());
+        for message_id in message_ids {
+            let Some(message) = cached_messages.get(&message_id) else {
+                return Ok(None);
+            };
+            messages.push(message.clone());
+        }
+
+        Ok(Some(messages))
     }
 
     /// 缓存会话消息列表（按时间范围）
@@ -334,5 +401,18 @@ impl RedisMessageCache {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_key_is_tenant_scoped() {
+        assert_eq!(
+            RedisMessageCache::tail_key("tenant-a", "conv-a"),
+            "cache:tail:tenant-a:conv-a"
+        );
     }
 }

@@ -1,27 +1,23 @@
-//! 临时消息处理服务 - 重构版
+//! 临时消息处理服务
 //!
-//! 处理临时消息（TYPING、SYSTEM_EVENT）：
+//! 处理临时消息（SYSTEM、NOTIFICATION、CUSTOM）：
 //! - 只推送，不持久化
 //! - 不经过 WAL
 //! - 不分配 seq
 //! - 离线消息直接丢弃
-//!
-//! ## TODO
-//! 当前实现标记为 TODO，等待后续完善推送逻辑。
 
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
-use flare_proto::common::Message;
+use flare_proto::common::{Message, MessageType};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tracing::instrument;
 
-use crate::MqPushRepository;
-use flare_server_core::error::Result;
+use crate::{MqPushRepository, PushRepository};
 
 /// 临时消息处理服务
 pub struct MessageTemporaryService {
     /// 推送仓储（使用具体类型以支持 async fn in traits）
-    #[allow(dead_code)]
     push_repository: Arc<MqPushRepository>,
 }
 
@@ -31,12 +27,6 @@ impl MessageTemporaryService {
     }
 
     /// 处理临时消息（只推送，不持久化）
-    ///
-    /// ## TODO
-    /// 当前实现为占位符，等待后续完善：
-    /// - 推送逻辑需要与 PushRepository 集成
-    /// - 需要支持不同的临时消息类型
-    /// - 需要添加消息校验
     #[instrument(skip(self, ctx), fields(
         request_id = %ctx.request_id(),
         trace_id = %ctx.trace_id(),
@@ -45,25 +35,39 @@ impl MessageTemporaryService {
         conversation_id = %message.conversation_id
     ))]
     pub async fn handle_temporary_message(&self, ctx: &Ctx, message: &Message) -> Result<()> {
-        // TODO: 实现临时消息推送逻辑
-        // 当前为占位符实现，等待后续完善
+        let conversation_id = message.conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
 
+        let recipient_user_ids = self.extract_recipient_user_ids(message);
+        if recipient_user_ids.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "temporary message recipient_user_ids is required",
+            )
+            .build_error());
+        }
         tracing::trace!(
             message_id = %message.server_id,
             conversation_id = %message.conversation_id,
             message_type = message.message_type,
-            "Temporary message handling - TODO: implement push logic"
+            recipient_count = recipient_user_ids.len(),
+            "Pushing temporary message without persistence"
         );
 
-        // 提取接收者用户 ID 列表
-        let _recipient_user_ids = self.extract_recipient_user_ids(message);
-
-        // TODO: 使用 PushRepository 推送消息
-        // 当前 PushRepository 的 publish_message 方法需要完整的 Message
-        // 临时消息可能需要特殊处理（如不分配 seq）
-
-        // 暂时返回成功，等待后续实现
-        Ok(())
+        self.push_repository
+            .push_only_message(
+                ctx,
+                message.clone(),
+                recipient_user_ids,
+                conversation_id.to_string(),
+            )
+            .await
     }
 
     /// 提取接收者用户 ID 列表
@@ -84,8 +88,6 @@ impl MessageTemporaryService {
 /// 临时消息类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemporaryMessageType {
-    /// 正在输入
-    Typing,
     /// 系统事件
     SystemEvent,
     /// 自定义临时消息
@@ -95,8 +97,11 @@ pub enum TemporaryMessageType {
 impl TemporaryMessageType {
     /// 从消息类型判断是否为临时消息
     pub fn from_message_type(message_type: i32) -> Option<Self> {
-        let _ = message_type;
-        None
+        match MessageType::try_from(message_type).ok()? {
+            MessageType::System | MessageType::Notification => Some(Self::SystemEvent),
+            MessageType::Custom => Some(Self::Custom),
+            _ => None,
+        }
     }
 
     /// 是否需要持久化
@@ -112,5 +117,30 @@ impl TemporaryMessageType {
     /// 是否需要在线推送
     pub fn require_online(&self) -> bool {
         true // 临时消息只在线推送
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_message_type_is_derived_from_current_proto_message_types() {
+        assert_eq!(
+            TemporaryMessageType::from_message_type(MessageType::System as i32),
+            Some(TemporaryMessageType::SystemEvent)
+        );
+        assert_eq!(
+            TemporaryMessageType::from_message_type(MessageType::Notification as i32),
+            Some(TemporaryMessageType::SystemEvent)
+        );
+        assert_eq!(
+            TemporaryMessageType::from_message_type(MessageType::Custom as i32),
+            Some(TemporaryMessageType::Custom)
+        );
+        assert_eq!(
+            TemporaryMessageType::from_message_type(MessageType::Text as i32),
+            None
+        );
     }
 }

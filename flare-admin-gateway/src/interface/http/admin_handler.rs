@@ -743,6 +743,10 @@ fn optional_string(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::admin_contract::{
+        EnterprisePolicyAuthority, EnterprisePolicyStatus, EnterpriseProtectedOperation,
+        RetentionEnforcementAnchor,
+    };
     use super::*;
     use flare_im_service_kit::gateway::{
         GatewayGrpcConfig, GatewaySettings, RateLimitConfig, ServerConfig, TracingConfig,
@@ -766,11 +770,30 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/v1/admin/auth/check")
         );
+        assert_eq!(
+            capabilities.organization_policy.status,
+            EnterprisePolicyStatus::ExternalPolicyRequired
+        );
+        assert_eq!(
+            capabilities.organization_policy.authority,
+            EnterprisePolicyAuthority::BusinessAdminIdentityProvider
+        );
+        assert_eq!(
+            capabilities.data_residency_policy.tenant_routing_key,
+            keys::TENANT_ID
+        );
         assert!(
             capabilities
-                .business_owned
+                .retention_legal_policy
+                .enforcement_anchors
                 .iter()
-                .any(|item| item == "admin_console_and_backend")
+                .any(|anchor| *anchor == RetentionEnforcementAnchor::CapabilityAuditLog)
+        );
+        assert!(
+            capabilities
+                .data_residency_policy
+                .protected_operations
+                .contains(&EnterpriseProtectedOperation::MessageExport)
         );
     }
 

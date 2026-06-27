@@ -1,7 +1,7 @@
 //! Push Proxy 配置:gRPC 监听地址与 JetStream Topic(以设计文档为准)
 
 use flare_im_contracts::constants::topics::{
-    TOPIC_PUSH_MESSAGES, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+    TOPIC_PUSH_ENVELOPE, TOPIC_PUSH_MESSAGES, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
 };
 use flare_im_service_kit::config::FlareAppConfig;
 use flare_server_core::mq::kafka::KafkaProducerConfig;
@@ -15,6 +15,8 @@ pub struct PushProxyConfig {
     pub jetstream_url: String,
     /// 推送消息入站 Topic(默认 `TOPIC_PUSH_MESSAGES` / `push-messages`)
     pub push_request_topic: String,
+    /// 统一推送信封入站 Topic(通知/自定义推送)
+    pub push_envelope_topic: String,
     /// 在线推送 Topic
     pub push_online_topic: String,
     /// 离线推送 Topic
@@ -31,6 +33,10 @@ pub struct PushProxyConfig {
     pub redis_url: String,
     /// Redis key 前缀
     pub redis_key_prefix: String,
+    /// 设备厂商 token registry Redis URL
+    pub device_token_redis_url: String,
+    /// 设备厂商 token registry key 前缀
+    pub device_token_key_prefix: String,
 }
 
 impl PushProxyConfig {
@@ -61,6 +67,10 @@ impl PushProxyConfig {
         let push_request_topic = env::var("PUSH_PROXY_PUSH_REQUEST_TOPIC")
             .ok()
             .unwrap_or_else(|| TOPIC_PUSH_MESSAGES.to_string());
+
+        let push_envelope_topic = env::var("PUSH_PROXY_PUSH_ENVELOPE_TOPIC")
+            .ok()
+            .unwrap_or_else(|| TOPIC_PUSH_ENVELOPE.to_string());
 
         let push_online_topic = env::var("PUSH_PROXY_PUSH_ONLINE_TOPIC")
             .ok()
@@ -110,11 +120,20 @@ impl PushProxyConfig {
         let redis_key_prefix = env::var("PUSH_PROXY_REDIS_KEY_PREFIX")
             .ok()
             .unwrap_or_else(|| "flare:push:proxy".to_string());
+        let device_token_redis_url = env::var("PUSH_PROXY_DEVICE_TOKEN_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| redis_url.clone());
+        let device_token_key_prefix = env::var("PUSH_PROXY_DEVICE_TOKEN_KEY_PREFIX")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
 
         Self {
             mq_backend,
             jetstream_url,
             push_request_topic,
+            push_envelope_topic,
             push_online_topic,
             push_offline_topic,
             jetstream_timeout_ms,
@@ -126,6 +145,8 @@ impl PushProxyConfig {
             kafka_options,
             redis_url,
             redis_key_prefix,
+            device_token_redis_url,
+            device_token_key_prefix,
         }
     }
 }

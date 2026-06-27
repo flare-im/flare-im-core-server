@@ -45,12 +45,14 @@ use flare_im_service_kit::clients::GrpcClients;
         message_handler::send_message,
         message_handler::execute_custom_event,
         message_handler::recall_message,
-        message_handler::mark_message_read,
         conversation_handler::list_conversations,
         conversation_handler::list_conversation_participants,
         conversation_handler::manage_participants,
         presence_handler::get_user_presence,
+        presence_handler::list_user_devices,
+        presence_handler::get_device,
         presence_handler::batch_get_user_presence,
+        presence_handler::kick_device,
         presence_handler::logout_presence,
     ),
     components(
@@ -98,8 +100,6 @@ use flare_im_service_kit::clients::GrpcClients;
             crate::application::dto::ExecuteCustomEventHttpResponse,
             crate::application::dto::RecallMessageHttpRequest,
             crate::application::dto::RecallMessageHttpResponse,
-            crate::application::dto::MarkReadHttpRequest,
-            crate::application::dto::MarkReadHttpResponse,
             super::conversation_handler::ListConversationsHttpRequest,
             super::conversation_handler::ConversationHttpResponse,
             super::conversation_handler::ListConversationsHttpResponse,
@@ -111,8 +111,12 @@ use flare_im_service_kit::clients::GrpcClients;
             super::conversation_handler::ParticipantRoleUpdateHttp,
             super::presence_handler::UserPresenceHttp,
             super::presence_handler::DevicePresenceHttp,
+            super::presence_handler::ConnectionQualityHttp,
+            super::presence_handler::ListUserDevicesHttpResponse,
             super::presence_handler::BatchGetUserPresenceHttpRequest,
             super::presence_handler::BatchGetUserPresenceHttpResponse,
+            super::presence_handler::KickDeviceHttpRequest,
+            super::presence_handler::KickDeviceHttpResponse,
             super::presence_handler::LogoutPresenceHttpRequest,
             super::presence_handler::LogoutPresenceHttpResponse,
         )
@@ -235,7 +239,6 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
             post(message_handler::execute_custom_event),
         )
         .route("/recall", post(message_handler::recall_message))
-        .route("/read", post(message_handler::mark_message_read))
         .layer(axum::Extension(clients.clone()))
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
@@ -257,8 +260,17 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
     let presence_router = Router::new()
         .route("/users/{user_id}", get(presence_handler::get_user_presence))
         .route(
+            "/users/{user_id}/devices",
+            get(presence_handler::list_user_devices),
+        )
+        .route(
             "/users/batch",
             post(presence_handler::batch_get_user_presence),
+        )
+        .route("/devices/{device_id}", get(presence_handler::get_device))
+        .route(
+            "/devices/{device_id}/kick",
+            post(presence_handler::kick_device),
         )
         .route("/logout", post(presence_handler::logout_presence))
         .layer(axum::Extension(clients.clone()))

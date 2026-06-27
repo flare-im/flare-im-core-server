@@ -8,10 +8,12 @@ use flare_grpc_proto::access_gateway::{
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_im_contracts::Ctx;
+use flare_proto::common::EventEnvelopeDeliveryMode;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
 use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
+use super::{ConversationPingDebouncer, PingDebounceDecision, PingDebounceKey};
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,
     merge_push_message_for_gateway, merge_push_notification_for_gateway,
@@ -22,6 +24,7 @@ use crate::infrastructure::rpc::OnlineServiceClient;
 pub struct GatewayPushExecutor {
     online: Arc<OnlineServiceClient>,
     gateway_router: Arc<GatewayRouter>,
+    ping_debouncer: Option<Arc<ConversationPingDebouncer>>,
 }
 
 impl GatewayPushExecutor {
@@ -29,7 +32,13 @@ impl GatewayPushExecutor {
         Self {
             online,
             gateway_router,
+            ping_debouncer: None,
         }
+    }
+
+    pub fn with_ping_debouncer(mut self, debouncer: Arc<ConversationPingDebouncer>) -> Self {
+        self.ping_debouncer = Some(debouncer);
+        self
     }
 
     fn route_failure_code(error: &FlareError) -> ErrorCode {
@@ -110,6 +119,80 @@ impl GatewayPushExecutor {
     }
 
     pub async fn push_event(
+        &self,
+        ctx: &Ctx,
+        target_user_id: &str,
+        strategy: PushStrategy,
+        push: PushEventRequest,
+    ) -> Result<()> {
+        if let Some(debouncer) = &self.ping_debouncer
+            && let Some((conversation_id, max_conversation_seq)) = event_ping_watermark(&push)
+        {
+            let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+            let key = PingDebounceKey::new(&tenant_id, target_user_id, conversation_id.clone());
+            let pending = pending_ping_request(&push, &conversation_id, max_conversation_seq);
+            match debouncer.observe(key.clone(), pending).await {
+                PingDebounceDecision::SendNow => {
+                    return self
+                        .push_event_now(ctx, target_user_id, strategy, push)
+                        .await;
+                }
+                PingDebounceDecision::ScheduleAfter(delay) => {
+                    self.spawn_debounced_push_event(
+                        ctx.clone(),
+                        target_user_id,
+                        strategy,
+                        key,
+                        delay,
+                    );
+                    return Ok(());
+                }
+                PingDebounceDecision::Suppressed => return Ok(()),
+            }
+        }
+
+        self.push_event_now(ctx, target_user_id, strategy, push)
+            .await
+    }
+
+    fn spawn_debounced_push_event(
+        &self,
+        ctx: Ctx,
+        target_user_id: &str,
+        strategy: PushStrategy,
+        key: PingDebounceKey,
+        delay: std::time::Duration,
+    ) {
+        let Some(debouncer) = self.ping_debouncer.clone() else {
+            return;
+        };
+        let online = self.online.clone();
+        let gateway_router = self.gateway_router.clone();
+        let target_user_id = target_user_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let Some(push) = debouncer.take_pending(&key).await else {
+                return;
+            };
+            let executor = GatewayPushExecutor {
+                online,
+                gateway_router,
+                ping_debouncer: None,
+            };
+            if let Err(error) = executor
+                .push_event_now(&ctx, &target_user_id, strategy, push)
+                .await
+            {
+                tracing::warn!(
+                    target_user_id = %target_user_id,
+                    error = %error,
+                    "Debounced push event trailing ping failed"
+                );
+            }
+        });
+    }
+
+    async fn push_event_now(
         &self,
         ctx: &Ctx,
         target_user_id: &str,
@@ -358,6 +441,42 @@ impl GatewayPushExecutor {
     }
 }
 
+fn event_ping_watermark(push: &PushEventRequest) -> Option<(String, u64)> {
+    let conversation_id = if push.conversation_id.trim().is_empty() {
+        push.events.first()?.conversation_id.trim().to_string()
+    } else {
+        push.conversation_id.trim().to_string()
+    };
+    if conversation_id.is_empty() {
+        return None;
+    }
+
+    let max_seq = push
+        .events
+        .iter()
+        .map(|event| event.conversation_seq)
+        .max()
+        .unwrap_or(0)
+        .max(push.max_conversation_seq);
+    (max_seq > 0).then_some((conversation_id, max_seq))
+}
+
+fn pending_ping_request(
+    push: &PushEventRequest,
+    conversation_id: &str,
+    max_conversation_seq: u64,
+) -> PushEventRequest {
+    PushEventRequest {
+        user_ids: push.user_ids.clone(),
+        events: vec![],
+        options: push.options.clone(),
+        conversation_id: conversation_id.to_string(),
+        max_conversation_seq,
+        delivery_mode: EventEnvelopeDeliveryMode::Ping as i32,
+        inline_events_truncated: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +499,20 @@ mod tests {
 
         assert_eq!(code, ErrorCode::UserOffline);
         assert!(!code.is_retryable());
+    }
+
+    #[test]
+    fn event_ping_watermark_uses_explicit_ping_fields() {
+        let push = PushEventRequest {
+            user_ids: vec!["u1".to_string()],
+            events: vec![],
+            options: None,
+            conversation_id: "c1".to_string(),
+            max_conversation_seq: 42,
+            delivery_mode: EventEnvelopeDeliveryMode::Ping as i32,
+            inline_events_truncated: true,
+        };
+
+        assert_eq!(event_ping_watermark(&push), Some(("c1".to_string(), 42)));
     }
 }

@@ -17,9 +17,7 @@ pub fn flare_from_tonic_status(status: &Status) -> FlareError {
     // 尝试从 Status details 解析结构化错误（如果启用 proto feature）
     #[cfg(feature = "proto")]
     if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(status) {
-        // 从结构化错误构建 FlareError
-        return FlareError::localized(ErrorCode::from(detail.code), detail.reason)
-            .with_details(detail.message);
+        return flare_server_core::error::from_error_detail(&detail);
     }
 
     // 降级：根据 gRPC Code 映射到 ErrorCode

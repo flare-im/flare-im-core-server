@@ -9,9 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 flare-server-core = { workspace = true }
-rand = { workspace = true }
 redis = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }

@@ -32,6 +32,11 @@ pub use manager::ConfigManager;
 /// 全局应用配置实例，使用 OnceLock 确保只初始化一次
 static APP_CONFIG: OnceLock<FlareAppConfig> = OnceLock::new();
 
+struct LoadedConfig {
+    config: FlareAppConfig,
+    source_path: Option<PathBuf>,
+}
+
 /// Redis 连接池配置
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RedisPoolConfig {
@@ -85,26 +90,22 @@ pub struct JetStreamTopologySpec {
 /// MQ 后端选择（`[mq]`）。
 ///
 /// 手动指定方式（优先级从高到低）：
-/// 1. 环境变量 `FLARE_MQ_DEFAULT_BACKEND`（如 `nats`、`kafka`、`jetstream`）
+/// 1. 环境变量 `FLARE_MQ_DEFAULT_BACKEND`（`nats` 或 `kafka`）
 /// 2. `config/environments/{FLARE_ENV}.toml` 根级 `[mq]`（由 [`ConfigManager::load_environment_config`] 合并）
 /// 3. `config/base.toml` 中的 `[mq]`
 ///
-/// `jetstream` 与 `nats` 等价（均表示 NATS JetStream）。生产运行时 Kafka 与 JetStream 二选一。
+/// `nats` 表示 NATS JetStream。生产运行时 Kafka 与 JetStream 二选一。
 #[derive(Debug, Clone, Deserialize)]
 pub struct MqBackendConfig {
     /// 当前选择的 MQ 后端（已小写、去首尾空格，见 [`Self::ensure_defaults`]）。
     #[serde(default = "default_mq_backend")]
     pub default_backend: String,
-    /// 迁移期显式开关；生产建议保持 false，避免同链路 fallback 造成语义不清。
-    #[serde(default)]
-    pub allow_kafka_fallback: bool,
 }
 
 impl Default for MqBackendConfig {
     fn default() -> Self {
         Self {
             default_backend: default_mq_backend(),
-            allow_kafka_fallback: false,
         }
     }
 }
@@ -326,6 +327,21 @@ pub struct AccessGatewayServiceConfig {
     /// 加密密钥（32字节，hex编码或直接字符串，如果启用加密但未设置则使用默认密钥）
     #[serde(default)]
     pub encryption_key: Option<String>,
+    /// 同步拉取限流开关（tenant + user 双令牌桶）
+    #[serde(default)]
+    pub sync_pull_rate_limit_enabled: Option<bool>,
+    /// 单用户同步拉取令牌补充速率（requests/second）
+    #[serde(default)]
+    pub sync_pull_user_requests_per_second: Option<u32>,
+    /// 单用户同步拉取突发容量
+    #[serde(default)]
+    pub sync_pull_user_burst: Option<u32>,
+    /// 单租户同步拉取令牌补充速率（requests/second）
+    #[serde(default)]
+    pub sync_pull_tenant_requests_per_second: Option<u32>,
+    /// 单租户同步拉取突发容量
+    #[serde(default)]
+    pub sync_pull_tenant_burst: Option<u32>,
 }
 
 /// API Gateway 服务配置（业务系统和三方 HTTP facade）
@@ -469,9 +485,21 @@ pub struct PushServerServiceConfig {
     /// 推送死信主题
     #[serde(default)]
     pub push_dlq_topic: Option<String>,
+    /// ConversationReadService gRPC endpoint，用于大群 pure ping 按页解析成员。
+    #[serde(default)]
+    pub conversation_read_endpoint: Option<String>,
+    /// 大群 pure ping 解析成员的分页大小。
+    #[serde(default)]
+    pub event_ping_participant_page_size: Option<i32>,
+    /// 大群 pure ping 在 Push Server 解析成员前按会话合并的窗口（毫秒），0 表示关闭。
+    #[serde(default)]
+    pub event_ping_coalesce_window_ms: Option<u64>,
     /// Redis 配置
     #[serde(default)]
     pub redis: Option<String>,
+    /// 在线状态查询后端：redis 或 grpc。
+    #[serde(default)]
+    pub online_status_backend: Option<String>,
     /// 在线状态过期时间（秒）
     #[serde(default)]
     pub online_ttl_seconds: Option<u64>,
@@ -557,6 +585,9 @@ pub struct PushWorkerServiceConfig {
     /// 未配置离线推送提供者时的有界本地 parking 容量
     #[serde(default)]
     pub offline_parking_capacity: Option<usize>,
+    /// 事件 ping 防抖窗口（毫秒），0 表示关闭
+    #[serde(default)]
+    pub event_ping_debounce_window_ms: Option<u64>,
     /// Prometheus 指标出口开关
     #[serde(default)]
     pub metrics_enabled: Option<bool>,
@@ -640,6 +671,18 @@ pub struct MessageOrchestratorServiceConfig {
     /// Conversation 服务类型（用于自动创建 conversation，如果配置了 registry，会自动发现）
     #[serde(default)]
     pub conversation_service_type: Option<String>,
+    /// 每个用户 sync 变更索引保留的最大版本条数。
+    #[serde(default)]
+    pub user_sync_index_max_changes_per_user: Option<usize>,
+    /// 用户 sync 变更索引与会话状态缓存 TTL（秒）；user_version 本身不设置 TTL。
+    #[serde(default)]
+    pub user_sync_index_ttl_seconds: Option<u64>,
+    /// 超过该收件人数的持久消息推送切换为 notify+pull ping；0 表示关闭。
+    #[serde(default)]
+    pub large_conversation_push_threshold: Option<usize>,
+    /// 持久消息是否启用 inline event 推送；关闭后全量退化为 notify+pull ping。
+    #[serde(default)]
+    pub inline_message_push_enabled: Option<bool>,
     /// 高频单聊 conversation ensure 缓存容量
     #[serde(default)]
     pub conversation_ensure_cache_capacity: Option<u64>,
@@ -764,6 +807,9 @@ pub struct StorageWriterServiceConfig {
     /// WAL 过期时间（秒）
     #[serde(default)]
     pub wal_ttl_seconds: Option<u64>,
+    /// Redis 会话尾部热缓存保留消息条数。
+    #[serde(default)]
+    pub redis_hot_tail_limit: Option<usize>,
     /// 批量大小
     #[serde(default)]
     pub batch_size: Option<u32>,
@@ -834,6 +880,9 @@ pub struct ConversationServiceConfig {
     /// 在线状态前缀
     #[serde(default)]
     pub presence_prefix: Option<String>,
+    /// 大群精确未读写扩散阈值；成员数超过阈值时未读计数近似化，0 表示始终精确。
+    #[serde(default)]
+    pub large_conversation_precise_unread_threshold: Option<i32>,
     /// 存储读取服务名（通过服务发现获取地址，可选）
     #[serde(default)]
     pub storage_reader_service: Option<String>,
@@ -923,7 +972,7 @@ pub struct FlareAppConfig {
 }
 
 impl FlareAppConfig {
-    /// 返回当前 MQ 后端标识（`nats` \| `jetstream` \| `kafka`）。
+    /// 返回当前 MQ 后端标识（`nats` \| `kafka`）。
     pub fn mq_default_backend(&self) -> &str {
         self.mq.default_backend.as_str()
     }
@@ -933,9 +982,9 @@ impl FlareAppConfig {
         self.mq.default_backend == "kafka"
     }
 
-    /// 是否配置为使用 NATS JetStream（含 `jetstream` 别名）。
+    /// 是否配置为使用 NATS JetStream。
     pub fn mq_uses_nats(&self) -> bool {
-        matches!(self.mq.default_backend.as_str(), "nats" | "jetstream")
+        self.mq.default_backend == "nats"
     }
 
     /// 获取核心配置
@@ -1133,7 +1182,7 @@ impl FlareAppConfig {
     /// 如果所有引用都有效，返回 Ok(())，否则返回错误信息
     pub fn validate_references(&self) -> Result<()> {
         match self.mq.default_backend.as_str() {
-            "nats" | "jetstream" => {}
+            "nats" => {}
             "kafka" => {
                 if self.kafka.is_empty() {
                     return Err(flare_server_core::error::FlareError::system(
@@ -1379,18 +1428,13 @@ impl FlareAppConfig {
 
 /// 环境变量覆盖 `[mq]`（优先级高于 `config/environments/{FLARE_ENV}.toml` 合并结果）。
 ///
-/// - `FLARE_MQ_DEFAULT_BACKEND`：`nats` \| `jetstream` \| `kafka`
-/// - `FLARE_MQ_ALLOW_KAFKA_FALLBACK`：迁移期显式开关；生产建议保持关闭
+/// - `FLARE_MQ_DEFAULT_BACKEND`：`nats` \| `kafka`
 fn apply_mq_env_overrides(cfg: &mut FlareAppConfig) {
     if let Ok(v) = env::var("FLARE_MQ_DEFAULT_BACKEND") {
         let t = v.trim().to_ascii_lowercase();
         if !t.is_empty() {
             cfg.mq.default_backend = t;
         }
-    }
-    if let Ok(v) = env::var("FLARE_MQ_ALLOW_KAFKA_FALLBACK") {
-        let s = v.trim();
-        cfg.mq.allow_kafka_fallback = matches!(s, "1" | "true" | "yes" | "on");
     }
 }
 
@@ -1429,10 +1473,14 @@ pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
     // 使用 OnceLock 确保配置只初始化一次
     APP_CONFIG.get_or_init(|| {
         // 使用备选方案加载配置
-        let mut cfg = load_with_fallback(&candidates);
+        let loaded = load_with_fallback(&candidates);
+        let mut cfg = loaded.config;
         // 加载环境特定配置
-        if let Err(e) = manager::ConfigManager::load_environment_config(&mut cfg) {
-            warn!("failed to load environment config: {}", e);
+        if let Err(err) = manager::ConfigManager::load_environment_config_from_root(
+            &mut cfg,
+            loaded.source_path.as_deref(),
+        ) {
+            panic!("failed to load active environment config: {err}");
         }
         apply_mq_env_overrides(&mut cfg);
         cfg.ensure_defaults();
@@ -1483,13 +1531,16 @@ pub fn app_config() -> &'static FlareAppConfig {
 /// 使用备选方案加载配置
 ///
 /// 按照候选路径列表依次尝试加载配置，如果都失败则使用默认配置
-fn load_with_fallback(candidates: &[PathBuf]) -> FlareAppConfig {
+fn load_with_fallback(candidates: &[PathBuf]) -> LoadedConfig {
     for path in candidates {
         match load_config_from_source(path) {
             Ok(mut cfg) => {
                 cfg.ensure_defaults();
                 tracing::info!(config_path = %path.display(), "loaded config from path");
-                return cfg;
+                return LoadedConfig {
+                    config: cfg,
+                    source_path: Some(path.clone()),
+                };
             }
             Err(err) => {
                 warn!("failed to load config from {}: {err}", path.display());
@@ -1498,7 +1549,10 @@ fn load_with_fallback(candidates: &[PathBuf]) -> FlareAppConfig {
     }
 
     warn!("no configuration source succeeded, falling back to defaults");
-    default_config()
+    LoadedConfig {
+        config: default_config(),
+        source_path: None,
+    }
 }
 
 /// 从源加载配置
@@ -1530,11 +1584,8 @@ fn load_config_from_source(path: &Path) -> Result<FlareAppConfig> {
 ///
 /// 读取并解析 TOML 配置文件
 fn load_config_from_file(path: &Path) -> Result<FlareAppConfig> {
-    // 读取配置文件内容
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("unable to read config file: {}", Path::new(path).display()))?;
-    // 解析 TOML 格式的配置内容
-    let mut cfg: FlareAppConfig = toml::from_str(&content).context(format!(
+    let value = load_toml_value(path)?;
+    let mut cfg: FlareAppConfig = value.try_into().context(format!(
         "invalid config format: {}",
         Path::new(path).display()
     ))?;
@@ -1607,11 +1658,100 @@ fn merge_directory(root: &mut Value, dir: &Path) -> Result<()> {
 fn load_toml_value(path: &Path) -> Result<Value> {
     let content = fs::read_to_string(path)
         .context(format!("unable to read config fragment {}", path.display()))?;
-    let value: Value = toml::from_str(&content).context(format!(
+    let mut value: Value = toml::from_str(&content).context(format!(
         "invalid TOML content in fragment {}",
         path.display()
     ))?;
+    expand_env_placeholders_in_value(&mut value, path)?;
     Ok(value)
+}
+
+fn expand_env_placeholders_in_value(value: &mut Value, path: &Path) -> Result<()> {
+    expand_env_placeholders_in_value_with(value, path, |name| env::var(name).ok())
+}
+
+fn expand_env_placeholders_in_value_with<F>(
+    value: &mut Value,
+    path: &Path,
+    mut lookup: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    fn visit<F>(value: &mut Value, path: &Path, lookup: &mut F) -> Result<()>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        match value {
+            Value::String(raw) => {
+                *raw = expand_env_placeholders(raw, path, lookup)?;
+            }
+            Value::Array(items) => {
+                for item in items {
+                    visit(item, path, lookup)?;
+                }
+            }
+            Value::Table(table) => {
+                for (_, item) in table.iter_mut() {
+                    visit(item, path, lookup)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(value, path, &mut lookup)
+}
+
+fn expand_env_placeholders<F>(input: &str, path: &Path, lookup: &mut F) -> Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(start_rel) = input[cursor..].find("${") {
+        let start = cursor + start_rel;
+        output.push_str(&input[cursor..start]);
+        let name_start = start + 2;
+        let Some(end_rel) = input[name_start..].find('}') else {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "unclosed environment placeholder in {}",
+                path.display()
+            )));
+        };
+        let end = name_start + end_rel;
+        let name = &input[name_start..end];
+        if !is_valid_env_placeholder_name(name) {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "invalid environment placeholder '${{{}}}' in {}",
+                name,
+                path.display()
+            )));
+        }
+        let value = lookup(name).ok_or_else(|| {
+            flare_server_core::error::FlareError::system(format!(
+                "environment variable {} required by {} is not set",
+                name,
+                path.display()
+            ))
+        })?;
+        output.push_str(&value);
+        cursor = end + 1;
+    }
+
+    output.push_str(&input[cursor..]);
+    Ok(output)
+}
+
+fn is_valid_env_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 /// 合并值
@@ -1726,4 +1866,86 @@ pub struct ServicesConfig {
     /// 能力服务配置（Hook + Capability）
     #[serde(default, rename = "capability")]
     pub capability: Option<CapabilityServiceConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_placeholders_expand_in_nested_toml_values() {
+        let mut value: Value = toml::from_str(
+            r#"
+            [object_storage.default]
+            access_key = "${FLARE_TEST_ACCESS_KEY}"
+            endpoint = "https://${FLARE_TEST_BUCKET}.example.com"
+            subjects = ["flare.${FLARE_TEST_BUCKET}.*"]
+            "#,
+        )
+        .expect("valid toml");
+
+        expand_env_placeholders_in_value_with(&mut value, Path::new("config/test.toml"), |name| {
+            match name {
+                "FLARE_TEST_ACCESS_KEY" => Some("ak-test".to_string()),
+                "FLARE_TEST_BUCKET" => Some("media".to_string()),
+                _ => None,
+            }
+        })
+        .expect("placeholders expand");
+
+        let storage = value
+            .get("object_storage")
+            .and_then(|v| v.get("default"))
+            .expect("object storage profile");
+        assert_eq!(
+            storage.get("access_key").and_then(Value::as_str),
+            Some("ak-test")
+        );
+        assert_eq!(
+            storage.get("endpoint").and_then(Value::as_str),
+            Some("https://media.example.com")
+        );
+        assert_eq!(
+            storage
+                .get("subjects")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("flare.media.*")
+        );
+    }
+
+    #[test]
+    fn env_placeholders_fail_when_variable_is_missing() {
+        let mut value = Value::String("${FLARE_TEST_MISSING_SECRET}".to_string());
+        let err = expand_env_placeholders_in_value_with(
+            &mut value,
+            Path::new("config/test.toml"),
+            |_| None,
+        )
+        .expect_err("missing env var must fail");
+
+        assert!(
+            err.to_string().contains("FLARE_TEST_MISSING_SECRET"),
+            "error should name the missing variable: {err}"
+        );
+    }
+
+    #[test]
+    fn mq_default_backend_accepts_only_canonical_values() {
+        let mut config = default_config();
+        config.mq.default_backend = "nats".to_string();
+        config
+            .validate_references()
+            .expect("nats is the canonical JetStream backend selector");
+
+        config.mq.default_backend = "jetstream".to_string();
+        let err = config
+            .validate_references()
+            .expect_err("jetstream is a profile family, not a backend selector");
+        assert!(
+            err.to_string().contains("expected 'nats' or 'kafka'"),
+            "error should describe canonical MQ backend values: {err}"
+        );
+    }
 }

@@ -27,6 +27,7 @@ where
             message_id,
             ctx.conversation_id,
             pin.pinned_by.as_str(),
+            pin.scope,
             true,
             expire_at,
             pin.reason.as_deref().filter(|s| !s.is_empty()),

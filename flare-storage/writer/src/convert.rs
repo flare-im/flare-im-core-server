@@ -144,9 +144,12 @@ fn event_payload_from_proto(p: &flare_proto::common::event::Payload) -> Option<E
             pinned_by: p.pinned_by.clone(),
             reason: p.reason.clone(),
             expire_at: p.expire_at.map(timestamp_seconds),
+            scope: p.scope,
         }),
         P::Unpin(u) => EventPayload::Unpin(UnpinPayload {
             server_msg_id: u.server_msg_id.clone(),
+            unpinned_by: u.unpinned_by.clone(),
+            scope: u.scope,
         }),
         P::Mark(m) => EventPayload::Mark(MarkPayload {
             server_msg_id: m.server_msg_id.clone(),
@@ -245,9 +248,12 @@ fn event_payload_to_proto(p: &EventPayload) -> Option<flare_proto::common::event
             pinned_by: p.pinned_by.clone(),
             reason: p.reason.clone(),
             expire_at: p.expire_at.as_ref().map(|ts| ts.seconds),
+            scope: p.scope,
         }),
         EventPayload::Unpin(u) => P::Unpin(common::UnpinEvent {
             server_msg_id: u.server_msg_id.clone(),
+            unpinned_by: u.unpinned_by.clone(),
+            scope: u.scope,
         }),
         EventPayload::Mark(m) => P::Mark(common::MarkEvent {
             server_msg_id: m.server_msg_id.clone(),

@@ -56,6 +56,8 @@ fn conversation_type_int_to_label(ty: i32) -> String {
         Ok(flare_proto::common::ConversationType::Customer) => "customer".to_string(),
         Ok(flare_proto::common::ConversationType::System) => "system".to_string(),
         Ok(flare_proto::common::ConversationType::Temp) => "temp".to_string(),
+        Ok(flare_proto::common::ConversationType::Channel) => "channel".to_string(),
+        Ok(flare_proto::common::ConversationType::Broadcast) => "broadcast".to_string(),
         Err(_) => "unknown".to_string(),
     }
 }

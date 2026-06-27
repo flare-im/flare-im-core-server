@@ -408,6 +408,46 @@ fn apply_draft(target: &mut MessageDraft, source: ProtoHookMessageDraft) {
     target.metadata = source.metadata;
 }
 
+fn conversation_type_label_to_proto(value: &str) -> i32 {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "single" => flare_proto::common::ConversationType::Single as i32,
+        "group" => flare_proto::common::ConversationType::Group as i32,
+        "ai" => flare_proto::common::ConversationType::Ai as i32,
+        "system" => flare_proto::common::ConversationType::System as i32,
+        "customer" => flare_proto::common::ConversationType::Customer as i32,
+        "temp" => flare_proto::common::ConversationType::Temp as i32,
+        "channel" => flare_proto::common::ConversationType::Channel as i32,
+        "broadcast" => flare_proto::common::ConversationType::Broadcast as i32,
+        _ => flare_proto::common::ConversationType::Unspecified as i32,
+    }
+}
+
+fn message_type_label_to_proto(value: &str) -> i32 {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "text" => flare_proto::common::MessageType::Text as i32,
+        "image" => flare_proto::common::MessageType::Image as i32,
+        "video" => flare_proto::common::MessageType::Video as i32,
+        "audio" => flare_proto::common::MessageType::Audio as i32,
+        "file" => flare_proto::common::MessageType::File as i32,
+        "location" => flare_proto::common::MessageType::Location as i32,
+        "card" => flare_proto::common::MessageType::Card as i32,
+        "sticker" => flare_proto::common::MessageType::Sticker as i32,
+        "emoji" => flare_proto::common::MessageType::Emoji as i32,
+        "link_card" => flare_proto::common::MessageType::LinkCard as i32,
+        "forward" => flare_proto::common::MessageType::Forward as i32,
+        "thread" => flare_proto::common::MessageType::Thread as i32,
+        "quote" => flare_proto::common::MessageType::Quote as i32,
+        "app_card" => flare_proto::common::MessageType::AppCard as i32,
+        "rich_text" => flare_proto::common::MessageType::RichText as i32,
+        "image_group" => flare_proto::common::MessageType::ImageGroup as i32,
+        "system" => flare_proto::common::MessageType::System as i32,
+        "notification" => flare_proto::common::MessageType::Notification as i32,
+        "custom" => flare_proto::common::MessageType::Custom as i32,
+        "placeholder" => flare_proto::common::MessageType::Placeholder as i32,
+        _ => flare_proto::common::MessageType::Unspecified as i32,
+    }
+}
+
 fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
     let persisted_ts = system_time_to_timestamp(record.persisted_at);
 
@@ -418,30 +458,7 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
         conversation_type: record
             .conversation_type
             .as_deref()
-            .map(|t| match t.to_ascii_lowercase().as_str() {
-                "single" | "conversation_type_single" | "1" => {
-                    flare_proto::common::ConversationType::Single as i32
-                }
-                "group" | "conversation_type_group" | "2" => {
-                    flare_proto::common::ConversationType::Group as i32
-                }
-                "channel" | "conversation_type_channel" | "3" => {
-                    flare_proto::common::ConversationType::Group as i32
-                }
-                "ai" | "conversation_type_ai" | "4" => {
-                    flare_proto::common::ConversationType::Ai as i32
-                }
-                "customer" | "conversation_type_customer" | "5" => {
-                    flare_proto::common::ConversationType::Customer as i32
-                }
-                "system" | "conversation_type_system" | "6" => {
-                    flare_proto::common::ConversationType::System as i32
-                }
-                "temp" | "conversation_type_temp" | "7" => {
-                    flare_proto::common::ConversationType::Temp as i32
-                }
-                _ => flare_proto::common::ConversationType::Unspecified as i32,
-            })
+            .map(conversation_type_label_to_proto)
             .unwrap_or(flare_proto::common::ConversationType::Unspecified as i32),
         created_at: persisted_ts
             .seconds
@@ -450,21 +467,7 @@ fn build_record(record: &MessageRecord) -> ProtoHookMessageRecord {
         message_type: record
             .message_type
             .as_deref()
-            .map(|kind| match kind.to_ascii_lowercase().as_str() {
-                "text" | "message_type_text" => flare_proto::common::MessageType::Text as i32,
-                "image" => flare_proto::common::MessageType::Image as i32,
-                "video" => flare_proto::common::MessageType::Video as i32,
-                "audio" => flare_proto::common::MessageType::Audio as i32,
-                "file" => flare_proto::common::MessageType::File as i32,
-                "location" => flare_proto::common::MessageType::Location as i32,
-                "card" => flare_proto::common::MessageType::Card as i32,
-                "notification" => flare_proto::common::MessageType::Notification as i32,
-                "binary" | "attachment" | "message_type_binary" => {
-                    flare_proto::common::MessageType::Custom as i32
-                }
-                "custom" | "message_type_custom" => flare_proto::common::MessageType::Custom as i32,
-                _ => flare_proto::common::MessageType::Unspecified as i32,
-            })
+            .map(message_type_label_to_proto)
             .unwrap_or(flare_proto::common::MessageType::Unspecified as i32),
         ..Default::default()
     };
@@ -513,5 +516,50 @@ fn system_time_to_timestamp(time: SystemTime) -> Timestamp {
     Timestamp {
         seconds: duration.as_secs() as i64,
         nanos: duration.subsec_nanos() as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{conversation_type_label_to_proto, message_type_label_to_proto};
+
+    #[test]
+    fn conversation_type_label_to_proto_accepts_only_canonical_names() {
+        assert_eq!(
+            conversation_type_label_to_proto("single"),
+            flare_proto::common::ConversationType::Single as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("broadcast"),
+            flare_proto::common::ConversationType::Broadcast as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("1"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("conversation_type_single"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+    }
+
+    #[test]
+    fn message_type_label_to_proto_accepts_only_canonical_names() {
+        assert_eq!(
+            message_type_label_to_proto("text"),
+            flare_proto::common::MessageType::Text as i32
+        );
+        assert_eq!(
+            message_type_label_to_proto("image_group"),
+            flare_proto::common::MessageType::ImageGroup as i32
+        );
+        assert_eq!(
+            message_type_label_to_proto("message_type_text"),
+            flare_proto::common::MessageType::Unspecified as i32
+        );
+        assert_eq!(
+            message_type_label_to_proto("attachment"),
+            flare_proto::common::MessageType::Unspecified as i32
+        );
     }
 }

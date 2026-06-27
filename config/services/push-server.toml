@@ -1,17 +1,9 @@
-# Push Server 服务配置
+# Push Server 服务配置：消费推送入口流，按在线状态分流到 Push Worker。
+
 [services.push_server]
-
-# ============================================
-# 基础配置
-# ============================================
-
-# JetStream 配置 profile 名称（引用 base.toml 中的 [jetstream.push]）
 jetstream = "push"
-
-# Redis 配置 profile 名称（引用 base.toml 中的 [redis.conversation_store]）
 redis = "conversation_store"
-
-# Consumer Group 名称
+online_status_backend = "redis"
 consumer_group = "push-server"
 
 # 推送入口 Subject：Push Server 只消费推送专用流，不消费 message main 主消息流。
@@ -19,115 +11,15 @@ push_message_topic = "flare.im.push.messages"
 push_event_topic = "flare.im.push.events"
 push_envelope_topic = "flare.im.push.envelope"
 
-# Push Server -> Push Worker 任务 Subject
+# Push Server -> Push Worker 任务 Subject。
 push_online_topic = "flare.im.push.online"
 push_offline_topic = "flare.im.push.offline"
 push_dlq_topic = "flare.im.push.dlq"
+event_ping_participant_page_size = 500
+# 10 万人大群高频消息：recipient-less ping 在解析成员前按会话合并水位，0 表示关闭。
+event_ping_coalesce_window_ms = 200
 
-# JetStream 超时配置（毫秒）
-jetstream_timeout_ms = 5000
-
-# Redis 在线状态 TTL（秒）
 online_ttl_seconds = 3600
-
-# 默认租户 ID
 default_tenant_id = "0"
-
-# Hook 配置
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
-
-# ============================================
-# 批量消费配置
-# ============================================
-
-# 单次拉取最大记录数
-max_poll_records = 500
-
-# 最小拉取字节数（1MB = 1048576 bytes）
-fetch_min_bytes = 1048576
-
-# 最大等待时间（毫秒）
-fetch_max_wait_ms = 100
-
-# ============================================
-# 批量查询在线状态配置
-# ============================================
-
-# 批量查询在线状态的大小
-online_status_batch_size = 100
-
-# 在线状态查询超时（毫秒）
-online_status_timeout_ms = 50
-
-# ============================================
-# Gateway Router 配置
-# ============================================
-
-# Gateway Router 连接池大小（每个 gateway_id 一个连接）
-gateway_router_connection_pool_size = 10
-
-# Gateway Router 连接超时（毫秒）
-gateway_router_connection_timeout_ms = 5000
-
-# Gateway Router 连接空闲超时（毫秒，5分钟）
-gateway_router_connection_idle_timeout_ms = 300000
-
-# Gateway 部署模式：single_region | multi_region
-gateway_deployment_mode = "single_region"
-
-# 本地 Gateway ID（多地区部署时使用，单地区部署可留空）
-# local_gateway_id = "gateway-beijing-1"
-
-# ============================================
-# 推送重试配置（Gateway 推送失败重试）
-# ============================================
-
-# 最大重试次数
-push_retry_max_attempts = 3
-
-# 初始重试延迟（毫秒）
-push_retry_initial_delay_ms = 100
-
-# 最大重试延迟（毫秒）
-push_retry_max_delay_ms = 5000
-
-# 重试退避乘数
-push_retry_backoff_multiplier = 2.0
-
-# ============================================
-# ACK 超时重试配置（区别于推送重试，避免 JetStream 阻塞）
-# ============================================
-
-# ACK 超时重试初始延迟（毫秒，较短，避免阻塞 JetStream）
-ack_retry_initial_delay_ms = 50
-
-# ACK 超时重试最大延迟（毫秒，较短，避免阻塞 JetStream）
-ack_retry_max_delay_ms = 1000
-
-# ============================================
-# ACK 超时配置
-# ============================================
-
-# ACK 超时时间（秒）
-ack_timeout_seconds = 30
-
-# ACK 监控间隔（秒）
-ack_monitor_interval_seconds = 1
-
-# ACK 监控性能优化配置
-# 每次 SCAN 的 keys 数量（避免一次性扫描太多）
-ack_scan_batch_size = 500
-
-# Pipeline 批量获取的批次大小（避免单个 Pipeline 太大）
-ack_pipeline_batch_size = 1000
-
-# 批量处理超时事件的批次大小
-ack_timeout_batch_size = 100
-
-# 并发处理超时事件的最大数量（使用信号量控制）
-ack_timeout_concurrent_limit = 50
-
-# ============================================
-# 离线推送队列配置
-# ============================================

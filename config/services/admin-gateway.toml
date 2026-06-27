@@ -19,7 +19,7 @@ token_ttl_seconds = 3600
 address = "0.0.0.0"
 port = 50051
 
-# 下游 gRPC 使用 Admin Gateway 独立环境变量：
+# 下游 gRPC 默认走 discovery:// 服务发现；覆盖时使用 Admin Gateway 独立环境变量：
 # FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL
@@ -27,10 +27,3 @@ port = 50051
 # FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL
 # 以及各自 FLARE_ADMIN_GATEWAY_*_STATIC_FALLBACK。
-[services.admin_gateway.grpc]
-message_ingest_service_url = "discovery://flare-message-ingest"
-message_orchestrator_service_url = "discovery://flare-orchestrator"
-conversation_service_url = "discovery://flare-conversation"
-media_service_url = "discovery://flare-media"
-online_service_url = "discovery://flare-signaling-online"
-storage_reader_service_url = "discovery://flare-storage-reader"

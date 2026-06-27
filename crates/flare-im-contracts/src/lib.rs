@@ -16,9 +16,10 @@ pub use flare_core_messaging::eventbus::{EventEnvelope, TopicEventBus};
 pub use abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAGS, StorageMessagePayload};
 pub use domain::{
     ClientMessageId, ConnectionEvent, ConnectionId, ConversationId, ConversationSyncSlice,
-    DeleteType, DeviceId, EventMeta, GatewayId, MarkType, MessageCommand, MessageCommandHandler,
-    MessageId, MultiDeviceSyncResult, OperationResult, ReactionAction, SendAckResult,
-    SendMessageCommand, Seq, SyncQueryHandler, SyncResult, UserId,
+    DeleteType, DeviceId, DevicePushToken, EventMeta, GatewayId, MarkType, MessageCommand,
+    MessageCommandHandler, MessageId, MultiDeviceSyncResult, OperationResult, ReactionAction,
+    SendAckResult, SendMessageCommand, Seq, SyncQueryHandler, SyncResult, UserId,
+    device_push_token_registry_field, device_push_token_registry_key,
 };
 pub use instrumentation::{
     BusinessProbeDelivery, BusinessProbeEvent, BusinessProbeKind, BusinessProbeSink,

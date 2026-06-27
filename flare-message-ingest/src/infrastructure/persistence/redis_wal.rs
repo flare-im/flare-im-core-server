@@ -94,6 +94,22 @@ impl RedisWalRepository {
         Ok(manager.clone())
     }
 
+    fn configured_wal_key(&self) -> Option<&str> {
+        self.config
+            .wal_hash_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+
+    fn require_wal_key(&self) -> Result<&str> {
+        self.configured_wal_key().ok_or_else(|| {
+            flare_server_core::error::FlareError::system(
+                "Redis WAL hash key is required for durable message append",
+            )
+        })
+    }
+
     async fn claim_pending_ids(
         &self,
         conn: &mut ConnectionManager,
@@ -186,16 +202,7 @@ impl WalRepository for RedisWalRepository {
         let _submission = submission; // 保持对 submission 的引用
         let _tenant_id = tenant_id; // 保持对 tenant_id 的引用
         Box::pin(async move {
-            let wal_key = match &_self.config.wal_hash_key {
-                Some(key) => key.as_str(),
-                None => {
-                    tracing::trace!(
-                        message_id = %_submission.message_id,
-                        "WAL not configured (wal_hash_key is None), skipping WAL write"
-                    );
-                    return Ok(());
-                }
-            };
+            let wal_key = _self.require_wal_key()?;
 
             let mut conn = _self.connection().await?;
             let pending_key = wal_pending_index_key(wal_key);
@@ -262,8 +269,8 @@ impl WalRepository for RedisWalRepository {
         let _self = self;
         let _message_id = message_id.to_string();
         Box::pin(async move {
-            let wal_key = match &_self.config.wal_hash_key {
-                Some(key) => key.as_str(),
+            let wal_key = match _self.configured_wal_key() {
+                Some(key) => key,
                 None => {
                     tracing::trace!(
                         message_id = %_message_id,
@@ -355,8 +362,8 @@ impl WalRepository for RedisWalRepository {
                 return Ok(Vec::new());
             }
 
-            let wal_key = match &_self.config.wal_hash_key {
-                Some(key) => key.as_str(),
+            let wal_key = match _self.configured_wal_key() {
+                Some(key) => key,
                 None => {
                     tracing::trace!(
                         "WAL not configured (wal_hash_key is None), no pending messages"
@@ -455,8 +462,8 @@ impl WalRepository for RedisWalRepository {
         let _self = self;
         let _message_id = message_id.to_string();
         Box::pin(async move {
-            let wal_key = match &_self.config.wal_hash_key {
-                Some(key) => key.as_str(),
+            let wal_key = match _self.configured_wal_key() {
+                Some(key) => key,
                 None => {
                     tracing::trace!(
                         message_id = %_message_id,
@@ -491,5 +498,63 @@ impl WalRepository for RedisWalRepository {
             );
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_contracts::utils::TimelineMetadata;
+    use flare_proto::common::Message as ProtoMessage;
+
+    fn repository_with_wal_key(wal_hash_key: Option<String>) -> RedisWalRepository {
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let config = MessageIngestConfig {
+            wal_hash_key,
+            ..MessageIngestConfig::default()
+        };
+        RedisWalRepository::new(Arc::new(client), Arc::new(config))
+    }
+
+    fn submission() -> MessageSubmission {
+        MessageSubmission {
+            message_id: "message-1".to_string(),
+            message: ProtoMessage {
+                server_id: "message-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                ..ProtoMessage::default()
+            },
+            timeline: TimelineMetadata::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_fails_closed_when_wal_hash_key_missing() {
+        let repo = repository_with_wal_key(None);
+        let result = repo.append(&submission(), "tenant-1").await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Redis WAL hash key is required")
+        );
+    }
+
+    #[tokio::test]
+    async fn append_fails_closed_when_wal_hash_key_blank() {
+        let repo = repository_with_wal_key(Some("  ".to_string()));
+        let result = repo.append(&submission(), "tenant-1").await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Redis WAL hash key is required")
+        );
     }
 }

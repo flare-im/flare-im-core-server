@@ -17,7 +17,7 @@ pub trait ConversationRepository: Send + Sync {
         stored_channel_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
-    /// 标记会话已读（更新未读数；read_seq 为 0 时由 Conversation 服务用 last_message_seq）
+    /// 标记会话已读（更新未读数；read_seq 必须为明确的正数会话序列）
     fn mark_conversation_as_read<'a>(
         &'a self,
         ctx: &'a flare_server_core::context::Context,

@@ -13,6 +13,24 @@ use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineDeliveryBackend {
+    Outbox,
+    Getui,
+    Disabled,
+}
+
+impl OfflineDeliveryBackend {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "outbox" => Self::Outbox,
+            "getui" => Self::Getui,
+            "disabled" | "off" | "none" => Self::Disabled,
+            other => panic!("unsupported PUSH_WORKER_OFFLINE_DELIVERY_BACKEND={other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PushWorkerConfig {
     pub mq_backend: String,
@@ -36,12 +54,32 @@ pub struct PushWorkerConfig {
     pub access_gateway_static_endpoint: Option<String>,
     /// 未配置离线推送提供者时的有界本地 parking 容量。
     pub offline_parking_capacity: usize,
+    /// 离线推送后端：outbox/getui/disabled。
+    pub offline_delivery_backend: OfflineDeliveryBackend,
     /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
     pub offline_outbox_redis_url: Option<String>,
     /// 离线推送 outbox Stream key
     pub offline_outbox_stream: String,
     /// 离线推送 outbox Stream MAXLEN（~ 近似裁剪）
     pub offline_outbox_maxlen: usize,
+    /// 设备厂商 token registry Redis 地址。
+    pub device_token_redis_url: String,
+    /// 设备厂商 token registry Redis key 前缀。
+    pub device_token_key_prefix: String,
+    /// 个推 App ID。
+    pub getui_app_id: Option<String>,
+    /// 个推 App Key。
+    pub getui_app_key: Option<String>,
+    /// 个推 Master Secret。
+    pub getui_master_secret: Option<String>,
+    /// 个推 RestAPI V2 BaseUrl；未配置时按 app_id 生成。
+    pub getui_base_url: Option<String>,
+    /// 个推离线消息默认 TTL。
+    pub getui_default_ttl_ms: u64,
+    /// 个推 HTTP 请求超时。
+    pub getui_request_timeout_ms: u64,
+    /// 在线事件 ping 防抖窗口（毫秒），0 表示关闭。
+    pub event_ping_debounce_window_ms: u64,
     pub metrics: MetricsEndpointConfig,
 }
 
@@ -144,6 +182,10 @@ impl PushWorkerConfig {
             .and_then(|value| value.parse::<usize>().ok())
             .or(service.offline_parking_capacity)
             .unwrap_or(4096);
+        let offline_delivery_backend = env::var("PUSH_WORKER_OFFLINE_DELIVERY_BACKEND")
+            .ok()
+            .map(|value| OfflineDeliveryBackend::parse(&value))
+            .unwrap_or(OfflineDeliveryBackend::Outbox);
         let offline_outbox_redis_url = resolve_offline_outbox_redis_url(
             env::var("PUSH_WORKER_OFFLINE_REDIS_URL").ok(),
             app.redis_profile("push").map(|profile| profile.url.clone()),
@@ -156,6 +198,33 @@ impl PushWorkerConfig {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(100_000);
+        let push_redis_profile_url = app.redis_profile("push").map(|profile| profile.url.clone());
+        let device_token_redis_url = env::var("PUSH_WORKER_DEVICE_TOKEN_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or(push_redis_profile_url)
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let device_token_key_prefix = env::var("PUSH_WORKER_DEVICE_TOKEN_KEY_PREFIX")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
+        let getui_app_id = non_empty_env("PUSH_WORKER_GETUI_APP_ID");
+        let getui_app_key = non_empty_env("PUSH_WORKER_GETUI_APP_KEY");
+        let getui_master_secret = non_empty_env("PUSH_WORKER_GETUI_MASTER_SECRET");
+        let getui_base_url = non_empty_env("PUSH_WORKER_GETUI_BASE_URL");
+        let getui_default_ttl_ms = env::var("PUSH_WORKER_GETUI_DEFAULT_TTL_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(7_200_000);
+        let getui_request_timeout_ms = env::var("PUSH_WORKER_GETUI_REQUEST_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(5_000);
+        let event_ping_debounce_window_ms = env::var("PUSH_WORKER_EVENT_PING_DEBOUNCE_WINDOW_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or(service.event_ping_debounce_window_ms)
+            .unwrap_or(200);
         let metrics_enabled = parse_bool_env("PUSH_WORKER_METRICS_ENABLED")
             .or(service.metrics_enabled)
             .unwrap_or(true);
@@ -193,12 +262,29 @@ impl PushWorkerConfig {
             online_service_endpoint,
             access_gateway_static_endpoint,
             offline_parking_capacity,
+            offline_delivery_backend,
             offline_outbox_redis_url,
             offline_outbox_stream,
             offline_outbox_maxlen,
+            device_token_redis_url,
+            device_token_key_prefix,
+            getui_app_id,
+            getui_app_key,
+            getui_master_secret,
+            getui_base_url,
+            getui_default_ttl_ms,
+            getui_request_timeout_ms,
+            event_ping_debounce_window_ms,
             metrics,
         }
     }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_bool_env(name: &str) -> Option<bool> {
@@ -289,7 +375,19 @@ impl KafkaConsumerConfig for PushWorkerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_offline_outbox_redis_url;
+    use super::{OfflineDeliveryBackend, resolve_offline_outbox_redis_url};
+
+    #[test]
+    fn offline_delivery_backend_is_explicit() {
+        assert_eq!(
+            OfflineDeliveryBackend::parse("getui"),
+            OfflineDeliveryBackend::Getui
+        );
+        assert_eq!(
+            OfflineDeliveryBackend::parse("off"),
+            OfflineDeliveryBackend::Disabled
+        );
+    }
 
     #[test]
     fn offline_outbox_defaults_to_push_redis_profile() {

@@ -81,7 +81,12 @@ impl StorageHandler {
 
                 // 主流持久消息拆分为存储事件与实时推送事件。
                 self.message_fanout_service
-                    .persist_and_push_with_recipients(ctx, message, envelope.recipient_user_ids)
+                    .persist_and_push_with_recipients(
+                        ctx,
+                        message,
+                        envelope.recipient_user_ids,
+                        envelope.large_conversation,
+                    )
                     .await?;
             }
             x if x == MqPayloadKind::Event as i32 => {

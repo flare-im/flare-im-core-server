@@ -78,6 +78,8 @@ pub struct MessageIngestConfig {
     pub conversation_ensure_cache_capacity: u64,
     /// 高频单聊 conversation ensure 缓存 TTL（秒）。
     pub conversation_ensure_cache_ttl_seconds: u64,
+    /// 超过该成员数的持久消息不在摄入链路物化成员列表。
+    pub large_conversation_materialize_threshold: usize,
     /// 服务器 ID（用于服务注册，标识服务实例）
     pub server_id: Option<String>,
     /// 业务系统标识符（SVID），用于服务发现时的过滤
@@ -435,6 +437,17 @@ impl MessageIngestConfig {
         })
         .unwrap_or(30);
 
+        let large_conversation_materialize_threshold =
+            env::var("MESSAGE_INGEST_LARGE_CONVERSATION_MATERIALIZE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.large_conversation_push_threshold)
+                })
+                .unwrap_or(500);
+
         // 从环境变量获取 server_id 和 svid
         let server_id = env_or_fallback("MESSAGE_INGEST_SERVER_ID", "SERVER_ID");
 
@@ -562,6 +575,7 @@ impl MessageIngestConfig {
             session_creation_mode,
             conversation_ensure_cache_capacity,
             conversation_ensure_cache_ttl_seconds,
+            large_conversation_materialize_threshold,
             server_id,
             svid,
             capability_hooks_auto,

@@ -373,10 +373,12 @@ CREATE TABLE pinned_messages (
     message_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     pinned_by TEXT NOT NULL,
+    scope INTEGER NOT NULL DEFAULT 0,
+    owner_user_id TEXT NOT NULL DEFAULT '',
     pinned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expire_at TIMESTAMPTZ,
     reason TEXT,
-    UNIQUE(tenant_id, conversation_id, message_id)
+    UNIQUE(tenant_id, conversation_id, message_id, scope, owner_user_id)
 );
 COMMENT ON TABLE pinned_messages IS '置顶消息（PinnedMessageInfo）；PinEvent/UnpinEvent';
 COMMENT ON COLUMN pinned_messages.id IS '自增主键';
@@ -384,10 +386,12 @@ COMMENT ON COLUMN pinned_messages.tenant_id IS '租户 ID';
 COMMENT ON COLUMN pinned_messages.message_id IS '被置顶消息的 server_id';
 COMMENT ON COLUMN pinned_messages.conversation_id IS '会话 ID';
 COMMENT ON COLUMN pinned_messages.pinned_by IS '置顶操作者 user_id';
+COMMENT ON COLUMN pinned_messages.scope IS '置顶作用域：0=会话全员，1=当前用户私有';
+COMMENT ON COLUMN pinned_messages.owner_user_id IS '私有置顶归属用户；会话全员置顶为空';
 COMMENT ON COLUMN pinned_messages.pinned_at IS '置顶时间';
 COMMENT ON COLUMN pinned_messages.expire_at IS '置顶过期时间（空=长期）';
 COMMENT ON COLUMN pinned_messages.reason IS '置顶说明';
-CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id);
+CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id, scope, owner_user_id);
 
 DROP TABLE IF EXISTS marked_messages CASCADE;
 CREATE TABLE marked_messages (

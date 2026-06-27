@@ -44,11 +44,11 @@ pub fn build_flare_server(
         .with_auth_timeout(Duration::from_secs(access_config.auth_timeout_secs))
         .with_max_connections(access_config.max_connections)
         .with_connection_timeout(Duration::from_secs(access_config.connection_timeout_secs))
-        .with_heartbeat(HeartbeatConfig {
-            interval: Duration::from_secs(access_config.heartbeat_interval_secs),
-            timeout: Duration::from_secs(access_config.heartbeat_timeout_secs),
-            enabled: true,
-        })
+        .with_heartbeat(
+            HeartbeatConfig::new()
+                .with_interval(Duration::from_secs(access_config.heartbeat_interval_secs))
+                .with_timeout(Duration::from_secs(access_config.heartbeat_timeout_secs)),
+        )
         .with_default_format(SerializationFormat::Protobuf)
         .with_default_compression(compression_algorithm);
 

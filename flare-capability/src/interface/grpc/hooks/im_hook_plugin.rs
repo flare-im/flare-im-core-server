@@ -32,6 +32,23 @@ use crate::infrastructure::capability::{CapabilityExtensionRegistry, evaluate_pr
 use flare_im_hooks::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
+fn proto_conversation_type_wire_name(value: i32) -> Option<&'static str> {
+    use flare_proto::common::ConversationType;
+
+    match ConversationType::try_from(value) {
+        Ok(ConversationType::Unspecified) => None,
+        Ok(ConversationType::Single) => Some("single"),
+        Ok(ConversationType::Group) => Some("group"),
+        Ok(ConversationType::Ai) => Some("ai"),
+        Ok(ConversationType::System) => Some("system"),
+        Ok(ConversationType::Customer) => Some("customer"),
+        Ok(ConversationType::Temp) => Some("temp"),
+        Ok(ConversationType::Channel) => Some("channel"),
+        Ok(ConversationType::Broadcast) => Some("broadcast"),
+        Err(_) => Some("unspecified"),
+    }
+}
+
 /// IM `HookPlugin` gRPC 适配器（接口层 → 应用命令 / 编排）。
 pub struct ImHookPluginServer {
     command_handler: Arc<HookCommandHandler>,
@@ -77,18 +94,8 @@ impl ImHookPluginServer {
             client_message_id: None,
             conversation_id: message.conversation_id.clone(),
             sender_id: message.sender_id.clone(),
-            conversation_type: match flare_proto::common::ConversationType::try_from(
-                message.conversation_type,
-            ) {
-                Ok(flare_proto::common::ConversationType::Unspecified) => None,
-                Ok(flare_proto::common::ConversationType::Single) => Some("single".to_string()),
-                Ok(flare_proto::common::ConversationType::Group) => Some("group".to_string()),
-                Ok(flare_proto::common::ConversationType::Ai) => Some("ai".to_string()),
-                Ok(flare_proto::common::ConversationType::Customer) => Some("customer".to_string()),
-                Ok(flare_proto::common::ConversationType::System) => Some("system".to_string()),
-                Ok(flare_proto::common::ConversationType::Temp) => Some("temp".to_string()),
-                Err(_) => Some("unspecified".to_string()),
-            },
+            conversation_type: proto_conversation_type_wire_name(message.conversation_type)
+                .map(str::to_string),
             message_type: None,
             persisted_at,
             metadata: proto.metadata.clone(),
@@ -1230,5 +1237,41 @@ impl HookPlugin for ImHookPluginServer {
         Err(Status::unimplemented(format!(
             "unknown hook operation: {operation}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proto_conversation_type_wire_name;
+    use flare_proto::common::ConversationType;
+
+    #[test]
+    fn maps_proto_conversation_types_to_hook_wire_names() {
+        let cases = [
+            (ConversationType::Unspecified, None),
+            (ConversationType::Single, Some("single")),
+            (ConversationType::Group, Some("group")),
+            (ConversationType::Ai, Some("ai")),
+            (ConversationType::System, Some("system")),
+            (ConversationType::Customer, Some("customer")),
+            (ConversationType::Temp, Some("temp")),
+            (ConversationType::Channel, Some("channel")),
+            (ConversationType::Broadcast, Some("broadcast")),
+        ];
+
+        for (conversation_type, expected) in cases {
+            assert_eq!(
+                proto_conversation_type_wire_name(conversation_type as i32),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn maps_unknown_proto_conversation_type_to_unspecified_label() {
+        assert_eq!(
+            proto_conversation_type_wire_name(i32::MAX),
+            Some("unspecified")
+        );
     }
 }

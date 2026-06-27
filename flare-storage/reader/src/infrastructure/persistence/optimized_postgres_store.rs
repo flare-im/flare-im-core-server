@@ -2,7 +2,7 @@
 //!
 //! 提供高性能的查询、批处理和缓存功能
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use flare_server_core::error::{AnyhowContext, Result};
 use serde_json::Value;
 use sqlx::Row;
 use tokio::time::Instant;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::convert::{
     event_from_proto, event_type_to_proto_i32, message_from_proto, message_to_proto,
@@ -41,6 +41,13 @@ impl PerformanceMetrics {
 
 fn tenant_id_from_ctx(ctx: &Ctx) -> &str {
     ctx.tenant_id().unwrap_or("0")
+}
+
+const MESSAGE_PIN_SCOPE_CONVERSATION: i32 = 0;
+const MESSAGE_PIN_SCOPE_SELF: i32 = 1;
+
+fn user_id_from_ctx(ctx: &Ctx) -> &str {
+    ctx.user_id().unwrap_or("")
 }
 
 fn timestamp_from_datetime(dt: Option<DateTime<Utc>>) -> Option<prost_types::Timestamp> {
@@ -137,6 +144,61 @@ impl OptimizedPostgresMessageStorageImpl {
             metrics,
         }
     }
+
+    async fn apply_current_pin_state(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        user_id: &str,
+        messages: &mut [Message],
+    ) -> Result<()> {
+        let message_ids: Vec<String> = messages
+            .iter()
+            .filter_map(|message| {
+                let message_id = message.server_id.trim();
+                (!message_id.is_empty()).then(|| message_id.to_string())
+            })
+            .collect();
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT message_id
+            FROM pinned_messages
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND message_id = ANY($3)
+              AND (scope = $4 OR (scope = $5 AND owner_user_id = $6))
+              AND (expire_at IS NULL OR expire_at > CURRENT_TIMESTAMP)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(&message_ids)
+        .bind(MESSAGE_PIN_SCOPE_CONVERSATION)
+        .bind(MESSAGE_PIN_SCOPE_SELF)
+        .bind(user_id)
+        .fetch_all(&self.base.pool)
+        .await
+        .context("query current pin state for messages")?;
+
+        let pinned: HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("message_id").ok())
+            .collect();
+        for message in messages {
+            if pinned.contains(&message.server_id) {
+                message
+                    .extra
+                    .insert("pinned".to_string(), "true".to_string());
+            } else {
+                message.extra.remove("pinned");
+            }
+        }
+        Ok(())
+    }
 }
 
 fn apply_burn_query_visibility(message: &mut Message, include_placeholder: bool) -> bool {
@@ -207,10 +269,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             );
 
             // 转换 proto 类型的消息为领域模型类型
-            let domain_messages: Vec<Message> = cached_messages
+            let mut domain_messages: Vec<Message> = cached_messages
                 .into_iter()
                 .map(|msg| message_from_proto(&msg))
                 .collect();
+            self.apply_current_pin_state(
+                &tenant_id,
+                conversation_id,
+                user_id_from_ctx(ctx),
+                &mut domain_messages,
+            )
+            .await?;
 
             tracing::trace!(
                 conversation_id = %conversation_id,
@@ -314,7 +383,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         )
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
-                    ), '[]'::jsonb) AS reactions_json
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = m.tenant_id
+                          AND pm.conversation_id = m.conversation_id
+                          AND pm.message_id = m.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
 	                FROM messages m
 	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.timestamp >= $3 AND m.timestamp <= $4
 	                  AND NOT EXISTS (
@@ -352,7 +428,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         )
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
-                    ), '[]'::jsonb) AS reactions_json
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = messages.tenant_id
+                          AND pm.conversation_id = messages.conversation_id
+                          AND pm.message_id = messages.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
 	                FROM messages
 	                WHERE tenant_id = $1 AND conversation_id = $2 AND timestamp >= $3 AND timestamp <= $4
 	                ORDER BY timestamp DESC, seq DESC NULLS LAST
@@ -384,6 +467,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 messages.push(message);
             }
         }
+        self.apply_current_pin_state(
+            &tenant_id,
+            conversation_id,
+            user_id_from_ctx(ctx),
+            &mut messages,
+        )
+        .await?;
 
         // 反转顺序，使最旧的消息在前（符合历史消息查询习惯）
         messages.reverse();
@@ -433,6 +523,56 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     ) -> Result<Vec<Message>> {
         let tenant_id = tenant_id_from_ctx(ctx).to_string();
         let limit = limit.clamp(1, 1000);
+
+        if user_id.is_none()
+            && let Some(cache) = &self.cache
+        {
+            match cache
+                .get_tail_messages_by_seq(&tenant_id, conversation_id, after_seq, before_seq, limit)
+                .await
+            {
+                Ok(Some(cached_messages)) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_cache_hit("redis_tail");
+                    }
+
+                    let mut messages: Vec<Message> = cached_messages
+                        .into_iter()
+                        .map(|message| message_from_proto(&message))
+                        .collect();
+                    self.apply_current_pin_state(
+                        &tenant_id,
+                        conversation_id,
+                        user_id_from_ctx(ctx),
+                        &mut messages,
+                    )
+                    .await?;
+
+                    let mut visible = Vec::with_capacity(messages.len());
+                    for mut message in messages {
+                        if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                            visible.push(message);
+                        }
+                    }
+                    return Ok(visible);
+                }
+                Ok(None) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_cache_miss("redis_tail");
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        conversation_id = %conversation_id,
+                        "Redis tail cache query failed; falling back to PostgreSQL"
+                    );
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_cache_miss("redis_tail");
+                    }
+                }
+            }
+        }
 
         // 构建查询：基于 seq 查询（性能更好），支持多租户
         // 优化：使用预编译查询和索引优化
@@ -512,7 +652,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         )
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
-                    ), '[]'::jsonb) AS reactions_json
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = m.tenant_id
+                          AND pm.conversation_id = m.conversation_id
+                          AND pm.message_id = m.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
 	                FROM messages m
 	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > $3 AND ($4::BIGINT IS NULL OR m.seq < $4)
 	                ORDER BY m.seq ASC
@@ -543,7 +690,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         )
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
-                    ), '[]'::jsonb) AS reactions_json
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = messages.tenant_id
+                          AND pm.conversation_id = messages.conversation_id
+                          AND pm.message_id = messages.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
 	                FROM messages
 	                WHERE tenant_id = $1 AND conversation_id = $2 AND seq > $3 AND ($4::BIGINT IS NULL OR seq < $4)
 	                ORDER BY seq ASC
@@ -567,6 +721,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 messages.push(message);
             }
         }
+        self.apply_current_pin_state(
+            &tenant_id,
+            conversation_id,
+            user_id_from_ctx(ctx),
+            &mut messages,
+        )
+        .await?;
 
         Ok(messages)
     }
@@ -592,7 +753,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     )
                     FROM message_reactions mr
                     WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
-	                ), '[]'::jsonb) AS reactions_json
+                ), '[]'::jsonb) AS reactions_json,
+                EXISTS (
+                    SELECT 1 FROM pinned_messages pm
+                    WHERE pm.tenant_id = messages.tenant_id
+                      AND pm.conversation_id = messages.conversation_id
+                      AND pm.message_id = messages.server_id
+                      AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                ) AS is_pinned
 	            FROM messages
 	            WHERE tenant_id = $1 AND (server_id = $2 OR client_msg_id = $2)
 	            LIMIT 1
@@ -606,7 +774,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
         match row {
             Some(row) => {
-                let message = self.base.row_to_message(&row)?;
+                let mut message = self.base.row_to_message(&row)?;
+                let conversation_id = message.conversation_id.clone();
+                self.apply_current_pin_state(
+                    &tenant_id,
+                    &conversation_id,
+                    user_id_from_ctx(ctx),
+                    std::slice::from_mut(&mut message),
+                )
+                .await?;
 
                 // 回填缓存（异步，不阻塞）
                 if let Some(cache) = &self.cache {
@@ -871,15 +1047,25 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 channel_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                 COALESCE((
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'reaction_type', reaction_type,
-                        'user_id', user_id,
-                        'created_at', created_at
-                    ) ORDER BY created_at ASC)
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'emoji', mr.emoji,
+                            'user_ids', mr.user_ids,
+                            'count', mr.count
+                        )
+                        ORDER BY mr.last_updated ASC
+                    )
                     FROM message_reactions mr
                     WHERE mr.tenant_id = messages.tenant_id
                       AND mr.message_id = messages.server_id
-                ), '[]'::jsonb) AS reactions_json
+                ), '[]'::jsonb) AS reactions_json,
+                EXISTS (
+                    SELECT 1 FROM pinned_messages pm
+                    WHERE pm.tenant_id = messages.tenant_id
+                      AND pm.conversation_id = messages.conversation_id
+                      AND pm.message_id = messages.server_id
+                      AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                ) AS is_pinned
             FROM messages
             WHERE tenant_id =
             "#,
@@ -1001,6 +1187,29 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
             messages.push(self.base.row_to_message(&row)?);
+        }
+        let mut indexes_by_conversation: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            indexes_by_conversation
+                .entry(message.conversation_id.clone())
+                .or_default()
+                .push(index);
+        }
+        for (conversation_id, indexes) in indexes_by_conversation {
+            let mut subset: Vec<Message> = indexes
+                .iter()
+                .map(|index| messages[*index].clone())
+                .collect();
+            self.apply_current_pin_state(
+                &tenant_id,
+                &conversation_id,
+                user_id_from_ctx(ctx),
+                &mut subset,
+            )
+            .await?;
+            for (index, message) in indexes.into_iter().zip(subset.into_iter()) {
+                messages[index].extra = message.extra;
+            }
         }
 
         Ok(messages)
@@ -1353,18 +1562,23 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         conversation_id: &str,
     ) -> Result<Vec<crate::domain::model::PinnedMessageInfo>> {
         let tenant_id = tenant_id_from_ctx(ctx);
+        let user_id = user_id_from_ctx(ctx);
         let rows = sqlx::query(
             r#"
-            SELECT message_id, pinned_by, pinned_at, expire_at, reason
+            SELECT message_id, pinned_by, scope, owner_user_id, pinned_at, expire_at, reason
             FROM pinned_messages
             WHERE tenant_id = $1
               AND conversation_id = $2
+              AND (scope = $3 OR (scope = $4 AND owner_user_id = $5))
               AND (expire_at IS NULL OR expire_at > CURRENT_TIMESTAMP)
             ORDER BY pinned_at DESC
             "#,
         )
         .bind(tenant_id)
         .bind(conversation_id)
+        .bind(MESSAGE_PIN_SCOPE_CONVERSATION)
+        .bind(MESSAGE_PIN_SCOPE_SELF)
+        .bind(user_id)
         .fetch_all(&self.base.pool)
         .await
         .context("query pinned messages")?;
@@ -1374,6 +1588,8 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 Ok(PinnedMessageInfo {
                     message_id: row.try_get("message_id").context("pinned message_id")?,
                     user_id: row.try_get("pinned_by").context("pinned_by")?,
+                    scope: row.try_get("scope").context("pin scope")?,
+                    owner_user_id: row.try_get("owner_user_id").context("pin owner_user_id")?,
                     pinned_at: row.try_get("pinned_at").ok(),
                     expire_at: row.try_get("expire_at").ok(),
                     reason: row.try_get("reason").ok(),
@@ -1708,7 +1924,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         )
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
-                    ), '[]'::jsonb) AS reactions_json
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = messages.tenant_id
+                          AND pm.conversation_id = messages.conversation_id
+                          AND pm.message_id = messages.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
 	                FROM messages
 	                WHERE tenant_id = $1 AND conversation_id = $2
 	                ORDER BY seq DESC
@@ -1734,6 +1957,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 max_seq = max_seq.max(seq_i64);
                 messages.push(message);
             }
+            self.apply_current_pin_state(
+                tenant_id,
+                conversation_id,
+                user_id_from_ctx(ctx),
+                &mut messages,
+            )
+            .await?;
 
             // 反转顺序，使最旧的消息在前
             messages.reverse();

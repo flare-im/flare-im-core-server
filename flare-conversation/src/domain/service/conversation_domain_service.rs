@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use chrono::TimeZone;
 use flare_core::common::conversation::{
-    generate_ai_conversation_id, generate_customer_conversation_id, generate_group_conversation_id,
-    generate_single_chat_conversation_id, generate_system_conversation_id,
-    generate_temp_conversation_id, validate_conversation_id,
+    generate_ai_conversation_id, generate_broadcast_conversation_id,
+    generate_channel_conversation_id, generate_customer_conversation_id,
+    generate_group_conversation_id, generate_single_chat_conversation_id,
+    generate_system_conversation_id, generate_temp_conversation_id, validate_conversation_id,
 };
 use flare_proto::common::Message;
 use flare_proto::common::message_content::Content;
@@ -91,6 +92,14 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .await?;
 
         let mut summaries = bootstrap.summaries;
+        let before_filter = summaries.len();
+        summaries.retain(|summary| valid_conversation_summary_id(&summary.conversation_id));
+        if summaries.len() != before_filter {
+            warn!(
+                dropped = before_filter - summaries.len(),
+                "Dropped invalid conversation summaries during bootstrap"
+            );
+        }
 
         // 优化：按优先级排序（未读会话优先，然后按更新时间降序）
         summaries.sort_by(|a, b| {
@@ -166,6 +175,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                                 Content::Placeholder(_) => "placeholder".to_string(),
                             })
                         });
+                        summary.last_message_preview = last_message_preview_text(last_msg);
 
                         // 更新 server_cursor_ts 为最后消息的毫秒时间戳
                         if last_message_at > 0 {
@@ -227,6 +237,14 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .await?;
 
         let mut summaries = bootstrap.summaries;
+        let before_filter = summaries.len();
+        summaries.retain(|summary| valid_conversation_summary_id(&summary.conversation_id));
+        if summaries.len() != before_filter {
+            warn!(
+                dropped = before_filter - summaries.len(),
+                "Dropped invalid conversation summaries during list"
+            );
+        }
         let (pivot_ts, pivot_id) = parse_cursor(cursor);
 
         if let Some(ts) = pivot_ts {
@@ -375,19 +393,39 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         stored_channel_id: String,
     ) -> Result<Conversation> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let stored_channel_id = stored_channel_id.trim().to_string();
+        let resolved_channel_route_id = match conversation_type {
+            ConversationType::Channel => Some(required_route_id(
+                &attributes,
+                "channel_id",
+                Some(&stored_channel_id),
+                "channel",
+            )?),
+            ConversationType::Broadcast => Some(required_route_id(
+                &attributes,
+                "broadcast_id",
+                Some(&stored_channel_id),
+                "broadcast",
+            )?),
+            _ => None,
+        };
         let normalized_channel_id = match conversation_type {
             ConversationType::Single => String::new(),
-            _ => stored_channel_id,
+            ConversationType::Channel | ConversationType::Broadcast => {
+                resolved_channel_route_id.clone().unwrap_or_default()
+            }
+            _ => stored_channel_id.clone(),
         };
         // 尝试从 attributes 中提取指定的 conversation_id
         if let Some(requested_conversation_id) = attributes.remove("conversation_id") {
-            // 验证会话ID格式（如果格式不正确，记录警告但继续处理，保持向后兼容）
+            let requested_conversation_id = requested_conversation_id.trim().to_string();
             if let Err(e) = validate_conversation_id(&requested_conversation_id) {
-                warn!(
-                    conversation_id = %requested_conversation_id,
-                    error = %e,
-                    "Invalid session ID format, but continuing for backward compatibility"
-                );
+                return Err(ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    format!("invalid conversation_id: {e}"),
+                )
+                .details(format!("conversation_id={requested_conversation_id}"))
+                .build_error());
             }
 
             // 检查会话是否已存在
@@ -524,13 +562,32 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     generate_customer_conversation_id(&customer_id, &channel)
                 }
                 ConversationType::Temp => generate_temp_conversation_id(),
+                ConversationType::Channel => {
+                    let Some(channel_id) = resolved_channel_route_id.as_deref() else {
+                        return Err(ErrorBuilder::new(
+                            ErrorCode::InvalidParameter,
+                            "channel conversation requires channel_id",
+                        )
+                        .build_error());
+                    };
+                    generate_channel_conversation_id(channel_id)
+                }
+                ConversationType::Broadcast => {
+                    let Some(broadcast_id) = resolved_channel_route_id.as_deref() else {
+                        return Err(ErrorBuilder::new(
+                            ErrorCode::InvalidParameter,
+                            "broadcast conversation requires broadcast_id",
+                        )
+                        .build_error());
+                    };
+                    generate_broadcast_conversation_id(broadcast_id)
+                }
                 ConversationType::Unspecified => {
-                    // 默认使用UUID（向后兼容）
-                    warn!(
-                        conversation_type = ?conversation_type,
-                        "Unspecified session type, using UUID for conversation_id (backward compatibility)"
-                    );
-                    Uuid::new_v4().to_string()
+                    return Err(ErrorBuilder::new(
+                        ErrorCode::InvalidParameter,
+                        "conversation_type must be specified",
+                    )
+                    .build_error());
                 }
             };
 
@@ -663,24 +720,18 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .await
     }
 
-    /// 批量确认（业务逻辑）
-    pub async fn batch_acknowledge(
-        &self,
-        ctx: &Context,
-        cursors: Vec<(String, i64)>,
-    ) -> Result<()> {
-        let user_id = require_user_id(ctx)?;
-        self.conversation_repo
-            .batch_acknowledge(ctx, &cursors)
-            .await?;
-        debug!(user_id = %user_id, count = cursors.len(), "Batch acknowledge completed");
-        Ok(())
-    }
-
-    /// 标记消息为已读（业务逻辑）
+    /// 标记会话为已读（业务逻辑）
     ///
     /// 更新用户的 last_read_msg_seq，并重新计算未读数
     pub async fn mark_as_read(&self, ctx: &Context, conversation_id: &str, seq: i64) -> Result<()> {
+        if seq <= 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "read_seq must be greater than 0",
+            )
+            .details(format!("conversation_id={conversation_id}, read_seq={seq}"))
+            .build_error());
+        }
         let user_id = ctx.user_id().unwrap_or("0");
         self.conversation_repo
             .mark_as_read(ctx, conversation_id, seq)
@@ -733,10 +784,64 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<ConversationSummary>, usize)> {
-        self.conversation_repo
+        let (mut summaries, total) = self
+            .conversation_repo
             .search_conversations(ctx, &filters, &sort, limit, offset)
-            .await
+            .await?;
+        let before_filter = summaries.len();
+        summaries.retain(|summary| valid_conversation_summary_id(&summary.conversation_id));
+        if summaries.len() != before_filter {
+            warn!(
+                dropped = before_filter - summaries.len(),
+                "Dropped invalid conversation summaries during search"
+            );
+        }
+        Ok((summaries, total))
     }
+}
+
+fn valid_conversation_summary_id(conversation_id: &str) -> bool {
+    !conversation_id.trim().is_empty()
+}
+
+fn last_message_preview_text(message: &Message) -> Option<String> {
+    if let Some(preview) = message
+        .attributes
+        .get("text_preview")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(preview.to_string());
+    }
+
+    let preview = match message.content.as_ref()?.content.as_ref()? {
+        Content::Text(text) => text.text.trim(),
+        _ => "",
+    };
+    (!preview.is_empty()).then(|| preview.to_string())
+}
+
+fn required_route_id(
+    attributes: &HashMap<String, String>,
+    attribute_key: &'static str,
+    fallback: Option<&str>,
+    label: &'static str,
+) -> Result<String> {
+    let value = attributes
+        .get(attribute_key)
+        .map(String::as_str)
+        .or(fallback)
+        .map(str::trim)
+        .unwrap_or_default();
+    if value.is_empty() {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            format!("{label} conversation requires {attribute_key}"),
+        )
+        .build_error());
+    }
+    Ok(value.to_string())
 }
 
 fn parse_cursor(cursor: Option<&str>) -> (Option<i64>, String) {
@@ -747,4 +852,34 @@ fn parse_cursor(cursor: Option<&str>) -> (Option<i64>, String) {
         return (Some(parsed), id.to_string());
     }
     (None, String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{required_route_id, valid_conversation_summary_id};
+
+    #[test]
+    fn conversation_summary_id_must_be_non_blank() {
+        assert!(!valid_conversation_summary_id(""));
+        assert!(!valid_conversation_summary_id("   "));
+        assert!(valid_conversation_summary_id("single:u1:u2"));
+    }
+
+    #[test]
+    fn channel_route_id_is_required_and_trimmed() {
+        let mut attributes = HashMap::new();
+        attributes.insert("channel_id".to_string(), "  channel-1  ".to_string());
+
+        assert_eq!(
+            required_route_id(&attributes, "channel_id", None, "channel").unwrap(),
+            "channel-1"
+        );
+        assert_eq!(
+            required_route_id(&HashMap::new(), "channel_id", Some(" stored "), "channel").unwrap(),
+            "stored"
+        );
+        assert!(required_route_id(&HashMap::new(), "channel_id", None, "channel").is_err());
+    }
 }

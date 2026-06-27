@@ -19,14 +19,20 @@ use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_servic
 use flare_proto::Message;
 use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
+use redis::aio::ConnectionManager;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, OnceLock};
 use tonic::transport::Channel;
+use tracing::warn;
 
 use crate::application::error::{discovery_unavailable, flare_from_tonic_status};
 
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, QueryEventsPage,
-    StorageConversationMessageHead, StorageReadPort,
+    ConversationEventReadPort, ConversationSyncPort, ConversationVersionChange,
+    ConversationVersionIndexPort, QueryEventsPage, StorageConversationMessageHead, StorageReadPort,
 };
+
+const DEFAULT_TENANT_ID: &str = "0";
 
 /// gRPC 同步适配器（基于 tonic）
 ///
@@ -61,6 +67,131 @@ impl GrpcSyncAdapters {
         let ch = Self::create_channel(&name).await?;
         Ok(StorageReaderServiceClient::new(ch))
     }
+
+    fn conversation_version_redis_client() -> Option<Arc<redis::Client>> {
+        static CLIENT: OnceLock<Option<Arc<redis::Client>>> = OnceLock::new();
+        CLIENT
+            .get_or_init(|| {
+                let Ok(url) = std::env::var("SYNC_ORCHESTRATOR_REDIS_URL") else {
+                    return None;
+                };
+
+                match redis::Client::open(url.as_str()) {
+                    Ok(client) => Some(Arc::new(client)),
+                    Err(error) => {
+                        warn!(error = %error, "invalid sync orchestrator Redis URL");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
+    async fn conversation_version_redis_connection() -> Result<Option<ConnectionManager>, FlareError>
+    {
+        let Some(client) = Self::conversation_version_redis_client() else {
+            return Ok(None);
+        };
+        ConnectionManager::new(client.as_ref().clone())
+            .await
+            .map(Some)
+            .map_err(|err| {
+                FlareError::system(format!("Redis conversation version index connect: {err}"))
+            })
+    }
+
+    fn tenant_id(ctx: &Ctx) -> String {
+        ctx.tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .unwrap_or(DEFAULT_TENANT_ID)
+            .to_string()
+    }
+
+    fn conversation_sync_state_key(tenant_id: &str, conversation_id: &str) -> String {
+        format!("sync:conversation:{tenant_id}:{conversation_id}:state")
+    }
+
+    fn normalized_known_conversation_versions(known: &[(String, u64)]) -> Vec<(String, u64)> {
+        let mut versions: BTreeMap<String, u64> = BTreeMap::new();
+        for (conversation_id, version) in known {
+            let conversation_id = conversation_id.trim();
+            if conversation_id.is_empty() {
+                continue;
+            }
+            versions
+                .entry(conversation_id.to_string())
+                .and_modify(|known_version| *known_version = (*known_version).max(*version))
+                .or_insert(*version);
+        }
+        versions.into_iter().collect()
+    }
+
+    fn parse_u64_field(
+        state: &HashMap<String, String>,
+        field: &str,
+        conversation_id: &str,
+    ) -> Result<Option<u64>, FlareError> {
+        state
+            .get(field)
+            .map(|value| {
+                value.parse::<u64>().map_err(|err| {
+                    FlareError::system(format!(
+                        "Redis conversation version index invalid {field} for conversation_id={conversation_id}: {err}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn parse_i64_field(
+        state: &HashMap<String, String>,
+        field: &str,
+        conversation_id: &str,
+    ) -> Result<Option<i64>, FlareError> {
+        state
+            .get(field)
+            .map(|value| {
+                value.parse::<i64>().map_err(|err| {
+                    FlareError::system(format!(
+                        "Redis conversation version index invalid {field} for conversation_id={conversation_id}: {err}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn conversation_change_from_state(
+        conversation_id: &str,
+        known_version: u64,
+        state: &HashMap<String, String>,
+    ) -> Result<Option<ConversationVersionChange>, FlareError> {
+        let Some(version) = Self::parse_u64_field(state, "version", conversation_id)? else {
+            return Ok(None);
+        };
+        if version <= known_version {
+            return Ok(None);
+        }
+
+        let stored_conversation_id = state
+            .get("conversation_id")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(conversation_id)
+            .to_string();
+
+        Ok(Some(ConversationVersionChange {
+            conversation_id: stored_conversation_id,
+            version,
+            max_conversation_seq: Self::parse_u64_field(
+                state,
+                "max_conversation_seq",
+                conversation_id,
+            )?
+            .unwrap_or_default(),
+            updated_at_ms: Self::parse_i64_field(state, "updated_at_ms", conversation_id)?
+                .unwrap_or_default(),
+        }))
+    }
 }
 
 impl ConversationSyncPort for GrpcSyncAdapters {
@@ -77,7 +208,7 @@ impl ConversationSyncPort for GrpcSyncAdapters {
         Ok(resp.into_inner())
     }
 
-    async fn update_read_cursor(
+    async fn update_sync_cursor(
         &self,
         ctx: &Ctx,
         req: UpdateCursorRequest,
@@ -217,5 +348,49 @@ impl ConversationEventReadPort for GrpcSyncAdapters {
             has_more: resp.has_more,
             next_cursor: resp.next_cursor,
         })
+    }
+}
+
+impl ConversationVersionIndexPort for GrpcSyncAdapters {
+    async fn diff_known_conversation_versions(
+        &self,
+        ctx: &Ctx,
+        known: &[(String, u64)],
+    ) -> Result<Vec<ConversationVersionChange>, FlareError> {
+        let known = Self::normalized_known_conversation_versions(known);
+        if known.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some(mut conn) = Self::conversation_version_redis_connection().await? else {
+            return Ok(Vec::new());
+        };
+
+        let tenant_id = Self::tenant_id(ctx);
+        let mut pipe = redis::pipe();
+        for (conversation_id, _) in &known {
+            pipe.cmd("HGETALL").arg(Self::conversation_sync_state_key(
+                &tenant_id,
+                conversation_id,
+            ));
+        }
+
+        let states: Vec<HashMap<String, String>> =
+            pipe.query_async(&mut conn).await.map_err(|err| {
+                FlareError::system(format!(
+                    "Redis conversation version index diff failed tenant_id={tenant_id} conversation_count={}: {err}",
+                    known.len()
+                ))
+            })?;
+
+        let mut changes = Vec::new();
+        for ((conversation_id, known_version), state) in known.into_iter().zip(states) {
+            if let Some(change) =
+                Self::conversation_change_from_state(&conversation_id, known_version, &state)?
+            {
+                changes.push(change);
+            }
+        }
+        Ok(changes)
     }
 }

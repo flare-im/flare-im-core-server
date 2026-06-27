@@ -1,3 +1,3 @@
-//! Compatibility facade for user capability grants.
+//! Domain facade for user capability grants.
 
 pub use flare_im_capability_core::UserCapabilityGrant;

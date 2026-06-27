@@ -12,6 +12,8 @@ use flare_im_service_kit::gateway::require_secure_token_secret;
 use flare_server_core::auth::AuthProviderMode;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
+use crate::domain::service::SyncPullRateLimitConfig;
+
 #[derive(Debug, Clone)]
 pub struct AccessGatewayConfig {
     pub signaling_service: String,
@@ -50,6 +52,16 @@ pub struct AccessGatewayConfig {
     pub auth_timeout_secs: u64,
     /// 下行发送超时（秒），默认 10，单帧发送超过此时长则放弃并记录
     pub send_timeout_secs: u64,
+    /// 同步拉取限流开关，默认开启
+    pub sync_pull_rate_limit_enabled: bool,
+    /// 单用户同步拉取令牌补充速率（requests/second）
+    pub sync_pull_user_requests_per_second: u32,
+    /// 单用户同步拉取突发容量
+    pub sync_pull_user_burst: u32,
+    /// 单租户同步拉取令牌补充速率（requests/second）
+    pub sync_pull_tenant_requests_per_second: u32,
+    /// 单租户同步拉取突发容量
+    pub sync_pull_tenant_burst: u32,
 }
 
 impl AccessGatewayConfig {
@@ -179,6 +191,24 @@ impl AccessGatewayConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10);
+        let sync_pull_defaults = SyncPullRateLimitConfig::default();
+        let sync_pull_rate_limit_enabled = env_bool("ACCESS_GATEWAY_SYNC_PULL_RATE_LIMIT_ENABLED")
+            .or(service.sync_pull_rate_limit_enabled)
+            .unwrap_or(sync_pull_defaults.enabled);
+        let sync_pull_user_requests_per_second =
+            env_u32("ACCESS_GATEWAY_SYNC_PULL_USER_REQUESTS_PER_SECOND")
+                .or(service.sync_pull_user_requests_per_second)
+                .unwrap_or(sync_pull_defaults.user_requests_per_second);
+        let sync_pull_user_burst = env_u32("ACCESS_GATEWAY_SYNC_PULL_USER_BURST")
+            .or(service.sync_pull_user_burst)
+            .unwrap_or(sync_pull_defaults.user_burst);
+        let sync_pull_tenant_requests_per_second =
+            env_u32("ACCESS_GATEWAY_SYNC_PULL_TENANT_REQUESTS_PER_SECOND")
+                .or(service.sync_pull_tenant_requests_per_second)
+                .unwrap_or(sync_pull_defaults.tenant_requests_per_second);
+        let sync_pull_tenant_burst = env_u32("ACCESS_GATEWAY_SYNC_PULL_TENANT_BURST")
+            .or(service.sync_pull_tenant_burst)
+            .unwrap_or(sync_pull_defaults.tenant_burst);
 
         Ok(Self {
             signaling_service,
@@ -206,7 +236,24 @@ impl AccessGatewayConfig {
             heartbeat_timeout_secs,
             auth_timeout_secs,
             send_timeout_secs,
+            sync_pull_rate_limit_enabled,
+            sync_pull_user_requests_per_second,
+            sync_pull_user_burst,
+            sync_pull_tenant_requests_per_second,
+            sync_pull_tenant_burst,
         })
+    }
+}
+
+impl AccessGatewayConfig {
+    pub fn sync_pull_rate_limit_config(&self) -> SyncPullRateLimitConfig {
+        SyncPullRateLimitConfig {
+            enabled: self.sync_pull_rate_limit_enabled,
+            user_requests_per_second: self.sync_pull_user_requests_per_second,
+            user_burst: self.sync_pull_user_burst,
+            tenant_requests_per_second: self.sync_pull_tenant_requests_per_second,
+            tenant_burst: self.sync_pull_tenant_burst,
+        }
     }
 }
 
@@ -268,6 +315,14 @@ fn non_empty(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    std::env::var(key).ok().and_then(|v| v.parse::<bool>().ok())
+}
+
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok())
 }
 
 fn config_error(reason: impl Into<String>) -> FlareError {

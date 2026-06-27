@@ -69,7 +69,6 @@ HTTP API 是公开 facade，不是生产主链高频调用的首选。业务系�
 | `POST /api/v1/messages/send` | 服务端/机器人/业务后台发送消息。 |
 | `POST /api/v1/messages/events/custom` | 服务端/业务后台提交自定义业务事件，转为 `MessageEventService.ExecuteEvent(EVENT_CUSTOM)`。 |
 | `POST /api/v1/messages/recall` | 撤回消息。 |
-| `POST /api/v1/messages/read` | 标记消息已读。 |
 | `GET /api/v1/conversations` | 会话列表。 |
 | `GET /api/v1/conversations/participants` | 会话成员分页。 |
 | `POST /api/v1/conversations/participants/manage` | 管理会话参与者，需强权限。 |

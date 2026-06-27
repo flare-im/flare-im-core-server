@@ -5,12 +5,6 @@ use crate::domain::model::{
     ConversationType, ConversationVisibility, DeviceState,
 };
 
-/// 批量确认命令
-#[derive(Debug, Clone)]
-pub struct BatchAcknowledgeCommand {
-    pub cursors: Vec<(String, i64)>,
-}
-
 /// 创建会话命令
 #[derive(Debug, Clone)]
 pub struct CreateConversationCommand {
@@ -53,7 +47,7 @@ pub struct UpdateCursorCommand {
     pub sync_seq: i64,
 }
 
-/// 标记会话已读命令（read_seq 为 0 时由服务端用 last_message_seq）
+/// 标记会话已读命令（read_seq 必须为明确的正数会话序列）
 #[derive(Debug, Clone)]
 pub struct MarkConversationAsReadCommand {
     pub conversation_id: String,

@@ -1,9 +1,11 @@
 //! Wire 风格依赖注入：组装 Push Worker 相关组件
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_server_core::error::Result;
 use flare_server_core::mq::NatsConsumerConfig;
+use flare_server_core::{ErrorCode, FlareError};
 
 use flare_im_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
 use flare_im_service_kit::discovery::{
@@ -14,8 +16,10 @@ use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
-use crate::application::GatewayPushExecutor;
-use crate::config::PushWorkerConfig;
+use crate::application::{ConversationPingDebouncer, GatewayPushExecutor};
+use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
+use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
+use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePushExecutor};
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
 use crate::infrastructure::rpc::OnlineServiceClient;
@@ -66,51 +70,85 @@ pub async fn initialize(
     .map_err(|e| flare_server_core::error::FlareError::system(format!("GatewayRouter: {}", e)))?;
 
     // 4. 创建 GatewayPushExecutor
-    let gateway_push = Arc::new(GatewayPushExecutor::new(online_client, gateway_router));
+    let gateway_push = {
+        let executor = GatewayPushExecutor::new(online_client, gateway_router);
+        if config.event_ping_debounce_window_ms == 0 {
+            Arc::new(executor)
+        } else {
+            Arc::new(
+                executor.with_ping_debouncer(Arc::new(ConversationPingDebouncer::new(
+                    Duration::from_millis(config.event_ping_debounce_window_ms),
+                ))),
+            )
+        }
+    };
 
     // 5. 创建 MessageHandler（直接实现，无适配器）
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
 
-    // 5.1 离线推送 outbox（厂商通道接入前的持久化暂存）；
-    //     连接失败/显式禁用时回退 DLQ/parking 路径并告警。
-    let offline_handler = match config.offline_outbox_redis_url.as_deref() {
-        Some(redis_url) => {
-            match RedisOfflineOutbox::connect(
+    // 5.1 离线推送后端：开发期按生产目标显式选择，不做隐式降级。
+    let offline_handler = match config.offline_delivery_backend {
+        OfflineDeliveryBackend::Outbox => {
+            let redis_url = config.offline_outbox_redis_url.as_deref().ok_or_else(|| {
+                FlareError::localized(
+                    ErrorCode::InvalidParameter,
+                    "offline outbox backend requires PUSH_WORKER_OFFLINE_REDIS_URL",
+                )
+            })?;
+            let outbox = RedisOfflineOutbox::connect(
                 redis_url,
                 config.offline_outbox_stream.clone(),
                 config.offline_outbox_maxlen,
             )
-            .await
-            {
-                Ok(outbox) => {
-                    tracing::info!(
-                        stream = %config.offline_outbox_stream,
-                        maxlen = config.offline_outbox_maxlen,
-                        "offline push outbox enabled (Redis Stream)"
-                    );
-                    OfflinePushConsumerFactory::create_handler_with_delivery(
-                        dlq,
-                        Arc::new(outbox),
-                        config.offline_parking_capacity,
-                        metrics,
-                    )
-                }
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        redis = %redis_url,
-                        "offline push outbox unavailable; falling back to DLQ/parking path"
-                    );
-                    OfflinePushConsumerFactory::create_handler(
-                        dlq,
-                        config.offline_parking_capacity,
-                        metrics,
-                    )
-                }
-            }
+            .await?;
+            tracing::info!(
+                stream = %config.offline_outbox_stream,
+                maxlen = config.offline_outbox_maxlen,
+                "offline push outbox enabled (Redis Stream)"
+            );
+            OfflinePushConsumerFactory::create_handler_with_delivery(
+                dlq,
+                Arc::new(outbox),
+                config.offline_parking_capacity,
+                metrics,
+            )
         }
-        None => {
-            tracing::warn!("offline push outbox disabled by config; tasks will go to DLQ/parking");
+        OfflineDeliveryBackend::Getui => {
+            let token_repo = RedisDeviceTokenRepository::connect(
+                &config.device_token_redis_url,
+                config.device_token_key_prefix.clone(),
+            )
+            .await?;
+            let getui_config = GetuiConfig::new(
+                required_config(config.getui_app_id.clone(), "PUSH_WORKER_GETUI_APP_ID")?,
+                required_config(config.getui_app_key.clone(), "PUSH_WORKER_GETUI_APP_KEY")?,
+                required_config(
+                    config.getui_master_secret.clone(),
+                    "PUSH_WORKER_GETUI_MASTER_SECRET",
+                )?,
+                config.getui_base_url.clone(),
+                config.getui_default_ttl_ms,
+                config.getui_request_timeout_ms,
+            )?;
+            let getui_client = Arc::new(GetuiClient::new(getui_config)?);
+            tracing::info!(
+                token_key_prefix = %config.device_token_key_prefix,
+                ttl_ms = config.getui_default_ttl_ms,
+                "offline push getui backend enabled"
+            );
+            OfflinePushConsumerFactory::create_handler_with_delivery(
+                dlq,
+                Arc::new(GetuiOfflinePushExecutor::new(
+                    Arc::new(token_repo),
+                    getui_client,
+                    config.getui_default_ttl_ms,
+                )),
+                config.offline_parking_capacity,
+                metrics,
+            )
+        }
+        OfflineDeliveryBackend::Disabled => {
+            tracing::warn!("offline push delivery disabled; tasks will go to DLQ/parking");
             OfflinePushConsumerFactory::create_handler(
                 dlq,
                 config.offline_parking_capacity,
@@ -157,5 +195,14 @@ pub async fn initialize(
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),
+    })
+}
+
+fn required_config(value: Option<String>, name: &'static str) -> Result<String> {
+    value.ok_or_else(|| {
+        FlareError::localized(
+            ErrorCode::InvalidParameter,
+            format!("missing required config {name}"),
+        )
     })
 }

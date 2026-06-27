@@ -20,9 +20,6 @@ use flare_server_core::{
 /// 获取会话列表请求
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ListConversationsHttpRequest {
-    /// 用户 ID（兼容旧接口；服务端以认证上下文为准）
-    #[serde(default)]
-    pub user_id: String,
     /// 页码
     #[serde(default = "default_page")]
     pub page: u32,
@@ -145,7 +142,6 @@ pub struct ManageParticipantsHttpResponse {
     path = "/api/v1/conversations",
     tag = "Conversation",
     params(
-        ("user_id" = String, Query, description = "用户 ID"),
         ("page" = Option<u32>, Query, description = "页码"),
         ("page_size" = Option<u32>, Query, description = "每页数量"),
     ),
@@ -163,7 +159,7 @@ pub async fn list_conversations(
     let ctx = Ctx::from_headers(&headers);
     debug!(
         trace_id = %ctx.trace_id(),
-        user_id = %req.user_id,
+        user_id = %ctx.user_id().unwrap_or(""),
         page = req.page,
         page_size = req.page_size,
         "Listing conversations"

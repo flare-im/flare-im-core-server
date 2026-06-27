@@ -83,7 +83,7 @@ impl ApplicationBootstrap {
                     ))
                 })?
             }
-            "nats" | "jetstream" => {
+            "nats" => {
                 flare_server_core::mq::nats::build_nats_consumer_tasks_with_failure_publishers(
                     orchestrator_mq_config.as_ref(),
                     consumer_config.clone(),
@@ -181,6 +181,28 @@ impl ApplicationBootstrap {
                 },
             );
         }
+
+        let user_sync_compensation_worker = context.user_sync_compensation_worker.clone();
+        service_runtime = service_runtime.add_spawn_with_shutdown(
+            "user-sync-compensation-worker",
+            move |mut shutdown_rx| async move {
+                let mut interval = tokio::time::interval(user_sync_compensation_worker.interval());
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            tracing::info!("user_sync compensation worker shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            if let Err(error) = user_sync_compensation_worker.replay_once().await {
+                                tracing::warn!(error = %error, "user_sync compensation worker tick failed");
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        );
 
         for task in mq_tasks {
             service_runtime = service_runtime.add_task(Box::new(task));

@@ -8,8 +8,8 @@ use crate::model::ConversationType;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    CreateConversationRequest, ListConversationParticipantsRequest, ManageParticipantsRequest,
-    MarkConversationAsReadRequest,
+    CreateConversationRequest, GetConversationDetailRequest, ListConversationParticipantsRequest,
+    ManageParticipantsRequest, MarkConversationAsReadRequest,
 };
 use flare_proto::common::ConversationParticipant;
 use flare_server_core::client::set_context_metadata;
@@ -224,6 +224,38 @@ impl ConversationRpcClient for ConversationClient {
                 "Retrieved conversation members"
             );
             Ok(member_ids)
+        })
+    }
+
+    fn get_conversation_member_count<'a>(
+        &'a self,
+        ctx: &'a Context,
+        conversation_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + 'a>> {
+        let client = Arc::clone(&self.read_client);
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let mut grpc_request = tonic::Request::new(GetConversationDetailRequest {
+                conversation_id: conversation_id.clone(),
+            });
+            set_context_metadata(&mut grpc_request, ctx);
+
+            let mut client = client.lock().await;
+            let response = client
+                .get_conversation_detail(grpc_request)
+                .await
+                .map_err(|e| FlareError::system(format!("GetConversationDetail failed: {}", e)))?;
+            let detail = response
+                .into_inner()
+                .detail
+                .ok_or_else(|| FlareError::system("GetConversationDetail missing detail"))?;
+            let member_count = usize::try_from(detail.member_count).unwrap_or(usize::MAX);
+            debug!(
+                conversation_id = %conversation_id,
+                member_count,
+                "Retrieved conversation member count"
+            );
+            Ok(member_count)
         })
     }
 

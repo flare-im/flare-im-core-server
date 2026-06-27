@@ -9,6 +9,8 @@
 /// - SYSTEM = 4 (CID 前缀 4)
 /// - CUSTOMER = 5 (CID 前缀 5)
 /// - TEMP = 6 (CID 前缀 6)
+/// - CHANNEL = 7 (CID 前缀 7，订阅者模型)
+/// - BROADCAST = 8 (CID 前缀 8，订阅者模型)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationType {
     Unspecified = 0,
@@ -18,6 +20,8 @@ pub enum ConversationType {
     System = 4,
     Customer = 5,
     Temp = 6,
+    Channel = 7,
+    Broadcast = 8,
 }
 
 impl ConversationType {
@@ -31,6 +35,8 @@ impl ConversationType {
             Some(ProtoConversationType::System) => Self::System,
             Some(ProtoConversationType::Customer) => Self::Customer,
             Some(ProtoConversationType::Temp) => Self::Temp,
+            Some(ProtoConversationType::Channel) => Self::Channel,
+            Some(ProtoConversationType::Broadcast) => Self::Broadcast,
             _ => Self::Unspecified,
         }
     }
@@ -46,6 +52,8 @@ impl ConversationType {
             ConversationType::System => ProtoConversationType::System as i32,
             ConversationType::Customer => ProtoConversationType::Customer as i32,
             ConversationType::Temp => ProtoConversationType::Temp as i32,
+            ConversationType::Channel => ProtoConversationType::Channel as i32,
+            ConversationType::Broadcast => ProtoConversationType::Broadcast as i32,
         }
     }
 
@@ -58,6 +66,8 @@ impl ConversationType {
             4 => Self::System,
             5 => Self::Customer,
             6 => Self::Temp,
+            7 => Self::Channel,
+            8 => Self::Broadcast,
             _ => Self::Unspecified,
         }
     }

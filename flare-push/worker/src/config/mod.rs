@@ -1,3 +1,3 @@
 pub mod settings;
 
-pub use settings::PushWorkerConfig;
+pub use settings::{OfflineDeliveryBackend, PushWorkerConfig};

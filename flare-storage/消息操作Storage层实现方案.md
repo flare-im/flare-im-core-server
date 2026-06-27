@@ -415,7 +415,6 @@ Domain Service
   - Recall → recall_message()
   - Edit → edit_message()
   - Delete → delete_message() / delete_message_for_user()
-  - Read → mark_message_read()
   - Attributes → set_message_attributes()
     ↓
 Storage.update_message() / update_message_visibility()
@@ -489,4 +488,3 @@ self.append_operation(message_id, operation).await?;
 
 **最后更新**: 2025-01-XX  
 **维护者**: IM 架构团队
-

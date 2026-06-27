@@ -17,7 +17,7 @@ use crate::application::commands::{
     PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
     PushNotificationCommand,
 };
-use crate::domain::service::PushDomainService;
+use crate::domain::service::{EventEnvelopePushRequest, PushDomainService};
 use flare_server_core::error::{ErrorBuilder, Result};
 
 fn push_result_at_now(
@@ -125,21 +125,35 @@ impl PushHandler {
             )
             .build_error());
         }
-        if req.events.is_empty() {
+        if req.events.is_empty()
+            && (req.conversation_id.trim().is_empty() || req.max_conversation_seq == 0)
+        {
             return Err(ErrorBuilder::new(
                 flare_server_core::error::ErrorCode::InvalidParameter,
-                "PushEvent: events is empty",
+                "PushEvent: events is empty and ping fields are incomplete",
             )
             .build_error());
         }
 
         let options = req.options.unwrap_or_default();
+        let window_id = uuid::Uuid::new_v4().to_string();
         let per_user = self
             .push_domain_service
-            .push_event_envelope_to_users(ctx, &req.user_ids, req.events, &options)
+            .push_event_envelope_to_users(
+                ctx,
+                EventEnvelopePushRequest {
+                    user_ids: &req.user_ids,
+                    events: req.events,
+                    options: &options,
+                    window_id: &window_id,
+                    conversation_id: &req.conversation_id,
+                    max_conversation_seq: req.max_conversation_seq,
+                    delivery_mode: req.delivery_mode,
+                    inline_events_truncated: req.inline_events_truncated,
+                },
+            )
             .await?;
 
-        let window_id = uuid::Uuid::new_v4().to_string();
         let at = Timestamp {
             seconds: Utc::now().timestamp(),
             nanos: 0,

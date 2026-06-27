@@ -4,6 +4,7 @@
 //! 若迁入 `flare-server-core` 会把 IM 语义绑进通用库，反而污染分层。Orchestrator 内部另有应用层 `SendMessageCommand`，勿混淆。
 
 use crate::Ctx;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub type ConversationId = String;
@@ -14,6 +15,43 @@ pub type Seq = u64;
 pub type DeviceId = String;
 pub type ConnectionId = String;
 pub type GatewayId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicePushToken {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub platform: String,
+    pub provider: String,
+    pub token: String,
+}
+
+impl DevicePushToken {
+    pub fn usable_for_provider(&self, provider: &str) -> bool {
+        !self.token.trim().is_empty()
+            && self.provider.trim().eq_ignore_ascii_case(provider)
+            && !self.device_id.trim().is_empty()
+            && !self.user_id.trim().is_empty()
+            && !self.tenant_id.trim().is_empty()
+    }
+}
+
+pub fn device_push_token_registry_key(prefix: &str, tenant_id: &str, user_id: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        prefix.trim_end_matches(':'),
+        tenant_id.trim(),
+        user_id.trim()
+    )
+}
+
+pub fn device_push_token_registry_field(provider: &str, device_id: &str) -> String {
+    format!(
+        "{}:{}",
+        provider.trim().to_ascii_lowercase(),
+        device_id.trim()
+    )
+}
 
 /// 连接事件占位（signaling/online 等使用）
 #[derive(Debug, Clone)]

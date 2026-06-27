@@ -27,14 +27,7 @@ token_ttl_seconds = 3600
 address = "0.0.0.0"
 port = 50050
 
-# 下游 gRPC：默认 discovery:// 服务发现；本地无注册中心时用 scoped *_STATIC_FALLBACK
-# 可通过环境变量覆盖：FLARE_API_GATEWAY_GRPC_*_SERVICE_URL / FLARE_API_GATEWAY_GRPC_*_STATIC_FALLBACK
-[services.api_gateway.grpc]
-message_ingest_service_url = "discovery://flare-message-ingest"
-message_orchestrator_service_url = "discovery://flare-orchestrator"
-conversation_service_url = "discovery://flare-conversation"
-media_service_url = "discovery://flare-media"
-message_ingest_static_fallback = "http://127.0.0.1:50182"
-message_orchestrator_static_fallback = "http://127.0.0.1:50181"
-conversation_static_fallback = "http://127.0.0.1:50090"
-media_static_fallback = "http://127.0.0.1:60081"
+# 下游 gRPC 默认走 discovery:// 服务发现。
+# 本地静态回退或跨环境路由使用作用域环境变量：
+#   FLARE_API_GATEWAY_GRPC_*_SERVICE_URL
+#   FLARE_API_GATEWAY_GRPC_*_STATIC_FALLBACK

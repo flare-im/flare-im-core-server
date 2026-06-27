@@ -72,6 +72,13 @@ impl RedisConversationRepository {
         })
     }
 
+    fn records_from_values(values: HashMap<String, String>) -> Result<Vec<RedisConnectionRecord>> {
+        values
+            .into_values()
+            .map(|payload| Self::parse_record(&payload))
+            .collect()
+    }
+
     fn connection_from_record(
         user_id: &UserId,
         record: RedisConnectionRecord,
@@ -108,10 +115,7 @@ impl RedisConversationRepository {
         let values: HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| {
             flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
         })?;
-        values
-            .into_values()
-            .map(|payload| Self::parse_record(&payload))
-            .collect()
+        Self::records_from_values(values)
     }
 }
 
@@ -201,10 +205,27 @@ impl ConversationRepository for RedisConversationRepository {
         &self,
         user_ids: &[String],
     ) -> Result<HashMap<String, OnlineStatusRecord>> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let mut conn = self.connection().await?;
-        let mut result = HashMap::new();
+        let mut pipe = redis::pipe();
         for user_id in user_ids {
-            let records = self.load_user_records(&mut conn, user_id).await?;
+            pipe.cmd("HGETALL").arg(self.connection_key(user_id));
+        }
+
+        let records_by_user: Vec<HashMap<String, String>> =
+            pipe.query_async(&mut conn).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "fetch statuses pipeline failed: {}",
+                    e
+                ))
+            })?;
+
+        let mut result = HashMap::new();
+        for (user_id, values) in user_ids.iter().zip(records_by_user) {
+            let records = Self::records_from_values(values)?;
             if let Some(latest) = records.into_iter().max_by_key(|record| record.last_seen) {
                 let last_seen = Self::to_timestamp(latest.last_seen);
                 result.insert(

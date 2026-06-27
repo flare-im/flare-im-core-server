@@ -206,26 +206,4 @@ impl MessageActionServiceClientWrapper {
             .await?;
         Ok(response.into_inner())
     }
-
-    /// 标记消息已读
-    pub async fn mark_message_read(
-        &mut self,
-        request: MarkMessageReadRequest,
-    ) -> Result<MarkMessageReadResponse> {
-        let response = self.client.mark_message_read(request).await?;
-        Ok(response.into_inner())
-    }
-
-    /// 标记消息已读（透传网关上下文）
-    pub async fn mark_message_read_with_ctx(
-        &mut self,
-        ctx: &Ctx,
-        request: MarkMessageReadRequest,
-    ) -> Result<MarkMessageReadResponse> {
-        let response = self
-            .client
-            .mark_message_read(Self::request_with_ctx(ctx, request))
-            .await?;
-        Ok(response.into_inner())
-    }
 }

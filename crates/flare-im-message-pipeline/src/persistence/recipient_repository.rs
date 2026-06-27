@@ -195,6 +195,25 @@ impl RecipientRepository for RecipientRepositoryImpl {
             }
         })
     }
+
+    fn get_conversation_member_count<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        conversation_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + 'a>> {
+        Box::pin(async move {
+            let member_count = self
+                .conversation_repo
+                .get_conversation_member_count(ctx, conversation_id)
+                .await?;
+            debug!(
+                conversation_id = %conversation_id,
+                member_count,
+                "Retrieved conversation member count from conversation service"
+            );
+            Ok(member_count)
+        })
+    }
 }
 
 #[cfg(test)]

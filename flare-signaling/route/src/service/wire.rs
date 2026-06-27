@@ -42,8 +42,7 @@ pub async fn initialize(
     let _connection_pool = Arc::new(GrpcConnectionPool::new(GrpcConnectionPoolConfig::default()));
 
     let flow_controller = Arc::new(DefaultFlowController::new());
-    // 不在启动期连接 Conversation，避免与 conversation 微服务启动顺序耦合。
-    let ack_to_push_proxy = AckToPushProxyForwarder::new_deferred(Arc::new(app_config.clone()));
+    let ack_to_push_proxy = AckToPushProxyForwarder::new(message_forwarder.clone());
     let message_routing_handler = Arc::new(MessageRoutingHandler::new(
         message_forwarder.clone(),
         Some(flow_controller.clone()),

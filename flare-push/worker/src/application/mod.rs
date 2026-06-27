@@ -2,4 +2,4 @@
 
 pub mod handlers;
 
-pub use handlers::GatewayPushExecutor;
+pub use handlers::{ConversationPingDebouncer, GatewayPushExecutor};

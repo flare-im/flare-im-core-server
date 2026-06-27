@@ -5,13 +5,15 @@ pub mod send_ack_domain_service;
 pub mod send_data_domain_service;
 pub mod send_event_domain_service;
 pub mod send_message_domain_service;
+pub mod sync_pull_limiter;
 pub mod sync_service;
 
 pub use connection_domain_service::ConnectionDomainService;
 pub use connection_quality_service::ConnectionQualityService;
-pub use push_domain_service::PushDomainService;
+pub use push_domain_service::{EventEnvelopePushRequest, PushDomainService};
 pub use send_ack_domain_service::SendAckDomainService;
 pub use send_data_domain_service::SendDataDomainService;
 pub use send_event_domain_service::SendEventDomainService;
 pub use send_message_domain_service::SendMessageDomainService;
+pub use sync_pull_limiter::{SyncPullLimiter, SyncPullRateLimitConfig};
 pub use sync_service::SyncService;

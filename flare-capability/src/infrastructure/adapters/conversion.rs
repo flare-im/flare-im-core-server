@@ -13,6 +13,20 @@ use flare_grpc_proto::capability::{
 use flare_im_hooks::{DeliveryEvent, MessageDraft, MessageRecord, PreSendDecision, RecallEvent};
 use flare_server_core::context::Context;
 
+fn conversation_type_label_to_proto(value: &str) -> i32 {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "single" => flare_proto::common::ConversationType::Single as i32,
+        "group" => flare_proto::common::ConversationType::Group as i32,
+        "ai" => flare_proto::common::ConversationType::Ai as i32,
+        "system" => flare_proto::common::ConversationType::System as i32,
+        "customer" => flare_proto::common::ConversationType::Customer as i32,
+        "temp" => flare_proto::common::ConversationType::Temp as i32,
+        "channel" => flare_proto::common::ConversationType::Channel as i32,
+        "broadcast" => flare_proto::common::ConversationType::Broadcast as i32,
+        _ => flare_proto::common::ConversationType::Unspecified as i32,
+    }
+}
+
 /// 将 flare_server_core::Context 转换为 HookInvocationContext
 pub fn context_to_proto(ctx: &Context) -> HookInvocationContext {
     use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
@@ -100,12 +114,7 @@ pub fn message_record_to_proto(record: &MessageRecord) -> HookMessageRecord {
         conversation_type: record
             .conversation_type
             .as_deref()
-            .map(|t| match t.to_ascii_lowercase().as_str() {
-                "single" | "1" => 1,
-                "group" | "2" => 2,
-                "channel" | "3" => 3,
-                _ => 0,
-            })
+            .map(conversation_type_label_to_proto)
             .unwrap_or(0),
         message_type: 0,
         message_seq: None,
@@ -260,4 +269,29 @@ pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
     };
 
     set_hook_context_data(ctx, hook_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conversation_type_label_to_proto;
+
+    #[test]
+    fn conversation_type_label_to_proto_accepts_only_canonical_names() {
+        assert_eq!(
+            conversation_type_label_to_proto("single"),
+            flare_proto::common::ConversationType::Single as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("channel"),
+            flare_proto::common::ConversationType::Channel as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("1"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+        assert_eq!(
+            conversation_type_label_to_proto("conversation_type_single"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+    }
 }

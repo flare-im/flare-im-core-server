@@ -28,7 +28,10 @@ use flare_server_core::{flare_err, flare_err_details};
 use tracing::instrument;
 
 use crate::domain::PersistenceMode;
-use crate::domain::repository::RecipientRepository;
+use crate::domain::repository::{
+    RecipientRepository, UserSyncCompensationRepository, UserSyncCompensationTask,
+    UserSyncIndexRepository,
+};
 use flare_im_message_pipeline::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
 };
@@ -58,6 +61,8 @@ where
     sequence_allocator: Arc<SA>,
     /// 事件校验策略
     validation_strategy: Arc<dyn EventValidationStrategy>,
+    user_sync_index: Option<Arc<dyn UserSyncIndexRepository>>,
+    user_sync_compensation: Option<Arc<dyn UserSyncCompensationRepository>>,
 }
 
 impl<PR, SA> EventDomainService<PR, SA>
@@ -77,7 +82,25 @@ where
             sequence_allocator,
             validation_strategy: validation_strategy
                 .unwrap_or_else(|| Arc::new(CompositeEventValidationStrategy::default_composite())),
+            user_sync_index: None,
+            user_sync_compensation: None,
         }
+    }
+
+    pub fn with_user_sync_index(
+        mut self,
+        user_sync_index: Arc<dyn UserSyncIndexRepository>,
+    ) -> Self {
+        self.user_sync_index = Some(user_sync_index);
+        self
+    }
+
+    pub fn with_user_sync_compensation(
+        mut self,
+        user_sync_compensation: Arc<dyn UserSyncCompensationRepository>,
+    ) -> Self {
+        self.user_sync_compensation = Some(user_sync_compensation);
+        self
     }
 
     /// 校验事件
@@ -317,9 +340,77 @@ where
         self.push_repository
             .persistence_only_event(ctx, event.clone(), conversation_id.clone())
             .await?;
+        let sync_result = if let Some(user_sync_index) = &self.user_sync_index {
+            Some(
+                user_sync_index
+                    .record_conversation_change(
+                        ctx,
+                        &recipient_user_ids,
+                        &conversation_id,
+                        event.conversation_seq,
+                        event.created_at,
+                    )
+                    .await,
+            )
+        } else {
+            None
+        };
+        if let Some(Err(error)) = sync_result {
+            tracing::warn!(
+                error = %error,
+                conversation_id = %conversation_id,
+                event_id = %event.event_id,
+                conversation_seq = event.conversation_seq,
+                recipient_count = recipient_user_ids.len(),
+                "User sync index event update deferred; event fanout continues"
+            );
+            let source_error = error.to_string();
+            self.enqueue_user_sync_compensation(
+                ctx,
+                &recipient_user_ids,
+                &conversation_id,
+                event.conversation_seq,
+                event.created_at,
+                &source_error,
+            )
+            .await;
+        }
         self.push_repository
             .push_only_event(ctx, event, recipient_user_ids, conversation_id)
             .await
+    }
+
+    async fn enqueue_user_sync_compensation(
+        &self,
+        ctx: &Ctx,
+        recipient_user_ids: &[String],
+        conversation_id: &str,
+        max_conversation_seq: u64,
+        occurred_at_ms: i64,
+        source_error: &str,
+    ) {
+        let Some(repository) = &self.user_sync_compensation else {
+            return;
+        };
+        let Some(task) = UserSyncCompensationTask::eager_user_changes(
+            ctx,
+            recipient_user_ids,
+            conversation_id,
+            max_conversation_seq,
+            occurred_at_ms,
+            UserSyncCompensationTask::due_now_ms(),
+        ) else {
+            return;
+        };
+        if let Err(error) = repository.enqueue(task.clone()).await {
+            tracing::warn!(
+                error = %error,
+                source_error = %source_error,
+                task_id = %task.task_id,
+                conversation_id = %conversation_id,
+                "failed to enqueue event user_sync compensation task"
+            );
+        }
     }
 
     /// 推送事件
@@ -374,9 +465,34 @@ where
 /// 从事件载荷解析推送目标，避免不必要的成员列表查询。
 fn resolve_recipients_from_event_payload(event: &Event) -> Option<Vec<String>> {
     match &event.payload {
-        Some(EventPayload::Read(r)) if !r.user_id.trim().is_empty() => {
-            Some(vec![r.user_id.clone()])
-        }
+        Some(EventPayload::Read(_)) => None,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_proto::common::{ReadReceiptEvent, event};
+
+    #[test]
+    fn read_receipt_does_not_resolve_to_reader_from_payload() {
+        let event = Event {
+            conversation_id: "c1".to_string(),
+            conversation_seq: 0,
+            r#type: EventType::EventReadReceipt as i32,
+            created_at: 1,
+            event_id: "e1".to_string(),
+            request_id: None,
+            payload: Some(event::Payload::Read(ReadReceiptEvent {
+                conversation_id: "c1".to_string(),
+                read_seq: 7,
+                user_id: "reader".to_string(),
+                message_ids: Vec::new(),
+                read_at: Some(1),
+            })),
+        };
+
+        assert!(resolve_recipients_from_event_payload(&event).is_none());
     }
 }

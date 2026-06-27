@@ -2,7 +2,7 @@
 //!
 //! 提供共享的 PostgreSQL 存储功能和辅助方法
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use flare_im_contracts::message::Message;
@@ -83,148 +83,142 @@ impl PostgresBaseStorage {
         Self::from_pool_and_cache(pool, cache).await.map(Some)
     }
 
-    /// 验证表结构是否存在；schema 和索引统一由 `deploy/init.sql` 管理。
+    /// 验证运行时 schema 与 `deploy/init.sql` 的当前契约一致。
     pub async fn verify_schema(&self) -> Result<()> {
-        // 检查 messages 表是否存在
+        self.require_table("messages").await?;
+        self.require_columns(
+            "messages",
+            &[
+                "tenant_id",
+                "server_id",
+                "conversation_id",
+                "client_msg_id",
+                "sender_id",
+                "sender_name",
+                "sender_avatar",
+                "channel_id",
+                "source",
+                "seq",
+                "timestamp",
+                "conversation_type",
+                "message_type",
+                "content",
+                "status",
+                "offline_push_info",
+                "extra",
+                "extensions",
+                "created_at",
+                "persisted_at",
+                "delivered_at",
+            ],
+        )
+        .await?;
+
+        self.require_table("message_operation_history").await?;
+        self.require_table("message_edit_history").await?;
+        self.require_table("message_read_records").await?;
+
+        self.require_table("message_visibility").await?;
+        self.require_columns(
+            "message_visibility",
+            &[
+                "tenant_id",
+                "message_id",
+                "user_id",
+                "scope",
+                "visibility_status",
+                "changed_at",
+            ],
+        )
+        .await?;
+
+        self.require_table("message_reactions").await?;
+        self.require_columns(
+            "message_reactions",
+            &[
+                "tenant_id",
+                "message_id",
+                "emoji",
+                "user_ids",
+                "count",
+                "last_updated",
+            ],
+        )
+        .await?;
+
+        self.require_table("pinned_messages").await?;
+        self.require_columns(
+            "pinned_messages",
+            &[
+                "tenant_id",
+                "message_id",
+                "conversation_id",
+                "pinned_by",
+                "scope",
+                "owner_user_id",
+                "pinned_at",
+                "expire_at",
+                "reason",
+            ],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn require_table(&self, table_name: &str) -> Result<()> {
         let exists: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'messages'
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = $1
             )
             "#,
         )
+        .bind(table_name)
         .fetch_one(&self.pool)
         .await
-        .context("Failed to check if messages table exists")?;
+        .context("Failed to verify required PostgreSQL table")?;
 
         if !exists {
-            return Err(flare_server_core::error::FlareError::system(
-                "messages table does not exist. Please run deploy/init.sql".to_string(),
-            ));
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "PostgreSQL schema mismatch: required table `{table_name}` is missing; re-run flare-im-core/deploy/init.sql"
+            )));
         }
+        Ok(())
+    }
 
-        // 检查 message_operation_history 表是否存在
-        let exists: bool = sqlx::query_scalar(
+    async fn require_columns(&self, table_name: &str, columns: &[&str]) -> Result<()> {
+        let expected: Vec<String> = columns.iter().map(|column| (*column).to_string()).collect();
+        let actual: HashSet<String> = sqlx::query_scalar::<_, String>(
             r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'message_operation_history'
-            )
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = ANY($2)
             "#,
         )
-        .fetch_one(&self.pool)
+        .bind(table_name)
+        .bind(&expected)
+        .fetch_all(&self.pool)
         .await
-        .context("Failed to check if message_operation_history table exists")?;
+        .context("Failed to verify required PostgreSQL columns")?
+        .into_iter()
+        .collect();
 
-        if !exists {
-            tracing::warn!(
-                "message_operation_history table does not exist. Please run init.sql to initialize the schema."
-            );
+        let missing: Vec<&str> = columns
+            .iter()
+            .copied()
+            .filter(|column| !actual.contains(*column))
+            .collect();
+        if !missing.is_empty() {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "PostgreSQL schema mismatch: table `{table_name}` missing columns [{}]; re-run flare-im-core/deploy/init.sql",
+                missing.join(", ")
+            )));
         }
-
-        // 检查 message_edit_history 表是否存在
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'message_edit_history'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check if message_edit_history table exists")?;
-
-        if !exists {
-            tracing::warn!(
-                "message_edit_history table does not exist. Please run init.sql to initialize the schema."
-            );
-        }
-
-        // 检查 message_read_records 表是否存在
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'message_read_records'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check if message_read_records table exists")?;
-
-        if !exists {
-            tracing::warn!(
-                "message_read_records table does not exist. Please run init.sql to initialize the schema."
-            );
-        }
-
-        // 检查 message_visibility 表是否存在
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'message_visibility'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check if message_visibility table exists")?;
-
-        if !exists {
-            tracing::warn!(
-                "message_visibility table does not exist. Please run init.sql to initialize the schema."
-            );
-        }
-
-        // 检查 message_reactions 表是否存在
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'message_reactions'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check if message_reactions table exists")?;
-
-        if !exists {
-            tracing::warn!(
-                "message_reactions table does not exist. Please run init.sql to initialize the schema."
-            );
-        }
-
-        // 检查 pinned_messages 表是否存在
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'pinned_messages'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check if pinned_messages table exists")?;
-
-        if !exists {
-            tracing::warn!(
-                "pinned_messages table does not exist. Please run init.sql to initialize the schema."
-            );
-        }
-
         Ok(())
     }
 
@@ -378,6 +372,7 @@ impl PostgresBaseStorage {
         let extra: Option<Value> = row.get("extra");
         let extensions: Option<Value> = row.get("extensions");
         let reactions_json: Option<Value> = row.try_get("reactions_json").ok();
+        let is_pinned: bool = row.try_get("is_pinned").unwrap_or(false);
 
         let mut extra_map = HashMap::new();
         if let Some(extra_value) = extra
@@ -396,6 +391,9 @@ impl PostgresBaseStorage {
                 rx.to_string()
             };
             extra_map.insert("reactionsJson".to_string(), serialized);
+        }
+        if is_pinned {
+            extra_map.insert("pinned".to_string(), "true".to_string());
         }
 
         let offline_push_proto = offline_push_info.as_ref().and_then(|v| {

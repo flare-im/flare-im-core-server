@@ -112,11 +112,14 @@ pub struct PinPayload {
     pub pinned_by: String,
     pub reason: Option<String>,
     pub expire_at: Option<prost_types::Timestamp>,
+    pub scope: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnpinPayload {
     pub server_msg_id: String,
+    pub unpinned_by: String,
+    pub scope: i32,
 }
 
 #[derive(Debug, Clone)]

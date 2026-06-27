@@ -32,7 +32,7 @@ flowchart TD
     M --> O["async cleanup WAL"]
     L --> P["main consumer fanout"]
     P --> Q["TOPIC_MESSAGE_CREATED / EVENTS"]
-    P --> R["TOPIC_PUSH_MESSAGES / EVENTS"]
+    P --> R["TOPIC_PUSH_EVENTS<br/>inline event / ping"]
     Q --> S["storage-writer"]
     S --> T["idempotency"]
     T --> U["archive + event stream"]
@@ -50,6 +50,8 @@ flowchart TD
 
 - 上行 typed gRPC 只做必要校验、Hook、seq 和 MQ publish；业务系统高频写调用推荐直接走 typed gRPC。
 - 持久化和推送并行 fanout。
+- 持久消息推送统一走 `EventEnvelope` 原语：小会话 inline、大群 ping；`MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED=false` 时全部退化为纯 notify+pull。
+- 10 万人大群高频消息使用 watermarked ping：Push Server 在成员分页前按会话合并重复 ping，窗口内只保留最高 `max_conversation_seq`，客户端通过 sync 拉取真实消息流。
 - conversation_id 作为 MQ partition key/subject key，保证同会话顺序并减少跨会话互相阻塞。
 - 存储 writer 负责批量、幂等和热缓存投影，避免发送请求同步等待。
 - 主链业务 Hook 推荐使用 gRPC transport，并按 priority 和 error policy 控制影响；旁路审计类 Hook 使用短超时和 ignore/retry。

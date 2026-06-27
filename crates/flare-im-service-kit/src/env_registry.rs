@@ -23,9 +23,11 @@ pub enum EnvOwner {
     PushProxy,
     PushServer,
     PushWorker,
+    Ops,
     SignalingOnline,
     SignalingRoute,
     Storage,
+    SyncOrchestrator,
     Runtime,
     Shared,
 }
@@ -116,6 +118,31 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "ACCESS_GATEWAY_SEND_TIMEOUT_SECS",
         EnvOwner::AccessGateway,
         EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "ACCESS_GATEWAY_SYNC_PULL_RATE_LIMIT_ENABLED",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_SYNC_PULL_TENANT_BURST",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_SYNC_PULL_TENANT_REQUESTS_PER_SECOND",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_SYNC_PULL_USER_BURST",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_SYNC_PULL_USER_REQUESTS_PER_SECOND",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "ACCESS_GATEWAY_USE_ACK_REPORT",
@@ -222,6 +249,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "CONVERSATION_KAFKA_CLIENT_ID",
         EnvOwner::Conversation,
         EnvPurpose::Mq,
+    ),
+    env(
+        "CONVERSATION_LARGE_CONVERSATION_PRECISE_UNREAD_THRESHOLD",
+        EnvOwner::Conversation,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "CONVERSATION_POLICY_ALLOW_ANONYMOUS",
@@ -390,12 +422,43 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::Capability,
         EnvPurpose::ServiceEndpoint,
     ),
+    env("FLARE_MQ_DEFAULT_BACKEND", EnvOwner::Shared, EnvPurpose::Mq),
     env(
-        "FLARE_MQ_ALLOW_KAFKA_FALLBACK",
-        EnvOwner::Shared,
+        "FLARE_DLQ_REPLAY_KAFKA_BROKERS",
+        EnvOwner::Ops,
         EnvPurpose::Mq,
     ),
-    env("FLARE_MQ_DEFAULT_BACKEND", EnvOwner::Shared, EnvPurpose::Mq),
+    env(
+        "FLARE_DLQ_REPLAY_KAFKA_CLIENT_ID",
+        EnvOwner::Ops,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "FLARE_DLQ_REPLAY_LOG",
+        EnvOwner::Ops,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_DLQ_REPLAY_NATS_RETRIES",
+        EnvOwner::Ops,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "FLARE_DLQ_REPLAY_NATS_RETRY_BACKOFF_MS",
+        EnvOwner::Ops,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "FLARE_DLQ_REPLAY_NATS_TIMEOUT_MS",
+        EnvOwner::Ops,
+        EnvPurpose::Mq,
+    ),
+    env("FLARE_DLQ_REPLAY_NATS_URL", EnvOwner::Ops, EnvPurpose::Mq),
+    env(
+        "FLARE_DLQ_REPLAY_TENANT_ID",
+        EnvOwner::Ops,
+        EnvPurpose::TenantDefaults,
+    ),
     env(
         "FLARE_OBJECT_STORE_PROFILE",
         EnvOwner::Runtime,
@@ -537,6 +600,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "MESSAGE_INGEST_LARGE_CONVERSATION_MATERIALIZE_THRESHOLD",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "MESSAGE_INGEST_MESSAGE_DLQ_TOPIC",
         EnvOwner::MessageIngest,
         EnvPurpose::Mq,
@@ -647,6 +715,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED",
+        EnvOwner::Orchestrator,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "MESSAGE_ORCHESTRATOR_KAFKA_CLIENT_ID",
         EnvOwner::Orchestrator,
         EnvPurpose::Mq,
@@ -672,9 +745,24 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Redis,
     ),
     env(
+        "MESSAGE_ORCHESTRATOR_LARGE_CONVERSATION_PUSH_THRESHOLD",
+        EnvOwner::Orchestrator,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "MESSAGE_ORCHESTRATOR_SESSION_SERVICE_TYPE",
         EnvOwner::Orchestrator,
         EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "MESSAGE_ORCHESTRATOR_USER_SYNC_INDEX_MAX_CHANGES_PER_USER",
+        EnvOwner::Orchestrator,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_ORCHESTRATOR_USER_SYNC_INDEX_TTL_SECONDS",
+        EnvOwner::Orchestrator,
+        EnvPurpose::Redis,
     ),
     env(
         "ORCHESTRATOR_SERVICE",
@@ -714,6 +802,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_PROXY_PUSH_ENVELOPE_TOPIC",
+        EnvOwner::PushProxy,
+        EnvPurpose::Mq,
+    ),
+    env(
         "PUSH_PROXY_PUSH_OFFLINE_TOPIC",
         EnvOwner::PushProxy,
         EnvPurpose::Mq,
@@ -744,9 +837,24 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_SERVER_CONVERSATION_READ_ENDPOINT",
+        EnvOwner::PushServer,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "PUSH_SERVER_DEFAULT_TENANT_ID",
         EnvOwner::PushServer,
         EnvPurpose::TenantDefaults,
+    ),
+    env(
+        "PUSH_SERVER_EVENT_PING_PARTICIPANT_PAGE_SIZE",
+        EnvOwner::PushServer,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_SERVER_EVENT_PING_COALESCE_WINDOW_MS",
+        EnvOwner::PushServer,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_SERVER_JETSTREAM_RETRIES",
@@ -784,6 +892,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::ServiceEndpoint,
     ),
     env(
+        "PUSH_SERVER_ONLINE_STATUS_BACKEND",
+        EnvOwner::PushServer,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "PUSH_SERVER_PUSH_DLQ_TOPIC",
         EnvOwner::PushServer,
         EnvPurpose::Mq,
@@ -809,6 +922,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_SERVER_REDIS_URL",
+        EnvOwner::PushServer,
+        EnvPurpose::Redis,
+    ),
+    env(
         "PUSH_SERVER_PUSH_ONLINE_TOPIC",
         EnvOwner::PushServer,
         EnvPurpose::Mq,
@@ -817,6 +935,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "PUSH_WORKER_CONSUMER_GROUP",
         EnvOwner::PushWorker,
         EnvPurpose::Mq,
+    ),
+    env(
+        "PUSH_WORKER_EVENT_PING_DEBOUNCE_WINDOW_MS",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_WORKER_JETSTREAM_RETRIES",
@@ -944,6 +1067,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Redis,
     ),
     env(
+        "SYNC_ORCHESTRATOR_REDIS_URL",
+        EnvOwner::SyncOrchestrator,
+        EnvPurpose::Redis,
+    ),
+    env(
         "STORAGE_FETCH_MAX_WAIT_MS",
         EnvOwner::Storage,
         EnvPurpose::Mq,
@@ -1050,6 +1178,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env(
         "STORAGE_READER_MAX_PAGE_SIZE",
+        EnvOwner::Storage,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "STORAGE_REDIS_HOT_TAIL_LIMIT",
         EnvOwner::Storage,
         EnvPurpose::RuntimeTuning,
     ),

@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ListConversationParticipantsRequest, UpdateCursorRequest,
+    ConversationBootstrapRequest, ListConversationParticipantsRequest,
+    UpdateConversationUserSettingsRequest, UpdateCursorRequest,
 };
 use flare_im_contracts::Ctx;
 use flare_proto::Message;
@@ -16,20 +17,22 @@ use flare_proto::common::sync_slice_item::Payload as SyncSlicePayload;
 use flare_proto::common::{
     ConversationDetailSync, ConversationDetailSyncRes, ConversationParticipant,
     ConversationParticipantsSync, ConversationParticipantsSyncRes, ConversationSummary,
-    ConversationsSync, ConversationsSyncRes, EventEnvelope, EventStreamAckSyncRes,
-    GetSyncCursorSync, GetSyncCursorSyncRes, MessagePreview, MultiConversationSync,
-    MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes,
-    SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow, SyncRes,
-    SyncSkipItem, SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes, SyncTombstoneItem,
-    UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
+    ConversationType as ProtoConversationType, ConversationUserSettingsSync,
+    ConversationUserSettingsSyncRes, ConversationVersion, ConversationsSync, ConversationsSyncRes,
+    EventEnvelope, EventEnvelopeDeliveryMode, EventStreamAckSyncRes, GetSyncCursorSync,
+    GetSyncCursorSyncRes, MessagePreview, MultiConversationSync, MultiConversationSyncRes,
+    MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes, SingleConversationSync,
+    SingleConversationSyncRes, SnapshotConversationRow, SyncRes, SyncSessionHints, SyncSkipItem,
+    SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes, SyncTombstoneItem, UpdateSyncCursorSync,
+    UpdateSyncCursorSyncRes,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use tracing::{debug, trace, warn};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, MemorySyncCursorCache, StorageReadPort,
-    SyncCursorCachePort,
+    ConversationEventReadPort, ConversationSyncPort, ConversationVersionIndexPort,
+    MemorySyncCursorCache, StorageReadPort, SyncCursorCachePort,
 };
 use crate::domain::model::{
     SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
@@ -67,7 +70,12 @@ struct MergedSnapshotRow {
 
 pub struct SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
+    I: ConversationSyncPort
+        + StorageReadPort
+        + ConversationEventReadPort
+        + ConversationVersionIndexPort
+        + Send
+        + Sync,
 {
     infra: Arc<I>,
     cursor_cache: Arc<MemorySyncCursorCache>,
@@ -75,7 +83,12 @@ where
 
 impl<I> SyncOrchestrationHandler<I>
 where
-    I: ConversationSyncPort + StorageReadPort + ConversationEventReadPort + Send + Sync,
+    I: ConversationSyncPort
+        + StorageReadPort
+        + ConversationEventReadPort
+        + ConversationVersionIndexPort
+        + Send
+        + Sync,
 {
     pub fn new(infra: Arc<I>, cursor_cache: Arc<MemorySyncCursorCache>) -> Self {
         Self {
@@ -139,6 +152,14 @@ where
                 let v = self.update_sync_cursor_sync(ctx, user_id, req).await?;
                 Ok(SyncRes {
                     payload: Some(SyncResPayload::UpdateSyncCursor(v)),
+                })
+            }
+            SyncPayload::ConversationUserSettings(req) => {
+                let v = self
+                    .conversation_user_settings_sync(ctx, user_id, req)
+                    .await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::ConversationUserSettings(v)),
                 })
             }
             SyncPayload::EventStreamAck(_) => Ok(SyncRes {
@@ -215,6 +236,14 @@ where
         let mut filtered_out = 0usize;
 
         for bootstrap in conv_resp.conversations {
+            if !valid_sync_conversation_id(&bootstrap.conversation_id) {
+                filtered_out += 1;
+                warn!(
+                    conversation_id = %bootstrap.conversation_id,
+                    "drop invalid conversation summary during sync snapshot"
+                );
+                continue;
+            }
             if let Some(set) = &filter_set
                 && !set.contains(bootstrap.conversation_id.as_str())
             {
@@ -323,7 +352,9 @@ where
             .map(|(_, _, m)| {
                 routing.push(ConversationSyncRoutingHint {
                     channel_id: m.bootstrap.channel_id.clone(),
-                    conversation_type: m.bootstrap.conversation_type.parse::<i32>().unwrap_or(0),
+                    conversation_type: conversation_type_from_summary(
+                        &m.bootstrap.conversation_type,
+                    ),
                     peer_read_seq: m
                         .bootstrap
                         .attributes
@@ -518,7 +549,7 @@ where
             .conversations
             .iter()
             .zip(outcome.routing.iter())
-            .filter(|(c, _)| !c.conversation_id.starts_with("sync:"))
+            .filter(|(c, _)| valid_sync_conversation_id(&c.conversation_id))
             .map(|(c, hint)| snapshot_row_to_summary(c, hint))
             .collect::<Vec<_>>();
         let next_cursor = if !response.next_cursor.is_empty() {
@@ -644,6 +675,11 @@ where
         } else {
             max_seq_from_events(&events)
         };
+        let min_seq = events
+            .iter()
+            .map(|event| event.conversation_seq)
+            .min()
+            .unwrap_or(0);
 
         Ok(QueryEventsSyncRes {
             envelope: Some(EventEnvelope {
@@ -652,6 +688,11 @@ where
                 has_more: page.has_more,
                 next_cursor: page.next_cursor,
                 window_id: String::new(),
+                delivery_mode: EventEnvelopeDeliveryMode::Inline as i32,
+                conversation_id: req.conversation_id,
+                min_conversation_seq: min_seq,
+                inline_events_truncated: false,
+                attributes: Default::default(),
             }),
             hints: None,
             stale: None,
@@ -665,6 +706,9 @@ where
         req: GetSyncCursorSync,
     ) -> Result<GetSyncCursorSyncRes, FlareError> {
         require_nonempty_conversation_id(&req.conversation_id)?;
+        let hints = self
+            .conversation_version_hints(ctx, user_id, &req.known_conversation_versions)
+            .await;
         if let Some(cursor) = self.cursor_cache.get(user_id, &req.conversation_id).await {
             debug!(
                 user_id = %user_id,
@@ -673,7 +717,7 @@ where
             );
             return Ok(GetSyncCursorSyncRes {
                 cursor: Some(cursor),
-                hints: None,
+                hints,
             });
         }
         debug!(
@@ -709,7 +753,7 @@ where
         let Some(last_sync_seq) = last_sync_seq else {
             return Ok(GetSyncCursorSyncRes {
                 cursor: None,
-                hints: None,
+                hints,
             });
         };
         let last_read_seq = summary
@@ -739,8 +783,53 @@ where
         );
         Ok(GetSyncCursorSyncRes {
             cursor: Some(cursor),
-            hints: None,
+            hints,
         })
+    }
+
+    async fn conversation_version_hints(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        known_versions: &[ConversationVersion],
+    ) -> Option<SyncSessionHints> {
+        let known = known_versions
+            .iter()
+            .map(|version| (version.conversation_id.clone(), version.version))
+            .filter(|(conversation_id, _)| !conversation_id.trim().is_empty())
+            .collect::<Vec<_>>();
+        if known.is_empty() {
+            return None;
+        }
+
+        match self
+            .infra
+            .diff_known_conversation_versions(ctx, &known)
+            .await
+        {
+            Ok(changes) if changes.is_empty() => None,
+            Ok(changes) => Some(SyncSessionHints {
+                conversation_versions: changes
+                    .into_iter()
+                    .map(|change| ConversationVersion {
+                        conversation_id: change.conversation_id,
+                        version: change.version,
+                        max_conversation_seq: change.max_conversation_seq,
+                        updated_at: change.updated_at_ms,
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            Err(error) => {
+                warn!(
+                    user_id = %user_id,
+                    known_version_count = known.len(),
+                    error = %error,
+                    "failed to build conversation version sync hints"
+                );
+                None
+            }
+        }
     }
 
     async fn update_sync_cursor_sync(
@@ -793,11 +882,11 @@ where
         );
 
         self.infra
-            .update_read_cursor(
+            .update_sync_cursor(
                 ctx,
                 UpdateCursorRequest {
                     conversation_id: cursor.conversation_id.clone(),
-                    message_ts: merged_seq as i64,
+                    sync_seq: merged_seq as i64,
                     device_id: cursor.device_id.clone(),
                 },
             )
@@ -816,6 +905,38 @@ where
         Ok(UpdateSyncCursorSyncRes {
             cursor: Some(out),
             hints: None,
+        })
+    }
+
+    async fn conversation_user_settings_sync(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        req: ConversationUserSettingsSync,
+    ) -> Result<ConversationUserSettingsSyncRes, FlareError> {
+        require_nonempty_conversation_id(&req.conversation_id)?;
+        debug!(
+            user_id = %user_id,
+            conversation_id = %req.conversation_id,
+            base_settings_version = req.base_settings_version,
+            "conversation_user_settings sync"
+        );
+        let resp = self
+            .infra
+            .update_conversation_user_settings(
+                ctx,
+                UpdateConversationUserSettingsRequest {
+                    conversation_id: req.conversation_id,
+                    is_pinned: req.is_pinned,
+                    is_muted: req.is_muted,
+                    is_archived: req.is_archived,
+                    draft: req.draft,
+                    base_settings_version: req.base_settings_version,
+                },
+            )
+            .await?;
+        Ok(ConversationUserSettingsSyncRes {
+            settings: resp.settings,
         })
     }
 }
@@ -956,6 +1077,35 @@ fn conversation_type_int(message: Option<&Message>) -> i32 {
     msg.conversation_type
 }
 
+fn conversation_type_from_summary(value: &str) -> i32 {
+    match value.trim() {
+        "single" => ProtoConversationType::Single as i32,
+        "group" => ProtoConversationType::Group as i32,
+        "ai" => ProtoConversationType::Ai as i32,
+        "system" => ProtoConversationType::System as i32,
+        "customer" => ProtoConversationType::Customer as i32,
+        "temp" => ProtoConversationType::Temp as i32,
+        "channel" => ProtoConversationType::Channel as i32,
+        "broadcast" => ProtoConversationType::Broadcast as i32,
+        "unspecified" | "" => ProtoConversationType::Unspecified as i32,
+        _ => ProtoConversationType::Unspecified as i32,
+    }
+}
+
+fn conversation_type_label(value: i32) -> &'static str {
+    match ProtoConversationType::try_from(value).ok() {
+        Some(ProtoConversationType::Single) => "single",
+        Some(ProtoConversationType::Group) => "group",
+        Some(ProtoConversationType::Ai) => "ai",
+        Some(ProtoConversationType::System) => "system",
+        Some(ProtoConversationType::Customer) => "customer",
+        Some(ProtoConversationType::Temp) => "temp",
+        Some(ProtoConversationType::Channel) => "channel",
+        Some(ProtoConversationType::Broadcast) => "broadcast",
+        _ => "unspecified",
+    }
+}
+
 /// 同步补丁摘要 `channel_id`。
 ///
 /// 单聊的对端路由以 Conversation Bootstrap 从成员表解析出的 channel_id 为准；
@@ -1049,7 +1199,7 @@ fn snapshot_row_to_summary(
     };
     ConversationSummary {
         conversation_id: item.conversation_id.clone(),
-        conversation_type: conversation_type.to_string(),
+        conversation_type: conversation_type_label(conversation_type).to_string(),
         display_name,
         avatar_url,
         last_message,
@@ -1090,6 +1240,11 @@ fn filter_events_by_types(events: &mut Vec<flare_proto::common::Event>, allowed:
     events.retain(|e| set.contains(&e.r#type));
 }
 
+fn valid_sync_conversation_id(conversation_id: &str) -> bool {
+    let conversation_id = conversation_id.trim();
+    !conversation_id.is_empty() && !conversation_id.starts_with("sync:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,6 +1258,8 @@ mod tests {
     struct MockInfra {
         bootstrap: ConversationBootstrapResponse,
         updates: Mutex<Vec<UpdateCursorRequest>>,
+        settings_updates: Mutex<Vec<UpdateConversationUserSettingsRequest>>,
+        version_changes: Vec<crate::application::ports::ConversationVersionChange>,
     }
 
     impl ConversationSyncPort for MockInfra {
@@ -1114,7 +1271,7 @@ mod tests {
             Ok(self.bootstrap.clone())
         }
 
-        async fn update_read_cursor(
+        async fn update_sync_cursor(
             &self,
             _ctx: &Ctx,
             req: UpdateCursorRequest,
@@ -1157,14 +1314,25 @@ mod tests {
         async fn update_conversation_user_settings(
             &self,
             _ctx: &Ctx,
-            _req: UpdateConversationUserSettingsRequest,
+            req: UpdateConversationUserSettingsRequest,
         ) -> Result<
             flare_grpc_proto::conversation::UpdateConversationUserSettingsResponse,
             FlareError,
         > {
+            self.settings_updates
+                .lock()
+                .expect("settings updates lock")
+                .push(req.clone());
             Ok(
                 flare_grpc_proto::conversation::UpdateConversationUserSettingsResponse {
-                    settings: Some(flare_proto::common::ConversationUserSettings::default()),
+                    settings: Some(flare_proto::common::ConversationUserSettings {
+                        is_pinned: req.is_pinned.unwrap_or_default(),
+                        is_muted: req.is_muted.unwrap_or_default(),
+                        is_archived: req.is_archived.unwrap_or_default(),
+                        draft: req.draft.unwrap_or_default(),
+                        settings_version: req.base_settings_version.saturating_add(1),
+                        ..Default::default()
+                    }),
                 },
             )
         }
@@ -1207,6 +1375,27 @@ mod tests {
         }
     }
 
+    impl ConversationVersionIndexPort for MockInfra {
+        async fn diff_known_conversation_versions(
+            &self,
+            _ctx: &Ctx,
+            known: &[(String, u64)],
+        ) -> Result<Vec<crate::application::ports::ConversationVersionChange>, FlareError> {
+            Ok(self
+                .version_changes
+                .iter()
+                .filter(|change| {
+                    known
+                        .iter()
+                        .find(|(conversation_id, _)| conversation_id == &change.conversation_id)
+                        .map(|(_, known_version)| change.version > *known_version)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
     fn ctx() -> Ctx {
         Arc::new(
             Context::root()
@@ -1214,6 +1403,52 @@ mod tests {
                 .with_user_id("22")
                 .with_trace_id("test-trace"),
         )
+    }
+
+    #[tokio::test]
+    async fn conversation_user_settings_sync_forwards_to_conversation_port() {
+        let infra = Arc::new(MockInfra::default());
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .execute_sync(
+                &ctx(),
+                "22",
+                flare_proto::common::Sync {
+                    device_id: "device-a".to_string(),
+                    payload: Some(SyncPayload::ConversationUserSettings(
+                        ConversationUserSettingsSync {
+                            conversation_id: "c1".to_string(),
+                            is_pinned: Some(true),
+                            is_muted: Some(false),
+                            is_archived: Some(true),
+                            draft: Some("draft text".to_string()),
+                            base_settings_version: 7,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("conversation user settings sync");
+
+        let Some(SyncResPayload::ConversationUserSettings(res)) = response.payload else {
+            panic!("expected conversation user settings response");
+        };
+        let settings = res.settings.expect("settings");
+        assert!(settings.is_pinned);
+        assert!(!settings.is_muted);
+        assert!(settings.is_archived);
+        assert_eq!(settings.draft, "draft text");
+        assert_eq!(settings.settings_version, 8);
+
+        let updates = infra
+            .settings_updates
+            .lock()
+            .expect("settings updates lock");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].conversation_id, "c1");
+        assert_eq!(updates[0].base_settings_version, 7);
     }
 
     #[test]
@@ -1278,6 +1513,46 @@ mod tests {
     }
 
     #[test]
+    fn conversation_summary_type_parser_accepts_only_canonical_names() {
+        assert_eq!(
+            conversation_type_from_summary("single"),
+            flare_proto::common::ConversationType::Single as i32
+        );
+        assert_eq!(
+            conversation_type_from_summary("channel"),
+            flare_proto::common::ConversationType::Channel as i32
+        );
+        assert_eq!(
+            conversation_type_from_summary("1"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+        assert_eq!(
+            conversation_type_from_summary("conversation_type_single"),
+            flare_proto::common::ConversationType::Unspecified as i32
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_emits_canonical_conversation_type_name() {
+        let message = Message {
+            server_id: "m1".to_string(),
+            conversation_seq: 10,
+            conversation_type: flare_proto::common::ConversationType::Single as i32,
+            ..Default::default()
+        };
+        let item = SnapshotConversationRow {
+            conversation_id: "c1".to_string(),
+            messages: vec![message],
+            last_conversation_seq: 10,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &ConversationSyncRoutingHint::default());
+
+        assert_eq!(summary.conversation_type, "single");
+    }
+
+    #[test]
     fn snapshot_summary_drops_impossible_peer_read_seq_hint() {
         let item = SnapshotConversationRow {
             conversation_id: "c1".to_string(),
@@ -1330,6 +1605,52 @@ mod tests {
         assert_eq!(response.conversations.len(), 1);
         assert_eq!(response.conversations[0].last_read_seq, 99);
         assert_eq!(response.conversations[0].unread_count, 39);
+    }
+
+    #[tokio::test]
+    async fn conversations_sync_drops_invalid_and_internal_conversation_ids() {
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                conversations: vec![
+                    ConversationSummary {
+                        conversation_id: String::new(),
+                        max_conversation_seq: 100,
+                        updated_at: 3_000,
+                        ..Default::default()
+                    },
+                    ConversationSummary {
+                        conversation_id: "sync:internal".to_string(),
+                        max_conversation_seq: 100,
+                        updated_at: 2_000,
+                        ..Default::default()
+                    },
+                    ConversationSummary {
+                        conversation_id: "c1".to_string(),
+                        max_conversation_seq: 100,
+                        updated_at: 1_000,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .conversations_sync(
+                &ctx(),
+                "22",
+                ConversationsSync {
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("conversations sync");
+
+        assert_eq!(response.conversations.len(), 1);
+        assert_eq!(response.conversations[0].conversation_id, "c1");
     }
 
     #[tokio::test]
@@ -1394,6 +1715,7 @@ mod tests {
                 GetSyncCursorSync {
                     device_id: "sdk-22".to_string(),
                     conversation_id: "c1".to_string(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1425,6 +1747,7 @@ mod tests {
                 GetSyncCursorSync {
                     device_id: "sdk-22-9357".to_string(),
                     conversation_id: "__conversations__".to_string(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1433,6 +1756,56 @@ mod tests {
         let cursor = response.cursor.expect("cursor");
         assert_eq!(cursor.conversation_id, "__conversations__");
         assert_eq!(cursor.last_conversation_seq, 1_778_673_857_000);
+    }
+
+    #[tokio::test]
+    async fn get_sync_cursor_returns_conversation_version_hints() {
+        let mut server_cursor_map = HashMap::new();
+        server_cursor_map.insert("c1".to_string(), 100);
+        let infra = Arc::new(MockInfra {
+            bootstrap: ConversationBootstrapResponse {
+                conversations: vec![ConversationSummary {
+                    conversation_id: "c1".to_string(),
+                    max_conversation_seq: 100,
+                    updated_at: 1_000,
+                    ..Default::default()
+                }],
+                server_cursor_map,
+                ..Default::default()
+            },
+            version_changes: vec![crate::application::ports::ConversationVersionChange {
+                conversation_id: "c-large".to_string(),
+                version: 7,
+                max_conversation_seq: 900,
+                updated_at_ms: 1_700,
+            }],
+            ..Default::default()
+        });
+        let handler = SyncOrchestrationHandler::new(infra, Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .get_sync_cursor_sync(
+                &ctx(),
+                "22",
+                GetSyncCursorSync {
+                    device_id: "sdk-22".to_string(),
+                    conversation_id: "c1".to_string(),
+                    known_conversation_versions: vec![ConversationVersion {
+                        conversation_id: "c-large".to_string(),
+                        version: 6,
+                        ..Default::default()
+                    }],
+                },
+            )
+            .await
+            .expect("get cursor");
+
+        let hints = response.hints.expect("version hints");
+        assert_eq!(hints.conversation_versions.len(), 1);
+        assert_eq!(hints.conversation_versions[0].conversation_id, "c-large");
+        assert_eq!(hints.conversation_versions[0].version, 7);
+        assert_eq!(hints.conversation_versions[0].max_conversation_seq, 900);
+        assert_eq!(hints.conversation_versions[0].updated_at, 1_700);
     }
 
     #[tokio::test]
@@ -1465,12 +1838,13 @@ mod tests {
         assert_eq!(cursor.last_read_seq, 40);
         assert_eq!(cursor.last_message_seq, 42);
 
-        let updates = infra.updates.lock().expect("updates lock");
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].conversation_id, "c1");
-        assert_eq!(updates[0].message_ts, 42);
-        assert_eq!(updates[0].device_id, "sdk-22");
-        drop(updates);
+        {
+            let updates = infra.updates.lock().expect("updates lock");
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].conversation_id, "c1");
+            assert_eq!(updates[0].sync_seq, 42);
+            assert_eq!(updates[0].device_id, "sdk-22");
+        }
 
         let cached = cache.get("22", "c1").await.expect("cached cursor");
         assert_eq!(cached.last_conversation_seq, 42);
@@ -1520,11 +1894,12 @@ mod tests {
         assert_eq!(cursor.last_message_seq, 121);
         assert_eq!(cursor.last_sync_at, 2_000);
 
-        let updates = infra.updates.lock().expect("updates lock");
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].conversation_id, "c1");
-        assert_eq!(updates[0].message_ts, 120);
-        drop(updates);
+        {
+            let updates = infra.updates.lock().expect("updates lock");
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].conversation_id, "c1");
+            assert_eq!(updates[0].sync_seq, 120);
+        }
 
         let cached = cache.get("22", "c1").await.expect("cached cursor");
         assert_eq!(cached.last_conversation_seq, 120);

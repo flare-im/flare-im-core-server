@@ -4,4 +4,6 @@ pub mod push_dispatcher;
 mod push_router_handler;
 
 pub use push_dispatcher::{PushDispatcher, PushExecutor};
-pub use push_router_handler::PushRouterHandler;
+pub use push_router_handler::{
+    ConversationOnlineIndexReader, OnlineStatusReader, PushRouterHandler, PushTaskPublisher,
+};

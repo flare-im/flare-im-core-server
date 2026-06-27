@@ -7,6 +7,7 @@ push_online_topic = "flare.im.push.online"
 push_offline_topic = "flare.im.push.offline"
 push_dlq_topic = "flare.im.push.dlq"
 offline_parking_capacity = 4096
+event_ping_debounce_window_ms = 200
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
 metrics_enabled = true

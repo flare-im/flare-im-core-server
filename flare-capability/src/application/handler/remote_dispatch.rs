@@ -38,7 +38,7 @@ fn decode_response_payload(payload: Option<prost_types::Any>) -> Value {
         return Value::Null;
     };
     match String::from_utf8(any.value.clone()) {
-        Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or_else(|_| Value::String(text)),
+        Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),
         Err(_) => Value::String(STANDARD.encode(any.value)),
     }
 }

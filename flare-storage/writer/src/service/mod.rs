@@ -78,7 +78,7 @@ impl ApplicationBootstrap {
                     ))
                 })?
             }
-            "nats" | "jetstream" => {
+            "nats" => {
                 flare_server_core::mq::nats::build_nats_consumer_tasks_with_failure_publishers(
                     context.config.as_ref(),
                     context.consumer_config.clone(),

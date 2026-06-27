@@ -25,8 +25,14 @@ pub fn decode_mq_envelope(
 pub fn mq_envelope_for_main_queue_message(
     message: &Message,
     recipient_user_ids: Vec<String>,
+    large_conversation: bool,
 ) -> MqEnvelope {
-    mq_envelope_for_main_queue_message_with_headers(message, recipient_user_ids, HashMap::new())
+    mq_envelope_for_main_queue_message_with_headers(
+        message,
+        recipient_user_ids,
+        HashMap::new(),
+        large_conversation,
+    )
 }
 
 /// 构造主队列 [`MqEnvelope`]（`payload_kind` = Message），并携带跨队列元数据。
@@ -34,6 +40,7 @@ pub fn mq_envelope_for_main_queue_message_with_headers(
     message: &Message,
     recipient_user_ids: Vec<String>,
     headers: HashMap<String, String>,
+    large_conversation: bool,
 ) -> MqEnvelope {
     MqEnvelope {
         envelope_id: uuid::Uuid::new_v4().to_string(),
@@ -45,6 +52,7 @@ pub fn mq_envelope_for_main_queue_message_with_headers(
         headers,
         push_only: false,
         persistence_only: false,
+        large_conversation,
         payload: Some(mq_envelope::Payload::Message(message.clone())),
     }
 }
@@ -73,6 +81,7 @@ pub fn mq_envelope_for_main_queue_event_with_headers(
         headers,
         push_only: false,
         persistence_only: false,
+        large_conversation: false,
         payload: Some(mq_envelope::Payload::Event(event.clone())),
     }
 }

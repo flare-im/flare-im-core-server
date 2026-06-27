@@ -1,9 +1,10 @@
-# 预发布环境配置示例
+# 预发布环境覆盖示例。
+# 仅支持 root [mq] 与 [object_storage.*]；完整服务覆盖请使用 config/overrides/*.toml。
+# `${VAR}` 会在加载时展开，缺失则配置加载失败。
 
 # 可选：覆盖默认 MQ（见 config/base.toml [mq] 说明；亦可用 FLARE_MQ_DEFAULT_BACKEND）
 # [mq]
 # default_backend = "kafka"
-# allow_kafka_fallback = false
 
 [object_storage.default]
 profile_type = "oss"

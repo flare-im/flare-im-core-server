@@ -125,6 +125,7 @@ pub async fn initialize(
         connection_port.clone(),
         route_grpc_pool,
         storage_sync_pool,
+        access_config.sync_pull_rate_limit_config(),
     );
 
     // 10. 推送领域服务

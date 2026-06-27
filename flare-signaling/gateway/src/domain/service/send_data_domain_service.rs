@@ -97,6 +97,7 @@ fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
         Some(SyncPayload::ConversationMaxSeq(_)) => "conversation_max_seq",
         Some(SyncPayload::Conversations(_)) => "conversations",
         Some(SyncPayload::ConversationParticipants(_)) => "conversation_participants",
+        Some(SyncPayload::ConversationUserSettings(_)) => "conversation_user_settings",
         None => "none",
     }
 }

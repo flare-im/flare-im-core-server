@@ -400,6 +400,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 last_sender_id: None,    // 将在ApplicationService层补充
                 last_message_type: None, // 将在ApplicationService层补充
                 last_content_type: None, // 将在ApplicationService层补充
+                last_message_preview: None,
                 unread_count,
                 last_read_seq,
                 metadata: attributes,
@@ -497,6 +498,13 @@ impl ConversationRepository for PostgresConversationRepository {
         session: &Conversation,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
+        if session.conversation_id.trim().is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
         let mut tx = self
             .pool
             .begin()
@@ -1128,69 +1136,6 @@ impl ConversationRepository for PostgresConversationRepository {
         })
     }
 
-    async fn batch_acknowledge(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        cursors: &[(String, i64)],
-    ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = require_user_id(ctx)?;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "begin transaction"))?;
-
-        let synced_at_ms = Utc::now().timestamp_millis();
-        for (conversation_id, seq) in cursors {
-            if conversation_id == "__conversations__" {
-                sqlx::query(
-                    r#"
-                    INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
-                    VALUES ($1, $2, $3, 0, $4, CURRENT_TIMESTAMP)
-                    ON CONFLICT (tenant_id, user_id, conversation_id)
-                    DO UPDATE SET
-                        last_synced_seq = 0,
-                        last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
-                        updated_at = CURRENT_TIMESTAMP
-                    "#,
-                )
-                .bind(tenant_id)
-                .bind(&user_id)
-                .bind(conversation_id)
-                .bind(*seq)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge conversation list cursor"))?;
-            } else {
-                sqlx::query(
-                    r#"
-                    INSERT INTO user_sync_cursor (tenant_id, user_id, conversation_id, last_synced_seq, last_synced_ts, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                    ON CONFLICT (tenant_id, user_id, conversation_id)
-                    DO UPDATE SET
-                        last_synced_seq = GREATEST(COALESCE(user_sync_cursor.last_synced_seq, 0), EXCLUDED.last_synced_seq),
-                        last_synced_ts = GREATEST(COALESCE(user_sync_cursor.last_synced_ts, 0), EXCLUDED.last_synced_ts),
-                        updated_at = CURRENT_TIMESTAMP
-                    "#,
-                )
-                .bind(tenant_id)
-                .bind(&user_id)
-                .bind(conversation_id)
-                .bind(*seq)
-                .bind(synced_at_ms)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to acknowledge message cursor"))?;
-            }
-        }
-
-        tx.commit()
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "commit transaction"))?;
-        Ok(())
-    }
-
     async fn search_conversations(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -1399,6 +1344,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     last_sender_id: None,
                     last_message_type: None,
                     last_content_type: None,
+                    last_message_preview: None,
                     unread_count,
                     last_read_seq: last_read_seq.max(0),
                     metadata: attributes,
@@ -1485,7 +1431,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     GREATEST(
                         COALESCE(c.last_message_seq, 0),
                         COALESCE(mx.max_seq, 0),
-                        CASE WHEN $1 > 0 THEN $1 ELSE 0 END
+                        $1
                     ) AS max_seq
                 FROM conversation_participants sp
                 LEFT JOIN conversations c
@@ -1511,7 +1457,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     LEAST(
                         GREATEST(
                             prev_read_seq,
-                            CASE WHEN $1 <= 0 THEN max_seq ELSE $1 END
+                            $1
                         ),
                         max_seq
                     ) AS next_read_seq
@@ -1676,6 +1622,7 @@ impl ConversationRepository for PostgresConversationRepository {
         status: i32,
     ) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let precise_unread_threshold = self.config.large_conversation_precise_unread_threshold;
 
         sqlx::query(
             r#"
@@ -1686,6 +1633,13 @@ impl ConversationRepository for PostgresConversationRepository {
                     updated_at = CURRENT_TIMESTAMP
                 WHERE c.tenant_id = $2 AND c.conversation_id = $3
                 RETURNING 1
+            ),
+            member_stats AS (
+                SELECT COUNT(*)::INT AS member_count
+                FROM conversation_participants
+                WHERE tenant_id = $2
+                  AND conversation_id = $3
+                  AND NOT COALESCE(is_deleted, false)
             )
             UPDATE conversation_participants sp
             SET
@@ -1696,9 +1650,11 @@ impl ConversationRepository for PostgresConversationRepository {
                     ELSE COALESCE(sp.unread_count, 0) + 1
                 END,
                 updated_at = CURRENT_TIMESTAMP
+            FROM member_stats
             WHERE sp.tenant_id = $2
               AND sp.conversation_id = $3
               AND NOT COALESCE(sp.is_deleted, false)
+              AND ($6 <= 0 OR member_stats.member_count <= $6)
             "#,
         )
         .bind(seq)
@@ -1706,6 +1662,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .bind(sender_id)
         .bind(status)
+        .bind(precise_unread_threshold)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -1717,23 +1674,6 @@ impl ConversationRepository for PostgresConversationRepository {
         })?;
 
         Ok(())
-    }
-
-    async fn get_last_message_seq(
-        &self,
-        ctx: &flare_server_core::context::Context,
-        conversation_id: &str,
-    ) -> Result<Option<i64>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let row = sqlx::query(
-            r#"SELECT last_message_seq FROM conversations WHERE tenant_id = $1 AND conversation_id = $2"#,
-        )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to get last_message_seq"))?;
-        Ok(row.and_then(|r| r.get("last_message_seq")))
     }
 
     async fn get_unread_count(

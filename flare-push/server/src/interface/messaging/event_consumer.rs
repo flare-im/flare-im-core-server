@@ -14,7 +14,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway::PushEventRequest;
-use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_im_contracts::constants::headers::{
+    DELIVERY_MODE_PING, HEADER_DELIVERY_MODE, HEADER_INLINE_EVENTS_TRUNCATED,
+};
+use flare_proto::common::{EventEnvelopeDeliveryMode, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
@@ -110,6 +113,7 @@ impl MessageHandler for PushEventHandler {
             conversation_id = %envelope.conversation_id,
             payload_kind = ?envelope.payload_kind,
             seq = envelope.seq,
+            large_conversation = envelope.large_conversation,
             "Processing MqEnvelope from TOPIC_PUSH_EVENTS"
         );
 
@@ -164,10 +168,73 @@ impl MessageHandler for PushEventHandler {
         let ctx = &message.context.ctx;
 
         // 5. 构建 PushEventRequest
-        let req = PushEventRequest {
-            user_ids: envelope.recipient_user_ids.clone(),
-            events: vec![proto_event.clone()],
-            options: None,
+        let is_ping = envelope
+            .headers
+            .get(HEADER_DELIVERY_MODE)
+            .is_some_and(|mode| mode == DELIVERY_MODE_PING);
+        let inline_events_truncated = envelope
+            .headers
+            .get(HEADER_INLINE_EVENTS_TRUNCATED)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        if envelope.large_conversation && !envelope.recipient_user_ids.is_empty() {
+            tracing::error!(
+                envelope_id = %envelope.envelope_id,
+                conversation_id = %envelope.conversation_id,
+                recipient_count = envelope.recipient_user_ids.len(),
+                "Large conversation push event envelope must not carry materialized recipients"
+            );
+            if let Err(e) = self
+                .publisher
+                .publish_dlq(
+                    ctx,
+                    Some(&envelope.conversation_id),
+                    message.payload.clone(),
+                )
+                .await
+            {
+                tracing::error!(error = %e, "Failed to send message to DLQ");
+            }
+            return Ok(MessageResult::Ack);
+        }
+        if is_ping && envelope.recipient_user_ids.is_empty() && !envelope.large_conversation {
+            tracing::error!(
+                envelope_id = %envelope.envelope_id,
+                conversation_id = %envelope.conversation_id,
+                "Recipient-less ping requires large_conversation=true"
+            );
+            if let Err(e) = self
+                .publisher
+                .publish_dlq(
+                    ctx,
+                    Some(&envelope.conversation_id),
+                    message.payload.clone(),
+                )
+                .await
+            {
+                tracing::error!(error = %e, "Failed to send message to DLQ");
+            }
+            return Ok(MessageResult::Ack);
+        }
+        let req = if is_ping {
+            PushEventRequest {
+                user_ids: envelope.recipient_user_ids.clone(),
+                events: vec![],
+                options: None,
+                conversation_id: proto_event.conversation_id.clone(),
+                max_conversation_seq: proto_event.conversation_seq,
+                delivery_mode: EventEnvelopeDeliveryMode::Ping as i32,
+                inline_events_truncated: true,
+            }
+        } else {
+            PushEventRequest {
+                user_ids: envelope.recipient_user_ids.clone(),
+                events: vec![proto_event.clone()],
+                options: None,
+                conversation_id: proto_event.conversation_id.clone(),
+                max_conversation_seq: proto_event.conversation_seq,
+                delivery_mode: EventEnvelopeDeliveryMode::PingWithInline as i32,
+                inline_events_truncated,
+            }
         };
 
         // 6. 调用 Application 层

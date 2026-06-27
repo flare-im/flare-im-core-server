@@ -158,7 +158,6 @@ Gateway 访问下游 gRPC 时必须透传：
 |------|-----|------|------|
 | Message | `POST /api/v1/messages/send` | 服务端/机器人发消息 | 已接入 typed gRPC |
 | Message | `POST /api/v1/messages/recall` | 撤回消息 | 已接入 typed gRPC |
-| Message | `POST /api/v1/messages/read` | 标记单条已读 | 已接入 typed gRPC |
 | Conversation | `GET /api/v1/conversations` | 会话列表 | 已接入 typed gRPC |
 | Conversation | `GET /api/v1/conversations/participants` | 参与者分页 | 已接入 typed gRPC |
 | Conversation | `POST /api/v1/conversations/participants/manage` | 参与者管理 | 已接入 typed gRPC，需 Admin/强权限 |

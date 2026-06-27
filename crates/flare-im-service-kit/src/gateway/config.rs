@@ -410,15 +410,21 @@ mod tests {
     }
 
     #[test]
-    fn auth_mode_parses_aliases() {
+    fn auth_mode_parses_only_canonical_values() {
         assert_eq!(
             "core_jwt".parse::<AuthProviderMode>().unwrap(),
             AuthProviderMode::CoreJwt
         );
         assert_eq!(
-            "external".parse::<AuthProviderMode>().unwrap(),
+            "http_hook".parse::<AuthProviderMode>().unwrap(),
             AuthProviderMode::HttpHook
         );
+        for alias in ["jwt", "core", "hook", "external"] {
+            assert!(
+                alias.parse::<AuthProviderMode>().is_err(),
+                "{alias} must not be accepted as an auth mode"
+            );
+        }
     }
 
     #[test]

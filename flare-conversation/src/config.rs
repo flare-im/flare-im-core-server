@@ -22,6 +22,7 @@ pub struct ConversationConfig {
     pub conversation_unread_prefix: String,
     pub user_cursor_prefix: String,
     pub presence_prefix: String,
+    pub large_conversation_precise_unread_threshold: i32,
     pub storage_reader_service: Option<String>,
     pub recent_message_limit: i32,
     pub default_policy: ConversationPolicy,
@@ -116,6 +117,13 @@ impl ConversationConfig {
             .ok()
             .or_else(|| service_config.presence_prefix.clone())
             .unwrap_or_else(|| "presence:user".to_string());
+        let large_conversation_precise_unread_threshold =
+            env::var("CONVERSATION_LARGE_CONVERSATION_PRECISE_UNREAD_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok())
+                .or(service_config.large_conversation_precise_unread_threshold)
+                .unwrap_or(500)
+                .max(0);
 
         let storage_reader_service = env::var("CONVERSATION_STORAGE_READER_SERVICE")
             .ok()
@@ -262,6 +270,7 @@ impl ConversationConfig {
             conversation_unread_prefix,
             user_cursor_prefix,
             presence_prefix,
+            large_conversation_precise_unread_threshold,
             storage_reader_service,
             recent_message_limit,
             default_policy,

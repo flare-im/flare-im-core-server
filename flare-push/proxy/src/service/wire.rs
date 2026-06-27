@@ -6,7 +6,7 @@ use flare_server_core::error::Result;
 
 use crate::application::{PushProxyCommandHandler, PushTaskStatusQuery};
 use crate::config::PushProxyConfig;
-use crate::infrastructure::{PushProxyMqPublisher, RedisStateStore};
+use crate::infrastructure::{PushProxyMqPublisher, RedisDeviceTokenRegistry, RedisStateStore};
 use crate::interface::grpc::PushServiceHandler;
 
 pub struct ApplicationContext {
@@ -20,8 +20,9 @@ pub async fn initialize(
     let config = Arc::new(PushProxyConfig::from_app_config(app_config));
     let publisher = Arc::new(PushProxyMqPublisher::new(config.clone()).await?);
     let store = Arc::new(RedisStateStore::new(config.clone())?);
+    let device_tokens = Arc::new(RedisDeviceTokenRegistry::new(config.clone())?);
     let command_handler = Arc::new(PushProxyCommandHandler::new(publisher));
     let status_query = Arc::new(PushTaskStatusQuery::new(store.clone()));
-    let handler = PushServiceHandler::new(command_handler, status_query, store);
+    let handler = PushServiceHandler::new(command_handler, status_query, store, device_tokens);
     Ok(ApplicationContext { handler })
 }

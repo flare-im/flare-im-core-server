@@ -57,6 +57,13 @@ pub trait RecipientRepository: Send + Sync {
         ctx: &'a Ctx,
         conversation_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>>;
+
+    /// 根据会话 ID 获取会话成员数量。
+    fn get_conversation_member_count<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        conversation_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + 'a>>;
 }
 
 /// 辅助函数：判断会话类型是否需要查询成员列表
@@ -67,5 +74,7 @@ pub fn needs_member_lookup(conversation_type: ConversationType) -> bool {
             | ConversationType::Ai
             | ConversationType::Customer
             | ConversationType::System
+            | ConversationType::Channel
+            | ConversationType::Broadcast
     )
 }

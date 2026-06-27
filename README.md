@@ -46,7 +46,7 @@ flowchart LR
     Ingest --> MQMain["flare.im.message.main"]
     MQMain --> OrchestratorFanout["主队列消费者<br/>拆分存储与推送"]
     OrchestratorFanout --> MQStorage["flare.im.message.storage<br/>flare.im.message.events"]
-    OrchestratorFanout --> MQPush["flare.im.push.messages<br/>flare.im.push.events"]
+    OrchestratorFanout --> MQPush["flare.im.push.events<br/>EventEnvelope inline / ping"]
     MQStorage --> StorageWriter["flare-storage/writer"]
     MQPush --> PushServer["flare-push/server"]
     PushServer --> PushWorker["flare-push/worker"]
@@ -106,13 +106,21 @@ sequenceDiagram
     I-->>Client: Send ACK durability=BrokerAccepted
     I->>W: async cleanup WAL
     MQ->>O: main queue consumer
-    O->>MQ: fanout storage topic and push topic
+    O->>MQ: fanout storage topic and EventEnvelope delivery primitive
     MQ->>SW: persist message/event
     SW->>DB: archive + event stream + ledger
-    MQ->>P: online/offline push
+    MQ->>P: inline event / ping push
 ```
 
 持久消息的成功 ACK 默认表示 broker accepted，而不是已经落库。调用方必须读取 `SendAckDurability`：
+
+持久会话消息的实时下行统一走 `flare.im.push.events`：小会话/单聊使用
+`EVENT_MESSAGE + PING_WITH_INLINE` 作为延迟优化，大群或 inline 泄压阀关闭时使用
+recipient-less `PING`，由 Push Server 分页解析成员并只对在线用户发送 ping。
+10 万人大群的高频消息在 Push Server 解析成员前按 `(tenant_id, conversation_id)` 合并水位：
+首个 ping 立即触达，窗口内后续 ping 只保留最高 `max_conversation_seq` 并发送 trailing ping，
+客户端按水位拉取补齐，避免每条消息都扫描 10 万成员。
+`flare.im.push.messages` 仅保留给非持久或直接 push-only 消息入口。
 
 | durability | 含义 | 适用场景 |
 |------------|------|----------|

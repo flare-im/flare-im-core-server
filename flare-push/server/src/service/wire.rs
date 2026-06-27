@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_server_core::error::Result;
 use flare_server_core::mq::consumer::ConsumerConfig;
@@ -25,7 +26,12 @@ pub async fn initialize(
 
     let publisher = Arc::new(PushServerMqPublisher::new(config.clone()).await?);
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
-    let route_handler = Arc::new(PushRouterHandler::new(online_status, publisher.clone()));
+    let route_handler = Arc::new(
+        PushRouterHandler::new(online_status.clone(), online_status, publisher.clone())
+            .with_conversation_ping_coalesce_window(Duration::from_millis(
+                config.event_ping_coalesce_window_ms,
+            )),
+    );
     let message_handler = PushMessageHandler::new(route_handler.clone(), publisher.clone());
     let event_handler = PushEventHandler::new(route_handler.clone(), publisher.clone());
     let push_handler = PushHandler::new(route_handler);

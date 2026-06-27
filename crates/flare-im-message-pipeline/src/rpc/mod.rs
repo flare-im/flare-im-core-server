@@ -51,6 +51,13 @@ pub trait ConversationRpcClient: Send + Sync {
         conversation_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>>;
 
+    /// 获取会话成员数量。
+    fn get_conversation_member_count<'a>(
+        &'a self,
+        ctx: &'a Context,
+        conversation_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + 'a>>;
+
     /// 标记会话已读
     ///
     /// # 参数

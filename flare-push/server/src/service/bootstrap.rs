@@ -48,7 +48,7 @@ impl ApplicationBootstrap {
                     e
                 ))
             })?,
-            "nats" | "jetstream" => flare_server_core::mq::nats::build_nats_consumer_tasks(
+            "nats" => flare_server_core::mq::nats::build_nats_consumer_tasks(
                 context.config.as_ref(),
                 context.consumer_config,
                 context.dispatcher.clone(),

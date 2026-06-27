@@ -4,8 +4,9 @@ use tonic::transport::Channel;
 use crate::clients::Ctx;
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_grpc_proto::signaling::online::{
-    BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, GetUserPresenceRequest,
-    GetUserPresenceResponse, LogoutRequest, LogoutResponse,
+    BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, GetDeviceRequest, GetDeviceResponse,
+    GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest, KickDeviceResponse,
+    ListUserDevicesRequest, ListUserDevicesResponse, LogoutRequest, LogoutResponse,
 };
 
 #[derive(Clone)]
@@ -44,6 +45,42 @@ impl OnlineServiceClientWrapper {
         let response = self
             .client
             .batch_get_user_presence(Self::request_with_ctx(ctx, request))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn list_user_devices_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        request: ListUserDevicesRequest,
+    ) -> Result<ListUserDevicesResponse> {
+        let response = self
+            .client
+            .list_user_devices(Self::request_with_ctx(ctx, request))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn get_device_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        request: GetDeviceRequest,
+    ) -> Result<GetDeviceResponse> {
+        let response = self
+            .client
+            .get_device(Self::request_with_ctx(ctx, request))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn kick_device_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        request: KickDeviceRequest,
+    ) -> Result<KickDeviceResponse> {
+        let response = self
+            .client
+            .kick_device(Self::request_with_ctx(ctx, request))
             .await?;
         Ok(response.into_inner())
     }

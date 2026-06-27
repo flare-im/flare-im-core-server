@@ -121,7 +121,7 @@ impl ReadReceiptEventConsumer {
                     |e| map_infra_error(e, ErrorCode::ConfigurationError, "build Kafka consumer"),
                 )?,
             ),
-            "nats" | "jetstream" => Box::new(
+            "nats" => Box::new(
                 NatsMessageFetcher::new(&consumer_config, vec![subject.to_string()])
                     .await
                     .map_err(|e| {
@@ -457,7 +457,7 @@ impl ConversationEnsureEventConsumer {
                     },
                 )?,
             ),
-            "nats" | "jetstream" => Box::new(
+            "nats" => Box::new(
                 NatsMessageFetcher::new(&consumer_config, vec![subject.to_string()])
                     .await
                     .map_err(|e| {
@@ -693,6 +693,7 @@ mod tests {
             headers: HashMap::new(),
             push_only: false,
             persistence_only: false,
+            large_conversation: false,
             payload: Some(mq_envelope::Payload::Event(event)),
         }
         .encode_to_vec()

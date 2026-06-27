@@ -1,4 +1,4 @@
-//! 客户端 ACK 上行路由：Conversation / Batch → Conversation 服务；PushAck 仅占位日志。
+//! 客户端 ACK 上行路由：Push / Conversation / Read / Batch。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,20 +34,17 @@ impl AckRoutingHandler {
         let start_time = Instant::now();
         let decision_duration = start_time.elapsed();
 
-        let forward = matches!(
-            ack.payload.as_ref(),
-            Some(AckPayload::Push(_) | AckPayload::Conversation(_) | AckPayload::Batch(_))
-        );
+        let forward = is_client_uplink_ack(ack.payload.as_ref());
 
         if !forward {
             tracing::warn!(
                 request_id = %ctx.request_id(),
                 ack_payload = ack_payload_name(ack.payload.as_ref()),
-                "RouteAck: not a client uplink variant (push/conversation/batch)"
+                "RouteAck: not a client uplink ack variant"
             );
             return Err(flare_err!(
                 ErrorCode::InvalidParameter,
-                "use RouteAck only for Push/Conversation/Batch; Send/Event are invalid uplink"
+                "use RouteAck only for Push/Conversation/Read/Batch; Send/Event are invalid uplink"
             ));
         }
 
@@ -87,5 +84,54 @@ fn ack_payload_name(payload: Option<&AckPayload>) -> &'static str {
         Some(AckPayload::Read(_)) => "read",
         Some(AckPayload::Batch(_)) => "batch",
         None => "none",
+    }
+}
+
+fn is_client_uplink_ack(payload: Option<&AckPayload>) -> bool {
+    matches!(
+        payload,
+        Some(
+            AckPayload::Push(_)
+                | AckPayload::Conversation(_)
+                | AckPayload::Read(_)
+                | AckPayload::Batch(_),
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_proto::common::{AckBatch, ConversationAck, EventAck, PushAck, ReadAck, SendAck};
+
+    #[test]
+    fn read_ack_is_a_client_uplink_ack() {
+        assert!(is_client_uplink_ack(Some(&AckPayload::Read(
+            ReadAck::default()
+        ))));
+    }
+
+    #[test]
+    fn only_client_uplink_ack_payloads_are_forwarded() {
+        assert!(is_client_uplink_ack(Some(&AckPayload::Push(
+            PushAck::default()
+        ))));
+        assert!(is_client_uplink_ack(Some(&AckPayload::Conversation(
+            ConversationAck::default(),
+        ))));
+        assert!(is_client_uplink_ack(Some(&AckPayload::Read(
+            ReadAck::default()
+        ))));
+        assert!(is_client_uplink_ack(Some(&AckPayload::Batch(
+            AckBatch::default()
+        ))));
+
+        assert!(!is_client_uplink_ack(Some(&AckPayload::Send(
+            SendAck::default()
+        ))));
+        assert!(!is_client_uplink_ack(Some(&AckPayload::Event(
+            EventAck::default()
+        ))));
+        assert!(!is_client_uplink_ack(None));
     }
 }

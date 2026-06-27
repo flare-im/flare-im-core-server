@@ -6,10 +6,9 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, require_user_id}
 use tracing::debug;
 
 use crate::application::commands::{
-    BatchAcknowledgeCommand, CreateConversationCommand, DeleteConversationCommand,
-    ForceConversationSyncCommand, ManageParticipantsCommand, MarkConversationAsReadCommand,
-    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
-    UpdatePresenceCommand,
+    CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand,
+    UpdateConversationUserSettingsCommand, UpdateCursorCommand, UpdatePresenceCommand,
 };
 use crate::application::queries::{
     ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
@@ -31,28 +30,6 @@ pub struct ConversationCommandHandler {
 impl ConversationCommandHandler {
     pub fn new(domain_service: Arc<DefaultConversationDomainService>) -> Self {
         Self { domain_service }
-    }
-
-    /// 处理批量确认命令
-    pub async fn handle_batch_acknowledge(
-        &self,
-        ctx: &Context,
-        command: BatchAcknowledgeCommand,
-    ) -> Result<()> {
-        let user_id = require_user_id(ctx)?;
-
-        debug!(
-            user_id = %user_id,
-            count = command.cursors.len(),
-            "Handling batch acknowledge command"
-        );
-
-        self.domain_service
-            .batch_acknowledge(ctx, command.cursors)
-            .await?;
-
-        debug!(user_id = %user_id, "Batch acknowledge completed");
-        Ok(())
     }
 
     /// 处理创建会话命令

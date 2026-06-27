@@ -7,7 +7,7 @@ use crate::config::AccessGatewayConfig;
 use crate::domain::ports::IConnectionPort;
 use crate::domain::service::{
     SendAckDomainService, SendDataDomainService, SendEventDomainService, SendMessageDomainService,
-    SyncService,
+    SyncPullLimiter, SyncPullRateLimitConfig, SyncService,
 };
 use crate::infrastructure::ports::{
     ConnectionContextResolver, RouterAckReportPort, RouterDataCommandPort, RouterEventCommandPort,
@@ -75,6 +75,7 @@ pub fn build_long_connection_handler(
     connection_port: Arc<dyn IConnectionPort>,
     route_pool: Arc<SignalingRouteGrpcPool>,
     storage_sync_pool: Arc<StorageSyncGrpcPool>,
+    sync_pull_rate_limit_config: SyncPullRateLimitConfig,
 ) -> Arc<LongConnectionHandler> {
     let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> =
         Arc::new(RouterMessageCommandPort::new(route_pool.clone()));
@@ -83,7 +84,10 @@ pub fn build_long_connection_handler(
     let storage_sync = Arc::new(StorageSyncPort::new(storage_sync_pool));
     let sync_port: Arc<dyn crate::domain::ports::ISyncPort> = storage_sync;
 
-    let sync_service = Arc::new(SyncService::new(sync_port));
+    let sync_service = Arc::new(
+        SyncService::new(sync_port)
+            .with_pull_limiter(Arc::new(SyncPullLimiter::new(sync_pull_rate_limit_config))),
+    );
     let send_event_service = Arc::new(SendEventDomainService::new(event_port));
 
     let data_port: Arc<dyn crate::domain::ports::IDataCommandPort> =

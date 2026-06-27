@@ -26,7 +26,7 @@ impl PushServerMqPublisher {
                     ))
                 },
             )?),
-            "nats" | "jetstream" => Arc::new(
+            "nats" => Arc::new(
                 NatsProducerBuilder::new()
                     .build(config.as_ref())
                     .await

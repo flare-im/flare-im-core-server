@@ -24,6 +24,7 @@ pub trait PushRepository: Send + Sync {
         message: Message,
         recipient_user_ids: Vec<String>,
         conversation_id: String,
+        large_conversation: bool,
     ) -> Result<()>;
 
     /// 推送领域事件到 MQ（持久化 + 推送）

@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flare_server_core::error::{AnyhowContext, Result};
 use toml::Value;
@@ -56,10 +55,9 @@ impl ConfigManager {
         env::var("FLARE_ENV").unwrap_or_else(|_| "development".to_string())
     }
 
-    /// 根据环境加载特定配置
+    /// 根据环境加载特定配置。
     ///
-    /// 加载 config/environments/{environment}.toml 文件中的配置，
-    /// 并将其合并到基础配置中
+    /// 兼容旧入口，默认从 `config/environments/{environment}.toml` 加载。
     ///
     /// # 参数
     /// * `base_config` - 基础配置，将被修改以包含环境特定配置
@@ -67,14 +65,24 @@ impl ConfigManager {
     /// # 返回
     /// 成功时返回 Ok(())，失败时返回错误信息
     pub fn load_environment_config(base_config: &mut FlareAppConfig) -> Result<()> {
-        let env = Self::get_environment();
-        let env_config_path = format!("config/environments/{}.toml", env);
+        Self::load_environment_config_from_root(base_config, Some(Path::new("config")))
+    }
 
-        if Path::new(&env_config_path).exists() {
-            let env_config_content = fs::read_to_string(&env_config_path)
-                .with_context(|| format!("无法读取环境配置文件: {}", env_config_path))?;
-            let env_config: Value = toml::from_str(&env_config_content)
-                .with_context(|| format!("无效的环境配置格式: {}", env_config_path))?;
+    /// 根据当前配置根加载环境覆盖。
+    ///
+    /// 对目录配置根，加载 `{config_root}/environments/{FLARE_ENV}.toml`；对单文件配置，
+    /// 加载其相邻目录下的 `environments/{FLARE_ENV}.toml`。当前覆盖面保持窄口径：
+    /// root `[mq]` 与 `[object_storage.*]`。
+    pub fn load_environment_config_from_root(
+        base_config: &mut FlareAppConfig,
+        config_root: Option<&Path>,
+    ) -> Result<()> {
+        let env = Self::get_environment();
+        let env_config_path = environment_config_path(config_root, &env);
+
+        if env_config_path.exists() {
+            let env_config = super::load_toml_value(&env_config_path)
+                .with_context(|| format!("无法读取环境配置文件: {}", env_config_path.display()))?;
 
             // 合并环境配置到基础配置中
             Self::merge_config_values(&mut base_config.object_storage, &env_config);
@@ -155,13 +163,17 @@ impl ConfigManager {
                 mq.default_backend = t.to_ascii_lowercase();
             }
         }
-        if let Some(v) = tbl.get("allow_kafka_fallback") {
-            if let Some(b) = v.as_bool() {
-                mq.allow_kafka_fallback = b;
-            } else if let Some(s) = v.as_str() {
-                let u = s.trim();
-                mq.allow_kafka_fallback = matches!(u, "1" | "true" | "yes");
-            }
-        }
+    }
+}
+
+fn environment_config_path(config_root: Option<&Path>, env: &str) -> PathBuf {
+    let file_name = format!("{env}.toml");
+    match config_root {
+        Some(root) if root.is_dir() => root.join("environments").join(file_name),
+        Some(file) => file
+            .parent()
+            .map(|parent| parent.join("environments").join(&file_name))
+            .unwrap_or_else(|| PathBuf::from("config").join("environments").join(file_name)),
+        None => PathBuf::from("config").join("environments").join(file_name),
     }
 }

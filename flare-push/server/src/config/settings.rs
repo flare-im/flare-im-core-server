@@ -33,9 +33,13 @@ pub struct PushServerConfig {
     pub push_online_topic: String,
     pub push_offline_topic: String,
     pub push_dlq_topic: String,
+    pub redis_url: String,
+    pub online_status_backend: String,
 
     /// flare-signaling/online 的 gRPC endpoint（与 `config/services/signaling-online.toml` 中 server.port 一致）
     pub online_service_endpoint: String,
+    /// 大群 pure ping 在解析成员前按会话合并的窗口（毫秒），0 表示关闭。
+    pub event_ping_coalesce_window_ms: u64,
 
     /// 默认 tenant（用于填充 Envelope）
     pub default_tenant_id: String,
@@ -47,11 +51,11 @@ fn default_signaling_online_grpc_endpoint(app: &FlareAppConfig) -> String {
     let Some(server) = so.runtime.server.as_ref() else {
         return "http://127.0.0.1:50061".to_string();
     };
-    endpoint_from_service_server(server)
+    endpoint_from_service_server(server, 50061)
 }
 
-fn endpoint_from_service_server(server: &ServiceEndpointConfig) -> String {
-    let port = server.port.unwrap_or(50061);
+fn endpoint_from_service_server(server: &ServiceEndpointConfig, default_port: u16) -> String {
+    let port = server.port.unwrap_or(default_port);
     let host = server
         .address
         .as_deref()
@@ -146,10 +150,30 @@ impl PushServerConfig {
             .ok()
             .or_else(|| service.push_dlq_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_DLQ.to_string());
+        let redis_url = env::var("PUSH_SERVER_REDIS_URL")
+            .ok()
+            .or_else(|| {
+                service
+                    .redis
+                    .as_deref()
+                    .and_then(|name| app.redis_profile(name))
+                    .map(|profile| profile.url.clone())
+            })
+            .unwrap_or_else(|| "redis://127.0.0.1:6379/0".to_string());
+        let online_status_backend = env::var("PUSH_SERVER_ONLINE_STATUS_BACKEND")
+            .ok()
+            .or_else(|| service.online_status_backend.clone())
+            .unwrap_or_else(|| "redis".to_string())
+            .to_ascii_lowercase();
 
         let online_service_endpoint = env::var("PUSH_SERVER_ONLINE_SERVICE_ENDPOINT")
             .ok()
             .unwrap_or_else(|| default_signaling_online_grpc_endpoint(app));
+        let event_ping_coalesce_window_ms = env::var("PUSH_SERVER_EVENT_PING_COALESCE_WINDOW_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or(service.event_ping_coalesce_window_ms)
+            .unwrap_or(200);
 
         let default_tenant_id = env::var("PUSH_SERVER_DEFAULT_TENANT_ID")
             .ok()
@@ -174,7 +198,10 @@ impl PushServerConfig {
             push_online_topic,
             push_offline_topic,
             push_dlq_topic,
+            redis_url,
+            online_status_backend,
             online_service_endpoint,
+            event_ping_coalesce_window_ms,
             default_tenant_id,
         }
     }

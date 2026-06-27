@@ -313,18 +313,6 @@ Authorization: Bearer <token>
 }
 ```
 
-#### 标记消息已读
-```http
-POST /api/v1/messages/read
-Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "conversation_id": "private:user1:user2",
-  "message_id": "msg-123"
-}
-```
-
 ### ConversationService
 
 #### 获取会话列表

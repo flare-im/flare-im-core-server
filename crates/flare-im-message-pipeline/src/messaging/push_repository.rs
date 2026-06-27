@@ -11,6 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::constants::headers::{
+    DELIVERY_MODE_PING, DELIVERY_MODE_PING_WITH_INLINE, HEADER_DELIVERY_MODE,
+    HEADER_INLINE_EVENTS_TRUNCATED,
+};
 use flare_im_contracts::constants::topics::{
     TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS, TOPIC_MESSAGE_MAIN, TOPIC_PUSH_ENVELOPE,
     TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
@@ -22,7 +26,7 @@ use flare_im_contracts::utils::{
     TimelineMetadata, context_to_mq_metadata, current_millis, embed_timeline_in_extra_map,
     normalize_tenant_id,
 };
-use flare_proto::common::{Event, Message, MqEnvelope, PushEnvelope};
+use flare_proto::common::{Event, EventType, Message, MqEnvelope, PushEnvelope};
 use flare_server_core::mq::producer::{Producer, ProducerError};
 use prost::Message as _;
 
@@ -126,6 +130,155 @@ impl MqPushRepository {
         envelope.headers = headers.clone();
         headers
     }
+
+    fn message_event(message: &Message, include_payload: bool) -> Event {
+        Event {
+            conversation_id: message.conversation_id.clone(),
+            conversation_seq: message.conversation_seq,
+            r#type: EventType::EventMessage as i32,
+            created_at: message.created_at,
+            event_id: if message.server_id.trim().is_empty() {
+                let kind = if include_payload {
+                    "message-inline"
+                } else {
+                    "message-ping"
+                };
+                format!(
+                    "{kind}:{}:{}",
+                    message.conversation_id, message.conversation_seq
+                )
+            } else if include_payload {
+                format!("message-inline:{}", message.server_id)
+            } else {
+                format!("message-ping:{}", message.server_id)
+            },
+            request_id: None,
+            payload: include_payload
+                .then(|| flare_proto::common::event::Payload::Message(message.clone())),
+        }
+    }
+
+    fn message_ping_event(message: &Message) -> Event {
+        Self::message_event(message, false)
+    }
+
+    fn message_inline_event(message: &Message) -> Event {
+        Self::message_event(message, true)
+    }
+
+    pub async fn push_only_message_ping(
+        &self,
+        ctx: &Ctx,
+        message: &Message,
+        recipient_user_ids: Vec<String>,
+        conversation_id: String,
+        large_conversation: bool,
+    ) -> Result<()> {
+        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+        let event = Self::message_ping_event(message);
+        let mut mq = mq_envelope_for_main_queue_event_with_headers(
+            &event,
+            recipient_user_ids,
+            Self::event_headers(ctx, &event),
+        );
+        mq.push_only = true;
+        mq.large_conversation = large_conversation;
+        mq.headers
+            .insert("push-only".to_string(), "true".to_string());
+        mq.headers.insert(
+            HEADER_DELIVERY_MODE.to_string(),
+            DELIVERY_MODE_PING.to_string(),
+        );
+        mq.headers.insert(
+            HEADER_INLINE_EVENTS_TRUNCATED.to_string(),
+            "true".to_string(),
+        );
+        Self::finalize_mq_headers(&mut mq);
+
+        let payload = mq.encode_to_vec();
+        if payload.len() > MAX_MESSAGE_SIZE {
+            tracing::error!(
+                payload_size = payload.len(),
+                conversation_id = %conversation_id,
+                "MqEnvelope too large, reject push-only message ping"
+            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "message ping payload too large",
+            )
+            .param("size", payload.len().to_string())
+            .param("max_size", MAX_MESSAGE_SIZE.to_string())
+            .build_error());
+        }
+
+        self.producer
+            .send(
+                ctx,
+                TOPIC_PUSH_EVENTS,
+                Some(&conversation_id),
+                payload,
+                Some(mq.headers.clone()),
+            )
+            .await
+            .map_err(Self::map_producer_error)
+    }
+
+    pub async fn push_only_message_inline_event(
+        &self,
+        ctx: &Ctx,
+        message: &Message,
+        recipient_user_ids: Vec<String>,
+        conversation_id: String,
+    ) -> Result<()> {
+        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+        let event = Self::message_inline_event(message);
+        let mut mq = mq_envelope_for_main_queue_event_with_headers(
+            &event,
+            recipient_user_ids,
+            Self::event_headers(ctx, &event),
+        );
+        mq.push_only = true;
+        mq.headers
+            .insert("push-only".to_string(), "true".to_string());
+        mq.headers.insert(
+            HEADER_DELIVERY_MODE.to_string(),
+            DELIVERY_MODE_PING_WITH_INLINE.to_string(),
+        );
+        mq.headers.insert(
+            HEADER_INLINE_EVENTS_TRUNCATED.to_string(),
+            "false".to_string(),
+        );
+        Self::finalize_mq_headers(&mut mq);
+
+        let payload = mq.encode_to_vec();
+        if payload.len() > MAX_MESSAGE_SIZE {
+            tracing::error!(
+                payload_size = payload.len(),
+                conversation_id = %conversation_id,
+                "MqEnvelope too large, reject push-only message inline event"
+            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "message inline event payload too large",
+            )
+            .param("size", payload.len().to_string())
+            .param("max_size", MAX_MESSAGE_SIZE.to_string())
+            .build_error());
+        }
+
+        self.producer
+            .send(
+                ctx,
+                TOPIC_PUSH_EVENTS,
+                Some(&conversation_id),
+                payload,
+                Some(mq.headers.clone()),
+            )
+            .await
+            .map_err(Self::map_producer_error)
+    }
 }
 
 impl PushRepository for MqPushRepository {
@@ -142,6 +295,7 @@ impl PushRepository for MqPushRepository {
         message: Message,
         recipient_user_ids: Vec<String>,
         conversation_id: String,
+        large_conversation: bool,
     ) -> Result<()> {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -150,6 +304,7 @@ impl PushRepository for MqPushRepository {
             &message,
             recipient_user_ids,
             Self::message_headers(ctx, &message),
+            large_conversation,
         );
         Self::finalize_mq_headers(&mut mq);
         let payload = mq.encode_to_vec();
@@ -268,6 +423,7 @@ impl PushRepository for MqPushRepository {
             &message,
             recipient_user_ids,
             Self::message_headers(ctx, &message),
+            false,
         );
 
         // 标记为仅推送（不持久化）
@@ -401,6 +557,7 @@ impl PushRepository for MqPushRepository {
             &message,
             Vec::new(),
             Self::message_headers(ctx, &message),
+            false,
         );
 
         // 标记为仅持久化（不推送）
@@ -638,6 +795,7 @@ mod tests {
             message,
             vec!["receiver-a".to_string()],
             "conversation-a".to_string(),
+            false,
         )
         .await
         .expect("publish should succeed");
@@ -667,6 +825,7 @@ mod tests {
             .expect("payload should decode as MqEnvelope");
         assert_eq!(envelope.conversation_id, "conversation-a");
         assert_eq!(envelope.seq, 42);
+        assert!(!envelope.large_conversation);
         assert_eq!(
             envelope.headers.get("x-tenant-id").map(String::as_str),
             Some("tenant-a")
@@ -679,6 +838,40 @@ mod tests {
             envelope.headers.get("x-envelope-id"),
             outer_headers.get("x-envelope-id")
         );
+    }
+
+    #[tokio::test]
+    async fn publish_message_marks_large_conversation_without_materialized_recipients() {
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let ctx: Ctx = Arc::new(Context::default().with_tenant_id("tenant-a"));
+        let message = Message {
+            server_id: "message-large".to_string(),
+            conversation_id: "conversation-large".to_string(),
+            conversation_seq: 88,
+            ..Message::default()
+        };
+
+        repo.publish_message(
+            &ctx,
+            message,
+            Vec::new(),
+            "conversation-large".to_string(),
+            true,
+        )
+        .await
+        .expect("publish should succeed");
+
+        let captured = producer
+            .send
+            .lock()
+            .expect("capture producer poisoned")
+            .clone()
+            .expect("send should be captured");
+        let envelope = MqEnvelope::decode(captured.payload.as_slice())
+            .expect("payload should decode as MqEnvelope");
+        assert!(envelope.large_conversation);
+        assert!(envelope.recipient_user_ids.is_empty());
     }
 
     #[test]

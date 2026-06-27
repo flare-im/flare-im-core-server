@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use crate::application::commands::{
     AddReactionCommand, DeleteMessageCommand, DeleteScope, DeleteType, EditMessageCommand,
-    MarkMessageCommand, PinMessageCommand, ReadMessageCommand, RecallMessageCommand,
-    RemoveReactionCommand, UnmarkMessageCommand, UnpinMessageCommand,
+    MarkMessageCommand, PinMessageCommand, RecallMessageCommand, RemoveReactionCommand,
+    UnmarkMessageCommand, UnpinMessageCommand,
 };
 
 // =============================================================================
@@ -396,6 +396,7 @@ pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &s
             pinned_by: pinned_by.to_string(),
             reason: None,
             expire_at: None,
+            scope: 0,
         })),
     }
 }
@@ -410,9 +411,9 @@ pub fn build_pin_event(conversation_id: &str, server_msg_id: &str, pinned_by: &s
 /// ```rust
 /// use flare_orchestrator::domain::build_unpin_event;
 ///
-/// let event = build_unpin_event("conv-123", "msg-456");
+/// let event = build_unpin_event("conv-123", "msg-456", "user-789");
 /// ```
-pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
+pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str, unpinned_by: &str) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         conversation_seq: 0,
@@ -422,6 +423,8 @@ pub fn build_unpin_event(conversation_id: &str, server_msg_id: &str) -> Event {
         request_id: None,
         payload: Some(event::Payload::Unpin(UnpinEvent {
             server_msg_id: server_msg_id.to_string(),
+            unpinned_by: unpinned_by.to_string(),
+            scope: 0,
         })),
     }
 }
@@ -748,25 +751,6 @@ impl EventBuilder {
         }
     }
 
-    /// 从已读命令构建事件
-    pub fn read(cmd: &ReadMessageCommand, seq: u64) -> Event {
-        Event {
-            conversation_id: cmd.base.conversation_id.clone(),
-            conversation_seq: seq,
-            r#type: EventType::EventReadReceipt as i32,
-            created_at: now_millis(),
-            event_id: format!("{}:{}", cmd.base.conversation_id, seq),
-            request_id: None,
-            payload: Some(event::Payload::Read(ReadReceiptEvent {
-                conversation_id: cmd.base.conversation_id.clone(),
-                read_seq: 0,
-                user_id: cmd.base.operator_id.clone(),
-                message_ids: cmd.message_ids.clone(),
-                read_at: Some(to_timestamp(cmd.read_at.unwrap_or_else(Utc::now))),
-            })),
-        }
-    }
-
     /// 从添加表情命令构建事件
     pub fn reaction_add(cmd: &AddReactionCommand, seq: u64) -> Event {
         Event {
@@ -817,6 +801,7 @@ impl EventBuilder {
                 pinned_by: cmd.base.operator_id.clone(),
                 reason: cmd.reason.clone(),
                 expire_at: cmd.expire_at.map(to_timestamp),
+                scope: cmd.scope,
             })),
         }
     }
@@ -832,6 +817,8 @@ impl EventBuilder {
             request_id: None,
             payload: Some(event::Payload::Unpin(UnpinEvent {
                 server_msg_id: cmd.base.message_id.clone(),
+                unpinned_by: cmd.base.operator_id.clone(),
+                scope: cmd.scope,
             })),
         }
     }

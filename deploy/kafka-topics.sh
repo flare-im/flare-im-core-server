@@ -71,9 +71,7 @@ ensure_topic "flare.im.message.storage.retry.5s" "${MESSAGE_PARTITIONS}" "${RETR
 # Push path.
 ensure_topic "flare.im.push.messages" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
 ensure_topic "flare.im.push.events" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
-ensure_topic "flare.im.push.notifications" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
 ensure_topic "flare.im.push.acks" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
-ensure_topic "flare.im.push.custom" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
 ensure_topic "flare.im.push.envelope" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
 ensure_topic "flare.im.push.online" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"
 ensure_topic "flare.im.push.offline" "${PUSH_PARTITIONS}" "${PUSH_RETENTION_MS}"

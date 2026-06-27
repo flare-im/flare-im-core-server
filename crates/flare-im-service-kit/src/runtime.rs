@@ -142,7 +142,7 @@ where
         Some(value) => value
             .parse::<u16>()
             .with_context(|| format!("invalid {port_key}: {value}"))?,
-        None => configured_port.unwrap_or_else(|| {
+        None => configured_port.unwrap_or({
             if default_port == 0 {
                 core_port
             } else {

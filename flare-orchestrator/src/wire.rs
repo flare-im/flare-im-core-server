@@ -30,7 +30,12 @@ use flare_server_core::mq::nats::NatsProducer;
 
 use crate::application::handlers::{EventHandler, MessageActionHandler, StorageHandler};
 use crate::config::MessageOrchestratorConfig;
-use crate::domain::service::{EventDomainService, MessageFanoutService};
+use crate::domain::service::{
+    EventDomainService, MessageFanoutService, UserSyncCompensationWorker,
+};
+use crate::infrastructure::persistence::{
+    RedisUserSyncCompensationRepository, RedisUserSyncIndexRepository,
+};
 use crate::interface::grpc::{MessageActionGrpcHandler, MessageEventExecuteGrpcHandler};
 use crate::interface::mq::StorageConsumerHandler;
 
@@ -45,6 +50,7 @@ pub struct ApplicationContext {
     pub retry_forwarder_dispatcher: Option<Arc<dyn Dispatcher>>,
     pub failure_publishers: ConsumerFailurePublishers,
     pub config: Arc<MessageOrchestratorConfig>,
+    pub user_sync_compensation_worker: Arc<UserSyncCompensationWorker>,
 }
 
 /// 构建应用上下文
@@ -63,6 +69,21 @@ pub async fn initialize(
         build_retry_forwarder_dispatcher(&config, mq_producer.clone())?;
 
     let push_repository = MqPushRepository::new(mq_producer.clone());
+    let user_sync_index_repository: Arc<dyn crate::domain::repository::UserSyncIndexRepository> =
+        Arc::new(RedisUserSyncIndexRepository::new(
+            redis_client.clone(),
+            config.user_sync_index_max_changes_per_user,
+            config.user_sync_index_ttl_seconds,
+        ));
+    let user_sync_compensation_repository: Arc<
+        dyn crate::domain::repository::UserSyncCompensationRepository,
+    > = Arc::new(RedisUserSyncCompensationRepository::new(
+        redis_client.clone(),
+    ));
+    let user_sync_compensation_worker = Arc::new(UserSyncCompensationWorker::new(
+        user_sync_compensation_repository.clone(),
+        user_sync_index_repository.clone(),
+    ));
 
     let conversation_service_type = config
         .conversation_service_type
@@ -94,14 +115,23 @@ pub async fn initialize(
             flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
         })?;
 
-    let message_fanout_service = Arc::new(MessageFanoutService::new(push_repository.clone()));
+    let message_fanout_service = Arc::new(
+        MessageFanoutService::new(push_repository.clone())
+            .with_inline_message_push_enabled(config.inline_message_push_enabled)
+            .with_user_sync_index(user_sync_index_repository.clone())
+            .with_user_sync_compensation(user_sync_compensation_repository.clone()),
+    );
 
-    let event_domain_service = Arc::new(EventDomainService::new(
-        push_repository.clone(),
-        recipient_repository.clone(),
-        Arc::new(sequence_allocator.clone()),
-        None,
-    ));
+    let event_domain_service = Arc::new(
+        EventDomainService::new(
+            push_repository.clone(),
+            recipient_repository.clone(),
+            Arc::new(sequence_allocator.clone()),
+            None,
+        )
+        .with_user_sync_index(user_sync_index_repository)
+        .with_user_sync_compensation(user_sync_compensation_repository),
+    );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));
 
@@ -141,6 +171,7 @@ pub async fn initialize(
         retry_forwarder_dispatcher,
         failure_publishers,
         config,
+        user_sync_compensation_worker,
     })
 }
 
@@ -169,7 +200,7 @@ async fn build_mq_producer(
             })?;
             Ok(Arc::new(producer))
         }
-        "nats" | "jetstream" => {
+        "nats" => {
             let producer = NatsProducer::new(config).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
                     "failed to create JetStream producer: {}",
@@ -204,7 +235,7 @@ fn build_failure_publishers(
                 .with_not_before_delay(Duration::from_millis(config.message_retry_delay_ms.max(1))),
             ))
             .with_dead_letter(dlq),
-        "nats" | "jetstream" => ConsumerFailurePublishers::new().with_dead_letter(dlq),
+        "nats" => ConsumerFailurePublishers::new().with_dead_letter(dlq),
         _ => ConsumerFailurePublishers::new(),
     }
 }

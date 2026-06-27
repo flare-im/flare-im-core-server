@@ -68,6 +68,38 @@ pub struct GetFileUrlHttpResponse {
     pub cdn_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct GetFileUrlHttpRequest {
+    pub file_id: String,
+    #[serde(default)]
+    pub expires_in: i32,
+    #[serde(default)]
+    pub download: bool,
+    #[serde(default)]
+    pub response_headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub retention_protected: bool,
+    #[serde(default = "available_content_visibility")]
+    pub content_visibility: i32,
+}
+
+fn available_content_visibility() -> i32 {
+    flare_proto::common::ContentVisibility::Available as i32
+}
+
+impl From<GetFileUrlHttpRequest> for flare_grpc_proto::media::GetFileUrlRequest {
+    fn from(value: GetFileUrlHttpRequest) -> Self {
+        Self {
+            file_id: value.file_id,
+            expires_in: value.expires_in,
+            download: value.download,
+            response_headers: value.response_headers,
+            retention_protected: value.retention_protected,
+            content_visibility: value.content_visibility,
+        }
+    }
+}
+
 impl From<flare_grpc_proto::media::GetFileUrlResponse> for GetFileUrlHttpResponse {
     fn from(value: flare_grpc_proto::media::GetFileUrlResponse) -> Self {
         Self {
@@ -311,6 +343,39 @@ impl From<flare_grpc_proto::media::UploadFileResponse> for UploadFileHttpRespons
             },
             info: value.info.map(FileInfoHttpResponse::from),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_file_url_http_request_matches_sdk_wire_shape() {
+        let req: GetFileUrlHttpRequest = serde_json::from_value(serde_json::json!({
+            "file_id": "file-1",
+            "expires_in": 180,
+            "download": true,
+            "response_headers": {
+                "content-disposition": "inline"
+            }
+        }))
+        .expect("sdk media get_file_url request should decode");
+
+        let grpc: flare_grpc_proto::media::GetFileUrlRequest = req.into();
+
+        assert_eq!(grpc.file_id, "file-1");
+        assert_eq!(grpc.expires_in, 180);
+        assert!(grpc.download);
+        assert_eq!(
+            grpc.response_headers.get("content-disposition"),
+            Some(&"inline".to_string())
+        );
+        assert!(!grpc.retention_protected);
+        assert_eq!(
+            grpc.content_visibility,
+            flare_proto::common::ContentVisibility::Available as i32
+        );
     }
 }
 
@@ -872,18 +937,5 @@ pub struct RecallMessageHttpRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RecallMessageHttpResponse {
-    pub success: bool,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct MarkReadHttpRequest {
-    pub conversation_id: String,
-    pub message_id: String,
-    #[serde(default)]
-    pub burn_after_read: bool,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MarkReadHttpResponse {
     pub success: bool,
 }

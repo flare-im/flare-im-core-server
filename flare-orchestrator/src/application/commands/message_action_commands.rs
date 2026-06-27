@@ -7,6 +7,17 @@ use flare_proto::common::Pagination as ProtoPagination;
 use flare_proto::message_content_ext::MessageContentExt;
 use serde::{Deserialize, Serialize};
 
+pub const MESSAGE_PIN_SCOPE_CONVERSATION: i32 = 0;
+pub const MESSAGE_PIN_SCOPE_SELF: i32 = 1;
+
+fn normalize_message_pin_scope(scope: i32) -> i32 {
+    if scope == MESSAGE_PIN_SCOPE_SELF {
+        MESSAGE_PIN_SCOPE_SELF
+    } else {
+        MESSAGE_PIN_SCOPE_CONVERSATION
+    }
+}
+
 fn operator_id_from_ctx(ctx: &flare_server_core::context::Ctx) -> String {
     ctx.actor()
         .map(|a| a.actor_id().to_string())
@@ -273,20 +284,6 @@ impl DeleteScope {
     }
 }
 
-/// 已读消息命令
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadMessageCommand {
-    /// 基础命令字段
-    #[serde(flatten)]
-    pub base: MessageOperationCommand,
-    /// 已读的消息ID列表（批量已读）
-    pub message_ids: Vec<String>,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 是否阅后即焚
-    pub burn_after_read: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadBurnMessageCommand {
     pub tenant_id: String,
@@ -309,32 +306,6 @@ pub struct HardDeleteBurnedMessagesCommand {
     pub tenant_id: String,
     pub now: i64,
     pub limit: i64,
-}
-
-impl ReadMessageCommand {
-    /// 从protobuf请求创建命令
-    pub fn from_request(
-        request: &flare_grpc_proto::message::MarkMessageReadRequest,
-        ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
-        let operator_id = operator_id_from_ctx(ctx);
-
-        Self {
-            base: MessageOperationCommand {
-                message_id: request.message_id.clone(),
-                operator_id,
-                timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
-                conversation_id: request.conversation_id.clone(),
-            },
-            message_ids: vec![request.message_id.clone()],
-            read_at: request.read_at.map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            burn_after_read: false,
-        }
-    }
 }
 
 /// 添加反应命令
@@ -411,6 +382,8 @@ pub struct PinMessageCommand {
     /// 基础命令字段
     #[serde(flatten)]
     pub base: MessageOperationCommand,
+    /// 置顶作用域
+    pub scope: i32,
     /// 置顶原因（可选）
     pub reason: Option<String>,
     /// 置顶到期时间（可选）
@@ -423,10 +396,7 @@ impl PinMessageCommand {
         request: &flare_grpc_proto::message::PinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
 
         Self {
             base: MessageOperationCommand {
@@ -436,6 +406,7 @@ impl PinMessageCommand {
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
                 conversation_id: String::new(), // 会在后续填充
             },
+            scope: normalize_message_pin_scope(request.scope),
             reason: if request.reason.is_empty() {
                 None
             } else {
@@ -455,6 +426,8 @@ pub struct UnpinMessageCommand {
     /// 基础命令字段
     #[serde(flatten)]
     pub base: MessageOperationCommand,
+    /// 取消置顶作用域
+    pub scope: i32,
 }
 
 impl UnpinMessageCommand {
@@ -463,10 +436,7 @@ impl UnpinMessageCommand {
         request: &flare_grpc_proto::message::UnpinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
     ) -> Self {
-        let operator_id = ctx
-            .actor()
-            .map(|a| a.actor_id().to_string())
-            .unwrap_or_default();
+        let operator_id = operator_id_from_ctx(ctx);
 
         Self {
             base: MessageOperationCommand {
@@ -476,6 +446,7 @@ impl UnpinMessageCommand {
                 tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
                 conversation_id: String::new(), // 会在后续填充
             },
+            scope: normalize_message_pin_scope(request.scope),
         }
     }
 }
@@ -551,115 +522,6 @@ impl UnmarkMessageCommand {
                 Some(request.mark_type)
             },
             user_id: String::new(), // 由 handler 从 context 填充
-        }
-    }
-}
-
-/// 批量标记已读命令
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchMarkMessageReadCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 要标记已读的消息ID列表（如果为空，则标记会话中所有未读消息）
-    pub message_ids: Vec<String>,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl BatchMarkMessageReadCommand {
-    /// 从protobuf请求创建命令
-    pub fn from_request(
-        request: &flare_grpc_proto::message::BatchMarkMessageReadRequest,
-        ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
-        let read_at = request
-            .read_at
-            .map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            })
-            .unwrap_or_else(chrono::Utc::now);
-
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            user_id: ctx
-                .actor()
-                .map(|a| a.actor_id().to_string())
-                .unwrap_or_default(),
-            message_ids: request.message_ids.clone(),
-            read_at: Some(read_at),
-            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
-        }
-    }
-}
-
-/// 标记会话已读命令
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarkConversationReadCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl MarkConversationReadCommand {
-    /// 从protobuf请求创建命令
-    pub fn from_request(
-        request: &flare_grpc_proto::message::MarkConversationReadRequest,
-        ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
-        let read_at = request
-            .read_at
-            .map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            })
-            .unwrap_or_else(chrono::Utc::now);
-
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            user_id: ctx
-                .actor()
-                .map(|a| a.actor_id().to_string())
-                .unwrap_or_default(),
-            read_at: Some(read_at),
-            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
-        }
-    }
-}
-
-/// 标记全部会话已读命令
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarkAllConversationsReadCommand {
-    /// 用户ID
-    pub user_id: String,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 会话类型筛选（可选，如果为空则标记所有类型的会话）
-    pub conversation_types: Vec<String>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl MarkAllConversationsReadCommand {
-    /// 从protobuf请求创建命令
-    pub fn from_request(
-        _request: &flare_grpc_proto::message::MarkAllConversationsReadRequest,
-        ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
-        Self {
-            user_id: String::new(), // 从context获取
-            read_at: Some(chrono::Utc::now()),
-            conversation_types: Vec::new(),
-            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
         }
     }
 }
@@ -869,6 +731,8 @@ pub struct AppPinMessageCommand {
     pub message_id: String,
     /// 操作者ID
     pub operator_id: String,
+    /// 置顶作用域
+    pub scope: i32,
     /// 置顶原因（可选）
     pub reason: Option<String>,
     /// 过期时间（可选）
@@ -884,6 +748,7 @@ impl From<&flare_grpc_proto::message::PinMessageRequest> for AppPinMessageComman
         Self {
             message_id: request.message_id.clone(),
             operator_id: String::new(), // 由 handler 从 context 填充
+            scope: normalize_message_pin_scope(request.scope),
             reason: if request.reason.is_empty() {
                 None
             } else {
@@ -906,6 +771,8 @@ pub struct AppUnpinMessageCommand {
     pub message_id: String,
     /// 操作者ID
     pub operator_id: String,
+    /// 取消置顶作用域
+    pub scope: i32,
     /// 租户ID
     pub tenant_id: String,
     /// 会话ID
@@ -916,7 +783,8 @@ impl From<&flare_grpc_proto::message::UnpinMessageRequest> for AppUnpinMessageCo
     fn from(request: &flare_grpc_proto::message::UnpinMessageRequest) -> Self {
         Self {
             message_id: request.message_id.clone(),
-            operator_id: String::new(),     // 由 handler 从 context 填充
+            operator_id: String::new(), // 由 handler 从 context 填充
+            scope: normalize_message_pin_scope(request.scope),
             tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
         }
@@ -980,128 +848,6 @@ impl From<&flare_grpc_proto::message::UnmarkMessageRequest> for AppUnmarkMessage
             mark_type: request.mark_type,
             tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
-        }
-    }
-}
-
-/// 应用层批量标记已读命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppBatchMarkMessageReadCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 消息ID列表
-    pub message_ids: Vec<String>,
-    /// 已读时间
-    pub read_at: Option<DateTime<Utc>>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl From<&flare_grpc_proto::message::BatchMarkMessageReadRequest>
-    for AppBatchMarkMessageReadCommand
-{
-    fn from(request: &flare_grpc_proto::message::BatchMarkMessageReadRequest) -> Self {
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            user_id: String::new(), // 由 handler 从 context 填充
-            message_ids: request.message_ids.clone(),
-            read_at: request.read_at.map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            tenant_id: String::new(), // 从context填充
-        }
-    }
-}
-
-/// 应用层标记会话已读命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppMarkConversationReadCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 已读时间
-    pub read_at: Option<DateTime<Utc>>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl From<&flare_grpc_proto::message::MarkConversationReadRequest>
-    for AppMarkConversationReadCommand
-{
-    fn from(request: &flare_grpc_proto::message::MarkConversationReadRequest) -> Self {
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            user_id: String::new(), // 由 handler 从 context 填充
-            read_at: request.read_at.map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            tenant_id: String::new(), // 从context填充
-        }
-    }
-}
-
-/// 应用层标记全部会话已读命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppMarkAllConversationsReadCommand {
-    /// 用户ID
-    pub user_id: String,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 会话类型筛选（可选）
-    pub conversation_types: Vec<String>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl From<&flare_grpc_proto::message::MarkAllConversationsReadRequest>
-    for AppMarkAllConversationsReadCommand
-{
-    fn from(request: &flare_grpc_proto::message::MarkAllConversationsReadRequest) -> Self {
-        Self {
-            user_id: String::new(), // 由 handler 从 context 填充
-            read_at: request.read_at.map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            conversation_types: request.conversation_types.clone(),
-            tenant_id: String::new(), // 从context填充
-        }
-    }
-}
-
-/// 应用层标记消息直到指定消息已读命令 - 完全与protobuf解耦
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppMarkMessagesReadUntilCommand {
-    /// 会话ID
-    pub conversation_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 已读到的消息ID
-    pub until_message_id: String,
-    /// 已读时间戳（可选，默认当前时间）
-    pub read_at: Option<DateTime<Utc>>,
-    /// 租户ID
-    pub tenant_id: String,
-}
-
-impl From<&flare_grpc_proto::message::MarkMessagesReadUntilRequest>
-    for AppMarkMessagesReadUntilCommand
-{
-    fn from(request: &flare_grpc_proto::message::MarkMessagesReadUntilRequest) -> Self {
-        Self {
-            conversation_id: request.conversation_id.clone(),
-            user_id: String::new(), // 由 handler 从 context 填充
-            until_message_id: request.until_message_id.clone(),
-            read_at: request.read_at.map(|ts| {
-                chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            tenant_id: String::new(), // 从context填充
         }
     }
 }

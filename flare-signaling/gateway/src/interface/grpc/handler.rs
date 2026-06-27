@@ -78,7 +78,15 @@ impl AccessGateway for AccessGatewayHandler {
             .push_handler
             .handle_push_event(
                 &ctx,
-                PushEventCommand::new(req.user_ids, req.events, req.options),
+                PushEventCommand::new(
+                    req.user_ids,
+                    req.events,
+                    req.options,
+                    req.conversation_id,
+                    req.max_conversation_seq,
+                    req.delivery_mode,
+                    req.inline_events_truncated,
+                ),
             )
             .await
             .map_err(|e| {
