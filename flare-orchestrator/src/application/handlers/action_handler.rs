@@ -88,11 +88,12 @@ impl MessageActionHandler {
     ))]
     pub async fn edit_message(&self, ctx: &Ctx, cmd: EditMessageCommand) -> Result<()> {
         // 1. 构建编辑事件
+        // 编辑版本不在发布端分配：异步扇出架构下发布时无法权威递增；客户端按
+        // conversation_seq 收敛编辑事件，writer 侧另行维护持久化版本号。
         let event = build_edit_event(
             &cmd.base.conversation_id,
             &cmd.base.message_id,
             cmd.new_content,
-            1, // TODO: 从存储获取当前编辑版本并递增
         );
 
         // 2. 调用 EventHandler 处理事件
@@ -177,7 +178,8 @@ impl MessageActionHandler {
     /// - `cmd`: 添加反应命令
     ///
     /// # 返回
-    /// - `Ok(reaction_count)`: 反应数量
+    /// - `Ok(())`: 已发布反应事件（当前数量不在此同步返回——异步扇出下无法同步算出，
+    ///   客户端按推送的反应事件 per-user 收敛获得权威计数）
     /// - `Err`: 错误
     #[instrument(skip(self, ctx), fields(
         request_id = %ctx.request_id(),
@@ -185,7 +187,7 @@ impl MessageActionHandler {
         message_id = %cmd.base.message_id,
         emoji = %cmd.emoji,
     ))]
-    pub async fn add_reaction(&self, ctx: &Ctx, cmd: AddReactionCommand) -> Result<i32> {
+    pub async fn add_reaction(&self, ctx: &Ctx, cmd: AddReactionCommand) -> Result<()> {
         // 1. 构建反应事件
         let event = build_reaction_event(
             &cmd.base.conversation_id,
@@ -196,10 +198,7 @@ impl MessageActionHandler {
         );
 
         // 2. 调用 EventHandler 处理事件
-        self.event_handler.handle_event(ctx, event).await?;
-
-        // TODO: 从存储获取当前反应数量
-        Ok(1)
+        self.event_handler.handle_event(ctx, event).await
     }
 
     /// 移除反应
@@ -213,7 +212,7 @@ impl MessageActionHandler {
     /// - `cmd`: 移除反应命令
     ///
     /// # 返回
-    /// - `Ok(reaction_count)`: 反应数量
+    /// - `Ok(())`: 已发布反应事件（当前数量不在此同步返回，理由同 [`add_reaction`]）
     /// - `Err`: 错误
     #[instrument(skip(self, ctx), fields(
         request_id = %ctx.request_id(),
@@ -221,7 +220,7 @@ impl MessageActionHandler {
         message_id = %cmd.base.message_id,
         emoji = %cmd.emoji,
     ))]
-    pub async fn remove_reaction(&self, ctx: &Ctx, cmd: RemoveReactionCommand) -> Result<i32> {
+    pub async fn remove_reaction(&self, ctx: &Ctx, cmd: RemoveReactionCommand) -> Result<()> {
         // 1. 构建反应事件
         let event = build_reaction_event(
             &cmd.base.conversation_id,
@@ -232,10 +231,7 @@ impl MessageActionHandler {
         );
 
         // 2. 调用 EventHandler 处理事件
-        self.event_handler.handle_event(ctx, event).await?;
-
-        // TODO: 从存储获取当前反应数量
-        Ok(0)
+        self.event_handler.handle_event(ctx, event).await
     }
 
     /// 置顶消息

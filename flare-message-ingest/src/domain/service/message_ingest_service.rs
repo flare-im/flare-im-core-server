@@ -295,7 +295,8 @@ impl MessageIngestService {
         use crate::domain::model::ConversationType;
         let conversation_type = ConversationType::from_proto(message.conversation_type);
 
-        self.recipient_repository
+        let mut recipients = self
+            .recipient_repository
             .get_message_recipients(
                 ctx,
                 &message.conversation_id,
@@ -313,7 +314,21 @@ impl MessageIngestService {
                     ErrorCode::InternalError,
                     &format!("Failed to get message recipients: {}", e)
                 )
-            })
+            })?;
+
+        if recipients.is_empty() && conversation_type != ConversationType::Single {
+            recipients = recipient_hints_from_message_attributes(message);
+            if !recipients.is_empty() {
+                tracing::warn!(
+                    conversation_id = %message.conversation_id,
+                    conversation_type = ?conversation_type,
+                    recipient_count = recipients.len(),
+                    "Resolved non-single message recipients from message attributes fallback"
+                );
+            }
+        }
+
+        Ok(recipients)
     }
 
     async fn resolve_persistent_message_recipients(
@@ -327,16 +342,33 @@ impl MessageIngestService {
         if needs_member_lookup(conversation_type)
             && self.large_conversation_materialize_threshold > 0
         {
-            let member_count = self
+            let member_count = match self
                 .recipient_repository
                 .get_conversation_member_count(ctx, &message.conversation_id)
                 .await
-                .map_err(|e| {
-                    flare_err!(
-                        ErrorCode::InternalError,
-                        &format!("Failed to get conversation member count: {}", e)
-                    )
-                })?;
+            {
+                Ok(member_count) => member_count,
+                Err(error) => {
+                    let recipients = recipient_hints_from_message_attributes(message);
+                    if recipients.is_empty() {
+                        return Err(flare_err!(
+                            ErrorCode::InternalError,
+                            &format!("Failed to get conversation member count: {}", error)
+                        ));
+                    }
+                    tracing::warn!(
+                        conversation_id = %message.conversation_id,
+                        conversation_type = ?conversation_type,
+                        recipient_count = recipients.len(),
+                        error = %error,
+                        "Using message attribute recipients after member-count lookup failed"
+                    );
+                    if recipients.len() > self.large_conversation_materialize_threshold {
+                        return Ok((Vec::new(), true));
+                    }
+                    return Ok((recipients, false));
+                }
+            };
             if member_count > self.large_conversation_materialize_threshold {
                 tracing::info!(
                     conversation_id = %message.conversation_id,
@@ -558,9 +590,24 @@ fn should_write_wal(profile: &MessageProfile, persistence_mode: PersistenceMode)
     !persistence_mode.should_push_only(profile.is_temporary())
 }
 
+fn recipient_hints_from_message_attributes(message: &Message) -> Vec<String> {
+    let Some(raw) = message.attributes.get("group_member_ids") else {
+        return Vec::new();
+    };
+    let mut recipients = raw
+        .split([',', ';', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != message.sender_id)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    recipients.sort();
+    recipients.dedup();
+    recipients
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_write_wal;
+    use super::{recipient_hints_from_message_attributes, should_write_wal};
     use crate::domain::PersistenceMode;
     use crate::domain::model::{MessageProfile, notification_persistent};
     use flare_proto::common::message_content::Content;
@@ -622,5 +669,22 @@ mod tests {
         let (profile, message) = notification_profile(false);
         assert_eq!(notification_persistent(&message), Some(false));
         assert!(!should_write_wal(&profile, PersistenceMode::ForcePushOnly));
+    }
+
+    #[test]
+    fn recipient_attribute_fallback_excludes_sender_and_deduplicates_members() {
+        let mut message = Message {
+            sender_id: "u1".to_string(),
+            ..Message::default()
+        };
+        message.attributes.insert(
+            "group_member_ids".to_string(),
+            " u1, u2;u2 u3\n\t".to_string(),
+        );
+
+        assert_eq!(
+            recipient_hints_from_message_attributes(&message),
+            vec!["u2".to_string(), "u3".to_string()]
+        );
     }
 }

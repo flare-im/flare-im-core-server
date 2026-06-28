@@ -412,28 +412,40 @@ where
         let conversation_id = req.conversation_id;
         require_nonempty_conversation_id(&conversation_id)?;
         let limit = req.limit.clamp(1, 500);
+        let requested_after_seq = req.after_conversation_seq;
+        let head_max_seq = self
+            .conversation_head_max_seq(ctx, &conversation_id, requested_after_seq as i64)
+            .await;
+        let cold_start_tail_after_seq = cold_start_tail_after_seq(
+            requested_after_seq,
+            req.cursor.as_str(),
+            head_max_seq,
+            limit,
+        );
+        let query_after_seq = cold_start_tail_after_seq.unwrap_or(requested_after_seq);
         // `after_conversation_seq`：客户端本地已应用的最后 conversation_seq。
         let (messages, _storage_last_seq) = self
             .infra
             .query_messages_by_seq(
                 ctx,
                 &conversation_id,
-                req.after_conversation_seq as i64,
+                query_after_seq as i64,
                 0,
                 limit + 1,
                 user_id,
             )
             .await?;
-        let head_max_seq = self
-            .conversation_head_max_seq(ctx, &conversation_id, req.after_conversation_seq as i64)
-            .await;
-        let page = build_contiguous_sync_items(
-            &conversation_id,
-            req.after_conversation_seq,
-            limit as usize,
-            messages,
-            head_max_seq as u64,
-        )?;
+        let page = if cold_start_tail_after_seq.is_some() {
+            build_tail_sync_items(messages, head_max_seq as u64)?
+        } else {
+            build_contiguous_sync_items(
+                &conversation_id,
+                requested_after_seq,
+                limit as usize,
+                messages,
+                head_max_seq as u64,
+            )?
+        };
         Ok(SingleConversationSyncRes {
             conversation_id,
             items: page.items,
@@ -971,6 +983,55 @@ struct ContiguousSyncPage {
     has_more: bool,
 }
 
+fn cold_start_tail_after_seq(
+    requested_after_seq: u64,
+    cursor: &str,
+    remote_max_seq: i64,
+    limit: i32,
+) -> Option<u64> {
+    if requested_after_seq != 0 || !cursor.trim().is_empty() {
+        return None;
+    }
+    let limit = limit.max(1) as u64;
+    let remote_max_seq = remote_max_seq.max(0) as u64;
+    if remote_max_seq <= limit {
+        return None;
+    }
+    Some(remote_max_seq.saturating_sub(limit))
+}
+
+fn build_tail_sync_items(
+    messages: Vec<Message>,
+    remote_max_seq: u64,
+) -> Result<ContiguousSyncPage, FlareError> {
+    let mut items = Vec::with_capacity(messages.len());
+    let mut max_message_seq = 0_u64;
+    let mut last_real_message_id = String::new();
+    for message in messages {
+        max_message_seq = max_message_seq.max(message.conversation_seq);
+        last_real_message_id = message.server_id.clone();
+        items.push(message_to_sync_item(&message)?);
+    }
+
+    let max_seq = remote_max_seq.max(max_message_seq);
+    let next_cursor = if max_seq > 0 {
+        if last_real_message_id.is_empty() {
+            format!("seq:{max_seq}")
+        } else {
+            format!("seq:{max_seq}:{last_real_message_id}")
+        }
+    } else {
+        String::new()
+    };
+
+    Ok(ContiguousSyncPage {
+        items,
+        max_seq,
+        next_cursor,
+        has_more: false,
+    })
+}
+
 fn build_contiguous_sync_items(
     conversation_id: &str,
     after_seq: u64,
@@ -1257,9 +1318,21 @@ mod tests {
     #[derive(Default)]
     struct MockInfra {
         bootstrap: ConversationBootstrapResponse,
+        messages: Vec<Message>,
+        message_head: crate::application::ports::StorageConversationMessageHead,
+        message_queries: Mutex<Vec<MessageQuery>>,
         updates: Mutex<Vec<UpdateCursorRequest>>,
         settings_updates: Mutex<Vec<UpdateConversationUserSettingsRequest>>,
         version_changes: Vec<crate::application::ports::ConversationVersionChange>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct MessageQuery {
+        conversation_id: String,
+        after_seq: i64,
+        before_seq: i64,
+        limit: i32,
+        user_id: String,
     }
 
     impl ConversationSyncPort for MockInfra {
@@ -1342,13 +1415,36 @@ mod tests {
         async fn query_messages_by_seq(
             &self,
             _ctx: &Ctx,
-            _conversation_id: &str,
-            _after_seq: i64,
-            _before_seq: i64,
-            _limit: i32,
-            _user_id: &str,
+            conversation_id: &str,
+            after_seq: i64,
+            before_seq: i64,
+            limit: i32,
+            user_id: &str,
         ) -> Result<(Vec<Message>, i64), FlareError> {
-            Ok((Vec::new(), 0))
+            self.message_queries
+                .lock()
+                .expect("message queries lock")
+                .push(MessageQuery {
+                    conversation_id: conversation_id.to_string(),
+                    after_seq,
+                    before_seq,
+                    limit,
+                    user_id: user_id.to_string(),
+                });
+            let messages = self
+                .messages
+                .iter()
+                .filter(|message| message.conversation_id == conversation_id)
+                .filter(|message| message.conversation_seq as i64 > after_seq)
+                .filter(|message| before_seq <= 0 || (message.conversation_seq as i64) < before_seq)
+                .take(limit.max(0) as usize)
+                .cloned()
+                .collect::<Vec<_>>();
+            let last_seq = messages
+                .last()
+                .map(|message| message.conversation_seq as i64)
+                .unwrap_or(after_seq);
+            Ok((messages, last_seq))
         }
 
         async fn get_conversation_message_head(
@@ -1356,7 +1452,7 @@ mod tests {
             _ctx: &Ctx,
             _conversation_id: &str,
         ) -> Result<crate::application::ports::StorageConversationMessageHead, FlareError> {
-            Ok(Default::default())
+            Ok(self.message_head.clone())
         }
     }
 
@@ -1403,6 +1499,60 @@ mod tests {
                 .with_user_id("22")
                 .with_trace_id("test-trace"),
         )
+    }
+
+    #[tokio::test]
+    async fn single_conversation_cold_start_returns_sparse_tail_message() {
+        let infra = Arc::new(MockInfra {
+            messages: vec![Message {
+                server_id: "m-tail".to_string(),
+                conversation_id: "c1".to_string(),
+                conversation_seq: 1_211_546,
+                ..Default::default()
+            }],
+            message_head: crate::application::ports::StorageConversationMessageHead {
+                max_seq: 1_211_546,
+                last_message_id: "m-tail".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .single_conversation_sync(
+                &ctx(),
+                "22",
+                SingleConversationSync {
+                    conversation_id: "c1".to_string(),
+                    after_conversation_seq: 0,
+                    limit: 200,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("single conversation sync");
+
+        assert_eq!(response.max_conversation_seq, 1_211_546);
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].conversation_seq, 1_211_546);
+        assert!(matches!(
+            response.items[0].payload,
+            Some(SyncSlicePayload::Message(_))
+        ));
+        let queries = infra.message_queries.lock().expect("message queries lock");
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].after_seq, 1_211_346);
+        assert_eq!(queries[0].limit, 201);
+    }
+
+    #[test]
+    fn cold_start_tail_after_seq_requires_blank_initial_cursor() {
+        assert_eq!(cold_start_tail_after_seq(0, "", 1_000, 200), Some(800));
+        assert_eq!(cold_start_tail_after_seq(0, "seq:200", 1_000, 200), None);
+        assert_eq!(cold_start_tail_after_seq(20, "", 1_000, 200), None);
+        assert_eq!(cold_start_tail_after_seq(0, "", 199, 200), None);
     }
 
     #[tokio::test]

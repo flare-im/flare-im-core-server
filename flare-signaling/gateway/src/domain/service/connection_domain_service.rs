@@ -211,14 +211,24 @@ impl ConnectionDomainService {
             Some(cid) => self.quality_service.get_quality(cid).await,
             None => None,
         };
-        let current_quality =
-            current_quality.map(|metrics| flare_proto::common::ConnectionQuality {
+        let current_quality = current_quality.map(|metrics| {
+            // 将单调时钟的测量时刻（last_update）换算为墙钟 epoch 毫秒。
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let last_measured_at =
+                (now_ms - metrics.last_update.elapsed().as_millis() as i64).max(0);
+            flare_proto::common::ConnectionQuality {
                 rtt_ms: metrics.rtt_ms,
                 packet_loss_rate: metrics.packet_loss_rate,
-                last_measured_at: 0, // TODO: 填充正确的时间戳
+                last_measured_at,
                 network_type: metrics.network_type,
-                signal_strength: 0, // TODO: 填充正确的信号强度
-            });
+                // 服务端质量服务仅采集 RTT/丢包；无线信号强度属客户端设备指标，
+                // 服务端不可得，0 表示「不可用」（非「信号极差」）。
+                signal_strength: 0,
+            }
+        });
 
         let heartbeat_request = HeartbeatRequest {
             user_id: user_id.to_string(),

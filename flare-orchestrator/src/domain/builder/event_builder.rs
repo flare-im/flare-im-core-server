@@ -127,20 +127,21 @@ pub fn build_recall_event(
 /// - `conversation_id`: 会话 ID
 /// - `server_msg_id`: 被编辑消息的服务端 ID
 /// - `new_content`: 新内容（序列化后的字节）
-/// - `edit_version`: 编辑版本号（递增）
+///
+/// 注：编辑版本号不在发布端分配（异步扇出下无法权威递增）；客户端按
+/// `conversation_seq` 收敛编辑事件，故事件中的 `edit_version` 置 0（未分配）。
 ///
 /// # 示例
 /// ```rust
 /// use flare_orchestrator::domain::build_edit_event;
 ///
 /// let new_content = Vec::new();
-/// let event = build_edit_event("conv-123", "msg-456", new_content, 1);
+/// let event = build_edit_event("conv-123", "msg-456", new_content);
 /// ```
 pub fn build_edit_event(
     conversation_id: &str,
     server_msg_id: &str,
     new_content: Vec<u8>,
-    edit_version: i32,
 ) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
@@ -152,7 +153,7 @@ pub fn build_edit_event(
         payload: Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
             new_content: Some(decode_message_content(&new_content)),
-            edit_version,
+            edit_version: 0,
             reason: String::new(),
             show_edited_mark: true,
         })),

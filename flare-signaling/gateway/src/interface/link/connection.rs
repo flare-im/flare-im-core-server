@@ -2,11 +2,13 @@
 //!
 //! 仅保留：disconnect_connection、refresh_session、on_connect，全部委托 application ConnectionHandler。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use flare_core::common::error::Result as CoreResult;
 use flare_core::server::connection::ConnectionManagerTrait;
 use flare_core::server::handle::ServerHandle;
+use tokio::sync::Mutex;
 use tracing::{instrument, warn};
 
 use crate::application::handlers::{ConnectionHandler, SendHandler};
@@ -17,6 +19,7 @@ use crate::infrastructure::error::server_error_to_core;
 pub struct LongConnectionHandler {
     pub connection_handler: Arc<ConnectionHandler>,
     pub send_handler: Arc<SendHandler>,
+    refresh_in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl LongConnectionHandler {
@@ -24,6 +27,7 @@ impl LongConnectionHandler {
         Self {
             connection_handler,
             send_handler,
+            refresh_in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -52,9 +56,17 @@ impl LongConnectionHandler {
         let handler = self.clone();
         let cid = connection_id.to_string();
         tokio::spawn(async move {
+            {
+                let mut in_flight = handler.refresh_in_flight.lock().await;
+                if !in_flight.insert(cid.clone()) {
+                    tracing::trace!(%cid, "skip duplicate refresh_session heartbeat");
+                    return;
+                }
+            }
             if let Err(err) = handler.refresh_session(&cid).await {
                 tracing::warn!(?err, %cid, "spawn_refresh_session: failed to refresh session heartbeat");
             }
+            handler.refresh_in_flight.lock().await.remove(&cid);
         });
     }
 

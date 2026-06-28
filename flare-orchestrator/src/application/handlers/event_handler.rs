@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
-use flare_proto::common::{Event, EventType};
+use flare_proto::common::Event;
 use tracing::instrument;
 
 use crate::domain::{PersistenceMode, service::EventDomainService};
@@ -55,66 +55,10 @@ impl EventHandler {
     ))]
     pub async fn handle_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-
-        // 根据事件类型路由到不同的处理方法
-        let event_type = EventType::try_from(event.r#type);
-        match event_type {
-            Ok(EventType::EventConversationUpdate) | Ok(EventType::EventConversationDelete) => {
-                // 会话相关事件使用专门的处理器
-                self.handle_conversation_event(ctx, event).await
-            }
-            _ => {
-                // 其他事件使用通用处理流程
-                self.handle_general_event(ctx, &tenant_id, event).await
-            }
-        }
-    }
-
-    /// 处理会话相关事件 (EVENT_CONVERSATION_UPDATE / EVENT_CONVERSATION_DELETE)
-    ///
-    /// # 编排流程
-    /// 1. 校验事件
-    /// 2. 分配序列号
-    /// 3. TODO: 更新会话读模型
-    /// 4. 推送事件
-    ///
-    /// # 参数
-    /// - `ctx`: 上下文
-    /// - `event`: 会话事件
-    ///
-    /// # 返回
-    /// - `Ok(())`: 成功
-    /// - `Err`: 错误
-    #[instrument(skip(self, ctx), fields(
-        request_id = %ctx.request_id(),
-        trace_id = %ctx.trace_id(),
-        event_id = %event.event_id,
-        conversation_id = %event.conversation_id,
-    ))]
-    async fn handle_conversation_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-
-        // 1. 校验事件
-        self.event_domain_service
-            .validate_event(ctx, &tenant_id, &event)
-            .await?;
-
-        // 2. 分配序列号
-        let event_with_seq = self
-            .event_domain_service
-            .allocate_seq(ctx, &tenant_id, event)
-            .await?;
-
-        // 3. 推送事件
-        self.event_domain_service
-            .push_event(ctx, event_with_seq, PersistenceMode::Auto)
-            .await?;
-
-        // TODO: 4. 更新会话读模型
-        // - EVENT_CONVERSATION_UPDATE: 更新会话的标题、头像等信息
-        // - EVENT_CONVERSATION_DELETE: 标记会话为已删除或移除会话数据
-
-        Ok(())
+        // 所有事件统一走通用流程（校验 → 分配序列号 → 推送）。
+        // 会话标题/头像/删除等读模型变更走直接 gRPC（flare-conversation 同步写读模型），
+        // 不经事件路径——避免与直接 API 形成双路径。
+        self.handle_general_event(ctx, &tenant_id, event).await
     }
 
     /// 处理通用事件

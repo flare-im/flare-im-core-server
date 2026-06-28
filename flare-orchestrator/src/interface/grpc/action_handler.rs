@@ -99,7 +99,6 @@ impl MessageActionService for MessageActionGrpcHandler {
             success: true,
             error_message: String::new(),
             message_id: req.message_id,
-            edit_version: 0,
             edited_at: Some(prost_types::Timestamp {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
@@ -143,8 +142,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let cmd = AddReactionCommand::from_request(&req, &ctx);
 
         // 调用应用层处理，使用 into_grpc 转换错误
-        let count = self
-            .action_handler
+        self.action_handler
             .add_reaction(&ctx, cmd)
             .await
             .into_grpc()?;
@@ -152,7 +150,6 @@ impl MessageActionService for MessageActionGrpcHandler {
         Ok(Response::new(MessageAddReactionResponse {
             success: true,
             error_message: String::new(),
-            new_count: count,
         }))
     }
 
@@ -168,8 +165,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let cmd = RemoveReactionCommand::from_request(&req, &ctx);
 
         // 调用应用层处理，使用 into_grpc 转换错误
-        let count = self
-            .action_handler
+        self.action_handler
             .remove_reaction(&ctx, cmd)
             .await
             .into_grpc()?;
@@ -177,7 +173,6 @@ impl MessageActionService for MessageActionGrpcHandler {
         Ok(Response::new(MessageRemoveReactionResponse {
             success: true,
             error_message: String::new(),
-            new_count: count,
         }))
     }
 

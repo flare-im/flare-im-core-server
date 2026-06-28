@@ -263,8 +263,7 @@ impl ConfigCenterLoader {
 
     /// 解析endpoint，支持etcd://host:port和consul://host:port格式
     fn parse_endpoint(&self) -> Result<(String, u16)> {
-        if self.endpoint.starts_with("etcd://") {
-            let addr = self.endpoint.strip_prefix("etcd://").unwrap();
+        if let Some(addr) = self.endpoint.strip_prefix("etcd://") {
             let parts: Vec<&str> = addr.split(':').collect();
             if parts.len() != 2 {
                 return Err(config_error(format!(
@@ -275,8 +274,7 @@ impl ConfigCenterLoader {
             let host = parts[0].to_string();
             let port = parts[1].parse::<u16>().context("Invalid etcd port")?;
             Ok((host, port))
-        } else if self.endpoint.starts_with("consul://") {
-            let addr = self.endpoint.strip_prefix("consul://").unwrap();
+        } else if let Some(addr) = self.endpoint.strip_prefix("consul://") {
             let parts: Vec<&str> = addr.split(':').collect();
             if parts.len() != 2 {
                 return Err(config_error(format!(
