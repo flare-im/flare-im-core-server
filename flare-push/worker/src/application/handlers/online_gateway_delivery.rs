@@ -1,30 +1,45 @@
 //! 在线推送：查 Online 设备 → 按 `gateway_id` 分组 → [`GatewayRouter`] 直推 Access Gateway。
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flare_grpc_proto::access_gateway::{
-    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
-    PushNotificationRequest,
+    DeliverToConversationRequest, PushAckRequest, PushCustomRequest, PushEventRequest,
+    PushMessageRequest, PushNotificationRequest,
 };
+use flare_grpc_proto::signaling::online::DeviceInfo;
 use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_im_contracts::Ctx;
-use flare_proto::common::EventEnvelopeDeliveryMode;
+use flare_proto::common::{EventEnvelopeDeliveryMode, Message};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
+use futures::{StreamExt, stream};
 
 use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
 use super::{ConversationPingDebouncer, PingDebounceDecision, PingDebounceKey};
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,
-    merge_push_message_for_gateway, merge_push_notification_for_gateway,
-    partition_targets_by_gateway, select_push_targets,
+    merge_push_notification_for_gateway, partition_targets_by_gateway, select_push_targets,
 };
 use crate::infrastructure::rpc::OnlineServiceClient;
+
+const DEFAULT_DEVICE_ROUTE_CACHE_TTL: Duration = Duration::from_secs(5);
+const DEVICE_ROUTE_CACHE_MAX_USERS: usize = 4096;
+const USER_ROUTE_LOOKUP_CONCURRENCY: usize = 64;
+const DEVICE_ROUTE_CACHE_TTL_ENV: &str = "FLARE_PUSH_DEVICE_ROUTE_CACHE_TTL_MS";
 
 pub struct GatewayPushExecutor {
     online: Arc<OnlineServiceClient>,
     gateway_router: Arc<GatewayRouter>,
     ping_debouncer: Option<Arc<ConversationPingDebouncer>>,
+    device_cache: tokio::sync::Mutex<HashMap<String, CachedDevices>>,
+}
+
+#[derive(Clone)]
+struct CachedDevices {
+    devices: Vec<DeviceInfo>,
+    expires_at: Instant,
 }
 
 impl GatewayPushExecutor {
@@ -33,6 +48,7 @@ impl GatewayPushExecutor {
             online,
             gateway_router,
             ping_debouncer: None,
+            device_cache: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -57,14 +73,49 @@ impl GatewayPushExecutor {
         map_infra_error(error, code, operation)
     }
 
-    pub async fn push_message(
+    async fn list_user_devices_cached(
         &self,
-        ctx: &Ctx,
+        core: &flare_server_core::context::Context,
         target_user_id: &str,
-        strategy: PushStrategy,
-        push: PushMessageRequest,
-    ) -> Result<()> {
-        let core = ctx.as_ref();
+    ) -> Result<Vec<DeviceInfo>> {
+        let now = Instant::now();
+        let cache_ttl = device_route_cache_ttl();
+        if cache_ttl.is_zero() {
+            return self.list_user_devices(core, target_user_id).await;
+        }
+        if let Some(cached) = self.device_cache.lock().await.get(target_user_id).cloned()
+            && cached.expires_at > now
+        {
+            return Ok(cached.devices);
+        }
+
+        let devices = self.list_user_devices(core, target_user_id).await?;
+
+        let mut cache = self.device_cache.lock().await;
+        if cache.len() >= DEVICE_ROUTE_CACHE_MAX_USERS {
+            cache.retain(|_, cached| cached.expires_at > now);
+            if cache.len() >= DEVICE_ROUTE_CACHE_MAX_USERS
+                && let Some(key) = cache.keys().next().cloned()
+            {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(
+            target_user_id.to_string(),
+            CachedDevices {
+                devices: devices.clone(),
+                expires_at: now + cache_ttl,
+            },
+        );
+
+        Ok(devices)
+    }
+
+    async fn list_user_devices(
+        &self,
+        core: &flare_server_core::context::Context,
+        target_user_id: &str,
+    ) -> Result<Vec<DeviceInfo>> {
         let devices_resp = self
             .online
             .list_user_devices(core, target_user_id)
@@ -76,44 +127,58 @@ impl GatewayPushExecutor {
                     "Failed to list user devices",
                 )
             })?;
-        let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
-        let by_gw = partition_targets_by_gateway(&targets);
-        let mut success_count = 0usize;
-        let mut failure_count = 0usize;
-        let mut first_error = None::<(String, ErrorCode)>;
-        for (gid, ts) in by_gw {
-            let push_g = merge_push_message_for_gateway(push.clone(), &ts);
-            match self.gateway_router.route_push_message(&gid, push_g).await {
-                Ok(_) => success_count += 1,
-                Err(error) => {
-                    failure_count += 1;
-                    let code = Self::route_failure_code(&error);
-                    first_error.get_or_insert_with(|| (error.to_string(), code));
-                    tracing::warn!(
-                        target_user_id,
-                        gateway_id = %gid,
-                        error = %error,
-                        "Skipping failed gateway route for push message"
-                    );
-                }
+        Ok(devices_resp.devices)
+    }
+
+    fn resolve_target_user_ids(target_user_id: &str, request_user_ids: &[String]) -> Vec<String> {
+        if !target_user_id.trim().is_empty() {
+            return vec![target_user_id.to_string()];
+        }
+        request_user_ids
+            .iter()
+            .filter(|user_id| !user_id.trim().is_empty())
+            .cloned()
+            .collect()
+    }
+
+    /// 统一读扩散：**不再解析收件人/按用户分网关**。按 conversation_id 分组（同批可能含多会话），
+    /// 每会话经 [`GatewayRouter::broadcast_deliver_to_conversation`] 广播到所有网关节点，各节点用
+    /// 本地会话订阅表过滤投递（O(在线/节点)，与群人数无关）。`target_user_id`/`strategy` 在读扩散下不再需要。
+    pub async fn push_message(
+        &self,
+        _ctx: &Ctx,
+        _target_user_id: &str,
+        _strategy: PushStrategy,
+        push: PushMessageRequest,
+    ) -> Result<()> {
+        if push.messages.is_empty() {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "PushMessage: messages is empty",
+            )
+            .build_error());
+        }
+        // 按会话分组（每条 NATS entry 仅在一个组、仅调一次 push_message → 不会重复投递）。
+        let mut by_conversation: HashMap<String, Vec<Message>> = HashMap::new();
+        for message in push.messages {
+            by_conversation
+                .entry(message.conversation_id.clone())
+                .or_default()
+                .push(message);
+        }
+        for (conversation_id, messages) in by_conversation {
+            if conversation_id.trim().is_empty() {
+                tracing::warn!("PushMessage: skip message batch with empty conversation_id");
+                continue;
             }
-        }
-        if success_count == 0
-            && let Some((error, code)) = first_error
-        {
-            return Err(Self::map_route_failure(
-                flare_server_core::error::FlareError::system((error).to_string()),
-                code,
-                "Failed to route push message",
-            ));
-        }
-        if failure_count > 0 {
-            tracing::warn!(
-                target_user_id,
-                success_gateway_count = success_count,
-                failed_gateway_count = failure_count,
-                "Push message completed with stale or failed gateway routes"
-            );
+            let request = DeliverToConversationRequest {
+                conversation_id,
+                messages,
+                options: push.options.clone(),
+            };
+            self.gateway_router
+                .broadcast_deliver_to_conversation(request)
+                .await?;
         }
         Ok(())
     }
@@ -125,7 +190,8 @@ impl GatewayPushExecutor {
         strategy: PushStrategy,
         push: PushEventRequest,
     ) -> Result<()> {
-        if let Some(debouncer) = &self.ping_debouncer
+        if push.events.is_empty()
+            && let Some(debouncer) = &self.ping_debouncer
             && let Some((conversation_id, max_conversation_seq)) = event_ping_watermark(&push)
         {
             let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
@@ -178,6 +244,7 @@ impl GatewayPushExecutor {
                 online,
                 gateway_router,
                 ping_debouncer: None,
+                device_cache: tokio::sync::Mutex::new(HashMap::new()),
             };
             if let Err(error) = executor
                 .push_event_now(&ctx, &target_user_id, strategy, push)
@@ -200,22 +267,38 @@ impl GatewayPushExecutor {
         push: PushEventRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self
-            .online
-            .list_user_devices(core, target_user_id)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::ServiceUnavailable,
-                    "Failed to list user devices",
-                )
-            })?;
-        let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
+        let target_user_ids = Self::resolve_target_user_ids(target_user_id, &push.user_ids);
+        if target_user_ids.is_empty() {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "PushEvent: target user_ids is empty",
+            )
+            .build_error());
+        }
+        let route_results = stream::iter(target_user_ids)
+            .map(|user_id| async move {
+                let devices = self.list_user_devices_cached(core, &user_id).await?;
+                let targets = select_push_targets(&devices, &user_id, strategy)?;
+                Ok::<_, FlareError>(targets)
+            })
+            .buffer_unordered(USER_ROUTE_LOOKUP_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut targets = Vec::new();
+        let mut first_error = None::<(String, ErrorCode)>;
+        for result in route_results {
+            match result {
+                Ok(mut user_targets) => targets.append(&mut user_targets),
+                Err(error) => {
+                    let code = Self::route_failure_code(&error);
+                    first_error.get_or_insert_with(|| (error.to_string(), code));
+                }
+            }
+        }
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
-        let mut first_error = None::<(String, ErrorCode)>;
         for (gid, ts) in by_gw {
             let push_g = merge_push_event_for_gateway(push.clone(), &ts);
             match self.gateway_router.route_push_event(&gid, push_g).await {
@@ -261,18 +344,8 @@ impl GatewayPushExecutor {
         push: PushNotificationRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self
-            .online
-            .list_user_devices(core, target_user_id)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::ServiceUnavailable,
-                    "Failed to list user devices",
-                )
-            })?;
-        let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
+        let devices = self.list_user_devices_cached(core, target_user_id).await?;
+        let targets = select_push_targets(&devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -326,18 +399,8 @@ impl GatewayPushExecutor {
         push: PushAckRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self
-            .online
-            .list_user_devices(core, target_user_id)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::ServiceUnavailable,
-                    "Failed to list user devices",
-                )
-            })?;
-        let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
+        let devices = self.list_user_devices_cached(core, target_user_id).await?;
+        let targets = select_push_targets(&devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -387,18 +450,8 @@ impl GatewayPushExecutor {
         push: PushCustomRequest,
     ) -> Result<()> {
         let core = ctx.as_ref();
-        let devices_resp = self
-            .online
-            .list_user_devices(core, target_user_id)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::ServiceUnavailable,
-                    "Failed to list user devices",
-                )
-            })?;
-        let targets = select_push_targets(&devices_resp.devices, target_user_id, strategy)?;
+        let devices = self.list_user_devices_cached(core, target_user_id).await?;
+        let targets = select_push_targets(&devices, target_user_id, strategy)?;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -439,6 +492,14 @@ impl GatewayPushExecutor {
         }
         Ok(())
     }
+}
+
+fn device_route_cache_ttl() -> Duration {
+    std::env::var(DEVICE_ROUTE_CACHE_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_DEVICE_ROUTE_CACHE_TTL)
 }
 
 fn event_ping_watermark(push: &PushEventRequest) -> Option<(String, u64)> {

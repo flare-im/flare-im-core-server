@@ -301,6 +301,34 @@ where
             .unwrap_or_else(|| "0".to_string())
     }
 
+    async fn record_write_stage_owned(
+        repo: Arc<dyn MessageWriteLedgerRepository>,
+        metrics: Option<Arc<StorageWriterMetrics>>,
+        ctx: Ctx,
+        tenant_id: String,
+        message_id: String,
+        stage: MessageWriteStage,
+        error: Option<String>,
+    ) {
+        if let Err(err) = repo
+            .mark_stage(&ctx, &tenant_id, &message_id, stage, error.as_deref())
+            .await
+        {
+            if let Some(metrics) = &metrics {
+                metrics.record_ledger_transition(stage.as_str(), "error");
+            }
+            warn!(
+                error = ?err,
+                tenant_id = %tenant_id,
+                message_id = %message_id,
+                stage = %stage.as_str(),
+                "Message write ledger stage update failed"
+            );
+        } else if let Some(metrics) = &metrics {
+            metrics.record_ledger_transition(stage.as_str(), "success");
+        }
+    }
+
     async fn record_write_stage(
         &self,
         ctx: &Ctx,
@@ -313,22 +341,28 @@ where
             return;
         };
 
-        if let Err(err) = repo
-            .mark_stage(ctx, tenant_id, message_id, stage, error)
-            .await
-        {
-            if let Some(metrics) = &self.metrics {
-                metrics.record_ledger_transition(stage.as_str(), "error");
-            }
-            warn!(
-                error = ?err,
-                tenant_id = %tenant_id,
-                message_id = %message_id,
-                stage = %stage.as_str(),
-                "Message write ledger stage update failed"
-            );
-        } else if let Some(metrics) = &self.metrics {
-            metrics.record_ledger_transition(stage.as_str(), "success");
+        Self::record_write_stage_owned(
+            Arc::clone(repo),
+            self.metrics.clone(),
+            Arc::clone(ctx),
+            tenant_id.to_string(),
+            message_id.to_string(),
+            stage,
+            error.map(ToOwned::to_owned),
+        )
+        .await;
+    }
+
+    fn record_write_stage_best_effort(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message_id: &str,
+        stage: MessageWriteStage,
+    ) {
+        let _ = (ctx, tenant_id, message_id);
+        if let Some(metrics) = &self.metrics {
+            metrics.record_ledger_transition(stage.as_str(), "skipped_hot_path");
         }
     }
 
@@ -459,14 +493,12 @@ where
     ) -> Result<()> {
         match self.publish_ack(ctx, result).await {
             Ok(()) => {
-                self.record_write_stage(
+                self.record_write_stage_best_effort(
                     ctx,
                     tenant_id,
                     &result.message_id,
                     MessageWriteStage::AckPublished,
-                    None,
-                )
-                .await;
+                );
                 Ok(())
             }
             Err(err) => {
@@ -484,7 +516,7 @@ where
         }
     }
 
-    /// 单条一致性流程：幂等 → 持久化 → WAL 清理 → ACK
+    /// 单条一致性流程：幂等 → 持久化 → ACK → WAL 清理
     pub async fn ensure_consistency(
         &self,
         ctx: &Ctx,
@@ -513,38 +545,12 @@ where
                 .await;
             return Err(err);
         }
-        self.record_write_stage(
+        self.record_write_stage_best_effort(
             ctx,
             &tenant_id,
             &message_id,
             MessageWriteStage::StoragePersisted,
-            None,
-        )
-        .await;
-
-        match self.cleanup_wal(ctx, &message_id).await? {
-            Some(true) => {
-                self.record_write_stage(
-                    ctx,
-                    &tenant_id,
-                    &message_id,
-                    MessageWriteStage::WalCleaned,
-                    None,
-                )
-                .await;
-            }
-            Some(false) => {
-                self.record_write_stage(
-                    ctx,
-                    &tenant_id,
-                    &message_id,
-                    MessageWriteStage::WalCleanupFailed,
-                    Some("wal cleanup failed"),
-                )
-                .await;
-            }
-            None => {}
-        }
+        );
 
         let result = PersistenceResult {
             message_id,
@@ -554,10 +560,32 @@ where
         };
         self.publish_ack_and_record(ctx, &tenant_id, &result)
             .await?;
+
+        match self.cleanup_wal(ctx, &result.message_id).await? {
+            Some(true) => {
+                self.record_write_stage_best_effort(
+                    ctx,
+                    &tenant_id,
+                    &result.message_id,
+                    MessageWriteStage::WalCleaned,
+                );
+            }
+            Some(false) => {
+                self.record_write_stage(
+                    ctx,
+                    &tenant_id,
+                    &result.message_id,
+                    MessageWriteStage::WalCleanupFailed,
+                    Some("wal cleanup failed"),
+                )
+                .await;
+            }
+            None => {}
+        }
         Ok(result)
     }
 
-    /// 批量一致性流程
+    /// 批量一致性流程：幂等 → 批量持久化 → ACK → WAL 清理
     pub async fn ensure_batch_consistency(
         &self,
         ctx: &Ctx,
@@ -603,24 +631,30 @@ where
             return Err(err);
         }
         for (msg, _, tenant_id) in &new_messages {
-            self.record_write_stage(
+            self.record_write_stage_best_effort(
                 ctx,
                 tenant_id,
                 &msg.message_id,
                 MessageWriteStage::StoragePersisted,
-                None,
-            )
-            .await;
+            );
+            let result = PersistenceResult {
+                message_id: msg.message_id.clone(),
+                conversation_id: msg.conversation_id.clone(),
+                timeline: msg.timeline.clone(),
+                deduplicated: false,
+            };
+            self.publish_ack_and_record(ctx, tenant_id, &result).await?;
+            results.push(result);
+        }
+        for (msg, _, tenant_id) in &new_messages {
             match self.cleanup_wal(ctx, &msg.message_id).await? {
                 Some(true) => {
-                    self.record_write_stage(
+                    self.record_write_stage_best_effort(
                         ctx,
                         tenant_id,
                         &msg.message_id,
                         MessageWriteStage::WalCleaned,
-                        None,
-                    )
-                    .await;
+                    );
                 }
                 Some(false) => {
                     self.record_write_stage(
@@ -634,17 +668,6 @@ where
                 }
                 None => {}
             }
-        }
-        for (msg, _, tenant_id) in new_messages {
-            let result = PersistenceResult {
-                message_id: msg.message_id.clone(),
-                conversation_id: msg.conversation_id.clone(),
-                timeline: msg.timeline.clone(),
-                deduplicated: false,
-            };
-            self.publish_ack_and_record(ctx, &tenant_id, &result)
-                .await?;
-            results.push(result);
         }
         Ok(results)
     }
@@ -690,7 +713,7 @@ mod tests {
 
     struct NoopRepository;
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     struct RecordedLedgerStage {
         message_id: String,
         stage: MessageWriteStage,
@@ -1297,7 +1320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_consistency_records_write_ledger_success_stages() {
+    async fn ensure_consistency_skips_write_ledger_success_stages_on_hot_path() {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let stages = Arc::new(Mutex::new(Vec::new()));
@@ -1330,23 +1353,9 @@ mod tests {
             .expect("message should persist and publish ack");
 
         let recorded = stages.lock().expect("recorded ledger lock").clone();
-        let stage_values = recorded
-            .iter()
-            .map(|record| record.stage)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            stage_values,
-            vec![
-                MessageWriteStage::StoragePersisted,
-                MessageWriteStage::WalCleaned,
-                MessageWriteStage::AckPublished,
-            ]
-        );
         assert!(
-            recorded
-                .iter()
-                .all(|record| record.message_id == "message-a" && record.error.is_none())
+            recorded.is_empty(),
+            "successful ledger stages must not write on the ACK hot path: {recorded:?}"
         );
     }
 

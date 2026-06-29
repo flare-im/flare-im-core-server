@@ -5,6 +5,7 @@
 mod ack_port;
 mod connection_port;
 mod connection_query;
+mod conversation_read_grpc_pool;
 mod context_resolver;
 mod data_port;
 mod event_prot;
@@ -17,6 +18,7 @@ mod storage_sync_port;
 pub use ack_port::RouterAckReportPort;
 pub use connection_port::ConnectionRepository;
 pub use connection_query::ManagerConnectionQuery;
+pub use conversation_read_grpc_pool::ConversationReadGrpcPool;
 pub use context_resolver::{ConnectionContextResolver, build_gateway_ctx_from_info};
 pub use data_port::RouterDataCommandPort;
 pub use event_prot::RouterEventCommandPort;

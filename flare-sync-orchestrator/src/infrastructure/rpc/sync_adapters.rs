@@ -22,6 +22,7 @@ use flare_server_core::error::FlareError;
 use redis::aio::ConnectionManager;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tracing::warn;
 
@@ -41,11 +42,34 @@ const DEFAULT_TENANT_ID: &str = "0";
 pub struct GrpcSyncAdapters;
 
 impl GrpcSyncAdapters {
+    fn channel_cache() -> &'static Mutex<HashMap<String, Channel>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
     async fn create_channel(service_name: &str) -> Result<Channel, FlareError> {
-        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
-        flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(service_name, fallback)
+        if let Some(channel) = Self::channel_cache()
+            .lock()
             .await
-            .map_err(|e| discovery_unavailable(service_name, e))
+            .get(service_name)
+            .cloned()
+        {
+            return Ok(channel);
+        }
+
+        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
+        let channel = flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(
+            service_name,
+            fallback,
+        )
+        .await
+        .map_err(|e| discovery_unavailable(service_name, e))?;
+
+        let mut cache = Self::channel_cache().lock().await;
+        Ok(cache
+            .entry(service_name.to_string())
+            .or_insert_with(|| channel.clone())
+            .clone())
     }
 
     async fn conversation_read_client() -> Result<ConversationReadServiceClient<Channel>, FlareError>

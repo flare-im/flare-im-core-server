@@ -102,11 +102,20 @@ pub async fn initialize(
         },
     ));
 
+    // 会话级在线订阅注册表（统一读扩散地基）：组合根创建、共享单例，注入连接/投递/订阅路径。
+    let conversation_subscriptions =
+        Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
+    // Conversation 读客户端池：登录 eager 订阅用户会话列表。
+    let conversation_read_pool =
+        Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new());
+
     let connection_handler_app = Arc::new(ConnectionHandler::new(
         session_domain_service.clone(),
         metrics.clone(),
         Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
         connection_port.clone(),
+        conversation_subscriptions.clone(),
+        conversation_read_pool.clone(),
     ));
 
     // 7. Push 端口
@@ -129,7 +138,12 @@ pub async fn initialize(
     );
 
     // 10. 推送领域服务
-    let push_domain_service = Arc::new(PushDomainService::new(push_port, connection_query.clone()));
+    let push_domain_service = Arc::new(PushDomainService::new(
+        push_port,
+        connection_query.clone(),
+        conversation_subscriptions.clone(),
+        conversation_read_pool.clone(),
+    ));
 
     // 11. 通话信令生命周期桥：gateway runtime -> flare-call FSM -> capability route hint。
     let call_session_repository = Arc::new(InMemoryCallSessionRepository::default());

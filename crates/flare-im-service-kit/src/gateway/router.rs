@@ -20,8 +20,9 @@ use flare_server_core::error::{AnyhowContext, ErrorBuilder, ErrorCode, FlareErro
 
 use flare_grpc_proto::access_gateway::access_gateway_client::AccessGatewayClient;
 use flare_grpc_proto::access_gateway::{
-    PushAckRequest, PushAckResponse, PushCustomRequest, PushEventRequest, PushMessageRequest,
-    PushNotificationRequest, PushNotificationResponse, PushResponse,
+    DeliverToConversationRequest, PushAckRequest, PushAckResponse, PushCustomRequest,
+    PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
+    PushResponse,
 };
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
@@ -342,6 +343,61 @@ impl GatewayRouter {
 
         Ok(client)
     }
+
+    /// 统一读扩散：把会话消息**广播到所有网关节点**，各节点按本地会话订阅过滤投递。
+    /// 上游（push-worker）无需解析收件人。best-effort：单节点失败不影响其他节点（在线投递为软实时，
+    /// 离线成员靠版本号增量拉兜底）。无服务发现实例时走静态 fallback 单端点。
+    pub async fn broadcast_deliver_to_conversation(
+        &self,
+        request: DeliverToConversationRequest,
+    ) -> Result<()> {
+        let gateway_ids: Vec<String> = match self.service_discover {
+            Some(ref sd) => sd
+                .get_instances()
+                .await
+                .into_iter()
+                .map(|inst| inst.instance_id)
+                .collect(),
+            None => Vec::new(),
+        };
+
+        if gateway_ids.is_empty() {
+            // 无服务发现实例：单端点（get_or_create_client 内部回退 static_fallback_endpoint）。
+            let mut client = self.get_or_create_client("__static_fallback__").await?;
+            client
+                .deliver_to_conversation(tonic::Request::new(request))
+                .await
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "deliver_to_conversation failed: {e}"
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        for gateway_id in gateway_ids {
+            match self.get_or_create_client(&gateway_id).await {
+                Ok(mut client) => {
+                    if let Err(e) = client
+                        .deliver_to_conversation(tonic::Request::new(request.clone()))
+                        .await
+                    {
+                        warn!(
+                            gateway_id = %gateway_id,
+                            error = %e,
+                            "broadcast deliver_to_conversation to gateway failed (continuing)"
+                        );
+                    }
+                }
+                Err(e) => warn!(
+                    gateway_id = %gateway_id,
+                    error = %e,
+                    "broadcast deliver_to_conversation: get gateway client failed (continuing)"
+                ),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl GatewayRouterTrait for GatewayRouter {
@@ -411,25 +467,20 @@ impl GatewayRouterTrait for GatewayRouter {
             Ok(Ok(resp)) => {
                 let response = resp.into_inner();
 
-                // 按用户明细推断「全未触达在线设备且存在离线队列」视为需重查在线态
-                let mut offline_users = Vec::new();
-                for ur in &response.user_results {
-                    if let Some(pr) = ur.result.as_ref()
-                        && pr.pushed_device_count == 0
-                        && pr.offline_pending_count > 0
-                    {
-                        offline_users.push(ur.user_id.clone());
-                    }
-                }
+                let (pushed_device_count, offline_users) =
+                    push_response_delivery_summary(&response);
 
                 if !offline_users.is_empty() {
                     warn!(
                         gateway_id = %gateway_id,
+                        pushed_device_count,
                         offline_user_count = offline_users.len(),
                         offline_users = ?offline_users,
-                        "Some users have no online delivery (offline pending), caller may re-query online"
+                        "Some users have no online delivery (offline pending)"
                     );
-                    return Err(users_offline_error(offline_users));
+                    if pushed_device_count == 0 {
+                        return Err(users_offline_error(offline_users));
+                    }
                 }
 
                 info!(
@@ -479,7 +530,26 @@ impl GatewayRouterTrait for GatewayRouter {
         )
         .await
         {
-            Ok(Ok(resp)) => Ok(resp.into_inner()),
+            Ok(Ok(resp)) => {
+                let response = resp.into_inner();
+                let (pushed_device_count, offline_users) =
+                    push_response_delivery_summary(&response);
+
+                if !offline_users.is_empty() {
+                    warn!(
+                        gateway_id = %gateway_id,
+                        pushed_device_count,
+                        offline_user_count = offline_users.len(),
+                        offline_users = ?offline_users,
+                        "Some users have no online event delivery (offline pending)"
+                    );
+                    if pushed_device_count == 0 {
+                        return Err(users_offline_error(offline_users));
+                    }
+                }
+
+                Ok(response)
+            }
             Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
                 "push_event: {}",
                 e
@@ -565,6 +635,21 @@ impl GatewayRouterTrait for GatewayRouter {
             ))),
         }
     }
+}
+
+fn push_response_delivery_summary(response: &PushResponse) -> (usize, Vec<String>) {
+    let mut pushed_device_count = 0usize;
+    let mut offline_users = Vec::new();
+    for user_result in &response.user_results {
+        if let Some(push_result) = user_result.result.as_ref() {
+            pushed_device_count =
+                pushed_device_count.saturating_add(push_result.pushed_device_count as usize);
+            if push_result.pushed_device_count == 0 && push_result.offline_pending_count > 0 {
+                offline_users.push(user_result.user_id.clone());
+            }
+        }
+    }
+    (pushed_device_count, offline_users)
 }
 
 fn users_offline_error(user_ids: Vec<String>) -> FlareError {

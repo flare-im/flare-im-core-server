@@ -437,7 +437,10 @@ fn send_ack_durability(
     if persistence_mode.should_push_only(profile.is_temporary()) {
         SendAckDurability::TransientAccepted
     } else {
-        SendAckDurability::BrokerAccepted
+        // 统一单写模型：消息已写入 WAL + 分配 conversation_seq + 发布到 JetStream 持久主队列，
+        // 即"提交点"已 durable（storage-writer 必定消费落库）。直接同步回 Persisted 作为发送方
+        // 权威持久化确认——发送方无需再等"自己的消息穿过整条 fanout 回流"(根治 116s 尾延迟)。
+        SendAckDurability::Persisted
     }
 }
 

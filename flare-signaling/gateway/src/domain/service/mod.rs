@@ -1,5 +1,6 @@
 pub mod connection_domain_service;
 pub mod connection_quality_service;
+pub mod conversation_subscription;
 pub mod push_domain_service;
 pub mod send_ack_domain_service;
 pub mod send_data_domain_service;
@@ -10,6 +11,7 @@ pub mod sync_service;
 
 pub use connection_domain_service::ConnectionDomainService;
 pub use connection_quality_service::ConnectionQualityService;
+pub use conversation_subscription::ConversationSubscriptionRegistry;
 pub use push_domain_service::{EventEnvelopePushRequest, PushDomainService};
 pub use send_ack_domain_service::SendAckDomainService;
 pub use send_data_domain_service::SendDataDomainService;

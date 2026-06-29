@@ -8,16 +8,25 @@ use flare_grpc_proto::access_gateway::PushOptions;
 use flare_im_contracts::Ctx;
 use flare_proto::common::{Event, EventEnvelope, EventEnvelopeDeliveryMode, Message, MessagePush};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use futures::{StreamExt, stream};
 use prost::Message as ProstMessage;
 use tracing::{info, instrument};
 
 use crate::domain::model::{ConnectionInfo, DomainPushResult};
 use crate::domain::ports::{ConnectionQuery, IPushPort};
 
+const USER_PUSH_FANOUT_CONCURRENCY: usize = 64;
+
 /// 推送领域服务
 pub struct PushDomainService {
     push_port: Arc<dyn IPushPort>,
     connection_query: Arc<dyn ConnectionQuery>,
+    /// 会话级在线订阅注册表（统一读扩散地基）：会话 publish 命中本节点时扇给本节点订阅连接。
+    conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
+    /// Conversation 读池：首次投递某会话时解析参与者，订阅本节点在线成员（确定性 bootstrap）。
+    conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+    /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。
+    resolved_conversations: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 pub struct EventEnvelopePushRequest<'a> {
@@ -32,11 +41,105 @@ pub struct EventEnvelopePushRequest<'a> {
 }
 
 impl PushDomainService {
-    pub fn new(push_port: Arc<dyn IPushPort>, connection_query: Arc<dyn ConnectionQuery>) -> Self {
+    pub fn new(
+        push_port: Arc<dyn IPushPort>,
+        connection_query: Arc<dyn ConnectionQuery>,
+        conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
+        conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+    ) -> Self {
         Self {
             push_port,
             connection_query,
+            conversation_subscriptions,
+            conversation_read,
+            resolved_conversations: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// 确定性 bootstrap：首次投递某会话时解析参与者，订阅其在**本节点**的在线连接。
+    /// 每会话每网关仅解析一次（缓存）；覆盖"会话在连接后创建"的订阅时序。best-effort。
+    async fn ensure_conversation_members_subscribed(&self, tx: &Ctx, conversation_id: &str) {
+        if self
+            .resolved_conversations
+            .read()
+            .map(|set| set.contains(conversation_id))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let participants = match self
+            .conversation_read
+            .list_participants(tx, conversation_id)
+            .await
+        {
+            Ok(users) => users,
+            Err(error) => {
+                tracing::warn!(%conversation_id, ?error, "ensure members: list participants failed");
+                return;
+            }
+        };
+        for user_id in participants {
+            if let Ok(conns) = self.connection_query.list_user_connections(&user_id).await {
+                for conn in conns {
+                    self.conversation_subscriptions
+                        .join(conversation_id, &conn.connection_id);
+                }
+            }
+        }
+        if let Ok(mut set) = self.resolved_conversations.write() {
+            set.insert(conversation_id.to_string());
+        }
+    }
+
+    /// 统一读扩散投递：把已编码载荷扇给**本节点**订阅该会话的在线连接。
+    /// 复杂度 O(本节点在线成员)，与群总人数无关；无本地订阅者直接跳过（返回 (0,0)）。
+    /// 跨节点由"会话 publish 命中所有有订阅者的节点"达成（上层 MQ 主题广播，F2 接入）。
+    pub async fn deliver_to_conversation(
+        &self,
+        tx: &Ctx,
+        conversation_id: &str,
+        payload_type: i32,
+        payload: &[u8],
+    ) -> Result<(i32, i32)> {
+        // 确定性 bootstrap：首次投递该会话时解析参与者并订阅本节点在线成员（缓存，每会话一次）。
+        self.ensure_conversation_members_subscribed(tx, conversation_id)
+            .await;
+        let connection_ids = self
+            .conversation_subscriptions
+            .local_subscribers(conversation_id);
+        if connection_ids.is_empty() {
+            return Ok((0, 0));
+        }
+        self.push_port
+            .push_payload_to_connections(tx, &connection_ids, payload_type, payload.to_vec())
+            .await
+    }
+
+    /// 统一读扩散投递业务消息：编码 `MessagePush`（与 [`Self::push_message_push_to_users`] 一致）→
+    /// 扇给本节点订阅该会话的在线连接。返回 (成功连接数, 失败连接数)；无本地订阅者返回 (0,0)。
+    pub async fn push_message_to_conversation(
+        &self,
+        tx: &Ctx,
+        conversation_id: &str,
+        messages: Vec<Message>,
+    ) -> Result<(i32, i32)> {
+        let push = MessagePush {
+            messages,
+            notifications: vec![],
+        };
+        let mut payload = Vec::new();
+        push.encode(&mut payload).map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "encode MessagePush failed")
+                .details(e.to_string())
+                .build_error()
+        })?;
+        self.deliver_to_conversation(
+            tx,
+            conversation_id,
+            flare_core::common::protocol::payload_command::Type::Message as i32,
+            &payload,
+        )
+        .await
     }
 
     fn build_event_envelope(
@@ -242,6 +345,77 @@ impl PushDomainService {
         Ok(self.filter_connections(tx, &connections, options))
     }
 
+    async fn push_encoded_payload_to_user(
+        &self,
+        tx: &Ctx,
+        user_id: String,
+        options: &PushOptions,
+        payload: Arc<Vec<u8>>,
+        payload_type: i32,
+        log_kind: &'static str,
+    ) -> Result<(String, i32, i32, i32)> {
+        let connections = self.get_filtered_connections(tx, &user_id, options).await?;
+        if connections.is_empty() {
+            info!(user_id = %user_id, "push: user has no matching online connection");
+            return Ok((user_id, 0, 0, 1));
+        }
+        let (ok, fail) = self
+            .push_payload_to_connections(
+                tx,
+                &user_id,
+                &connections,
+                payload_type,
+                payload.as_slice(),
+            )
+            .await?;
+        info!(
+            user_id = %user_id,
+            pushed = ok,
+            failed = fail,
+            kind = log_kind,
+            "push: encoded payload delivered"
+        );
+        Ok((user_id, ok, fail, 0))
+    }
+
+    async fn push_encoded_payload_to_users(
+        &self,
+        tx: &Ctx,
+        user_ids: &[String],
+        options: &PushOptions,
+        payload: Vec<u8>,
+        payload_type: i32,
+        log_kind: &'static str,
+    ) -> Result<Vec<(String, i32, i32, i32)>> {
+        let payload = Arc::new(payload);
+        let results = stream::iter(user_ids.iter().cloned().enumerate())
+            .map(|(index, user_id)| {
+                let payload = Arc::clone(&payload);
+                async move {
+                    self.push_encoded_payload_to_user(
+                        tx,
+                        user_id,
+                        options,
+                        payload,
+                        payload_type,
+                        log_kind,
+                    )
+                    .await
+                    .map(|row| (index, row))
+                }
+            })
+            .buffer_unordered(USER_PUSH_FANOUT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut ordered = Vec::with_capacity(results.len());
+        for result in results {
+            ordered.push(result?);
+        }
+        ordered.sort_by_key(|(index, _)| *index);
+        Ok(ordered.into_iter().map(|(_, row)| row).collect())
+    }
+
     /// 将业务消息下行给多个用户：载荷为 `MessagePush` 编码字节（与客户端 `chatroom_client` / SDK 解码一致）。
     ///
     /// 返回 `(user_id, pushed_device_count, failed_count, offline_pending_count)` 按用户一行。
@@ -264,26 +438,15 @@ impl PushDomainService {
                 .build_error()
         })?;
 
-        let mut out = Vec::with_capacity(user_ids.len());
-        for user_id in user_ids {
-            let connections = self.get_filtered_connections(tx, user_id, options).await?;
-            if connections.is_empty() {
-                info!(user_id = %user_id, "push_message: user has no matching online connection");
-                out.push((user_id.clone(), 0, 0, 1));
-                continue;
-            }
-            let (ok, fail) = self
-                .push_to_connections(tx, user_id, &connections, &payload)
-                .await?;
-            info!(
-                user_id = %user_id,
-                pushed = ok,
-                failed = fail,
-                "push_message: MessagePush delivered"
-            );
-            out.push((user_id.clone(), ok, fail, 0));
-        }
-        Ok(out)
+        self.push_encoded_payload_to_users(
+            tx,
+            user_ids,
+            options,
+            payload,
+            flare_core::common::protocol::payload_command::Type::Message as i32,
+            "message",
+        )
+        .await
     }
 
     /// 将领域事件批下行给多个用户：载荷为 `EventEnvelope` 编码字节（与客户端 SDK `ProtobufCodec::decode_server` 一致，走 `PayloadCommand::Message` 内层解码）。
@@ -310,28 +473,15 @@ impl PushDomainService {
                 .build_error()
         })?;
 
-        let mut out = Vec::with_capacity(request.user_ids.len());
-        for user_id in request.user_ids {
-            let connections = self
-                .get_filtered_connections(tx, user_id, request.options)
-                .await?;
-            if connections.is_empty() {
-                info!(user_id = %user_id, "push_event: user has no matching online connection");
-                out.push((user_id.clone(), 0, 0, 1));
-                continue;
-            }
-            let (ok, fail) = self
-                .push_to_connections(tx, user_id, &connections, &payload)
-                .await?;
-            info!(
-                user_id = %user_id,
-                pushed = ok,
-                failed = fail,
-                "push_event: EventEnvelope delivered"
-            );
-            out.push((user_id.clone(), ok, fail, 0));
-        }
-        Ok(out)
+        self.push_encoded_payload_to_users(
+            tx,
+            request.user_ids,
+            request.options,
+            payload,
+            flare_core::common::protocol::payload_command::Type::Message as i32,
+            "event_envelope",
+        )
+        .await
     }
 
     /// 推送 ACK 字节给用户（payload 为 common::Ack encode_to_vec）
@@ -346,6 +496,26 @@ impl PushDomainService {
         self.push_port
             .push_payload_to_user(tx, user_id, payload_type, ack_payload)
             .await
+    }
+
+    /// 推送 ACK 字节给多个用户，按设备过滤并返回每个用户的下发结果。
+    #[instrument(skip(self, tx, ack_payload), fields(user_count = user_ids.len()))]
+    pub async fn push_ack_to_users(
+        &self,
+        tx: &Ctx,
+        user_ids: &[String],
+        ack_payload: Vec<u8>,
+        options: &PushOptions,
+    ) -> Result<Vec<(String, i32, i32, i32)>> {
+        self.push_encoded_payload_to_users(
+            tx,
+            user_ids,
+            options,
+            ack_payload,
+            flare_core::common::protocol::payload_command::Type::Ack as i32,
+            "ack",
+        )
+        .await
     }
 
     /// 构建推送结果
@@ -503,7 +673,12 @@ mod tests {
                 .with_platform("ios".to_string()),
             ],
         });
-        let service = PushDomainService::new(push_port.clone(), connection_query);
+        let service = PushDomainService::new(
+            push_port.clone(),
+            connection_query,
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+        );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root());
         let user_ids = vec!["u1".to_string()];
         let event = Event {

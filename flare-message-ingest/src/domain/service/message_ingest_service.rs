@@ -338,48 +338,9 @@ impl MessageIngestService {
     ) -> Result<(Vec<String>, bool)> {
         use crate::domain::model::ConversationType;
 
-        let conversation_type = ConversationType::from_proto(message.conversation_type);
-        if needs_member_lookup(conversation_type)
-            && self.large_conversation_materialize_threshold > 0
-        {
-            let member_count = match self
-                .recipient_repository
-                .get_conversation_member_count(ctx, &message.conversation_id)
-                .await
-            {
-                Ok(member_count) => member_count,
-                Err(error) => {
-                    let recipients = recipient_hints_from_message_attributes(message);
-                    if recipients.is_empty() {
-                        return Err(flare_err!(
-                            ErrorCode::InternalError,
-                            &format!("Failed to get conversation member count: {}", error)
-                        ));
-                    }
-                    tracing::warn!(
-                        conversation_id = %message.conversation_id,
-                        conversation_type = ?conversation_type,
-                        recipient_count = recipients.len(),
-                        error = %error,
-                        "Using message attribute recipients after member-count lookup failed"
-                    );
-                    if recipients.len() > self.large_conversation_materialize_threshold {
-                        return Ok((Vec::new(), true));
-                    }
-                    return Ok((recipients, false));
-                }
-            };
-            if member_count > self.large_conversation_materialize_threshold {
-                tracing::info!(
-                    conversation_id = %message.conversation_id,
-                    member_count,
-                    threshold = self.large_conversation_materialize_threshold,
-                    "Large conversation message skips recipient materialization"
-                );
-                return Ok((Vec::new(), true));
-            }
-        }
-
+        let _ = ConversationType::from_proto(message.conversation_type);
+        // 写扩散基线（读扩散投递改造未完成前的可靠投递）：物化收件人 + 非 large → orchestrator 内联写扩散。
+        // 注：统一读扩散需改造 EventEnvelope 投递路径（消息经 push_event 而非 push_message 下行），属后续。
         self.get_recipient_user_ids(ctx, message)
             .await
             .map(|recipients| (recipients, false))
@@ -687,4 +648,5 @@ mod tests {
             vec!["u2".to_string(), "u3".to_string()]
         );
     }
+
 }

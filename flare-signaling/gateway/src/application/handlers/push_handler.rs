@@ -10,6 +10,8 @@ use flare_grpc_proto::access_gateway::{
     PushAckResponse, PushNotificationResponse, PushResponse, PushResult, UserPushResult,
 };
 use flare_im_contracts::Ctx;
+use flare_proto::common::Message;
+use prost::Message as ProstMessage;
 use prost_types::Timestamp;
 use tracing::instrument;
 
@@ -18,7 +20,7 @@ use crate::application::commands::{
     PushNotificationCommand,
 };
 use crate::domain::service::{EventEnvelopePushRequest, PushDomainService};
-use flare_server_core::error::{ErrorBuilder, Result};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 fn push_result_at_now(
     pushed_device_count: i32,
@@ -83,11 +85,13 @@ impl PushHandler {
         };
 
         let mut total_pushed: i32 = 0;
+        let mut total_failed: i32 = 0;
         let mut total_offline: i32 = 0;
         let mut user_results: Vec<UserPushResult> = Vec::with_capacity(per_user.len());
 
-        for (user_id, pushed, _fail, offline) in per_user {
+        for (user_id, pushed, fail, offline) in per_user {
             total_pushed = total_pushed.saturating_add(pushed);
+            total_failed = total_failed.saturating_add(fail);
             total_offline = total_offline.saturating_add(offline);
             user_results.push(UserPushResult {
                 user_id,
@@ -99,6 +103,16 @@ impl PushHandler {
                 }),
             });
         }
+        if total_failed > 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "PushMessage: failed to write to one or more online connections",
+            )
+            .details(format!(
+                "pushed_device_count={total_pushed}, failed_connection_count={total_failed}, offline_pending_count={total_offline}"
+            ))
+            .build_error());
+        }
 
         Ok(PushResponse {
             result: Some(PushResult {
@@ -108,6 +122,51 @@ impl PushHandler {
                 at: Some(at),
             }),
             user_results,
+        })
+    }
+
+    /// DeliverToConversation（统一读扩散）：把消息扇给"本网关节点订阅该会话的在线连接"。
+    /// 上游无需解析收件人；无本地订阅者时为空操作（成功 0）。
+    #[instrument(skip(self, messages), fields(message_count = messages.len()))]
+    pub async fn handle_deliver_to_conversation(
+        &self,
+        ctx: &Ctx,
+        conversation_id: String,
+        messages: Vec<Message>,
+    ) -> Result<PushResponse> {
+        if conversation_id.trim().is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "DeliverToConversation: conversation_id is empty",
+            )
+            .build_error());
+        }
+        if messages.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "DeliverToConversation: messages is empty",
+            )
+            .build_error());
+        }
+        let (pushed, failed) = self
+            .push_domain_service
+            .push_message_to_conversation(ctx, &conversation_id, messages)
+            .await?;
+        if failed > 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "DeliverToConversation: failed to write to one or more connections",
+            )
+            .details(format!("pushed={pushed}, failed={failed}"))
+            .build_error());
+        }
+        Ok(PushResponse {
+            result: Some(push_result_at_now(
+                pushed,
+                0,
+                uuid::Uuid::new_v4().to_string(),
+            )),
+            user_results: vec![],
         })
     }
 
@@ -160,11 +219,13 @@ impl PushHandler {
         };
 
         let mut total_pushed: i32 = 0;
+        let mut total_failed: i32 = 0;
         let mut total_offline: i32 = 0;
         let mut user_results: Vec<UserPushResult> = Vec::with_capacity(per_user.len());
 
-        for (user_id, pushed, _fail, offline) in per_user {
+        for (user_id, pushed, fail, offline) in per_user {
             total_pushed = total_pushed.saturating_add(pushed);
+            total_failed = total_failed.saturating_add(fail);
             total_offline = total_offline.saturating_add(offline);
             user_results.push(UserPushResult {
                 user_id,
@@ -175,6 +236,16 @@ impl PushHandler {
                     at: Some(at),
                 }),
             });
+        }
+        if total_failed > 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "PushEvent: failed to write to one or more online connections",
+            )
+            .details(format!(
+                "pushed_device_count={total_pushed}, failed_connection_count={total_failed}, offline_pending_count={total_offline}"
+            ))
+            .build_error());
         }
 
         Ok(PushResponse {
@@ -207,11 +278,56 @@ impl PushHandler {
     /// PushAck：编排领域层（可委托 push_domain_service.push_ack_to_user）
     #[instrument(skip(self))]
     pub async fn handle_push_ack(&self, ctx: &Ctx, req: PushAckCommand) -> Result<PushAckResponse> {
-        let _ = req;
         let window_id = uuid::Uuid::new_v4().to_string();
+        if req.user_ids.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "PushAck: user_ids is empty",
+            )
+            .build_error());
+        }
+
+        let options = req.options.unwrap_or_default();
+        let mut ack_payload = Vec::new();
+        req.ack.encode(&mut ack_payload).map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "encode PushAck payload failed")
+                .details(e.to_string())
+                .build_error()
+        })?;
+        let per_user = self
+            .push_domain_service
+            .push_ack_to_users(ctx, &req.user_ids, ack_payload, &options)
+            .await?;
+        let at = Timestamp {
+            seconds: Utc::now().timestamp(),
+            nanos: 0,
+        };
+
+        let mut total_pushed: i32 = 0;
+        let mut total_offline: i32 = 0;
+        let mut user_results: Vec<UserPushResult> = Vec::with_capacity(per_user.len());
+        for (user_id, pushed, _fail, offline) in per_user {
+            total_pushed = total_pushed.saturating_add(pushed);
+            total_offline = total_offline.saturating_add(offline);
+            user_results.push(UserPushResult {
+                user_id,
+                result: Some(PushResult {
+                    pushed_device_count: pushed,
+                    offline_pending_count: offline,
+                    window_id: window_id.clone(),
+                    at: Some(at),
+                }),
+            });
+        }
+
         Ok(PushAckResponse {
-            result: Some(push_result_at_now(0, 0, window_id)),
-            user_results: vec![],
+            result: Some(PushResult {
+                pushed_device_count: total_pushed,
+                offline_pending_count: total_offline,
+                window_id,
+                at: Some(at),
+            }),
+            user_results,
         })
     }
 

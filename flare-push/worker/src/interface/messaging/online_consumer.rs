@@ -10,6 +10,7 @@
 //! - 上下文重建：从 MQ headers 中提取追踪信息
 //! - 委托给 Application 层：调用 GatewayPushExecutor 处理推送
 
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::{
@@ -20,11 +21,15 @@ use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_proto::common::{PushTaskEnvelope, PushTaskPayloadKind};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use flare_server_core::{ErrorCode, FlareError, flare_err};
+use futures::{StreamExt, stream};
 use prost::Message as _;
 use tracing::instrument;
 
 use crate::application::GatewayPushExecutor;
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
+
+const MESSAGE_GROUP_FANOUT_CONCURRENCY: usize = 64;
+const ACK_FANOUT_CONCURRENCY: usize = 64;
 
 /// 在线推送消费者处理器
 pub struct OnlinePushHandler {
@@ -36,6 +41,17 @@ struct BatchEntry {
     index: usize,
     message: Message,
     envelope: PushTaskEnvelope,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct MessageBatchKey {
+    user_ids: Vec<String>,
+    options: Vec<u8>,
+}
+
+struct MessageBatchGroup {
+    request: PushMessageRequest,
+    entry_indices: Vec<usize>,
 }
 
 impl OnlinePushHandler {
@@ -64,48 +80,74 @@ impl OnlinePushHandler {
         })
     }
 
-    fn build_message_group(
+    fn push_options_key(options: &Option<PushOptions>) -> Vec<u8> {
+        options
+            .as_ref()
+            .map(|options| options.encode_to_vec())
+            .unwrap_or_default()
+    }
+
+    fn build_message_groups(
         entries: &[BatchEntry],
-        start: usize,
-    ) -> Option<(usize, PushMessageRequest)> {
-        let first = &entries[start].envelope;
-        if Self::payload_kind(first) != PushTaskPayloadKind::Message {
-            return None;
-        }
+    ) -> (HashMap<MessageBatchKey, MessageBatchGroup>, HashSet<usize>) {
+        let mut groups = HashMap::<MessageBatchKey, MessageBatchGroup>::new();
+        let mut grouped_indices = HashSet::<usize>::new();
 
-        let mut request = match Self::decode_push_message_request(first) {
-            Ok(request) => request,
-            Err(_) => return None,
-        };
-        let user_id = first.user_id.clone();
-        let options: Option<PushOptions> = request.options.clone();
-        request.user_ids = vec![user_id.clone()];
-
-        let mut end = start + 1;
-        while end < entries.len() {
-            let envelope = &entries[end].envelope;
-            if envelope.user_id != user_id
-                || Self::payload_kind(envelope) != PushTaskPayloadKind::Message
-            {
-                break;
+        for entry in entries {
+            if Self::payload_kind(&entry.envelope) != PushTaskPayloadKind::Message {
+                continue;
             }
-
-            let next = match Self::decode_push_message_request(envelope) {
-                Ok(next) => next,
-                Err(_) => break,
+            let Ok(mut request) = Self::decode_push_message_request(&entry.envelope) else {
+                continue;
             };
-            if next.options != options {
-                break;
+            let user_ids = if entry.envelope.user_id.trim().is_empty() {
+                request
+                    .user_ids
+                    .iter()
+                    .filter(|user_id| !user_id.trim().is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                vec![entry.envelope.user_id.clone()]
+            };
+            if user_ids.is_empty() {
+                continue;
             }
-            request.messages.extend(next.messages);
-            end += 1;
+            let options = Self::push_options_key(&request.options);
+            let messages = std::mem::take(&mut request.messages);
+            request.user_ids = user_ids.clone();
+            request.messages = messages;
+            let key = MessageBatchKey { user_ids, options };
+
+            match groups.entry(key) {
+                Entry::Occupied(mut occupied) => {
+                    let group = occupied.get_mut();
+                    group.request.messages.extend(request.messages);
+                    group.entry_indices.push(entry.index);
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(MessageBatchGroup {
+                        request,
+                        entry_indices: vec![entry.index],
+                    });
+                }
+            }
+            grouped_indices.insert(entry.index);
         }
 
-        if end == start + 1 {
-            return None;
-        }
+        (groups, grouped_indices)
+    }
 
-        Some((end, request))
+    fn ack_entry_positions(entries: &[BatchEntry], grouped_indices: &HashSet<usize>) -> Vec<usize> {
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(position, entry)| {
+                (!grouped_indices.contains(&entry.index)
+                    && Self::payload_kind(&entry.envelope) == PushTaskPayloadKind::Ack)
+                    .then_some(position)
+            })
+            .collect()
     }
 
     async fn route_by_payload_kind(
@@ -217,7 +259,7 @@ impl OnlinePushHandler {
 
     async fn apply_group_route_result(
         &self,
-        entries: &[BatchEntry],
+        entries: &[&BatchEntry],
         result: Result<(), FlareError>,
     ) -> std::result::Result<MessageResult, ConsumerError> {
         match result {
@@ -308,29 +350,82 @@ impl MessageHandler for OnlinePushHandler {
         }
 
         let mut results = vec![MessageResult::Nack; entries.len()];
-        let mut offset = 0usize;
-        while offset < entries.len() {
-            if let Some((end, request)) = Self::build_message_group(&entries, offset) {
-                let group = &entries[offset..end];
-                let first = &group[0];
+        let (message_groups, grouped_indices) = Self::build_message_groups(&entries);
+        let entries_ref = &entries;
+        let group_results = stream::iter(message_groups.into_values())
+            .map(|group| {
+                let entries = entries_ref;
+                async move {
+                    let entry_indices = group.entry_indices;
+                    let group_entries = entry_indices
+                        .iter()
+                        .map(|index| &entries[*index])
+                        .collect::<Vec<_>>();
+                    let first = group_entries[0];
+                    let result = self
+                        .gateway_push
+                        .push_message(
+                            &first.message.context.ctx,
+                            &first.envelope.user_id,
+                            PushStrategy::AllDevices,
+                            group.request,
+                        )
+                        .await;
+                    let route_result = self
+                        .apply_group_route_result(&group_entries, result)
+                        .await?;
+                    Ok::<_, ConsumerError>((entry_indices, route_result))
+                }
+            })
+            .buffer_unordered(MESSAGE_GROUP_FANOUT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        for group_result in group_results {
+            let (entry_indices, route_result) = group_result?;
+            for index in entry_indices {
+                results[index] = route_result.clone();
+            }
+        }
+
+        let ack_positions = Self::ack_entry_positions(&entries, &grouped_indices);
+        let entries_ref = &entries;
+        let ack_results = stream::iter(ack_positions)
+            .map(|position| async move {
+                let entry = &entries_ref[position];
                 let result = self
-                    .gateway_push
-                    .push_message(
-                        &first.message.context.ctx,
-                        &first.envelope.user_id,
+                    .route_by_payload_kind(
+                        &entry.message.context.ctx,
+                        &entry.envelope,
+                        &entry.envelope.user_id,
                         PushStrategy::AllDevices,
-                        request,
                     )
                     .await;
-                let route_result = self.apply_group_route_result(group, result).await?;
-                for entry in group {
-                    results[entry.index] = route_result.clone();
-                }
-                offset = end;
+                let route_result = self
+                    .apply_route_result(
+                        &entry.message.context.ctx,
+                        &entry.envelope,
+                        &entry.message.payload,
+                        result,
+                    )
+                    .await?;
+                Ok::<_, ConsumerError>((entry.index, route_result))
+            })
+            .buffer_unordered(ACK_FANOUT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut ack_indices = HashSet::with_capacity(ack_results.len());
+        for ack_result in ack_results {
+            let (index, route_result) = ack_result?;
+            ack_indices.insert(index);
+            results[index] = route_result;
+        }
+
+        for entry in &entries {
+            if grouped_indices.contains(&entry.index) || ack_indices.contains(&entry.index) {
                 continue;
             }
-
-            let entry = &entries[offset];
             let result = self
                 .route_by_payload_kind(
                     &entry.message.context.ctx,
@@ -347,7 +442,6 @@ impl MessageHandler for OnlinePushHandler {
                     result,
                 )
                 .await?;
-            offset += 1;
         }
 
         Ok(results)
@@ -423,33 +517,125 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_message_group_merges_contiguous_same_user_messages_in_order() {
-        let entries = vec![
-            batch_entry(0, "bob", "m1"),
-            batch_entry(1, "bob", "m2"),
-            batch_entry(2, "alice", "m3"),
-        ];
-
-        let (end, request) = OnlinePushHandler::build_message_group(&entries, 0)
-            .expect("first two bob messages should merge");
-
-        assert_eq!(end, 2);
-        assert_eq!(request.user_ids, vec!["bob".to_string()]);
-        let server_ids = request
-            .messages
-            .into_iter()
-            .map(|message| message.server_id)
-            .collect::<Vec<_>>();
-        assert_eq!(server_ids, vec!["m1".to_string(), "m2".to_string()]);
+    fn ack_entry(index: usize, user_id: &str, ack_id: &str) -> BatchEntry {
+        let request = PushAckRequest {
+            user_ids: vec![user_id.to_string()],
+            ack: Some(Default::default()),
+            options: None,
+        };
+        let envelope = PushTaskEnvelope {
+            user_id: user_id.to_string(),
+            message_id: ack_id.to_string(),
+            conversation_id: "conv-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            priority: 5,
+            expire_at: None,
+            push_payload: request.encode_to_vec(),
+            headers: Default::default(),
+            payload_kind: PushTaskPayloadKind::Ack as i32,
+        };
+        let ctx = Arc::new(Context::with_request_id(format!("req-{ack_id}")));
+        let message = Message::new(
+            envelope.encode_to_vec(),
+            ContentType::Protobuf,
+            MessageContext::new(ctx, "push.online".to_string()).with_key(user_id.to_string()),
+        );
+        BatchEntry {
+            index,
+            message,
+            envelope,
+        }
     }
 
     #[test]
-    fn build_message_group_does_not_cross_user_boundary() {
+    fn build_message_groups_merges_non_contiguous_same_user_messages_in_order() {
+        let entries = vec![
+            batch_entry(0, "bob", "m1"),
+            batch_entry(1, "alice", "m2"),
+            batch_entry(2, "bob", "m3"),
+        ];
+
+        let (groups, grouped_indices) = OnlinePushHandler::build_message_groups(&entries);
+        let bob = groups
+            .values()
+            .find(|group| group.request.user_ids == vec!["bob".to_string()])
+            .expect("bob group should exist");
+
+        assert_eq!(grouped_indices.len(), 3);
+        let server_ids = bob
+            .request
+            .messages
+            .iter()
+            .map(|message| message.server_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(server_ids, vec!["m1".to_string(), "m3".to_string()]);
+    }
+
+    #[test]
+    fn build_message_groups_keeps_different_users_separate() {
         let entries = vec![batch_entry(0, "bob", "m1"), batch_entry(1, "alice", "m2")];
 
-        let group = OnlinePushHandler::build_message_group(&entries, 0);
+        let (groups, grouped_indices) = OnlinePushHandler::build_message_groups(&entries);
 
-        assert!(group.is_none());
+        assert_eq!(grouped_indices.len(), 2);
+        assert_eq!(groups.len(), 2);
+        let mut users = groups
+            .values()
+            .map(|group| group.request.user_ids[0].clone())
+            .collect::<Vec<_>>();
+        users.sort();
+        assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+        for group in groups.values() {
+            assert_eq!(group.request.messages.len(), 1);
+        }
+    }
+
+    #[test]
+    fn build_message_groups_ignores_non_message_entries() {
+        let mut entry = batch_entry(0, "bob", "m1");
+        entry.envelope.payload_kind = PushTaskPayloadKind::Event as i32;
+        let entries = vec![entry];
+
+        let (groups, grouped_indices) = OnlinePushHandler::build_message_groups(&entries);
+
+        assert!(groups.is_empty());
+        assert!(grouped_indices.is_empty());
+    }
+
+    #[test]
+    fn build_message_groups_preserves_message_order_per_user() {
+        let entries = vec![
+            batch_entry(0, "bob", "m1"),
+            batch_entry(1, "bob", "m2"),
+            batch_entry(2, "bob", "m3"),
+        ];
+
+        let (groups, _) = OnlinePushHandler::build_message_groups(&entries);
+        let group = groups.values().next().expect("group should exist");
+        let server_ids = group
+            .request
+            .messages
+            .iter()
+            .map(|message| message.server_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            server_ids,
+            vec!["m1".to_string(), "m2".to_string(), "m3".to_string()]
+        );
+    }
+
+    #[test]
+    fn ack_entry_positions_finds_ungrouped_ack_entries() {
+        let entries = vec![
+            batch_entry(10, "bob", "m1"),
+            ack_entry(11, "bob", "ack-1"),
+            ack_entry(12, "alice", "ack-2"),
+        ];
+        let mut grouped_indices = HashSet::new();
+        grouped_indices.insert(10);
+
+        let positions = OnlinePushHandler::ack_entry_positions(&entries, &grouped_indices);
+
+        assert_eq!(positions, vec![1, 2]);
     }
 }

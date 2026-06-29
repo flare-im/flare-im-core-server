@@ -13,9 +13,10 @@ use crate::application::commands::{
 use crate::application::handlers::{ConnectionQueryHandler, PushHandler};
 use flare_grpc_proto::access_gateway::access_gateway_server::AccessGateway;
 use flare_grpc_proto::access_gateway::{
-    ConnectionInfo as ProtoConnectionInfo, GetUserConnectionsRequest, GetUserConnectionsResponse,
-    PushAckRequest, PushAckResponse, PushCustomRequest, PushEventRequest, PushMessageRequest,
-    PushNotificationRequest, PushNotificationResponse, PushResponse,
+    ConnectionInfo as ProtoConnectionInfo, DeliverToConversationRequest, GetUserConnectionsRequest,
+    GetUserConnectionsResponse, PushAckRequest, PushAckResponse, PushCustomRequest,
+    PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
+    PushResponse,
 };
 use flare_im_contracts::require_context;
 use prost_types::Timestamp;
@@ -62,6 +63,28 @@ impl AccessGateway for AccessGatewayHandler {
             .await
             .map_err(|e| {
                 tracing::error!(?e, "Failed to push message");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(response))
+    }
+
+    async fn deliver_to_conversation(
+        &self,
+        request: Request<DeliverToConversationRequest>,
+    ) -> Result<Response<PushResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+        debug!(
+            "DeliverToConversation request: conv={} messages={}",
+            req.conversation_id,
+            req.messages.len()
+        );
+        let response = self
+            .push_handler
+            .handle_deliver_to_conversation(&ctx, req.conversation_id, req.messages)
+            .await
+            .map_err(|e| {
+                tracing::error!(?e, "Failed to deliver to conversation");
                 Status::internal(e.to_string())
             })?;
         Ok(Response::new(response))

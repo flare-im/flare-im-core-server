@@ -26,8 +26,8 @@ use flare_server_core::error::FlareError;
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 
-fn retry_or_dlq_result(error: &FlareError) -> Option<MessageResult> {
-    error.is_retryable().then_some(MessageResult::Nack)
+fn retry_or_dlq_result(_error: &FlareError) -> Option<MessageResult> {
+    None
 }
 
 /// 推送事件消费者处理器
@@ -298,13 +298,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retryable_error_requests_nack() {
+    fn retryable_error_uses_dlq_path() {
         let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "mq unavailable").build_error();
 
-        assert!(matches!(
-            retry_or_dlq_result(&err),
-            Some(MessageResult::Nack)
-        ));
+        assert!(retry_or_dlq_result(&err).is_none());
     }
 
     #[test]

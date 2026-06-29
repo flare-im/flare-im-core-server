@@ -187,6 +187,13 @@ impl LongConnectionHandler {
         self.spawn_refresh_session(connection_id);
         let conversation_id =
             self.conversation_id_from_metadata_or_message(&command.metadata, &command.payload);
+        // 统一读扩散地基（惰性订阅）：连接对某会话有交互即订阅，后续该会话的会话级 publish
+        // 由本节点扇给此连接（O(在线/节点)，与群人数无关）。幂等。
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            self.connection_handler
+                .conversation_subscriptions()
+                .join(conversation_id, connection_id);
+        }
         let message = match decode_message_payload(&command.payload) {
             Ok(m) => m,
             Err(e) => {

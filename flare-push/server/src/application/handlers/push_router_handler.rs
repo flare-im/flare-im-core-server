@@ -11,6 +11,7 @@ use flare_proto::common::{
     PushTaskPayloadKind, SystemPayload, ack, notification_message, push_envelope,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+use futures::stream::{self, StreamExt};
 use prost::Message as _;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -249,6 +250,88 @@ struct PushTaskTemplate<'a> {
     payload_kind: i32,
 }
 
+struct PendingPushTask {
+    user_id: String,
+    payload: Vec<u8>,
+    online: bool,
+}
+
+const PUSH_TASK_PUBLISH_CONCURRENCY: usize = 64;
+
+fn rewrite_push_payload_user_ids(
+    payload_kind: i32,
+    payload: &[u8],
+    user_ids: &[String],
+) -> Result<Vec<u8>> {
+    let kind =
+        PushTaskPayloadKind::try_from(payload_kind).unwrap_or(PushTaskPayloadKind::Unspecified);
+    match kind {
+        PushTaskPayloadKind::Message => {
+            let mut request = access_gateway::PushMessageRequest::decode(payload).map_err(|e| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "decode PushMessageRequest failed",
+                )
+                .details(e.to_string())
+                .build_error()
+            })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
+        PushTaskPayloadKind::Event => {
+            let mut request = access_gateway::PushEventRequest::decode(payload).map_err(|e| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "decode PushEventRequest failed",
+                )
+                .details(e.to_string())
+                .build_error()
+            })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
+        PushTaskPayloadKind::Notification => {
+            let mut request =
+                access_gateway::PushNotificationRequest::decode(payload).map_err(|e| {
+                    ErrorBuilder::new(
+                        ErrorCode::InvalidParameter,
+                        "decode PushNotificationRequest failed",
+                    )
+                    .details(e.to_string())
+                    .build_error()
+                })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
+        PushTaskPayloadKind::Ack => {
+            let mut request = access_gateway::PushAckRequest::decode(payload).map_err(|e| {
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "decode PushAckRequest failed")
+                    .details(e.to_string())
+                    .build_error()
+            })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
+        PushTaskPayloadKind::Custom => {
+            let mut request = access_gateway::PushCustomRequest::decode(payload).map_err(|e| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "decode PushCustomRequest failed",
+                )
+                .details(e.to_string())
+                .build_error()
+            })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
+        PushTaskPayloadKind::Unspecified => Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "PushTaskPayloadKind unspecified",
+        )
+        .build_error()),
+    }
+}
+
 impl PushRouterHandler {
     pub fn new(
         online_status: Arc<dyn OnlineStatusReader>,
@@ -455,6 +538,8 @@ impl PushRouterHandler {
         template: PushTaskTemplate<'_>,
         online_only: bool,
     ) -> Result<()> {
+        let mut online_user_ids = Vec::with_capacity(user_ids.len());
+        let mut offline_tasks = Vec::new();
         for user_id in user_ids {
             let is_online = online_statuses.get(user_id).copied().unwrap_or(false);
             if online_only && !is_online {
@@ -463,6 +548,11 @@ impl PushRouterHandler {
                     conversation_id = %template.conversation_id,
                     "Skipping offline user for pure conversation ping"
                 );
+                continue;
+            }
+
+            if is_online {
+                online_user_ids.push(user_id.clone());
                 continue;
             }
 
@@ -479,29 +569,76 @@ impl PushRouterHandler {
             };
 
             let payload = task.encode_to_vec();
-            if is_online {
-                self.publisher
-                    .publish_online_task(ctx, Some(user_id.as_str()), payload)
-                    .await
-                    .map_err(|e| {
-                        map_infra_error(
-                            e,
-                            ErrorCode::ServiceUnavailable,
-                            "Failed to publish online push task",
-                        )
-                    })?;
-            } else if !online_only {
-                self.publisher
-                    .publish_offline_task(ctx, Some(user_id.as_str()), payload)
-                    .await
-                    .map_err(|e| {
-                        map_infra_error(
-                            e,
-                            ErrorCode::ServiceUnavailable,
-                            "Failed to publish offline push task",
-                        )
-                    })?;
-            }
+            offline_tasks.push(PendingPushTask {
+                user_id: user_id.clone(),
+                payload,
+                online: false,
+            });
+        }
+
+        let mut tasks =
+            Vec::with_capacity(offline_tasks.len() + usize::from(!online_user_ids.is_empty()));
+        if !online_user_ids.is_empty() {
+            let push_payload = rewrite_push_payload_user_ids(
+                template.payload_kind,
+                template.push_payload,
+                &online_user_ids,
+            )?;
+            let task = PushTaskEnvelope {
+                user_id: String::new(),
+                message_id: template.message_id.to_string(),
+                conversation_id: template.conversation_id.to_string(),
+                tenant_id: template.tenant_id.to_string(),
+                priority: template.priority,
+                expire_at: template.expire_at,
+                push_payload,
+                headers: template.headers.clone(),
+                payload_kind: template.payload_kind,
+            };
+            tasks.push(PendingPushTask {
+                user_id: template.conversation_id.to_string(),
+                payload: task.encode_to_vec(),
+                online: true,
+            });
+        }
+        tasks.extend(offline_tasks);
+
+        let publisher = self.publisher.clone();
+        let results = stream::iter(tasks)
+            .map(|task| {
+                let publisher = publisher.clone();
+                async move {
+                    if task.online {
+                        publisher
+                            .publish_online_task(ctx, Some(task.user_id.as_str()), task.payload)
+                            .await
+                            .map_err(|e| {
+                                map_infra_error(
+                                    e,
+                                    ErrorCode::ServiceUnavailable,
+                                    "Failed to publish online push task",
+                                )
+                            })
+                    } else {
+                        publisher
+                            .publish_offline_task(ctx, Some(task.user_id.as_str()), task.payload)
+                            .await
+                            .map_err(|e| {
+                                map_infra_error(
+                                    e,
+                                    ErrorCode::ServiceUnavailable,
+                                    "Failed to publish offline push task",
+                                )
+                            })
+                    }
+                }
+            })
+            .buffer_unordered(PUSH_TASK_PUBLISH_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        for result in results {
+            result?;
         }
 
         Ok(())
@@ -568,7 +705,14 @@ impl PushRouterHandler {
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
         let tenant_id = self.online_status.default_tenant_id().to_string();
-        let online_statuses = self.load_online_statuses(ctx, user_ids).await?;
+        let online_statuses = if online_only {
+            self.load_online_statuses(ctx, user_ids).await?
+        } else {
+            user_ids
+                .iter()
+                .map(|user_id| (user_id.clone(), true))
+                .collect()
+        };
         self.publish_targeted_tasks(
             ctx,
             user_ids,
@@ -1025,7 +1169,7 @@ mod tests {
                 .iter()
                 .map(|(key, _)| key.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("online-a"), Some("online-c")]
+            vec![Some("conversation-large")]
         );
 
         for (_key, task) in online_tasks {
@@ -1038,6 +1182,10 @@ mod tests {
             assert_eq!(push.max_conversation_seq, 42);
             assert_eq!(push.delivery_mode, EventEnvelopeDeliveryMode::Ping as i32);
             assert!(push.inline_events_truncated);
+            assert_eq!(
+                push.user_ids,
+                vec!["online-a".to_string(), "online-c".to_string()]
+            );
         }
     }
 
@@ -1094,12 +1242,18 @@ mod tests {
                 .iter()
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>(),
-            online_user_ids
-                .iter()
-                .map(|user_id| Some(user_id.clone()))
-                .collect::<Vec<_>>(),
-            "first ping should publish only users returned by the online index"
+            vec![Some("conversation-large".to_string())],
+            "first ping should publish one bulk task for users returned by the online index"
         );
+        let online_tasks = publisher
+            .online
+            .lock()
+            .expect("online task lock poisoned")
+            .clone();
+        let push =
+            access_gateway::PushEventRequest::decode(online_tasks[0].1.push_payload.as_slice())
+                .expect("bulk push event should decode");
+        assert_eq!(push.user_ids, online_user_ids);
 
         handler
             .handle_event(
@@ -1128,7 +1282,7 @@ mod tests {
                 .lock()
                 .expect("online task lock poisoned")
                 .len(),
-            3,
+            1,
             "second ping should only update pending watermark inside coalesce window"
         );
 
