@@ -259,6 +259,30 @@ where
         Ok((messages, last_seq))
     }
 
+    /// 批量窗口：N 个会话各取最新 limit 条（冷启 bundle 每页 1 RPC）。
+    #[instrument(skip(self, ctx, targets), fields(conversations = targets.len(), limit = per_conversation_limit))]
+    pub async fn handle_query_conversations_message_windows(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        targets: &[(String, i64)],
+        user_id: Option<&str>,
+        per_conversation_limit: i32,
+        newest_window: bool,
+        include_burned_placeholder: bool,
+    ) -> Result<Vec<(String, Vec<Message>)>> {
+        self.storage
+            .query_conversations_message_windows(
+                ctx,
+                targets,
+                user_id,
+                per_conversation_limit,
+                newest_window,
+                include_burned_placeholder,
+            )
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database query failed"))
+    }
+
     /// 查询消息操作历史
     #[instrument(skip(self, ctx), fields(message_id = %query.message_id))]
     pub async fn handle_query_message_operations(
@@ -512,6 +536,18 @@ mod tests {
             _limit: i32,
             _include_burned_placeholder: bool,
         ) -> AnyhowResult<Vec<Message>> {
+            unimplemented!()
+        }
+
+        async fn query_conversations_message_windows(
+            &self,
+            _ctx: &flare_im_contracts::Ctx,
+            _targets: &[(String, i64)],
+            _user_id: Option<&str>,
+            _per_conversation_limit: i32,
+            _newest_window: bool,
+            _include_burned_placeholder: bool,
+        ) -> AnyhowResult<Vec<(String, Vec<Message>)>> {
             unimplemented!()
         }
 

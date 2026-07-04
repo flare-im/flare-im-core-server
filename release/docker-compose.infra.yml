@@ -1,0 +1,141 @@
+networks:
+  flare-network:
+    driver: bridge
+
+services:
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: flare-consul
+    restart: unless-stopped
+    networks:
+      - flare-network
+    ports:
+      - "127.0.0.1:28500:8500"
+      - "127.0.0.1:28600:8600/udp"
+    environment:
+      CONSUL_BIND_INTERFACE: eth0
+    volumes:
+      - ./data/consul:/consul/data
+    command: >
+      consul agent
+      -server
+      -ui
+      -bootstrap-expect=1
+      -client=0.0.0.0
+      -bind=0.0.0.0
+      -data-dir=/consul/data
+      -log-level=WARN
+    mem_limit: 192m
+
+  redis:
+    image: redis:7-alpine
+    container_name: flare-redis
+    restart: unless-stopped
+    networks:
+      - flare-network
+    ports:
+      - "127.0.0.1:26379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 384mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: flare-postgres
+    restart: unless-stopped
+    networks:
+      - flare-network
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flare123}
+      POSTGRES_DB: ${POSTGRES_DB:-flare2}
+    ports:
+      - "127.0.0.1:25432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command:
+      - postgres
+      - -c
+      - max_connections=80
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1024MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - wal_buffers=16MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flare}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1280m
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: flare-nats
+    restart: unless-stopped
+    networks:
+      - flare-network
+    ports:
+      - "127.0.0.1:24222:4222"
+      - "127.0.0.1:28222:8222"
+    command:
+      - "-c"
+      - "/etc/nats/nats.conf"
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    volumes:
+      - ./data/nats:/data
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 384m
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: flare-rustfs
+    restart: unless-stopped
+    networks:
+      - flare-network
+    ports:
+      - "127.0.0.1:29000:9000"
+      - "127.0.0.1:29001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes:
+      - ./data/rustfs:/data
+    command:
+      - "--address"
+      - ":9000"
+      - "--console-address"
+      - ":9001"
+      - "--console-enable"
+      - "--access-key"
+      - "${RUSTFS_ACCESS_KEY:-rustfsadmin}"
+      - "--secret-key"
+      - "${RUSTFS_SECRET_KEY:-rustfsadmin}"
+      - "/data"
+    mem_limit: 384m

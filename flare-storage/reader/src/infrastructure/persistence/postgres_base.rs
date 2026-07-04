@@ -354,6 +354,7 @@ impl PostgresBaseStorage {
         let sender_name: Option<String> = row.get("sender_name");
         let sender_avatar: Option<String> = row.get("sender_avatar");
         let channel_id: Option<String> = row.get("channel_id");
+        let thread_id: Option<String> = row.try_get("thread_id").ok().flatten();
         let source: i32 = row.get("source");
         let seq: i64 = row.get("seq");
         let timestamp: DateTime<Utc> = row.get("timestamp");
@@ -458,6 +459,7 @@ impl PostgresBaseStorage {
             message_type,
             message_seq: None,
             channel_id: channel_id.unwrap_or_default(),
+            thread_id,
             content,
             status,
             retention_policy: None,

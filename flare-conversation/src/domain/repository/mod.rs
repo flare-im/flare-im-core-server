@@ -26,10 +26,13 @@ pub struct PresenceUpdate {
 /// 使用 Rust 2024 原生 async fn in traits（无需 async-trait 宏）
 /// 注意：由于需要作为 trait 对象（dyn Trait）使用，需要使用泛型包装器模式
 pub trait ConversationRepository: Send + Sync {
+    /// `updated_after_ms > 0` 时只返回 `effective_updated_at` 晚于该时刻的会话
+    /// （存储层增量过滤，热启/重连列表同步 O(变化)）；`0` = 全量。
     async fn load_bootstrap(
         &self,
         ctx: &flare_server_core::context::Context,
         client_cursor: &HashMap<String, i64>,
+        updated_after_ms: i64,
     ) -> Result<ConversationBootstrapResult>;
 
     async fn update_cursor(

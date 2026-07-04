@@ -135,6 +135,11 @@ services:
       - "24222:4222"  # NATS client
       - "28222:8222"  # NATS monitoring
     command:
+      # 超大群建群:首条消息携带整张成员表(10万≈1MB),需提高 NATS 单消息上限(默认 1MB)。
+      # max_payload 只能经配置文件设置(无对应 CLI flag);data/nats/nats.conf 写 `max_payload: 16MB`。
+      # 注:这是支撑"建群一次性大消息"的务实配置;生产更优解是服务端显式建群(消息不带成员表)。
+      - "-c"
+      - "/data/nats.conf"
       - "-js"
       - "-sd"
       - "/data"

@@ -14,15 +14,28 @@
 //! [`remove_connection`]: ConversationSubscriptionRegistry::remove_connection
 
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+type SubscriptionMap = HashMap<String, HashSet<String>>;
 
 /// 网关本节点的会话→在线连接订阅表。
 #[derive(Default)]
 pub struct ConversationSubscriptionRegistry {
     /// conversation_id → 本节点订阅的连接集合。
-    by_conversation: RwLock<HashMap<String, HashSet<String>>>,
+    by_conversation: RwLock<SubscriptionMap>,
     /// connection_id → 其订阅的会话集合（断线清扫反向索引）。
-    by_connection: RwLock<HashMap<String, HashSet<String>>>,
+    by_connection: RwLock<SubscriptionMap>,
+}
+
+/// 长驻服务路径不 panic：锁中毒（持锁线程 panic）时恢复内层数据继续服务——
+/// 订阅表操作均为幂等集合增删，部分状态可被后续 join/leave/断线清扫自愈。
+fn write_recovered(lock: &RwLock<SubscriptionMap>) -> RwLockWriteGuard<'_, SubscriptionMap> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn read_recovered(lock: &RwLock<SubscriptionMap>) -> RwLockReadGuard<'_, SubscriptionMap> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl ConversationSubscriptionRegistry {
@@ -35,15 +48,11 @@ impl ConversationSubscriptionRegistry {
         if conversation_id.is_empty() || connection_id.is_empty() {
             return;
         }
-        self.by_conversation
-            .write()
-            .expect("conversation subscription lock poisoned")
+        write_recovered(&self.by_conversation)
             .entry(conversation_id.to_string())
             .or_default()
             .insert(connection_id.to_string());
-        self.by_connection
-            .write()
-            .expect("connection index lock poisoned")
+        write_recovered(&self.by_connection)
             .entry(connection_id.to_string())
             .or_default()
             .insert(conversation_id.to_string());
@@ -52,10 +61,7 @@ impl ConversationSubscriptionRegistry {
     /// 连接退订会话（幂等）。集合空则回收键，避免无界增长。
     pub fn leave(&self, conversation_id: &str, connection_id: &str) {
         {
-            let mut conv = self
-                .by_conversation
-                .write()
-                .expect("conversation subscription lock poisoned");
+            let mut conv = write_recovered(&self.by_conversation);
             if let Some(set) = conv.get_mut(conversation_id) {
                 set.remove(connection_id);
                 if set.is_empty() {
@@ -64,10 +70,7 @@ impl ConversationSubscriptionRegistry {
             }
         }
         {
-            let mut byc = self
-                .by_connection
-                .write()
-                .expect("connection index lock poisoned");
+            let mut byc = write_recovered(&self.by_connection);
             if let Some(set) = byc.get_mut(connection_id) {
                 set.remove(conversation_id);
                 if set.is_empty() {
@@ -79,20 +82,13 @@ impl ConversationSubscriptionRegistry {
 
     /// 断线：清除该连接的所有会话订阅（O(该连接订阅的会话数)）。
     pub fn remove_connection(&self, connection_id: &str) {
-        let conversations = {
-            let mut byc = self
-                .by_connection
-                .write()
-                .expect("connection index lock poisoned");
-            byc.remove(connection_id).unwrap_or_default()
-        };
+        let conversations = write_recovered(&self.by_connection)
+            .remove(connection_id)
+            .unwrap_or_default();
         if conversations.is_empty() {
             return;
         }
-        let mut conv = self
-            .by_conversation
-            .write()
-            .expect("conversation subscription lock poisoned");
+        let mut conv = write_recovered(&self.by_conversation);
         for cid in conversations {
             if let Some(set) = conv.get_mut(&cid) {
                 set.remove(connection_id);
@@ -105,9 +101,7 @@ impl ConversationSubscriptionRegistry {
 
     /// 本节点订阅该会话的在线连接（读扩散扇出目标）。
     pub fn local_subscribers(&self, conversation_id: &str) -> Vec<String> {
-        self.by_conversation
-            .read()
-            .expect("conversation subscription lock poisoned")
+        read_recovered(&self.by_conversation)
             .get(conversation_id)
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default()
@@ -115,9 +109,7 @@ impl ConversationSubscriptionRegistry {
 
     /// 本节点该会话的在线订阅数（用于"无订阅则跳过扇出"快判）。
     pub fn local_subscriber_count(&self, conversation_id: &str) -> usize {
-        self.by_conversation
-            .read()
-            .expect("conversation subscription lock poisoned")
+        read_recovered(&self.by_conversation)
             .get(conversation_id)
             .map(HashSet::len)
             .unwrap_or(0)

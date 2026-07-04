@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use flare_grpc_proto::access_gateway::{
-    PushAckResponse, PushNotificationResponse, PushResponse, PushResult, UserPushResult,
+    DeliverToConversationRequest, PushAckResponse, PushNotificationResponse, PushResponse,
+    PushResult, UserPushResult,
 };
 use flare_im_contracts::Ctx;
-use flare_proto::common::Message;
 use prost::Message as ProstMessage;
 use prost_types::Timestamp;
 use tracing::instrument;
@@ -125,15 +125,18 @@ impl PushHandler {
         })
     }
 
-    /// DeliverToConversation（统一读扩散）：把消息扇给"本网关节点订阅该会话的在线连接"。
+    /// DeliverToConversation（统一读扩散）：把会话载荷扇给"本网关节点订阅该会话的在线连接"。
     /// 上游无需解析收件人；无本地订阅者时为空操作（成功 0）。
-    #[instrument(skip(self, messages), fields(message_count = messages.len()))]
+    /// 载荷由 oneof 显式判别：messages（MessagePush）/ events（EventEnvelope）/ ping（纯水位）。
+    #[instrument(skip(self, req), fields(conversation_id = %req.conversation_id))]
     pub async fn handle_deliver_to_conversation(
         &self,
         ctx: &Ctx,
-        conversation_id: String,
-        messages: Vec<Message>,
+        req: DeliverToConversationRequest,
     ) -> Result<PushResponse> {
+        use flare_grpc_proto::access_gateway::deliver_to_conversation_request::Payload;
+
+        let conversation_id = req.conversation_id;
         if conversation_id.trim().is_empty() {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
@@ -141,17 +144,54 @@ impl PushHandler {
             )
             .build_error());
         }
-        if messages.is_empty() {
-            return Err(ErrorBuilder::new(
+
+        let invalid = |detail: &str| {
+            Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
-                "DeliverToConversation: messages is empty",
+                format!("DeliverToConversation: {detail}"),
             )
-            .build_error());
-        }
-        let (pushed, failed) = self
-            .push_domain_service
-            .push_message_to_conversation(ctx, &conversation_id, messages)
-            .await?;
+            .build_error())
+        };
+        let (pushed, failed) = match req.payload {
+            Some(Payload::Messages(delivery)) if !delivery.messages.is_empty() => {
+                self.push_domain_service
+                    .push_message_to_conversation(ctx, &conversation_id, delivery.messages)
+                    .await?
+            }
+            Some(Payload::Messages(_)) => return invalid("messages payload is empty"),
+            Some(Payload::Events(delivery)) if !delivery.events.is_empty() => {
+                let window_id = uuid::Uuid::new_v4().to_string();
+                self.push_domain_service
+                    .deliver_event_envelope_to_conversation(
+                        ctx,
+                        &conversation_id,
+                        delivery.events,
+                        &window_id,
+                        0, // 水位由网关从 events 推断
+                        delivery.delivery_mode,
+                        delivery.inline_events_truncated,
+                    )
+                    .await?
+            }
+            Some(Payload::Events(_)) => return invalid("events payload is empty"),
+            Some(Payload::Ping(ping)) if ping.max_conversation_seq > 0 => {
+                let window_id = uuid::Uuid::new_v4().to_string();
+                self.push_domain_service
+                    .deliver_event_envelope_to_conversation(
+                        ctx,
+                        &conversation_id,
+                        Vec::new(),
+                        &window_id,
+                        ping.max_conversation_seq,
+                        ping.delivery_mode,
+                        ping.inline_events_truncated,
+                    )
+                    .await?
+            }
+            Some(Payload::Ping(_)) => return invalid("ping requires max_conversation_seq > 0"),
+            None => return invalid("missing payload"),
+        };
+
         if failed > 0 {
             return Err(ErrorBuilder::new(
                 ErrorCode::ServiceUnavailable,

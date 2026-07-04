@@ -98,6 +98,7 @@ impl ConversationRepository for RedisConversationRepository {
         &self,
         ctx: &flare_server_core::context::Context,
         client_cursor: &HashMap<String, i64>,
+        updated_after_ms: i64,
     ) -> Result<ConversationBootstrapResult> {
         let user_id = require_user_id(ctx)?;
         let mut conn = self.connection().await?;
@@ -146,6 +147,12 @@ impl ConversationRepository for RedisConversationRepository {
             let last_ts = state
                 .get("last_message_ts")
                 .and_then(|v| v.parse::<i64>().ok());
+
+            // 增量过滤（与 Postgres 实现语义对齐）：最后活跃时间不晚于边界的会话跳过。
+            // Redis 读模型无 per-row LATERAL 成本，此处过滤只为响应体量与语义一致。
+            if updated_after_ms > 0 && last_ts.map(|ts| ts <= updated_after_ms).unwrap_or(false) {
+                continue;
+            }
 
             let summary = ConversationSummary {
                 conversation_id: conversation_id.clone(),

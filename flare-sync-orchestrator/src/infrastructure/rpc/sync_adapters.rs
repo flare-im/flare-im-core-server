@@ -5,14 +5,16 @@
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
-    GetConversationDetailResponse, ListConversationParticipantsRequest,
-    ListConversationParticipantsResponse, UpdateConversationUserSettingsRequest,
-    UpdateConversationUserSettingsResponse, UpdateCursorRequest,
+    ConversationBootstrapRequest, ConversationBootstrapResponse, CreateConversationRequest,
+    CreateConversationResponse, GetConversationDetailRequest, GetConversationDetailResponse,
+    ListConversationParticipantsRequest, ListConversationParticipantsResponse,
+    UpdateConversationUserSettingsRequest, UpdateConversationUserSettingsResponse,
+    UpdateCursorRequest,
 };
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
-    GetConversationMessageHeadRequest, QueryConversationEventsRequest, QueryMessagesBySeqRequest,
+    ConversationWindowTarget, GetConversationMessageHeadRequest, QueryConversationEventsRequest,
+    QueryConversationsMessageWindowsRequest, QueryMessagesBySeqRequest,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
@@ -283,6 +285,19 @@ impl ConversationSyncPort for GrpcSyncAdapters {
             .map_err(|e| flare_from_tonic_status(&e))?;
         Ok(resp.into_inner())
     }
+
+    async fn create_conversation(
+        &self,
+        ctx: &Ctx,
+        req: CreateConversationRequest,
+    ) -> Result<CreateConversationResponse, FlareError> {
+        let mut client = Self::conversation_manage_client().await?;
+        let resp = client
+            .create_conversation(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
+    }
 }
 
 impl StorageReadPort for GrpcSyncAdapters {
@@ -336,6 +351,42 @@ impl StorageReadPort for GrpcSyncAdapters {
             last_message_id: resp.last_message_id,
             last_timestamp: resp.last_timestamp,
         })
+    }
+
+    async fn query_conversations_message_windows(
+        &self,
+        ctx: &Ctx,
+        targets: &[(String, i64)],
+        per_conversation_limit: i32,
+        newest_window: bool,
+        user_id: &str,
+    ) -> Result<Vec<(String, Vec<Message>, i64)>, FlareError> {
+        let mut client = Self::storage_client().await?;
+        let resp = client
+            .query_conversations_message_windows(request_with_context(
+                QueryConversationsMessageWindowsRequest {
+                    targets: targets
+                        .iter()
+                        .map(|(conversation_id, after_seq)| ConversationWindowTarget {
+                            conversation_id: conversation_id.clone(),
+                            after_seq: *after_seq,
+                        })
+                        .collect(),
+                    per_conversation_limit,
+                    user_id: user_id.to_string(),
+                    include_burned_placeholder: false,
+                    newest_window,
+                },
+                ctx,
+            ))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?
+            .into_inner();
+        Ok(resp
+            .windows
+            .into_iter()
+            .map(|window| (window.conversation_id, window.messages, window.last_seq))
+            .collect())
     }
 }
 

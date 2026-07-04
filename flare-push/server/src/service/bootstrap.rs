@@ -48,11 +48,13 @@ impl ApplicationBootstrap {
                     e
                 ))
             })?,
-            "nats" => flare_server_core::mq::nats::build_nats_consumer_tasks(
+            // 接通死信:处理失败/毒消息投到独立死信流 flare.im.dlq.push-server,不再无限重投。
+            "nats" => flare_server_core::mq::nats::build_nats_consumer_tasks_with_dlq(
                 context.config.as_ref(),
                 context.consumer_config,
                 context.dispatcher.clone(),
                 "push-server-consumer",
+                "flare.im.dlq.push-server",
             )
             .await
             .map_err(|e| {

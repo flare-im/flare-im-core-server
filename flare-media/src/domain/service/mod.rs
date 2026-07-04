@@ -74,9 +74,7 @@ impl MediaService {
             config,
         }
     }
-
 }
-
 
 mod direct;
 mod helpers;

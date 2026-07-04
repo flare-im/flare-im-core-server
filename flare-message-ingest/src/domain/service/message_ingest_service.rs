@@ -48,23 +48,17 @@ pub struct MessageIngestService {
     message_decorator: Arc<dyn MessageDecorator>,
     /// 消息校验策略
     validation_strategy: Arc<dyn MessageValidationStrategy>,
-    /// 大群持久消息收件人物化阈值；超过后主链路只携带会话级版本信号。
-    large_conversation_materialize_threshold: usize,
 }
 
+#[derive(Default)]
 pub struct MessageIngestServiceOptions {
-    pub large_conversation_materialize_threshold: usize,
     pub message_decorator: Option<Arc<dyn MessageDecorator>>,
     pub validation_strategy: Option<Arc<dyn MessageValidationStrategy>>,
 }
 
 impl MessageIngestServiceOptions {
-    pub fn new(large_conversation_materialize_threshold: usize) -> Self {
-        Self {
-            large_conversation_materialize_threshold,
-            message_decorator: None,
-            validation_strategy: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -89,8 +83,6 @@ impl MessageIngestService {
             validation_strategy: options.validation_strategy.unwrap_or_else(|| {
                 Arc::new(CompositeMessageValidationStrategy::default_composite())
             }),
-            large_conversation_materialize_threshold: options
-                .large_conversation_materialize_threshold,
         }
     }
 
@@ -142,34 +134,39 @@ impl MessageIngestService {
         Ok(())
     }
 
-    /// 准备消息提交并分配序列号
+    /// 准备消息提交（不分配序列号）。
     ///
     /// # 参数
-    /// - `ctx`: 上下文
-    /// - `tenant_id`: 租户 ID
     /// - `message`: 消息
     ///
     /// # 返回
-    /// - `Ok((submission, profile))`: 消息提交和消息配置
+    /// - `Ok(submission)`: 已填充默认值和消息 ID 的提交
     /// - `Err`: 错误
     #[instrument(skip(self), fields(
         conversation_id = %message.conversation_id,
         message_type = message.message_type,
     ))]
-    pub async fn prepare_and_allocate_seq(
-        &self,
-        ctx: &Ctx,
-        tenant_id: &str,
-        message: Message,
-    ) -> Result<(MessageSubmission, MessageProfile)> {
+    pub async fn prepare_submission(&self, message: Message) -> Result<MessageSubmission> {
         // 准备消息提交
-        let submission = MessageSubmission::prepare(message, &self.defaults).map_err(|e| {
+        MessageSubmission::prepare(message, &self.defaults).map_err(|e| {
             flare_err!(
                 ErrorCode::InvalidParameter,
                 &format!("Failed to prepare message: {}", e)
             )
-        })?;
+        })
+    }
 
+    /// 为已准备好的提交分配会话序列号。
+    #[instrument(skip(self, submission), fields(
+        conversation_id = %submission.message.conversation_id,
+        message_id = %submission.message_id,
+    ))]
+    pub async fn allocate_seq_for_submission(
+        &self,
+        _ctx: &Ctx,
+        tenant_id: &str,
+        mut submission: MessageSubmission,
+    ) -> Result<(MessageSubmission, MessageProfile)> {
         // 分配序列号
         let session_seq = self
             .sequence_allocator
@@ -191,7 +188,6 @@ impl MessageIngestService {
             "Allocated session sequence"
         );
 
-        let mut submission = submission;
         submission.message.conversation_seq = session_seq;
 
         // 获取消息类型信息
@@ -199,6 +195,25 @@ impl MessageIngestService {
         let profile = MessageProfile::ensure(&mut message_for_profile);
 
         Ok((submission, profile))
+    }
+
+    /// 准备消息提交并分配序列号。
+    ///
+    /// 保留给已有测试和直接调用方；发送主链应在会话 ensure / decorate 成功后再调用
+    /// [`Self::allocate_seq_for_submission`]，减少失败路径消耗会话序列号。
+    #[instrument(skip(self), fields(
+        conversation_id = %message.conversation_id,
+        message_type = message.message_type,
+    ))]
+    pub async fn prepare_and_allocate_seq(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        message: Message,
+    ) -> Result<(MessageSubmission, MessageProfile)> {
+        let submission = self.prepare_submission(message).await?;
+        self.allocate_seq_for_submission(ctx, tenant_id, submission)
+            .await
     }
 
     /// 写入 WAL（如果需要）
@@ -338,9 +353,14 @@ impl MessageIngestService {
     ) -> Result<(Vec<String>, bool)> {
         use crate::domain::model::ConversationType;
 
-        let _ = ConversationType::from_proto(message.conversation_type);
-        // 写扩散基线（读扩散投递改造未完成前的可靠投递）：物化收件人 + 非 large → orchestrator 内联写扩散。
-        // 注：统一读扩散需改造 EventEnvelope 投递路径（消息经 push_event 而非 push_message 下行），属后续。
+        let conversation_type = ConversationType::from_proto(message.conversation_type);
+        // 统一读扩散：成员制会话（群/频道/系统/AI/客服/广播）**永不物化收件人** → (vec![], large=true)。
+        // 投递经会话级 publish + 网关在线订阅（O(在线/节点)，与群人数无关）；离线成员靠 conversation 版本号增量拉。
+        // 10 万群热路径不再做 O(成员) 物化。
+        if needs_member_lookup(conversation_type) {
+            return Ok((Vec::new(), true));
+        }
+        // 1:1(Single) / Temp：解析对端用于 channel 归一化与小会话内联投递（非 large）。
         self.get_recipient_user_ids(ctx, message)
             .await
             .map(|recipients| (recipients, false))
@@ -648,5 +668,4 @@ mod tests {
             vec!["u2".to_string(), "u3".to_string()]
         );
     }
-
 }

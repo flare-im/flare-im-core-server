@@ -17,6 +17,7 @@ path = "cmd/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 thiserror = { workspace = true }
 flare-server-core = { workspace = true, features = ["discovery", "proto"] }
 flare-core-runtime = { workspace = true }

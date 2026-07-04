@@ -18,6 +18,10 @@ Cargo.lock
 config/overrides/local.toml
 .env.local
 .env.*.local
+release/deploy.env
+release/*.env
+!release/*.env.example
+release/dist/
 
 # 本地临时工作区
 /dev/

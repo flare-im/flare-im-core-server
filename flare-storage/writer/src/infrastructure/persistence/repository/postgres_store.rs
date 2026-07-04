@@ -38,6 +38,7 @@ struct MessageRow {
     sender_name: Option<String>,
     sender_avatar: Option<String>,
     channel_id: Option<String>,
+    thread_id: Option<String>,
     source: i32,
     seq: i64,
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -197,7 +198,7 @@ impl PostgresMessageStore {
         let row = sqlx::query_as::<_, MessageRow>(
             r#"
             SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at,
                 burned_at, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
             FROM messages WHERE server_id = $1 LIMIT 1
@@ -293,6 +294,7 @@ impl PostgresMessageStore {
             message_type: row.message_type,
             message_seq: None,
             channel_id: row.channel_id.unwrap_or_default(),
+            thread_id: row.thread_id,
             content,
             status: row.status,
             retention_policy: None,
@@ -510,6 +512,13 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .execute(&mut *tx)
         .await
         .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                message_id = %proto_msg.server_id,
+                conversation_id = %proto_msg.conversation_id,
+                seq,
+                "insert message write ledger failed"
+            );
             flare_server_core::error::FlareError::system(format!(
                 "insert message write ledger failed message_id={} conversation_id={} seq={}: {err}",
                 proto_msg.server_id, proto_msg.conversation_id, seq
@@ -532,11 +541,11 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             r#"
             INSERT INTO messages (
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at,
                 burned_at, offline_push_info, extra, extensions, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
             ON CONFLICT (tenant_id, server_id, created_at) DO NOTHING
             "#,
         )
@@ -548,6 +557,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .bind(if message.sender_name.is_empty() { None::<String> } else { Some(message.sender_name.clone()) })
         .bind(if message.sender_avatar.is_empty() { None::<String> } else { Some(message.sender_avatar.clone()) })
         .bind(if proto_msg.channel_id.is_empty() { None::<String> } else { Some(proto_msg.channel_id.clone()) })
+        .bind(proto_msg.thread_id.clone().filter(|thread_id| !thread_id.is_empty()))
         .bind(proto_msg.source)
         .bind(seq)
         .bind(created_at_dt)
@@ -568,6 +578,13 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .execute(&mut *tx)
         .await
         .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                message_id = %proto_msg.server_id,
+                conversation_id = %proto_msg.conversation_id,
+                seq,
+                "insert message archive failed"
+            );
             flare_server_core::error::FlareError::system(format!(
                 "insert message archive failed message_id={} conversation_id={} seq={}: {err}",
                 proto_msg.server_id,
@@ -593,6 +610,11 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         .execute(&mut *tx)
         .await
         .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                message_id = %proto_msg.server_id,
+                "update message write ledger archive stage failed"
+            );
             flare_server_core::error::FlareError::system(format!(
                 "update message write ledger archive stage failed message_id={}: {err}",
                 proto_msg.server_id
@@ -1128,6 +1150,10 @@ impl PostgresMessageStore {
                     } else {
                         Some(proto_msg.channel_id.clone())
                     },
+                    proto_msg
+                        .thread_id
+                        .clone()
+                        .filter(|thread_id| !thread_id.is_empty()),
                     proto_msg.source,
                     seq,
                     created_at_dt,
@@ -1189,7 +1215,7 @@ impl PostgresMessageStore {
                 b.push_bind(&row.0); // tenant_id
                 b.push_bind(&row.1); // server_id
                 b.push_bind(&row.2); // conversation_id
-                b.push_bind(row.9); // seq
+                b.push_bind(row.10); // seq
             });
             ledger_builder.push(
                 " ON CONFLICT (tenant_id, server_id) DO NOTHING RETURNING tenant_id, server_id",
@@ -1242,7 +1268,7 @@ impl PostgresMessageStore {
                 r#"
                 INSERT INTO messages (
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at,
                     burned_at, offline_push_info, extra, extensions, created_at
                 )
@@ -1259,23 +1285,24 @@ impl PostgresMessageStore {
                 b.push_bind(&row.5); // sender_name
                 b.push_bind(&row.6); // sender_avatar
                 b.push_bind(&row.7); // channel_id
-                b.push_bind(row.8); // source
-                b.push_bind(row.9); // seq
-                b.push_bind(row.10); // timestamp
-                b.push_bind(row.11); // conversation_type
-                b.push_bind(row.12); // message_type
-                b.push_bind(&row.13); // content
-                b.push_bind(row.14); // status
-                b.push_bind(row.15); // burn_enabled
-                b.push_bind(row.16); // burn_after_read_seconds
-                b.push_bind(row.17); // burn_status
-                b.push_bind(row.18); // first_read_at
-                b.push_bind(row.19); // burn_at
-                b.push_bind(row.20); // burned_at
-                b.push_bind(&row.21); // offline_push_info
-                b.push_bind(&row.22); // extra
-                b.push_bind(&row.23); // extensions
-                b.push_bind(row.24); // created_at
+                b.push_bind(&row.8); // thread_id
+                b.push_bind(row.9); // source
+                b.push_bind(row.10); // seq
+                b.push_bind(row.11); // timestamp
+                b.push_bind(row.12); // conversation_type
+                b.push_bind(row.13); // message_type
+                b.push_bind(&row.14); // content
+                b.push_bind(row.15); // status
+                b.push_bind(row.16); // burn_enabled
+                b.push_bind(row.17); // burn_after_read_seconds
+                b.push_bind(row.18); // burn_status
+                b.push_bind(row.19); // first_read_at
+                b.push_bind(row.20); // burn_at
+                b.push_bind(row.21); // burned_at
+                b.push_bind(&row.22); // offline_push_info
+                b.push_bind(&row.23); // extra
+                b.push_bind(&row.24); // extensions
+                b.push_bind(row.25); // created_at
             });
 
             query_builder.push(" ON CONFLICT (tenant_id, server_id, created_at) DO NOTHING");

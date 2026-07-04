@@ -11,6 +11,7 @@ use flare_grpc_proto::conversation::{
 };
 use flare_im_contracts::Ctx;
 use flare_proto::Message;
+use flare_proto::common::SyncRecoveryHint;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::sync_res::Payload as SyncResPayload;
 use flare_proto::common::sync_slice_item::Payload as SyncSlicePayload;
@@ -19,20 +20,21 @@ use flare_proto::common::{
     ConversationParticipantsSync, ConversationParticipantsSyncRes, ConversationSummary,
     ConversationType as ProtoConversationType, ConversationUserSettingsSync,
     ConversationUserSettingsSyncRes, ConversationVersion, ConversationsSync, ConversationsSyncRes,
-    EventEnvelope, EventEnvelopeDeliveryMode, EventStreamAckSyncRes, GetSyncCursorSync,
-    GetSyncCursorSyncRes, MessagePreview, MultiConversationSync, MultiConversationSyncRes,
-    MultiDeviceCursor, QueryEventsSync, QueryEventsSyncRes, SingleConversationSync,
-    SingleConversationSyncRes, SnapshotConversationRow, SyncRes, SyncSessionHints, SyncSkipItem,
-    SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes, SyncTombstoneItem, UpdateSyncCursorSync,
-    UpdateSyncCursorSyncRes,
+    EnsureConversationSync, EnsureConversationSyncRes, EventEnvelope, EventEnvelopeDeliveryMode,
+    EventReplayPreset, EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes,
+    MessagePreview, MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor,
+    QueryEventsSync, QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes,
+    SnapshotConversationRow, SyncRes, SyncSessionHints, SyncSkipItem, SyncSliceItem,
+    SyncSnapshotSync, SyncSnapshotSyncRes, SyncStaleContext, SyncTombstoneItem,
+    UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use tracing::{debug, trace, warn};
 
 use crate::application::error::require_nonempty_conversation_id;
 use crate::application::ports::{
-    ConversationEventReadPort, ConversationSyncPort, ConversationVersionIndexPort,
-    MemorySyncCursorCache, StorageReadPort, SyncCursorCachePort,
+    BootstrapPageCache, ConversationEventReadPort, ConversationSyncPort,
+    ConversationVersionIndexPort, MemorySyncCursorCache, StorageReadPort, SyncCursorCachePort,
 };
 use crate::domain::model::{
     SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
@@ -41,6 +43,16 @@ use crate::domain::model::{
 use crate::domain::service::{
     build_snapshot_cursor, max_seq_from_events, parse_snapshot_cursor, snapshot_global_seq,
 };
+use futures::stream::{StreamExt, TryStreamExt};
+
+/// 批内/页内会话级存储查询的保序有界并发（J1）：延迟从 Σ(单查) 降到 ≈max(单查)×⌈N/并发⌉，
+/// 并发上限护住存储连接池。`multi_conversation_sync` 与 `get_sync_snapshot` 共用。
+const MULTI_SYNC_QUERY_CONCURRENCY: usize = 8;
+
+/// 快照分页的 bootstrap 拉取上限：分页在编排层完成，须一次拿到大账号全集
+/// （conversation 服务默认保守截 100 会让 >100 会话账号的其余会话永远不经列表同步下发）；
+/// 受 conversation 侧硬上限共同钳制。
+const SNAPSHOT_BOOTSTRAP_MAX_CONVERSATIONS: i32 = 5_000;
 
 /// 与 `SyncSnapshotSyncRes.conversations` 逐行对齐，来自 ConversationBootstrap 摘要（单聊 `channel_id` 等对端路由）
 #[derive(Clone, Default)]
@@ -79,6 +91,8 @@ where
 {
     infra: Arc<I>,
     cursor_cache: Arc<MemorySyncCursorCache>,
+    /// 分页续拉专用 bootstrap 快照缓存（见 [`BootstrapPageCache`]）。
+    bootstrap_page_cache: BootstrapPageCache,
 }
 
 impl<I> SyncOrchestrationHandler<I>
@@ -94,6 +108,7 @@ where
         Self {
             infra,
             cursor_cache,
+            bootstrap_page_cache: BootstrapPageCache::new(),
         }
     }
 
@@ -177,6 +192,12 @@ where
                     payload: Some(SyncResPayload::ConversationParticipants(v)),
                 })
             }
+            SyncPayload::EnsureConversation(req) => {
+                let v = self.ensure_conversation_sync(ctx, user_id, req).await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::EnsureConversation(v)),
+                })
+            }
             SyncPayload::ConversationsIncremental(_)
             | SyncPayload::ConversationsAll(_)
             | SyncPayload::ConversationMaxSeq(_) => Err(ErrorBuilder::new(
@@ -206,23 +227,62 @@ where
             "get_sync_snapshot (初始化/分页快照)"
         );
 
-        let conv_resp = self
-            .infra
-            .conversation_bootstrap(
-                ctx,
-                ConversationBootstrapRequest {
-                    client_cursor_map: Default::default(),
-                    include_recent_messages: false,
-                    recent_message_limit: 0,
-                    device_id: String::new(),
-                    device_platform: String::new(),
-                },
-            )
-            .await?;
+        // 分页游标只解析一次（过滤边界与分页共用同一份）。
+        let page_cursor = parse_snapshot_cursor(&req.snapshot_cursor);
+        // 存储层增量过滤：仅 **ASC 列表续拉**（warm 增量，cursor 非空）传边界——
+        // DESC（冷启 bundle）与定向 conversation_ids 快照需要全集，不过滤。
+        // 边界取 cursor_ms - 1：分页元组过滤是 (ms,cid) > (cursor_ms,cid)，同毫秒不同 cid
+        // 的行仍可入页，-1 保证存储层返回的是元组过滤结果的超集（绝不欠拉）。
+        let updated_after_ms = (req.conversation_ids.is_empty() && !req.newest_first)
+            .then(|| {
+                page_cursor
+                    .as_ref()
+                    .map(|(ms, _)| ms.saturating_sub(1).max(0))
+            })
+            .flatten()
+            .unwrap_or(0);
+
+        // 续拉页（cursor 非空）在 TTL 内复用同一份 bootstrap 快照：
+        // 消灭"每页全量 bootstrap"的 DB 放大，并让同一分页序列看到一致数据集。
+        // 第 1 页（cursor 为空）恒新鲜并回填缓存。缓存按"超集规则"服务（见 BootstrapPageCache）。
+        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let is_continuation_page = !req.snapshot_cursor.trim().is_empty();
+        let cached = if is_continuation_page {
+            self.bootstrap_page_cache
+                .get(&tenant_id, user_id, updated_after_ms)
+        } else {
+            None
+        };
+        let from_page_cache = cached.is_some();
+        let conv_resp = match cached {
+            Some(cached) => cached,
+            None => {
+                let resp = std::sync::Arc::new(
+                    self.infra
+                        .conversation_bootstrap(
+                            ctx,
+                            ConversationBootstrapRequest {
+                                client_cursor_map: Default::default(),
+                                include_recent_messages: false,
+                                recent_message_limit: 0,
+                                device_id: String::new(),
+                                device_platform: String::new(),
+                                updated_after_ms,
+                                max_conversations: SNAPSHOT_BOOTSTRAP_MAX_CONVERSATIONS,
+                            },
+                        )
+                        .await?,
+                );
+                self.bootstrap_page_cache
+                    .put(&tenant_id, user_id, updated_after_ms, resp.clone());
+                resp
+            }
+        };
 
         debug!(
             user_id = %user_id,
             conversation_bootstrap_count = conv_resp.conversations.len(),
+            from_page_cache,
             "conversation bootstrap returned"
         );
 
@@ -232,10 +292,11 @@ where
             Some(req.conversation_ids.iter().map(String::as_str).collect())
         };
 
-        let mut merged: HashMap<String, MergedSnapshotRow> = HashMap::new();
+        // 引用级筛选/去重/排序/分页——bootstrap 摘要（draft/preview/成员预览等大字段）
+        // 只在**最终页**克隆一次；缓存命中时续拉页不再为全账号做 K×N 克隆 + K 次全量排序开销以外的复制。
+        let mut candidate_index: HashMap<&str, &_> = HashMap::new();
         let mut filtered_out = 0usize;
-
-        for bootstrap in conv_resp.conversations {
+        for bootstrap in conv_resp.conversations.iter() {
             if !valid_sync_conversation_id(&bootstrap.conversation_id) {
                 filtered_out += 1;
                 warn!(
@@ -250,107 +311,144 @@ where
                 filtered_out += 1;
                 continue;
             }
-            let conversation_id = bootstrap.conversation_id.clone();
-            let max_seq = bootstrap.max_conversation_seq as i64;
-            let mut item = SnapshotConversationRow {
-                conversation_id: conversation_id.clone(),
-                messages: Vec::new(),
-                last_conversation_seq: max_seq.max(0) as u64,
-                last_message_at: bootstrap.updated_at,
-                unread_count: (bootstrap.unread_count as i32).max(0),
-                last_read_seq: bootstrap.last_read_seq,
-            };
-
-            if message_limit > 0 && max_seq > 0 {
-                let after_seq = (max_seq - message_limit as i64).max(0);
-                trace!(
-                    user_id = %user_id,
-                    conversation_id = %conversation_id,
-                    max_seq,
-                    after_seq,
-                    limit = message_limit,
-                    "querying messages for snapshot item"
-                );
-                let (messages, last_seq) = self
-                    .infra
-                    .query_messages_by_seq(
-                        ctx,
-                        &conversation_id,
-                        after_seq,
-                        0,
-                        message_limit,
-                        user_id,
-                    )
-                    .await?;
-
-                item.messages = messages;
-                if last_seq > 0 {
-                    item.last_conversation_seq = last_seq as u64;
-                }
-                if item.last_message_at <= 0 {
-                    item.last_message_at = item
-                        .messages
-                        .iter()
-                        .map(|m| m.created_at)
-                        .max()
-                        .unwrap_or_default();
-                }
-            }
-
-            merged.insert(
-                conversation_id,
-                MergedSnapshotRow {
-                    row: item,
-                    bootstrap,
-                },
-            );
+            candidate_index.insert(bootstrap.conversation_id.as_str(), bootstrap);
         }
 
-        let page_limit = req
-            .messages_per_conversation
-            .max(crate::domain::model::MIN_SNAPSHOT_PAGE_SIZE) as usize;
-        let page_cursor = parse_snapshot_cursor(&req.snapshot_cursor);
+        // 页大小与每会话消息数正交（旧实现复用 messages_per_conversation 双重语义）。
+        // conversation_page_limit=0 → 沿用 messages_per_conversation 派生的旧默认。
+        let page_limit = if req.conversation_page_limit > 0 {
+            req.conversation_page_limit
+        } else {
+            req.messages_per_conversation
+                .max(crate::domain::model::MIN_SNAPSHOT_PAGE_SIZE)
+        }
+        .max(crate::domain::model::MIN_SNAPSHOT_PAGE_SIZE) as usize;
         debug!(
             user_id = %user_id,
-            merged_conversation_count = merged.len(),
+            merged_conversation_count = candidate_index.len(),
             filtered_out,
             page_limit,
             parsed_cursor = ?page_cursor,
             "snapshot merge completed"
         );
 
-        let mut sorted = merged
-            .into_values()
-            .map(|m| {
-                let patched_ms = m.row.last_message_at;
-                (patched_ms, m.row.conversation_id.clone(), m)
+        let mut sorted: Vec<(i64, &str)> = candidate_index
+            .values()
+            .map(|b| (b.updated_at, b.conversation_id.as_str()))
+            .collect();
+        if req.newest_first {
+            // I6 冷启 bundle：按活跃度降序，首屏 top-N 先到。
+            sorted.sort_by(|a, b| b.cmp(a));
+        } else {
+            sorted.sort();
+        }
+
+        let page_keys: Vec<(i64, &str)> = match &page_cursor {
+            Some((cursor_ms, cursor_cid)) => {
+                let boundary = (*cursor_ms, cursor_cid.as_str());
+                sorted
+                    .into_iter()
+                    .filter(|key| {
+                        if req.newest_first {
+                            *key < boundary
+                        } else {
+                            *key > boundary
+                        }
+                    })
+                    .collect()
+            }
+            None => sorted,
+        };
+
+        let has_more = page_keys.len() > page_limit;
+        // I6：只要本页有行就返回行水位游标（旧行为 !has_more 时返回空 → 上层回显旧游标 →
+        // 客户端游标永不前进 → 每次热启/重连全量拉列表）。页空时保持空串，上层回显客户端游标。
+        let next_cursor = page_keys
+            .iter()
+            .take(page_limit)
+            .next_back()
+            .map(|(ms, cid)| build_snapshot_cursor(*ms, cid))
+            .unwrap_or_default();
+
+        // 只克隆最终页的 bootstrap 行。
+        let mut page: Vec<MergedSnapshotRow> = page_keys
+            .into_iter()
+            .take(page_limit)
+            .filter_map(|(_, cid)| candidate_index.get(cid).copied())
+            .map(|bootstrap| {
+                let max_seq = bootstrap.max_conversation_seq as i64;
+                MergedSnapshotRow {
+                    row: SnapshotConversationRow {
+                        conversation_id: bootstrap.conversation_id.clone(),
+                        messages: Vec::new(),
+                        last_conversation_seq: max_seq.max(0) as u64,
+                        last_message_at: bootstrap.updated_at,
+                        unread_count: (bootstrap.unread_count as i32).max(0),
+                        last_read_seq: bootstrap.last_read_seq,
+                        summary: None,
+                    },
+                    bootstrap: bootstrap.clone(),
+                }
             })
-            .collect::<Vec<_>>();
-        sorted.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            .collect();
 
-        let filtered = if let Some((cursor_ms, cursor_cid)) = page_cursor {
-            sorted
-                .into_iter()
-                .filter(|(ms, cid, _)| (*ms, cid.clone()) > (cursor_ms, cursor_cid.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            sorted
-        };
+        // 消息只为最终页内会话查询（分页裁剪后）：批量窗口一次 RPC 取整页
+        //（替代逐会话 buffered(8) 的 N 次存储往返）。
+        if message_limit > 0 {
+            let mut index_by_id: HashMap<String, usize> = page
+                .iter()
+                .enumerate()
+                .map(|(idx, m)| (m.row.conversation_id.clone(), idx))
+                .collect();
+            let query_targets: Vec<(String, i64)> = page
+                .iter()
+                .filter(|m| m.bootstrap.max_conversation_seq as i64 > 0)
+                .map(|m| (m.row.conversation_id.clone(), 0))
+                .collect();
+            if !query_targets.is_empty() {
+                trace!(
+                    user_id = %user_id,
+                    conversations = query_targets.len(),
+                    limit = message_limit,
+                    "querying message windows for snapshot page"
+                );
+                let windows = self
+                    .infra
+                    .query_conversations_message_windows(
+                        ctx,
+                        &query_targets,
+                        message_limit,
+                        true,
+                        user_id,
+                    )
+                    .await?;
+                for (conversation_id, messages, last_seq) in windows {
+                    let Some(idx) = index_by_id.remove(&conversation_id) else {
+                        continue;
+                    };
+                    let m = &mut page[idx];
+                    m.row.messages = messages;
+                    if last_seq > 0 {
+                        m.row.last_conversation_seq = last_seq as u64;
+                    }
+                    if m.row.last_message_at <= 0 {
+                        m.row.last_message_at = m
+                            .row
+                            .messages
+                            .iter()
+                            .map(|msg| msg.created_at)
+                            .max()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+        }
 
-        let has_more = filtered.len() > page_limit;
-        let page = filtered.into_iter().take(page_limit).collect::<Vec<_>>();
-        let next_cursor = if has_more {
-            page.last()
-                .map(|(ms, cid, _)| build_snapshot_cursor(*ms, cid))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
         let mut routing = Vec::with_capacity(page.len());
         let conversations: Vec<SnapshotConversationRow> = page
             .into_iter()
-            .map(|(_, _, m)| {
-                routing.push(ConversationSyncRoutingHint {
+            .map(|m| {
+                let hint = ConversationSyncRoutingHint {
                     channel_id: m.bootstrap.channel_id.clone(),
                     conversation_type: conversation_type_from_summary(
                         &m.bootstrap.conversation_type,
@@ -369,8 +467,14 @@ where
                     user_settings_version: m.bootstrap.user_settings_version,
                     draft: m.bootstrap.draft.clone(),
                     visible_after_conversation_seq: m.bootstrap.visible_after_conversation_seq,
-                });
-                m.row
+                };
+                let mut row = m.row;
+                if req.include_conversations {
+                    // I6 冷启 bundle：行内内嵌完整摘要，客户端一次 RPC 同得摘要+首页消息。
+                    row.summary = Some(snapshot_row_to_summary(&row, &hint));
+                }
+                routing.push(hint);
+                row
             })
             .collect();
 
@@ -413,6 +517,37 @@ where
         require_nonempty_conversation_id(&conversation_id)?;
         let limit = req.limit.clamp(1, 500);
         let requested_after_seq = req.after_conversation_seq;
+        // 历史回溯：方向由 proto 显式字段表达（替代旧 "before:" 字符串游标约定）。
+        if req.before_conversation_seq > 0 {
+            let before_seq = req.before_conversation_seq;
+            let (mut messages, _storage_last_seq) = self
+                .infra
+                .query_messages_by_seq(
+                    ctx,
+                    &conversation_id,
+                    0,
+                    before_seq as i64,
+                    limit + 1,
+                    user_id,
+                )
+                .await?;
+            let has_more = messages.len() as i32 > limit;
+            if has_more {
+                let limit = limit as usize;
+                let overflow = messages.len().saturating_sub(limit);
+                messages.drain(0..overflow);
+            }
+            let page = build_backfill_sync_items(messages, has_more)?;
+            return Ok(SingleConversationSyncRes {
+                conversation_id,
+                items: page.items,
+                max_conversation_seq: page.max_seq,
+                next_cursor: page.next_cursor,
+                has_more: page.has_more,
+                hints: None,
+                stale: None,
+            });
+        }
         let head_max_seq = self
             .conversation_head_max_seq(ctx, &conversation_id, requested_after_seq as i64)
             .await;
@@ -487,31 +622,52 @@ where
         req: MultiConversationSync,
     ) -> Result<MultiConversationSyncRes, FlareError> {
         let limit = req.limit_per_conversation.clamp(1, 500);
-        let mut slices = Vec::new();
+        let targets: Vec<(String, i64)> = req
+            .conversation_ids
+            .iter()
+            .filter(|cid| !cid.trim().is_empty())
+            .map(|cid| {
+                let after = req
+                    .last_conversation_seq_per_conversation
+                    .get(cid)
+                    .copied()
+                    .unwrap_or(0) as i64;
+                (cid.clone(), after)
+            })
+            .collect();
+        // 消息批量窗口：一次存储 RPC 取全部会话增量页（limit+1 探测 has_more）；
+        // 水位 head 仍逐会话（单行点查），保序有界并发。
+        let windows = self
+            .infra
+            .query_conversations_message_windows(ctx, &targets, limit + 1, false, user_id)
+            .await?;
+        let after_by_id: HashMap<&str, i64> = targets
+            .iter()
+            .map(|(cid, after)| (cid.as_str(), *after))
+            .collect();
+        let query_results: Vec<(String, ContiguousSyncPage)> =
+            futures::stream::iter(windows.into_iter().map(|(cid, messages, _last_seq)| {
+                let after = after_by_id.get(cid.as_str()).copied().unwrap_or(0);
+                async move {
+                    let head_max_seq = self.conversation_head_max_seq(ctx, &cid, after).await;
+                    let page = build_contiguous_sync_items(
+                        &cid,
+                        after as u64,
+                        limit as usize,
+                        messages,
+                        head_max_seq as u64,
+                    )?;
+                    Ok::<_, FlareError>((cid, page))
+                }
+            }))
+            .buffered(MULTI_SYNC_QUERY_CONCURRENCY)
+            .try_collect()
+            .await?;
+
+        let mut slices = Vec::with_capacity(query_results.len());
         let mut max_seq_per_conversation = HashMap::new();
         let mut has_more = false;
-
-        for cid in &req.conversation_ids {
-            if cid.trim().is_empty() {
-                continue;
-            }
-            let after = req
-                .last_conversation_seq_per_conversation
-                .get(cid)
-                .copied()
-                .unwrap_or(0) as i64;
-            let (messages, _storage_last_seq) = self
-                .infra
-                .query_messages_by_seq(ctx, cid, after, 0, limit + 1, user_id)
-                .await?;
-            let head_max_seq = self.conversation_head_max_seq(ctx, cid, after).await;
-            let page = build_contiguous_sync_items(
-                cid,
-                after as u64,
-                limit as usize,
-                messages,
-                head_max_seq as u64,
-            )?;
+        for (cid, page) in query_results {
             let slice_has_more = page.has_more;
             if page.has_more {
                 has_more = true;
@@ -519,7 +675,7 @@ where
             let max_seq = page.max_seq;
             max_seq_per_conversation.insert(cid.clone(), max_seq);
             slices.push(flare_proto::common::ConversationSyncSlice {
-                conversation_id: cid.clone(),
+                conversation_id: cid,
                 items: page.items,
                 max_conversation_seq: max_seq,
                 next_cursor: page.next_cursor,
@@ -546,7 +702,9 @@ where
         let is_cold_start = client_cursor.is_empty();
         let snap_req = SyncSnapshotSync {
             conversation_ids: Vec::new(),
-            messages_per_conversation: limit,
+            // 列表同步只需最新 1 条做预览/身份合并——旧值 `limit`(列表页大小) 会对页内每会话
+            // 拉整页消息再丢弃（J1 消灭的 DB 放大之一）。
+            messages_per_conversation: 1,
             include_deleted: req.include_deleted,
             include_conversations: true,
             snapshot_cursor: if is_cold_start {
@@ -554,6 +712,8 @@ where
             } else {
                 client_cursor.clone()
             },
+            newest_first: false,
+            conversation_page_limit: limit,
         };
         let outcome = self.get_sync_snapshot(ctx, user_id, snap_req).await?;
         let response = outcome.res;
@@ -621,6 +781,58 @@ where
         })
     }
 
+    /// 显式建群：客户端 get_group_by_user_ids 一次性把成员表交给服务端建群(幂等,按 attributes 携带的
+    /// conversation_id 建)。建成后消息不再携带整张成员表——超大群建群不再受 NATS 单消息上限约束。
+    async fn ensure_conversation_sync(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        req: EnsureConversationSync,
+    ) -> Result<EnsureConversationSyncRes, FlareError> {
+        require_nonempty_conversation_id(&req.conversation_id)?;
+
+        // 成员去重 + 确保发起者在内。
+        let mut members: Vec<String> = req
+            .member_ids
+            .into_iter()
+            .filter(|m| !m.trim().is_empty())
+            .collect();
+        if !user_id.trim().is_empty() {
+            members.push(user_id.to_string());
+        }
+        members.sort();
+        members.dedup();
+
+        let member_count = members.len() as u64;
+        // 建群约定（attributes 携带 conversation_id 等）唯一实现在 flare-grpc-proto。
+        let request = flare_grpc_proto::ensure_conversation_request(
+            &req.conversation_id,
+            req.conversation_type,
+            req.business_type,
+            members,
+            req.channel_id,
+        );
+
+        match self.infra.create_conversation(ctx, request).await {
+            Ok(_) => Ok(EnsureConversationSyncRes {
+                conversation_id: req.conversation_id,
+                ok: true,
+                error: String::new(),
+                member_count,
+            }),
+            // 失败返回 ok=false(非 Err):客户端据此回退到"首条消息携带成员表"的兜底建群。
+            Err(error) => {
+                warn!(conversation_id = %req.conversation_id, %error, "ensure_conversation_sync failed");
+                Ok(EnsureConversationSyncRes {
+                    conversation_id: req.conversation_id,
+                    ok: false,
+                    error: error.to_string(),
+                    member_count: 0,
+                })
+            }
+        }
+    }
+
     async fn conversation_detail_sync(
         &self,
         ctx: &Ctx,
@@ -650,7 +862,11 @@ where
         mut req: QueryEventsSync,
     ) -> Result<QueryEventsSyncRes, FlareError> {
         require_nonempty_conversation_id(&req.conversation_id)?;
-        normalize_query_event_types(&mut req.event_types);
+        let unfiltered_replay_requested = req.event_types.is_empty()
+            && req.replay_preset == EventReplayPreset::AllPersisted as i32;
+        if !unfiltered_replay_requested {
+            normalize_query_event_types(&mut req.event_types);
+        }
         let limit = clamp_query_events_limit(req.limit);
         let max_seq_hint = None;
         let intent = SyncIntent::from_event_anchor(req.after_conversation_seq as i64, max_seq_hint);
@@ -692,6 +908,41 @@ where
             .map(|event| event.conversation_seq)
             .min()
             .unwrap_or(0);
+        if unfiltered_replay_requested
+            && let Some(gap) = detect_event_replay_gap(req.after_conversation_seq, &events)
+        {
+            let server_replay_max_seq = last_seq.max(gap.observed_seq as i64).max(0) as u64;
+            let (hints, stale) = event_replay_gap_repair_context(
+                &req.conversation_id,
+                req.after_conversation_seq,
+                server_replay_max_seq,
+                gap,
+            );
+            warn!(
+                conversation_id = %req.conversation_id,
+                after_seq = req.after_conversation_seq,
+                expected_seq = gap.expected_seq,
+                observed_seq = gap.observed_seq,
+                server_replay_max_seq,
+                "event replay gap detected; returning stale context for conversation resync"
+            );
+            return Ok(QueryEventsSyncRes {
+                envelope: Some(EventEnvelope {
+                    events: Vec::new(),
+                    max_conversation_seq: req.after_conversation_seq,
+                    has_more: false,
+                    next_cursor: String::new(),
+                    window_id: String::new(),
+                    delivery_mode: EventEnvelopeDeliveryMode::Inline as i32,
+                    conversation_id: req.conversation_id,
+                    min_conversation_seq: req.after_conversation_seq,
+                    inline_events_truncated: false,
+                    attributes: Default::default(),
+                }),
+                hints: Some(hints),
+                stale: Some(stale),
+            });
+        }
 
         Ok(QueryEventsSyncRes {
             envelope: Some(EventEnvelope {
@@ -748,6 +999,9 @@ where
                     recent_message_limit: 0,
                     device_id: req.device_id.clone(),
                     device_platform: String::new(),
+                    // 游标回填需要目标会话必在集合内 → 全量、放开截断上限。
+                    updated_after_ms: 0,
+                    max_conversations: SNAPSHOT_BOOTSTRAP_MAX_CONVERSATIONS,
                 },
             )
             .await?;
@@ -998,6 +1252,23 @@ fn cold_start_tail_after_seq(
         return None;
     }
     Some(remote_max_seq.saturating_sub(limit))
+}
+
+fn build_backfill_sync_items(
+    messages: Vec<Message>,
+    has_more: bool,
+) -> Result<ContiguousSyncPage, FlareError> {
+    let mut items = Vec::with_capacity(messages.len());
+    for message in messages {
+        items.push(message_to_sync_item(&message)?);
+    }
+    // 回溯分页由客户端驱动（下一页 before = 本地已加载的最小 seq），无需服务端续拉游标。
+    Ok(ContiguousSyncPage {
+        items,
+        max_seq: 0,
+        next_cursor: String::new(),
+        has_more,
+    })
 }
 
 fn build_tail_sync_items(
@@ -1301,6 +1572,60 @@ fn filter_events_by_types(events: &mut Vec<flare_proto::common::Event>, allowed:
     events.retain(|e| set.contains(&e.r#type));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EventReplayGap {
+    expected_seq: u64,
+    observed_seq: u64,
+}
+
+fn detect_event_replay_gap(
+    after_seq: u64,
+    events: &[flare_proto::common::Event],
+) -> Option<EventReplayGap> {
+    let mut expected_seq = after_seq.saturating_add(1);
+    for event in events {
+        let observed_seq = event.conversation_seq;
+        if observed_seq <= after_seq || observed_seq < expected_seq {
+            continue;
+        }
+        if observed_seq > expected_seq {
+            return Some(EventReplayGap {
+                expected_seq,
+                observed_seq,
+            });
+        }
+        expected_seq = expected_seq.saturating_add(1);
+    }
+    None
+}
+
+fn event_replay_gap_repair_context(
+    conversation_id: &str,
+    after_seq: u64,
+    server_replay_max_seq: u64,
+    gap: EventReplayGap,
+) -> (SyncSessionHints, SyncStaleContext) {
+    let mut localization_params = HashMap::new();
+    localization_params.insert("expected_seq".to_string(), gap.expected_seq.to_string());
+    localization_params.insert("observed_seq".to_string(), gap.observed_seq.to_string());
+
+    (
+        SyncSessionHints {
+            recovery_hint: SyncRecoveryHint::ResyncConversation as i32,
+            localization_key: "sync.events.gap_detected".to_string(),
+            localization_params,
+            server_replay_max_conversation_seq: server_replay_max_seq,
+            ..Default::default()
+        },
+        SyncStaleContext {
+            conversation_id: conversation_id.to_string(),
+            client_reported_conversation_seq: after_seq,
+            server_earliest_available_conversation_seq: gap.observed_seq,
+            recommended_action: SyncRecoveryHint::ResyncConversation as i32,
+        },
+    )
+}
+
 fn valid_sync_conversation_id(conversation_id: &str) -> bool {
     let conversation_id = conversation_id.trim();
     !conversation_id.is_empty() && !conversation_id.starts_with("sync:")
@@ -1321,6 +1646,7 @@ mod tests {
         messages: Vec<Message>,
         message_head: crate::application::ports::StorageConversationMessageHead,
         message_queries: Mutex<Vec<MessageQuery>>,
+        events_page: crate::application::ports::QueryEventsPage,
         updates: Mutex<Vec<UpdateCursorRequest>>,
         settings_updates: Mutex<Vec<UpdateConversationUserSettingsRequest>>,
         version_changes: Vec<crate::application::ports::ConversationVersionChange>,
@@ -1409,6 +1735,15 @@ mod tests {
                 },
             )
         }
+
+        async fn create_conversation(
+            &self,
+            _ctx: &Ctx,
+            _req: flare_grpc_proto::conversation::CreateConversationRequest,
+        ) -> Result<flare_grpc_proto::conversation::CreateConversationResponse, FlareError>
+        {
+            Ok(flare_grpc_proto::conversation::CreateConversationResponse { conversation: None })
+        }
     }
 
     impl StorageReadPort for MockInfra {
@@ -1454,6 +1789,44 @@ mod tests {
         ) -> Result<crate::application::ports::StorageConversationMessageHead, FlareError> {
             Ok(self.message_head.clone())
         }
+
+        /// 测试替身的批量窗口显式实现（生产语义见 Postgres/LATERAL）：
+        /// 逐会话循环的成本与语义在 mock 层可见，而不是藏在 trait 默认实现后面。
+        async fn query_conversations_message_windows(
+            &self,
+            ctx: &Ctx,
+            targets: &[(String, i64)],
+            per_conversation_limit: i32,
+            newest_window: bool,
+            user_id: &str,
+        ) -> Result<Vec<(String, Vec<Message>, i64)>, FlareError> {
+            let mut windows = Vec::with_capacity(targets.len());
+            for (conversation_id, after_seq) in targets {
+                let after = if newest_window {
+                    // mock 消息量小：最新窗口用「总量减 limit」近似 tail 截断。
+                    let total = self
+                        .messages
+                        .iter()
+                        .filter(|m| m.conversation_id == *conversation_id)
+                        .count() as i64;
+                    (total - per_conversation_limit as i64).max(0)
+                } else {
+                    *after_seq
+                };
+                let (messages, last_seq) = self
+                    .query_messages_by_seq(
+                        ctx,
+                        conversation_id,
+                        after,
+                        0,
+                        per_conversation_limit,
+                        user_id,
+                    )
+                    .await?;
+                windows.push((conversation_id.clone(), messages, last_seq));
+            }
+            Ok(windows)
+        }
     }
 
     impl ConversationEventReadPort for MockInfra {
@@ -1467,7 +1840,7 @@ mod tests {
             _event_types: &[i32],
             _include_deleted: bool,
         ) -> Result<crate::application::ports::QueryEventsPage, FlareError> {
-            Ok(Default::default())
+            Ok(self.events_page.clone())
         }
     }
 
@@ -1499,6 +1872,15 @@ mod tests {
                 .with_user_id("22")
                 .with_trace_id("test-trace"),
         )
+    }
+
+    fn sync_event(conversation_id: &str, seq: u64) -> flare_proto::common::Event {
+        flare_proto::common::Event {
+            conversation_id: conversation_id.to_string(),
+            conversation_seq: seq,
+            event_id: format!("{conversation_id}:{seq}"),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -1553,6 +1935,73 @@ mod tests {
         assert_eq!(cold_start_tail_after_seq(0, "seq:200", 1_000, 200), None);
         assert_eq!(cold_start_tail_after_seq(20, "", 1_000, 200), None);
         assert_eq!(cold_start_tail_after_seq(0, "", 199, 200), None);
+    }
+
+    #[test]
+    fn event_replay_gap_detection_requires_contiguous_unfiltered_events() {
+        assert_eq!(
+            detect_event_replay_gap(1, &[sync_event("c1", 2), sync_event("c1", 3)]),
+            None
+        );
+        assert_eq!(
+            detect_event_replay_gap(1, &[sync_event("c1", 3), sync_event("c1", 4)]),
+            Some(EventReplayGap {
+                expected_seq: 2,
+                observed_seq: 3,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn query_events_sync_returns_stale_context_on_event_gap() {
+        let infra = Arc::new(MockInfra {
+            events_page: crate::application::ports::QueryEventsPage {
+                events: vec![sync_event("c1", 3), sync_event("c1", 4)],
+                last_seq: 4,
+                has_more: false,
+                next_cursor: "evt:4".to_string(),
+            },
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .query_events_sync(
+                &ctx(),
+                "22",
+                QueryEventsSync {
+                    conversation_id: "c1".to_string(),
+                    after_conversation_seq: 1,
+                    limit: 100,
+                    replay_preset: EventReplayPreset::AllPersisted as i32,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("query events sync");
+
+        let stale = response.stale.expect("gap should return stale context");
+        assert_eq!(stale.conversation_id, "c1");
+        assert_eq!(stale.client_reported_conversation_seq, 1);
+        assert_eq!(stale.server_earliest_available_conversation_seq, 3);
+        assert_eq!(
+            stale.recommended_action,
+            SyncRecoveryHint::ResyncConversation as i32
+        );
+        let hints = response.hints.expect("gap should return recovery hints");
+        assert_eq!(
+            hints.recovery_hint,
+            SyncRecoveryHint::ResyncConversation as i32
+        );
+        assert_eq!(hints.server_replay_max_conversation_seq, 4);
+        assert!(
+            response
+                .envelope
+                .expect("gap response still carries empty envelope")
+                .events
+                .is_empty()
+        );
     }
 
     #[tokio::test]

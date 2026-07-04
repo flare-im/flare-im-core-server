@@ -125,7 +125,9 @@ impl MessageFanoutService {
         };
         let conversation_id = message.conversation_id.clone();
         let recipient_count = recipient_user_ids.len();
-        let use_notify_pull_ping = large_conversation || !self.inline_message_push_enabled;
+        // 统一读扩散：大群也始终内联 event 投递（经会话级 publish + 网关在线订阅广播），不再发空收件人 ping。
+        // 仅当显式关闭内联推送时才回退 notify+pull ping。
+        let use_notify_pull_ping = !self.inline_message_push_enabled;
         self.push_repository
             .persistence_only_message(ctx, message.clone(), conversation_id.clone())
             .await?;
@@ -551,7 +553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_conversation_fanout_uses_notify_pull_ping() {
+    async fn large_conversation_fanout_uses_inline_event() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let producer = Arc::new(CapturingProducer {
             sends: Mutex::new(Vec::new()),
@@ -601,7 +603,7 @@ mod tests {
                 "sync-conversation-version",
                 TOPIC_PUSH_EVENTS
             ],
-            "large conversation fanout must persist, bump conversation version, then publish ping"
+            "large conversation fanout must persist, bump conversation version, then publish inline event"
         );
 
         let push = &captured[1];
@@ -612,41 +614,41 @@ mod tests {
             push_headers.get("push-only").map(String::as_str),
             Some("true")
         );
+        // 统一读扩散：大群也内联 event 投递（PingWithInline），经会话级 publish + 网关在线订阅广播。
         assert_eq!(
             push_headers.get(HEADER_DELIVERY_MODE).map(String::as_str),
-            Some(DELIVERY_MODE_PING)
+            Some(DELIVERY_MODE_PING_WITH_INLINE)
         );
         assert_eq!(
             push_headers
                 .get(HEADER_INLINE_EVENTS_TRUNCATED)
                 .map(String::as_str),
-            Some("true")
+            Some("false")
         );
 
         let push_envelope =
-            MqEnvelope::decode(push.payload.as_slice()).expect("decode ping envelope");
+            MqEnvelope::decode(push.payload.as_slice()).expect("decode inline event envelope");
         assert!(push_envelope.push_only);
         assert!(!push_envelope.persistence_only);
         assert_eq!(push_envelope.payload_kind, MqPayloadKind::Event as i32);
         assert_eq!(push_envelope.conversation_id, "conversation-large-a");
         assert_eq!(push_envelope.seq, 777);
-        assert!(push_envelope.large_conversation);
         assert_eq!(
             push_envelope.recipient_user_ids,
             Vec::<String>::new(),
-            "large conversation ping must not carry materialized push recipients"
+            "large conversation inline event must not carry materialized push recipients"
         );
 
         let Some(mq_envelope::Payload::Event(event)) = push_envelope.payload else {
-            panic!("ping envelope must carry event watermark");
+            panic!("inline event envelope must carry event");
         };
-        assert_eq!(event.event_id, "message-ping:message-large-a");
+        assert_eq!(event.event_id, "message-inline:message-large-a");
         assert_eq!(event.conversation_id, "conversation-large-a");
         assert_eq!(event.conversation_seq, 777);
         assert_eq!(event.r#type, EventType::EventMessage as i32);
         assert!(
-            event.payload.is_none(),
-            "notify+pull ping must not carry message payload"
+            event.payload.is_some(),
+            "inline event must carry message payload for read-fanout broadcast"
         );
     }
 
@@ -763,9 +765,10 @@ mod tests {
         assert_eq!(captured.len(), 2);
         let push = &captured[1];
         let push_envelope =
-            MqEnvelope::decode(push.payload.as_slice()).expect("decode ping envelope");
+            MqEnvelope::decode(push.payload.as_slice()).expect("decode inline event envelope");
         assert_eq!(push_envelope.conversation_id, "conversation-sync-failure");
-        assert!(push_envelope.large_conversation);
+        // 统一读扩散：大群内联 event（不再设置 envelope.large_conversation ping 标记）。
+        assert!(!push_envelope.large_conversation);
         assert_eq!(push_envelope.recipient_user_ids, Vec::<String>::new());
         let compensation_tasks = compensation
             .tasks

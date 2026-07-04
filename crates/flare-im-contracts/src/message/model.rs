@@ -53,6 +53,8 @@ pub struct Message {
     pub channel_id: String,
     pub sender_name: String,
     pub sender_avatar: String,
+    /// 话题/线程根消息 ID；普通消息为空。
+    pub thread_id: Option<String>,
     pub content: Option<MessageContent>,
     pub status: i32,
     pub retention_policy: Option<MessageRetentionPolicy>,

@@ -130,3 +130,68 @@ groups:
           summary: "服务 {{ $labels.service }} 错误率超过 5%"
           description: "服务 {{ $labels.service }} 的错误率在过去 5 分钟内超过 5%，当前值: {{ $value | humanizePercentage }}"
 
+  - name: flare_im_release_gates
+    interval: 30s
+    rules:
+      - alert: FlareImSendAckP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(message_orchestrator_send_stage_duration_seconds_bucket{stage="send_ack"}[5m])) by (le)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+          component: release-gate
+        annotations:
+          summary: "Send ACK P99 超过 2s"
+          description: "核心发送 ACK P99 连续 10 分钟超过 2s，需要检查 ingest/orchestrator/storage/broker。"
+
+      - alert: FlareImCommittedMessageFailureRateHigh
+        expr: |
+          (
+            sum(rate(message_orchestrator_send_total{outcome=~"error|failed"}[5m]))
+            /
+            clamp_min(sum(rate(message_orchestrator_send_total[5m])), 1)
+          ) > 0.001
+        for: 10m
+        labels:
+          severity: critical
+          component: release-gate
+        annotations:
+          summary: "消息发送失败率超过 0.1%"
+          description: "核心发送失败率超过发布门禁，必须确认没有 committed message loss 或不可恢复 DLQ 增长。"
+
+      - alert: FlareImMqNackOrTermRateHigh
+        expr: |
+          sum(rate(mq_process_ack_total{action=~"nack|term"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: mq
+        annotations:
+          summary: "MQ nack/term 速率过高"
+          description: "MQ consumer nack/term 速率超过发布门禁，需要检查 poison message、retry 和 DLQ。"
+
+      - alert: FlareImDlqGrowth
+        expr: |
+          increase(dead_letter_queue_messages_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: dlq
+        annotations:
+          summary: "DLQ 出现新增消息"
+          description: "DLQ 在 10 分钟窗口内增长，发布前必须完成 dry-run 或受控 replay 验证。"
+
+      - alert: FlareImSyncLagP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(flare_sync_page_duration_seconds_bucket[5m])) by (le)
+          ) > 3
+        for: 10m
+        labels:
+          severity: warning
+          component: sync
+        annotations:
+          summary: "Sync page P99 超过 3s"
+          description: "Sync page P99 超过发布门禁，可能影响 reconnect 和大群 pull 收敛体验。"

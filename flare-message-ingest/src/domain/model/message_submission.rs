@@ -75,6 +75,12 @@ impl MessageSubmission {
             request.status = 1;
         }
 
+        // Ordering is server-authoritative. Client-provided sequence hints must not leak into
+        // pre-allocation stages; `MessageIngestService::allocate_seq_for_submission` assigns the
+        // durable conversation sequence after ensure/decorate succeeds.
+        request.conversation_seq = 0;
+        request.message_seq = None;
+
         let _profile = MessageProfile::ensure(&mut request);
 
         if request.created_at <= 0 {
@@ -107,5 +113,40 @@ impl SubmittedMessage for MessageSubmission {
 
     fn message_id(&self) -> &str {
         &self.message_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults() -> MessageDefaults {
+        MessageDefaults {
+            default_business_type: "im".to_string(),
+            default_conversation_type: ConversationType::Group,
+            default_sender_type: "user".to_string(),
+            default_tenant_id: Some("tenant-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn prepare_submission_clears_client_sequence_until_server_allocation() {
+        let submission = MessageSubmission::prepare(
+            Message {
+                conversation_id: "conv-1".to_string(),
+                sender_id: "user-1".to_string(),
+                conversation_seq: 99,
+                message_seq: Some(88),
+                ..Default::default()
+            },
+            &defaults(),
+        )
+        .expect("prepare");
+
+        assert_eq!(
+            submission.message.conversation_seq, 0,
+            "prepare must leave conversation_seq unassigned until server allocation"
+        );
+        assert_eq!(submission.message.message_seq, None);
     }
 }

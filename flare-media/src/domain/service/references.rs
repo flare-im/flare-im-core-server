@@ -167,5 +167,4 @@ impl MediaService {
             .map(|asset| asset.file_id)
             .collect())
     }
-
 }

@@ -43,6 +43,8 @@ impl ConversationReadService for ConversationGrpcHandler {
                     client_cursor: cursor_map.clone(),
                     include_recent,
                     recent_limit,
+                    updated_after_ms: req.updated_after_ms.max(0),
+                    max_conversations: req.max_conversations.max(0),
                 },
             )
             .await

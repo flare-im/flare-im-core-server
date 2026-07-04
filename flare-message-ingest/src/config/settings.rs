@@ -78,8 +78,6 @@ pub struct MessageIngestConfig {
     pub conversation_ensure_cache_capacity: u64,
     /// 高频单聊 conversation ensure 缓存 TTL（秒）。
     pub conversation_ensure_cache_ttl_seconds: u64,
-    /// 超过该成员数的持久消息不在摄入链路物化成员列表。
-    pub large_conversation_materialize_threshold: usize,
     /// 服务器 ID（用于服务注册，标识服务实例）
     pub server_id: Option<String>,
     /// 业务系统标识符（SVID），用于服务发现时的过滤
@@ -108,6 +106,20 @@ pub struct MessageIngestConfig {
     pub extension_hook_message_type_allowlist: Vec<i32>,
     /// Prometheus 指标出口配置。
     pub metrics: MetricsEndpointConfig,
+    /// 发送入口限流开关。
+    pub send_rate_limit_enabled: bool,
+    /// tenant 维度每秒发送上限，0 表示不限制。
+    pub send_rate_limit_tenant_per_second: u32,
+    /// tenant+sender 维度每秒发送上限，0 表示不限制。
+    pub send_rate_limit_tenant_sender_per_second: u32,
+    /// tenant+conversation 维度每秒发送上限，0 表示不限制。
+    pub send_rate_limit_tenant_conversation_per_second: u32,
+    /// 发送限流 fixed-window 大小（毫秒）。
+    pub send_rate_limit_window_ms: u64,
+    /// 发送限流本地保留 key 上限。
+    pub send_rate_limit_max_tracked_keys: usize,
+    /// WAL 后 MQ publish 阶段超时（毫秒），0 表示不启用额外阶段超时。
+    pub send_publish_timeout_ms: u64,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
@@ -437,17 +449,6 @@ impl MessageIngestConfig {
         })
         .unwrap_or(30);
 
-        let large_conversation_materialize_threshold =
-            env::var("MESSAGE_INGEST_LARGE_CONVERSATION_MATERIALIZE_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .or_else(|| {
-                    service_config
-                        .as_ref()
-                        .and_then(|service| service.large_conversation_push_threshold)
-                })
-                .unwrap_or(500);
-
         // 从环境变量获取 server_id 和 svid
         let server_id = env_or_fallback("MESSAGE_INGEST_SERVER_ID", "SERVER_ID");
 
@@ -541,6 +542,73 @@ impl MessageIngestConfig {
             MetricsEndpointConfig::new(metrics_address, metrics_port).with_path(metrics_path);
         metrics.enabled = metrics_enabled;
 
+        let send_rate_limit_enabled =
+            parse_bool(env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_ENABLED").ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.send_rate_limit_enabled)
+                })
+                .unwrap_or(false);
+        let send_rate_limit_tenant_per_second =
+            env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_PER_SECOND")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.send_rate_limit_tenant_per_second)
+                })
+                .unwrap_or(0);
+        let send_rate_limit_tenant_sender_per_second =
+            env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_SENDER_PER_SECOND")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.send_rate_limit_tenant_sender_per_second)
+                })
+                .unwrap_or(0);
+        let send_rate_limit_tenant_conversation_per_second =
+            env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_CONVERSATION_PER_SECOND")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.send_rate_limit_tenant_conversation_per_second)
+                })
+                .unwrap_or(0);
+        let send_rate_limit_window_ms = env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_WINDOW_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                service_config
+                    .as_ref()
+                    .and_then(|service| service.send_rate_limit_window_ms)
+            })
+            .unwrap_or(1000);
+        let send_rate_limit_max_tracked_keys =
+            env::var("MESSAGE_INGEST_SEND_RATE_LIMIT_MAX_TRACKED_KEYS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .or_else(|| {
+                    service_config
+                        .as_ref()
+                        .and_then(|service| service.send_rate_limit_max_tracked_keys)
+                })
+                .unwrap_or(200_000);
+        let send_publish_timeout_ms = env::var("MESSAGE_INGEST_SEND_PUBLISH_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                service_config
+                    .as_ref()
+                    .and_then(|service| service.send_publish_timeout_ms)
+            })
+            .unwrap_or(5000);
+
         Self {
             mq_backend,
             jetstream_url,
@@ -575,7 +643,6 @@ impl MessageIngestConfig {
             session_creation_mode,
             conversation_ensure_cache_capacity,
             conversation_ensure_cache_ttl_seconds,
-            large_conversation_materialize_threshold,
             server_id,
             svid,
             capability_hooks_auto,
@@ -588,6 +655,13 @@ impl MessageIngestConfig {
             extension_tenant_allowlist,
             extension_hook_message_type_allowlist,
             metrics,
+            send_rate_limit_enabled,
+            send_rate_limit_tenant_per_second,
+            send_rate_limit_tenant_sender_per_second,
+            send_rate_limit_tenant_conversation_per_second,
+            send_rate_limit_window_ms,
+            send_rate_limit_max_tracked_keys,
+            send_publish_timeout_ms,
         }
     }
 

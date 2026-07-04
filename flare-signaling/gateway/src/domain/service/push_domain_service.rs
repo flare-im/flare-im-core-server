@@ -17,6 +17,49 @@ use crate::domain::ports::{ConnectionQuery, IPushPort};
 
 const USER_PUSH_FANOUT_CONCURRENCY: usize = 64;
 
+/// 默认"已 bootstrap 会话"缓存容量上限。长跑网关会服务大量不同会话，无界缓存会缓慢泄漏 → 终致 OOM。
+const DEFAULT_RESOLVED_CONVERSATIONS_CAPACITY: usize = 100_000;
+
+/// 有界的"已 bootstrap 会话"集合：FIFO 淘汰最旧条目，封顶内存。被淘汰的（冷）会话下次投递会**幂等重 bootstrap**
+/// （`join` 幂等、`list_participants` 只读重取），故淘汰仅是极少的重做成本，不影响正确性。
+/// 会话参与者缓存（LRU 有界）。缓存 `conversation_id → 参与者 user_id 列表`，
+/// 使投递路径跳过 `list_participants` RPC，但**订阅仍每次执行**——
+/// 后上线的成员连接（多端/重连/多实例）据此幂等补订阅，避免"首投递时已在线的
+/// 连接被订阅、之后上线的连接永不订阅"导致实时下行漏送。
+struct ResolvedConversations {
+    order: std::collections::VecDeque<String>,
+    participants: std::collections::HashMap<String, std::sync::Arc<Vec<String>>>,
+    capacity: usize,
+}
+
+impl ResolvedConversations {
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            order: std::collections::VecDeque::with_capacity(capacity.min(1024)),
+            participants: std::collections::HashMap::with_capacity(capacity.min(1024)),
+            capacity,
+        }
+    }
+
+    fn get(&self, conversation_id: &str) -> Option<std::sync::Arc<Vec<String>>> {
+        self.participants.get(conversation_id).cloned()
+    }
+
+    fn insert(&mut self, conversation_id: String, participants: Vec<String>) {
+        if !self.participants.contains_key(&conversation_id) {
+            self.order.push_back(conversation_id.clone());
+            while self.order.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.participants.remove(&evicted);
+                }
+            }
+        }
+        self.participants
+            .insert(conversation_id, std::sync::Arc::new(participants));
+    }
+}
+
 /// 推送领域服务
 pub struct PushDomainService {
     push_port: Arc<dyn IPushPort>,
@@ -25,8 +68,8 @@ pub struct PushDomainService {
     conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
     /// Conversation 读池：首次投递某会话时解析参与者，订阅本节点在线成员（确定性 bootstrap）。
     conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
-    /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。
-    resolved_conversations: std::sync::RwLock<std::collections::HashSet<String>>,
+    /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。**有界 FIFO**，防长跑泄漏。
+    resolved_conversations: std::sync::RwLock<ResolvedConversations>,
 }
 
 pub struct EventEnvelopePushRequest<'a> {
@@ -52,42 +95,54 @@ impl PushDomainService {
             connection_query,
             conversation_subscriptions,
             conversation_read,
-            resolved_conversations: std::sync::RwLock::new(std::collections::HashSet::new()),
+            resolved_conversations: std::sync::RwLock::new(ResolvedConversations::new(
+                std::env::var("GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(DEFAULT_RESOLVED_CONVERSATIONS_CAPACITY),
+            )),
         }
     }
 
     /// 确定性 bootstrap：首次投递某会话时解析参与者，订阅其在**本节点**的在线连接。
-    /// 每会话每网关仅解析一次（缓存）；覆盖"会话在连接后创建"的订阅时序。best-effort。
+    /// 每次投递前确保参与者的**当前在线连接**都已订阅（join 幂等）。
+    /// 参与者列表每会话每网关仅解析一次（缓存跳过 `list_participants` RPC），
+    /// 但订阅每次执行——覆盖"会话在连接后创建"以及"成员连接在首投递后才上线
+    ///（多端登录/断线重连/客户端多实例）"的订阅时序漏洞。best-effort。
     async fn ensure_conversation_members_subscribed(&self, tx: &Ctx, conversation_id: &str) {
-        if self
+        let cached = self
             .resolved_conversations
             .read()
-            .map(|set| set.contains(conversation_id))
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let participants = match self
-            .conversation_read
-            .list_participants(tx, conversation_id)
-            .await
-        {
-            Ok(users) => users,
-            Err(error) => {
-                tracing::warn!(%conversation_id, ?error, "ensure members: list participants failed");
-                return;
+            .ok()
+            .and_then(|cache| cache.get(conversation_id));
+        let participants = match cached {
+            Some(participants) => participants,
+            None => {
+                let participants = match self
+                    .conversation_read
+                    .list_participants(tx, conversation_id)
+                    .await
+                {
+                    Ok(users) => users,
+                    Err(error) => {
+                        tracing::warn!(%conversation_id, ?error, "ensure members: list participants failed");
+                        return;
+                    }
+                };
+                let participants = std::sync::Arc::new(participants);
+                if let Ok(mut cache) = self.resolved_conversations.write() {
+                    cache.insert(conversation_id.to_string(), participants.as_ref().clone());
+                }
+                participants
             }
         };
-        for user_id in participants {
-            if let Ok(conns) = self.connection_query.list_user_connections(&user_id).await {
+        for user_id in participants.iter() {
+            if let Ok(conns) = self.connection_query.list_user_connections(user_id).await {
                 for conn in conns {
                     self.conversation_subscriptions
                         .join(conversation_id, &conn.connection_id);
                 }
             }
-        }
-        if let Ok(mut set) = self.resolved_conversations.write() {
-            set.insert(conversation_id.to_string());
         }
     }
 
@@ -130,6 +185,43 @@ impl PushDomainService {
         let mut payload = Vec::new();
         push.encode(&mut payload).map_err(|e| {
             ErrorBuilder::new(ErrorCode::InternalError, "encode MessagePush failed")
+                .details(e.to_string())
+                .build_error()
+        })?;
+        self.deliver_to_conversation(
+            tx,
+            conversation_id,
+            flare_core::common::protocol::payload_command::Type::Message as i32,
+            &payload,
+        )
+        .await
+    }
+
+    /// 统一读扩散投递领域事件批：编码 `EventEnvelope`（与 [`Self::push_event_envelope_to_users`] 一致）→
+    /// 扇给本节点订阅该会话的在线连接。群消息主路径（消息经 EventEnvelope 下行）。
+    /// 返回 (成功连接数, 失败连接数)；无本地订阅者返回 (0,0)。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deliver_event_envelope_to_conversation(
+        &self,
+        tx: &Ctx,
+        conversation_id: &str,
+        events: Vec<Event>,
+        window_id: &str,
+        max_conversation_seq: u64,
+        delivery_mode: i32,
+        inline_events_truncated: bool,
+    ) -> Result<(i32, i32)> {
+        let envelope = Self::build_event_envelope(
+            events,
+            window_id,
+            conversation_id,
+            max_conversation_seq,
+            delivery_mode,
+            inline_events_truncated,
+        )?;
+        let mut payload = Vec::new();
+        envelope.encode(&mut payload).map_err(|e| {
+            ErrorBuilder::new(ErrorCode::InternalError, "encode EventEnvelope failed")
                 .details(e.to_string())
                 .build_error()
         })?;
@@ -571,6 +663,23 @@ mod tests {
 
     use async_trait::async_trait;
     use std::sync::Mutex;
+
+    #[test]
+    fn resolved_conversations_evicts_oldest_when_capacity_exceeded() {
+        let mut set = ResolvedConversations::new(2);
+        set.insert("a".to_string(), vec!["u1".to_string()]);
+        set.insert("b".to_string(), vec!["u2".to_string()]);
+        assert!(set.get("a").is_some() && set.get("b").is_some());
+        assert_eq!(set.get("a").unwrap().as_slice(), ["u1"]);
+        set.insert("c".to_string(), vec!["u3".to_string()]); // 越界 → 淘汰最旧的 "a"
+        assert!(set.get("a").is_none(), "oldest evicted");
+        assert!(set.get("b").is_some() && set.get("c").is_some());
+        assert_eq!(set.order.len(), 2, "memory bounded at capacity");
+        // 重复插入刷新参与者但不增长、不重复入队（LRU 顺序稳定）。
+        set.insert("b".to_string(), vec!["u2b".to_string()]);
+        assert_eq!(set.order.len(), 2);
+        assert_eq!(set.get("b").unwrap().as_slice(), ["u2b"]);
+    }
 
     #[derive(Default)]
     struct CapturingPushPort {

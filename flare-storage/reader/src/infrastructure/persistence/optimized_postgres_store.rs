@@ -45,6 +45,8 @@ fn tenant_id_from_ctx(ctx: &Ctx) -> &str {
 
 const MESSAGE_PIN_SCOPE_CONVERSATION: i32 = 0;
 const MESSAGE_PIN_SCOPE_SELF: i32 = 1;
+const CONVERSATION_EVENT_HIGH_WATER_SQL: &str =
+    "SELECT MAX(seq) FROM events WHERE tenant_id = $1 AND conversation_id = $2";
 
 fn user_id_from_ctx(ctx: &Ctx) -> &str {
     ctx.user_id().unwrap_or("")
@@ -152,6 +154,40 @@ impl OptimizedPostgresMessageStorageImpl {
         user_id: &str,
         messages: &mut [Message],
     ) -> Result<()> {
+        self.apply_pin_flags(
+            tenant_id,
+            user_id,
+            &[conversation_id.to_string()],
+            messages.iter_mut().collect(),
+        )
+        .await
+    }
+
+    /// [`Self::apply_current_pin_state`] 的批量版：一次查询覆盖多个会话的窗口消息。
+    async fn apply_current_pin_state_multi(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        conversation_ids: &[String],
+        grouped: &mut HashMap<String, Vec<Message>>,
+    ) -> Result<()> {
+        self.apply_pin_flags(
+            tenant_id,
+            user_id,
+            conversation_ids,
+            grouped.values_mut().flatten().collect(),
+        )
+        .await
+    }
+
+    /// pin 可见性规则（scope/owner/expire）唯一实现：单会话与批量窗口共用，防谓词漂移。
+    async fn apply_pin_flags(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        conversation_ids: &[String],
+        messages: Vec<&mut Message>,
+    ) -> Result<()> {
         let message_ids: Vec<String> = messages
             .iter()
             .filter_map(|message| {
@@ -168,14 +204,14 @@ impl OptimizedPostgresMessageStorageImpl {
             SELECT message_id
             FROM pinned_messages
             WHERE tenant_id = $1
-              AND conversation_id = $2
+              AND conversation_id = ANY($2)
               AND message_id = ANY($3)
               AND (scope = $4 OR (scope = $5 AND owner_user_id = $6))
               AND (expire_at IS NULL OR expire_at > CURRENT_TIMESTAMP)
             "#,
         )
         .bind(tenant_id)
-        .bind(conversation_id)
+        .bind(conversation_ids)
         .bind(&message_ids)
         .bind(MESSAGE_PIN_SCOPE_CONVERSATION)
         .bind(MESSAGE_PIN_SCOPE_SELF)
@@ -199,6 +235,94 @@ impl OptimizedPostgresMessageStorageImpl {
         }
         Ok(())
     }
+}
+
+/// 消息行投影（m 别名 + 可见性遮蔽 + reactions/pins），`{uid}` 为可见性视角参数占位。
+/// 单会话（$5）与批量窗口（$3）共享一份，防止三处漂移。
+const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.tenant_id, m.server_id, m.conversation_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN '' ELSE m.client_msg_id END AS client_msg_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN '' ELSE m.sender_id END AS sender_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN '' ELSE m.sender_name END AS sender_name,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN '' ELSE m.sender_avatar END AS sender_avatar,
+                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN 0 ELSE m.message_type END AS message_type,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN '\x'::bytea ELSE m.content END AS content,
+                    m.status,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN NULL ELSE m.offline_push_info END AS offline_push_info,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM message_visibility mv
+                            WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                              AND mv.visibility_status IN (1, 2)
+                              AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                        )
+                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
+                        ELSE m.extra
+                    END AS extra,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM message_visibility mv
+                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                          AND mv.visibility_status IN (1, 2)
+                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
+                    ) THEN NULL ELSE m.extensions END AS extensions,
+                    m.created_at, m.persisted_at, m.delivered_at,
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'emoji', mr.emoji,
+                                'user_ids', mr.user_ids,
+                                'count', mr.count
+                            )
+                        )
+                        FROM message_reactions mr
+                        WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
+                    ), '[]'::jsonb) AS reactions_json,
+                    EXISTS (
+                        SELECT 1 FROM pinned_messages pm
+                        WHERE pm.tenant_id = m.tenant_id
+                          AND pm.conversation_id = m.conversation_id
+                          AND pm.message_id = m.server_id
+                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
+                    ) AS is_pinned
+"#;
+
+fn message_row_projection(uid_param: &str) -> String {
+    MESSAGE_ROW_PROJECTION_WITH_VISIBILITY.replace("{uid}", uid_param)
 }
 
 fn apply_burn_query_visibility(message: &mut Message, include_placeholder: bool) -> bool {
@@ -416,7 +540,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 r#"
                 SELECT
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((
                         SELECT jsonb_agg(
@@ -523,6 +647,8 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
     ) -> Result<Vec<Message>> {
         let tenant_id = tenant_id_from_ctx(ctx).to_string();
         let limit = limit.clamp(1, 1000);
+        let backfill_tail_page =
+            crate::domain::repository::is_backfill_tail_page(after_seq, before_seq);
 
         if user_id.is_none()
             && let Some(cache) = &self.cache
@@ -575,110 +701,30 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         }
 
         // 构建查询：基于 seq 查询（性能更好），支持多租户
-        // 优化：使用预编译查询和索引优化
+        // 回溯页（after==0 且带 before）按 seq **降序**取"最近 limit 条"再在内存反转为升序——
+        // 显式 ORDER BY 方向走 (tenant_id, conversation_id, seq) 索引；
+        // 旧 `ORDER BY CASE WHEN ... THEN -seq ...` 使规划器无法用索引序，每页全范围排序。
+        let seq_order = if backfill_tail_page { "DESC" } else { "ASC" };
         let rows = if let Some(uid) = user_id {
-            sqlx::query(
-                r#"
-                SELECT
-                    m.tenant_id, m.server_id, m.conversation_id,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN '' ELSE m.client_msg_id END AS client_msg_id,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN '' ELSE m.sender_id END AS sender_id,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN '' ELSE m.sender_name END AS sender_name,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN '' ELSE m.sender_avatar END AS sender_avatar,
-                    m.channel_id, m.source, m.seq, m.timestamp, m.conversation_type,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN 0 ELSE m.message_type END AS message_type,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN '\x'::bytea ELSE m.content END AS content,
-                    m.status,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN NULL ELSE m.offline_push_info END AS offline_push_info,
-                    CASE
-                        WHEN EXISTS (
-                            SELECT 1 FROM message_visibility mv
-                            WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                              AND mv.visibility_status IN (1, 2)
-                              AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                        )
-                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
-                        ELSE m.extra
-                    END AS extra,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM message_visibility mv
-                        WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
-                          AND mv.visibility_status IN (1, 2)
-                          AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
-                    ) THEN NULL ELSE m.extensions END AS extensions,
-                    m.created_at, m.persisted_at, m.delivered_at,
-                    COALESCE((
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
-                                'count', mr.count
-                            )
-                        )
-                        FROM message_reactions mr
-                        WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
-                    ), '[]'::jsonb) AS reactions_json,
-                    EXISTS (
-                        SELECT 1 FROM pinned_messages pm
-                        WHERE pm.tenant_id = m.tenant_id
-                          AND pm.conversation_id = m.conversation_id
-                          AND pm.message_id = m.server_id
-                          AND (pm.expire_at IS NULL OR pm.expire_at > CURRENT_TIMESTAMP)
-                    ) AS is_pinned
-	                FROM messages m
-	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > $3 AND ($4::BIGINT IS NULL OR m.seq < $4)
-	                ORDER BY m.seq ASC
-	                LIMIT $6
-	                "#,
-            )
-            .bind(&tenant_id)
-            .bind(conversation_id)
-            .bind(after_seq)
-            .bind(before_seq)
-            .bind(uid)
-            .bind(limit)
-            .fetch_all(&self.base.pool)
-            .await
+            let sql = format!(
+                "SELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > $3 AND ($4::BIGINT IS NULL OR m.seq < $4)\nORDER BY m.seq {seq_order}\nLIMIT $6",
+                projection = message_row_projection("$5"),
+                seq_order = seq_order,
+            );
+            sqlx::query(&sql)
+                .bind(&tenant_id)
+                .bind(conversation_id)
+                .bind(after_seq)
+                .bind(before_seq)
+                .bind(uid)
+                .bind(limit)
+                .fetch_all(&self.base.pool)
+                .await
         } else {
-            sqlx::query(
+            let sql = format!(
                 r#"
                 SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((
                         SELECT jsonb_agg(
@@ -700,17 +746,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     ) AS is_pinned
 	                FROM messages
 	                WHERE tenant_id = $1 AND conversation_id = $2 AND seq > $3 AND ($4::BIGINT IS NULL OR seq < $4)
-	                ORDER BY seq ASC
+	                ORDER BY seq {seq_order}
 	                LIMIT $5
-	                "#,
-            )
-            .bind(&tenant_id)
-            .bind(conversation_id)
-            .bind(after_seq)
-            .bind(before_seq)
-            .bind(limit)
-            .fetch_all(&self.base.pool)
-            .await
+	                "#
+            );
+            sqlx::query(&sql)
+                .bind(&tenant_id)
+                .bind(conversation_id)
+                .bind(after_seq)
+                .bind(before_seq)
+                .bind(limit)
+                .fetch_all(&self.base.pool)
+                .await
         }
         .context("Failed to query messages by seq")?;
 
@@ -720,6 +767,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
                 messages.push(message);
             }
+        }
+        if backfill_tail_page {
+            messages.reverse();
         }
         self.apply_current_pin_state(
             &tenant_id,
@@ -732,6 +782,87 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         Ok(messages)
     }
 
+    /// 批量窗口：单条 SQL（unnest + LATERAL）取 N 个会话的消息窗口。
+    /// 每会话经 `(tenant_id, conversation_id, seq)` 索引只读 limit 行，
+    /// 昂贵投影只对返回行求值；投影与单会话查询共享
+    /// [`MESSAGE_ROW_PROJECTION_WITH_VISIBILITY`]，可见性语义一致。
+    #[instrument(skip(self, targets), fields(conversations = targets.len(), limit = per_conversation_limit, newest_window))]
+    async fn query_conversations_message_windows(
+        &self,
+        ctx: &Ctx,
+        targets: &[(String, i64)],
+        user_id: Option<&str>,
+        per_conversation_limit: i32,
+        newest_window: bool,
+        include_burned_placeholder: bool,
+    ) -> Result<Vec<(String, Vec<Message>)>> {
+        const MAX_WINDOW_CONVERSATIONS: usize = 200;
+        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let limit = per_conversation_limit.clamp(1, 500);
+        let targets: Vec<(String, i64)> = targets
+            .iter()
+            .filter(|(id, _)| !id.trim().is_empty())
+            .take(MAX_WINDOW_CONVERSATIONS)
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
+        let after_seqs: Vec<i64> = targets.iter().map(|(_, after)| *after).collect();
+
+        // LATERAL 内 ORDER BY 方向恒定 → 每会话走索引序只读 limit 行：
+        // newest_window：seq DESC 截最新 limit 条（后统一反转为升序）；
+        // 增量：seq > after_seq 升序前 limit 条（与 QueryMessagesBySeq 一致）。
+        let projection = message_row_projection("$5");
+        let sql = if newest_window {
+            format!(
+                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid\nORDER BY m.seq DESC\nLIMIT $4\n) w",
+            )
+        } else {
+            format!(
+                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid AND m.seq > t.after_seq\nORDER BY m.seq ASC\nLIMIT $4\n) w",
+            )
+        };
+        let uid = user_id.unwrap_or_default();
+        let rows = sqlx::query(&sql)
+            .bind(&tenant_id)
+            .bind(&ids)
+            .bind(&after_seqs)
+            .bind(limit as i64)
+            .bind(uid)
+            .fetch_all(&self.base.pool)
+            .await
+            .context("Failed to query conversations message windows")?;
+
+        let mut grouped: HashMap<String, Vec<Message>> = HashMap::with_capacity(ids.len());
+        for row in rows {
+            let mut message = self.base.row_to_message(&row)?;
+            if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
+                grouped
+                    .entry(message.conversation_id.clone())
+                    .or_default()
+                    .push(message);
+            }
+        }
+        if newest_window {
+            // tail 形态返回 DESC，统一为 seq 升序。
+            for messages in grouped.values_mut() {
+                messages.reverse();
+            }
+        }
+        self.apply_current_pin_state_multi(&tenant_id, user_id_from_ctx(ctx), &ids, &mut grouped)
+            .await?;
+
+        Ok(ids
+            .into_iter()
+            .map(|conversation_id| {
+                let messages = grouped.remove(&conversation_id).unwrap_or_default();
+                (conversation_id, messages)
+            })
+            .collect())
+    }
+
     #[instrument(skip(self), fields(message_id))]
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
         let tenant_id = tenant_id_from_ctx(ctx).to_string();
@@ -741,7 +872,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             r#"
             SELECT
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                 COALESCE((
                     SELECT jsonb_agg(
@@ -1044,7 +1175,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             r#"
             SELECT
                 tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                 COALESCE((
                     SELECT jsonb_agg(
@@ -1784,14 +1915,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         conversation_id: &str,
     ) -> Result<Option<i64>> {
         let _ = ctx;
-        let row = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(seq) FROM messages WHERE tenant_id = $1 AND conversation_id = $2",
-        )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .fetch_one(&self.base.pool)
-        .await
-        .context("get_conversation_max_seq")?;
+        let row = sqlx::query_scalar::<_, Option<i64>>(CONVERSATION_EVENT_HIGH_WATER_SQL)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .fetch_one(&self.base.pool)
+            .await
+            .context("get_conversation_max_seq")?;
         Ok(row)
     }
 
@@ -1912,7 +2041,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 r#"
                 SELECT
                     tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
-                    channel_id, source, seq, timestamp, conversation_type, message_type, content,
+                    channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((
                         SELECT jsonb_agg(
@@ -2011,5 +2140,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .await
         .context("update sync cursor")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CONVERSATION_EVENT_HIGH_WATER_SQL;
+
+    #[test]
+    fn conversation_high_water_uses_durable_event_stream() {
+        assert!(CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM events"));
+        assert!(!CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM messages"));
     }
 }

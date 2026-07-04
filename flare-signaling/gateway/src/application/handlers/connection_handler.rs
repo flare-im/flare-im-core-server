@@ -30,6 +30,12 @@ pub struct ConnectionHandler {
     state_notifier: Arc<dyn ConnectionStateNotifier>,
     connection_port: Arc<dyn IConnectionPort>,
     online_sessions: Arc<RwLock<HashMap<String, OnlineSession>>>,
+    /// 连接注册去重：`on_connect` 与心跳补偿（`refresh_session` 的 None 分支）可能并发触发
+    /// `handle_connect`；在 `register_connection` 的 await 窗口内 `online_sessions` 尚未写入 →
+    /// 双重注册 → 双 login + `platform_exclusive` 自我清理 → 会话订阅抖动 → 接收方在线连接漏订阅
+    /// → 实时投递 fanout `success=1`（对端实时收不到，仅重登录 history-sync 才补回）。
+    /// 用该集合序列化同一 connection 的注册，保证幂等。
+    connecting: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// 会话级在线订阅注册表（统一读扩散地基）：断线时清扫该连接的全部会话订阅。
     conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
     /// Conversation 读服务客户端池：登录时拉取用户会话列表用于 eager 订阅。
@@ -51,6 +57,7 @@ impl ConnectionHandler {
             state_notifier,
             connection_port,
             online_sessions: Arc::new(RwLock::new(HashMap::new())),
+            connecting: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             conversation_subscriptions,
             conversation_read,
         }
@@ -70,42 +77,77 @@ impl ConnectionHandler {
     }
 
     /// 统一读扩散：登录即按用户会话列表 eager 订阅，确保在线成员 race-free 收到会话 publish。
-    /// best-effort——失败仅日志，不阻断连接（send/进会话仍会惰性 join 兜底）。
+    /// best-effort——失败仅日志，不阻断连接（send/进会话仍会惰性 join 兜底 + 首投递成员 bootstrap）。
     async fn eager_subscribe_user_conversations(&self, connection_id: &str, user_id: &str) {
-        let ctx = match self.build_request_ctx(connection_id).await {
+        Self::eager_subscribe_impl(
+            self.connection_port.clone(),
+            self.conversation_read.clone(),
+            self.conversation_subscriptions.clone(),
+            connection_id.to_string(),
+            user_id.to_string(),
+        )
+        .await;
+    }
+
+    /// 静态实现：克隆所需 Arc 即可在后台任务中执行，使 eager 订阅**不阻塞 CONNECT_ACK 关键路径**
+    /// （连接风暴下 conversation 服务 list_conversations 慢会拖垮连接建立）。
+    async fn eager_subscribe_impl(
+        connection_port: Arc<dyn IConnectionPort>,
+        conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+        conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
+        connection_id: String,
+        user_id: String,
+    ) {
+        let ctx = match connection_port.build_ctx(&connection_id).await {
             Ok(ctx) => ctx,
             Err(error) => {
                 warn!(%user_id, %connection_id, ?error, "eager subscribe: build ctx failed");
                 return;
             }
         };
-        let mut client = match self.conversation_read.ensure_client().await {
+        let mut client = match conversation_read.ensure_client().await {
             Ok(client) => client,
             Err(error) => {
                 warn!(%user_id, %connection_id, ?error, "eager subscribe: conversation read client unavailable");
                 return;
             }
         };
-        let request = flare_server_core::client::request_with_context(
-            flare_grpc_proto::conversation::ListConversationsRequest {
-                cursor: String::new(),
-                limit: 0,
-                order: 0,
-            },
-            &ctx,
-        );
-        match client.list_conversations(request).await {
-            Ok(response) => {
-                let conversations = response.into_inner().conversations;
-                let count = conversations.len();
-                for summary in conversations {
-                    self.conversation_subscriptions
-                        .join(&summary.conversation_id, connection_id);
+        // 订阅用户的**全部**会话(分页),否则会话数 > 服务端默认 limit(20)时,超出部分得不到实时
+        // 读扩散推送(被动接收方在非前 20 会话里收不到消息,要等安全轮询)。后台任务执行,不阻塞 CONNECT_ACK。
+        const EAGER_PAGE_LIMIT: i32 = 500;
+        const EAGER_MAX_TOTAL: usize = 10_000; // 封顶,避免极端会话数撑爆单连接订阅内存
+        let mut cursor = String::new();
+        let mut total = 0usize;
+        loop {
+            let request = flare_server_core::client::request_with_context(
+                flare_grpc_proto::conversation::ListConversationsRequest {
+                    cursor: cursor.clone(),
+                    limit: EAGER_PAGE_LIMIT,
+                    order: 0,
+                },
+                &ctx,
+            );
+            match client.list_conversations(request).await {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    for summary in &page.conversations {
+                        conversation_subscriptions.join(&summary.conversation_id, &connection_id);
+                    }
+                    total += page.conversations.len();
+                    if page.conversations.is_empty()
+                        || !page.has_more
+                        || page.next_cursor.is_empty()
+                        || total >= EAGER_MAX_TOTAL
+                    {
+                        debug!(%user_id, %connection_id, subscribed = total, "eager subscribed user conversations");
+                        break;
+                    }
+                    cursor = page.next_cursor;
                 }
-                debug!(%user_id, %connection_id, subscribed = count, "eager subscribed user conversations");
-            }
-            Err(error) => {
-                warn!(%user_id, %connection_id, ?error, "eager subscribe: list_conversations failed");
+                Err(error) => {
+                    warn!(%user_id, %connection_id, ?error, "eager subscribe: list_conversations failed");
+                    break;
+                }
             }
         }
     }
@@ -157,8 +199,15 @@ impl ConnectionHandler {
         );
 
         // 统一读扩散：登录即订阅用户全部会话（race-free 收会话 publish）；best-effort。
-        self.eager_subscribe_user_conversations(connection_id, &user_id)
-            .await;
+        // **不阻塞 CONNECT_ACK**：后台执行，避免连接风暴下 list_conversations 慢拖垮连接建立
+        // （首投递成员 bootstrap + send 惰性 join 兜底订阅时序）。
+        tokio::spawn(Self::eager_subscribe_impl(
+            self.connection_port.clone(),
+            self.conversation_read.clone(),
+            self.conversation_subscriptions.clone(),
+            connection_id.to_string(),
+            user_id.clone(),
+        ));
 
         // 通知连接状态(业务端通知)
         self.state_notifier
@@ -195,7 +244,8 @@ impl ConnectionHandler {
     #[instrument(skip(self))]
     pub async fn handle_disconnect(&self, connection_id: &str) -> Result<()> {
         // 统一读扩散地基：断线先清扫该连接的全部会话订阅（幂等，O(该连接订阅的会话数)）。
-        self.conversation_subscriptions.remove_connection(connection_id);
+        self.conversation_subscriptions
+            .remove_connection(connection_id);
         let session = self
             .online_sessions
             .write()
@@ -275,13 +325,15 @@ impl ConnectionHandler {
     /// 3. 记录日志
     #[instrument(skip(self))]
     pub async fn refresh_session(&self, connection_id: &str) -> Result<()> {
-        let session = match self
-            .online_sessions
-            .read()
-            .await
-            .get(connection_id)
-            .cloned()
-        {
+        // 读锁必须在进入 None 分支前释放：match 的 scrutinee 临时量（含锁守卫）
+        // 存活到整个 match 结束，若在 None 分支持锁调用 handle_connect（内部
+        // write().await 同一把锁）= 异步自死锁——之后**所有**连接的 handle_connect
+        // 永久排队，eager 订阅全部失效（实时下行只剩首投递兜底）。
+        let existing = {
+            let sessions = self.online_sessions.read().await;
+            sessions.get(connection_id).cloned()
+        };
+        let session = match existing {
             Some(session) => session,
             None => {
                 self.handle_connect(connection_id).await?;

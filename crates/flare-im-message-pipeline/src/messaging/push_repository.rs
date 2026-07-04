@@ -874,6 +874,158 @@ mod tests {
         assert!(envelope.recipient_user_ids.is_empty());
     }
 
+    #[tokio::test]
+    async fn push_only_message_ping_marks_large_conversation_without_inline_payload() {
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let ctx: Ctx = Arc::new(
+            Context::with_request_id("req-large-ping")
+                .with_trace_id("trace-large-ping")
+                .with_tenant_id("tenant-a"),
+        );
+        let message = Message {
+            server_id: "message-large".to_string(),
+            conversation_id: "conversation-large".to_string(),
+            conversation_seq: 99,
+            created_at: 1_700_000_000_099,
+            ..Message::default()
+        };
+
+        repo.push_only_message_ping(
+            &ctx,
+            &message,
+            Vec::new(),
+            "conversation-large".to_string(),
+            true,
+        )
+        .await
+        .expect("push-only ping should publish");
+
+        let captured = producer
+            .send
+            .lock()
+            .expect("capture producer poisoned")
+            .clone()
+            .expect("send should be captured");
+        assert_eq!(captured.topic, TOPIC_PUSH_EVENTS);
+        assert_eq!(captured.key.as_deref(), Some("conversation-large"));
+
+        let outer_headers = captured.headers.expect("outer headers should be set");
+        assert_eq!(
+            outer_headers.get(HEADER_DELIVERY_MODE).map(String::as_str),
+            Some(DELIVERY_MODE_PING)
+        );
+        assert_eq!(
+            outer_headers
+                .get(HEADER_INLINE_EVENTS_TRUNCATED)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            outer_headers.get("push-only").map(String::as_str),
+            Some("true")
+        );
+
+        let envelope = MqEnvelope::decode(captured.payload.as_slice())
+            .expect("payload should decode as MqEnvelope");
+        assert!(envelope.push_only);
+        assert!(envelope.large_conversation);
+        assert!(envelope.recipient_user_ids.is_empty());
+        assert_eq!(
+            envelope
+                .headers
+                .get(HEADER_DELIVERY_MODE)
+                .map(String::as_str),
+            Some(DELIVERY_MODE_PING)
+        );
+        assert_eq!(
+            envelope
+                .headers
+                .get(HEADER_INLINE_EVENTS_TRUNCATED)
+                .map(String::as_str),
+            Some("true")
+        );
+        match envelope.payload.expect("event payload should exist") {
+            flare_proto::common::mq_envelope::Payload::Event(event) => {
+                assert_eq!(event.conversation_id, "conversation-large");
+                assert_eq!(event.conversation_seq, 99);
+                assert_eq!(event.r#type, EventType::EventMessage as i32);
+                assert_eq!(event.event_id, "message-ping:message-large");
+                assert!(
+                    event.payload.is_none(),
+                    "ping must not inline message bytes"
+                );
+            }
+            other => panic!("expected event payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_only_message_inline_event_carries_typed_message_payload() {
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let ctx: Ctx = Arc::new(Context::default().with_tenant_id("tenant-a"));
+        let message = Message {
+            server_id: "message-small".to_string(),
+            conversation_id: "conversation-small".to_string(),
+            conversation_seq: 7,
+            created_at: 1_700_000_000_007,
+            ..Message::default()
+        };
+
+        repo.push_only_message_inline_event(
+            &ctx,
+            &message,
+            vec!["receiver-a".to_string()],
+            "conversation-small".to_string(),
+        )
+        .await
+        .expect("push-only inline event should publish");
+
+        let captured = producer
+            .send
+            .lock()
+            .expect("capture producer poisoned")
+            .clone()
+            .expect("send should be captured");
+        assert_eq!(captured.topic, TOPIC_PUSH_EVENTS);
+        assert_eq!(captured.key.as_deref(), Some("conversation-small"));
+
+        let envelope = MqEnvelope::decode(captured.payload.as_slice())
+            .expect("payload should decode as MqEnvelope");
+        assert!(envelope.push_only);
+        assert!(!envelope.large_conversation);
+        assert_eq!(envelope.recipient_user_ids, vec!["receiver-a".to_string()]);
+        assert_eq!(
+            envelope
+                .headers
+                .get(HEADER_DELIVERY_MODE)
+                .map(String::as_str),
+            Some(DELIVERY_MODE_PING_WITH_INLINE)
+        );
+        assert_eq!(
+            envelope
+                .headers
+                .get(HEADER_INLINE_EVENTS_TRUNCATED)
+                .map(String::as_str),
+            Some("false")
+        );
+        match envelope.payload.expect("event payload should exist") {
+            flare_proto::common::mq_envelope::Payload::Event(event) => {
+                assert_eq!(event.event_id, "message-inline:message-small");
+                match event.payload.expect("inline message should exist") {
+                    flare_proto::common::event::Payload::Message(inline) => {
+                        assert_eq!(inline.server_id, "message-small");
+                        assert_eq!(inline.conversation_id, "conversation-small");
+                        assert_eq!(inline.conversation_seq, 7);
+                    }
+                    other => panic!("expected inline message payload, got {other:?}"),
+                }
+            }
+            other => panic!("expected event payload, got {other:?}"),
+        }
+    }
+
     #[test]
     fn transient_producer_errors_remain_retryable() {
         let errors = [

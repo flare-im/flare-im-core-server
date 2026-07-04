@@ -138,11 +138,7 @@ pub fn build_recall_event(
 /// let new_content = Vec::new();
 /// let event = build_edit_event("conv-123", "msg-456", new_content);
 /// ```
-pub fn build_edit_event(
-    conversation_id: &str,
-    server_msg_id: &str,
-    new_content: Vec<u8>,
-) -> Event {
+pub fn build_edit_event(conversation_id: &str, server_msg_id: &str, new_content: Vec<u8>) -> Event {
     Event {
         conversation_id: conversation_id.to_string(),
         conversation_seq: 0,

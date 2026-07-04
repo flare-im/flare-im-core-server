@@ -404,6 +404,8 @@ impl ConversationQueryHandler {
                 query.client_cursor,
                 query.include_recent,
                 query.recent_limit,
+                query.updated_after_ms,
+                query.max_conversations,
             )
             .await?;
 

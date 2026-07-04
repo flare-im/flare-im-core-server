@@ -5,6 +5,30 @@
 //! - 典型实现：Redis 等 KV 存储，key 为 message_id，TTL 与业务保留策略一致。
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_tenant_id;
+
+/// 客户端消息幂等 key 的**唯一**作用域规则（tenant/sender/conversation 归一化 + 兜底 "0"）。
+/// trait 默认实现与所有存储实现都必须经由此函数——任何一处 fork 都会静默分裂去重键空间，
+/// 造成跨实现的重复检测假阴性（生产不可见）。
+pub fn scoped_client_idempotency_key(
+    ctx: &Ctx,
+    client_msg_id: &str,
+    sender_id: Option<&str>,
+    conversation_id: Option<&str>,
+) -> String {
+    let tenant_id = ctx
+        .tenant_id()
+        .filter(|tenant_id| !tenant_id.trim().is_empty())
+        .map(normalize_tenant_id)
+        .unwrap_or_else(|| "0".to_string());
+    let sender_id = sender_id
+        .filter(|sender_id| !sender_id.trim().is_empty())
+        .unwrap_or("0");
+    let conversation_id = conversation_id
+        .filter(|conversation_id| !conversation_id.trim().is_empty())
+        .unwrap_or("0");
+    format!("client:{tenant_id}:{sender_id}:{conversation_id}:{client_msg_id}")
+}
 
 pub trait MessageIdempotencyRepository: Send + Sync {
     /// 检查消息ID是否为新消息（基于服务端消息ID）
@@ -21,12 +45,17 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         &self,
         ctx: &Ctx,
         client_msg_id: &str,
-        _sender_id: Option<&str>,
+        sender_id: Option<&str>,
+        conversation_id: Option<&str>,
     ) -> flare_server_core::error::Result<bool> {
         if client_msg_id.is_empty() {
             return Ok(true);
         }
-        self.is_new(ctx, client_msg_id).await
+        self.is_new(
+            ctx,
+            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id),
+        )
+        .await
     }
 
     /// 释放一次尚未完成 durable write 的客户端消息 ID 预占坑。
@@ -34,11 +63,16 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         &self,
         ctx: &Ctx,
         client_msg_id: &str,
-        _sender_id: Option<&str>,
+        sender_id: Option<&str>,
+        conversation_id: Option<&str>,
     ) -> flare_server_core::error::Result<()> {
         if client_msg_id.is_empty() {
             return Ok(());
         }
-        self.release(ctx, client_msg_id).await
+        self.release(
+            ctx,
+            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id),
+        )
+        .await
     }
 }

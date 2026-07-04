@@ -23,7 +23,11 @@ impl MediaService {
         Ok(dir)
     }
 
-    pub(super) async fn assemble_payload(&self, upload_id: &str, chunks: &[u32]) -> Result<Vec<u8>> {
+    pub(super) async fn assemble_payload(
+        &self,
+        upload_id: &str,
+        chunks: &[u32],
+    ) -> Result<Vec<u8>> {
         let dir = self.session_dir(upload_id);
         let mut payload = Vec::new();
 
@@ -74,7 +78,10 @@ impl MediaService {
         Ok(())
     }
 
-    pub(super) fn direct_state_from_session(&self, session: &UploadSession) -> DirectUploadSessionState {
+    pub(super) fn direct_state_from_session(
+        &self,
+        session: &UploadSession,
+    ) -> DirectUploadSessionState {
         DirectUploadSessionState {
             upload_id: session.upload_id.clone(),
             file_id: session
@@ -312,7 +319,10 @@ impl MediaService {
                 .unwrap_or(false)
     }
 
-    pub(super) fn stamp_lifecycle_scope(metadata: &mut HashMap<String, String>, message_managed: bool) {
+    pub(super) fn stamp_lifecycle_scope(
+        metadata: &mut HashMap<String, String>,
+        message_managed: bool,
+    ) {
         if message_managed {
             metadata.insert(
                 MEDIA_LIFECYCLE_SCOPE_METADATA_KEY.to_string(),
@@ -341,7 +351,10 @@ impl MediaService {
         }
     }
 
-    pub(super) fn apply_reference_lifecycle(metadata: &mut MediaFileMetadata, orphan_grace_seconds: i64) {
+    pub(super) fn apply_reference_lifecycle(
+        metadata: &mut MediaFileMetadata,
+        orphan_grace_seconds: i64,
+    ) {
         if metadata.reference_count > 0 {
             metadata.status = MediaAssetStatus::Active;
             metadata.grace_expires_at = None;
@@ -354,7 +367,10 @@ impl MediaService {
         }
     }
 
-    pub(super) fn can_reuse_hash_match(existing: &MediaFileMetadata, message_managed: bool) -> bool {
+    pub(super) fn can_reuse_hash_match(
+        existing: &MediaFileMetadata,
+        message_managed: bool,
+    ) -> bool {
         message_managed || !Self::is_message_managed_asset(existing) || existing.reference_count > 0
     }
 
@@ -379,7 +395,10 @@ impl MediaService {
         format!("ref_{}", &digest[..32])
     }
 
-    pub(super) fn extract_reference_scope(&self, context: &UploadContext<'_>) -> Option<MediaReferenceScope> {
+    pub(super) fn extract_reference_scope(
+        &self,
+        context: &UploadContext<'_>,
+    ) -> Option<MediaReferenceScope> {
         if context.user_id.is_empty() || !Self::is_message_lifecycle_context(context) {
             return None;
         }
@@ -475,7 +494,11 @@ impl MediaService {
         Ok(())
     }
 
-    pub(super) async fn save_and_cache(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
+    pub(super) async fn save_and_cache(
+        &self,
+        ctx: &Context,
+        metadata: &MediaFileMetadata,
+    ) -> Result<()> {
         if let Some(store) = &self.metadata_store {
             store
                 .save_metadata(metadata)

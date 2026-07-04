@@ -5,4 +5,4 @@
 
 pub mod message_storage;
 
-pub use message_storage::MessageStorage;
+pub use message_storage::{MessageStorage, is_backfill_tail_page};

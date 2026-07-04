@@ -8,10 +8,9 @@ use crate::model::ConversationType;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::{
-    CreateConversationRequest, GetConversationDetailRequest, ListConversationParticipantsRequest,
-    ManageParticipantsRequest, MarkConversationAsReadRequest,
+    GetConversationDetailRequest, ListConversationParticipantsRequest, ManageParticipantsRequest,
+    MarkConversationAsReadRequest,
 };
-use flare_proto::common::ConversationParticipant;
 use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::{Context, ContextExt};
 use flare_server_core::error::{FlareError, Result};
@@ -74,30 +73,16 @@ impl ConversationRpcClient for ConversationClient {
         let conversation_type_proto = conversation_type.as_proto();
         let business_type = business_type.to_string();
 
-        // 将 conversation_id 放入 attributes，确保会话服务使用传入的 conversation_id
-        let mut attributes = std::collections::HashMap::new();
-        attributes.insert("conversation_id".to_string(), conversation_id.clone());
-
-        let participant_protos: Vec<_> = participants
-            .into_iter()
-            .map(|p| ConversationParticipant {
-                user_id: p,
-                roles: vec![],
-                muted: false,
-                pinned: false,
-                attributes: std::collections::HashMap::new(),
-                joined_at: 0,
-            })
-            .collect();
-
-        let request = CreateConversationRequest {
-            conversation_type: conversation_type_proto,
-            business_type: business_type.clone(),
-            participants: participant_protos.clone(),
-            attributes,
-            visibility: 0, // SessionVisibility::SessionVisibilityPrivate
-            channel_id: stored_channel_id.clone(),
-        };
+        // 建群约定（attributes 携带 conversation_id 等）唯一实现在 flare-grpc-proto。
+        let request = flare_grpc_proto::ensure_conversation_request(
+            &conversation_id,
+            conversation_type_proto,
+            business_type.clone(),
+            participants,
+            stored_channel_id.clone(),
+        );
+        // AlreadyExists 修补参与者时复用同一份参与者列表。
+        let participant_protos = request.participants.clone();
 
         let client = Arc::clone(&self.manage_client);
         Box::pin(async move {

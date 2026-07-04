@@ -395,9 +395,18 @@ mod tests {
         let alloc = allocator(3, clock.clone());
 
         // 前 3 次同号段：仅 1 次后端调用（首次获取）。
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(1));
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(2));
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(3));
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(1)
+        );
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(2)
+        );
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(3)
+        );
         assert_eq!(alloc.backend.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -414,7 +423,10 @@ mod tests {
             }
         }
         // 严格递增。
-        assert!(seqs.windows(2).all(|w| w[1] > w[0]), "seqs must be strictly increasing: {seqs:?}");
+        assert!(
+            seqs.windows(2).all(|w| w[1] > w[0]),
+            "seqs must be strictly increasing: {seqs:?}"
+        );
         // seg=3 → 7 次需要 3 次后端调用（号段 [1-3],[4-6],[7-9]）。
         assert_eq!(alloc.backend.calls.load(Ordering::SeqCst), 3);
     }
@@ -424,7 +436,10 @@ mod tests {
         let clock = TestClock::new();
         let alloc = allocator(100, clock.clone()); // 大号段，确保不是因耗尽而续租
 
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(1));
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(1)
+        );
         assert_eq!(alloc.backend.calls.load(Ordering::SeqCst), 1);
 
         // 本地有效期 = ttl(1000) - margin(200) = 800ms。推进到 801ms → 即便号段仍有余也必须续租。
@@ -442,16 +457,28 @@ mod tests {
         let clock = TestClock::new();
         let alloc = allocator(100, clock.clone());
 
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(1));
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(1)
+        );
         // 模拟租约被他人接管。
         alloc.backend.deny.store(true, Ordering::SeqCst);
         // 本地号段仍有效期内 → 仍走快路径发 2（未触发后端）。
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(2));
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(2)
+        );
         // 推进过本地有效期 → 续租触发 → 后端拒绝 → NotOwner + 清本地。
         clock.advance(1001);
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::NotOwner);
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::NotOwner
+        );
         // 再次分配仍触发后端（本地已清空），仍被拒。
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::NotOwner);
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::NotOwner
+        );
     }
 
     #[tokio::test]
@@ -459,10 +486,22 @@ mod tests {
         let clock = TestClock::new();
         let alloc = allocator(2, clock.clone());
 
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(1));
-        assert_eq!(alloc.allocate("t:c2").await.unwrap(), SeqAllocation::Allocated(3)); // c2 领到下一号段 [3-4]
-        assert_eq!(alloc.allocate("t:c1").await.unwrap(), SeqAllocation::Allocated(2));
-        assert_eq!(alloc.allocate("t:c2").await.unwrap(), SeqAllocation::Allocated(4));
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(1)
+        );
+        assert_eq!(
+            alloc.allocate("t:c2").await.unwrap(),
+            SeqAllocation::Allocated(3)
+        ); // c2 领到下一号段 [3-4]
+        assert_eq!(
+            alloc.allocate("t:c1").await.unwrap(),
+            SeqAllocation::Allocated(2)
+        );
+        assert_eq!(
+            alloc.allocate("t:c2").await.unwrap(),
+            SeqAllocation::Allocated(4)
+        );
     }
 
     /// 集群验证清单 #5（本地可验证部分）：高并发下，同一会话**绝不**重复发号。
@@ -494,7 +533,11 @@ mod tests {
             all.extend(h.await.unwrap());
         }
 
-        assert_eq!(all.len(), TASKS * PER_TASK, "every allocate must yield a seq");
+        assert_eq!(
+            all.len(),
+            TASKS * PER_TASK,
+            "every allocate must yield a seq"
+        );
         let mut sorted = all.clone();
         sorted.sort_unstable();
         sorted.dedup();

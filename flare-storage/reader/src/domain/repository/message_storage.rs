@@ -25,6 +25,13 @@ use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 
+/// 回溯尾页约定：`after_seq == 0` 且 `before_seq` 有值 ⇒「取最新 limit 条」
+/// （存储层按 seq DESC 截断后升序返回；溢出从头部裁剪）。
+/// 存储实现与 gRPC 层共用此谓词，防止同一分页约定在两层各自推导后漂移。
+pub fn is_backfill_tail_page(after_seq: i64, before_seq: Option<i64>) -> bool {
+    after_seq == 0 && before_seq.is_some()
+}
+
 /// 使用 `async-trait` 保证返回的 Future 为 `Send`，满足 tonic gRPC 对 `async` 方法的线程间调度要求。
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -62,6 +69,21 @@ pub trait MessageStorage: Send + Sync {
         limit: i32,
         include_burned_placeholder: bool,
     ) -> Result<Vec<Message>>;
+
+    /// 批量窗口：一条 SQL 取多个会话的消息窗口（无默认实现——批量是本方法的
+    /// 性能契约，隐式逐会话回退会把 N+1 藏回接口后面）。
+    /// `newest_window=true`：每会话取最新 limit 条（忽略 after_seq，冷启首页）；
+    /// `false`：每会话取 `seq > after_seq` 升序前 limit 条（增量 catch-up）。
+    /// 返回消息一律 seq 升序。
+    async fn query_conversations_message_windows(
+        &self,
+        ctx: &Ctx,
+        targets: &[(String, i64)],
+        user_id: Option<&str>,
+        per_conversation_limit: i32,
+        newest_window: bool,
+        include_burned_placeholder: bool,
+    ) -> Result<Vec<(String, Vec<Message>)>>;
 
     async fn count_messages(
         &self,

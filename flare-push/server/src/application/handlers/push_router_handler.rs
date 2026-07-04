@@ -779,6 +779,49 @@ impl PushRouterHandler {
         .await
     }
 
+    /// 统一读扩散：成员制会话内联事件（ingest 不物化收件人 → user_ids 空）→ 发**一个**在线任务按会话广播。
+    /// push-worker 解码后经 `broadcast_deliver_to_conversation` 扇给所有网关节点，各节点用本地会话订阅表
+    /// 过滤投递（O(在线/节点)，与群人数无关）。离线成员靠 conversation 版本号增量拉兜底（orchestrator 已 bump）。
+    async fn publish_event_broadcast_task(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        req: access_gateway::PushEventRequest,
+        conversation_id: String,
+    ) -> Result<()> {
+        let priority = req.options.as_ref().map(|o| o.priority).unwrap_or(5);
+        let expire_at = req
+            .options
+            .as_ref()
+            .map(|o| o.expire_at_ms)
+            .filter(|expire_at| *expire_at > 0);
+        let message_id = Self::event_message_id(&req);
+        let tenant_id = self.online_status.default_tenant_id().to_string();
+
+        // user_ids 在读扩散下不再使用（网关按会话订阅投递）；保持为空避免误导下游。
+        let push_payload = req.encode_to_vec();
+        let task = PushTaskEnvelope {
+            user_id: String::new(),
+            message_id,
+            conversation_id: conversation_id.clone(),
+            tenant_id,
+            priority,
+            expire_at,
+            push_payload,
+            headers: HashMap::new(),
+            payload_kind: PushTaskPayloadKind::Event as i32,
+        };
+        self.publisher
+            .publish_online_task(ctx, Some(&conversation_id), task.encode_to_vec())
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::ServiceUnavailable,
+                    "Failed to publish conversation broadcast push task",
+                )
+            })
+    }
+
     async fn handle_conversation_ping_without_recipients(
         &self,
         ctx: &flare_server_core::context::Ctx,
@@ -951,6 +994,18 @@ impl PushRouterHandler {
                         max_conversation_seq,
                     )
                     .await;
+            }
+            // 统一读扩散：成员制会话内联事件（无收件人物化）→ 按会话广播，不再丢弃。
+            if !req.events.is_empty() {
+                let conversation_id = Self::event_conversation_id(&req);
+                if !conversation_id.trim().is_empty() {
+                    return self
+                        .publish_event_broadcast_task(ctx, req, conversation_id)
+                        .await;
+                }
+                tracing::warn!(
+                    "handle_event: recipient-less inline event has empty conversation_id; dropping"
+                );
             }
             return Ok(());
         }

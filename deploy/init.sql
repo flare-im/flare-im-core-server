@@ -109,6 +109,7 @@ CREATE TABLE messages (
     sender_name TEXT,
     sender_avatar TEXT,
     channel_id TEXT,
+    thread_id TEXT,
     source INT NOT NULL DEFAULT 1,  -- MessageSource: USER=1, SYSTEM=2, BOT=3, ADMIN=4
     seq BIGINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -138,6 +139,7 @@ COMMENT ON COLUMN messages.client_msg_id IS '客户端消息 ID（去重/幂等�
 COMMENT ON COLUMN messages.sender_id IS '发送者 ID';
 COMMENT ON COLUMN messages.sender_name IS '发送者昵称（展示用，可选）';
 COMMENT ON COLUMN messages.sender_avatar IS '发送者头像 URL（展示用，可选）';
+COMMENT ON COLUMN messages.thread_id IS '话题/线程根消息 ID；普通消息为空';
 COMMENT ON COLUMN messages.channel_id IS '会话频道 ID：单聊=对方 user_id，群聊=群 ID，频道/话题=对应 ID（proto 无 receiver_id）';
 COMMENT ON COLUMN messages.source IS '消息来源：1=USER 2=SYSTEM 3=BOT 4=ADMIN';
 COMMENT ON COLUMN messages.seq IS '会话内序列号（读扩散主序）';
@@ -153,7 +155,7 @@ COMMENT ON COLUMN messages.first_read_at IS '首次真实阅读时间（Unix 秒
 COMMENT ON COLUMN messages.burn_at IS '服务端权威焚毁时间（Unix 秒）';
 COMMENT ON COLUMN messages.burned_at IS '实际焚毁时间（Unix 秒）';
 COMMENT ON COLUMN messages.offline_push_info IS '离线推送展示（OfflinePushInfo JSON）';
-COMMENT ON COLUMN messages.extra IS '扩展键值（conversation_type、business_type、thread_id 等）';
+COMMENT ON COLUMN messages.extra IS '扩展键值（仅用于非稳定扩展语义）';
 COMMENT ON COLUMN messages.extensions IS '业务扩展（key 建议命名空间）';
 COMMENT ON COLUMN messages.created_at IS '入库时间（Hypertable 分区键）';
 COMMENT ON COLUMN messages.persisted_at IS '持久化完成时间（MessageTimeline.persisted_at）';
@@ -170,6 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_tenant_message_type_timestamp ON message
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_status_timestamp ON messages(tenant_id, status, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_source_timestamp ON messages(tenant_id, source, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_channel_timestamp ON messages(tenant_id, channel_id, timestamp DESC) WHERE channel_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_thread_seq ON messages(tenant_id, thread_id, seq) WHERE thread_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_persisted_at ON messages(tenant_id, persisted_at DESC) WHERE persisted_at IS NOT NULL;
 
 SELECT create_hypertable('messages', 'created_at', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);

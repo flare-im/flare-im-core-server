@@ -135,6 +135,8 @@ pub async fn initialize(
         route_grpc_pool,
         storage_sync_pool,
         access_config.sync_pull_rate_limit_config(),
+        conversation_subscriptions.clone(),
+        push_port.clone(),
     );
 
     // 10. 推送领域服务

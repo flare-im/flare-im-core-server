@@ -96,6 +96,29 @@ cargo test -p flare-im-service-kit --test startup_contract
 
 针对真实中间件的测试需要先启动 Docker Compose，并按测试说明准备环境变量。
 
+## 发布门禁矩阵（2026-06-30）
+
+本节记录当前一期生产就绪门禁。发布前优先执行模块级命令，避免在仓库根目录做不可控的全量扫描或 clean install。
+
+| 门禁 | 命令 | 通过标准 |
+|------|------|----------|
+| 协议主干 | `cd flare-proto && rtk cargo test`；`cd flare-grpc-proto && rtk cargo test --features sfu_control` | proto 编译和 SFU opt-in feature 不回退。 |
+| 服务端大群原语 | `cd flare-im-core && rtk cargo test -p flare-im-message-pipeline`；`rtk cargo test -p flare-orchestrator`；`rtk cargo test -p flare-push-server`；`rtk cargo test -p flare-im-arch-tests large_conversation` | 大群不物化全量收件人；push-only ping 不携带 inline message payload；recipient-less ping 走在线索引。 |
+| 传输与 runtime | `cd flare-core && rtk cargo test --all-features`；`cd flare-server-core && rtk cargo test --all-features` | heartbeat half-open、runtime shutdown、MQ backpressure 等回归保持通过。 |
+| SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |
+| SDK codegen | `cd flare-im-core-sdk && rtk cargo xtask codegen-check` | sdk-spec、native ABI、生成模板和平台包保持一致。 |
+| 六端一期示例 | Android `assembleDebug`；Flutter `flutter analyze && flutter build apk --debug`；iOS `swift test` + simulator `xcodebuild`；Web typecheck/test/build/Playwright；Tauri typecheck/test/build/cargo check/tauri build；Uni typecheck/test | 一期客户端至少能构建、运行核心业务流，并暴露 SDK 事件/诊断。 |
+| 插件基线 | `cd flare-plugin/flare-strom-sfu && rtk cargo test`；`cd flare-sdk-plugin/flare-sdk-plugin-call && rtk cargo test` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
+
+当前已验证的 live 端到端基线：
+
+| 场景 | 结果 |
+|------|------|
+| 两人消息发送 | 20/20 sent，20/20 persisted ACK，20/20 received，0 lost，0 duplicate。 |
+| 100 人大群，每人 1 条 | 100 persisted ACK，9900/9900 remote deliveries，0 lost，0 duplicate，p99 remote latency 9836.168 ms。 |
+| 20 人群，每人 5 条 | 100 persisted ACK，1900/1900 remote deliveries，0 lost，0 duplicate，p99 remote latency 3337.454 ms。 |
+| 协作态 | `typing_relay_e2e` 返回 `TYPING_AGGREGATE_OK`；`read_receipt_e2e` 返回 `READ_RECEIPT_OK`。 |
+
 ## 消息收发读链路烟测
 
 启动 Core 后执行：
@@ -234,6 +257,36 @@ GROUP BY write_state;
 - metrics label 不要使用 tenant_id、conversation_id、message_id。
 - trace/log 可以带 request_id、trace_id、message_id。
 
+## Dashboard 面板
+
+上线前至少建立这些低基数面板，并把 p95/p99、错误率和队列深度做成同一时间窗口：
+
+| 面板 | 核心图表 | 告警方向 |
+|------|----------|----------|
+| Gateway Connections | active connections、login failures、heartbeat timeout、reconnect rate | 半开连接增长、重连风暴、token 失败率突增。 |
+| Send Command | send stage p50/p95/p99、durability outcome、idempotency replay、rate-limit rejection | ACK p99 抖动、重试回放异常、限流持续触发。 |
+| Broker And DLQ | topic lag、consumer ack/nack/term、retry topic depth、DLQ growth | 主队列 lag 持续增长、DLQ 非零增长、retry age 超预算。 |
+| Storage Writer/Reader | persist p95/p99、ledger state transition、query page latency、DB pool usage | persisted ACK 延迟、ledger failed、连接池耗尽。 |
+| Push Path | online index read、recipient-less ping coalescing、push online/offline backlog、worker failures | 大群 ping 未合并、push lag、offline backend redelivery storm。 |
+| Sync | cursor gap count、sync page latency、resync required、stale cursor rejection | seq gap 修复失败、sync lag 超预算。 |
+| SDK | command error code、pending send age、event queue depth、local DB errors、connection state | 客户端 pending 堆积、事件桥断开、SQLite 错误。 |
+| Plugin | capability unavailable、dispatch latency、plugin health、quota rejection | SFU/AI 等插件不可用、dispatch p99 或失败率突增。 |
+
+## Chaos 演练
+
+每个演练都要有明确的恢复标准：无已提交消息丢失、重复可去重、客户端最终通过 sync 收敛、DLQ 有可解释增长且可重放。
+
+| 演练 | 方法 | 必须验证 |
+|------|------|----------|
+| Broker outage | 暂停 NATS/Kafka 或阻断 publish ACK。 | WAL/pending handoff 生效，send ACK durability 不虚报，恢复后 storage 收敛。 |
+| Storage outage | 暂停 PostgreSQL 或耗尽连接池。 | storage writer retry/DLQ 生效，ledger 不进入错误成功态，客户端可见失败或等待语义明确。 |
+| Redis/seq outage | 暂停 Redis 或 seq allocator 依赖。 | 发送被明确拒绝或进入可恢复路径，不产生重复 seq。 |
+| Gateway reconnect storm | 让 1k+ SDK 客户端同时断线重连。 | heartbeat timeout、route refresh、auth retry 不放大 broker/storage 压力。 |
+| Duplicate send retry | 固定 `clientMsgId` 重放同一发送。 | ingest 和 storage writer 均返回同一 durable outcome，不产生第二条消息。 |
+| Out-of-order push | 人为延迟/重排 push events。 | SDK 通过 conversation seq 和 sync repair 收敛，UI 不显示不可去重重复消息。 |
+| Token expiry during send/sync | 发送或 sync 过程中使 access token 过期。 | SDK 暴露结构化 auth error，刷新 token 后 pending send/sync 可恢复。 |
+| Plugin unavailable | 关闭 SFU/plugin backend 或禁用 capability。 | `capability unavailable` 事件到达客户端，UI 展示 typed unavailable 状态而非静默失败。 |
+
 ## 排障手册
 
 ### 已收到 `BrokerAccepted`，但历史查不到
@@ -265,6 +318,42 @@ GROUP BY write_state;
 2. 如果是 false，这是临时通知，不承诺离线恢复。
 3. 需要历史可查时改为 `persistent = true`。
 4. 业务已有可靠通知中心时，可以保留 false，但客户端要从业务通知中心补齐。
+
+### 客户端 pending send 卡住
+
+1. 查 SDK diagnostics：pending send age、connection state、recent command failures。
+2. 查服务端是否有对应 `client_msg_id` 的 ingest/storage 幂等记录。
+3. 如果服务端已 persisted，客户端通过 sync repair 补齐并清理 pending。
+4. 如果只有 WAL/broker accepted，等待 retry 或检查 DLQ；不要在客户端盲目生成新的 `clientMsgId`。
+5. 如果是 auth/token 错误，先刷新 token，再重放 pending queue。
+
+### seq gap 或 timeline 不连续
+
+1. 查客户端 gap 起点、conversation high-water mark 和本地 cursor。
+2. 查 `flare-sync-orchestrator` 是否返回 stale/resync required。
+3. 查 storage reader 对应 seq 范围是否可读。
+4. 触发 sync repair 后，客户端应按 server seq 合并，而不是按 push 到达顺序插入。
+
+### sync lag 持续增长
+
+1. 分离读路径和推送路径：先确认 storage reader page latency。
+2. 查 sync page size、cursor stale rejection、read model lag。
+3. 查客户端 event queue depth 和本地 DB 写入延迟。
+4. 对大群优先使用 pull/sync 补齐，不要恢复全量 push 收件人扩散。
+
+### plugin outage
+
+1. 查 capability registry 是否仍注册该 capability namespace。
+2. 查 plugin health、dispatch latency、quota rejection 和 unavailable event。
+3. 服务端插件不可用时返回 typed unavailable，不得吞成 generic error。
+4. 客户端应降级 UI：禁用入口、展示重试/联系管理员，不阻塞核心消息收发。
+
+### SDK native artifact mismatch
+
+1. 查 `ffiContractVersion`：sdk-spec manifest、native ABI、生成平台常量必须一致。
+2. Android 查 `jniLibs` ABI 是否覆盖目标架构；Flutter/Android/iOS 查 FFI artifact sync 脚本是否执行。
+3. 运行平台最小编译门禁：Android `compileDebugKotlin`/`assembleDebug`、Flutter debug APK、iOS simulator build。
+4. mismatch 不允许通过 metadata fallback 兼容，必须更新生成链或 native artifact。
 
 ## 生产前检查清单
 

@@ -123,8 +123,10 @@ start_detached_process() {
     DETACHED_PID=""
     if [ "${FLARE_USE_LAUNCHCTL:-0}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
         launchctl remove "$label" >/dev/null 2>&1 || true
+        # 提高每个服务进程的 fd 上限（launchd 任务默认 soft 256；网关大群需上万连接）。
+        # hard 为 unlimited，受 kern.maxfilesperproc 限制；取一个安全高值，失败不阻断启动。
         launchctl submit -l "$label" -o "$log_file" -e "$log_file" -- \
-            /bin/sh -c 'cd "$1" && shift && exec "$@"' sh "$PROJECT_ROOT" "$@"
+            /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@"
 
         local waited=0
         while [ "$waited" -lt 10 ]; do
@@ -138,7 +140,7 @@ start_detached_process() {
         return 1
     fi
 
-    nohup /bin/sh -c 'cd "$1" && shift && exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null > "$log_file" 2>&1 &
+    nohup /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null > "$log_file" 2>&1 &
     DETACHED_PID=$!
     return 0
 }

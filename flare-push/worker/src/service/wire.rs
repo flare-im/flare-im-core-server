@@ -1,7 +1,6 @@
 //! Wire 风格依赖注入：组装 Push Worker 相关组件
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use flare_server_core::error::Result;
 use flare_server_core::mq::NatsConsumerConfig;
@@ -16,7 +15,7 @@ use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
-use crate::application::{ConversationPingDebouncer, GatewayPushExecutor};
+use crate::application::GatewayPushExecutor;
 use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
 use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
 use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePushExecutor};
@@ -69,19 +68,8 @@ pub async fn initialize(
     .await
     .map_err(|e| flare_server_core::error::FlareError::system(format!("GatewayRouter: {}", e)))?;
 
-    // 4. 创建 GatewayPushExecutor
-    let gateway_push = {
-        let executor = GatewayPushExecutor::new(online_client, gateway_router);
-        if config.event_ping_debounce_window_ms == 0 {
-            Arc::new(executor)
-        } else {
-            Arc::new(
-                executor.with_ping_debouncer(Arc::new(ConversationPingDebouncer::new(
-                    Duration::from_millis(config.event_ping_debounce_window_ms),
-                ))),
-            )
-        }
-    };
+    // 4. 创建 GatewayPushExecutor（统一读扩散：事件按会话广播，无 per-user ping 去抖）
+    let gateway_push = Arc::new(GatewayPushExecutor::new(online_client, gateway_router));
 
     // 5. 创建 MessageHandler（直接实现，无适配器）
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());

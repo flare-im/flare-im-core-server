@@ -70,12 +70,15 @@ pub async fn build_authenticator(
 }
 
 /// 构建长连接上行处理器
+#[allow(clippy::too_many_arguments)]
 pub fn build_long_connection_handler(
     connection_handler_app: Arc<ConnectionHandler>,
     connection_port: Arc<dyn IConnectionPort>,
     route_pool: Arc<SignalingRouteGrpcPool>,
     storage_sync_pool: Arc<StorageSyncGrpcPool>,
     sync_pull_rate_limit_config: SyncPullRateLimitConfig,
+    conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
+    push_port: Arc<dyn crate::domain::ports::IPushPort>,
 ) -> Arc<LongConnectionHandler> {
     let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> =
         Arc::new(RouterMessageCommandPort::new(route_pool.clone()));
@@ -100,7 +103,12 @@ pub fn build_long_connection_handler(
     let send_handler = Arc::new(SendHandler::new(
         Arc::new(SendMessageDomainService::new(message_port)),
         send_event_service,
-        Arc::new(SendDataDomainService::new(data_port, sync_service)),
+        Arc::new(SendDataDomainService::new(
+            data_port,
+            sync_service,
+            conversation_subscriptions,
+            push_port,
+        )),
         Arc::new(SendAckDomainService::new(ack_port)),
         context_resolver,
     ));

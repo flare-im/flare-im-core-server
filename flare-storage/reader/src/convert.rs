@@ -34,7 +34,7 @@ fn millis_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
 }
 
 /// 统一从 flare-im-core 重导出
-pub use flare_im_contracts::message::{message_from_proto, message_to_proto};
+pub use flare_im_contracts::message::{message_from_proto, message_into_proto, message_to_proto};
 
 /// 从 proto Event 转为领域 Event（整条 event 序列化存于 payload_bytes；operator_id 由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {

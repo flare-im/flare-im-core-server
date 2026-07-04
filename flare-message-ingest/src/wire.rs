@@ -23,7 +23,9 @@ use flare_server_core::mq::nats::NatsProducer;
 use crate::application::extension::{
     ExtensionOrchestrator, ExtensionPolicy, ExtensionRouting, ExtensionRuntimePolicy,
 };
-use crate::application::handlers::{MessageIngestHandler, WalReplayHandler};
+use crate::application::handlers::{
+    MessageIngestHandler, SendRateLimitConfig, SendRateLimiter, WalReplayHandler,
+};
 use crate::config::MessageIngestConfig;
 use crate::domain::service::{
     ConversationEnsureService, HookExecutionService, MessageIngestService,
@@ -90,7 +92,7 @@ pub async fn initialize(
         wal_repository.clone(),
         Arc::new(sequence_allocator),
         config.defaults(),
-        MessageIngestServiceOptions::new(config.large_conversation_materialize_threshold),
+        MessageIngestServiceOptions::new(),
     ));
 
     let wal_replay_handler = Arc::new(WalReplayHandler::new(
@@ -131,12 +133,50 @@ pub async fn initialize(
     ));
 
     let ingest_metrics = Arc::new(MessageOrchestratorMetrics::new());
-    let message_ingest_handler = Arc::new(MessageIngestHandler::new(
+
+    // 摄入边界幂等(按 client_msg_id 去重重发)。reserve_ttl 须 ≥ 单次发送处理时长(覆盖客户端 ack 超时窗口),
+    // 否则慢首发会被并发重试误判;result_ttl 覆盖合理重试窗口(含离线重连补发)。复用 WAL 的 Redis 连接。
+    let idem_reserve_ttl = std::env::var("INGEST_IDEMPOTENCY_RESERVE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(180);
+    let idem_result_ttl = std::env::var("INGEST_IDEMPOTENCY_RESULT_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(3600);
+    let idempotency_store = Arc::new(
+        crate::infrastructure::persistence::redis_idempotency::RedisIngestIdempotencyStore::new(
+            redis_client.clone(),
+            idem_reserve_ttl,
+            idem_result_ttl,
+        ),
+    );
+
+    let mut message_ingest_handler = MessageIngestHandler::new(
         message_ingest_service,
         extension_orchestrator,
         conversation_ensure_service,
         ingest_metrics.clone(),
-    ));
+    )
+    .with_idempotency(idempotency_store);
+    let send_rate_limit_config = SendRateLimitConfig {
+        enabled: config.send_rate_limit_enabled,
+        tenant_per_second: config.send_rate_limit_tenant_per_second,
+        tenant_sender_per_second: config.send_rate_limit_tenant_sender_per_second,
+        tenant_conversation_per_second: config.send_rate_limit_tenant_conversation_per_second,
+        window_ms: config.send_rate_limit_window_ms,
+        max_tracked_keys: config.send_rate_limit_max_tracked_keys,
+    };
+    if send_rate_limit_config.is_effective() {
+        message_ingest_handler = message_ingest_handler
+            .with_send_rate_limiter(Arc::new(SendRateLimiter::new(send_rate_limit_config)));
+    }
+    if config.send_publish_timeout_ms > 0 {
+        message_ingest_handler = message_ingest_handler.with_send_publish_timeout(
+            std::time::Duration::from_millis(config.send_publish_timeout_ms),
+        );
+    }
+    let message_ingest_handler = Arc::new(message_ingest_handler);
 
     let message_send_grpc = MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics);
 

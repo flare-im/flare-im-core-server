@@ -1,0 +1,131 @@
+{
+  "dashboard": {
+    "title": "Release Gates",
+    "tags": ["flare-im", "release-gates", "slo"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Core Service Availability",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "up{job=~\"message-orchestrator|storage-writer|storage-reader|push-server|push-worker|access-gateway|signaling-online|signaling-route\"}",
+            "legendFormat": "{{job}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+            ]
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Send ACK P99",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"send_ack\"}[5m])) by (le))",
+            "legendFormat": "send_ack_p99"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "seconds"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Message Failure Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "sum(rate(message_orchestrator_send_total{outcome=~\"error|failed\"}[5m])) / clamp_min(sum(rate(message_orchestrator_send_total[5m])), 1)",
+            "legendFormat": "failure_rate"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "ratio"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "MQ Nack/Term Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "sum(rate(mq_process_ack_total{action=~\"nack|term\"}[5m])) by (action)",
+            "legendFormat": "{{action}}"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "events/s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "DLQ Growth",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "increase(dead_letter_queue_messages_total[10m])",
+            "legendFormat": "dlq_growth_10m"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "messages"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Sync Page P99",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(flare_sync_page_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "sync_page_p99"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "seconds"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Push Backlog",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+        "targets": [
+          {
+            "expr": "sum(push_online_backlog) or vector(0)",
+            "legendFormat": "online_backlog"
+          },
+          {
+            "expr": "sum(push_offline_backlog) or vector(0)",
+            "legendFormat": "offline_backlog"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "tasks"},
+          {"format": "short"}
+        ]
+      }
+    ]
+  }
+}

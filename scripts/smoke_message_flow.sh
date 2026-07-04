@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+proto_root="${SMOKE_PROTO_ROOT:-$WORKSPACE_ROOT}"
 
 grpcurl_bin="${SMOKE_GRPCURL:-grpcurl}"
 psql_bin="${SMOKE_PSQL:-psql}"
@@ -28,13 +29,13 @@ require_command() {
 require_command "$grpcurl_bin"
 require_command "$psql_bin"
 
-if [ ! -f "$WORKSPACE_ROOT/flare-grpc-proto/proto/message_service.proto" ]; then
-    echo "missing proto file: $WORKSPACE_ROOT/flare-grpc-proto/proto/message_service.proto" >&2
+if [ ! -f "$proto_root/flare-grpc-proto/proto/message_service.proto" ]; then
+    echo "missing proto file: $proto_root/flare-grpc-proto/proto/message_service.proto" >&2
     exit 1
 fi
 
-if [ ! -f "$WORKSPACE_ROOT/flare-grpc-proto/proto/storage_service.proto" ]; then
-    echo "missing proto file: $WORKSPACE_ROOT/flare-grpc-proto/proto/storage_service.proto" >&2
+if [ ! -f "$proto_root/flare-grpc-proto/proto/storage_service.proto" ]; then
+    echo "missing proto file: $proto_root/flare-grpc-proto/proto/storage_service.proto" >&2
     exit 1
 fi
 
@@ -89,9 +90,9 @@ JSON
 
 if ! "$grpcurl_bin" \
     -plaintext \
-    -import-path "$WORKSPACE_ROOT/flare-grpc-proto/proto" \
-    -import-path "$WORKSPACE_ROOT/flare-proto/proto" \
-    -proto "$WORKSPACE_ROOT/flare-grpc-proto/proto/message_service.proto" \
+    -import-path "$proto_root/flare-grpc-proto/proto" \
+    -import-path "$proto_root/flare-proto/proto" \
+    -proto "$proto_root/flare-grpc-proto/proto/message_service.proto" \
     -H "x-request-id: smoke-$run_id" \
     -H "x-tenant-id: $tenant_id" \
     -H "x-user-id: $sender_id" \
@@ -188,9 +189,9 @@ JSON
 
 if ! "$grpcurl_bin" \
     -plaintext \
-    -import-path "$WORKSPACE_ROOT/flare-grpc-proto/proto" \
-    -import-path "$WORKSPACE_ROOT/flare-proto/proto" \
-    -proto "$WORKSPACE_ROOT/flare-grpc-proto/proto/storage_service.proto" \
+    -import-path "$proto_root/flare-grpc-proto/proto" \
+    -import-path "$proto_root/flare-proto/proto" \
+    -proto "$proto_root/flare-grpc-proto/proto/storage_service.proto" \
     -H "x-request-id: smoke-read-$run_id" \
     -H "x-tenant-id: $tenant_id" \
     -H "x-user-id: $recipient_id" \

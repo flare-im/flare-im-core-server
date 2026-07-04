@@ -495,9 +495,24 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::GatewayRuntime,
     ),
     env(
+        "GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "GRPC_PORT",
         EnvOwner::AccessGateway,
         EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "INGEST_IDEMPOTENCY_RESERVE_TTL_SECS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "INGEST_IDEMPOTENCY_RESULT_TTL_SECS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "MEDIA_SERVICE_ENDPOINT",
@@ -655,6 +670,41 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::ServiceEndpoint,
     ),
     env(
+        "MESSAGE_INGEST_SEND_PUBLISH_TIMEOUT_MS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_ENABLED",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_MAX_TRACKED_KEYS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_CONVERSATION_PER_SECOND",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_PER_SECOND",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_TENANT_SENDER_PER_SECOND",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_SEND_RATE_LIMIT_WINDOW_MS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "MESSAGE_INGEST_WAL_HASH_KEY",
         EnvOwner::MessageIngest,
         EnvPurpose::Redis,
@@ -771,6 +821,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env("PORT", EnvOwner::AccessGateway, EnvPurpose::GatewayRuntime),
     env("POSTGRES_URL", EnvOwner::Storage, EnvPurpose::Database),
+    env(
+        "PUSH_PROXY_DEVICE_TOKEN_KEY_PREFIX",
+        EnvOwner::PushProxy,
+        EnvPurpose::Redis,
+    ),
+    env(
+        "PUSH_PROXY_DEVICE_TOKEN_REDIS_URL",
+        EnvOwner::PushProxy,
+        EnvPurpose::Redis,
+    ),
     env(
         "PUSH_PROXY_JETSTREAM_RETRIES",
         EnvOwner::PushProxy,
@@ -937,7 +997,27 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_WORKER_DEVICE_TOKEN_KEY_PREFIX",
+        EnvOwner::PushWorker,
+        EnvPurpose::Redis,
+    ),
+    env(
+        "PUSH_WORKER_DEVICE_TOKEN_REDIS_URL",
+        EnvOwner::PushWorker,
+        EnvPurpose::Redis,
+    ),
+    env(
         "PUSH_WORKER_EVENT_PING_DEBOUNCE_WINDOW_MS",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_DEFAULT_TTL_MS",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_REQUEST_TIMEOUT_MS",
         EnvOwner::PushWorker,
         EnvPurpose::RuntimeTuning,
     ),
@@ -985,6 +1065,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "PUSH_WORKER_METRICS_PORT",
         EnvOwner::PushWorker,
         EnvPurpose::Observability,
+    ),
+    env(
+        "PUSH_WORKER_OFFLINE_DELIVERY_BACKEND",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_WORKER_OFFLINE_OUTBOX_MAXLEN",
@@ -1065,6 +1150,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "SIGNALING_ONLINE_REDIS_URL",
         EnvOwner::SignalingOnline,
         EnvPurpose::Redis,
+    ),
+    env(
+        "SYNC_ORCHESTRATOR_BOOTSTRAP_PAGE_CACHE_TTL_MS",
+        EnvOwner::SyncOrchestrator,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "SYNC_ORCHESTRATOR_CURSOR_CACHE_CAPACITY",
+        EnvOwner::SyncOrchestrator,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "SYNC_ORCHESTRATOR_REDIS_URL",

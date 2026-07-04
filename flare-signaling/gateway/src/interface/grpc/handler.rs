@@ -74,14 +74,24 @@ impl AccessGateway for AccessGatewayHandler {
     ) -> Result<Response<PushResponse>, Status> {
         let ctx = require_context(&request)?;
         let req = request.into_inner();
-        debug!(
-            "DeliverToConversation request: conv={} messages={}",
-            req.conversation_id,
-            req.messages.len()
-        );
+        {
+            use flare_grpc_proto::access_gateway::deliver_to_conversation_request::Payload;
+            let payload_kind = match &req.payload {
+                Some(Payload::Messages(delivery)) => {
+                    format!("messages({})", delivery.messages.len())
+                }
+                Some(Payload::Events(delivery)) => format!("events({})", delivery.events.len()),
+                Some(Payload::Ping(ping)) => format!("ping(max_seq={})", ping.max_conversation_seq),
+                None => "none".to_string(),
+            };
+            debug!(
+                "DeliverToConversation request: conv={} payload={}",
+                req.conversation_id, payload_kind
+            );
+        }
         let response = self
             .push_handler
-            .handle_deliver_to_conversation(&ctx, req.conversation_id, req.messages)
+            .handle_deliver_to_conversation(&ctx, req)
             .await
             .map_err(|e| {
                 tracing::error!(?e, "Failed to deliver to conversation");

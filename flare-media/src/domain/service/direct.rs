@@ -440,5 +440,4 @@ impl MediaService {
         store.delete_session(upload_id).await.ok();
         Ok(())
     }
-
 }

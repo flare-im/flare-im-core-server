@@ -78,17 +78,20 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         }
     }
 
-    /// 会话引导（业务逻辑）
+    /// 会话引导（业务逻辑）。`updated_after_ms > 0` = 存储层增量过滤（0=全量）；
+    /// `max_conversations > 0` = 调用方声明的返回上限（受硬上限钳制，0=服务默认保守值）。
     pub async fn bootstrap_conversation(
         &self,
         ctx: &Context,
         client_cursor: HashMap<String, i64>,
         include_recent: bool,
         recent_limit: Option<i32>,
+        updated_after_ms: i64,
+        max_conversations: i32,
     ) -> Result<ConversationBootstrapOutput> {
         let bootstrap = self
             .conversation_repo
-            .load_bootstrap(ctx, &client_cursor)
+            .load_bootstrap(ctx, &client_cursor, updated_after_ms)
             .await?;
 
         let mut summaries = bootstrap.summaries;
@@ -116,10 +119,18 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             b_ts.cmp(&a_ts)
         });
 
-        // 优化：限制返回的会话数量（默认最多 100 个，避免响应过大）
-        let max_conversations = self.config.max_bootstrap_conversations.unwrap_or(100);
-        if summaries.len() > max_conversations {
-            summaries.truncate(max_conversations);
+        // 返回量上限：调用方声明的上限（受硬上限钳制）优先；否则服务默认保守值。
+        // 编排层快照分页传高值 → >默认上限 的大账号冷启/列表分页可覆盖全量（旧行为：恒截 top-100，
+        // 大账号的其余会话永远不经列表同步下发）。
+        const BOOTSTRAP_HARD_MAX_CONVERSATIONS: usize = 5_000;
+        let default_cap = self.config.max_bootstrap_conversations.unwrap_or(100);
+        let effective_cap = if max_conversations > 0 {
+            (max_conversations as usize).min(BOOTSTRAP_HARD_MAX_CONVERSATIONS)
+        } else {
+            default_cap
+        };
+        if summaries.len() > effective_cap {
+            summaries.truncate(effective_cap);
         }
 
         // 仅在需要 recent 数据时补充最后一条消息，避免 bootstrap 首屏同步超时。
@@ -233,7 +244,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
     ) -> Result<(Vec<ConversationSummary>, Option<String>, bool)> {
         let bootstrap = self
             .conversation_repo
-            .load_bootstrap(ctx, &HashMap::new())
+            .load_bootstrap(ctx, &HashMap::new(), 0)
             .await?;
 
         let mut summaries = bootstrap.summaries;
@@ -340,7 +351,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
 
         let bootstrap = self
             .conversation_repo
-            .load_bootstrap(ctx, &HashMap::new())
+            .load_bootstrap(ctx, &HashMap::new(), 0)
             .await?;
 
         let known: HashSet<String> = bootstrap

@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
@@ -9,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::PersistenceMode;
 use crate::domain::model::{MessageProfile, MessageSubmission, notification_persistent};
-use crate::domain::repository::{WalRepository, WalRepositoryItem};
+use crate::domain::repository::WalRepository;
 use crate::domain::service::MessageIngestService;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,20 +23,42 @@ pub struct WalReplayReport {
 }
 
 pub struct WalReplayHandler {
-    wal_repository: Arc<WalRepositoryItem>,
-    message_ingest_service: Arc<MessageIngestService>,
+    wal_repository: Arc<dyn WalRepository>,
+    publisher: Arc<dyn WalReplayPublisher>,
     default_tenant_id: String,
+}
+
+pub trait WalReplayPublisher: Send + Sync {
+    fn push_wal_message<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        submission: &'a MessageSubmission,
+        profile: &'a MessageProfile,
+        persistence_mode: PersistenceMode,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+}
+
+impl WalReplayPublisher for MessageIngestService {
+    fn push_wal_message<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        submission: &'a MessageSubmission,
+        profile: &'a MessageProfile,
+        persistence_mode: PersistenceMode,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(self.push_message(ctx, submission, profile, persistence_mode))
+    }
 }
 
 impl WalReplayHandler {
     pub fn new(
-        wal_repository: Arc<WalRepositoryItem>,
-        message_ingest_service: Arc<MessageIngestService>,
+        wal_repository: Arc<dyn WalRepository>,
+        publisher: Arc<dyn WalReplayPublisher>,
         default_tenant_id: Option<String>,
     ) -> Self {
         Self {
             wal_repository,
-            message_ingest_service,
+            publisher,
             default_tenant_id: default_tenant_id
                 .map(|tenant_id| normalize_tenant_id(&tenant_id))
                 .unwrap_or_else(|| "0".to_string()),
@@ -76,8 +100,8 @@ impl WalReplayHandler {
             };
 
             match self
-                .message_ingest_service
-                .push_message(&ctx, &submission, &profile, persistence_mode)
+                .publisher
+                .push_wal_message(&ctx, &submission, &profile, persistence_mode)
                 .await
             {
                 Ok(()) => {
@@ -125,11 +149,184 @@ fn replay_persistence_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::replay_persistence_mode;
+    use super::{WalReplayHandler, WalReplayPublisher, replay_persistence_mode};
     use crate::domain::PersistenceMode;
     use crate::domain::model::MessageProfile;
+    use crate::domain::model::MessageSubmission;
+    use crate::domain::repository::{WalPendingMessage, WalRepository};
     use flare_proto::common::message_content::Content;
     use flare_proto::common::{Message, MessageContent, NotificationContent, TextContent};
+    use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MemoryWalRepository {
+        entries: Mutex<HashMap<String, WalPendingMessage>>,
+        removed: Mutex<Vec<String>>,
+    }
+
+    impl MemoryWalRepository {
+        fn with_entries(entries: Vec<WalPendingMessage>) -> Arc<Self> {
+            Arc::new(Self {
+                entries: Mutex::new(
+                    entries
+                        .into_iter()
+                        .map(|entry| (entry.message_id.clone(), entry))
+                        .collect(),
+                ),
+                removed: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn contains(&self, message_id: &str) -> bool {
+            self.entries
+                .lock()
+                .expect("memory wal poisoned")
+                .contains_key(message_id)
+        }
+
+        fn removed_ids(&self) -> Vec<String> {
+            self.removed
+                .lock()
+                .expect("memory wal removed poisoned")
+                .clone()
+        }
+    }
+
+    impl WalRepository for MemoryWalRepository {
+        fn append<'a>(
+            &'a self,
+            submission: &'a MessageSubmission,
+            tenant_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                let message_id = submission.message_id.clone();
+                self.entries.lock().expect("memory wal poisoned").insert(
+                    message_id.clone(),
+                    WalPendingMessage {
+                        message_id,
+                        tenant_id: tenant_id.to_string(),
+                        message: submission.message.clone(),
+                    },
+                );
+                Ok(())
+            })
+        }
+
+        fn find_by_message_id<'a>(
+            &'a self,
+            message_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Message>>> + Send + 'a>> {
+            Box::pin(async move {
+                Ok(self
+                    .entries
+                    .lock()
+                    .expect("memory wal poisoned")
+                    .get(message_id)
+                    .map(|entry| entry.message.clone()))
+            })
+        }
+
+        fn list_pending<'a>(
+            &'a self,
+            limit: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<WalPendingMessage>>> + Send + 'a>> {
+            Box::pin(async move {
+                if limit == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut entries = self
+                    .entries
+                    .lock()
+                    .expect("memory wal poisoned")
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                entries.sort_by(|a, b| a.message_id.cmp(&b.message_id));
+                entries.truncate(limit);
+                Ok(entries)
+            })
+        }
+
+        fn remove<'a>(
+            &'a self,
+            message_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.entries
+                    .lock()
+                    .expect("memory wal poisoned")
+                    .remove(message_id);
+                self.removed
+                    .lock()
+                    .expect("memory wal removed poisoned")
+                    .push(message_id.to_string());
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedReplay {
+        tenant_id: String,
+        message_id: String,
+        server_id: String,
+        persistence_mode: PersistenceMode,
+    }
+
+    #[derive(Default)]
+    struct FakeReplayPublisher {
+        fail: bool,
+        captured: Mutex<Vec<CapturedReplay>>,
+    }
+
+    impl FakeReplayPublisher {
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Self {
+                fail,
+                captured: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn captured(&self) -> Vec<CapturedReplay> {
+            self.captured
+                .lock()
+                .expect("fake publisher poisoned")
+                .clone()
+        }
+    }
+
+    impl WalReplayPublisher for FakeReplayPublisher {
+        fn push_wal_message<'a>(
+            &'a self,
+            ctx: &'a flare_im_contracts::Ctx,
+            submission: &'a MessageSubmission,
+            _profile: &'a MessageProfile,
+            persistence_mode: PersistenceMode,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.captured
+                    .lock()
+                    .expect("fake publisher poisoned")
+                    .push(CapturedReplay {
+                        tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                        message_id: submission.message_id.clone(),
+                        server_id: submission.message.server_id.clone(),
+                        persistence_mode,
+                    });
+                if self.fail {
+                    return Err(
+                        ErrorBuilder::new(ErrorCode::ServiceUnavailable, "replay failed")
+                            .build_error(),
+                    );
+                }
+                Ok(())
+            })
+        }
+    }
 
     fn notification(persistent: bool) -> (MessageProfile, Message) {
         let mut message = Message {
@@ -152,6 +349,41 @@ mod tests {
         };
         let profile = MessageProfile::ensure(&mut message);
         (profile, message)
+    }
+
+    fn pending_text(message_id: &str, tenant_id: &str) -> WalPendingMessage {
+        WalPendingMessage {
+            message_id: message_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            message: Message {
+                server_id: String::new(),
+                conversation_id: "conv-1".to_string(),
+                sender_id: "sender-1".to_string(),
+                conversation_seq: 42,
+                content: Some(MessageContent {
+                    content: Some(Content::Text(TextContent {
+                        text: "hello".to_string(),
+                        mentions: vec![],
+                    })),
+                }),
+                ..Message::default()
+            },
+        }
+    }
+
+    fn pending_notification(message_id: &str, persistent: bool) -> WalPendingMessage {
+        let (_, message) = notification(persistent);
+        WalPendingMessage {
+            message_id: message_id.to_string(),
+            tenant_id: "tenant-a".to_string(),
+            message: Message {
+                server_id: message_id.to_string(),
+                conversation_id: "conv-1".to_string(),
+                sender_id: "sender-1".to_string(),
+                conversation_seq: 43,
+                ..message
+            },
+        }
     }
 
     #[test]
@@ -185,5 +417,93 @@ mod tests {
             replay_persistence_mode(&profile, &message),
             PersistenceMode::Auto
         );
+    }
+
+    #[tokio::test]
+    async fn replay_success_removes_wal_entry_and_backfills_server_id() {
+        let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", "tenant-a")]);
+        let publisher = FakeReplayPublisher::new(false);
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), Some("0".to_string()));
+
+        let report = handler.replay_once(10).await.unwrap();
+
+        assert_eq!(
+            report,
+            super::WalReplayReport {
+                scanned: 1,
+                replayed: 1,
+                failed: 0,
+                skipped: 0,
+            }
+        );
+        assert!(!wal.contains("msg-1"));
+        assert_eq!(wal.removed_ids(), vec!["msg-1".to_string()]);
+        assert_eq!(
+            publisher.captured(),
+            vec![CapturedReplay {
+                tenant_id: "tenant-a".to_string(),
+                message_id: "msg-1".to_string(),
+                server_id: "msg-1".to_string(),
+                persistence_mode: PersistenceMode::Auto,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_failure_keeps_wal_entry_for_later_retry() {
+        let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", "tenant-a")]);
+        let publisher = FakeReplayPublisher::new(true);
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), Some("0".to_string()));
+
+        let report = handler.replay_once(10).await.unwrap();
+
+        assert_eq!(
+            report,
+            super::WalReplayReport {
+                scanned: 1,
+                replayed: 0,
+                failed: 1,
+                skipped: 0,
+            }
+        );
+        assert!(wal.contains("msg-1"));
+        assert!(wal.removed_ids().is_empty());
+        assert_eq!(publisher.captured().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn replay_skips_and_removes_push_only_entries() {
+        let wal =
+            MemoryWalRepository::with_entries(vec![pending_notification("msg-ephemeral", false)]);
+        let publisher = FakeReplayPublisher::new(false);
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), None);
+
+        let report = handler.replay_once(10).await.unwrap();
+
+        assert_eq!(
+            report,
+            super::WalReplayReport {
+                scanned: 1,
+                replayed: 0,
+                failed: 0,
+                skipped: 1,
+            }
+        );
+        assert!(!wal.contains("msg-ephemeral"));
+        assert_eq!(publisher.captured(), Vec::<CapturedReplay>::new());
+    }
+
+    #[tokio::test]
+    async fn replay_limit_zero_does_not_claim_or_publish() {
+        let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", "tenant-a")]);
+        let publisher = FakeReplayPublisher::new(false);
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), None);
+
+        let report = handler.replay_once(0).await.unwrap();
+
+        assert_eq!(report, super::WalReplayReport::default());
+        assert!(wal.contains("msg-1"));
+        assert!(wal.removed_ids().is_empty());
+        assert!(publisher.captured().is_empty());
     }
 }

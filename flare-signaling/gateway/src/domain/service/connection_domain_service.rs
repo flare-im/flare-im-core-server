@@ -79,6 +79,9 @@ impl ConnectionDomainService {
         if let Some(connection_id) = connection_id {
             metadata.insert("connection_id".to_string(), connection_id.to_string());
         }
+        let desired_conflict_strategy = connection_metadata
+            .map(resolve_desired_conflict_strategy)
+            .unwrap_or(DeviceConflictStrategy::PlatformExclusive as i32);
         if let Some(connection_metadata) = connection_metadata {
             for key in [
                 "tenant_id",
@@ -86,6 +89,7 @@ impl ConnectionDomainService {
                 "app_version",
                 "system_version",
                 "model",
+                "desired_conflict_strategy",
             ] {
                 if let Some(value) = connection_metadata.get(key)
                     && !value.trim().is_empty()
@@ -104,7 +108,7 @@ impl ConnectionDomainService {
             metadata,
             device_platform: device_platform.to_string(),
             app_version,
-            desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+            desired_conflict_strategy,
             device_priority: 2, // Normal 优先级
             token_version: 0,
             initial_quality: None,
@@ -275,5 +279,162 @@ impl ConnectionDomainService {
                 )
             }
         }
+    }
+}
+
+fn resolve_desired_conflict_strategy(metadata: &std::collections::HashMap<String, String>) -> i32 {
+    let Some(raw) = metadata
+        .get("desired_conflict_strategy")
+        .or_else(|| metadata.get("device_conflict_strategy"))
+    else {
+        return DeviceConflictStrategy::PlatformExclusive as i32;
+    };
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "exclusive" => DeviceConflictStrategy::Exclusive as i32,
+        "2" | "platform_exclusive" | "platform-exclusive" | "platformexclusive" => {
+            DeviceConflictStrategy::PlatformExclusive as i32
+        }
+        "3" | "coexist" => DeviceConflictStrategy::Coexist as i32,
+        _ => DeviceConflictStrategy::PlatformExclusive as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::model::ConnectionInfo;
+    use crate::domain::ports::IConnectionPort;
+    use async_trait::async_trait;
+    use flare_grpc_proto::signaling::{
+        GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
+        LoginResponse, LogoutRequest, LogoutResponse,
+    };
+    use flare_im_contracts::Ctx;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingConnectionPort {
+        last_login: Mutex<Option<LoginRequest>>,
+    }
+
+    #[async_trait]
+    impl IConnectionPort for CapturingConnectionPort {
+        async fn login(&self, request: LoginRequest) -> Result<LoginResponse> {
+            *self.last_login.lock().await = Some(request.clone());
+            Ok(LoginResponse {
+                success: true,
+                conversation_id: "presence-session-1".to_string(),
+                route_server: "gateway-test".to_string(),
+                error_message: String::new(),
+                applied_conflict_strategy: request.desired_conflict_strategy,
+            })
+        }
+
+        async fn logout(&self, _request: LogoutRequest) -> Result<LogoutResponse> {
+            Ok(LogoutResponse::default())
+        }
+
+        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<HeartbeatResponse> {
+            Ok(HeartbeatResponse::default())
+        }
+
+        async fn get_online_status(
+            &self,
+            _request: GetOnlineStatusRequest,
+        ) -> Result<GetOnlineStatusResponse> {
+            Ok(GetOnlineStatusResponse::default())
+        }
+
+        async fn list_user_connections(&self, _user_id: &str) -> Result<Vec<ConnectionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_connection_info(&self, connection_id: &str) -> Result<ConnectionInfo> {
+            Ok(ConnectionInfo::new(
+                connection_id.to_string(),
+                "u1".to_string(),
+                "0".to_string(),
+                "d1".to_string(),
+            ))
+        }
+
+        async fn get_connection_metadata(
+            &self,
+            _connection_id: &str,
+        ) -> Result<HashMap<String, String>> {
+            Ok(HashMap::new())
+        }
+
+        async fn build_ctx(&self, _connection_id: &str) -> Result<Ctx> {
+            Ok(std::sync::Arc::new(flare_server_core::Context::root()))
+        }
+    }
+
+    fn service_with_port(port: std::sync::Arc<CapturingConnectionPort>) -> ConnectionDomainService {
+        let trait_port: std::sync::Arc<dyn IConnectionPort> = port;
+        ConnectionDomainService::new(
+            trait_port,
+            std::sync::Arc::new(ConnectionQualityService::new()),
+            ConnectionDomainServiceConfig {
+                gateway_id: "gateway-test".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn conflict_strategy_defaults_to_platform_exclusive() {
+        let metadata = HashMap::new();
+
+        assert_eq!(
+            resolve_desired_conflict_strategy(&metadata),
+            DeviceConflictStrategy::PlatformExclusive as i32
+        );
+    }
+
+    #[test]
+    fn conflict_strategy_parses_core_sdk_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "desired_conflict_strategy".to_string(),
+            "platform_exclusive".to_string(),
+        );
+
+        assert_eq!(
+            resolve_desired_conflict_strategy(&metadata),
+            DeviceConflictStrategy::PlatformExclusive as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn register_connection_passes_conflict_strategy_to_online_login() {
+        let port = std::sync::Arc::new(CapturingConnectionPort::default());
+        let service = service_with_port(port.clone());
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "desired_conflict_strategy".to_string(),
+            "platform_exclusive".to_string(),
+        );
+
+        service
+            .register_connection("u1", "d1", Some("web"), Some("conn-1"), Some(&metadata))
+            .await
+            .expect("register connection should succeed");
+
+        let request = port
+            .last_login
+            .lock()
+            .await
+            .clone()
+            .expect("login request should be captured");
+        assert_eq!(
+            request.desired_conflict_strategy,
+            DeviceConflictStrategy::PlatformExclusive as i32
+        );
+        assert_eq!(
+            request.metadata.get("desired_conflict_strategy"),
+            Some(&"platform_exclusive".to_string())
+        );
     }
 }

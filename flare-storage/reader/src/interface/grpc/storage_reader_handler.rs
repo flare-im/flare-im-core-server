@@ -14,8 +14,8 @@ use crate::application::queries::{
 };
 use crate::convert::{
     edit_history_entry_to_proto, event_to_proto_or_default, event_type_from_proto_i32,
-    filter_expression_from_proto, mark_entry_to_proto, message_to_proto, reaction_item_to_proto,
-    read_list_entry_to_proto,
+    filter_expression_from_proto, mark_entry_to_proto, message_into_proto, message_to_proto,
+    reaction_item_to_proto, read_list_entry_to_proto,
 };
 use crate::domain::model::{
     EventType, MessageExportTaskDraft, MessageWriteLedgerEntry as DomainMessageWriteLedgerEntry,
@@ -366,6 +366,10 @@ where
 
         let req = request.into_inner();
         let requested_limit = req.limit.max(1);
+        let is_backfill_tail_page = crate::domain::repository::is_backfill_tail_page(
+            req.after_seq,
+            (req.before_seq != 0).then_some(req.before_seq),
+        );
 
         let query = QueryMessagesBySeqQuery {
             conversation_id: req.conversation_id,
@@ -393,7 +397,13 @@ where
                 let mut messages = messages;
                 let has_more = messages.len() as i32 > requested_limit;
                 if has_more {
-                    messages.truncate(requested_limit as usize);
+                    let requested_limit = requested_limit as usize;
+                    if is_backfill_tail_page {
+                        let overflow = messages.len().saturating_sub(requested_limit);
+                        messages.drain(0..overflow);
+                    } else {
+                        messages.truncate(requested_limit);
+                    }
                 }
                 let last_seq = messages
                     .last()
@@ -426,6 +436,58 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages by seq");
+                Err(Status::internal(err.to_string()))
+            }
+        }
+    }
+
+    async fn query_conversations_message_windows(
+        &self,
+        request: Request<QueryConversationsMessageWindowsRequest>,
+    ) -> Result<Response<QueryConversationsMessageWindowsResponse>, Status> {
+        let ctx = extract_ctx_from_request_opt(&request)
+            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let req = request.into_inner();
+        let user_id = (!req.user_id.is_empty()).then_some(req.user_id.as_str());
+        let targets: Vec<(String, i64)> = req
+            .targets
+            .iter()
+            .map(|t| (t.conversation_id.clone(), t.after_seq))
+            .collect();
+
+        match self
+            .query_handler
+            .handle_query_conversations_message_windows(
+                &ctx,
+                &targets,
+                user_id,
+                req.per_conversation_limit,
+                req.newest_window,
+                req.include_burned_placeholder,
+            )
+            .await
+        {
+            Ok(windows) => Ok(Response::new(QueryConversationsMessageWindowsResponse {
+                windows: windows
+                    .into_iter()
+                    .map(|(conversation_id, messages)| {
+                        // 按值转换：move 内容字节/字符串，整页免深拷贝。
+                        let proto_messages: Vec<flare_proto::Message> =
+                            messages.into_iter().map(message_into_proto).collect();
+                        let last_seq = proto_messages
+                            .last()
+                            .and_then(extract_seq_from_message)
+                            .unwrap_or(0);
+                        ConversationMessageWindow {
+                            conversation_id,
+                            messages: proto_messages,
+                            last_seq,
+                        }
+                    })
+                    .collect(),
+            })),
+            Err(err) => {
+                error!(error = ?err, "Failed to query conversations message windows");
                 Err(Status::internal(err.to_string()))
             }
         }

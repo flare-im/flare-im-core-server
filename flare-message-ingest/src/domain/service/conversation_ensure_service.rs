@@ -115,47 +115,64 @@ impl ConversationEnsureService {
         ctx: &Ctx,
         request: &ConversationEnsureRequest,
     ) -> Result<()> {
-        let cache_key = self.cache_key(request);
-        if let (Some(cache), Some(key)) = (&self.ensure_cache, cache_key.as_ref())
-            && cache.get(key).await.is_some()
-        {
-            tracing::trace!(
-                conversation_id = %request.conversation_id,
-                "Conversation ensure skipped by single-chat hot cache"
-            );
-            return Ok(());
+        // 命中缓存即跳过 + **单飞(single-flight)**:同一会话的并发 ensure(大群冷启动时 N 个发送者的
+        // 首条消息同时触发建群)合并为一次 CreateConversation,否则 N×O(成员) 的并发建群会击穿管线(万级群实测雪崩)。
+        // try_get_with 对同 key 的并发调用只跑一次 init,成功结果按 TTL 缓存;失败不缓存(后续可重试)。
+        if let (Some(cache), Some(key)) = (&self.ensure_cache, self.cache_key(request)) {
+            return cache
+                .try_get_with(key, async {
+                    match self.session_creation_mode {
+                        SessionCreationMode::Sync => {
+                            self.ensure_conversation_sync(ctx, request).await
+                        }
+                        SessionCreationMode::Async => {
+                            self.ensure_conversation_async(ctx, request).await
+                        }
+                    }
+                    .map(|_ensured| ())
+                })
+                .await
+                .map_err(|err: std::sync::Arc<FlareError>| FlareError::system(err.to_string()));
         }
 
-        let ensured = match self.session_creation_mode {
+        match self.session_creation_mode {
             SessionCreationMode::Sync => self.ensure_conversation_sync(ctx, request).await?,
             SessionCreationMode::Async => self.ensure_conversation_async(ctx, request).await?,
         };
-        if ensured && let (Some(cache), Some(key)) = (&self.ensure_cache, cache_key) {
-            cache.insert(key, ()).await;
-        }
         Ok(())
     }
 
     fn cache_key(&self, request: &ConversationEnsureRequest) -> Option<String> {
-        if request.conversation_type != flare_proto::common::ConversationType::Single as i32 {
-            return None;
-        }
-        if request.conversation_id.trim().is_empty() || request.participants.len() < 2 {
+        if request.conversation_id.trim().is_empty() {
             return None;
         }
         let mut participants = request.participants.clone();
         participants.retain(|id| !id.trim().is_empty());
         participants.sort();
         participants.dedup();
-        if participants.len() < 2 {
-            return None;
+
+        if request.conversation_type == flare_proto::common::ConversationType::Single as i32 {
+            // 单聊：按参与者对缓存（会话由首消息创建、成员固定）。
+            if participants.len() < 2 {
+                return None;
+            }
+            return Some(format!(
+                "{}|{}|{}|{}",
+                request.tenant_id,
+                request.conversation_id,
+                request.business_type,
+                participants.join(",")
+            ));
         }
+
+        // 群/频道等成员制会话：按 conversation_id 缓存 + 单飞。让已存在的群跳过每消息 CreateConversation
+        // (其对已存在会话会加载全部成员 = O(成员),是大群发送热路径瓶颈),并让冷启动时的并发建群合并为一次。
+        // 注意:带 group_member_ids(member-add)的首条消息也走此 key —— 故成员变更在缓存 TTL 内会被合并/延后
+        // (≤TTL)。ad-hoc 用户集合群成员恒定(conversation_id=hash(成员集))不受影响;命名群的成员管理应走
+        // 显式成员操作而非每消息携带,TTL 兜底其最终一致。
         Some(format!(
-            "{}|{}|{}|{}",
-            request.tenant_id,
-            request.conversation_id,
-            request.business_type,
-            participants.join(",")
+            "grp|{}|{}|{}",
+            request.tenant_id, request.conversation_id, request.business_type
         ))
     }
 

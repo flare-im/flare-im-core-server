@@ -127,35 +127,67 @@ impl PostgresConversationRepository {
             return Ok(());
         }
 
+        // 仅取每会话前 N 条做预览（LATERAL + LIMIT），绝不全量加载成员——10 万群下全量 SELECT 会返回
+        // O(成员) 行(实测单次 18 万行/1.5s),每个客户端 ListConversations/同步都触发,直接打垮 Postgres。
+        // 真实人数走单独的 COUNT 聚合(索引扫描,不物化行)。完整成员由独立成员同步按需拉取。
+        const MEMBER_PREVIEW_LIMIT: i64 = 10;
         let rows = sqlx::query(
             r#"
             SELECT
-                cp.conversation_id::text AS conversation_id,
-                cp.user_id::text AS user_id,
-                COALESCE(cp.roles, ARRAY[]::text[]) AS roles,
-                COALESCE(cp.muted, false) AS muted,
-                COALESCE(cp.pinned, false) AS pinned,
-                COALESCE(cp.attributes, '{}'::jsonb) AS attributes,
-                COALESCE(cp.nickname, '') AS nickname
-            FROM conversation_participants cp
-            WHERE cp.tenant_id = $1
-              AND cp.conversation_id = ANY($2)
-              AND NOT COALESCE(cp.is_deleted, false)
-              AND cp.quit_at IS NULL
-            ORDER BY cp.conversation_id, cp.joined_at ASC, cp.user_id ASC
+                p.conversation_id::text AS conversation_id,
+                p.user_id::text AS user_id,
+                COALESCE(p.roles, ARRAY[]::text[]) AS roles,
+                COALESCE(p.muted, false) AS muted,
+                COALESCE(p.pinned, false) AS pinned,
+                COALESCE(p.attributes, '{}'::jsonb) AS attributes,
+                COALESCE(p.nickname, '') AS nickname
+            FROM unnest($2::text[]) AS c(conversation_id)
+            CROSS JOIN LATERAL (
+                SELECT cp.*
+                FROM conversation_participants cp
+                WHERE cp.tenant_id = $1
+                  AND cp.conversation_id = c.conversation_id
+                  AND NOT COALESCE(cp.is_deleted, false)
+                  AND cp.quit_at IS NULL
+                ORDER BY cp.joined_at ASC, cp.user_id ASC
+                LIMIT $3
+            ) p
             "#,
         )
         .bind(tenant_id)
         .bind(&need_participants)
+        .bind(MEMBER_PREVIEW_LIMIT)
         .fetch_all(pool)
         .await
         .map_err(|e| {
             map_infra_error(
                 e,
                 ErrorCode::DatabaseError,
-                "fill conversation participants",
+                "fill conversation member preview",
             )
         })?;
+
+        // 真实成员数：按会话 COUNT 聚合（索引扫描，不把 O(成员) 行拉回应用层）。
+        let count_rows = sqlx::query(
+            r#"
+            SELECT cp.conversation_id::text AS conversation_id, COUNT(*)::bigint AS member_count
+            FROM conversation_participants cp
+            WHERE cp.tenant_id = $1
+              AND cp.conversation_id = ANY($2)
+              AND NOT COALESCE(cp.is_deleted, false)
+              AND cp.quit_at IS NULL
+            GROUP BY cp.conversation_id
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&need_participants)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "count conversation members"))?;
+        let mut count_by_cid: HashMap<String, i64> = HashMap::new();
+        for row in count_rows {
+            count_by_cid.insert(row.get("conversation_id"), row.get("member_count"));
+        }
 
         let mut by_cid: HashMap<String, Vec<ConversationParticipant>> = HashMap::new();
         for row in rows {
@@ -193,12 +225,24 @@ impl PostgresConversationRepository {
         }
 
         for summary in summaries.iter_mut() {
-            if let Some(participants) = by_cid.remove(&summary.conversation_id) {
+            // 真实人数取 COUNT 结果；预览取 LATERAL 的前 N 条。
+            let member_count = count_by_cid
+                .get(&summary.conversation_id)
+                .copied()
+                .unwrap_or(0)
+                .max(0) as u64;
+            if member_count > 0 {
                 summary
                     .metadata
-                    .insert("member_count".to_string(), participants.len().to_string());
-                summary.participant_version = participants.len() as u64;
-                summary.member_preview = participants.into_iter().take(10).collect();
+                    .insert("member_count".to_string(), member_count.to_string());
+                summary.participant_version = member_count;
+            }
+            if let Some(participants) = by_cid.remove(&summary.conversation_id) {
+                // LATERAL 查询已按 MEMBER_PREVIEW_LIMIT 截断，这里仅防御性对齐同一常量。
+                summary.member_preview = participants
+                    .into_iter()
+                    .take(MEMBER_PREVIEW_LIMIT as usize)
+                    .collect();
             }
         }
 
@@ -211,9 +255,15 @@ impl ConversationRepository for PostgresConversationRepository {
         &self,
         ctx: &flare_server_core::context::Context,
         client_cursor: &HashMap<String, i64>,
+        updated_after_ms: i64,
     ) -> Result<ConversationBootstrapResult> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let user_id = require_user_id(ctx)?;
+        // 增量过滤边界（None=全量）。EXISTS 探针走 idx_messages_conversation_ts，
+        // 使热启/重连列表同步的存储成本从 O(全账号会话×LATERAL) 降到 O(变化)。
+        let updated_after: Option<chrono::DateTime<chrono::Utc>> = (updated_after_ms > 0)
+            .then(|| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(updated_after_ms))
+            .flatten();
         // 1. 从 user_sync_cursor 表加载按会话消息 seq 游标。
         // last_synced_ts 只服务于 __conversations__ 这种列表时间游标，不能参与单会话消息游标。
         let cursor_rows = sqlx::query(
@@ -330,11 +380,26 @@ impl ConversationRepository for PostgresConversationRepository {
               AND sp.user_id = $2
               AND s.lifecycle_state != 'deleted'
               AND NOT COALESCE(sp.is_deleted, false)
+              -- 增量过滤：任一构成 effective_updated_at 的来源晚于边界即命中；
+              -- EXISTS 探针不引用 LATERAL 输出，可被规划器下推在 LATERAL 之前裁剪行。
+              AND (
+                  $3::timestamptz IS NULL
+                  OR s.updated_at > $3
+                  OR sp.joined_at > $3
+                  OR sp.updated_at > $3
+                  OR EXISTS (
+                      SELECT 1 FROM messages mx
+                      WHERE mx.tenant_id = s.tenant_id
+                        AND mx.conversation_id = s.conversation_id
+                        AND mx.timestamp > $3
+                  )
+              )
             ORDER BY effective_updated_at DESC
             "#,
         )
         .bind(tenant_id)
         .bind(&user_id)
+        .bind(updated_after)
         .fetch_all(&*self.pool)
         .await
         .map_err(|e| {
@@ -546,38 +611,43 @@ impl ConversationRepository for PostgresConversationRepository {
             debug!(conversation_id = %session.conversation_id, "Conversation row inserted");
         }
 
-        // 插入参与者记录（使用 ON CONFLICT 处理重复插入）
-        for participant in &session.participants {
-            sqlx::query(
-                r#"
-                INSERT INTO conversation_participants (
-                    tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, created_at, updated_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (tenant_id, conversation_id, user_id) 
-                DO UPDATE SET
-                    roles = EXCLUDED.roles,
-                    muted = EXCLUDED.muted,
-                    pinned = EXCLUDED.pinned,
-                    attributes = EXCLUDED.attributes,
-                    is_deleted = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(&session.conversation_id)
-            .bind(&participant.user_id)
-            .bind(&participant.roles)
-            .bind(participant.muted)
-            .bind(participant.pinned)
-            .bind(
-                serde_json::to_value(&participant.attributes).map_err(|e| {
-                    map_infra_error(e, ErrorCode::SerializationError, "serialize participant attributes")
-                })?,
-            )
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to create participant"))?;
+        // 批量插入参与者（多行 VALUES 分块 + ON CONFLICT 幂等）。
+        // 逐行 INSERT 在万级/十万级群是建群的致命瓶颈：N 次网络往返 + 长事务。改为分块多行插入,
+        // 每块 ≤PARTICIPANT_INSERT_CHUNK 行 × 7 参数 < PG 65535 参数上限,把往返从 O(成员) 降到 O(成员/块)。
+        if !session.participants.is_empty() {
+            use sqlx::QueryBuilder;
+            const PARTICIPANT_INSERT_CHUNK: usize = 5000;
+            for chunk in session.participants.chunks(PARTICIPANT_INSERT_CHUNK) {
+                let mut qb = QueryBuilder::new(
+                    "INSERT INTO conversation_participants \
+                     (tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, created_at, updated_at) ",
+                );
+                qb.push_values(chunk, |mut b, participant| {
+                    let attrs = serde_json::to_value(&participant.attributes)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    b.push_bind(tenant_id)
+                        .push_bind(&session.conversation_id)
+                        .push_bind(&participant.user_id)
+                        .push_bind(&participant.roles)
+                        .push_bind(participant.muted)
+                        .push_bind(participant.pinned)
+                        .push_bind(attrs)
+                        .push("CURRENT_TIMESTAMP")
+                        .push("CURRENT_TIMESTAMP");
+                });
+                qb.push(
+                    " ON CONFLICT (tenant_id, conversation_id, user_id) DO UPDATE SET \
+                     roles = EXCLUDED.roles, muted = EXCLUDED.muted, pinned = EXCLUDED.pinned, \
+                     attributes = EXCLUDED.attributes, is_deleted = FALSE, updated_at = CURRENT_TIMESTAMP",
+                );
+                qb.build().execute(&mut *tx).await.map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::DatabaseError,
+                        "Failed to batch insert participants",
+                    )
+                })?;
+            }
         }
 
         tx.commit()
@@ -983,7 +1053,18 @@ impl ConversationRepository for PostgresConversationRepository {
         include_removed: bool,
     ) -> Result<ConversationParticipantsPage> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
-        let user_id = require_user_id(ctx)?;
+        // 受信内部调用（Service/System actor，如网关读扩散成员订阅 bootstrap）跳过"调用者须为成员"的鉴权，
+        // 仅按 tenant + conversation 范围读取成员；用户态调用仍要求 user_id 且必须是会话成员。
+        let is_internal = ctx
+            .actor()
+            .map(|actor| {
+                matches!(
+                    actor.actor_type,
+                    flare_server_core::context::ActorType::Service
+                        | flare_server_core::context::ActorType::System
+                )
+            })
+            .unwrap_or(false);
         let conversation_id = conversation_id.trim();
         if conversation_id.is_empty() {
             return Err(flare_server_core::error::ErrorBuilder::new(
@@ -998,32 +1079,35 @@ impl ConversationRepository for PostgresConversationRepository {
             .max(0);
         let limit = limit.clamp(1, 500);
 
-        let membership_exists: Option<i64> = sqlx::query_scalar(
-            r#"
-            SELECT 1::BIGINT
-            FROM conversation_participants
-            WHERE tenant_id = $1
-              AND conversation_id = $2
-              AND user_id = $3
-              AND NOT COALESCE(is_deleted, false)
-              AND quit_at IS NULL
-            LIMIT 1
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .bind(&user_id)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
-        })?;
-        if membership_exists.is_none() {
-            return Err(flare_server_core::error::ErrorBuilder::new(
-                ErrorCode::MessageNotFound,
-                "conversation not found",
+        if !is_internal {
+            let user_id = require_user_id(ctx)?;
+            let membership_exists: Option<i64> = sqlx::query_scalar(
+                r#"
+                SELECT 1::BIGINT
+                FROM conversation_participants
+                WHERE tenant_id = $1
+                  AND conversation_id = $2
+                  AND user_id = $3
+                  AND NOT COALESCE(is_deleted, false)
+                  AND quit_at IS NULL
+                LIMIT 1
+                "#,
             )
-            .build_error());
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(&user_id)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
+            })?;
+            if membership_exists.is_none() {
+                return Err(flare_server_core::error::ErrorBuilder::new(
+                    ErrorCode::MessageNotFound,
+                    "conversation not found",
+                )
+                .build_error());
+            }
         }
 
         let active_filter = if include_removed {

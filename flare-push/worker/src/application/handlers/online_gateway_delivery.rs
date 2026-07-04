@@ -5,34 +5,32 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flare_grpc_proto::access_gateway::{
+    ConversationEventsDelivery, ConversationMessagesDelivery, ConversationWatermarkPing,
     DeliverToConversationRequest, PushAckRequest, PushCustomRequest, PushEventRequest,
     PushMessageRequest, PushNotificationRequest,
+    deliver_to_conversation_request::Payload as DeliverPayload,
 };
 use flare_grpc_proto::signaling::online::DeviceInfo;
 use flare_grpc_proto::signaling::router::PushStrategy;
 use flare_im_contracts::Ctx;
-use flare_proto::common::{EventEnvelopeDeliveryMode, Message};
+use flare_proto::common::{Event, Message};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
-use futures::{StreamExt, stream};
 
 use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
-use super::{ConversationPingDebouncer, PingDebounceDecision, PingDebounceKey};
 use crate::domain::push_routing::{
-    merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_event_for_gateway,
-    merge_push_notification_for_gateway, partition_targets_by_gateway, select_push_targets,
+    merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_notification_for_gateway,
+    partition_targets_by_gateway, select_push_targets,
 };
 use crate::infrastructure::rpc::OnlineServiceClient;
 
 const DEFAULT_DEVICE_ROUTE_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEVICE_ROUTE_CACHE_MAX_USERS: usize = 4096;
-const USER_ROUTE_LOOKUP_CONCURRENCY: usize = 64;
 const DEVICE_ROUTE_CACHE_TTL_ENV: &str = "FLARE_PUSH_DEVICE_ROUTE_CACHE_TTL_MS";
 
 pub struct GatewayPushExecutor {
     online: Arc<OnlineServiceClient>,
     gateway_router: Arc<GatewayRouter>,
-    ping_debouncer: Option<Arc<ConversationPingDebouncer>>,
     device_cache: tokio::sync::Mutex<HashMap<String, CachedDevices>>,
 }
 
@@ -47,14 +45,8 @@ impl GatewayPushExecutor {
         Self {
             online,
             gateway_router,
-            ping_debouncer: None,
             device_cache: tokio::sync::Mutex::new(HashMap::new()),
         }
-    }
-
-    pub fn with_ping_debouncer(mut self, debouncer: Arc<ConversationPingDebouncer>) -> Self {
-        self.ping_debouncer = Some(debouncer);
-        self
     }
 
     fn route_failure_code(error: &FlareError) -> ErrorCode {
@@ -130,17 +122,6 @@ impl GatewayPushExecutor {
         Ok(devices_resp.devices)
     }
 
-    fn resolve_target_user_ids(target_user_id: &str, request_user_ids: &[String]) -> Vec<String> {
-        if !target_user_id.trim().is_empty() {
-            return vec![target_user_id.to_string()];
-        }
-        request_user_ids
-            .iter()
-            .filter(|user_id| !user_id.trim().is_empty())
-            .cloned()
-            .collect()
-    }
-
     /// 统一读扩散：**不再解析收件人/按用户分网关**。按 conversation_id 分组（同批可能含多会话），
     /// 每会话经 [`GatewayRouter::broadcast_deliver_to_conversation`] 广播到所有网关节点，各节点用
     /// 本地会话订阅表过滤投递（O(在线/节点)，与群人数无关）。`target_user_id`/`strategy` 在读扩散下不再需要。
@@ -173,8 +154,10 @@ impl GatewayPushExecutor {
             }
             let request = DeliverToConversationRequest {
                 conversation_id,
-                messages,
                 options: push.options.clone(),
+                payload: Some(DeliverPayload::Messages(ConversationMessagesDelivery {
+                    messages,
+                })),
             };
             self.gateway_router
                 .broadcast_deliver_to_conversation(request)
@@ -183,155 +166,68 @@ impl GatewayPushExecutor {
         Ok(())
     }
 
+    /// 统一读扩散：**不再解析收件人/按用户分网关**。按 conversation_id 分组事件，
+    /// 每会话经 [`GatewayRouter::broadcast_deliver_to_conversation`] 广播 `EventEnvelope` 到所有网关节点，
+    /// 各节点用本地会话订阅表过滤投递（O(在线/节点)，与群人数无关）。群消息主路径（消息经 EventEnvelope 下行）。
+    /// `target_user_id`/`strategy` 在读扩散下不再需要。
     pub async fn push_event(
         &self,
-        ctx: &Ctx,
-        target_user_id: &str,
-        strategy: PushStrategy,
+        _ctx: &Ctx,
+        _target_user_id: &str,
+        _strategy: PushStrategy,
         push: PushEventRequest,
     ) -> Result<()> {
-        if push.events.is_empty()
-            && let Some(debouncer) = &self.ping_debouncer
-            && let Some((conversation_id, max_conversation_seq)) = event_ping_watermark(&push)
-        {
-            let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
-            let key = PingDebounceKey::new(&tenant_id, target_user_id, conversation_id.clone());
-            let pending = pending_ping_request(&push, &conversation_id, max_conversation_seq);
-            match debouncer.observe(key.clone(), pending).await {
-                PingDebounceDecision::SendNow => {
-                    return self
-                        .push_event_now(ctx, target_user_id, strategy, push)
-                        .await;
-                }
-                PingDebounceDecision::ScheduleAfter(delay) => {
-                    self.spawn_debounced_push_event(
-                        ctx.clone(),
-                        target_user_id,
-                        strategy,
-                        key,
-                        delay,
-                    );
-                    return Ok(());
-                }
-                PingDebounceDecision::Suppressed => return Ok(()),
+        // 纯 ping（events 空）：按 request.conversation_id 广播一次水位 ping。
+        if push.events.is_empty() {
+            let conversation_id = push.conversation_id.trim().to_string();
+            if conversation_id.is_empty() || push.max_conversation_seq == 0 {
+                return Err(flare_server_core::error::ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "PushEvent: events is empty and ping fields are incomplete",
+                )
+                .build_error());
             }
-        }
-
-        self.push_event_now(ctx, target_user_id, strategy, push)
-            .await
-    }
-
-    fn spawn_debounced_push_event(
-        &self,
-        ctx: Ctx,
-        target_user_id: &str,
-        strategy: PushStrategy,
-        key: PingDebounceKey,
-        delay: std::time::Duration,
-    ) {
-        let Some(debouncer) = self.ping_debouncer.clone() else {
-            return;
-        };
-        let online = self.online.clone();
-        let gateway_router = self.gateway_router.clone();
-        let target_user_id = target_user_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let Some(push) = debouncer.take_pending(&key).await else {
-                return;
+            let request = DeliverToConversationRequest {
+                conversation_id,
+                options: push.options.clone(),
+                payload: Some(DeliverPayload::Ping(ConversationWatermarkPing {
+                    max_conversation_seq: push.max_conversation_seq,
+                    delivery_mode: push.delivery_mode,
+                    inline_events_truncated: push.inline_events_truncated,
+                })),
             };
-            let executor = GatewayPushExecutor {
-                online,
-                gateway_router,
-                ping_debouncer: None,
-                device_cache: tokio::sync::Mutex::new(HashMap::new()),
+            self.gateway_router
+                .broadcast_deliver_to_conversation(request)
+                .await?;
+            return Ok(());
+        }
+
+        // 有 events：按 conversation_id 分组（同批可能含多会话），每会话广播一次。
+        // max_conversation_seq 留 0 由网关从 events 的 conversation_seq 推断（避免跨会话水位串扰）。
+        let mut by_conversation: HashMap<String, Vec<Event>> = HashMap::new();
+        for event in push.events {
+            by_conversation
+                .entry(event.conversation_id.clone())
+                .or_default()
+                .push(event);
+        }
+        for (conversation_id, events) in by_conversation {
+            if conversation_id.trim().is_empty() {
+                tracing::warn!("PushEvent: skip event batch with empty conversation_id");
+                continue;
+            }
+            let request = DeliverToConversationRequest {
+                conversation_id,
+                options: push.options.clone(),
+                payload: Some(DeliverPayload::Events(ConversationEventsDelivery {
+                    events,
+                    delivery_mode: push.delivery_mode,
+                    inline_events_truncated: push.inline_events_truncated,
+                })),
             };
-            if let Err(error) = executor
-                .push_event_now(&ctx, &target_user_id, strategy, push)
-                .await
-            {
-                tracing::warn!(
-                    target_user_id = %target_user_id,
-                    error = %error,
-                    "Debounced push event trailing ping failed"
-                );
-            }
-        });
-    }
-
-    async fn push_event_now(
-        &self,
-        ctx: &Ctx,
-        target_user_id: &str,
-        strategy: PushStrategy,
-        push: PushEventRequest,
-    ) -> Result<()> {
-        let core = ctx.as_ref();
-        let target_user_ids = Self::resolve_target_user_ids(target_user_id, &push.user_ids);
-        if target_user_ids.is_empty() {
-            return Err(flare_server_core::error::ErrorBuilder::new(
-                ErrorCode::InvalidParameter,
-                "PushEvent: target user_ids is empty",
-            )
-            .build_error());
-        }
-        let route_results = stream::iter(target_user_ids)
-            .map(|user_id| async move {
-                let devices = self.list_user_devices_cached(core, &user_id).await?;
-                let targets = select_push_targets(&devices, &user_id, strategy)?;
-                Ok::<_, FlareError>(targets)
-            })
-            .buffer_unordered(USER_ROUTE_LOOKUP_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut targets = Vec::new();
-        let mut first_error = None::<(String, ErrorCode)>;
-        for result in route_results {
-            match result {
-                Ok(mut user_targets) => targets.append(&mut user_targets),
-                Err(error) => {
-                    let code = Self::route_failure_code(&error);
-                    first_error.get_or_insert_with(|| (error.to_string(), code));
-                }
-            }
-        }
-        let by_gw = partition_targets_by_gateway(&targets);
-        let mut success_count = 0usize;
-        let mut failure_count = 0usize;
-        for (gid, ts) in by_gw {
-            let push_g = merge_push_event_for_gateway(push.clone(), &ts);
-            match self.gateway_router.route_push_event(&gid, push_g).await {
-                Ok(_) => success_count += 1,
-                Err(error) => {
-                    failure_count += 1;
-                    let code = Self::route_failure_code(&error);
-                    first_error.get_or_insert_with(|| (error.to_string(), code));
-                    tracing::warn!(
-                        target_user_id,
-                        gateway_id = %gid,
-                        error = %error,
-                        "Skipping failed gateway route for push event"
-                    );
-                }
-            }
-        }
-        if success_count == 0
-            && let Some((error, code)) = first_error
-        {
-            return Err(Self::map_route_failure(
-                flare_server_core::error::FlareError::system((error).to_string()),
-                code,
-                "Failed to route push event",
-            ));
-        }
-        if failure_count > 0 {
-            tracing::warn!(
-                target_user_id,
-                success_gateway_count = success_count,
-                failed_gateway_count = failure_count,
-                "Push event completed with stale or failed gateway routes"
-            );
+            self.gateway_router
+                .broadcast_deliver_to_conversation(request)
+                .await?;
         }
         Ok(())
     }
@@ -502,42 +398,6 @@ fn device_route_cache_ttl() -> Duration {
         .unwrap_or(DEFAULT_DEVICE_ROUTE_CACHE_TTL)
 }
 
-fn event_ping_watermark(push: &PushEventRequest) -> Option<(String, u64)> {
-    let conversation_id = if push.conversation_id.trim().is_empty() {
-        push.events.first()?.conversation_id.trim().to_string()
-    } else {
-        push.conversation_id.trim().to_string()
-    };
-    if conversation_id.is_empty() {
-        return None;
-    }
-
-    let max_seq = push
-        .events
-        .iter()
-        .map(|event| event.conversation_seq)
-        .max()
-        .unwrap_or(0)
-        .max(push.max_conversation_seq);
-    (max_seq > 0).then_some((conversation_id, max_seq))
-}
-
-fn pending_ping_request(
-    push: &PushEventRequest,
-    conversation_id: &str,
-    max_conversation_seq: u64,
-) -> PushEventRequest {
-    PushEventRequest {
-        user_ids: push.user_ids.clone(),
-        events: vec![],
-        options: push.options.clone(),
-        conversation_id: conversation_id.to_string(),
-        max_conversation_seq,
-        delivery_mode: EventEnvelopeDeliveryMode::Ping as i32,
-        inline_events_truncated: true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,20 +420,5 @@ mod tests {
 
         assert_eq!(code, ErrorCode::UserOffline);
         assert!(!code.is_retryable());
-    }
-
-    #[test]
-    fn event_ping_watermark_uses_explicit_ping_fields() {
-        let push = PushEventRequest {
-            user_ids: vec!["u1".to_string()],
-            events: vec![],
-            options: None,
-            conversation_id: "c1".to_string(),
-            max_conversation_seq: 42,
-            delivery_mode: EventEnvelopeDeliveryMode::Ping as i32,
-            inline_events_truncated: true,
-        };
-
-        assert_eq!(event_ping_watermark(&push), Some(("c1".to_string(), 42)));
     }
 }

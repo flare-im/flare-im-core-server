@@ -2,10 +2,7 @@
 //!
 //! [`PushRepository`]：基于 `ServerHandle` 的真实推送（需启动时装配句柄）。
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicI32, Ordering},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_core::common::protocol::{
@@ -15,7 +12,6 @@ use flare_core::common::protocol::{
 use flare_core::server::handle::ServerHandle;
 use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
-use futures::stream::{self, StreamExt};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -25,8 +21,6 @@ use crate::domain::ports::IPushPort;
 pub struct PushRepository {
     server_handle: Arc<Mutex<Option<Arc<dyn ServerHandle>>>>,
 }
-
-const PUSH_CONNECTION_FANOUT_CONCURRENCY: usize = 64;
 
 impl PushRepository {
     pub fn new(server_handle: Arc<Mutex<Option<Arc<dyn ServerHandle>>>>) -> Self {
@@ -192,44 +186,24 @@ impl IPushPort for PushRepository {
             metadata: Default::default(),
             seq: 0,
         };
-        let frame = Arc::new(frame_with_payload_command(cmd, Reliability::AtLeastOnce));
-        let success_count = Arc::new(AtomicI32::new(0));
-        let failure_count = Arc::new(AtomicI32::new(0));
-
-        stream::iter(connection_ids)
-            .for_each_concurrent(PUSH_CONNECTION_FANOUT_CONCURRENCY, |connection_id| {
-                let handle = Arc::clone(&handle);
-                let frame = Arc::clone(&frame);
-                let success_count = Arc::clone(&success_count);
-                let failure_count = Arc::clone(&failure_count);
-                let message_id = message_id.clone();
-                async move {
-                    match handle.send_to(&connection_id, &frame).await {
-                        Ok(()) => {
-                            success_count.fetch_add(1, Ordering::Relaxed);
-                            debug!(
-                                connection_id = %connection_id,
-                                message_id = %message_id,
-                                "Payload pushed to connection"
-                            );
-                        }
-                        Err(error) => {
-                            failure_count.fetch_add(1, Ordering::Relaxed);
-                            warn!(
-                                connection_id = %connection_id,
-                                message_id = %message_id,
-                                ?error,
-                                "Failed to send payload to connection"
-                            );
-                        }
-                    }
-                }
-            })
-            .await;
-
-        Ok((
-            success_count.load(Ordering::Relaxed),
-            failure_count.load(Ordering::Relaxed),
-        ))
+        let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
+        // 分组扇出（flare-core）：同（格式,压缩）无加密连接共享一次序列化，
+        // N 订阅者下行从 N 次 serialize+compress → 组数次（通常 1）。
+        let (success, failure) = handle.send_to_connections(&connection_ids, &frame).await;
+        if failure > 0 {
+            warn!(
+                message_id = %message_id,
+                success,
+                failure,
+                "payload fanout finished with failures"
+            );
+        } else {
+            debug!(
+                message_id = %message_id,
+                success,
+                "payload fanout finished"
+            );
+        }
+        Ok((success, failure))
     }
 }

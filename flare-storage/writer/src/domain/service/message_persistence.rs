@@ -53,6 +53,7 @@ enum IdempotencyReservation {
     ClientMessageId {
         client_msg_id: String,
         sender_id: Option<String>,
+        conversation_id: Option<String>,
     },
 }
 
@@ -194,6 +195,7 @@ where
                             ctx,
                             &prepared.message.client_msg_id,
                             Some(&prepared.message.sender_id),
+                            Some(&prepared.conversation_id),
                         )
                         .await
                     {
@@ -203,6 +205,8 @@ where
                                 client_msg_id: prepared.message.client_msg_id.clone(),
                                 sender_id: (!prepared.message.sender_id.is_empty())
                                     .then(|| prepared.message.sender_id.clone()),
+                                conversation_id: (!prepared.conversation_id.is_empty())
+                                    .then(|| prepared.conversation_id.clone()),
                             },
                         }),
                         Ok(false) => Ok(IdempotencyDecision {
@@ -274,9 +278,15 @@ where
             IdempotencyReservation::ClientMessageId {
                 client_msg_id,
                 sender_id,
+                conversation_id,
             } => {
-                repo.release_by_client_msg_id(ctx, client_msg_id, sender_id.as_deref())
-                    .await
+                repo.release_by_client_msg_id(
+                    ctx,
+                    client_msg_id,
+                    sender_id.as_deref(),
+                    conversation_id.as_deref(),
+                )
+                .await
             }
         };
 
@@ -753,6 +763,34 @@ mod tests {
 
     impl MessageIdempotencyRepository for NoopRepository {
         async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
+            Ok(true)
+        }
+    }
+
+    struct CapturingClientIdempotencyRepository {
+        observed: Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>,
+    }
+
+    impl MessageIdempotencyRepository for CapturingClientIdempotencyRepository {
+        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
+            Ok(true)
+        }
+
+        async fn is_new_by_client_msg_id(
+            &self,
+            _ctx: &Ctx,
+            client_msg_id: &str,
+            sender_id: Option<&str>,
+            conversation_id: Option<&str>,
+        ) -> AnyhowResult<bool> {
+            self.observed
+                .lock()
+                .expect("observed idempotency lock")
+                .push((
+                    client_msg_id.to_string(),
+                    sender_id.map(ToString::to_string),
+                    conversation_id.map(ToString::to_string),
+                ));
             Ok(true)
         }
     }
@@ -1316,6 +1354,50 @@ mod tests {
             stream_attempts.load(Ordering::SeqCst),
             2,
             "retry must re-enter durable event stream path"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_consistency_scopes_client_idempotency_by_conversation() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let stream_writes = Arc::new(AtomicUsize::new(0));
+        let service: MessagePersistenceDomainService<
+            CapturingClientIdempotencyRepository,
+            NoopRepository,
+            NoopRepository,
+            CountingEventStreamRepository,
+            NoopRepository,
+            NoopRepository,
+        > = MessagePersistenceDomainService::new(
+            Some(Arc::new(CapturingClientIdempotencyRepository {
+                observed: observed.clone(),
+            })),
+            None,
+            Some(Arc::new(NoopRepository)),
+            Some(Arc::new(CountingEventStreamRepository {
+                writes: stream_writes,
+            })),
+            None,
+            Some(Arc::new(NoopRepository)),
+        );
+        let mut prepared = prepared_message("message-a", 1);
+        prepared.message.client_msg_id = "client-a".to_string();
+
+        service
+            .ensure_consistency(&test_ctx(), prepared)
+            .await
+            .expect("message should persist");
+
+        assert_eq!(
+            observed
+                .lock()
+                .expect("observed idempotency lock")
+                .as_slice(),
+            &[(
+                "client-a".to_string(),
+                Some("sender-a".to_string()),
+                Some("conversation-a".to_string()),
+            )]
         );
     }
 

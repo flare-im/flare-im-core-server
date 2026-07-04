@@ -701,6 +701,27 @@ pub struct MessageOrchestratorServiceConfig {
     /// Prometheus 指标路径
     #[serde(default)]
     pub metrics_path: Option<String>,
+    /// 发送入口限流开关
+    #[serde(default)]
+    pub send_rate_limit_enabled: Option<bool>,
+    /// tenant 维度每秒发送上限，0 表示不限制
+    #[serde(default)]
+    pub send_rate_limit_tenant_per_second: Option<u32>,
+    /// tenant+sender 维度每秒发送上限，0 表示不限制
+    #[serde(default)]
+    pub send_rate_limit_tenant_sender_per_second: Option<u32>,
+    /// tenant+conversation 维度每秒发送上限，0 表示不限制
+    #[serde(default)]
+    pub send_rate_limit_tenant_conversation_per_second: Option<u32>,
+    /// 发送限流 fixed-window 大小（毫秒）
+    #[serde(default)]
+    pub send_rate_limit_window_ms: Option<u64>,
+    /// 发送限流本地保留 key 上限
+    #[serde(default)]
+    pub send_rate_limit_max_tracked_keys: Option<usize>,
+    /// WAL 后 MQ publish 阶段超时（毫秒），0 表示不启用额外阶段超时
+    #[serde(default)]
+    pub send_publish_timeout_ms: Option<u64>,
 }
 
 /// 消息摄入服务配置。

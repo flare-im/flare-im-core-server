@@ -27,7 +27,7 @@ pub use instrumentation::{
 };
 pub use message::{
     Attachment, Message as MessageDomain, RetentionTransitionError, message_from_proto,
-    message_to_proto,
+    message_into_proto, message_to_proto,
 };
 pub use service_names::{get_service_name, service_name_env_var, validate_service_name};
 pub use utils::{

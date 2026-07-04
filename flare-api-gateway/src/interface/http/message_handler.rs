@@ -67,6 +67,7 @@ pub async fn send_message(
         message_type: req.message_type,
         message_seq: None,
         channel_id: req.channel_id,
+        thread_id: None,
         sender_name: req.sender_name,
         sender_avatar: req.sender_avatar,
         // HTTP 网关保留 JSON 透明代理能力；结构化客户端仍应通过 SDK 写入具体 MessageContent 变体。

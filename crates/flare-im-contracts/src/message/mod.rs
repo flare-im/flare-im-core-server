@@ -5,5 +5,5 @@
 mod convert;
 mod model;
 
-pub use convert::{message_from_proto, message_to_proto};
+pub use convert::{message_from_proto, message_into_proto, message_to_proto};
 pub use model::{Attachment, Message, RetentionTransitionError};

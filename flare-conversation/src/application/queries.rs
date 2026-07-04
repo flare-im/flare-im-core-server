@@ -24,6 +24,10 @@ pub struct ConversationBootstrapQuery {
     pub client_cursor: HashMap<String, i64>,
     pub include_recent: bool,
     pub recent_limit: Option<i32>,
+    /// 增量过滤边界（毫秒）：只返回 effective_updated_at 晚于该时刻的会话；0=全量。
+    pub updated_after_ms: i64,
+    /// 返回会话数上限：0=服务默认；>0 受硬上限钳制（编排层快照分页用高值覆盖大账号）。
+    pub max_conversations: i32,
 }
 
 /// 单会话详情（读模型）
