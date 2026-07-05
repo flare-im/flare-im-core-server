@@ -49,7 +49,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.94.0"
 authors = ["Flare Team"]
@@ -117,27 +117,27 @@ axum = "0.8"
 etcd-client = "0.17"
 
 # Flare Core
-flare-core = { path = "../flare-core" }
+flare-core = { version = "1.0.3", path = "../flare-core" }
 
 # Flare Server Core (启用 proto feature 以使用错误转换函数)
-flare-server-core = { path = "../flare-server-core", features = ["proto", "grpc", "http"] }
-flare-core-base = { path = "../flare-server-core/flare-core-base" }
-flare-core-messaging = { path = "../flare-server-core/flare-core-messaging" }
-flare-core-runtime = { path = "../flare-server-core/flare-core-runtime" }
+flare-server-core = { version = "1.0.3", path = "../flare-server-core", features = ["proto", "grpc", "http"] }
+flare-core-base = { version = "1.0.3", path = "../flare-server-core/flare-core-base" }
+flare-core-messaging = { version = "1.0.3", path = "../flare-server-core/flare-core-messaging" }
+flare-core-runtime = { version = "1.0.3", path = "../flare-server-core/flare-core-runtime" }
 
 # Flare IM shared crates
-flare-im-contracts = { path = "crates/flare-im-contracts" }
-flare-im-service-kit = { path = "crates/flare-im-service-kit" }
-flare-im-message-pipeline = { path = "crates/flare-im-message-pipeline" }
-flare-im-seq = { path = "crates/flare-im-seq" }
-flare-im-ack = { path = "crates/flare-im-ack" }
-flare-im-hooks = { path = "crates/flare-im-hooks" }
-flare-im-capability-core = { path = "crates/flare-im-capability-core" }
-flare-call = { path = "crates/flare-call" }
+flare-im-contracts = { version = "1.0.3", path = "crates/flare-im-contracts" }
+flare-im-service-kit = { version = "1.0.3", path = "crates/flare-im-service-kit" }
+flare-im-message-pipeline = { version = "1.0.3", path = "crates/flare-im-message-pipeline" }
+flare-im-seq = { version = "1.0.3", path = "crates/flare-im-seq" }
+flare-im-ack = { version = "1.0.3", path = "crates/flare-im-ack" }
+flare-im-hooks = { version = "1.0.3", path = "crates/flare-im-hooks" }
+flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capability-core" }
+flare-call = { version = "1.0.3", path = "crates/flare-call" }
 
 # Flare Proto
-flare-proto = { path = "../flare-proto" }
-flare-grpc-proto = { path = "../flare-grpc-proto" }
+flare-proto = { version = "1.0.3", path = "../flare-proto" }
+flare-grpc-proto = { version = "1.0.3", path = "../flare-grpc-proto" }
 
 # Prometheus 指标收集
 prometheus = "0.14"
