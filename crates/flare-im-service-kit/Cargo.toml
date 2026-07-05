@@ -19,7 +19,7 @@ flare-core = { workspace = true }
 flare-core-base = { workspace = true }
 flare-core-runtime = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-contracts = { path = "../flare-im-contracts" }
+flare-im-contracts = { version = "1.0.3", path = "../flare-im-contracts" }
 flare-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
 hex = { workspace = true }
