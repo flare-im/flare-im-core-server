@@ -12,8 +12,8 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 flare-core-base = { workspace = true }
 flare-grpc-proto = { workspace = true }
-flare-im-contracts = { path = "../flare-im-contracts" }
-flare-im-service-kit = { path = "../flare-im-service-kit", features = ["discovery"] }
+flare-im-contracts = "1.0.3"
+flare-im-service-kit = { version = "1.0.3", features = ["discovery"] }
 flare-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "grpc"] }
 once_cell = { workspace = true }

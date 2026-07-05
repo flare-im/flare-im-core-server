@@ -17,7 +17,7 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-contracts = { workspace = true }
 flare-im-service-kit = { workspace = true }
-flare-core = { path = "../../../flare-core" }
+flare-core = "1.0.3"
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
