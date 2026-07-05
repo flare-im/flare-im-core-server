@@ -168,9 +168,12 @@ fn capability_config_from_env(
         .or_else(|| postgres_profile.and_then(|p| p.max_lifetime_seconds))
         .unwrap_or(1800);
 
+    // Config center is Consul (see deploy/docker-compose.yml: Consul serves both service
+    // registry and config center); there is no etcd in the deployment. Defaulting to the
+    // stale etcd endpoint caused the config watcher to fail every 60s with "tcp connect error".
     let config_center_endpoint = std::env::var("CONFIG_CENTER_ENDPOINT")
         .ok()
-        .or_else(|| Some("etcd://localhost:22379".to_string()));
+        .or_else(|| Some("consul://localhost:28500".to_string()));
 
     let tenant_id = std::env::var("TENANT_ID").ok();
     let config_file = std::env::var("CONFIG_FILE")
