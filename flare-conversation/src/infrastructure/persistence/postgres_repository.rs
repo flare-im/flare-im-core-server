@@ -17,6 +17,48 @@ use crate::domain::model::{
 };
 use crate::domain::repository::ConversationRepository;
 
+/// 会话摘要读时补全:解码最后一条消息的 content(BYTEA proto `MessageContent`)→
+/// (预览文本, content_type 标签)。文本类取正文,媒体/卡片等取占位标签;解码失败或空 → (None, None)。
+/// 仅在读会话列表时按会话取最后一行解码,不新增落库列。
+fn last_message_preview_from_content(bytes: Option<&[u8]>) -> (Option<String>, Option<String>) {
+    use flare_proto::common::{MessageContent, message_content::Content};
+    use prost::Message as _;
+    let bytes = match bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => return (None, None),
+    };
+    let content = match MessageContent::decode(bytes) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let (preview, kind): (String, &str) = match content.content {
+        Some(Content::Text(t)) => (t.text, "text"),
+        Some(Content::RichText(_)) => ("[富文本]".to_string(), "rich_text"),
+        Some(Content::Image(_)) | Some(Content::ImageGroup(_)) => ("[图片]".to_string(), "image"),
+        Some(Content::Video(_)) => ("[视频]".to_string(), "video"),
+        Some(Content::Audio(_)) => ("[语音]".to_string(), "audio"),
+        Some(Content::File(_)) => ("[文件]".to_string(), "file"),
+        Some(Content::Location(_)) => ("[位置]".to_string(), "location"),
+        Some(Content::Sticker(_)) | Some(Content::Emoji(_)) => ("[表情]".to_string(), "sticker"),
+        Some(Content::Card(_)) | Some(Content::AppCard(_)) | Some(Content::LinkCard(_)) => {
+            ("[卡片]".to_string(), "card")
+        }
+        Some(Content::Quote(_)) => ("[引用]".to_string(), "quote"),
+        Some(Content::Forward(_)) => ("[转发]".to_string(), "forward"),
+        Some(Content::Notification(_)) | Some(Content::System(_)) => {
+            ("[系统消息]".to_string(), "system")
+        }
+        Some(_) => ("[消息]".to_string(), "other"),
+        None => return (None, None),
+    };
+    let preview = if preview.trim().is_empty() {
+        None
+    } else {
+        Some(preview)
+    };
+    (preview, Some(kind.to_string()))
+}
+
 /// 会话查询行结构（与 init_v2 一致：visibility 为 INT）
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
@@ -349,7 +391,12 @@ impl ConversationRepository for PostgresConversationRepository {
                     )
                     THEN COALESCE(peer.max_peer_read_seq, 0)
                     ELSE 0
-                END AS peer_read_seq
+                END AS peer_read_seq,
+                message_tail.last_message_id AS last_message_id,
+                message_tail.last_sender_id AS last_sender_id,
+                message_tail.last_message_type AS last_message_type,
+                message_tail.last_message_at AS last_message_at,
+                message_tail.last_content AS last_content
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
             LEFT JOIN LATERAL (
@@ -361,10 +408,16 @@ impl ConversationRepository for PostgresConversationRepository {
                   AND NOT COALESCE(sp2.is_deleted, false)
             ) peer ON TRUE
             LEFT JOIN LATERAL (
-                SELECT MAX(m.seq) AS max_seq, MAX(m.timestamp) AS last_message_at
+                -- 取会话最后一条消息行(seq 最大)。seq 单调即为最新,兼作 max_seq/last_message_at,
+                -- 并带出发送者/类型/content 供读时补全会话摘要预览。
+                SELECT m.seq AS max_seq, m.timestamp AS last_message_at,
+                       m.server_id AS last_message_id, m.sender_id AS last_sender_id,
+                       m.message_type AS last_message_type, m.content AS last_content
                 FROM messages m
                 WHERE m.tenant_id = s.tenant_id
                   AND m.conversation_id = s.conversation_id
+                ORDER BY m.seq DESC
+                LIMIT 1
             ) message_tail ON TRUE
             LEFT JOIN LATERAL (
                 SELECT COUNT(1)::INT AS unread_count
@@ -429,6 +482,15 @@ impl ConversationRepository for PostgresConversationRepository {
             let visible_after_seq: i64 = row.get("visible_after_seq");
             let peer_read_seq: i64 = row.get("peer_read_seq");
 
+            // 读时补全会话最后一条消息(替代注释中未落地的 ApplicationService/MessageProvider)。
+            let last_message_id: Option<String> = row.get("last_message_id");
+            let last_sender_id: Option<String> = row.get("last_sender_id");
+            let last_message_type: Option<i32> = row.get("last_message_type");
+            let last_message_time: Option<DateTime<Utc>> = row.get("last_message_at");
+            let last_content: Option<Vec<u8>> = row.get("last_content");
+            let (last_message_preview, last_content_type) =
+                last_message_preview_from_content(last_content.as_deref());
+
             let attributes: HashMap<String, String> = attributes
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
@@ -460,12 +522,12 @@ impl ConversationRepository for PostgresConversationRepository {
                     .map(ConversationType::from_int)
                     .unwrap_or(ConversationType::Unspecified),
                 business_type,
-                last_message_id: None,   // 将在ApplicationService层补充
-                last_message_time: None, // 将在ApplicationService层补充
-                last_sender_id: None,    // 将在ApplicationService层补充
-                last_message_type: None, // 将在ApplicationService层补充
-                last_content_type: None, // 将在ApplicationService层补充
-                last_message_preview: None,
+                last_message_id,
+                last_message_time,
+                last_sender_id,
+                last_message_type,
+                last_content_type,
+                last_message_preview,
                 unread_count,
                 last_read_seq,
                 metadata: attributes,
@@ -1789,5 +1851,49 @@ impl ConversationRepository for PostgresConversationRepository {
         };
 
         Ok(unread_count)
+    }
+}
+
+#[cfg(test)]
+mod last_message_preview_tests {
+    use super::last_message_preview_from_content;
+    use flare_proto::common::{ImageContent, MessageContent, TextContent, message_content::Content};
+    use prost::Message as _;
+
+    fn encode(content: Content) -> Vec<u8> {
+        MessageContent {
+            content: Some(content),
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn text_content_yields_text_preview() {
+        let bytes = encode(Content::Text(TextContent {
+            text: "hello preview".to_string(),
+            mentions: vec![],
+        }));
+        let (preview, kind) = last_message_preview_from_content(Some(&bytes));
+        assert_eq!(preview.as_deref(), Some("hello preview"));
+        assert_eq!(kind.as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn media_content_yields_label() {
+        let bytes = encode(Content::Image(ImageContent::default()));
+        let (preview, kind) = last_message_preview_from_content(Some(&bytes));
+        assert_eq!(preview.as_deref(), Some("[图片]"));
+        assert_eq!(kind.as_deref(), Some("image"));
+    }
+
+    #[test]
+    fn empty_or_invalid_content_yields_none() {
+        assert_eq!(last_message_preview_from_content(None), (None, None));
+        assert_eq!(last_message_preview_from_content(Some(&[])), (None, None));
+        // 无效 protobuf(非法 wire type)→ 解码失败 → None。
+        assert_eq!(
+            last_message_preview_from_content(Some(&[0xff, 0xff])),
+            (None, None)
+        );
     }
 }
