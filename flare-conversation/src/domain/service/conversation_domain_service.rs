@@ -826,11 +826,26 @@ fn last_message_preview_text(message: &Message) -> Option<String> {
         return Some(preview.to_string());
     }
 
+    // 与 sync-orchestrator / 会话摘要读时补全一致:文本取正文,媒体/卡片等取占位标签。
     let preview = match message.content.as_ref()?.content.as_ref()? {
-        Content::Text(text) => text.text.trim(),
-        _ => "",
+        Content::Text(text) => {
+            let t = text.text.trim();
+            return (!t.is_empty()).then(|| t.to_string());
+        }
+        Content::RichText(_) => "[富文本]",
+        Content::Image(_) | Content::ImageGroup(_) => "[图片]",
+        Content::Video(_) => "[视频]",
+        Content::Audio(_) => "[语音]",
+        Content::File(_) => "[文件]",
+        Content::Location(_) => "[位置]",
+        Content::Sticker(_) | Content::Emoji(_) => "[表情]",
+        Content::Card(_) | Content::AppCard(_) | Content::LinkCard(_) => "[卡片]",
+        Content::Quote(_) => "[引用]",
+        Content::Forward(_) => "[转发]",
+        Content::Notification(_) | Content::System(_) => "[系统消息]",
+        _ => "[消息]",
     };
-    (!preview.is_empty()).then(|| preview.to_string())
+    Some(preview.to_string())
 }
 
 fn required_route_id(
