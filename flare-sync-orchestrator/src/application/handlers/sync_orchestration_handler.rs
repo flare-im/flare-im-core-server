@@ -1465,17 +1465,49 @@ fn merge_sync_summary_conversation_type(from_message: i32, hint: i32) -> i32 {
     hint
 }
 
+/// 从消息 content 派生会话列表预览文本:文本类取正文,媒体/卡片等取占位标签。
+/// 供 `message_preview` 在 `attributes["text_preview"]` 缺失时兜底(历史消息普遍未写该属性)。
+fn preview_text_from_content(content: Option<&flare_proto::common::MessageContent>) -> String {
+    use flare_proto::common::message_content::Content;
+    let Some(mc) = content else {
+        return String::new();
+    };
+    match &mc.content {
+        Some(Content::Text(t)) => t.text.clone(),
+        Some(Content::RichText(_)) => "[富文本]".to_string(),
+        Some(Content::Image(_)) | Some(Content::ImageGroup(_)) => "[图片]".to_string(),
+        Some(Content::Video(_)) => "[视频]".to_string(),
+        Some(Content::Audio(_)) => "[语音]".to_string(),
+        Some(Content::File(_)) => "[文件]".to_string(),
+        Some(Content::Location(_)) => "[位置]".to_string(),
+        Some(Content::Sticker(_)) | Some(Content::Emoji(_)) => "[表情]".to_string(),
+        Some(Content::Card(_)) | Some(Content::AppCard(_)) | Some(Content::LinkCard(_)) => {
+            "[卡片]".to_string()
+        }
+        Some(Content::Quote(_)) => "[引用]".to_string(),
+        Some(Content::Forward(_)) => "[转发]".to_string(),
+        Some(Content::Notification(_)) | Some(Content::System(_)) => "[系统消息]".to_string(),
+        Some(_) => "[消息]".to_string(),
+        None => String::new(),
+    }
+}
+
 fn message_preview(message: Option<&Message>, sent_at: i64) -> Option<MessagePreview> {
-    message.map(|m| MessagePreview {
-        message_id: m.server_id.clone(),
-        sender_id: m.sender_id.clone(),
-        r#type: m.message_type,
-        text: m
+    message.map(|m| {
+        // 优先 attributes["text_preview"](写入方已算好);缺失/空时从 content 派生。
+        let text = m
             .attributes
             .get("text_preview")
+            .filter(|t| !t.trim().is_empty())
             .cloned()
-            .unwrap_or_default(),
-        created_at: sent_at,
+            .unwrap_or_else(|| preview_text_from_content(m.content.as_ref()));
+        MessagePreview {
+            message_id: m.server_id.clone(),
+            sender_id: m.sender_id.clone(),
+            r#type: m.message_type,
+            text,
+            created_at: sent_at,
+        }
     })
 }
 
@@ -2505,5 +2537,47 @@ mod tests {
         assert_eq!(cached.last_read_seq, 118);
         assert_eq!(cached.last_message_seq, 121);
         assert_eq!(cached.last_sync_at, 2_000);
+    }
+
+    #[test]
+    fn message_preview_derives_text_from_content_when_attribute_missing() {
+        use flare_proto::common::{
+            ImageContent, MessageContent, TextContent, message_content::Content,
+        };
+
+        // 无 text_preview 属性 → 从 content 取正文(修复会话列表恒显'暂无消息')。
+        let mut text_msg = Message {
+            server_id: "s1".to_string(),
+            sender_id: "u1".to_string(),
+            message_type: 1,
+            ..Default::default()
+        };
+        text_msg.content = Some(MessageContent {
+            content: Some(Content::Text(TextContent {
+                text: "hello list".to_string(),
+                mentions: vec![],
+            })),
+        });
+        assert_eq!(message_preview(Some(&text_msg), 123).unwrap().text, "hello list");
+
+        // 媒体 → 占位标签。
+        let mut image_msg = Message::default();
+        image_msg.content = Some(MessageContent {
+            content: Some(Content::Image(ImageContent::default())),
+        });
+        assert_eq!(message_preview(Some(&image_msg), 1).unwrap().text, "[图片]");
+
+        // attributes["text_preview"] 优先于 content。
+        let mut attr_msg = Message::default();
+        attr_msg
+            .attributes
+            .insert("text_preview".to_string(), "attr wins".to_string());
+        attr_msg.content = Some(MessageContent {
+            content: Some(Content::Text(TextContent {
+                text: "ignored".to_string(),
+                mentions: vec![],
+            })),
+        });
+        assert_eq!(message_preview(Some(&attr_msg), 1).unwrap().text, "attr wins");
     }
 }
