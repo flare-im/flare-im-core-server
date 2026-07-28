@@ -136,8 +136,8 @@ flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capabili
 flare-call = { version = "1.0.3", path = "crates/flare-call" }
 
 # Flare Proto
-flare-proto = { version = "1.0.3", path = "../flare-proto" }
-flare-grpc-proto = { version = "1.0.3", path = "../flare-grpc-proto" }
+flare-proto = { version = "2.0.0", path = "../flare-proto" }
+flare-grpc-proto = { version = "2.0.0", path = "../flare-grpc-proto" }
 
 # Prometheus 指标收集
 prometheus = "0.14"
