@@ -42,6 +42,17 @@ use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use tracing::debug;
 
+/// "带下限"分配的原子 Lua 脚本（与 [`SequenceAllocator::seq_after_floor`] 语义一一对应）。
+///
+/// 读取当前高水位（缺失视为 0），与 `floor`(ARGV[1]) 取大，`+1` 后写回并返回。
+/// 整段脚本在 Redis 单线程内原子执行，天然跨实例串行；不设 TTL —— 持久会话高水位必须长期保留。
+const FLOOR_SEQ_LUA: &str = r"local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+local floor = tonumber(ARGV[1])
+if cur < floor then cur = floor end
+cur = cur + 1
+redis.call('SET', KEYS[1], cur)
+return cur";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SequenceRange {
     next: u64,
@@ -130,6 +141,32 @@ impl SequenceAllocator {
         pipe
     }
 
+    /// 计算"带下限(floor)"的下一个序列号：`max(当前高水位, floor) + 1`。
+    ///
+    /// 这是 [`Self::allocate_seq_with_floor`] 的纯逻辑核心，Lua 原子脚本与之一一对应。
+    /// - `current_high_water`：Redis 中当前 seq 高水位（key 缺失时为 0）。
+    /// - `floor`：持久化存储的会话 max_seq（权威高水位下限）。
+    ///
+    /// 语义保证：
+    /// 1. 返回值恒 `> max(current_high_water, floor)`，即绝不回退到已用/已持久化区间；
+    /// 2. `floor` 陈旧偏低无害——`max` 会优先采用更高的 Redis live 高水位；
+    /// 3. `floor` 仅在 Redis 被 flush（高水位 < 持久化 max_seq）时起"救回"作用。
+    ///
+    /// 这是 [`FLOOR_SEQ_LUA`] 原子脚本的参考规格，仅供单测校验语义。
+    #[cfg(test)]
+    pub(crate) fn seq_after_floor(current_high_water: u64, floor: u64) -> u64 {
+        current_high_water.max(floor).saturating_add(1)
+    }
+
+    /// 构建"带下限"分配的原子 Lua 脚本。
+    ///
+    /// 等价于 `redis.call` 版的 [`Self::seq_after_floor`]：读取当前值（缺失视为 0），
+    /// 与 `floor` 取大，`+1` 后写回并返回。整段脚本在 Redis 单线程内原子执行，
+    /// 天然跨实例串行，不设 TTL（持久会话高水位必须长期保留）。
+    fn floor_seq_script() -> redis::Script {
+        redis::Script::new(FLOOR_SEQ_LUA)
+    }
+
     fn build_allocate_batch_pipeline(key: &str, batch_size: u64) -> redis::Pipeline {
         let mut pipe = redis::pipe();
         pipe.atomic().cmd("INCRBY").arg(key).arg(batch_size);
@@ -170,6 +207,55 @@ impl SequenceAllocator {
         let key = self.build_redis_key(tenant_id, conversation_id);
         self.allocate_single_seq(&key, conversation_id, tenant_id)
             .await
+    }
+
+    /// 分配 seq，并保证结果不低于持久化高水位 `floor`（自愈防回退）。
+    ///
+    /// # 背景
+    ///
+    /// `allocate_seq` 依赖 Redis 计数器作为唯一高水位。一旦 Redis 被 flush / 实例重启 /
+    /// key 丢失，缺失 key 的 `INCR` 会从 1 重新计数，而持久化历史（Postgres）仍保留旧的
+    /// 更高 seq —— 新消息因此拿到 **低于历史** 的 seq，客户端按 seq 升序渲染时会把新消息
+    /// 插到历史中间。本方法以持久化 max_seq 作下限，用原子 Lua `max(GET,floor)+1` 消除回退。
+    ///
+    /// # 参数
+    ///
+    /// - `floor`：该会话在持久化存储中的权威 `max_seq`；无历史（新会话）时传 0，
+    ///   行为退化为普通递增。传入偏低的陈旧值也安全——脚本会与 Redis live 高水位取大。
+    ///
+    /// # 返回
+    ///
+    /// - `Ok(seq)`：恒 `> max(redis_high_water, floor)`，严格递增。
+    /// - `Err`：Redis 不可用时返回错误（同 `allocate_seq`，调用方须失败/重试，不得降级发号）。
+    pub async fn allocate_seq_with_floor(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        floor: u64,
+    ) -> Result<u64> {
+        // floor 为 0 时没有回退风险，走更轻量的单次 INCR 快路径。
+        if floor == 0 {
+            return self.allocate_seq(conversation_id, tenant_id).await;
+        }
+
+        let key = self.build_redis_key(tenant_id, conversation_id);
+        let mut conn = self.connection_manager.clone();
+        let seq: u64 = Self::floor_seq_script()
+            .key(&key)
+            .arg(floor)
+            .invoke_async(&mut conn)
+            .await
+            .context("Failed to allocate floor-guarded sequence in Redis")?;
+
+        debug!(
+            conversation_id = %conversation_id,
+            tenant_id = %tenant_id,
+            floor = floor,
+            seq = seq,
+            "Allocated floor-guarded session sequence"
+        );
+
+        Ok(seq)
     }
 
     async fn allocate_single_seq(
@@ -374,6 +460,48 @@ mod tests {
         assert!(packed_contains(&packed, b"INCRBY"));
         assert!(
             !packed_contains(&packed, b"EXPIRE"),
+            "persistent conversation sequence keys must not expire"
+        );
+    }
+
+    #[test]
+    fn seq_after_floor_never_regresses_below_floor() {
+        // 冷 key（Redis 被 flush）后高水位=5，但持久化 max_seq=76 → 必须救回到 77。
+        assert_eq!(SequenceAllocator::seq_after_floor(5, 76), 77);
+        // key 缺失（高水位=0）+ 有历史 → 从 floor 之上继续。
+        assert_eq!(SequenceAllocator::seq_after_floor(0, 76), 77);
+        // floor 恰等于高水位 → 正常 +1。
+        assert_eq!(SequenceAllocator::seq_after_floor(76, 76), 77);
+    }
+
+    #[test]
+    fn seq_after_floor_prefers_live_high_water_when_floor_is_stale() {
+        // Redis live 高水位(100)高于陈旧 floor(76) → 采用 live，floor 不拖低。
+        assert_eq!(SequenceAllocator::seq_after_floor(100, 76), 101);
+        // 全新会话（无历史，floor=0，高水位=0）→ 从 1 开始。
+        assert_eq!(SequenceAllocator::seq_after_floor(0, 0), 1);
+    }
+
+    #[test]
+    fn seq_after_floor_is_strictly_monotonic_over_both_inputs() {
+        // 返回值恒 > max(current, floor)，绝不落进已用/已持久化区间。
+        for &(cur, floor) in &[(0u64, 0u64), (5, 76), (76, 5), (999, 1000), (1000, 999)] {
+            let next = SequenceAllocator::seq_after_floor(cur, floor);
+            assert!(next > cur, "next({next}) must exceed current({cur})");
+            assert!(next > floor, "next({next}) must exceed floor({floor})");
+        }
+    }
+
+    #[test]
+    fn floor_seq_lua_reads_and_writes_high_water_without_expiry() {
+        // Lua 脚本必须：GET 当前值、与 floor(ARGV[1]) 取大、SET 回写，且绝不 EXPIRE。
+        assert!(FLOOR_SEQ_LUA.contains("redis.call('GET', KEYS[1])"));
+        assert!(FLOOR_SEQ_LUA.contains("tonumber(ARGV[1])"));
+        assert!(FLOOR_SEQ_LUA.contains("if cur < floor then cur = floor end"));
+        assert!(FLOOR_SEQ_LUA.contains("cur = cur + 1"));
+        assert!(FLOOR_SEQ_LUA.contains("redis.call('SET', KEYS[1], cur)"));
+        assert!(
+            !FLOOR_SEQ_LUA.to_uppercase().contains("EXPIRE"),
             "persistent conversation sequence keys must not expire"
         );
     }

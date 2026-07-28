@@ -4,7 +4,8 @@ use tonic::transport::Channel;
 use crate::clients::Ctx;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
-    ExportMessagesRequest, ExportMessagesResponse, GetMessageRequest, GetMessageResponse,
+    ExportMessagesRequest, ExportMessagesResponse, GetConversationMessageHeadRequest,
+    GetConversationMessageHeadResponse, GetMessageRequest, GetMessageResponse,
     QueryMessageEventsRequest, QueryMessageEventsResponse, QueryMessageWriteLedgerRequest,
     QueryMessageWriteLedgerResponse, SearchMessagesRequest, SearchMessagesResponse,
 };
@@ -45,6 +46,19 @@ impl StorageReaderServiceClientWrapper {
         let response = self
             .client
             .get_message(Self::request_with_ctx(ctx, request))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 查询会话在持久化存储中的权威消息头（含 `max_seq`）。
+    pub async fn get_conversation_message_head_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        request: GetConversationMessageHeadRequest,
+    ) -> Result<GetConversationMessageHeadResponse> {
+        let response = self
+            .client
+            .get_conversation_message_head(Self::request_with_ctx(ctx, request))
             .await?;
         Ok(response.into_inner())
     }

@@ -35,7 +35,21 @@ $EDITOR release/deploy.env
 
 ```bash
 cd /path/to/flare-im/flare-im-core
-./release/scripts/build_release_bundle.sh --jobs 1
+./release/scripts/build_linux_bundle_docker.sh --jobs 1
+```
+
+`flarectl.sh deploy` 默认使用 `--build-mode auto`：Linux 构建机直接本机打包；macOS 等非 Linux 构建机会通过 Docker 生成 `linux/amd64` 发布包，避免把 Mach-O/Darwin 二进制上传到 Ubuntu 服务器。也可以显式指定：
+
+```bash
+./release/flarectl.sh deploy --build-mode docker --smoke
+./release/flarectl.sh deploy --build-mode host --smoke
+```
+
+Docker 打包需要本机 Docker。国内网络拉 crate 较慢时可配置 Cargo sparse 镜像：
+
+```bash
+export FLARE_DOCKER_CARGO_REGISTRY_MIRROR='sparse+https://mirrors.ustc.edu.cn/crates.io-index/'
+./release/scripts/build_linux_bundle_docker.sh --jobs 1
 ```
 
 生成目录默认位于：
@@ -196,9 +210,9 @@ cd /opt/flare-im-core/current
 `smoke.sh` 会发送一条单聊文本消息，并验证：
 
 - `flare-message-ingest` 返回成功
-- ACK durability 达到 `SEND_ACK_DURABILITY_BROKER_ACCEPTED`
+- ACK durability 至少达到 `SEND_ACK_DURABILITY_BROKER_ACCEPTED`
 - PostgreSQL `messages` 有持久化记录
-- `message_write_ledger.write_state = ack_published`
+- `message_write_ledger.write_state` 至少达到 `archive_persisted`
 - `flare-storage-reader` 可按 seq 读回刚发送的消息
 
 也可以启动后自动跑 smoke：

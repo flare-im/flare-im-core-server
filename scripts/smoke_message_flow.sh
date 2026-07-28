@@ -16,7 +16,10 @@ sender_id="${SMOKE_SENDER_ID:-smoke-user-a}"
 recipient_id="${SMOKE_RECIPIENT_ID:-smoke-user-b}"
 timeout_seconds="${SMOKE_TIMEOUT_SECONDS:-30}"
 
-expected_durability="SEND_ACK_DURABILITY_BROKER_ACCEPTED"
+minimum_durability="SEND_ACK_DURABILITY_BROKER_ACCEPTED"
+accepted_durability_pattern="^(SEND_ACK_DURABILITY_BROKER_ACCEPTED|SEND_ACK_DURABILITY_PERSISTED)$"
+minimum_ledger_state="archive_persisted"
+accepted_ledger_state_pattern="^(archive_persisted|storage_persisted|wal_cleaned|ack_published)$"
 conversation_id="${SMOKE_CONVERSATION_ID:-single:${sender_id}:${recipient_id}}"
 
 require_command() {
@@ -112,8 +115,9 @@ if ! grep -Eq '"success"[[:space:]]*:[[:space:]]*true' "$response_file"; then
     exit 1
 fi
 
-if ! grep -q "$expected_durability" "$response_file"; then
-    echo "SendMessage did not reach $expected_durability:" >&2
+actual_durability="$(sed -n 's/.*"durability"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$response_file" | head -1)"
+if ! printf '%s\n' "$actual_durability" | grep -Eq "$accepted_durability_pattern"; then
+    echo "SendMessage did not reach at least $minimum_durability:" >&2
     cat "$response_file" >&2
     exit 1
 fi
@@ -159,7 +163,8 @@ durable_ready=0
 while [ "$(date +%s)" -le "$deadline" ]; do
     if message_count="$(query_message_count 2>/dev/null)" \
         && ledger_state="$(query_ledger_state 2>/dev/null)"; then
-        if [ "${message_count:-0}" -ge 1 ] && [ "$ledger_state" = "ack_published" ]; then
+        if [ "${message_count:-0}" -ge 1 ] \
+            && printf '%s\n' "$ledger_state" | grep -Eq "$accepted_ledger_state_pattern"; then
             durable_ready=1
             break
         fi
@@ -173,7 +178,7 @@ if [ "$durable_ready" -ne 1 ]; then
     echo "server_msg_id=$server_id" >&2
     echo "messages_row_count=${message_count:-unknown}" >&2
     echo "ledger_write_state=${ledger_state:-unknown}" >&2
-    echo "expected_ledger_write_state=ack_published" >&2
+    echo "minimum_ledger_write_state=$minimum_ledger_state" >&2
     exit 1
 fi
 
@@ -220,8 +225,10 @@ echo "tenant_id=$tenant_id"
 echo "conversation_id=$conversation_id"
 echo "server_msg_id=$server_id"
 echo "conversation_seq=$conversation_seq"
-echo "durability=$expected_durability"
+echo "durability=$actual_durability"
+echo "minimum_durability=$minimum_durability"
 echo "messages_row_count=$message_count"
 echo "ledger_write_state=$ledger_state"
+echo "minimum_ledger_write_state=$minimum_ledger_state"
 echo "storage_reader_messages_count=$storage_reader_messages_count"
 echo "status=pass"

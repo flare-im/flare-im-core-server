@@ -128,8 +128,8 @@ pub fn build_recall_event(
 /// - `server_msg_id`: 被编辑消息的服务端 ID
 /// - `new_content`: 新内容（序列化后的字节）
 ///
-/// 注：编辑版本号不在发布端分配（异步扇出下无法权威递增）；客户端按
-/// `conversation_seq` 收敛编辑事件，故事件中的 `edit_version` 置 0（未分配）。
+/// 注：编辑事件不带版本号——发布端在异步扇出下无法权威递增，客户端按
+/// `conversation_seq` 收敛新旧编辑（原 `edit_version` 字段恒 0，已从 proto 移除）。
 ///
 /// # 示例
 /// ```rust
@@ -149,7 +149,6 @@ pub fn build_edit_event(conversation_id: &str, server_msg_id: &str, new_content:
         payload: Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
             new_content: Some(decode_message_content(&new_content)),
-            edit_version: 0,
             reason: String::new(),
             show_edited_mark: true,
         })),
@@ -604,16 +603,10 @@ impl EventBuilder {
     }
 
     /// 设置编辑事件载荷
-    pub fn with_edit_payload(
-        mut self,
-        server_msg_id: &str,
-        new_content: Vec<u8>,
-        edit_version: i32,
-    ) -> Self {
+    pub fn with_edit_payload(mut self, server_msg_id: &str, new_content: Vec<u8>) -> Self {
         self.payload = Some(event::Payload::Edit(MessageEditEvent {
             server_msg_id: server_msg_id.to_string(),
             new_content: Some(decode_message_content(&new_content)),
-            edit_version,
             reason: String::new(),
             show_edited_mark: true,
         }));
@@ -713,7 +706,6 @@ impl EventBuilder {
             payload: Some(event::Payload::Edit(MessageEditEvent {
                 server_msg_id: cmd.base.message_id.clone(),
                 new_content: Some(decode_message_content(&cmd.new_content)),
-                edit_version: 0, // 由 storage 持久化时确定
                 reason: cmd.reason.clone().unwrap_or_default(),
                 show_edited_mark: true,
             })),

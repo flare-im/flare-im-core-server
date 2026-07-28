@@ -232,7 +232,8 @@ pub trait MessageStorage: Send + Sync {
         conversation_id: &str,
     ) -> Result<Option<i64>>;
 
-    /// 同步用：最新消息 seq / server_id / 时间（会话无消息则 `None`）
+    /// 同步用：会话 seq 高水位（GREATEST(messages, events)，共用计数器）+ 最新消息
+    /// server_id / 时间；会话既无消息也无事件则 `None`
     async fn get_conversation_message_head(
         &self,
         ctx: &Ctx,

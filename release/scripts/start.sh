@@ -46,11 +46,26 @@ flare_load_env_file "$APP_HOME"
 flare_configure_runtime_env "$APP_HOME"
 flare_ensure_token_secrets "$APP_HOME"
 
-mkdir -p "$APP_HOME/logs" "$APP_HOME/run" "$APP_HOME/data"
+mkdir -p "$APP_HOME/logs" "$APP_HOME/run" "$APP_HOME/data" "$APP_HOME/data/rustfs"
+
+prepare_rustfs_data_dir() {
+    local uid="${RUSTFS_DATA_UID:-10001}"
+    local gid="${RUSTFS_DATA_GID:-10001}"
+    local dir="$APP_HOME/data/rustfs"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R "$uid:$gid" "$dir"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo chown -R "$uid:$gid" "$dir"
+    elif ! chown -R "$uid:$gid" "$dir" 2>/dev/null; then
+        chmod -R a+rwX "$dir" 2>/dev/null || true
+    fi
+}
 
 if [ "$START_INFRA" -eq 1 ]; then
     flare_require_command docker
     compose_cmd="$(flare_compose_cmd)" || flare_die "missing docker compose"
+    prepare_rustfs_data_dir
     flare_log "starting required infrastructure: consul redis postgres nats rustfs"
     (cd "$APP_HOME" && $compose_cmd -f docker-compose.infra.yml up -d consul redis postgres nats rustfs)
 

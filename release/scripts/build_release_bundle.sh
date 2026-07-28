@@ -15,6 +15,7 @@ dry_run=0
 force=0
 jobs="${CARGO_BUILD_JOBS:-1}"
 package_dir="$RELEASE_ROOT/dist/flare-im-core-cloud-4c4g-$(date +%Y%m%d%H%M%S)"
+build_target="${FLARE_RELEASE_BUILD_TARGET:-host}"
 
 usage() {
     cat <<'USAGE'
@@ -93,6 +94,7 @@ workspace_root=$WORKSPACE_ROOT
 profile=$profile
 jobs=$jobs
 build=$build_label
+build_target=$build_target
 config_layout=cloud-4c4g
 package_dir=$package_dir
 EOF
@@ -259,6 +261,7 @@ cat > "$package_dir/manifest.txt" <<EOF
 name=flare-im-core-cloud-4c4g
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 profile=$profile
+build_target=$build_target
 mq_backend=nats
 required_infra=consul,redis,postgres,nats,rustfs
 optional_infra=kafka,prometheus,loki,tempo,grafana

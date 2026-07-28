@@ -1,9 +1,11 @@
 pub mod conversation_repository;
 pub mod ingest_idempotency;
+pub mod seq_floor_provider;
 pub mod wal_repository;
 
 // 重新导出各个仓储 trait
 pub use conversation_repository::ConversationRepository;
+pub use seq_floor_provider::SeqFloorProvider;
 pub use flare_im_message_pipeline::{
     ConversationClient, PushRepository, RecipientRepository, needs_member_lookup,
 };

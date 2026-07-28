@@ -113,7 +113,6 @@ fn event_payload_from_proto(p: &flare_proto::common::event::Payload) -> Option<E
                     Some(bytes)
                 })
                 .unwrap_or_default(),
-            edit_version: e.edit_version,
             reason: e.reason.clone(),
             show_edited_mark: e.show_edited_mark,
         }),
@@ -218,7 +217,6 @@ fn event_payload_to_proto(p: &EventPayload) -> Option<flare_proto::common::event
         EventPayload::Edit(e) => P::Edit(common::MessageEditEvent {
             server_msg_id: e.server_msg_id.clone(),
             new_content: flare_proto::decode_message_content(&e.new_content).ok(),
-            edit_version: e.edit_version,
             reason: e.reason.clone(),
             show_edited_mark: e.show_edited_mark,
         }),

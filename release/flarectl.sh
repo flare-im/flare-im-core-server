@@ -19,6 +19,7 @@ dry_run=0
 run_smoke=0
 tail_lines=""
 env_file="${FLARE_DEPLOY_ENV_FILE:-}"
+build_mode="${FLARE_DEPLOY_BUILD_MODE:-auto}"
 
 usage() {
     cat <<'USAGE'
@@ -48,6 +49,7 @@ Connection options:
 
 Deploy options:
   --package-dir DIR       Existing release bundle directory. If omitted, deploy builds one.
+  --build-mode MODE       Bundle build mode: auto, host, or docker. Default: auto.
   --skip-build            Copy existing target artifacts into the generated bundle.
   --profile PROFILE       Cargo profile for generated bundle: release or debug. Default: release.
   --jobs N                Cargo build jobs. Default: CARGO_BUILD_JOBS or 1.
@@ -78,6 +80,15 @@ quote() {
     printf '%q' "$1"
 }
 
+join_shell_words() {
+    local word
+    local joined=""
+    for word in "$@"; do
+        joined="$joined $(quote "$word")"
+    done
+    printf '%s' "${joined# }"
+}
+
 load_env_file() {
     local file="$1"
     [ -f "$file" ] || die "env file not found: $file"
@@ -91,6 +102,24 @@ is_truthy() {
     case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
         1|true|yes|y|on) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+resolve_build_mode() {
+    case "$build_mode" in
+        auto)
+            if [ "$(uname -s)" = "Linux" ]; then
+                printf '%s\n' "host"
+            else
+                printf '%s\n' "docker"
+            fi
+            ;;
+        host|docker)
+            printf '%s\n' "$build_mode"
+            ;;
+        *)
+            die "--build-mode must be auto, host, or docker"
+            ;;
     esac
 }
 
@@ -145,6 +174,7 @@ identity_file="${FLARE_DEPLOY_IDENTITY_FILE:-}"
 ssh_port="${FLARE_DEPLOY_SSH_PORT:-22}"
 remote_dir="${FLARE_DEPLOY_REMOTE_DIR:-/opt/flare-im-core}"
 package_dir="${FLARE_DEPLOY_PACKAGE_DIR:-}"
+build_mode="${FLARE_DEPLOY_BUILD_MODE:-$build_mode}"
 profile="${FLARE_DEPLOY_PROFILE:-release}"
 jobs="${FLARE_DEPLOY_JOBS:-${CARGO_BUILD_JOBS:-1}}"
 tail_lines="${FLARE_DEPLOY_TAIL_LINES:-120}"
@@ -202,6 +232,11 @@ while [ "$#" -gt 0 ]; do
             package_dir="$2"
             shift 2
             ;;
+        --build-mode)
+            [ "$#" -ge 2 ] || die "--build-mode requires a value"
+            build_mode="$2"
+            shift 2
+            ;;
         --skip-build)
             skip_build=1
             shift
@@ -256,6 +291,11 @@ case "$profile" in
     *) die "--profile must be release or debug" ;;
 esac
 
+case "$build_mode" in
+    auto|host|docker) ;;
+    *) die "--build-mode must be auto, host, or docker" ;;
+esac
+
 case "$jobs" in
     ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
     0) die "--jobs must be greater than 0" ;;
@@ -287,6 +327,7 @@ build_label="auto"
 [ -n "$package_dir" ] && build_label="provided"
 
 if [ "$dry_run" -eq 1 ]; then
+    effective_build_mode="$(resolve_build_mode)"
     cat <<EOF
 remote operation plan
 action=$action
@@ -299,6 +340,8 @@ package_dir=${package_dir:-auto}
 profile=$profile
 jobs=$jobs
 build=$build_label
+build_mode=$build_mode
+effective_build_mode=$effective_build_mode
 smoke=$run_smoke
 EOF
     exit 0
@@ -336,6 +379,26 @@ $script
 EOF
 }
 
+upload_archive() {
+    local archive="$1"
+    local remote_tmp="$2"
+
+    if command -v rsync >/dev/null 2>&1 && remote_shell "command -v rsync >/dev/null 2>&1"; then
+        local rsync_ssh
+        rsync_ssh="$(join_shell_words ssh "${ssh_opts[@]}")"
+        log "uploading release archive with rsync"
+        if [ -n "$password" ]; then
+            sshpass -e rsync -P --inplace -e "$rsync_ssh" "$archive" "$remote:$remote_tmp"
+        else
+            rsync -P --inplace -e "$rsync_ssh" "$archive" "$remote:$remote_tmp"
+        fi
+        return 0
+    fi
+
+    log "uploading release archive with scp"
+    "${scp_cmd[@]}" "$archive" "$remote:$remote_tmp"
+}
+
 ensure_package_dir() {
     if [ -n "$package_dir" ]; then
         [ -d "$package_dir" ] || die "package dir not found: $package_dir"
@@ -347,8 +410,17 @@ ensure_package_dir() {
     if [ "$skip_build" -eq 1 ]; then
         build_args+=(--skip-build)
     fi
-    log "building release bundle: $package_dir"
-    "$SCRIPT_DIR/scripts/build_release_bundle.sh" "${build_args[@]}"
+    local effective_build_mode
+    effective_build_mode="$(resolve_build_mode)"
+    log "building release bundle ($effective_build_mode): $package_dir"
+    case "$effective_build_mode" in
+        docker)
+            "$SCRIPT_DIR/scripts/build_linux_bundle_docker.sh" "${build_args[@]}"
+            ;;
+        host)
+            "$SCRIPT_DIR/scripts/build_release_bundle.sh" "${build_args[@]}"
+            ;;
+    esac
 }
 
 preflight_remote() {
@@ -388,8 +460,7 @@ deploy_release() {
     log "preparing remote directory $remote_dir"
     remote_shell "mkdir -p $(quote "$remote_dir")/releases $(quote "$remote_dir")/shared $(quote "$remote_dir")/tmp"
 
-    log "uploading release archive"
-    "${scp_cmd[@]}" "$archive" "$remote:$remote_tmp"
+    upload_archive "$archive" "$remote_tmp"
 
     local q_remote_dir q_release_id q_release_path q_remote_tmp q_start_args
     q_remote_dir="$(quote "$remote_dir")"

@@ -1931,29 +1931,40 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         conversation_id: &str,
     ) -> Result<Option<ConversationMessageHead>> {
         let tenant_id = tenant_id_from_ctx(ctx);
+        // 消息与事件共用同一会话 seq 计数器，max_seq 必须取两表 GREATEST，
+        // 否则事件占据高位时（如已读回执晚于最后一条消息）水位偏低撞号。
         let row = sqlx::query(
             r#"
-            SELECT seq, server_id, timestamp
-            FROM messages
-            WHERE tenant_id = $1 AND conversation_id = $2
-            ORDER BY seq DESC NULLS LAST
-            LIMIT 1
+            SELECT m.seq AS msg_seq, m.server_id, m.timestamp, e.ev_max
+            FROM (
+                SELECT MAX(seq) AS ev_max
+                FROM events
+                WHERE tenant_id = $1 AND conversation_id = $2
+            ) e
+            LEFT JOIN LATERAL (
+                SELECT seq, server_id, timestamp
+                FROM messages
+                WHERE tenant_id = $1 AND conversation_id = $2
+                ORDER BY seq DESC NULLS LAST
+                LIMIT 1
+            ) m ON TRUE
             "#,
         )
         .bind(tenant_id)
         .bind(conversation_id)
-        .fetch_optional(&self.base.pool)
+        .fetch_one(&self.base.pool)
         .await
         .context("get_conversation_message_head")?;
 
-        let Some(row) = row else {
+        let msg_seq: Option<i64> = row.try_get("msg_seq").ok().flatten();
+        let ev_max: Option<i64> = row.try_get("ev_max").ok().flatten();
+        if msg_seq.is_none() && ev_max.is_none() {
             return Ok(None);
-        };
-        let seq: i64 = row.try_get("seq").context("head seq")?;
-        let last_message_id: String = row.try_get("server_id").context("head server_id")?;
+        }
+        let last_message_id: String = row.try_get("server_id").unwrap_or_default();
         let last_at: Option<DateTime<Utc>> = row.try_get("timestamp").ok();
         Ok(Some(ConversationMessageHead {
-            max_seq: seq,
+            max_seq: msg_seq.unwrap_or(0).max(ev_max.unwrap_or(0)),
             last_message_id,
             last_at,
         }))

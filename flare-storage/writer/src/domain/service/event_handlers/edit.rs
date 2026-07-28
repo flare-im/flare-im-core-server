@@ -25,7 +25,6 @@ where
             ctx.tenant_id,
             message_id,
             &edit.new_content,
-            edit.edit_version,
             event.operator_id.as_str(),
             (!edit.reason.is_empty()).then_some(edit.reason.as_str()),
             content_text,

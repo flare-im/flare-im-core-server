@@ -77,8 +77,8 @@ cargo run --example chatroom_client -- user2
 - `flare-message-ingest` `MessageSendService/SendMessage`：`127.0.0.1:50182`
 - `flare-storage-reader` `StorageReaderService/QueryMessagesBySeq`：`127.0.0.1:60083`
 - PostgreSQL / TimescaleDB：`postgres://flare:flare123@localhost:25432/flare2`
-- 可靠性边界：`SEND_ACK_DURABILITY_BROKER_ACCEPTED`
-- 持久化账本终态：`message_write_ledger.write_state = ack_published`
+- ACK durability 至少达到：`SEND_ACK_DURABILITY_BROKER_ACCEPTED`
+- 持久化账本至少达到：`message_write_ledger.write_state = archive_persisted`
 - 读模型返回刚发送的 `server_msg_id`
 
 ---

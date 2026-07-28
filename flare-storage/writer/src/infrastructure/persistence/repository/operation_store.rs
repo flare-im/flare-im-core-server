@@ -94,7 +94,6 @@ impl OperationStore {
         tenant_id: &str,
         message_id: &str,
         new_content: &[u8],
-        edit_version: i32,
         editor_id: &str,
         reason: Option<&str>,
         content_text_for_extra: Option<&str>,
@@ -137,10 +136,9 @@ impl OperationStore {
         .bind(&real_server_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let final_edit_version =
-            next_version_row
-                .unwrap_or(1)
-                .max(if edit_version > 0 { edit_version } else { 1 });
+        // 版本号完全由本表权威推导：调用方曾传入的 edit_version 恒为 0（发布端无法在
+        // 异步扇出下同步分配），只作下限从无实际作用，已随 proto 死字段一并移除。
+        let final_edit_version = next_version_row.unwrap_or(1).max(1);
 
         if let Value::Object(ref mut map) = extra {
             if let Some(text) = content_text_for_extra {

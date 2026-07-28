@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use flare_im_contracts::service_names::{CONVERSATION, MESSAGE_INGEST};
+use flare_im_contracts::service_names::{CONVERSATION, MESSAGE_INGEST, STORAGE_READER};
 use flare_im_hooks::hooks::adapters::DefaultHookFactory;
 use flare_im_hooks::hooks::{
     HookConfig, HookConfigLoader, HookDefinition, HookDispatcher, HookRegistry, HookTransportConfig,
@@ -86,13 +86,40 @@ pub async fn initialize(
             flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
         })?;
 
+    // seq 回退自愈：懒连接 storage-reader，用其权威 max_seq 作 seq 分配 floor 下限。
+    // 懒连接失败仅告警并退化为普通 INCR（绝不比现状更差），不阻断摄入服务启动。
+    let seq_floor_provider = match flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+        app_config,
+        STORAGE_READER,
+        flare_im_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
+    ) {
+        Ok(channel) => {
+            let provider: Arc<dyn crate::domain::repository::SeqFloorProvider> = Arc::new(
+                crate::infrastructure::persistence::storage_seq_floor_provider::StorageSeqFloorProvider::from_channel(
+                    channel,
+                ),
+            );
+            Some(provider)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "storage-reader lazy channel unavailable; seq floor self-heal disabled (plain INCR)"
+            );
+            None
+        }
+    };
+
     let message_ingest_service = Arc::new(MessageIngestService::new(
         push_repository,
         recipient_repository,
         wal_repository.clone(),
         Arc::new(sequence_allocator),
         config.defaults(),
-        MessageIngestServiceOptions::new(),
+        MessageIngestServiceOptions {
+            seq_floor_provider,
+            ..MessageIngestServiceOptions::new()
+        },
     ));
 
     let wal_replay_handler = Arc::new(WalReplayHandler::new(

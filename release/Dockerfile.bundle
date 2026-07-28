@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_IMAGE=rust:1.94.1-bookworm
+FROM ${RUST_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        clang \
+        cmake \
+        git \
+        jq \
+        libcurl4-openssl-dev \
+        libprotobuf-dev \
+        libssl-dev \
+        pkg-config \
+        protobuf-compiler \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_TARGET_DIR=/cargo-target \
+    PROTOC=/usr/bin/protoc \
+    PATH=/usr/local/cargo/bin:$PATH
+
+WORKDIR /workspace/flare-im/flare-im-core

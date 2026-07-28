@@ -578,8 +578,6 @@ pub struct AppEditMessageCommand {
     pub reason: Option<String>,
     /// 显示编辑标记
     pub show_edited_mark: bool,
-    /// 编辑版本
-    pub edit_version: i32,
     /// 操作者ID
     pub operator_id: String,
     /// 租户ID
@@ -605,7 +603,6 @@ impl From<&flare_grpc_proto::message::EditMessageRequest> for AppEditMessageComm
                 Some(request.reason.clone())
             },
             show_edited_mark: request.show_edited_mark,
-            edit_version: request.edit_version,
             operator_id: String::new(), // 从context填充
             tenant_id: String::new(),   // 从context填充
             conversation_id: request.conversation_id.clone(), // 客户端可选提供，便于无 StorageReader 时解析

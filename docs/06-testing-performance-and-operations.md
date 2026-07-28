@@ -39,7 +39,7 @@ cd flare-im-core
 ./scripts/smoke_message_flow.sh
 ```
 
-该烟测通过 `flare-message-ingest` 的 `MessageSendService/SendMessage` 发送一条文本消息，等待 PostgreSQL / TimescaleDB 中的 `messages` 与 `message_write_ledger` 收敛到 `ack_published`，再通过 `flare-storage-reader` 的 `StorageReaderService/QueryMessagesBySeq` 读回刚发送的 `server_msg_id`。
+该烟测通过 `flare-message-ingest` 的 `MessageSendService/SendMessage` 发送一条文本消息，等待 PostgreSQL / TimescaleDB 中的 `messages` 与 `message_write_ledger` 至少收敛到 `archive_persisted`，再通过 `flare-storage-reader` 的 `StorageReaderService/QueryMessagesBySeq` 读回刚发送的 `server_msg_id`。
 
 接入业务系统 Hook：
 
@@ -130,9 +130,9 @@ cargo test -p flare-im-service-kit --test startup_contract
 该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
 
 - `flare-message-ingest` gRPC send entrypoint。
-- `SEND_ACK_DURABILITY_BROKER_ACCEPTED`。
+- ACK durability 至少达到 `SEND_ACK_DURABILITY_BROKER_ACCEPTED`。
 - `messages` 落库。
-- `message_write_ledger.write_state = ack_published`。
+- `message_write_ledger.write_state` 至少达到 `archive_persisted`。
 - `flare-storage-reader` gRPC read model readback。
 
 ## 消息发送压测入口状态

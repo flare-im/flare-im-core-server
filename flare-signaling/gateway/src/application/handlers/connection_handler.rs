@@ -173,6 +173,29 @@ impl ConnectionHandler {
     /// 4. 记录指标和日志
     #[instrument(skip(self))]
     pub async fn handle_connect(&self, connection_id: &str) -> Result<String> {
+        // 单飞：同一 connection 的并发注册（on_connect × 心跳补偿）只放行一个。
+        // 已注册 → 幂等返回；他人注册中 → 短轮询等其完成后复用结果。
+        loop {
+            if let Some(session) = self.online_sessions.read().await.get(connection_id) {
+                return Ok(session.conversation_id.clone());
+            }
+            if self
+                .connecting
+                .lock()
+                .await
+                .insert(connection_id.to_string())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let result = self.handle_connect_inner(connection_id).await;
+        self.connecting.lock().await.remove(connection_id);
+        result
+    }
+
+    /// 注册主体（仅经 `handle_connect` 单飞入口进入）。
+    async fn handle_connect_inner(&self, connection_id: &str) -> Result<String> {
         let connection_info = self
             .connection_port
             .get_connection_info(connection_id)

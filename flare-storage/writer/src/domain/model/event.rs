@@ -73,7 +73,6 @@ pub struct RecallPayload {
 pub struct EditPayload {
     pub server_msg_id: String,
     pub new_content: Vec<u8>,
-    pub edit_version: i32,
     pub reason: String,
     pub show_edited_mark: bool,
 }

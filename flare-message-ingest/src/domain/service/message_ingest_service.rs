@@ -13,6 +13,7 @@
 //! - 不包含 Hook 执行、会话 ensure、gRPC 适配或存储实现
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flare_im_contracts::Ctx;
 use flare_im_contracts::abstractions::decorator::{MessageDecorator, NoopMessageDecorator};
@@ -23,7 +24,8 @@ use tracing::instrument;
 
 use crate::domain::model::{MessageDefaults, MessageSubmission};
 use crate::domain::repository::{
-    PushRepository, RecipientRepository, WalRepository, WalRepositoryItem, needs_member_lookup,
+    PushRepository, RecipientRepository, SeqFloorProvider, WalRepository, WalRepositoryItem,
+    needs_member_lookup,
 };
 use crate::domain::{MessageProfile, PersistenceMode};
 use flare_im_message_pipeline::MqPushRepository;
@@ -48,17 +50,65 @@ pub struct MessageIngestService {
     message_decorator: Arc<dyn MessageDecorator>,
     /// 消息校验策略
     validation_strategy: Arc<dyn MessageValidationStrategy>,
+    /// 会话持久化 max_seq 提供者（seq 回退自愈）。为 `None` 时退化为普通 `INCR` 分配。
+    seq_floor_provider: Option<Arc<dyn SeqFloorProvider>>,
+    /// 进程内 floor 校验状态（key = `tenant::conversation`）。
+    ///
+    /// 每个会话在本进程内**首次触达**时查一次持久化权威 max_seq 作 floor 修复；之后温路径
+    /// 直接走快 `INCR`。查询失败进入退避期，期间不再重试（避免存储故障时每消息打点）。
+    /// 有界缓存：逐出仅意味着该会话多付一次 floor 查询，语义安全。
+    seq_floor_state: moka::future::Cache<String, SeqFloorState>,
 }
+
+/// 会话 floor 校验状态。
+#[derive(Clone)]
+enum SeqFloorState {
+    /// 已完成 floor 校验，温路径走快 `INCR`。
+    Checked,
+    /// 上次校验失败的时刻；退避期内不重试。
+    FailedAt(Instant),
+}
+
+/// floor 查询失败后的重试退避窗口。
+const SEQ_FLOOR_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+/// floor 查询 RPC 上限：超时即降级普通 `INCR`，发送主链绝不被存储黑洞拖死。
+const SEQ_FLOOR_RPC_TIMEOUT: Duration = Duration::from_millis(800);
+/// floor 状态缓存容量上限（约数百万会话进程的内存保险丝）。
+const SEQ_FLOOR_CACHE_CAPACITY: u64 = 200_000;
 
 #[derive(Default)]
 pub struct MessageIngestServiceOptions {
     pub message_decorator: Option<Arc<dyn MessageDecorator>>,
     pub validation_strategy: Option<Arc<dyn MessageValidationStrategy>>,
+    /// 会话持久化 max_seq 提供者；注入后启用 seq 回退自愈。
+    pub seq_floor_provider: Option<Arc<dyn SeqFloorProvider>>,
 }
 
 impl MessageIngestServiceOptions {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// seq 分配计划（纯决策，便于单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeqAllocPlan {
+    /// 温路径：普通 `INCR`（已校验过 floor，或未配置 provider）。
+    PlainIncr,
+    /// 首次触达：查持久化权威 max_seq 作 floor 修复回退。
+    FirstTouchFloor,
+}
+
+/// 决定本次 seq 分配走哪条路径。
+///
+/// - 未配置 provider → 永远 `PlainIncr`（保持既有行为，绝不比现状更差）。
+/// - 本进程已对该会话做过 floor 校验 → `PlainIncr`（温路径快 INCR）。
+/// - 否则 → `FirstTouchFloor`（首次触达查存储权威 max_seq）。
+pub(crate) fn plan_seq_alloc(has_provider: bool, already_checked: bool) -> SeqAllocPlan {
+    if has_provider && !already_checked {
+        SeqAllocPlan::FirstTouchFloor
+    } else {
+        SeqAllocPlan::PlainIncr
     }
 }
 
@@ -83,6 +133,8 @@ impl MessageIngestService {
             validation_strategy: options.validation_strategy.unwrap_or_else(|| {
                 Arc::new(CompositeMessageValidationStrategy::default_composite())
             }),
+            seq_floor_provider: options.seq_floor_provider,
+            seq_floor_state: moka::future::Cache::new(SEQ_FLOOR_CACHE_CAPACITY),
         }
     }
 
@@ -156,6 +208,125 @@ impl MessageIngestService {
         })
     }
 
+    /// 分配会话序列号，并在本进程首次触达该会话时以持久化权威 `max_seq` 作 floor 自愈回退。
+    ///
+    /// - 温路径（已校验、退避期内或无 provider）：普通 `INCR`，热路径仅一次缓存读。
+    /// - 首次触达：查存储权威 `max_seq` 作 floor（RPC 有超时上限），`allocate_seq_with_floor`
+    ///   消除回退；查询失败/超时则降级为普通 `INCR`（绝不比现状更差）并进入退避期，
+    ///   退避结束后下次发送重试 floor 校验。
+    async fn allocate_conversation_seq(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<u64> {
+        let cache_key = format!("{tenant_id}::{conversation_id}");
+        let already_checked = match self.seq_floor_state.get(&cache_key).await {
+            Some(SeqFloorState::Checked) => true,
+            Some(SeqFloorState::FailedAt(at)) => at.elapsed() < SEQ_FLOOR_FAILURE_BACKOFF,
+            None => false,
+        };
+
+        match plan_seq_alloc(self.seq_floor_provider.is_some(), already_checked) {
+            SeqAllocPlan::PlainIncr => {
+                let seq = self
+                    .sequence_allocator
+                    .allocate_seq(conversation_id, tenant_id)
+                    .await?;
+                // 运行中 Redis flush 检测：已完成 floor 校验的会话不可能再分到 1
+                //（首触路径至少返回 floor+1，温路径单调递增）。seq==1 几乎必是
+                // 计数器丢失 → 立即重做 floor 校验重新分配（seq 1 作废成洞，无害）。
+                if seq == 1
+                    && matches!(
+                        self.seq_floor_state.get(&cache_key).await,
+                        Some(SeqFloorState::Checked)
+                    )
+                {
+                    tracing::warn!(
+                        conversation_id = %conversation_id,
+                        tenant_id = %tenant_id,
+                        "checked conversation allocated seq=1; counter likely lost (redis flush), re-running floor check"
+                    );
+                    return self
+                        .first_touch_floor_alloc(ctx, tenant_id, conversation_id, cache_key)
+                        .await;
+                }
+                Ok(seq)
+            }
+            SeqAllocPlan::FirstTouchFloor => {
+                self.first_touch_floor_alloc(ctx, tenant_id, conversation_id, cache_key)
+                    .await
+            }
+        }
+    }
+
+    /// 首触/疑似丢计数器路径：查存储权威 `max_seq` 作 floor 分配，失败降级 + 退避。
+    async fn first_touch_floor_alloc(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        cache_key: String,
+    ) -> Result<u64> {
+        // 无 provider 时降级为普通 INCR 而非 panic：本函数是发送主链上的长驻服务路径，
+        // 调用方（plan_seq_alloc / flush 检测）已保证 provider 存在，但不靠断言兜底。
+        let Some(provider) = self.seq_floor_provider.as_ref() else {
+            return self
+                .sequence_allocator
+                .allocate_seq(conversation_id, tenant_id)
+                .await;
+        };
+        let lookup = tokio::time::timeout(
+            SEQ_FLOOR_RPC_TIMEOUT,
+            provider.persisted_max_seq(ctx, tenant_id, conversation_id),
+        )
+        .await;
+        let floor = match lookup {
+            Ok(Ok(floor)) => floor,
+            Ok(Err(error)) => {
+                // 存储读不可用：降级普通 INCR + 退避，存储恢复后自愈。
+                tracing::warn!(
+                    conversation_id = %conversation_id,
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "persisted max_seq lookup failed; falling back to plain INCR (backoff before retry)"
+                );
+                self.seq_floor_state
+                    .insert(cache_key, SeqFloorState::FailedAt(Instant::now()))
+                    .await;
+                return self
+                    .sequence_allocator
+                    .allocate_seq(conversation_id, tenant_id)
+                    .await;
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    conversation_id = %conversation_id,
+                    tenant_id = %tenant_id,
+                    timeout_ms = SEQ_FLOOR_RPC_TIMEOUT.as_millis() as u64,
+                    "persisted max_seq lookup timed out; falling back to plain INCR (backoff before retry)"
+                );
+                self.seq_floor_state
+                    .insert(cache_key, SeqFloorState::FailedAt(Instant::now()))
+                    .await;
+                return self
+                    .sequence_allocator
+                    .allocate_seq(conversation_id, tenant_id)
+                    .await;
+            }
+        };
+
+        let seq = self
+            .sequence_allocator
+            .allocate_seq_with_floor(conversation_id, tenant_id, floor)
+            .await?;
+
+        self.seq_floor_state
+            .insert(cache_key, SeqFloorState::Checked)
+            .await;
+        Ok(seq)
+    }
+
     /// 为已准备好的提交分配会话序列号。
     #[instrument(skip(self, submission), fields(
         conversation_id = %submission.message.conversation_id,
@@ -163,14 +334,13 @@ impl MessageIngestService {
     ))]
     pub async fn allocate_seq_for_submission(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         tenant_id: &str,
         mut submission: MessageSubmission,
     ) -> Result<(MessageSubmission, MessageProfile)> {
-        // 分配序列号
+        // 分配序列号（首次触达某会话时以持久化权威 max_seq 作 floor，自愈 seq 回退）。
         let session_seq = self
-            .sequence_allocator
-            .allocate_seq(&submission.message.conversation_id, tenant_id)
+            .allocate_conversation_seq(ctx, tenant_id, &submission.message.conversation_id)
             .await
             .map_err(|e| {
                 flare_err!(
@@ -588,11 +758,28 @@ fn recipient_hints_from_message_attributes(message: &Message) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{recipient_hints_from_message_attributes, should_write_wal};
+    use super::{
+        SeqAllocPlan, plan_seq_alloc, recipient_hints_from_message_attributes, should_write_wal,
+    };
     use crate::domain::PersistenceMode;
     use crate::domain::model::{MessageProfile, notification_persistent};
     use flare_proto::common::message_content::Content;
     use flare_proto::common::{Message, MessageContent, NotificationContent, TextContent};
+
+    #[test]
+    fn no_provider_always_plain_incr() {
+        // 未配置 provider：保持既有行为，永远走普通 INCR。
+        assert_eq!(plan_seq_alloc(false, false), SeqAllocPlan::PlainIncr);
+        assert_eq!(plan_seq_alloc(false, true), SeqAllocPlan::PlainIncr);
+    }
+
+    #[test]
+    fn first_touch_consults_floor_then_warm_path_is_fast() {
+        // 有 provider 且本进程首次触达该会话 → 查存储权威 max_seq 作 floor。
+        assert_eq!(plan_seq_alloc(true, false), SeqAllocPlan::FirstTouchFloor);
+        // 已校验过（温路径）→ 快 INCR，不再查存储。
+        assert_eq!(plan_seq_alloc(true, true), SeqAllocPlan::PlainIncr);
+    }
 
     fn text_profile() -> MessageProfile {
         let mut message = Message {
