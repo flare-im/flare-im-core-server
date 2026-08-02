@@ -1857,7 +1857,9 @@ impl ConversationRepository for PostgresConversationRepository {
 #[cfg(test)]
 mod last_message_preview_tests {
     use super::last_message_preview_from_content;
-    use flare_proto::common::{ImageContent, MessageContent, TextContent, message_content::Content};
+    use flare_proto::common::{
+        ImageContent, MessageContent, TextContent, message_content::Content,
+    };
     use prost::Message as _;
 
     fn encode(content: Content) -> Vec<u8> {

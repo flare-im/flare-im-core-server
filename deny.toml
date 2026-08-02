@@ -1,0 +1,45 @@
+# cargo-deny 配置 —— 依赖的许可 / 来源 / 重复版本治理
+#
+# 首次在 CI 跑起来时大概率会报出若干条目需要逐一裁决（新增许可类型、
+# 重复版本等）。CI 中该 job 设了 continue-on-error，先观察再收紧，
+# 不要一上来就阻断 PR。
+
+[graph]
+all-features = false
+
+[licenses]
+# 本项目自身为 Apache-2.0。依赖只接受宽松许可——
+# copyleft（GPL/AGPL/LGPL）会传染到分发物，商业授权下不可接受。
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+
+[bans]
+# 重复版本先给 warn。收紧成 deny 之前要先把现存的重复依赖清理干净，
+# 否则会阻断所有 PR。
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# 只允许 crates.io。git 依赖绕过 registry 的审计与 yank 机制，
+# 出现时必须显式加进 allow-git 并说明理由。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+# 已知漏洞一律拒绝。若某条确实不影响本项目用法，
+# 在此列出 ID 并写明豁免理由，不要整体关掉检查。
+ignore = []

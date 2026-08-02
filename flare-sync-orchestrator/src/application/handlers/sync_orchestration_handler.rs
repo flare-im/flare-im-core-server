@@ -2558,7 +2558,10 @@ mod tests {
                 mentions: vec![],
             })),
         });
-        assert_eq!(message_preview(Some(&text_msg), 123).unwrap().text, "hello list");
+        assert_eq!(
+            message_preview(Some(&text_msg), 123).unwrap().text,
+            "hello list"
+        );
 
         // 媒体 → 占位标签。
         let mut image_msg = Message::default();
@@ -2578,6 +2581,9 @@ mod tests {
                 mentions: vec![],
             })),
         });
-        assert_eq!(message_preview(Some(&attr_msg), 1).unwrap().text, "attr wins");
+        assert_eq!(
+            message_preview(Some(&attr_msg), 1).unwrap().text,
+            "attr wins"
+        );
     }
 }
