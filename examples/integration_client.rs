@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| {
         use flare_server_core::TokenService;
         TokenService::new(
-            "insecure-secret".to_string(),
+            std::env::var("TOKEN_SECRET").unwrap_or_else(|_| "insecure-secret".to_string()),
             "flare-im-core".to_string(),
             3600,
         )

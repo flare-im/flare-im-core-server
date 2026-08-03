@@ -67,12 +67,18 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:50050/api/v1/conversatio
 
 ## 5. 看一个完整客户端
 
+示例客户端自己签 token，所以同样要拿到服务端那把密钥：
+
 ```bash
-cargo run --example chatroom_client
+export TOKEN_SECRET="$(cat logs/.dev-token-secret)"
+NEGOTIATION_HOST=localhost:60051 \
+  cargo run -p flare-im-core-examples --example chatroom_client -- user1
 ```
 
+连上后会看到 `✅ 收到 CONNECT_ACK` 与 `✅ 已连接到 localhost:60051`。
+
 `examples/` 下还有 `integration_client.rs`（业务集成）与
-`perf_message_send.rs`（压测）。
+`perf_message_send.rs`（压测），跑法相同。
 
 ---
 
@@ -148,7 +154,15 @@ curl -s http://127.0.0.1:28500/v1/status/leader
 - 用 `logs/.dev-token-secret` 签出的 token 调 `/api/v1/conversations`
   返回 **HTTP 200** `{"code":0,"data":{"conversations":[],...}}`
 - 不带 token 返回 **HTTP 401**，确认鉴权确实在生效
+- 示例客户端连上网关，收到 `CONNECT_ACK`
 
-途中真实踩到并已收录进上面排查表的问题：Consul 陈旧数据导致启动中止。
+途中真实踩到并已修复/收录的问题：
+
+1. **Consul 陈旧数据导致启动中止** —— 已收录进上面排查表
+2. **`cargo run --example chatroom_client` 跑不了** —— `examples/` 既无
+   `Cargo.toml` 也不是 workspace 成员，报 `no example target named ...`。
+   而 `start_server.sh` 启动成功后打印的正是这条命令。已补 examples 包清单。
+3. **示例客户端连不上** —— 它硬编码用 `insecure-secret` 签 token，而服务端用
+   随机强密钥，必然被拒（服务端拒绝弱密钥是正确行为）。已改为读 `TOKEN_SECRET`。
 
 边界与商业部分的划分见工作区根 `GOVERNANCE.md`。

@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    # 可运行示例：不进 workspace 就无法 cargo run --example
+    "examples",
     # IM shared crates - explicit dependency boundaries
     "crates/flare-im-contracts",
     "crates/flare-im-service-kit",

@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
         // 如果没有提供 token，生成一个测试 token
         use flare_server_core::TokenService;
         let token_service = TokenService::new(
-            "insecure-secret".to_string(),
+            std::env::var("TOKEN_SECRET").unwrap_or_else(|_| "insecure-secret".to_string()),
             "flare-im-core".to_string(),
             3600,
         );

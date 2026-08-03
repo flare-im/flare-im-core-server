@@ -1,0 +1,52 @@
+[package]
+name = "flare-im-core-examples"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+publish = false
+description = "flare-im-core 的可运行示例客户端"
+
+# 这个包存在的唯一理由：让 `cargo run --example xxx` 真的能跑。
+#
+# 之前 examples/ 下只有裸 .rs 文件，既没有 Cargo.toml 也不是 workspace 成员，
+# 于是 `cargo run --example chatroom_client` 会报
+#   error: no example target named `chatroom_client` in default-run packages
+# —— 而 start_server.sh 启动成功后打印的正是这条命令，scripts/start_client.sh
+# 也调用它。也就是说，照着服务端自己的指引走，最后一步必然撞墙。
+#
+[[example]]
+name = "chatroom_client"
+path = "chatroom_client.rs"
+
+[[example]]
+name = "business_push_client"
+path = "business_push_client.rs"
+
+[[example]]
+name = "integration_client"
+path = "integration_client.rs"
+
+[[example]]
+name = "complete_ack_example"
+path = "complete_ack_example.rs"
+
+[[example]]
+name = "perf_message_send"
+path = "perf_message_send.rs"
+
+[dependencies]
+flare-core = { workspace = true }
+flare-proto = { workspace = true }
+flare-grpc-proto = { workspace = true }
+flare-server-core = { workspace = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+prost = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
