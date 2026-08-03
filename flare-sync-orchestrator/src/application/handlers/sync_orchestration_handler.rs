@@ -2564,10 +2564,12 @@ mod tests {
         );
 
         // 媒体 → 占位标签。
-        let mut image_msg = Message::default();
-        image_msg.content = Some(MessageContent {
-            content: Some(Content::Image(ImageContent::default())),
-        });
+        let image_msg = Message {
+            content: Some(MessageContent {
+                content: Some(Content::Image(ImageContent::default())),
+            }),
+            ..Default::default()
+        };
         assert_eq!(message_preview(Some(&image_msg), 1).unwrap().text, "[图片]");
 
         // attributes["text_preview"] 优先于 content。

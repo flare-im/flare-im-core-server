@@ -1332,7 +1332,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 .map(|index| messages[*index].clone())
                 .collect();
             self.apply_current_pin_state(
-                &tenant_id,
+                tenant_id,
                 &conversation_id,
                 user_id_from_ctx(ctx),
                 &mut subset,

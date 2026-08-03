@@ -102,6 +102,7 @@ impl MessageIngestHandler {
     /// 摄入幂等 key：
     /// - 有可信设备上下文：`idem:{tenant}:{sender}:device:{device}:{conversation}:{client_msg_id}`。
     /// - 无设备上下文：`idem:{tenant}:{sender}:{conversation}:{client_msg_id}`。
+    ///
     /// client_msg_id 为空 → 无法去重 → None。
     fn idempotency_key(
         tenant_id: &str,

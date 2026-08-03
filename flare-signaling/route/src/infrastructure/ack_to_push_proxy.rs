@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn builds_canonical_read_receipt_event() {
-        let ctx = Context::with_request_id("req-read-1".to_string());
+        let ctx = Context::with_request_id("req-read-1");
         let event = build_read_receipt_event(&ctx, "c1", "reader", 42);
 
         assert_eq!(event.conversation_id, "c1");

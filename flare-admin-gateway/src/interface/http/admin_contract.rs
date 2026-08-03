@@ -66,6 +66,9 @@ pub struct AdminRetentionLegalPolicyDescriptor {
     pub protected_operations: Vec<EnterpriseProtectedOperation>,
 }
 
+// 变体同以 Provider 结尾是刻意的：它们是对外 API 契约名，
+// 经 serde 序列化并进入 OpenAPI schema，改名等于破坏已发布接口。
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EnterprisePolicyAuthority {

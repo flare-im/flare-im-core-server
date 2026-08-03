@@ -786,8 +786,7 @@ mod tests {
             capabilities
                 .retention_legal_policy
                 .enforcement_anchors
-                .iter()
-                .any(|anchor| *anchor == RetentionEnforcementAnchor::CapabilityAuditLog)
+                .contains(&RetentionEnforcementAnchor::CapabilityAuditLog)
         );
         assert!(
             capabilities

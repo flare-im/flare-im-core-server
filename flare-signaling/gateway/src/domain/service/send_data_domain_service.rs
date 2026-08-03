@@ -185,7 +185,9 @@ impl SendDataDomainService {
     /// - typing：经 [`TypingAggregator`] 聚合为"N 人正在输入"聚合包，按会话节流后下发给**全部**在线订阅者
     ///   （含正在输入者自身，客户端按自身 user_id 过滤显示）；窗口内折叠则不发。
     /// - presence/custom：原样直转给**其他**在线订阅者（排除发送方）。
-    /// 不调 `ensure_conversation_members_subscribed`（高频，依赖消息活动已建立的订阅；未订阅者收不到属有损语义）。
+    ///
+    /// 不调 `ensure_conversation_members_subscribed`（高频，依赖消息活动已建立的订阅；
+    /// 未订阅者收不到属有损语义）。
     async fn relay_realtime_control(
         &self,
         tx: &Ctx,
@@ -279,6 +281,27 @@ impl SendDataDomainService {
     }
 }
 
+fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
+    match payload {
+        Some(SyncPayload::SingleConversation(_)) => "single_conversation",
+        Some(SyncPayload::MultiConversation(_)) => "multi_conversation",
+        Some(SyncPayload::ConversationsIncremental(_)) => "conversations_incremental",
+        Some(SyncPayload::ConversationsAll(_)) => "conversations_all",
+        Some(SyncPayload::ConversationDetail(_)) => "conversation_detail",
+        Some(SyncPayload::QueryEvents(_)) => "query_events",
+        Some(SyncPayload::GetSyncCursor(_)) => "get_sync_cursor",
+        Some(SyncPayload::UpdateSyncCursor(_)) => "update_sync_cursor",
+        Some(SyncPayload::EventStreamAck(_)) => "event_stream_ack",
+        Some(SyncPayload::SyncSnapshot(_)) => "sync_snapshot",
+        Some(SyncPayload::ConversationMaxSeq(_)) => "conversation_max_seq",
+        Some(SyncPayload::Conversations(_)) => "conversations",
+        Some(SyncPayload::ConversationParticipants(_)) => "conversation_participants",
+        Some(SyncPayload::ConversationUserSettings(_)) => "conversation_user_settings",
+        Some(SyncPayload::EnsureConversation(_)) => "ensure_conversation",
+        None => "none",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,9 +310,12 @@ mod tests {
     use flare_proto::common::{Sync as ClientSync, SyncRes, TypingStatePacket};
     use std::sync::Mutex;
 
+    /// 一次推送调用的捕获记录：(接收者 user_ids, 事件类型, 负载)。
+    type PushCall = (Vec<String>, i32, Vec<u8>);
+
     #[derive(Default)]
     struct CapturingPushPort {
-        calls: Mutex<Vec<(Vec<String>, i32, Vec<u8>)>>,
+        calls: Mutex<Vec<PushCall>>,
     }
 
     type PushResult<T> = flare_server_core::error::Result<T>;
@@ -501,26 +527,5 @@ mod tests {
             push.calls.lock().expect("calls mutex poisoned").is_empty(),
             "no relay when sender is the only subscriber"
         );
-    }
-}
-
-fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
-    match payload {
-        Some(SyncPayload::SingleConversation(_)) => "single_conversation",
-        Some(SyncPayload::MultiConversation(_)) => "multi_conversation",
-        Some(SyncPayload::ConversationsIncremental(_)) => "conversations_incremental",
-        Some(SyncPayload::ConversationsAll(_)) => "conversations_all",
-        Some(SyncPayload::ConversationDetail(_)) => "conversation_detail",
-        Some(SyncPayload::QueryEvents(_)) => "query_events",
-        Some(SyncPayload::GetSyncCursor(_)) => "get_sync_cursor",
-        Some(SyncPayload::UpdateSyncCursor(_)) => "update_sync_cursor",
-        Some(SyncPayload::EventStreamAck(_)) => "event_stream_ack",
-        Some(SyncPayload::SyncSnapshot(_)) => "sync_snapshot",
-        Some(SyncPayload::ConversationMaxSeq(_)) => "conversation_max_seq",
-        Some(SyncPayload::Conversations(_)) => "conversations",
-        Some(SyncPayload::ConversationParticipants(_)) => "conversation_participants",
-        Some(SyncPayload::ConversationUserSettings(_)) => "conversation_user_settings",
-        Some(SyncPayload::EnsureConversation(_)) => "ensure_conversation",
-        None => "none",
     }
 }

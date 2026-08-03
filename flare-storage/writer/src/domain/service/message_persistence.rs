@@ -767,8 +767,11 @@ mod tests {
         }
     }
 
+    /// 一次幂等写入的捕获记录：(key, client_msg_id, device_id)。
+    type IdempotencyObservation = (String, Option<String>, Option<String>);
+
     struct CapturingClientIdempotencyRepository {
-        observed: Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>,
+        observed: Arc<Mutex<Vec<IdempotencyObservation>>>,
     }
 
     impl MessageIdempotencyRepository for CapturingClientIdempotencyRepository {
