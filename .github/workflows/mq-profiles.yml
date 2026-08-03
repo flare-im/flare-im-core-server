@@ -1,0 +1,49 @@
+name: MQ Profiles
+
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mq-profiles.yml"
+  workflow_dispatch:
+
+jobs:
+  jetstream:
+    name: JetStream profile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    env:
+      FLARE_MQ_DEFAULT_BACKEND: jetstream
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: mq-jetstream
+      - name: Check JetStream backend
+        run: cargo check --workspace --locked
+
+  kafka:
+    name: Kafka profile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    env:
+      FLARE_MQ_DEFAULT_BACKEND: kafka
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: mq-kafka
+      - name: Install Kafka native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libsasl2-dev
+      - name: Check Kafka backend
+        run: cargo check --workspace --locked

@@ -1,0 +1,65 @@
+name: Release Gates
+
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/**"
+      - "docs/06-testing-performance-and-operations.md"
+      - "scripts/chaos/**"
+      - ".github/workflows/release-gates.yml"
+  workflow_dispatch:
+
+jobs:
+  large-group-primitives:
+    name: Large group primitives
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: release-large-group
+      - name: Message pipeline push primitive tests
+        run: cargo test -p flare-im-message-pipeline push_only_message_
+      - name: Orchestrator large conversation tests
+        run: cargo test -p flare-orchestrator large_conversation
+      - name: Push server recipient-less ping tests
+        run: cargo test -p flare-push-server recipientless_conversation_ping
+      - name: Architecture large conversation guards
+        run: cargo test -p flare-im-arch-tests large_conversation
+
+  observability-config:
+    name: Observability config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Prometheus config and alert rules
+        run: |
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/deploy:/etc/prometheus:ro" \
+            prom/prometheus:v2.55.1 \
+            check config /etc/prometheus/prometheus.yml
+      - name: Validate Grafana dashboard JSON
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("deploy/grafana/provisioning/dashboards")
+          for path in root.rglob("*.json"):
+              with path.open("r", encoding="utf-8") as handle:
+                  json.load(handle)
+              print(f"valid json: {path}")
+          PY
+
+  chaos-dry-run:
+    name: Chaos drill dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate chaos drill catalog
+        run: bash scripts/chaos/run_release_chaos_drills.sh --dry-run

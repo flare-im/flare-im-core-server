@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 格式先查：最快，失败得早，省掉后面的编译时间
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+  # 供应链审计与主流程解耦：advisory DB 每天在变，
+  # 不该因为上游新披露的 CVE 就让无关的功能 PR 变红。
+  audit:
+    name: 依赖审计
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 cargo-audit / cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
+
+      - name: cargo audit（已知漏洞）
+        run: cargo audit
+
+      - name: cargo deny（许可 / 来源 / 重复依赖）
+        run: cargo deny check
