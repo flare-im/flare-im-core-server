@@ -224,3 +224,27 @@ make stop   # 停止全部 Core 服务
 - 业务系统主链 Hook 推荐使用 gRPC transport；可信内网高频服务间调用推荐使用 typed gRPC。
 - 持久消息与临时消息的可靠性承诺必须分开描述。
 - 所有跨服务写路径优先采用 command -> domain -> event/MQ -> consumer/projection。
+
+---
+
+## 下一步
+
+| 想做什么 | 去哪里 |
+|---|---|
+| **五分钟跑起来** | [QUICKSTART](https://github.com/flare-im/flare-im-core-server/blob/main/QUICKSTART.md) —— 起服务、手签 token、调通接口，**不需要自建用户体系** |
+| 接入自己的用户系统 | 实现 `TokenValidator`（`CoreJwtTokenValidator` 本地验签 / `HttpHookTokenValidator` 调你的接口） |
+| 加自己的业务规则 | `flare-im-hooks` 的 8 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember |
+| 做界面 | [`@flare-im/vue-ui`](https://www.npmjs.com/package/@flare-im/vue-ui) —— 107 个组件，四端一致的契约 |
+| 报安全问题 | [SECURITY.md](SECURITY.md)，**请勿开公开 issue** |
+
+## 需要账号体系与社交能力时
+
+开源部分是**通信基础设施**。如果你需要的是现成的账号、好友关系、群治理（角色 / 入群审批 / 禁言）、朋友圈，
+这些在商业模块里 —— 自研这一层通常要数月，且都是与通信无关的重复劳动。
+
+企业场景另有 SSO / 组织架构 / 审计导出 / 数据驻留 / SLA 支持。
+
+咨询：`<BUSINESS-CONTACT-待填写>`
+
+> 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-im-core-server/blob/main/GOVERNANCE.md)。
+> 简言之：**已开源的不会被收回，鉴权与 hooks 契约永远开源、不会为逼迫付费而阉割。**
