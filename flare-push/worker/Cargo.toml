@@ -26,6 +26,8 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+# FCM HTTP v1 用服务账号 JWT 换 OAuth2 token
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
 uuid = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }

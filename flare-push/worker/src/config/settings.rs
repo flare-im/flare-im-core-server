@@ -17,6 +17,7 @@ use flare_server_core::mq::nats::{
 pub enum OfflineDeliveryBackend {
     Outbox,
     Getui,
+    Fcm,
     Disabled,
 }
 
@@ -25,6 +26,7 @@ impl OfflineDeliveryBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "outbox" => Self::Outbox,
             "getui" => Self::Getui,
+            "fcm" | "firebase" => Self::Fcm,
             "disabled" | "off" | "none" => Self::Disabled,
             other => panic!("unsupported PUSH_WORKER_OFFLINE_DELIVERY_BACKEND={other}"),
         }
@@ -54,7 +56,7 @@ pub struct PushWorkerConfig {
     pub access_gateway_static_endpoint: Option<String>,
     /// 未配置离线推送提供者时的有界本地 parking 容量。
     pub offline_parking_capacity: usize,
-    /// 离线推送后端：outbox/getui/disabled。
+    /// 离线推送后端：outbox/getui/fcm/disabled。
     pub offline_delivery_backend: OfflineDeliveryBackend,
     /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
     pub offline_outbox_redis_url: Option<String>,
@@ -67,6 +69,8 @@ pub struct PushWorkerConfig {
     /// 设备厂商 token registry Redis key 前缀。
     pub device_token_key_prefix: String,
     /// 个推 App ID。
+    /// FCM 服务账号 JSON（整份内容）。**用环境变量或密钥管理注入，勿写进配置文件**。
+    pub fcm_service_account_json: Option<String>,
     pub getui_app_id: Option<String>,
     /// 个推 App Key。
     pub getui_app_key: Option<String>,
@@ -208,6 +212,7 @@ impl PushWorkerConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
+        let fcm_service_account_json = non_empty_env("PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON");
         let getui_app_id = non_empty_env("PUSH_WORKER_GETUI_APP_ID");
         let getui_app_key = non_empty_env("PUSH_WORKER_GETUI_APP_KEY");
         let getui_master_secret = non_empty_env("PUSH_WORKER_GETUI_MASTER_SECRET");
@@ -268,6 +273,7 @@ impl PushWorkerConfig {
             offline_outbox_maxlen,
             device_token_redis_url,
             device_token_key_prefix,
+            fcm_service_account_json,
             getui_app_id,
             getui_app_key,
             getui_master_secret,

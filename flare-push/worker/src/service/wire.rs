@@ -18,6 +18,7 @@ use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use crate::application::GatewayPushExecutor;
 use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
 use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
+use crate::infrastructure::fcm_push::{FcmOfflinePushExecutor, FcmServiceAccount};
 use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePushExecutor};
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
@@ -97,6 +98,38 @@ pub async fn initialize(
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
                 Arc::new(outbox),
+                config.offline_parking_capacity,
+                metrics,
+            )
+        }
+        OfflineDeliveryBackend::Fcm => {
+            let token_repo = RedisDeviceTokenRepository::connect(
+                &config.device_token_redis_url,
+                config.device_token_key_prefix.clone(),
+            )
+            .await?;
+            let raw = required_config(
+                config.fcm_service_account_json.clone(),
+                "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
+            )?;
+            let account: FcmServiceAccount = serde_json::from_str(&raw).map_err(|e| {
+                flare_server_core::error::FlareError::localized(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    format!("PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON 不是合法的服务账号 JSON: {e}"),
+                )
+            })?;
+            tracing::info!(
+                project_id = %account.project_id,
+                token_key_prefix = %config.device_token_key_prefix,
+                "offline push fcm backend enabled"
+            );
+            OfflinePushConsumerFactory::create_handler_with_delivery(
+                dlq,
+                Arc::new(FcmOfflinePushExecutor::new(
+                    account,
+                    reqwest::Client::new(),
+                    Arc::new(token_repo),
+                )),
                 config.offline_parking_capacity,
                 metrics,
             )
