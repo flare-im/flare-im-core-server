@@ -18,6 +18,7 @@ pub enum OfflineDeliveryBackend {
     Outbox,
     Getui,
     Fcm,
+    Apns,
     Disabled,
 }
 
@@ -27,6 +28,7 @@ impl OfflineDeliveryBackend {
             "outbox" => Self::Outbox,
             "getui" => Self::Getui,
             "fcm" | "firebase" => Self::Fcm,
+            "apns" | "apple" => Self::Apns,
             "disabled" | "off" | "none" => Self::Disabled,
             other => panic!("unsupported PUSH_WORKER_OFFLINE_DELIVERY_BACKEND={other}"),
         }
@@ -56,7 +58,7 @@ pub struct PushWorkerConfig {
     pub access_gateway_static_endpoint: Option<String>,
     /// 未配置离线推送提供者时的有界本地 parking 容量。
     pub offline_parking_capacity: usize,
-    /// 离线推送后端：outbox/getui/fcm/disabled。
+    /// 离线推送后端：outbox/getui/fcm/apns/disabled。
     pub offline_delivery_backend: OfflineDeliveryBackend,
     /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
     pub offline_outbox_redis_url: Option<String>,
@@ -71,6 +73,13 @@ pub struct PushWorkerConfig {
     /// 个推 App ID。
     /// FCM 服务账号 JSON（整份内容）。**用环境变量或密钥管理注入，勿写进配置文件**。
     pub fcm_service_account_json: Option<String>,
+    /// APNs：Team ID / Key ID / p8 私钥 / bundle id / 是否沙箱。
+    /// **p8 私钥走环境变量或密钥管理注入，勿写进配置文件。**
+    pub apns_team_id: Option<String>,
+    pub apns_key_id: Option<String>,
+    pub apns_private_key: Option<String>,
+    pub apns_topic: Option<String>,
+    pub apns_sandbox: bool,
     pub getui_app_id: Option<String>,
     /// 个推 App Key。
     pub getui_app_key: Option<String>,
@@ -213,6 +222,13 @@ impl PushWorkerConfig {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
         let fcm_service_account_json = non_empty_env("PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON");
+        let apns_team_id = non_empty_env("PUSH_WORKER_APNS_TEAM_ID");
+        let apns_key_id = non_empty_env("PUSH_WORKER_APNS_KEY_ID");
+        let apns_private_key = non_empty_env("PUSH_WORKER_APNS_PRIVATE_KEY");
+        let apns_topic = non_empty_env("PUSH_WORKER_APNS_TOPIC");
+        let apns_sandbox = non_empty_env("PUSH_WORKER_APNS_SANDBOX")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
         let getui_app_id = non_empty_env("PUSH_WORKER_GETUI_APP_ID");
         let getui_app_key = non_empty_env("PUSH_WORKER_GETUI_APP_KEY");
         let getui_master_secret = non_empty_env("PUSH_WORKER_GETUI_MASTER_SECRET");
@@ -274,6 +290,11 @@ impl PushWorkerConfig {
             device_token_redis_url,
             device_token_key_prefix,
             fcm_service_account_json,
+            apns_team_id,
+            apns_key_id,
+            apns_private_key,
+            apns_topic,
+            apns_sandbox,
             getui_app_id,
             getui_app_key,
             getui_master_secret,

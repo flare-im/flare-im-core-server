@@ -17,6 +17,7 @@ use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
 use crate::application::GatewayPushExecutor;
 use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
+use crate::infrastructure::apns_push::{ApnsCredentials, ApnsOfflinePushExecutor};
 use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
 use crate::infrastructure::fcm_push::{FcmOfflinePushExecutor, FcmServiceAccount};
 use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePushExecutor};
@@ -98,6 +99,39 @@ pub async fn initialize(
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
                 Arc::new(outbox),
+                config.offline_parking_capacity,
+                metrics,
+            )
+        }
+        OfflineDeliveryBackend::Apns => {
+            let token_repo = RedisDeviceTokenRepository::connect(
+                &config.device_token_redis_url,
+                config.device_token_key_prefix.clone(),
+            )
+            .await?;
+            let creds = ApnsCredentials {
+                team_id: required_config(config.apns_team_id.clone(), "PUSH_WORKER_APNS_TEAM_ID")?,
+                key_id: required_config(config.apns_key_id.clone(), "PUSH_WORKER_APNS_KEY_ID")?,
+                private_key_pem: required_config(
+                    config.apns_private_key.clone(),
+                    "PUSH_WORKER_APNS_PRIVATE_KEY",
+                )?,
+                topic: required_config(config.apns_topic.clone(), "PUSH_WORKER_APNS_TOPIC")?,
+                sandbox: config.apns_sandbox,
+            };
+            tracing::info!(
+                topic = %creds.topic,
+                sandbox = creds.sandbox,
+                token_key_prefix = %config.device_token_key_prefix,
+                "offline push apns backend enabled"
+            );
+            OfflinePushConsumerFactory::create_handler_with_delivery(
+                dlq,
+                Arc::new(ApnsOfflinePushExecutor::new(
+                    creds,
+                    reqwest::Client::new(),
+                    Arc::new(token_repo),
+                )),
                 config.offline_parking_capacity,
                 metrics,
             )

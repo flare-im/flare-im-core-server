@@ -37,6 +37,7 @@ tonic = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
-reqwest = { workspace = true }
+# APNs 只接受 HTTP/2，必须显式开启该特性
+reqwest = { workspace = true, features = ["http2"] }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
