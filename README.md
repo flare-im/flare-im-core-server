@@ -1,5 +1,28 @@
 # Flare IM Core
 
+> ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
+>
+> 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**
+> （没有注册登录、好友关系、群角色/审批/禁言、朋友圈）。
+>
+> 但它自带完整且可插拔的鉴权契约，两条路都在开源侧：
+>
+> - **`CoreJwtTokenValidator`** —— 本地验 JWT。手签一个 token 就能跑起来做
+>   demo / POC，**不需要任何用户体系**。
+> - **`HttpHookTokenValidator`** —— 把 token POST 到你自己的接口，
+>   **这是接入自有用户体系的入口**。
+>
+> 业务规则同理：`flare-im-core/crates/flare-im-hooks` 提供 8 个扩展点
+> （PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
+> ConversationLifecycle / ConversationMember）。
+>
+> 要上生产，你需要自行实现用户体系并按上述契约接入 —— 与 Sendbird /
+> Twilio Conversations 的「自带身份」模型一致，区别是 Flare 可自托管、
+> 协议与核心可审计。
+>
+> 边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 
