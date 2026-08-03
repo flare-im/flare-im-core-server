@@ -105,8 +105,50 @@ cargo run --example chatroom_client
 
 | 现象 | 原因 |
 |---|---|
-| 接口返回 401 | token 与服务端密钥不一致；或租户不匹配（默认租户是 `"0"`） |
+| 接口返回 401 | token 与服务端密钥不一致；或签发者不是 `flare-im-core`；或租户不匹配（默认 `"0"`） |
+| 启动脚本报 `✗ Consul 未运行 (端口 28500)` | 见下方「放置一周后再启动」 |
 | 服务起不来 | 依赖没起齐，先跑 `check_services.sh` 看缺哪个 |
 | token 立刻失效 | 检查机器时钟；验签带 60 秒时钟偏移宽限，漂移过大会失败 |
+
+### 放置一周后再启动：Consul 拒绝启动
+
+容器显示 `running`，但端口 28500 不通，启动脚本判定基础设施未就绪并中止。
+`docker compose logs consul` 里会看到：
+
+```
+refusing to rejoin cluster because server has been offline for more than
+the configured server_rejoin_age_max (168h0m0s) - consider wiping your data dir
+```
+
+Consul 的数据目录是 bind mount（`deploy/data/consul`），离线超过 168 小时就会
+拒绝重新加入集群。全新环境不会遇到，但**跑过一次、搁置一周再回来必然遇到**。
+
+本地开发的服务发现数据可以安全清空：
+
+```bash
+docker compose -f deploy/docker-compose.yml stop consul
+rm -rf deploy/data/consul && mkdir -p deploy/data/consul
+docker compose -f deploy/docker-compose.yml up -d consul
+```
+
+等它选出 leader 再起服务：
+
+```bash
+curl -s http://127.0.0.1:28500/v1/status/leader
+```
+
+---
+
+## 本文档的验证状态
+
+上述流程**已在 macOS 上实际跑通**（2026-08-03），不是照着代码推断出来的：
+
+- 12 个依赖容器全部 healthy
+- 全部微服务启动成功，api-gateway 监听 50050
+- 用 `logs/.dev-token-secret` 签出的 token 调 `/api/v1/conversations`
+  返回 **HTTP 200** `{"code":0,"data":{"conversations":[],...}}`
+- 不带 token 返回 **HTTP 401**，确认鉴权确实在生效
+
+途中真实踩到并已收录进上面排查表的问题：Consul 陈旧数据导致启动中止。
 
 边界与商业部分的划分见工作区根 `GOVERNANCE.md`。
