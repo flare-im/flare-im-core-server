@@ -16,6 +16,9 @@ docker compose -f deploy/docker-compose.yml up -d
 最后那条命令跑 6 个真实端到端用例（发消息落库、事件总线、全量操作面、未读回归、
 RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不必先读完文档才知道它是否可用。
 
+同一套用例每天在 CI 上跑一遍完整栈（上面的 Nightly E2E 徽章）。所以这句
+「6/6 通过」不是某次手动跑出来的截图，而是每天都在重新验证的状态。
+
 ## 为什么用它
 
 - **消息不丢**：服务端消息 ID + 客户端幂等 ID + 会话 seq + 发送侧 WAL + broker ack
@@ -30,6 +33,7 @@ RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不�
   Swift、Kotlin、Dart、鸿蒙 ArkTS / 仓颉，接口契约由同一份 sdk-spec 生成。
 
 
+[![Nightly E2E](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml/badge.svg)](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 

@@ -23,9 +23,22 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SDK_ROOT="$(cd "$CORE_ROOT/../flare-im-core-sdk" && pwd)"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
+
+# 用例住在客户端 SDK 仓（flare-im-core-sdk）。默认按同级目录找，可用
+# FLARE_SDK_ROOT 覆盖 —— CI 里两个仓不一定并排放。
+#
+# 这里不用 `cd ... && pwd`：目录不存在时 cd 失败，SDK_ROOT 会悄悄变成当前目录，
+# 然后 cargo 报一句风马牛不相及的错。宁可当场说清楚缺的是什么。
+SDK_ROOT="${FLARE_SDK_ROOT:-$CORE_ROOT/../flare-im-core-sdk}"
+if [ ! -f "$SDK_ROOT/Cargo.toml" ]; then
+  echo -e "${RED}✗ 找不到客户端 SDK 仓：$SDK_ROOT${NC}" >&2
+  echo "  用例在 flare-im-core-sdk 里。把它 clone 到本仓同级目录，" >&2
+  echo "  或用 FLARE_SDK_ROOT=/path/to/flare-im-core-sdk 指定。" >&2
+  exit 1
+fi
+SDK_ROOT="$(cd "$SDK_ROOT" && pwd)"
 
 if [ ! -s "$CORE_ROOT/logs/.dev-token-secret" ]; then
   echo -e "${RED}✗ 没找到 logs/.dev-token-secret —— 先跑 ./scripts/start_server.sh${NC}" >&2
