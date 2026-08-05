@@ -17,6 +17,7 @@
 #   - 事件总线：连接/同步/消息事件的观察
 #   - 未读回归
 #   - RTC 房间加入（media-control 链路）
+#   - 端到端加密：服务端只见密文，仅持钥方可还原
 
 set -u
 
@@ -39,8 +40,11 @@ CASES=(
   "e2e_unread_regression:未读回归"
 )
 
+# E2EE 演示要额外的 e2ee feature，单列
+E2EE_CASE="e2ee_demo:端到端加密（服务端只见密文）"
+
 pass=0; fail=0
-echo -e "${YELLOW}开源栈冒烟（${#CASES[@]} 项）${NC}"
+echo -e "${YELLOW}开源栈冒烟（$(( ${#CASES[@]} + 1 )) 项）${NC}"
 cd "$SDK_ROOT" || exit 1
 
 for entry in "${CASES[@]}"; do
@@ -53,10 +57,18 @@ for entry in "${CASES[@]}"; do
   fi
 done
 
+ex="${E2EE_CASE%%:*}"; desc="${E2EE_CASE#*:}"
+if cargo run -q --example "$ex" --features "lifecycle-sqlite e2ee" >/tmp/flare-smoke-$ex.log 2>&1; then
+  pass=$((pass+1)); echo -e "  ${GREEN}✓${NC} $desc"
+else
+  fail=$((fail+1)); echo -e "  ${RED}✗${NC} $desc  —— 详见 /tmp/flare-smoke-$ex.log"
+  tail -3 "/tmp/flare-smoke-$ex.log" | sed 's/^/      /'
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
-  echo -e "${GREEN}✅ 开源栈自足：$pass/${#CASES[@]} 通过（全程未用到任何商业组件）${NC}"
+  echo -e "${GREEN}✅ 开源栈自足：$pass/$(( ${#CASES[@]} + 1 )) 通过（全程未用到任何商业组件）${NC}"
 else
-  echo -e "${RED}❌ $fail 项失败 / 共 ${#CASES[@]} 项${NC}"
+  echo -e "${RED}❌ $fail 项失败 / 共 $(( ${#CASES[@]} + 1 )) 项${NC}"
 fi
 exit "$fail"

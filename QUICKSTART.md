@@ -181,3 +181,8 @@ curl -s http://127.0.0.1:28500/v1/status/leader
    随机强密钥，必然被拒（服务端拒绝弱密钥是正确行为）。已改为读 `TOKEN_SECRET`。
 
 边界与商业部分的划分见工作区根 `GOVERNANCE.md`。
+
+---
+
+跑通之后，接进自己的业务看 [INTEGRATION.md](./INTEGRATION.md)：
+用户体系怎么接、各端客户端怎么用、生产要改哪三件事、哪些部分需要你自己实现。

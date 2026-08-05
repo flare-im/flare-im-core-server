@@ -35,6 +35,9 @@
 Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编排、会话同步、在线状态、信令路由、存储读写、推送、媒资与能力扩展。它面向生产级 IM 场景设计，保持业务中立：用户、好友、群资料、业务权限和产品规则由业务系统或插件提供，Core 只消费清晰的身份、会话、成员、Hook 与能力合同。
 
 
+> **上手路径**：[QUICKSTART.md](./QUICKSTART.md)（五分钟跑通，含一条命令的自证）
+> → [INTEGRATION.md](./INTEGRATION.md)（接进你自己的业务：用户体系、客户端、部署、E2EE）
+
 ## 核心亮点
 
 - 业务中立 IM Core：只承载消息、会话、seq、sync、push、presence、media、hook、capability 等通用能力。
