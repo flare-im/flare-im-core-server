@@ -113,7 +113,7 @@ NEGOTIATION_HOST=localhost:60051 \
 
 ### 接入你的业务规则
 
-`crates/flare-im-hooks` 提供 8 个扩展点：
+`crates/flare-im-hooks` 提供 9 个扩展点：
 
 `PreSend` / `PostSend` / `Delivery` / `Recall` / `MessageRead` /
 `MessageReaction` / `ConversationLifecycle` / `ConversationMember`

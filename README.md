@@ -1,26 +1,33 @@
 # Flare IM Core
 
-> ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
->
-> 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**
-> （没有注册登录、好友关系、群角色/审批/禁言、朋友圈）。
->
-> 但它自带完整且可插拔的鉴权契约，两条路都在开源侧：
->
-> - **`CoreJwtTokenValidator`** —— 本地验 JWT。手签一个 token 就能跑起来做
->   demo / POC，**不需要任何用户体系**。
-> - **`HttpHookTokenValidator`** —— 把 token POST 到你自己的接口，
->   **这是接入自有用户体系的入口**。
->
-> 业务规则同理：`flare-im-core/crates/flare-im-hooks` 提供 8 个扩展点
-> （PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
-> ConversationLifecycle / ConversationMember）。
->
-> 要上生产，你需要自行实现用户体系并按上述契约接入 —— 与 Sendbird /
-> Twilio Conversations 的「自带身份」模型一致，区别是 Flare 可自托管、
-> 协议与核心可审计。
->
-> 边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+**自托管的生产级 IM 服务端。** 消息可靠投递、多端同步、离线推送、端到端加密 ——
+这些你不想再写一遍的东西，它已经写好了，而且可以审计。
+
+```bash
+git clone … && cd flare-im-core
+docker compose -f deploy/docker-compose.yml up -d
+./scripts/start_server.sh && ./scripts/smoke_opensource.sh
+```
+
+```
+✅ 开源栈自足：6/6 通过（全程未用到任何商业组件）
+```
+
+最后那条命令跑 6 个真实端到端用例（发消息落库、事件总线、全量操作面、未读回归、
+RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不必先读完文档才知道它是否可用。
+
+## 为什么用它
+
+- **消息不丢**：服务端消息 ID + 客户端幂等 ID + 会话 seq + 发送侧 WAL + broker ack
+  + 存储幂等 + write ledger，每一环都可查。不是「我们很可靠」，是每一步都有痕迹。
+- **发送不卡**：ACK 在 broker accepted 边界就返回，存储与推送异步收敛 ——
+  用户等的是入队，不是落盘。
+- **端到端加密真的能演示**：`cargo run --example e2ee_demo` 会当场打印服务端只
+  看得到 323 字节密文、明文未泄漏、第三方解密失败。
+- **可自托管、可审计**：Rust 实现，Apache-2.0，协议与核心都在仓库里 ——
+  不是一个你只能相信的黑盒。
+- **6 个平台 SDK + 111 个 UI 组件**：TypeScript（Web / Tauri / Electron 共用）、
+  Swift、Kotlin、Dart、鸿蒙 ArkTS / 仓颉，接口契约由同一份 sdk-spec 生成。
 
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
@@ -49,7 +56,65 @@ Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编�
 - 服务间 typed gRPC 优先：业务系统在可信内网调用消息、会话、媒体、在线状态等高频能力时，推荐使用 typed gRPC；HTTP/OpenAPI 主要作为外部三方、管理后台、低频后台和临时适配 facade。
 - 可观测与可运维：tracing、Prometheus、Grafana、Loki、Tempo、message write ledger、MQ retry/DLQ topic 为生产排障提供边界。
 
-## 架构总览
+## 我的代码在哪一层
+
+```mermaid
+flowchart TB
+    subgraph yours["🟡 你实现的部分"]
+        auth["用户体系<br/>注册 / 登录 / 签发 token"]
+        rules["业务规则<br/>谁能给谁发 · 内容审核"]
+        profile["用户资料<br/>昵称 / 头像"]
+    end
+
+    subgraph client["🟢 开源：客户端"]
+        ui["flare-im-design<br/>111 个 UI 组件 · 四端"]
+        sdk["平台 SDK<br/>TS / Swift / Kotlin / Dart / ArkTS"]
+        engine["flare-im-core-sdk<br/>Rust 客户端引擎<br/>发送队列 · 本地存储 · 同步 · E2EE"]
+    end
+
+    subgraph server["🟢 开源：服务端"]
+        gw["网关<br/>长连接接入 · 验签"]
+        core["flare-im-core<br/>消息编排 · 会话 · 同步 · 推送 · 媒资"]
+        store[("PostgreSQL<br/>NATS / Consul")]
+    end
+
+    auth -. "签发 JWT" .-> gw
+    rules -. "Hook 回调" .-> core
+    profile -. "ProfileProvider" .-> engine
+
+    ui --> sdk --> engine
+    engine -- "QUIC / WebSocket" --> gw --> core --> store
+
+    classDef mine fill:#FFF3CD,stroke:#E0A800,color:#000
+    classDef oss fill:#D4EDDA,stroke:#28A745,color:#000
+    class auth,rules,profile mine
+    class ui,sdk,engine,gw,core,store oss
+```
+
+**绿色的部分开箱可用，黄色的三处需要你接。** 其中只有「签发 token」是必做的 ——
+另外两处不接也能跑，只是没有昵称头像、没有发送权限校验。
+怎么接见 [INTEGRATION.md](./INTEGRATION.md)。
+
+## 关于边界：不含账号体系
+
+上面那张图里的黄色部分不是遗漏，是分工。每家的用户体系都长得不一样，
+硬塞一套进来对谁都是负担。
+
+鉴权契约本身**完全在开源侧**，两条路任选：
+
+- **`CoreJwtTokenValidator`** —— 本地验 JWT。手签一个 token 就能跑 demo / POC，
+  不需要任何用户体系。
+- **`HttpHookTokenValidator`** —— 把 token POST 到你自己的接口，
+  这是接入自有用户体系的入口。
+
+业务规则同理，9 个 Hook 扩展点都在 `crates/flare-im-hooks`：
+PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
+ConversationLifecycle / ConversationMember / GetConversationParticipants。
+
+这与 Sendbird / Twilio Conversations 的「自带身份」模型一致，区别是
+Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+
+## 服务拓扑
 
 ```mermaid
 flowchart LR
@@ -236,7 +301,7 @@ make stop   # 停止全部 Core 服务
 |---|---|
 | **五分钟跑起来** | [QUICKSTART](https://github.com/flare-im/flare-im-core-server/blob/main/QUICKSTART.md) —— 起服务、手签 token、调通接口，**不需要自建用户体系** |
 | 接入自己的用户系统 | 实现 `TokenValidator`（`CoreJwtTokenValidator` 本地验签 / `HttpHookTokenValidator` 调你的接口） |
-| 加自己的业务规则 | `flare-im-hooks` 的 8 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember |
+| 加自己的业务规则 | `flare-im-hooks` 的 9 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember / GetConversationParticipants |
 | 做界面 | [`@flare-im/vue-ui`](https://www.npmjs.com/package/@flare-im/vue-ui) —— 107 个组件，四端一致的契约 |
 | 报安全问题 | [SECURITY.md](SECURITY.md)，**请勿开公开 issue** |
 
