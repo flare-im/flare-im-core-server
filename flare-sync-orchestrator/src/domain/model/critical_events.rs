@@ -1,6 +1,6 @@
 use flare_proto::common::EventType;
 
-/// 默认必须参与离线/增量回放的事件类型（与 `im_sync_best_practice` 一致：影响最终状态、需参与 seq 补齐）。
+/// 默认必须参与离线/增量回放的事件类型（与 `flare-storage/im-sync-design.md` 的事件分级一致：影响最终状态、需参与 seq 补齐）。
 pub const DEFAULT_CRITICAL_EVENT_TYPES: [i32; 9] = [
     EventType::EventMessageRecall as i32,
     EventType::EventMessageEdit as i32,

@@ -2,7 +2,7 @@
 
 日期：2026-06-12
 
-本文是 [08-billion-scale-evolution-plan.md](08-billion-scale-evolution-plan.md) / [10-100k-large-group-test-report.md](10-100k-large-group-test-report.md) 的后续：08 给方向，10 验证了 100k 分页 pure-ping 的**功能正确性**，本文针对一次面向 100k 会话的代码级复检中发现的、**功能测试覆盖不到的规模与可靠性问题**，逐条给出落地方案。
+本文是 [08-billion-scale-evolution-plan.md](08-billion-scale-evolution-plan.md) / [10-100k-large-group-test-report.md](archive/10-100k-large-group-test-report.md) 的后续：08 给方向，10 验证了 100k 分页 pure-ping 的**功能正确性**，本文针对一次面向 100k 会话的代码级复检中发现的、**功能测试覆盖不到的规模与可靠性问题**，逐条给出落地方案。
 
 核心结论一句话：读扩散改造已正确消灭了**推送 payload** 的 O(成员) 放大，但一条消息在 100k 群里穿过的成员成正比基底有四层，目前只砍掉了最表层一层；其余三层（ingest 物化、user_sync per-member 写、presence per-user 读）仍是 O(成员)，且 user_sync 的当前模型与"大群不物化成员"的终极形态在数学上互斥。
 

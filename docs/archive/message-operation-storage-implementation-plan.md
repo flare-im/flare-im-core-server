@@ -1,5 +1,12 @@
 # 消息操作 Storage 层实现方案
 
+> **📦 已归档（历史规划文档）**：本文是 2025-01 的一次性实现规划，其 P0/P1/P2
+> 计划大部分已落地。文中 API 命名（`is_operation_message` / `update_message_status`
+> / `ProcessMessageOperationCommand` / `MessageOperationDomainService`）已与当前实现
+> 漂移——真实写模型走 `flare-storage/writer` 的 `EventApplicationService` +
+> `event_handlers::dispatch` + `ArchiveStoreRepository`（`update_message_fsm_state`
+> / `update_message_content` / `update_message_visibility` 等）。仅作历史参考，勿当现状。
+
 > **作者**: IM 架构专家  
 > **日期**: 2025-01-XX  
 > **版本**: 1.0  

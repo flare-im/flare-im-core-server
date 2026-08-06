@@ -13,7 +13,7 @@
 7. [Core 架构优化落地方案](07-core-architecture-optimization-roadmap.md)
 8. [亿级演进整体改造规划](08-billion-scale-evolution-plan.md)
 9. [亿级落地验证标准](09-billion-scale-validation.md)
-10. [10 万人大群测试报告](10-100k-large-group-test-report.md)
+10. [10 万人大群测试报告](archive/10-100k-large-group-test-report.md)（已归档）
 11. [超大群与可靠性整改方案](11-large-group-and-reliability-remediation.md)
 
 ## 文档分类
@@ -29,9 +29,9 @@
 | 落地方案 | [07-core-architecture-optimization-roadmap.md](07-core-architecture-optimization-roadmap.md) | 网关边界、message-ingest、PostgreSQL/TimescaleDB、统一鉴权如何分阶段落地。 |
 | 演进规划 | [08-billion-scale-evolution-plan.md](08-billion-scale-evolution-plan.md) | 亿级容量下低延迟、0 丢失、同步策略的瓶颈在哪，统一读扩散内核如何分四阶段改造。 |
 | 验证标准 | [09-billion-scale-validation.md](09-billion-scale-validation.md) | 统一读扩散、大群 notify+pull、DLQ replay、压测和混沌演练如何验收。 |
-| 测试报告 | [10-100k-large-group-test-report.md](10-100k-large-group-test-report.md) | 10 万参与者大群 pure-ping 分页、online-only、coalescing 的功能验证结果。 |
+| 测试报告 | [10-100k-large-group-test-report.md](archive/10-100k-large-group-test-report.md) | 10 万参与者大群 pure-ping 分页、online-only、coalescing 的功能验证结果。 |
 | 整改方案 | [11-large-group-and-reliability-remediation.md](11-large-group-and-reliability-remediation.md) | 100k 会话复检发现的伪读扩散四层基底、Redis 关键路径耦合等 15 个问题的逐条解决方案。 |
-| 测试报告 | [10-100k-large-group-test-report.md](10-100k-large-group-test-report.md) | 10 万人大群 recipient-less ping、分页、coalescing 和验证结果。 |
+| 测试报告 | [10-100k-large-group-test-report.md](archive/10-100k-large-group-test-report.md) | 10 万人大群 recipient-less ping、分页、coalescing 和验证结果。 |
 
 ## 接入协议推荐
 
