@@ -35,6 +35,14 @@ pub trait MessageIdempotencyRepository: Send + Sync {
     async fn is_new(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<bool>;
 
     /// 释放一次尚未完成 durable write 的服务端消息 ID 预占坑。
+    ///
+    /// 默认体是**有意的最佳努力 no-op**：仅“检查不预占”的幂等实现（`is_new`
+    /// 不占坑，例如内存/测试 mock）本就无坑可释放，返回 `Ok(())` 是正确语义，
+    /// 且调用方 `release_idempotency_reservation` 已把释放失败当最佳努力吞掉并 `warn!`。
+    ///
+    /// ⚠️ 但凡 `is_new` 会**预占坑**的实现（如 Redis `SET NX`），都**必须** override
+    /// 本方法，否则失败路径下坑永不释放 → 客户端在 TTL 到期前无法重发（坑泄漏）。
+    /// 这与 `ArchiveStoreRepository` 的写方法不同：那里 no-op = 静默丢数据，故那里默认体直接报错。
     async fn release(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<()> {
         let _ = (ctx, message_id);
         Ok(())

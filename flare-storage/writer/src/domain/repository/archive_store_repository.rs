@@ -2,7 +2,23 @@
 
 use crate::domain::model::{Event, Message};
 use flare_im_contracts::Ctx;
-use flare_server_core::error::Result;
+use flare_server_core::error::{FlareError, Result};
+
+/// 未实现守卫：把“忘记 override 的写方法静默成功”变成显式失败。
+///
+/// 这些方法的默认实现历史上是 `Ok(())` / `Ok(false)` / `Ok(None)` 空实现，
+/// 一旦某个具体存储实现漏掉 override，消息编辑/撤回/软删/已读/阅后即焚等操作
+/// 会“静默成功却不落库”，且无任何告警——线上不可见的数据丢失。
+///
+/// 生产实现 `PostgresMessageStore` 已 override 全部方法；默认体只应被测试
+/// mock/半成品命中。让默认体返回明确错误后，任何漏实现都会在运行期立即暴露，
+/// 测试 double 也必须显式声明“我把该写当作 no-op”而不是静默继承。
+#[inline]
+fn unimplemented_archive_method(method: &str) -> FlareError {
+    FlareError::system(format!(
+        "ArchiveStoreRepository::{method} has no durable implementation; the concrete store must override it to avoid silent data loss"
+    ))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub trait ArchiveStoreRepository: Send + Sync {
@@ -26,7 +42,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         recall_reason: Option<&str>,
     ) -> Result<()> {
         let _ = (ctx, tenant_id, message_id, fsm_state, recall_reason);
-        Ok(())
+        Err(unimplemented_archive_method("update_message_fsm_state"))
     }
 
     /// 更新消息内容（用于编辑操作）；`content_text_for_extra` 写入 `extra.contentText`
@@ -49,7 +65,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
             reason,
             content_text_for_extra,
         );
-        Ok(())
+        Err(unimplemented_archive_method("update_message_content"))
     }
 
     /// 更新消息可见性（用于软删除操作）
@@ -70,7 +86,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
             scope,
             visibility_status,
         );
-        Ok(())
+        Err(unimplemented_archive_method("update_message_visibility"))
     }
 
     /// 记录消息已读
@@ -82,7 +98,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         user_id: &str,
     ) -> Result<()> {
         let _ = (ctx, tenant_id, message_id, user_id);
-        Ok(())
+        Err(unimplemented_archive_method("record_message_read"))
     }
 
     /// 阅后即焚：首次阅读后安排服务端权威倒计时。
@@ -103,7 +119,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
             first_read_at,
             burn_at,
         );
-        Ok(false)
+        Err(unimplemented_archive_method("schedule_message_burn"))
     }
 
     /// 阅后即焚：根据消息自身 `burn_after_read_seconds` 在写模型内原子安排倒计时。
@@ -116,7 +132,9 @@ pub trait ArchiveStoreRepository: Send + Sync {
         first_read_at: i64,
     ) -> Result<Option<i64>> {
         let _ = (ctx, tenant_id, message_id, reader_id, first_read_at);
-        Ok(None)
+        Err(unimplemented_archive_method(
+            "schedule_message_burn_after_read",
+        ))
     }
 
     /// 阅后即焚：标记消息已焚毁并清除可见内容。
@@ -128,7 +146,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         burned_at: i64,
     ) -> Result<bool> {
         let _ = (ctx, tenant_id, message_id, burned_at);
-        Ok(false)
+        Err(unimplemented_archive_method("mark_message_burned"))
     }
 
     /// 阅后即焚：硬删除/清理完成。
@@ -140,7 +158,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         hard_deleted_at: i64,
     ) -> Result<bool> {
         let _ = (ctx, tenant_id, message_id, hard_deleted_at);
-        Ok(false)
+        Err(unimplemented_archive_method("mark_message_hard_deleted"))
     }
 
     /// 添加或更新消息反应
@@ -154,7 +172,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         add: bool,
     ) -> Result<()> {
         let _ = (ctx, tenant_id, message_id, emoji, user_id, add);
-        Ok(())
+        Err(unimplemented_archive_method("upsert_message_reaction"))
     }
 
     /// 置顶或取消置顶消息
@@ -181,7 +199,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
             expire_at,
             reason,
         );
-        Ok(())
+        Err(unimplemented_archive_method("pin_message"))
     }
 
     /// 标记或取消标记消息
@@ -206,24 +224,24 @@ pub trait ArchiveStoreRepository: Send + Sync {
             color,
             add,
         );
-        Ok(())
+        Err(unimplemented_archive_method("mark_message"))
     }
 
     /// 追加领域事件到操作历史（读侧 QueryMessageEvents 等）
     async fn append_event(
         &self,
         ctx: &Ctx,
-        _tenant_id: &str,
-        _message_id: &str,
-        _event: &Event,
+        tenant_id: &str,
+        message_id: &str,
+        event: &Event,
     ) -> Result<()> {
-        let _ = ctx;
-        Ok(())
+        let _ = (ctx, tenant_id, message_id, event);
+        Err(unimplemented_archive_method("append_event"))
     }
 
     /// 获取消息（用于权限验证与 tenant_id 解析，写模型内部查询）
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
         let _ = (ctx, message_id);
-        Ok(None)
+        Err(unimplemented_archive_method("get_message"))
     }
 }

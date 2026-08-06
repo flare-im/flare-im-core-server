@@ -87,6 +87,28 @@ mod tests {
         ) -> AnyhowResult<()> {
             Ok(())
         }
+
+        // 该测试聚焦事件流失败路径：这两个写方法在此显式声明为 no-op（成功），
+        // 否则会命中 trait 的“未实现即失败”默认体而提前出错。
+        async fn record_message_read(
+            &self,
+            _ctx: &flare_im_contracts::Ctx,
+            _tenant_id: &str,
+            _message_id: &str,
+            _user_id: &str,
+        ) -> AnyhowResult<()> {
+            Ok(())
+        }
+
+        async fn append_event(
+            &self,
+            _ctx: &flare_im_contracts::Ctx,
+            _tenant_id: &str,
+            _message_id: &str,
+            _event: &Event,
+        ) -> AnyhowResult<()> {
+            Ok(())
+        }
     }
 
     struct FailingEventStreamRepository;
