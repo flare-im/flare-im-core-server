@@ -1,31 +1,33 @@
-# Flare Storage 存储服务
+# Flare Storage Service
 
-> **状态**: 核心链路以 PostgreSQL / TimescaleDB 为唯一持久化数据库，Redis 仅承载热缓存、WAL、短期状态和幂等辅助。
+English · [中文](README.zh-CN.md)
 
-`flare-storage` 包含两个核心服务：
+> **Status**: The core path uses PostgreSQL / TimescaleDB as the sole persistent database; Redis only carries the hot cache, WAL, short-lived state, and idempotency assistance.
 
-- `flare-storage/writer`：消费 MQ 存储事件，完成消息归档、事件流、ledger、热缓存和 ACK。
-- `flare-storage/reader`：提供历史消息、事件流、审计和导出查询。
+`flare-storage` contains two core services:
 
-## 设计边界
+- `flare-storage/writer`: consumes MQ storage events and completes message archiving, the event stream, the ledger, the hot cache, and ACKs.
+- `flare-storage/reader`: provides queries for historical messages, the event stream, audit, and export.
 
-- 不使用 MongoDB 存储消息体或实时数据。
-- 不做同一份消息数据的跨数据库同步双写。
-- PostgreSQL / TimescaleDB 是消息、事件、ledger、审计查询的唯一持久化数据库族。
-- Redis 只用于热缓存、发送/写入 WAL、幂等窗口、在线/短期状态和读路径加速。
-- MQ 是写路径异步边界；writer 消费失败进入 retry / DLQ，而不是让接入层同步等待数据库成功。
+## Design boundaries
+
+- Does not use MongoDB to store message bodies or real-time data.
+- Does not perform cross-database synchronous dual-writing of the same message data.
+- PostgreSQL / TimescaleDB is the sole persistent database family for messages, events, the ledger, and audit queries.
+- Redis is only used for the hot cache, the send/write WAL, the idempotency window, presence/short-lived state, and read-path acceleration.
+- MQ is the asynchronous boundary of the write path; when the writer fails to consume, it goes into retry / DLQ, rather than making the access layer synchronously wait for database success.
 
 ## Writer
 
-`flare-storage/writer` 的职责：
+Responsibilities of `flare-storage/writer`:
 
-- 消费 `flare.im.message.storage` 和 `flare.im.message.events` 等存储 topic。
-- 使用 Redis 幂等窗口和 PostgreSQL `message_write_ledger` 保证重复投递可重入。
-- 将消息写入 `messages`，将操作/同步事件写入 `events`。
-- 维护热缓存和写入阶段状态。
-- 发布 ACK 或失败状态，供客户端 ack/sync 收敛和运维排障。
+- Consume storage topics such as `flare.im.message.storage` and `flare.im.message.events`.
+- Use the Redis idempotency window and the PostgreSQL `message_write_ledger` to ensure re-entrancy on duplicate delivery.
+- Write messages into `messages`, and write operation/sync events into `events`.
+- Maintain the hot cache and write-stage state.
+- Publish ACK or failure status, for client ack/sync convergence and operational troubleshooting.
 
-持久消息写入流：
+Durable message write flow:
 
 ```text
 flare-message-ingest
@@ -37,26 +39,26 @@ flare-message-ingest
   -> ACK / retry / DLQ
 ```
 
-失败处理：
+Failure handling:
 
-- 可重试错误进入 `STORAGE_MESSAGE_RETRY_TOPIC`。
-- 超过重试预算或不可恢复错误进入 `STORAGE_MESSAGE_DLQ_TOPIC`。
-- `message_write_ledger` 记录 archive/event/ack 等阶段，便于按 `tenant_id + server_id` 排障。
+- Retryable errors go into `STORAGE_MESSAGE_RETRY_TOPIC`.
+- Errors that exceed the retry budget or are unrecoverable go into `STORAGE_MESSAGE_DLQ_TOPIC`.
+- `message_write_ledger` records stages such as archive/event/ack, to facilitate troubleshooting by `tenant_id + server_id`.
 
 ## Reader
 
-`flare-storage/reader` 的职责：
+Responsibilities of `flare-storage/reader`:
 
-- `QueryMessages`：按会话、seq、时间范围、分页游标查询消息。
-- `GetMessage`：按消息 ID 查询详情。
-- `QueryMessageEvents`：查询消息相关事件流。
-- `QueryMessageWriteLedger`：查询写入阶段和失败原因。
-- `ExportMessages`：登记导出任务，文件生成由后续 worker 执行。
-- 消息操作查询和审计读取统一回源 PostgreSQL / TimescaleDB，Redis 只作为缓存。
+- `QueryMessages`: query messages by conversation, seq, time range, and pagination cursor.
+- `GetMessage`: query details by message ID.
+- `QueryMessageEvents`: query the event stream related to a message.
+- `QueryMessageWriteLedger`: query the write stage and failure reason.
+- `ExportMessages`: register an export task; the file generation is performed by a subsequent worker.
+- Message-operation queries and audit reads uniformly go back to the source PostgreSQL / TimescaleDB, with Redis serving only as a cache.
 
-## 配置
+## Configuration
 
-Writer 常用环境变量：
+Common Writer environment variables:
 
 - `STORAGE_JETSTREAM_URL`
 - `STORAGE_JETSTREAM_GROUP`
@@ -72,31 +74,31 @@ Writer 常用环境变量：
 - `STORAGE_POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
 - `STORAGE_WAL_HASH_KEY`
 
-Reader 常用环境变量：
+Common Reader environment variables:
 
 - `STORAGE_READER_REDIS_URL`
 - `STORAGE_READER_POSTGRES_URL`
 - `STORAGE_READER_DEFAULT_RANGE_SECONDS`
 - `STORAGE_READER_MAX_PAGE_SIZE`
 
-实际配置优先来自 `config/services/*.toml` 和 `FlareAppConfig`，环境变量用于部署覆盖。
+The actual configuration comes primarily from `config/services/*.toml` and `FlareAppConfig`; environment variables are used for deployment overrides.
 
 ## PostgreSQL / TimescaleDB
 
-数据库初始化以 `deploy/init.sql` 为唯一入口，不在 storage 模块 README 中复制 DDL，避免 schema 漂移。
+Database initialization uses `deploy/init.sql` as the sole entry point; the DDL is not duplicated in the storage module README, to avoid schema drift.
 
-当前核心约定：
+Current core conventions:
 
-- `messages` 是消息聚合根，按 `created_at` 建 TimescaleDB hypertable。
-- `timestamp` 是业务消息时间，用于时间线、筛选和展示，不作为分区键。
-- `events` 是 durable event stream，按 `tenant_id + conversation_id + seq` 保证事件幂等。
-- `message_write_ledger` 是普通表，负责 `tenant_id + server_id` 的最终幂等和写链路状态诊断。
-- 同步查询优先使用 `(tenant_id, conversation_id, seq)`。
-- 管理端检索优先使用租户 + 维度 + `timestamp DESC` 组合索引。
+- `messages` is the message aggregate root, built as a TimescaleDB hypertable by `created_at`.
+- `timestamp` is the business message time, used for the timeline, filtering, and display; it is not used as the partition key.
+- `events` is a durable event stream, with event idempotency guaranteed by `tenant_id + conversation_id + seq`.
+- `message_write_ledger` is a regular table, responsible for the final idempotency of `tenant_id + server_id` and diagnosing write-path status.
+- Sync queries preferentially use `(tenant_id, conversation_id, seq)`.
+- Management-side retrieval preferentially uses a composite index of tenant + dimension + `timestamp DESC`.
 
-完整字段、索引、压缩策略和触发器见 `deploy/init.sql` 与 `deploy/TIMESCALEDB_GUIDE.md`。
+For the complete fields, indexes, compression policies, and triggers, see `deploy/init.sql` and `deploy/TIMESCALEDB_GUIDE.md`.
 
-## 验证
+## Verification
 
 ```bash
 cargo test --package flare-storage-writer

@@ -1,40 +1,42 @@
 # flare-push-worker
 
-离线推送投递。用户不在线时，消息经此 worker 送到厂商推送通道，最终落到设备通知栏。
+English · [中文](README.zh-CN.md)
 
-**这是移动端产品的底线能力** —— 离线收不到消息，IM 就不能上生产。
+Offline push delivery. When a user is offline, messages pass through this worker to a vendor push channel, and finally land in the device's notification tray.
 
-## 选择投递后端
+**This is a bottom-line capability for mobile products** — if messages can't be received while offline, the IM can't go to production.
+
+## Choosing the delivery backend
 
 ```bash
 PUSH_WORKER_OFFLINE_DELIVERY_BACKEND=fcm   # outbox | getui | fcm | apns | disabled
 ```
 
-| 后端 | 覆盖 | 何时用 |
+| Backend | Coverage | When to use |
 |---|---|---|
-| `apns` | iOS 原生 | 需要 VoIP 来电、Live Activity、Critical Alert —— 这些**只有原生 APNs 支持** |
-| `fcm` | Android + 经 FCM 转发的 iOS | 海外为主的产品，一套接入覆盖两端 |
-| `getui` | 国内 Android 全家桶 | 国内产品：小米/华为/OPPO/vivo 等厂商通道由个推聚合 |
-| `outbox` | —— | 只落库不投递，由外部系统消费 |
-| `disabled` | —— | 关闭离线推送 |
+| `apns` | Native iOS | When you need VoIP calls, Live Activity, or Critical Alert — these are **only supported by native APNs** |
+| `fcm` | Android + iOS forwarded via FCM | Products targeting overseas mainly; one integration covers both platforms |
+| `getui` | The full lineup of domestic Android | Domestic products: vendor channels such as Xiaomi/Huawei/OPPO/vivo are aggregated by Getui |
+| `outbox` | — | Only persist, do not deliver; consumed by an external system |
+| `disabled` | — | Turn off offline push |
 
-> 一个 worker 实例只跑一个后端。要同时覆盖多个通道，就起多个实例、各配各的后端 ——
-> 设备 token 注册表里带 `provider` 字段，每个实例只处理属于自己的那批 token，互不干扰。
+> A single worker instance runs only one backend. To cover multiple channels at once, start multiple instances, each configured with its own backend —
+> the device-token registry carries a `provider` field, so each instance only handles the batch of tokens that belong to it, without interfering with the others.
 
-## 配置
+## Configuration
 
 ### APNs
 
 ```bash
 PUSH_WORKER_APNS_TEAM_ID=XXXXXXXXXX          # Apple Developer Team ID
-PUSH_WORKER_APNS_KEY_ID=YYYYYYYYYY           # p8 私钥的 Key ID
+PUSH_WORKER_APNS_KEY_ID=YYYYYYYYYY           # Key ID of the p8 private key
 PUSH_WORKER_APNS_PRIVATE_KEY="$(cat AuthKey_YYYYYYYYYY.p8)"
 PUSH_WORKER_APNS_TOPIC=com.example.app       # bundle id
-PUSH_WORKER_APNS_SANDBOX=false               # 开发构建的设备 token 必须设 true
+PUSH_WORKER_APNS_SANDBOX=false               # must be set to true for device tokens from development builds
 ```
 
-> ⚠️ **`SANDBOX` 设错是最常见的坑**：开发构建注册的 device token 只在沙箱有效，
-> 拿到生产环境用会一律返回 `BadDeviceToken`，看起来像 token 全失效了。
+> ⚠️ **Setting `SANDBOX` wrong is the most common pitfall**: a device token registered by a development build is only valid in the sandbox,
+> and using it in production will uniformly return `BadDeviceToken`, which looks as if all tokens have become invalid.
 
 ### FCM
 
@@ -42,7 +44,7 @@ PUSH_WORKER_APNS_SANDBOX=false               # 开发构建的设备 token 必�
 PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON="$(cat service-account.json)"
 ```
 
-### 个推
+### Getui
 
 ```bash
 PUSH_WORKER_GETUI_APP_ID=...
@@ -50,34 +52,31 @@ PUSH_WORKER_GETUI_APP_KEY=...
 PUSH_WORKER_GETUI_MASTER_SECRET=...
 ```
 
-> **私钥与 secret 一律走环境变量或密钥管理服务注入，不要写进配置文件提交到版本控制。**
+> **Private keys and secrets must always be injected via environment variables or a secret-management service; do not write them into a config file and commit it to version control.**
 
-## 失效 token 清理
+## Invalid-token cleanup
 
-厂商明确告知「此 token 永久失效」时，worker 会把它从注册表删除，避免为一个
-永不可达的设备无限重试。
+When a vendor explicitly informs that "this token is permanently invalid", the worker removes it from the registry, to avoid infinitely retrying a device that is permanently unreachable.
 
-判定刻意**保守**：
+The determination is deliberately **conservative**:
 
-| 厂商 | 判定为失效 | 不判定（会重试） |
+| Vendor | Determined as invalid | Not determined (will retry) |
 |---|---|---|
-| APNs | `410 Gone`、`400 BadDeviceToken`、`400 DeviceTokenNotForTopic` | 限流、5xx、`ExpiredProviderToken`、`PayloadTooLarge` |
-| FCM | `404`、`UNREGISTERED`、`INVALID_ARGUMENT` | 限流、5xx、`PERMISSION_DENIED` |
+| APNs | `410 Gone`, `400 BadDeviceToken`, `400 DeviceTokenNotForTopic` | Rate limiting, 5xx, `ExpiredProviderToken`, `PayloadTooLarge` |
+| FCM | `404`, `UNREGISTERED`, `INVALID_ARGUMENT` | Rate limiting, 5xx, `PERMISSION_DENIED` |
 
-**把临时故障误判为失效，会删掉正常设备的 token，用户从此再也收不到推送，
-且不重装 App 无法自愈。** 宁可多重试几次，也不能误删 —— 单测专门钉住了这条边界。
+**Misjudging a temporary failure as invalid will delete a normal device's token, after which the user will never receive pushes again, and cannot self-heal without reinstalling the App.** Better to retry a few more times than to delete by mistake — a unit test specifically pins down this boundary.
 
-## 多设备语义
+## Multi-device semantics
 
-一个用户可能有多台设备。**只要有一台投递成功就算整体成功** —— 否则某台旧设备
-持续失败会触发整批重试，给其余正常设备造成重复通知。
+A user may have multiple devices. **As long as one device is delivered to successfully, it counts as overall success** — otherwise, an old device that keeps failing would trigger a retry of the entire batch, causing duplicate notifications for the other normal devices.
 
-## 加一个新通道
+## Adding a new channel
 
-1. 在 `infrastructure/` 下实现 `OfflinePushExecutor`
-2. 「信封 → 标题/正文」直接用 `push_display::notification_display`，**不要自己解码** ——
-   各通道对「消息被撤回 / 内容不可见时显示什么」的判断必须一致，那是最容易泄露内容的地方
-3. 在 `OfflineDeliveryBackend` 加枚举分支与 `wire.rs` 的接线
-4. 失效判定单独写成纯函数并覆盖测试，尤其是**不该判定为失效**的那些情况
+1. Implement `OfflinePushExecutor` under `infrastructure/`
+2. For "envelope → title/body", use `push_display::notification_display` directly, **do not decode it yourself** —
+   each channel's judgment of "what to display when a message is recalled / content is not visible" must be consistent; that is the place most prone to leaking content
+3. Add an enum branch in `OfflineDeliveryBackend` and the wiring in `wire.rs`
+4. Write the invalidity determination as a standalone pure function and cover it with tests, especially the cases that **should not be determined as invalid**
 
-`fcm_push.rs` 与 `apns_push.rs` 都是可直接照抄的模板。
+`fcm_push.rs` and `apns_push.rs` are both templates you can copy directly.

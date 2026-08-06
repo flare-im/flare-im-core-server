@@ -1,43 +1,45 @@
 # Flare Push Proxy
 
-暴露 **PushService** gRPC API（`push_service.proto`），将调用方提交的推送请求写入 MQ，由 [Push Server](../server) 消费并执行在线/离线分流与实际推送。
+English · [中文](README.zh-CN.md)
 
-## 职责
+Exposes the **PushService** gRPC API (`push_service.proto`), writing the push requests submitted by callers into MQ, which the [Push Server](../server) consumes to perform online/offline routing and the actual push.
 
-- **PushMessage**：接收 `PushMessageRequest`，写入消息推送入站 topic（默认 `flare.im.push.messages`）。
-- **PushNotification**：接收 `PushNotificationRequest`，构造成裸 `PushEnvelope`，写入统一信封 topic（默认 `flare.im.push.envelope`）。
-- **PushCustom**：接收 `PushCustomRequest`，构造成裸 `PushEnvelope`，写入统一信封 topic（默认 `flare.im.push.envelope`）。
-- 模板、定时推送、查询状态等 RPC 当前返回 `Unimplemented`，可按需扩展。
+## Responsibilities
 
-## 配置
+- **PushMessage**: receives a `PushMessageRequest` and writes it to the message-push inbound topic (default `flare.im.push.messages`).
+- **PushNotification**: receives a `PushNotificationRequest`, constructs a bare `PushEnvelope`, and writes it to the unified envelope topic (default `flare.im.push.envelope`).
+- **PushCustom**: receives a `PushCustomRequest`, constructs a bare `PushEnvelope`, and writes it to the unified envelope topic (default `flare.im.push.envelope`).
+- RPCs such as template push, scheduled push, and status query currently return `Unimplemented` and can be extended as needed.
 
-| 环境变量 | 说明 | 默认 |
+## Configuration
+
+| Environment variable | Description | Default |
 |----------|------|------|
-| `PUSH_PROXY_LISTEN` | gRPC 监听地址 | `0.0.0.0:50090` |
-| `PUSH_PROXY_JETSTREAM_URL` | JetStream 地址 | 同 push 配置或 `nats://127.0.0.1:24222` |
-| `PUSH_PROXY_PUSH_REQUEST_TOPIC` | 消息推送入站 Topic | `flare.im.push.messages` |
-| `PUSH_PROXY_PUSH_ENVELOPE_TOPIC` | 通知/自定义统一信封 Topic | `flare.im.push.envelope` |
-| `PUSH_PROXY_PUSH_ONLINE_TOPIC` | 在线推送任务 Topic | `flare.im.push.online` |
-| `PUSH_PROXY_PUSH_OFFLINE_TOPIC` | 离线推送任务 Topic | `flare.im.push.offline` |
-| `PUSH_PROXY_JETSTREAM_TIMEOUT_MS` | JetStream 发送超时（毫秒） | `5000` |
+| `PUSH_PROXY_LISTEN` | gRPC listen address | `0.0.0.0:50090` |
+| `PUSH_PROXY_JETSTREAM_URL` | JetStream address | Same as the push config or `nats://127.0.0.1:24222` |
+| `PUSH_PROXY_PUSH_REQUEST_TOPIC` | Message-push inbound topic | `flare.im.push.messages` |
+| `PUSH_PROXY_PUSH_ENVELOPE_TOPIC` | Notification/custom unified envelope topic | `flare.im.push.envelope` |
+| `PUSH_PROXY_PUSH_ONLINE_TOPIC` | Online push task topic | `flare.im.push.online` |
+| `PUSH_PROXY_PUSH_OFFLINE_TOPIC` | Offline push task topic | `flare.im.push.offline` |
+| `PUSH_PROXY_JETSTREAM_TIMEOUT_MS` | JetStream send timeout (milliseconds) | `5000` |
 
-也可通过 `config/services/push-server.toml` 等应用配置中的 JetStream 配置引用（`push_server.jetstream`）间接影响 bootstrap。
+It can also be indirectly influenced at bootstrap via the JetStream config reference (`push_server.jetstream`) in application configs such as `config/services/push-server.toml`.
 
-## 运行
+## Running
 
 ```bash
-# 使用默认配置
+# Use the default configuration
 cargo run -p flare-push-proxy
 
-# 指定监听端口与 JetStream
+# Specify the listen port and JetStream
 PUSH_PROXY_LISTEN=0.0.0.0:50090 \
 PUSH_PROXY_JETSTREAM_URL=nats://127.0.0.1:24222 \
 cargo run -p flare-push-proxy
 ```
 
-## 与 Push Server 的关系
+## Relationship with the Push Server
 
-- **Proxy**：无状态 gRPC 入口，只负责鉴权（可选）、参数校验与写入 MQ。
-- **Server**：消费 `flare.im.push.messages`、`flare.im.push.events`、`flare.im.push.envelope`，查在线、生成 `PushTaskEnvelope`，再写入 online/offline worker topic。
+- **Proxy**: a stateless gRPC entry point, responsible only for authentication (optional), parameter validation, and writing to MQ.
+- **Server**: consumes `flare.im.push.messages`, `flare.im.push.events`, and `flare.im.push.envelope`, checks presence, generates a `PushTaskEnvelope`, and then writes it to the online/offline worker topic.
 
-`PUSH_PROXY_PUSH_ENVELOPE_TOPIC` 需与 Push Server 的 `push_envelope_topic` 一致，否则通知和自定义推送不会被统一信封消费者接收。
+`PUSH_PROXY_PUSH_ENVELOPE_TOPIC` must match the Push Server's `push_envelope_topic`, otherwise notifications and custom pushes will not be received by the unified-envelope consumer.
