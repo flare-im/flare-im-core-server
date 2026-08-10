@@ -38,6 +38,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 契约由 .proto 生成，构建期需要 protobuf 编译器。
+      - name: 安装 protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+
       # 格式先查：最快，失败得早，省掉后面的编译时间
       - name: rustfmt
         run: cargo fmt --all -- --check
@@ -73,6 +78,11 @@ jobs:
           clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      # 契约由 .proto 生成，构建期需要 protobuf 编译器。
+      - name: 安装 protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
 
       - name: 安装 cargo-audit / cargo-deny
         run: cargo install cargo-audit cargo-deny --locked
