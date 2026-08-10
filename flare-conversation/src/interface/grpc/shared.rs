@@ -37,6 +37,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
                     pinned: p.pinned,
                     attributes: p.attributes,
                     joined_at: 0,
+                    visible_from_seq: p.visible_from_seq,
                 })
                 .collect()
         };
@@ -151,6 +152,7 @@ pub fn participant_proto_to_domain(p: ProtoConversationParticipant) -> Conversat
         muted: p.muted,
         pinned: p.pinned,
         attributes: p.attributes,
+        visible_from_seq: p.visible_from_seq,
     }
 }
 
@@ -205,6 +207,7 @@ pub fn participant_domain_to_proto(p: ConversationParticipant) -> ProtoConversat
         pinned: p.pinned,
         attributes: p.attributes,
         joined_at: 0,
+        visible_from_seq: p.visible_from_seq,
     }
 }
 
@@ -225,6 +228,7 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
                 pinned: p.pinned,
                 attributes: p.attributes,
                 joined_at: 0,
+                visible_from_seq: p.visible_from_seq,
             })
             .collect(),
         visibility: conversation.visibility.as_proto(),

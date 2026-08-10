@@ -336,6 +336,11 @@ pub struct ConversationParticipant {
     pub muted: bool,
     pub pinned: bool,
     pub attributes: HashMap<String, String>,
+    /// 该成员可见的历史下限：只返回 `conversation_seq > visible_from_seq` 的消息；0 = 不限。
+    ///
+    /// 核心只执行这条下限，不关心它为何被设置——「新成员是否可见入群前消息」是
+    /// 业务规则，由业务层在加人时决定写不写当前 seq。
+    pub visible_from_seq: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

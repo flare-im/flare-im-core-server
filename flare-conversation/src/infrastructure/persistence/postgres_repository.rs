@@ -263,6 +263,7 @@ impl PostgresConversationRepository {
                     muted: row.get("muted"),
                     pinned: row.get("pinned"),
                     attributes,
+                    visible_from_seq: row.get("visible_from_seq"),
                 });
         }
 
@@ -682,7 +683,7 @@ impl ConversationRepository for PostgresConversationRepository {
             for chunk in session.participants.chunks(PARTICIPANT_INSERT_CHUNK) {
                 let mut qb = QueryBuilder::new(
                     "INSERT INTO conversation_participants \
-                     (tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, created_at, updated_at) ",
+                     (tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, visible_from_seq, created_at, updated_at) ",
                 );
                 qb.push_values(chunk, |mut b, participant| {
                     let attrs = serde_json::to_value(&participant.attributes)
@@ -694,13 +695,18 @@ impl ConversationRepository for PostgresConversationRepository {
                         .push_bind(participant.muted)
                         .push_bind(participant.pinned)
                         .push_bind(attrs)
+                        // 建会话的初始成员本来就在场，没有「入群前」可言：
+                        // 负哨兵（从加入时刻起）在这里等价于 0（不限）。
+                        .push_bind(participant.visible_from_seq.max(0))
                         .push("CURRENT_TIMESTAMP")
                         .push("CURRENT_TIMESTAMP");
                 });
                 qb.push(
                     " ON CONFLICT (tenant_id, conversation_id, user_id) DO UPDATE SET \
                      roles = EXCLUDED.roles, muted = EXCLUDED.muted, pinned = EXCLUDED.pinned, \
-                     attributes = EXCLUDED.attributes, is_deleted = FALSE, updated_at = CURRENT_TIMESTAMP",
+                     attributes = EXCLUDED.attributes, is_deleted = FALSE, \
+                     visible_from_seq = GREATEST(conversation_participants.visible_from_seq, EXCLUDED.visible_from_seq), \
+                     updated_at = CURRENT_TIMESTAMP",
                 );
                 qb.build().execute(&mut *tx).await.map_err(|e| {
                     map_infra_error(
@@ -773,7 +779,8 @@ impl ConversationRepository for PostgresConversationRepository {
         // 查询参与者
         let participant_rows = sqlx::query(
             r#"
-            SELECT user_id, roles, muted, pinned, attributes
+            SELECT user_id, roles, muted, pinned, attributes,
+                   COALESCE(visible_from_seq, 0) AS visible_from_seq
             FROM conversation_participants
             WHERE tenant_id = $1 AND conversation_id = $2
             "#,
@@ -801,6 +808,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 muted,
                 pinned,
                 attributes,
+                visible_from_seq: p_row.get("visible_from_seq"),
             });
         }
 
@@ -1000,15 +1008,32 @@ impl ConversationRepository for PostgresConversationRepository {
             sqlx::query(
                 r#"
                 INSERT INTO conversation_participants (
-                    tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, created_at, updated_at
+                    tenant_id, conversation_id, user_id, roles, muted, pinned, attributes, visible_from_seq, created_at, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES ($1, $2, $3, $4, $5, $6, $7,
+                    -- $8 < 0 是「从加入时刻起可见」的哨兵：由核心在写入时解析成当前会话 seq。
+                    -- 让业务层自己先查 seq 再传会多一次往返，且查与写之间新到的消息会漏进可见范围。
+                    --
+                    -- 取的是 messages 的实际最大 seq，不是 conversations.last_message_seq——
+                    -- 后者当前没有任何写入方维护（恒为 NULL），拿它解析会静默退化成 0（不限）。
+                    -- 走 idx_messages_tenant_conv_seq 的索引末端，不是全表扫。
+                    CASE WHEN $8 < 0 THEN COALESCE(
+                        (SELECT MAX(m.seq) FROM messages m
+                          WHERE m.tenant_id = $1 AND m.conversation_id = $2), 0)
+                    ELSE $8 END,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (tenant_id, conversation_id, user_id)
                 DO UPDATE SET
                     roles = $4,
                     muted = $5,
                     pinned = $6,
                     attributes = $7,
+                    -- 历史下限只升不降：重复加人（旧客户端不带该字段即 0）绝不能把
+                    -- 已经设好的下限抹平、把入群前的历史泄露出去。要放开历史需走显式接口。
+                    visible_from_seq = GREATEST(
+                        conversation_participants.visible_from_seq,
+                        EXCLUDED.visible_from_seq
+                    ),
                     is_deleted = FALSE,
                     quit_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
@@ -1025,6 +1050,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     map_infra_error(e, ErrorCode::SerializationError, "serialize participant attributes")
                 })?,
             )
+            .bind(participant.visible_from_seq)
             .execute(&mut *tx)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to add participant"))?;
@@ -1072,7 +1098,8 @@ impl ConversationRepository for PostgresConversationRepository {
         // 返回更新后的参与者列表
         let participant_rows = sqlx::query(
             r#"
-            SELECT user_id, roles, muted, pinned, attributes
+            SELECT user_id, roles, muted, pinned, attributes,
+                   COALESCE(visible_from_seq, 0) AS visible_from_seq
             FROM conversation_participants
             WHERE tenant_id = $1 AND conversation_id = $2
             "#,
@@ -1100,6 +1127,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 muted,
                 pinned,
                 attributes,
+                visible_from_seq: p_row.get("visible_from_seq"),
             });
         }
 
@@ -1215,7 +1243,8 @@ impl ConversationRepository for PostgresConversationRepository {
                 COALESCE(pinned, false) AS pinned,
                 COALESCE(attributes, '{{}}'::jsonb) AS attributes,
                 joined_at,
-                COALESCE(nickname, '') AS nickname
+                COALESCE(nickname, '') AS nickname,
+                COALESCE(visible_from_seq, 0) AS visible_from_seq
             FROM conversation_participants
             WHERE tenant_id = $1
               AND conversation_id = $2
@@ -1262,6 +1291,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     muted: row.get("muted"),
                     pinned: row.get("pinned"),
                     attributes,
+                    visible_from_seq: row.get("visible_from_seq"),
                 }
             })
             .collect::<Vec<_>>();

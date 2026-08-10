@@ -235,6 +235,43 @@ impl OptimizedPostgresMessageStorageImpl {
         }
         Ok(())
     }
+
+    /// 取该成员的历史下限（`visible_from_seq`），无记录/无用户视角时为 0（不限）。
+    ///
+    /// 只给时间范围查询用：它的 Redis 缓存是按会话+时间窗缓存的、跨用户共享，
+    /// 命中时走不到 SQL 谓词，所以必须先把下限取到 Rust 侧，两条路径共用同一个值。
+    /// 基于 seq 的查询是同步热路径，那边用内联子查询避免这次额外往返。
+    async fn participant_visible_from_seq(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        user_id: &str,
+    ) -> i64 {
+        if user_id.is_empty() {
+            return 0;
+        }
+        sqlx::query_scalar::<_, i64>(
+            "SELECT visible_from_seq FROM conversation_participants \
+             WHERE tenant_id = $1 AND conversation_id = $2 AND user_id = $3",
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&self.base.pool)
+        .await
+        .unwrap_or_else(|err| {
+            // 取不到下限时按「不限」放行会泄露历史，按「全挡」又会让查询整体不可用。
+            // 这里选择保守挡住：读失败是基础设施异常，宁可这一页为空也不外泄。
+            warn!(
+                error = %err,
+                conversation_id = %conversation_id,
+                "query participant visible_from_seq failed; treating history as invisible"
+            );
+            Some(i64::MAX)
+        })
+        // 查不到参与者行 = 此刻不在这个会话里，挡住全部历史（同 `visible_from_seq_sql`）。
+        .unwrap_or(i64::MAX)
+    }
 }
 
 /// 消息行投影（m 别名 + 可见性遮蔽 + reactions/pins），`{uid}` 为可见性视角参数占位。
@@ -325,6 +362,30 @@ fn message_row_projection(uid_param: &str) -> String {
     MESSAGE_ROW_PROJECTION_WITH_VISIBILITY.replace("{uid}", uid_param)
 }
 
+/// 成员历史下限的 SQL 片段：取 `conversation_participants.visible_from_seq`。
+///
+/// 这是**机制**不是策略——存储层不判断「为什么」该成员有下限，只在读取时执行它。
+/// 下限由业务层（如群历史可见性策略）在加人时写入。
+///
+/// 两种「没有下限记录」必须区别对待，否则下限形同虚设：
+/// - `user_id` 为空串 = 服务端内部读取（扩散、归档、运维），没有用户视角 → 不设限。
+/// - `user_id` 非空但**查不到参与者行** = 该用户此刻不在这个会话里 → 挡住全部历史。
+///   曾经写成 `COALESCE(..., 0)`（查不到即不限），结果是：业务侧刚把人加进群、
+///   IM 侧的参与者行还没落地的那段窗口里，新成员照样能把入群前的历史全拉走——
+///   实测这个窗口有几十秒。按用户视角读历史本就该以「在场」为前提。
+///
+/// 写成内联标量子查询而不是先查后传，是为了不给同步热路径加一次数据库往返：
+/// 命中的是主键 `(tenant_id, conversation_id, user_id)`，规划器走索引单行取值。
+fn visible_from_seq_sql(tenant_param: &str, conversation_expr: &str, uid_param: &str) -> String {
+    format!(
+        "CASE WHEN {uid_param} = '' THEN 0 ELSE COALESCE(( \
+           SELECT cp.visible_from_seq FROM conversation_participants cp \
+           WHERE cp.tenant_id = {tenant_param} AND cp.conversation_id = {conversation_expr} \
+             AND cp.user_id = {uid_param}), {blocked}) END",
+        blocked = i64::MAX,
+    )
+}
+
 fn apply_burn_query_visibility(message: &mut Message, include_placeholder: bool) -> bool {
     match message.content_visibility() {
         ContentVisibility::Hidden | ContentVisibility::Redacted | ContentVisibility::Purged => {
@@ -379,6 +440,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
         let limit = limit.clamp(1, 1000);
+        let visible_from_seq = self
+            .participant_visible_from_seq(&tenant_id, conversation_id, user_id.unwrap_or_default())
+            .await;
 
         // L2 缓存策略：先查 Redis，未命中再查 TimescaleDB
         if let Some(cache) = &self.cache
@@ -418,6 +482,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
             let mut visible = Vec::with_capacity(domain_messages.len());
             for mut message in domain_messages {
+                // 缓存跨用户共享，成员历史下限只能在这里按视角过滤。
+                if (message.conversation_seq as i64) <= visible_from_seq {
+                    continue;
+                }
                 if apply_burn_query_visibility(&mut message, include_burned_placeholder) {
                     visible.push(message);
                 }
@@ -517,6 +585,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     ) AS is_pinned
 	                FROM messages m
 	                WHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.timestamp >= $3 AND m.timestamp <= $4
+	                  AND m.seq > $7
 	                  AND NOT EXISTS (
 	                      SELECT 1 FROM message_visibility mv
 	                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
@@ -533,6 +602,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .bind(end_ts)
             .bind(uid)
             .bind(limit)
+            .bind(visible_from_seq)
             .fetch_all(&self.base.pool)
             .await
         } else {
@@ -706,9 +776,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         // 旧 `ORDER BY CASE WHEN ... THEN -seq ...` 使规划器无法用索引序，每页全范围排序。
         let seq_order = if backfill_tail_page { "DESC" } else { "ASC" };
         let rows = if let Some(uid) = user_id {
+            let floor = visible_from_seq_sql("$1", "$2", "$5");
             let sql = format!(
-                "SELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > $3 AND ($4::BIGINT IS NULL OR m.seq < $4)\nORDER BY m.seq {seq_order}\nLIMIT $6",
+                "SELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = $2 AND m.seq > GREATEST($3, {floor}) AND ($4::BIGINT IS NULL OR m.seq < $4)\nORDER BY m.seq {seq_order}\nLIMIT $6",
                 projection = message_row_projection("$5"),
+                floor = floor,
                 seq_order = seq_order,
             );
             sqlx::query(&sql)
@@ -815,13 +887,14 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         // newest_window：seq DESC 截最新 limit 条（后统一反转为升序）；
         // 增量：seq > after_seq 升序前 limit 条（与 QueryMessagesBySeq 一致）。
         let projection = message_row_projection("$5");
+        let floor = visible_from_seq_sql("$1", "t.cid", "$5");
         let sql = if newest_window {
             format!(
-                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid\nORDER BY m.seq DESC\nLIMIT $4\n) w",
+                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid AND m.seq > {floor}\nORDER BY m.seq DESC\nLIMIT $4\n) w",
             )
         } else {
             format!(
-                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid AND m.seq > t.after_seq\nORDER BY m.seq ASC\nLIMIT $4\n) w",
+                "SELECT w.* FROM unnest($2::text[], $3::bigint[]) AS t(cid, after_seq)\nCROSS JOIN LATERAL (\nSELECT\n{projection}\nFROM messages m\nWHERE m.tenant_id = $1 AND m.conversation_id = t.cid AND m.seq > GREATEST(t.after_seq, {floor})\nORDER BY m.seq ASC\nLIMIT $4\n) w",
             )
         };
         let uid = user_id.unwrap_or_default();

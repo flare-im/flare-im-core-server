@@ -86,6 +86,10 @@ pub struct ConversationParticipantHttp {
     pub pinned: bool,
     #[serde(default)]
     pub attributes: HashMap<String, String>,
+    /// 该成员可见的历史下限：只能读到 seq 高于此值的消息；0=不限。
+    /// 由业务方（如群历史可见性策略）在加人时决定是否设值，核心只负责执行。
+    #[serde(default)]
+    pub visible_from_seq: i64,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -315,6 +319,7 @@ fn participant_proto_to_http(
         muted: p.muted,
         pinned: p.pinned,
         attributes: p.attributes,
+        visible_from_seq: p.visible_from_seq,
     }
 }
 
@@ -328,5 +333,6 @@ fn participant_http_to_proto(
         pinned: p.pinned,
         attributes: p.attributes,
         joined_at: 0,
+        visible_from_seq: p.visible_from_seq,
     }
 }

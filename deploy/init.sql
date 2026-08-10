@@ -583,6 +583,7 @@ CREATE TABLE conversation_participants (
     settings_version BIGINT NOT NULL DEFAULT 0,
     draft TEXT,
     quit_at TIMESTAMPTZ,
+    visible_from_seq BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenant_id, conversation_id, user_id),
@@ -604,6 +605,7 @@ COMMENT ON COLUMN conversation_participants.unread_count IS '未读数（冗余�
 COMMENT ON COLUMN conversation_participants.is_deleted IS '用户侧删除会话（软删）';
 COMMENT ON COLUMN conversation_participants.mute_until IS '静音截止时间（空=长期免打扰）';
 COMMENT ON COLUMN conversation_participants.quit_at IS '退出时间（NULL=仍在会话中）';
+COMMENT ON COLUMN conversation_participants.visible_from_seq IS '该成员可见的历史下限：只能读到 seq > 此值的消息；0=不限。业务层（如群历史可见性策略）决定是否设值';
 COMMENT ON COLUMN conversation_participants.created_at IS '创建时间';
 COMMENT ON COLUMN conversation_participants.updated_at IS '更新时间';
 CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_user ON conversation_participants(tenant_id, user_id, updated_at DESC);

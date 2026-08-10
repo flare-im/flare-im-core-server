@@ -154,6 +154,7 @@ impl ConversationReadService for ConversationGrpcHandler {
                     pinned: p.pinned,
                     attributes: p.attributes,
                     joined_at: 0,
+                    visible_from_seq: p.visible_from_seq,
                 })
                 .collect(),
             next_cursor: page.next_cursor.unwrap_or_default(),
