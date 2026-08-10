@@ -381,8 +381,13 @@ impl ConversationRepository for PostgresConversationRepository {
                 COALESCE(sp.is_archived, false) as is_archived,
                 COALESCE(sp.settings_version, 0) as settings_version,
                 sp.draft as draft,
-                -- visible_after_seq 是历史可见边界，不是同步游标。
-                -- 当前服务端未持久化用户级清空历史边界，不能用 last_sync_seq / user_sync_cursor 代替。
+                -- visible_after_seq 是历史可见边界，不是同步游标：
+                -- 不能用 last_sync_seq / user_sync_cursor 代替，那是「同步到哪了」不是「能看到哪」。
+                --
+                -- 数据源本应是成员的 visible_from_seq，但**暂不喂真值**：实测发出去之后，
+                -- 新成员反而把入群前的消息拉进了时间线——客户端把它当同步锚点用，
+                -- 且 shared.rs 还会拿它抬高 last_read_seq。在客户端语义厘清前保持 0；
+                -- 服务端该挡的已在存储读取侧按 visible_from_seq 挡住，不依赖这个字段。
                 0::BIGINT AS visible_after_seq,
                 CASE
                     WHEN COALESCE(peer.max_peer_read_seq, 0) <= GREATEST(
@@ -417,6 +422,9 @@ impl ConversationRepository for PostgresConversationRepository {
                 FROM messages m
                 WHERE m.tenant_id = s.tenant_id
                   AND m.conversation_id = s.conversation_id
+                  -- 预览也要守住历史下限：否则会话列表里照样显示一条入群前消息的内容，
+                  -- 时间线挡住了、摘要却漏出去，等于没挡。
+                  AND m.seq > COALESCE(sp.visible_from_seq, 0)
                 ORDER BY m.seq DESC
                 LIMIT 1
             ) message_tail ON TRUE
@@ -425,7 +433,8 @@ impl ConversationRepository for PostgresConversationRepository {
                 FROM messages m
                 WHERE m.tenant_id = s.tenant_id
                   AND m.conversation_id = s.conversation_id
-                  AND m.seq > COALESCE(sp.last_read_seq, 0)
+                  -- 看不到的消息不该计入未读，否则新成员一进群就顶着一堆读不到的红点。
+                  AND m.seq > GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.visible_from_seq, 0))
                   AND m.sender_id <> $2
                   AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
             ) unread_tail ON TRUE
