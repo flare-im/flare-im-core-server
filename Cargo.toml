@@ -159,7 +159,14 @@ chrono-tz = "0.9"
 url = "2.5"
 
 # AWS SDK (用于对象存储)
-aws-sdk-s3 = "1"
+# 关掉 s3 的默认 "rustls" 特性：它映射到 aws-smithy-http-client/legacy-rustls-ring，
+# 会拉进 rustls 0.21 + rustls-webpki 0.101（多条 RUSTSEC 未修复公告）。
+# default-https-client 走的是现代的 rustls-aws-lc，功能等价且在维护中。
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "sigv4a",
+    "default-https-client",
+    "rt-tokio",
+] }
 aws-config = "1"
 
 # 测试工具
