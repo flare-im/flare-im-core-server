@@ -152,7 +152,13 @@ impl<MC: MonitoringClient> FlowController<MC> {
 
     /// 更新热点会话信息
     fn update_hot_session(&self, conversation_id: &str, current_qps: u32) {
-        let mut hot_sessions = self.hot_sessions.write().unwrap();
+        // 热点会话缓存只是统计快照，不是完整性敏感数据。
+        // 用 unwrap 会让「某处 panic 毒化了锁」升级成「此后每次路由都 panic」，
+        // 故障从一次异常放大成持续不可用——中毒后取回内层数据继续用。
+        let mut hot_sessions = self
+            .hot_sessions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let info = HotSessionInfo {
             last_detected: std::time::SystemTime::now(),
             current_qps,
@@ -163,7 +169,10 @@ impl<MC: MonitoringClient> FlowController<MC> {
 
     /// 检查会话是否已被降级
     fn is_session_degraded(&self, conversation_id: &str) -> bool {
-        let hot_sessions = self.hot_sessions.read().unwrap();
+        let hot_sessions = self
+            .hot_sessions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(info) = hot_sessions.get(conversation_id) {
             info.degraded
         } else {

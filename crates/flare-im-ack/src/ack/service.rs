@@ -257,9 +257,10 @@ impl AckService {
             .await?
         {
             // 将从Redis获取的ACK信息缓存到内存中
+            // 时钟早于 UNIX 纪元时退化为 0，而不是让 ACK 服务整个崩掉
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs();
 
             self.cache.insert(

@@ -106,12 +106,13 @@ impl MediaService {
             tracing::warn!(file_id = context.file_id, "未配置元数据存储");
         }
 
-        let md5 = Some(format!("{:x}", md5_compute(context.payload)));
+        let digest = format!("{:x}", md5_compute(context.payload));
         tracing::trace!(
             file_id = context.file_id,
-            md5 = md5.as_ref().unwrap(),
+            md5 = %digest,
             "计算文件MD5哈希"
         );
+        let md5 = Some(digest);
 
         let mut storage_bucket = self
             .object_repo

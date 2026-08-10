@@ -310,9 +310,10 @@ impl PushEnvelopeBuilder {
 
 /// 获取当前时间戳（毫秒）
 fn current_time_ms() -> i64 {
+    // 构造推送信封是消息热路径，时钟异常不该在这里 panic
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as i64
 }
 

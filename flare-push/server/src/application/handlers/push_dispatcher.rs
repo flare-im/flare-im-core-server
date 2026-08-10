@@ -51,9 +51,10 @@ impl PushDispatcher {
             && let Some(expire_at) = options.expire_at
             && expire_at > 0
         {
+            // 时钟异常时按「未过期」处理：宁可多投一条，也不要让推送分发 panic
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis() as i64;
             return now > expire_at;
         }
@@ -198,9 +199,10 @@ mod tests {
                 device_id: device.device_id.clone(),
                 user_id: device.user_id.clone(),
                 result: Some(push_result::Result::Delivered(PushDelivered {
+                    // 时钟异常时按「未过期」处理：宁可多投一条，也不要让推送分发 panic
                     pushed_at: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_millis() as i64,
                 })),
             }

@@ -175,9 +175,10 @@ impl AlertManager {
             rule_name: rule.name.clone(),
             severity: rule.severity.clone(),
             message: self.format_alert_message(&rule.notification_config.template, rule, metric_value),
+            // 告警时间戳取不到就记 0；为了一个时间戳把告警链路打挂不值
             triggered_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
             metric_value,
         };
