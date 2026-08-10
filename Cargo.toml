@@ -96,7 +96,14 @@ deadpool-redis = "0.18"
 # 消息队列
 
 # 认证
-jsonwebtoken = { version = "10.2", default-features = false, features = ["rust_crypto"] }
+# 只开实际用到的算法，不用 rust_crypto 聚合特性——后者还会拉进
+# ed25519-dalek / p384 / rand，全是用不上的攻击面。
+# 用到的两处：APNs 走 ES256（p256），FCM 的服务账号 OAuth JWT 走 RS256（rsa）。
+jsonwebtoken = { version = "10.2", default-features = false, features = [
+    "p256",
+    "rsa",
+    "sha2",
+] }
 
 # 工具
 bytes = "1"
