@@ -36,3 +36,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 ulid = { workspace = true }  # 添加ulid依赖
+
+[lints]
+workspace = true

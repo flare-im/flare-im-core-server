@@ -36,3 +36,6 @@ prometheus = { workspace = true }
 redis = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = "6"
+
+[lints]
+workspace = true

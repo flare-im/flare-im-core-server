@@ -42,3 +42,6 @@ chrono = { workspace = true }
 prost-types = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost = { workspace = true }
+
+[lints]
+workspace = true

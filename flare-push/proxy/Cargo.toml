@@ -31,3 +31,6 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 redis = { workspace = true }
+
+[lints]
+workspace = true

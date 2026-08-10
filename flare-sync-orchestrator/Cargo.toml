@@ -32,3 +32,6 @@ tracing-subscriber = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 redis = { workspace = true }
+
+[lints]
+workspace = true

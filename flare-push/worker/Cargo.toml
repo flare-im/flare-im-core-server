@@ -41,3 +41,6 @@ sha2 = { workspace = true }
 reqwest = { workspace = true, features = ["http2"] }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
+
+[lints]
+workspace = true

@@ -50,6 +50,14 @@ members = [
 
 resolver = "2"
 
+# 领域层的仓储端口（trait）统一用 `async fn`，不套 #[async_trait] 的装箱开销。
+# `async_fn_in_trait` 提示的是「调用方无法为返回的 future 指定 Send 等 auto trait
+# 约束」——这些 trait 只在本工作区内部被 tokio 多线程执行器消费，实现方全部是
+# Send 的，不存在被外部以其它执行器消费的场景，因此该提示在这里不适用。
+# 若将来把某个 trait 作为公共 SDK 契约导出，应改回 #[async_trait] 并移除此处豁免。
+[workspace.lints.rust]
+async_fn_in_trait = "allow"
+
 [workspace.package]
 version = "1.0.3"
 edition = "2024"

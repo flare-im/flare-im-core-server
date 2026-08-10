@@ -68,3 +68,6 @@ prost-types = { workspace = true }
 [features]
 default = ["backend-remote"]
 backend-remote = ["flare-grpc-proto/sfu_control"]
+
+[lints]
+workspace = true

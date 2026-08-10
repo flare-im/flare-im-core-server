@@ -63,3 +63,6 @@ utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
 # 验证
 validator = { version = "0.16", features = ["derive"] }
+
+[lints]
+workspace = true

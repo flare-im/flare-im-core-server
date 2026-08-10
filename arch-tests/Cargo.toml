@@ -7,3 +7,6 @@ description = "Workspace 级架构守卫测试（错误处理边界等）"
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

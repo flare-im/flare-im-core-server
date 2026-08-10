@@ -44,3 +44,6 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+
+[lints]
+workspace = true

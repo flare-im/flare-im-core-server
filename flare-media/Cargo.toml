@@ -49,3 +49,6 @@ futures-util = { workspace = true }
 image = { workspace = true }
 
 # Media processing dependencies
+
+[lints]
+workspace = true

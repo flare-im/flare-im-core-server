@@ -14,3 +14,6 @@ chrono = { workspace = true }
 flare-server-core = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
+
+[lints]
+workspace = true

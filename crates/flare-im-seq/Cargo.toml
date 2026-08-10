@@ -12,3 +12,6 @@ flare-server-core = { workspace = true }
 redis = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+
+[lints]
+workspace = true

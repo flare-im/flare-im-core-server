@@ -43,3 +43,6 @@ flare-im-hooks = { workspace = true }
 
 [features]
 default = []
+
+[lints]
+workspace = true
