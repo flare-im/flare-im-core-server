@@ -17,6 +17,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 本项目是多仓库结构，各仓的 path 依赖指向同级仓库目录。
+      # 单仓 checkout 后这些路径不存在，cargo 会直接解析失败，
+      # 所以这里按开发时的布局把依赖仓拉到同级位置。
+      - name: 拉取同级仓库
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-core.git "../flare-core"
+          clone https://github.com/flare-im/flare-proto.git "../flare-proto"
+          clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
+          clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -41,6 +56,21 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      # 本项目是多仓库结构，各仓的 path 依赖指向同级仓库目录。
+      # 单仓 checkout 后这些路径不存在，cargo 会直接解析失败，
+      # 所以这里按开发时的布局把依赖仓拉到同级位置。
+      - name: 拉取同级仓库
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-core.git "../flare-core"
+          clone https://github.com/flare-im/flare-proto.git "../flare-proto"
+          clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
+          clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

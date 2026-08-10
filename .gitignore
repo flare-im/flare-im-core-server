@@ -1,6 +1,7 @@
 # 构建产物
 /target/
-Cargo.lock
+# Cargo.lock 入库：本仓产出 17 个服务端二进制，锁文件是可复现构建
+# 与供应链审计（cargo audit 结果稳定）的前提。
 
 # IDE / 本地工具状态
 /.cargo/
