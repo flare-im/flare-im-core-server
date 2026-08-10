@@ -309,7 +309,7 @@ impl MessageProvider for StorageReaderClient {
             }
         }
 
-        messages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        messages.sort_by_key(|m| std::cmp::Reverse(m.created_at));
 
         Ok(messages)
     }

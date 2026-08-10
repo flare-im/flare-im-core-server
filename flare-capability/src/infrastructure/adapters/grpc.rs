@@ -263,9 +263,7 @@ impl GrpcHookAdapter {
             context: Some(context_to_proto(ctx)),
             draft: Some(message_draft_to_proto(draft)),
         };
-        let key = ctx
-            .session_id()
-            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx.session_id().filter(|&s| !s.is_empty());
         let response: PreSendHookResponse = self
             .call_hook(
                 ctx,
@@ -291,9 +289,7 @@ impl GrpcHookAdapter {
             record: Some(message_record_to_proto(record)),
             draft: Some(message_draft_to_proto(draft)),
         };
-        let key = ctx
-            .session_id()
-            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx.session_id().filter(|&s| !s.is_empty());
         let response: PostSendHookResponse = self
             .call_hook(
                 ctx,
@@ -349,9 +345,7 @@ impl GrpcHookAdapter {
             context: Some(context_to_proto(ctx)),
             event: Some(recall_event_to_proto(event)),
         };
-        let key = ctx
-            .session_id()
-            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let key = ctx.session_id().filter(|&s| !s.is_empty());
         let response: RecallHookResponse = self
             .call_hook(
                 ctx,

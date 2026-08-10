@@ -92,7 +92,7 @@ impl ExecutionRecorder {
             .collect();
 
         // 按时间倒序排序
-        filtered.sort_by(|a, b| b.executed_at.cmp(&a.executed_at));
+        filtered.sort_by_key(|r| std::cmp::Reverse(r.executed_at));
 
         filtered.into_iter().take(limit).collect()
     }

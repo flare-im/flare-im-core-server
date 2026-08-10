@@ -138,7 +138,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_post_send(
@@ -153,7 +153,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_delivery(
@@ -168,7 +168,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_recall(
@@ -183,7 +183,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_message_read(
@@ -198,7 +198,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_message_reaction(
@@ -213,7 +213,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_conversation_lifecycle(
@@ -228,7 +228,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn register_conversation_member(
@@ -243,7 +243,7 @@ impl HookRegistry {
             selector,
             handler,
         ));
-        guard.sort_by(|a, b| a.metadata.priority.cmp(&b.metadata.priority));
+        guard.sort_by_key(|a| a.metadata.priority);
     }
 
     pub async fn plan_pre_send(&self, ctx: &Ctx) -> Vec<PreSendPlan> {

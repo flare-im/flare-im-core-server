@@ -395,7 +395,7 @@ impl WalRepository for RedisWalRepository {
                 })?;
 
             let mut pending = Vec::with_capacity(claimed_ids.len());
-            for (message_id, entry_json) in claimed_ids.into_iter().zip(entry_jsons.into_iter()) {
+            for (message_id, entry_json) in claimed_ids.into_iter().zip(entry_jsons) {
                 let Some(entry_json) = entry_json else {
                     Self::cleanup_pending_index(&mut conn, &pending_key, &message_id).await?;
                     continue;
