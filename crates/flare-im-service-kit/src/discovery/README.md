@@ -6,12 +6,12 @@
 
 ## 特性
 
-- ✅ **配置驱动**: 从 `base.toml` 配置文件自动读取服务发现配置
-- ✅ **自动初始化**: 一键完成服务注册和发现初始化
-- ✅ **多后端支持**: etcd、consul、DNS、Service Mesh
-- ✅ **自动心跳**: 服务注册器自动处理心跳续期
-- ✅ **优雅关闭**: 服务停止时自动注销
-- ✅ **Tower 兼容**: 完全兼容 tower 生态系统
+- ✓ **配置驱动**: 从 `base.toml` 配置文件自动读取服务发现配置
+- ✓ **自动初始化**: 一键完成服务注册和发现初始化
+- ✓ **多后端支持**: etcd、consul、DNS、Service Mesh
+- ✓ **自动心跳**: 服务注册器自动处理心跳续期
+- ✓ **优雅关闭**: 服务停止时自动注销
+- ✓ **Tower 兼容**: 完全兼容 tower 生态系统
 
 ## 架构设计
 
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await? {
         // registry 会自动处理心跳续期（每 30 秒）
         // 当 registry 被 drop 时，会自动注销服务
-        
+
         // 使用 discover 进行服务发现
         use flare_im_service_kit::ServiceClient;
         let mut client = ServiceClient::new(discover);
@@ -95,9 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 未配置服务发现
         tracing::info!("Service discovery not configured");
     }
-    
+
     // 启动服务...
-    
+
     Ok(())
 }
 ```
@@ -121,9 +121,9 @@ pub struct ConversationServiceApp {
 impl ConversationServiceApp {
     pub async fn new() -> Result<Self> {
         // ... 其他初始化代码 ...
-        
+
         let address: SocketAddr = /* 解析地址 */;
-        
+
         // 初始化服务注册和发现
         let (registry, discover, _updater) = if let Some((r, d, u)) = init_from_app_config(
             "conversation",
@@ -134,7 +134,7 @@ impl ConversationServiceApp {
         } else {
             (None, None, None)
         };
-        
+
         Ok(Self {
             handler,
             address,
@@ -142,7 +142,7 @@ impl ConversationServiceApp {
             _discover: discover,
         })
     }
-    
+
     pub async fn run(&self) -> Result<()> {
         // 启动服务...
         // ServiceRegistry 会在 drop 时自动注销服务
@@ -184,13 +184,13 @@ let (registry, discover, updater) = init_from_registry_config(
 
 使用 `init_from_app_config` 或 `init_from_registry_config` 时，会自动使用以下最优默认配置：
 
-- ✅ **心跳间隔**: 30 秒（平衡网络开销和故障检测速度）
-- ✅ **TTL**: 90 秒（心跳间隔的 3 倍，确保网络抖动时不会误判）
-- ✅ **刷新间隔**: 30 秒（与服务发现同步）
-- ✅ **健康检查**: 启用，间隔 10 秒，超时 5 秒
-- ✅ **负载均衡**: 一致性哈希（适合大多数场景）
-- ✅ **失败阈值**: 3 次
-- ✅ **成功阈值**: 2 次
+- ✓ **心跳间隔**: 30 秒（平衡网络开销和故障检测速度）
+- ✓ **TTL**: 90 秒（心跳间隔的 3 倍，确保网络抖动时不会误判）
+- ✓ **刷新间隔**: 30 秒（与服务发现同步）
+- ✓ **健康检查**: 启用，间隔 10 秒，超时 5 秒
+- ✓ **负载均衡**: 一致性哈希（适合大多数场景）
+- ✓ **失败阈值**: 3 次
+- ✓ **成功阈值**: 2 次
 
 ## 服务发现使用
 

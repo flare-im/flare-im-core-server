@@ -12,7 +12,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ```
-✅ 开源栈自足：6/6 通过（全程未用到任何商业组件）
+✓ 开源栈自足：6/6 通过（全程未用到任何商业组件）
 ```
 
 最后那条命令跑 6 个真实端到端用例（发消息落库、事件总线、全量操作面、未读回归、
@@ -66,19 +66,19 @@ Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编�
 
 ```mermaid
 flowchart TB
-    subgraph yours["🟡 你实现的部分"]
+    subgraph yours["~ 你实现的部分"]
         auth["用户体系<br/>注册 / 登录 / 签发 token"]
         rules["业务规则<br/>谁能给谁发 · 内容审核"]
         profile["用户资料<br/>昵称 / 头像"]
     end
 
-    subgraph client["🟢 开源：客户端"]
+    subgraph client["✓ 开源：客户端"]
         ui["flare-im-design<br/>111 个 UI 组件 · 四端"]
         sdk["平台 SDK<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust 客户端引擎<br/>发送队列 · 本地存储 · 同步 · E2EE"]
     end
 
-    subgraph server["🟢 开源：服务端"]
+    subgraph server["✓ 开源：服务端"]
         gw["网关<br/>长连接接入 · 验签"]
         core["flare-im-core<br/>消息编排 · 会话 · 同步 · 推送 · 媒资"]
         store[("PostgreSQL<br/>NATS / Consul")]

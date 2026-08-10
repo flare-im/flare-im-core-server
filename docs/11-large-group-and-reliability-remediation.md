@@ -10,21 +10,21 @@
 
 | ID | 严重度 | 问题 | 现状落点 | 状态 |
 |----|--------|------|----------|------|
-| P1 | 🔴 阻断 | user_sync 大群 eager per-member 模型与"不物化成员"互斥（设计死结） | `event_domain_service.rs:330` | 待改造 |
-| P2 | 🔴 高 | user_sync 写入是 **per-user 串行 EVAL**（100k 群 = 10万次串行 Redis 往返） | `redis_user_sync_index.rs:125` | 待改造 |
-| P3 | 🔴 高 | presence `fetch_statuses` **per-user 串行 GET**（非 MGET/pipeline） | `online/.../redis/repository.rs:206` | 待修复 |
-| P4 | 🔴 高 | 无 per-conversation 在线成员索引：查大群在线 = 扫全员 O(成员) | 缺失 | 待新增 |
-| P5 | 🟠 中 | ingest 大群仍全量物化成员（无 cap），MQ 信封承载 100k user_id | `message_ingest_service.rs:269`、`topic_envelope.proto:20` | 待改造 |
-| P6 | 🔴 高 | user_sync 写入在投递关键路径上（`.await?`），Redis 抖动→大群 fanout 全停 | `event_domain_service.rs:330` | 待解耦 |
-| P7 | 🟠 中 | 单 Redis 故障域 = seq+WAL+presence+user_sync+cache 五合一 | 部署/config | 待拆分 |
-| P8 | 🟠 中 | WAL fail-closed 契约未落地（Redis 不可用时行为未定义） | ingest WAL 分支 | 待补 |
-| P9 | 🟡 低 | DLQ 有重放 CLI 但无 depth 告警 | `tools/flare-dlq-replay` | 待补 |
-| P10 | 🟠 中 | 大群成员解析在 push 消费内同步 200 页，阻塞 consumer | `push_router_handler.rs:592` | 待解耦 |
-| P11 | 🟡 低 | ping coalesce 状态在进程内存，多实例不跨实例合并 | `ConversationPingCoalescer` | 待下沉 |
-| P12 | 🟡 低 | MQ 主题分区键 conversation_id，10万人热群=单分区热点 | topic 设计 | 待分片 |
-| P13 | 🟢 治理 | `doc/` 与 `docs/` 并存 | 仓库根 | 待归档 |
-| P14 | 🟢 治理 | service-kit 6.6K 未拆（08 W4 列了未排期） | `crates/flare-im-service-kit` | 待排期 |
-| P15 | 🟢 治理 | gateway 8041 行最大，call_signal 子模块待收敛 | `flare-signaling/gateway` | 待收敛 |
+| P1 | ✗ 阻断 | user_sync 大群 eager per-member 模型与"不物化成员"互斥（设计死结） | `event_domain_service.rs:330` | 待改造 |
+| P2 | ✗ 高 | user_sync 写入是 **per-user 串行 EVAL**（100k 群 = 10万次串行 Redis 往返） | `redis_user_sync_index.rs:125` | 待改造 |
+| P3 | ✗ 高 | presence `fetch_statuses` **per-user 串行 GET**（非 MGET/pipeline） | `online/.../redis/repository.rs:206` | 待修复 |
+| P4 | ✗ 高 | 无 per-conversation 在线成员索引：查大群在线 = 扫全员 O(成员) | 缺失 | 待新增 |
+| P5 |  中 | ingest 大群仍全量物化成员（无 cap），MQ 信封承载 100k user_id | `message_ingest_service.rs:269`、`topic_envelope.proto:20` | 待改造 |
+| P6 | ✗ 高 | user_sync 写入在投递关键路径上（`.await?`），Redis 抖动→大群 fanout 全停 | `event_domain_service.rs:330` | 待解耦 |
+| P7 |  中 | 单 Redis 故障域 = seq+WAL+presence+user_sync+cache 五合一 | 部署/config | 待拆分 |
+| P8 |  中 | WAL fail-closed 契约未落地（Redis 不可用时行为未定义） | ingest WAL 分支 | 待补 |
+| P9 | ~ 低 | DLQ 有重放 CLI 但无 depth 告警 | `tools/flare-dlq-replay` | 待补 |
+| P10 |  中 | 大群成员解析在 push 消费内同步 200 页，阻塞 consumer | `push_router_handler.rs:592` | 待解耦 |
+| P11 | ~ 低 | ping coalesce 状态在进程内存，多实例不跨实例合并 | `ConversationPingCoalescer` | 待下沉 |
+| P12 | ~ 低 | MQ 主题分区键 conversation_id，10万人热群=单分区热点 | topic 设计 | 待分片 |
+| P13 | ✓ 治理 | `doc/` 与 `docs/` 并存 | 仓库根 | 待归档 |
+| P14 | ✓ 治理 | service-kit 6.6K 未拆（08 W4 列了未排期） | `crates/flare-im-service-kit` | 待排期 |
+| P15 | ✓ 治理 | gateway 8041 行最大，call_signal 子模块待收敛 | `flare-signaling/gateway` | 待收敛 |
 
 > 核查更正：`logs/` 与 `data/` 经 `git ls-files` 确认**未被跟踪**，无需处理。上一轮报告中此项作废。
 
@@ -200,7 +200,7 @@ if let Some(idx) = &self.user_sync_index {
 
 ### P9（低）DLQ depth 告警
 
-**根因**：`tools/flare-dlq-replay` 能重放（✅），但无人知道 DLQ 在涨。
+**根因**：`tools/flare-dlq-replay` 能重放（✓），但无人知道 DLQ 在涨。
 
 **方案**：push/orchestrator 暴露 `*_dlq_depth` gauge（消费组 lag 或 stream 长度）；Prometheus 告警规则 depth > 0 持续 N 分钟。重放 runbook 引用 CLI。
 

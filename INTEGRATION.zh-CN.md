@@ -219,8 +219,8 @@ cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 服务端可读文本  : "[Encrypted message]"
 服务端载荷      : 323 字节密文
-明文是否泄漏    : 否 ✅
-第三方解密      : 失败 ✅
+明文是否泄漏    : 否 ✓
+第三方解密      : 失败 ✓
 ```
 
 架构上是**密码学无关**的：`ContentEncryptionInterceptor` 负责把明文换成密文信封，

@@ -35,7 +35,7 @@ PUSH_WORKER_APNS_TOPIC=com.example.app       # bundle id
 PUSH_WORKER_APNS_SANDBOX=false               # 开发构建的设备 token 必须设 true
 ```
 
-> ⚠️ **`SANDBOX` 设错是最常见的坑**：开发构建注册的 device token 只在沙箱有效，
+> 注意：**`SANDBOX` 设错是最常见的坑**：开发构建注册的 device token 只在沙箱有效，
 > 拿到生产环境用会一律返回 `BadDeviceToken`，看起来像 token 全失效了。
 
 ### FCM

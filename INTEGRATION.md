@@ -233,8 +233,8 @@ cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 server-visible text : "[Encrypted message]"
 server payload      : 323 bytes of ciphertext
-plaintext leaked    : no ✅
-third-party decrypt : failed ✅
+plaintext leaked    : no ✓
+third-party decrypt : failed ✓
 ```
 
 The architecture is **cryptography-agnostic**: `ContentEncryptionInterceptor` swaps

@@ -7,12 +7,12 @@
 //!
 //! # 正确性前提（必须满足，否则退化）
 //! 1. **会话亲和路由**：同一会话的消息需稳定落到同一节点（NATS 按 `conversation_id` 分区消费）。
-//!    否则租约频繁易主、本地号段大量空洞，退化得比单次 `INCR` 还差。**这是 A1 的部署前提。**
+//! 否则租约频繁易主、本地号段大量空洞，退化得比单次 `INCR` 还差。**这是 A1 的部署前提。**
 //! 2. **租约安全余量**：本地在 `lease_ttl - local_margin` 即停止本地发号并强制续租，确保旧 owner 在
-//!    新 owner 可接管（Redis 租约 TTL 到期）之前就停手。`local_margin` 必须 ≥ 最大时钟偏移 + 单批处理时延。
-//!    fencing token 作为时钟异常时的兜底：失去租约的旧 owner 续租时 token 不匹配 → 被拒。
+//! 新 owner 可接管（Redis 租约 TTL 到期）之前就停手。`local_margin` 必须 ≥ 最大时钟偏移 + 单批处理时延。
+//! fencing token 作为时钟异常时的兜底：失去租约的旧 owner 续租时 token 不匹配 → 被拒。
 //!
-//! # 故障切换（⚠️ 仅多节点集群可验证；本地单测覆盖状态机，不覆盖真实 Redis/多节点）
+//! # 故障切换（注意：仅多节点集群可验证；本地单测覆盖状态机，不覆盖真实 Redis/多节点）
 //! owner 宕机 → Redis 租约 TTL 到期 → 其他节点 `acquire` 成功、fence `INCR` 自增 → 旧 owner 即便复活，
 //! 其本地 `local_valid_until` 早已过期（停发），且续租时 token 与新 owner 不符 → Lua 拒绝 → 不发冲突 seq。
 //!
@@ -244,7 +244,7 @@ else
 end
 "#;
 
-/// 生产用 Redis 租约后端（Lua 原子）。⚠️ 故障切换/多节点正确性需集群验证。
+/// 生产用 Redis 租约后端（Lua 原子）。注意：故障切换/多节点正确性需集群验证。
 #[derive(Clone)]
 pub struct RedisSeqLeaseBackend {
     connection_manager: ConnectionManager,

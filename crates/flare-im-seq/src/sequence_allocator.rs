@@ -16,8 +16,8 @@
 ///
 /// | 方案 | 优点 | 缺点 | 适用场景 |
 /// |------|------|------|----------|
-/// | **Redis INCR** | 性能高（10w+ QPS）、强一致 | 依赖 Redis | ✅ 推荐（微信方案） |
-/// | 数据库自增 ID | 强一致 | 性能差（<1w QPS）、单点 | ❌ 不推荐 |
+/// | **Redis INCR** | 性能高（10w+ QPS）、强一致 | 依赖 Redis |  推荐（微信方案） |
+/// | 数据库自增 ID | 强一致 | 性能差（<1w QPS）、单点 |  不推荐 |
 /// | Snowflake | 无依赖 | 仅保证"趋势递增"，非严格递增 | 部分场景 |
 ///
 /// # 使用示例
@@ -195,7 +195,7 @@ impl SequenceAllocator {
     ///
     /// - `Ok(seq)`: 分配成功，返回序列号（从 1 开始递增）
     /// - `Err`: Redis 不可用时返回错误。调用方必须失败或重试，**不得降级发号**——
-    ///   会话内 seq 是严格排序高水位，降级会破坏顺序/造成回退碰撞。
+    /// 会话内 seq 是严格排序高水位，降级会破坏顺序/造成回退碰撞。
     ///
     /// # 示例
     ///
@@ -221,7 +221,7 @@ impl SequenceAllocator {
     /// # 参数
     ///
     /// - `floor`：该会话在持久化存储中的权威 `max_seq`；无历史（新会话）时传 0，
-    ///   行为退化为普通递增。传入偏低的陈旧值也安全——脚本会与 Redis live 高水位取大。
+    /// 行为退化为普通递增。传入偏低的陈旧值也安全——脚本会与 Redis live 高水位取大。
     ///
     /// # 返回
     ///
@@ -303,7 +303,7 @@ impl SequenceAllocator {
     ///
     /// # 注意事项
     ///
-    /// ⚠️ 如果调用方获取整批后未全部提交，seq 可能会有空洞（如 [150-199] 未使用）。
+    /// 注意：如果调用方获取整批后未全部提交，seq 可能会有空洞（如 [150-199] 未使用）。
     /// 这在 IM 系统中是可接受的，因为 seq 只需保证"严格递增"，不需要"连续"。
     ///
     /// # 参数
@@ -323,8 +323,8 @@ impl SequenceAllocator {
     /// println!("Allocated batch: {:?}", seqs); // [100, 101, ..., 199]
     ///
     /// for seq in seqs {
-    ///     message.seq = seq;
-    ///     send_to_jetstream(message);
+    /// message.seq = seq;
+    /// send_to_jetstream(message);
     /// }
     /// ```
     pub async fn allocate_batch(&self, conversation_id: &str, tenant_id: &str) -> Result<Vec<u64>> {

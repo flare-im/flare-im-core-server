@@ -59,7 +59,7 @@ step 4** — the single most common trip-up in this guide, which is why the tool
 an error when it can't find a secret instead of minting a token that is guaranteed not to
 work.
 
-> ⚠️ That is a local development secret. In production, inject a strong one (at least 32
+> 注意：That is a local development secret. In production, inject a strong one (at least 32
 > bytes) via `FLARE_API_GATEWAY_TOKEN_SECRET` and sign with the same key — a weak secret
 > means anyone can forge any user's identity.
 
@@ -82,7 +82,7 @@ unread regression, RTC room join) plus the E2EE demo, **without touching any com
 component**. Exit code 0 means all passed:
 
 ```
-✅ Open-source stack is self-sufficient: 6/6 passed (no commercial components involved)
+✓ Open-source stack is self-sufficient: 6/6 passed (no commercial components involved)
 ```
 
 No extra secret configuration needed — the examples read the

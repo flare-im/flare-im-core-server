@@ -58,17 +58,17 @@ A high-performance HTTP → gRPC gateway for exposing the IM system's RESTful AP
 
 ## Features
 
-✅ RESTful HTTP API exposure
-✅ JSON request/response
-✅ Parameter validation
-✅ gRPC service forwarding
-✅ Unified error handling
-✅ Distributed tracing (Tracing)
-✅ Request timeout
-✅ Rate limiting support
-✅ OpenAPI documentation (Swagger UI)
-✅ CORS support
-✅ Health check
+✓ RESTful HTTP API exposure
+✓ JSON request/response
+✓ Parameter validation
+✓ gRPC service forwarding
+✓ Unified error handling
+✓ Distributed tracing (Tracing)
+✓ Request timeout
+✓ Rate limiting support
+✓ OpenAPI documentation (Swagger UI)
+✓ CORS support
+✓ Health check
 
 ## Gateway specification
 

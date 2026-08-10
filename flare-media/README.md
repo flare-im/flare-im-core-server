@@ -99,7 +99,7 @@ The object-storage profile in `config/base.toml` has been unified to an S3-compa
 
 The actual object storage path follows: `{bucket_root_prefix?}/{file_type}/{yyyy}/{mm}/{dd}/{file_id}[.ext]`. `file_type` is automatically classified as `images` / `videos` / `audio` / `documents` / `others` based on the upload metadata or MIME, to facilitate tiered governance and lifecycle-policy orchestration.
 
-> ⚠️ Access policy is left to the object storage itself: whether it is public, read/write permissions, CORS, bandwidth limits, etc. are all configured in the bucket policy / gateway layer; `flare-media` only decides whether to return a presigned or direct URL based on `use_presign`.
+> 注意：Access policy is left to the object storage itself: whether it is public, read/write permissions, CORS, bandwidth limits, etc. are all configured in the bucket policy / gateway layer; `flare-media` only decides whether to return a presigned or direct URL based on `use_presign`.
 
 ## Module structure
 
@@ -170,12 +170,12 @@ User avatars, as a special kind of media resource, require special handling:
      userId: userId,
      namespace: 'user_avatars'
    };
-   
+
    const response = await mediaClient.uploadFile({
      metadata: metadata,
      chunkData: avatarFile
    });
-   
+
    // Important: store only the file_id, not the full URL
    const fileId = response.fileId;
    ```
@@ -193,14 +193,14 @@ User avatars, as a special kind of media resource, require special handling:
    // Get the avatar file_id from the user profile
    const user = await userDatabase.getUser(userId);
    const fileId = user.avatar_file_id;
-   
+
    if (fileId) {
      // Get the access URL
      const urlResponse = await mediaClient.getFileUrl({
        fileId: fileId,
        expiresIn: 3600  // expires in 1 hour
      });
-     
+
      // Display the avatar on the page
      document.getElementById('user-avatar').src = urlResponse.url;
    }
@@ -210,12 +210,12 @@ User avatars, as a special kind of media resource, require special handling:
    ```javascript
    // When the user updates the avatar, first upload the new avatar to get a new file_id
    const newFileId = newAvatarResponse.fileId;
-   
+
    // Update the avatar file_id in the user profile
    await userDatabase.updateUser(userId, {
      avatar_file_id: newFileId
    });
-   
+
    // Optional: delete the old avatar (if no longer needed)
    // await mediaClient.deleteFile({fileId: oldFileId});
    ```

@@ -55,7 +55,7 @@ cargo run -q --example mint_token -- alice --tenant 0 --ttl 86400
 快速上手最容易踩的坑，所以工具在没拿到密钥时会直接报错退出，而不是签出一个
 注定用不了的 token。
 
-> ⚠️ 上面那把是本机开发密钥。生产环境请通过 `FLARE_API_GATEWAY_TOKEN_SECRET`
+> 注意：上面那把是本机开发密钥。生产环境请通过 `FLARE_API_GATEWAY_TOKEN_SECRET`
 > 注入强密钥（至少 32 字节），签发端用同一把 —— 弱密钥等于任何人都能伪造
 > 任意用户的身份。
 
@@ -77,7 +77,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:50050/api/v1/conversatio
 RTC 房间加入），**全程不碰任何商业组件**，退出码 0 即全通过：
 
 ```
-✅ 开源栈自足：5/5 通过（全程未用到任何商业组件）
+✓ 开源栈自足：5/5 通过（全程未用到任何商业组件）
 ```
 
 密钥不用另外配 —— 示例会自己读上一步生成的 `logs/.dev-token-secret`。
@@ -92,7 +92,7 @@ NEGOTIATION_HOST=localhost:60051 \
   cargo run -p flare-im-core-examples --example chatroom_client -- user1
 ```
 
-连上后会看到 `✅ 收到 CONNECT_ACK` 与 `✅ 已连接到 localhost:60051`。
+连上后会看到 `✓ 收到 CONNECT_ACK` 与 `✓ 已连接到 localhost:60051`。
 
 `examples/` 下还有 `integration_client.rs`（业务集成）与
 `perf_message_send.rs`（压测），跑法相同。

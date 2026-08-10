@@ -13,7 +13,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ```
-✅ Open-source stack is self-sufficient: 6/6 passed (no commercial components involved)
+✓ Open-source stack is self-sufficient: 6/6 passed (no commercial components involved)
 ```
 
 That last command runs six real end-to-end cases (send + persist, event bus, full
@@ -56,19 +56,19 @@ re-verified daily.
 
 ```mermaid
 flowchart TB
-    subgraph yours["🟡 What you implement"]
+    subgraph yours["~ What you implement"]
         auth["Identity<br/>signup / login / issue token"]
         rules["Business rules<br/>who may message whom · moderation"]
         profile["User profile<br/>display name / avatar"]
     end
 
-    subgraph client["🟢 Open source: client"]
+    subgraph client["✓ Open source: client"]
         ui["flare-im-design<br/>111 UI components · 4 platforms"]
         sdk["Platform SDKs<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust client engine<br/>send queue · local store · sync · E2EE"]
     end
 
-    subgraph server["🟢 Open source: server"]
+    subgraph server["✓ Open source: server"]
         gw["Gateway<br/>long connection · token validation"]
         core["flare-im-core<br/>orchestration · conversations · sync · push · media"]
         store[("PostgreSQL<br/>NATS / Consul")]

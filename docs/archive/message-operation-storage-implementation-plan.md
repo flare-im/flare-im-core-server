@@ -1,20 +1,20 @@
 # 消息操作 Storage 层实现方案
 
-> **📦 已归档（历史规划文档）**：本文是 2025-01 的一次性实现规划，其 P0/P1/P2
+> ** 已归档（历史规划文档）**：本文是 2025-01 的一次性实现规划，其 P0/P1/P2
 > 计划大部分已落地。文中 API 命名（`is_operation_message` / `update_message_status`
 > / `ProcessMessageOperationCommand` / `MessageOperationDomainService`）已与当前实现
 > 漂移——真实写模型走 `flare-storage/writer` 的 `EventApplicationService` +
 > `event_handlers::dispatch` + `ArchiveStoreRepository`（`update_message_fsm_state`
 > / `update_message_content` / `update_message_visibility` 等）。仅作历史参考，勿当现状。
 
-> **作者**: IM 架构专家  
-> **日期**: 2025-01-XX  
-> **版本**: 1.0  
+> **作者**: IM 架构专家
+> **日期**: 2025-01-XX
+> **版本**: 1.0
 > **参考**: 微信、飞书、Discord、Telegram 等主流 IM 系统
 
 ---
 
-## 📋 目录
+## 目录
 
 1. [架构设计](#架构设计)
 2. [操作分类与处理路径](#操作分类与处理路径)
@@ -24,7 +24,7 @@
 
 ---
 
-## 🏗️ 架构设计
+## 架构设计
 
 ### 核心原则
 
@@ -68,25 +68,25 @@
 
 ---
 
-## 📊 操作分类与处理路径
+## 操作分类与处理路径
 
 ### 完整操作分类表
 
 | 操作类型 | JetStream 策略 | 处理路径 | 实现位置 |
 |---------|-----------|---------|---------|
-| **撤回消息（全局）** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
-| **撤回消息（仅自己）** | ❌ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
-| **编辑消息** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
-| **删除消息（硬删除）** | ✔️ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
-| **删除消息（软删除，仅自己）** | ❌ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
-| **已读回执** | ⚠️ 条件 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
-| **反应操作** | ✔️ 必须 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
-| **置顶操作** | ✔️ 必须 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
-| **收藏/标记** | ❌ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
+| **撤回消息（全局）** | ✓ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
+| **撤回消息（仅自己）** | ✗ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
+| **编辑消息** | ✓ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
+| **删除消息（硬删除）** | ✓ 必须 | Orchestrator → JetStream → Writer → DB | Writer 消费操作消息 |
+| **删除消息（软删除，仅自己）** | ✗ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
+| **已读回执** | 注意：条件 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
+| **反应操作** | ✓ 必须 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
+| **置顶操作** | ✓ 必须 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新（需要推送） |
+| **收藏/标记** | ✗ 不需要 | Orchestrator → Reader (gRPC) → DB | Reader 直接更新 |
 
 ---
 
-## 🔧 Writer 实现方案
+## Writer 实现方案
 
 ### 1. 操作消息识别
 
@@ -145,7 +145,7 @@ impl MessageOperationDomainService {
             _ => Err(anyhow!("Unsupported operation type")),
         }
     }
-    
+
     /// 处理撤回操作
     async fn handle_recall_operation(
         &self,
@@ -153,7 +153,7 @@ impl MessageOperationDomainService {
         _message: &Message,
     ) -> Result<()> {
         let message_id = &operation.target_message_id;
-        
+
         // 更新数据库：设置 is_recalled = true, status = Recalled
         if let Some(repo) = &self.archive_repo {
             repo.update_message_status(
@@ -163,10 +163,10 @@ impl MessageOperationDomainService {
                 Some(operation.timestamp.clone()),  // recalled_at
             ).await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// 处理编辑操作
     async fn handle_edit_operation(
         &self,
@@ -174,7 +174,7 @@ impl MessageOperationDomainService {
         _message: &Message,
     ) -> Result<()> {
         let message_id = &operation.target_message_id;
-        
+
         // 从 operation_data 中提取编辑后的内容
         if let Some(OperationData::Edit(edit_data)) = &operation.operation_data {
             if let Some(repo) = &self.archive_repo {
@@ -185,10 +185,10 @@ impl MessageOperationDomainService {
                 ).await?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// 处理删除操作（硬删除）
     async fn handle_delete_operation(
         &self,
@@ -196,7 +196,7 @@ impl MessageOperationDomainService {
         _message: &Message,
     ) -> Result<()> {
         let message_id = &operation.target_message_id;
-        
+
         // 硬删除：更新 visibility 为 DELETED（全局）
         if let Some(repo) = &self.archive_repo {
             repo.update_message_visibility(
@@ -205,7 +205,7 @@ impl MessageOperationDomainService {
                 VisibilityStatus::Deleted,
             ).await?;
         }
-        
+
         Ok(())
     }
 }
@@ -237,7 +237,7 @@ async fn process_store_message(
             }
         }
     }
-    
+
     // 普通消息处理
     self.command_handler
         .handle(ProcessStoreMessageCommand { request })
@@ -247,13 +247,13 @@ async fn process_store_message(
 
 ---
 
-## 🔧 Reader 实现方案
+## Reader 实现方案
 
 ### 1. 完善现有操作实现
 
 Reader 已经有撤回、删除等操作的 gRPC 接口，需要确保实现完整：
 
-#### 撤回消息（已实现 ✅）
+#### 撤回消息（已实现 ✓）
 
 ```rust
 // domain/service/message_storage_domain_service.rs
@@ -262,7 +262,7 @@ pub async fn recall_message(
     message_id: &str,
     recall_time_limit_seconds: i64,
 ) -> Result<Option<Timestamp>> {
-    // ✅ 已实现：检查时间限制、更新状态、记录操作
+    // ✓ 已实现：检查时间限制、更新状态、记录操作
 }
 ```
 
@@ -281,7 +281,7 @@ pub async fn edit_message(
     // 获取消息
     let message = self.get_message(message_id).await?
         .ok_or_else(|| anyhow!("message not found"))?;
-    
+
     // 验证编辑权限（只有发送者可以编辑）
     // 验证编辑版本号（必须递增）
     if edit_version <= message.extra.get("edit_version")
@@ -289,7 +289,7 @@ pub async fn edit_message(
         .unwrap_or(0) {
         return Err(anyhow!("Edit version must be greater than current version"));
     }
-    
+
     // 更新消息内容
     let update = MessageUpdate {
         // ... 其他字段
@@ -301,20 +301,20 @@ pub async fn edit_message(
         }),
         // 注意：content 更新需要通过特殊方法处理
     };
-    
+
     // 更新数据库
     self.storage.update_message_content(message_id, new_content, edit_version).await?;
-    
+
     Ok(())
 }
 ```
 
-#### 删除消息（已实现 ✅）
+#### 删除消息（已实现 ✓）
 
 ```rust
 // domain/service/message_storage_domain_service.rs
 pub async fn delete_messages(&self, message_ids: &[String]) -> Result<usize> {
-    // ✅ 已实现：批量更新 visibility 为 DELETED
+    // ✓ 已实现：批量更新 visibility 为 DELETED
 }
 
 pub async fn delete_message_for_user(
@@ -323,7 +323,7 @@ pub async fn delete_message_for_user(
     user_id: &str,
     permanent: bool,
 ) -> Result<usize> {
-    // ✅ 已实现：更新用户维度的 visibility
+    // ✓ 已实现：更新用户维度的 visibility
 }
 ```
 
@@ -368,15 +368,15 @@ pub async fn append_operation(
 ) -> Result<()> {
     let message = self.get_message(message_id).await?
         .ok_or_else(|| anyhow!("message not found"))?;
-    
+
     let mut operations = message.operations.clone();
     operations.push(operation);
-    
+
     let update = MessageUpdate {
         operations: Some(operations),
         // ... 其他字段
     };
-    
+
     self.storage.update_message(message_id, update).await?;
     Ok(())
 }
@@ -384,7 +384,7 @@ pub async fn append_operation(
 
 ---
 
-## 🔧 实现细节
+## 实现细节
 
 ### 1. Writer 操作消息处理流程
 
@@ -449,12 +449,12 @@ self.append_operation(message_id, operation).await?;
 
 ---
 
-## 📝 实现优先级
+## 实现优先级
 
 ### P0（核心功能，必须实现）
 
-1. ✅ **撤回消息** - Reader 已实现，Writer 需要支持
-2. ✅ **删除消息** - Reader 已实现（软删除），Writer 需要支持硬删除
+1. ✓ **撤回消息** - Reader 已实现，Writer 需要支持
+2. ✓ **删除消息** - Reader 已实现（软删除），Writer 需要支持硬删除
 3. ⏳ **编辑消息** - Reader 和 Writer 都需要实现
 
 ### P1（重要功能，优先实现）
@@ -470,7 +470,7 @@ self.append_operation(message_id, operation).await?;
 
 ---
 
-## 🎯 关键实现点
+## 关键实现点
 
 ### 1. Writer 操作消息识别
 
@@ -493,5 +493,5 @@ self.append_operation(message_id, operation).await?;
 
 ---
 
-**最后更新**: 2025-01-XX  
+**最后更新**: 2025-01-XX
 **维护者**: IM 架构团队

@@ -99,7 +99,7 @@ cdn_base_url = "http://localhost:50092/files"
 
 对象实际存储路径遵循：`{bucket_root_prefix?}/{file_type}/{yyyy}/{mm}/{dd}/{file_id}[.ext]`。`file_type` 会根据上传元数据或 MIME 自动归类为 `images` / `videos` / `audio` / `documents` / `others`，便于分级治理与生命周期策略编排。
 
-> ⚠️ 访问策略交由对象存储自身管理：是否公有、读写权限、CORS、带宽限制等都在桶策略/网关层配置；`flare-media` 仅按照 `use_presign` 决定返回预签名还是直链。
+> 注意：访问策略交由对象存储自身管理：是否公有、读写权限、CORS、带宽限制等都在桶策略/网关层配置；`flare-media` 仅按照 `use_presign` 决定返回预签名还是直链。
 
 ## 模块结构
 
@@ -170,12 +170,12 @@ flare-media/
      userId: userId,
      namespace: 'user_avatars'
    };
-   
+
    const response = await mediaClient.uploadFile({
      metadata: metadata,
      chunkData: avatarFile
    });
-   
+
    // 重要：只存储file_id，不存储完整的URL
    const fileId = response.fileId;
    ```
@@ -193,14 +193,14 @@ flare-media/
    // 获取用户资料中的头像file_id
    const user = await userDatabase.getUser(userId);
    const fileId = user.avatar_file_id;
-   
+
    if (fileId) {
      // 获取访问URL
      const urlResponse = await mediaClient.getFileUrl({
        fileId: fileId,
        expiresIn: 3600  // 1小时过期
      });
-     
+
      // 在页面中显示头像
      document.getElementById('user-avatar').src = urlResponse.url;
    }
@@ -210,12 +210,12 @@ flare-media/
    ```javascript
    // 用户更新头像时，先上传新头像获取新的file_id
    const newFileId = newAvatarResponse.fileId;
-   
+
    // 更新用户资料中的头像file_id
    await userDatabase.updateUser(userId, {
      avatar_file_id: newFileId
    });
-   
+
    // 可选：删除旧头像（如果不再需要）
    // await mediaClient.deleteFile({fileId: oldFileId});
    ```

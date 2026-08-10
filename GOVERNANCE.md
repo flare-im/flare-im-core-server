@@ -39,7 +39,7 @@ Flare IM 目前由核心团队维护，**尚未形成多方治理结构**。这�
 `flare-im-core-client-sdk` / `flare-im-design`）**同一发布批次使用同一版本号**，
 每次发布附兼容矩阵。
 
-> ⚠️ **当前尚未对齐**：实现层实际是 1.0.3 与 1.0.4 混用（契约层已到 2.0.0）。
+> 注意：**当前尚未对齐**：实现层实际是 1.0.3 与 1.0.4 混用（契约层已到 2.0.0）。
 > 首次公开发布时统一，见
 > [`docs/roadmap/product-and-business-design.md`](docs/roadmap/product-and-business-design.md) §1.3。
 > 在对齐完成前，请以各仓库自身的 `Cargo.toml` 为准。

@@ -35,7 +35,7 @@ PUSH_WORKER_APNS_TOPIC=com.example.app       # bundle id
 PUSH_WORKER_APNS_SANDBOX=false               # must be set to true for device tokens from development builds
 ```
 
-> ⚠️ **Setting `SANDBOX` wrong is the most common pitfall**: a device token registered by a development build is only valid in the sandbox,
+> 注意：**Setting `SANDBOX` wrong is the most common pitfall**: a device token registered by a development build is only valid in the sandbox,
 > and using it in production will uniformly return `BadDeviceToken`, which looks as if all tokens have become invalid.
 
 ### FCM

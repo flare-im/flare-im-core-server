@@ -1,17 +1,17 @@
 # Flare IM 通信核心层部署指南
 
-> **版本**: 0.1.0  
+> **版本**: 0.1.0
 > **用途**: 提供中间件和服务的 Docker Compose 部署配置
 
 ---
 
-## 📋 概述
+## 概述
 
 本目录只保留 Flare IM Core 本地开发/压测所需的中间件编排，覆盖注册发现、缓存、主存储、消息队列、对象存储和 Grafana 可观测性栈。数据库 schema 以根目录 `init.sql` 为唯一入口。
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 启动所有中间件
 
@@ -34,7 +34,7 @@ docker compose logs -f [service_name]
 
 ---
 
-## 📦 包含的服务
+## 包含的服务
 
 ### 1. Consul (服务注册 / 配置中心)
 
@@ -59,7 +59,7 @@ docker compose logs -f [service_name]
 - **访问**: postgresql://flare:flare123@localhost:25432/flare2
 - **数据目录**: `./data/postgres`
 - **初始化脚本**: `./init.sql`
-- **特性**: 
+- **特性**:
   - TimescaleDB 扩展已启用
   - 消息表使用超表（Hypertable）按 `created_at` 分区
   - 支持消息、会话、媒体、Hook、Capability、ACK 审计等核心表
@@ -86,7 +86,7 @@ docker compose logs -f [service_name]
 - **控制台端口**: 29001
 - **默认用户**: rustfsadmin
 - **默认密码**: rustfsadmin
-- **访问**: 
+- **访问**:
   - API: http://localhost:29000
   - 控制台: http://localhost:29001
 - **数据目录**: `./data/rustfs`
@@ -122,7 +122,7 @@ docker compose logs -f [service_name]
 
 ---
 
-## 🔧 配置说明
+## 配置说明
 
 ### 环境变量
 
@@ -157,14 +157,14 @@ RUSTFS_SECRET_KEY=rustfsadmin
 - `./data/grafana`: Grafana 数据
 - `./data/tempo`: Tempo 数据
 
-> 💡 **提示**: 首次启动前，建议创建数据目录：
+>  **提示**: 首次启动前，建议创建数据目录：
 > ```bash
 > mkdir -p data/{consul,redis,postgres,nats,kafka,rustfs,loki,prometheus,grafana,tempo}
 > ```
 
 ---
 
-## 📝 使用示例
+## 使用示例
 
 ### 1. 启动服务
 
@@ -204,7 +204,7 @@ docker compose logs -f nats kafka
 
 ---
 
-## 🔗 服务连接信息
+## 服务连接信息
 
 ### 开发环境连接
 
@@ -243,7 +243,7 @@ grafana_url = "http://localhost:23000"
 
 ---
 
-## 📚 相关文档
+## 相关文档
 
 - [部署指南](../doc/DEPLOYMENT_GUIDE.md)
 - [项目结构](../doc/PROJECT_STRUCTURE.md)
@@ -252,6 +252,6 @@ grafana_url = "http://localhost:23000"
 
 ---
 
-**文档维护**: Flare IM Architecture Team  
-**最后更新**: 2025-01-XX  
+**文档维护**: Flare IM Architecture Team
+**最后更新**: 2025-01-XX
 **版本**: 0.1.0

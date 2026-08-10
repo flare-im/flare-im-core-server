@@ -58,17 +58,17 @@
 
 ## 功能特性
 
-✅ RESTful HTTP API 暴露
-✅ JSON 请求/响应
-✅ 参数校验
-✅ gRPC 服务转发
-✅ 统一错误处理
-✅ 链路追踪 (Tracing)
-✅ 请求超时
-✅ 限流支持
-✅ OpenAPI 文档 (Swagger UI)
-✅ CORS 支持
-✅ 健康检查
+✓ RESTful HTTP API 暴露
+✓ JSON 请求/响应
+✓ 参数校验
+✓ gRPC 服务转发
+✓ 统一错误处理
+✓ 链路追踪 (Tracing)
+✓ 请求超时
+✓ 限流支持
+✓ OpenAPI 文档 (Swagger UI)
+✓ CORS 支持
+✓ 健康检查
 
 ## 网关规范
 

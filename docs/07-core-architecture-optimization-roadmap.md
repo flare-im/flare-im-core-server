@@ -229,7 +229,7 @@ MQ：
 - 迁移 typed gRPC clients，`flare-api-gateway` 与 `flare-admin-gateway` 只依赖 client crate 和 gateway-auth，不依赖 runtime kit。
 - 迁移 `FlareAppConfig` 与 service config DTO 到 config crate；runtime kit 只消费 config crate，不反向持有 discovery/client/auth。
 - 最后迁移 `build_service_runtime_plan`、`ImServiceRuntimePlan`、health/tracing glue 到 runtime kit，并删除旧 `flare-im-service-kit` 宽口径 facade。
-- 验收：arch-tests 禁止新代码从 `flare-im-service-kit::{clients,discovery,gateway_auth,gateway,metrics}` 导入；workspace check 全绿；服务启动脚本仍按统一 runtime plan 启动。
+- 验收：arch-tests 禁止新代码从 `flare-im-service-kit::{clients,discovery,gateway_auth,gateway,metrics}` 导入；workspace check 全部通过；服务启动脚本仍按统一 runtime plan 启动。
 
 ## 5. 扩展性
 

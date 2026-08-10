@@ -40,7 +40,7 @@ pub trait MessageIdempotencyRepository: Send + Sync {
     /// 不占坑，例如内存/测试 mock）本就无坑可释放，返回 `Ok(())` 是正确语义，
     /// 且调用方 `release_idempotency_reservation` 已把释放失败当最佳努力吞掉并 `warn!`。
     ///
-    /// ⚠️ 但凡 `is_new` 会**预占坑**的实现（如 Redis `SET NX`），都**必须** override
+    /// 注意：但凡 `is_new` 会**预占坑**的实现（如 Redis `SET NX`），都**必须** override
     /// 本方法，否则失败路径下坑永不释放 → 客户端在 TTL 到期前无法重发（坑泄漏）。
     /// 这与 `ArchiveStoreRepository` 的写方法不同：那里 no-op = 静默丢数据，故那里默认体直接报错。
     async fn release(&self, ctx: &Ctx, message_id: &str) -> flare_server_core::error::Result<()> {
