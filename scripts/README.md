@@ -571,10 +571,8 @@ cargo run --example business_push_client
 
 ## 相关文档
 
-- [架构设计文档](../doc/消息流程架构设计.md)
-- [跨地区网关路由设计](../doc/跨地区网关路由设计.md)
-- [跨地区网关路由使用指南](../doc/跨地区网关路由使用指南.md)
-- [消息上下行流程设计](../doc/消息上下行流程设计.md)
+- [架构总览](../docs/01-architecture-overview.md)
+- [消息模型与通知持久化](../docs/03-message-model-and-notification-persistence.md)
 
 ---
 

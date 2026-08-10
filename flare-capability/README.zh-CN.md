@@ -390,6 +390,4 @@ flare-capability/
 
 ## 参考文档
 
-- [Hook可配置点与业务处理设计](../doc/Hook可配置点与业务处理设计.md)
-- [Hook 系统设计](../doc/Hook系统设计.md)
-- [Hook编排机制设计](../doc/Hook编排机制设计.md)
+- [Hook 与插件扩展性设计](../docs/HOOK_PLUGIN_EXTENSIBILITY_DESIGN.md)

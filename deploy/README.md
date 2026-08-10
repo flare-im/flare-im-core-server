@@ -245,9 +245,9 @@ grafana_url = "http://localhost:23000"
 
 ## 相关文档
 
-- [部署指南](../doc/DEPLOYMENT_GUIDE.md)
-- [项目结构](../doc/PROJECT_STRUCTURE.md)
-- [集成指南](../doc/INTEGRATION_GUIDE.md)
+- [测试、性能与运维](../docs/06-testing-performance-and-operations.md)
+- [架构总览](../docs/01-architecture-overview.md)
+- [第三方接入](../docs/04-third-party-integration.md)
 - [TimescaleDB 使用指南](./TIMESCALEDB_GUIDE.md) - TimescaleDB 详细配置和使用
 
 ---

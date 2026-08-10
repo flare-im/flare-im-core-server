@@ -234,5 +234,4 @@ let response = grpc_client.your_method(request).await?;
 
 ## 相关文档
 
-- [flare-server-core 服务发现文档](../../flare-server-core/src/discovery/README.md)
-- [配置文档](../config/README.md)
+- [flare-server-core 服务发现文档](https://github.com/flare152/flare-server-core/blob/main/flare-core-transport/src/discovery/README.md)

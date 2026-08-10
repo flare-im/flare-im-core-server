@@ -136,5 +136,4 @@ cargo test --package flare-im-core --lib utils
 
 ## 参考文档
 
-- [消息关系模型落地优化方案](../../doc/plan/04-消息关系模型落地优化方案.md)
-- [消息关系设计](../../doc/消息关系设计.md)
+- [操作消息统一设计](../../../../docs/DESIGN_OPERATION_MESSAGE_UNIFIED.md)

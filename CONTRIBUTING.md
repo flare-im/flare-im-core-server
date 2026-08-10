@@ -9,9 +9,9 @@
 
 架构方向与未完成项见：
 
-- [`docs/roadmap/open-items.md`](docs/roadmap/open-items.md) —— 未完成技术项的权威清单
-- [`docs/roadmap/competitive-roadmap.md`](docs/roadmap/competitive-roadmap.md) —— 能力对标与路线
-- [`docs/roadmap/oss-commercial-strategy.md`](docs/roadmap/oss-commercial-strategy.md) —— 项目形态与商业边界
+- [`docs/roadmap/open-items.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/open-items.md) —— 未完成技术项的权威清单
+- [`docs/roadmap/competitive-roadmap.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/competitive-roadmap.md) —— 能力对标与路线
+- [`docs/roadmap/oss-commercial-strategy.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/oss-commercial-strategy.md) —— 项目形态与商业边界
 
 ## 仓库结构
 

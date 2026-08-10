@@ -390,6 +390,4 @@ This service provides the following hook-related monitoring metrics:
 
 ## Reference documentation
 
-- [Hook Configurable Points and Business Processing Design](../doc/Hook可配置点与业务处理设计.md)
-- [Hook System Design](../doc/Hook系统设计.md)
-- [Hook Orchestration Mechanism Design](../doc/Hook编排机制设计.md)
+- [Hook and Plugin Extensibility Design](../docs/HOOK_PLUGIN_EXTENSIBILITY_DESIGN.md)
