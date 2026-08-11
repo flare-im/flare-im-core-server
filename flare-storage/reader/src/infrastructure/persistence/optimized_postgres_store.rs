@@ -1904,7 +1904,6 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         event_type_filter: Vec<i32>,
     ) -> Result<Vec<Event>> {
-        let _ = ctx;
         let limit = limit.clamp(1, 500);
 
         let mut b = sqlx::QueryBuilder::new(
@@ -1915,6 +1914,23 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         b.push_bind(conversation_id);
         b.push(" AND seq > ");
         b.push_bind(after_seq);
+
+        // events 行存的是整条消息 payload，客户端会据此materialize出消息——所以它和
+        // 消息查询一样要守成员历史下限，否则时间线挡住了、事件回放又把同样的内容送了回去。
+        // 用户身份取自 ctx（这里原先直接 `let _ = ctx;` 丢掉了它），因此不必改 proto。
+        // 与消息查询一致地失败关闭：查不到参与者行 = 此刻不在这个会话里，一条都不给。
+        let viewer_id = user_id_from_ctx(ctx);
+        if !viewer_id.is_empty() {
+            b.push(" AND seq > COALESCE((SELECT cp.visible_from_seq FROM conversation_participants cp WHERE cp.tenant_id = ");
+            b.push_bind(tenant_id);
+            b.push(" AND cp.conversation_id = ");
+            b.push_bind(conversation_id);
+            b.push(" AND cp.user_id = ");
+            b.push_bind(viewer_id.to_string());
+            b.push("), ");
+            b.push_bind(i64::MAX);
+            b.push(")");
+        }
         if before_seq > 0 {
             b.push(" AND seq < ");
             b.push_bind(before_seq);
