@@ -28,6 +28,9 @@ pub async fn initialize(
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
     let route_handler = Arc::new(
         PushRouterHandler::new(online_status.clone(), online_status, publisher.clone())
+            .with_notify_policy(Arc::new(
+                crate::infrastructure::ConversationNotifyPolicy::new(),
+            ))
             .with_conversation_ping_coalesce_window(Duration::from_millis(
                 config.event_ping_coalesce_window_ms,
             )),

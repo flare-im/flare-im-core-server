@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use futures::stream::{self, StreamExt};
 use prost::Message as _;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::domain::repository::NotifyPolicyRepository;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
 
@@ -237,6 +238,8 @@ pub struct PushRouterHandler {
     conversation_online_index: Arc<dyn ConversationOnlineIndexReader>,
     publisher: Arc<dyn PushTaskPublisher>,
     conversation_ping_coalescer: Option<Arc<ConversationPingCoalescer>>,
+    /// 免打扰读取。未接线时不做任何过滤——保持既有行为，而不是把推送全挡掉。
+    notify_policy: Option<Arc<dyn NotifyPolicyRepository>>,
 }
 
 struct PushTaskTemplate<'a> {
@@ -343,7 +346,14 @@ impl PushRouterHandler {
             conversation_online_index,
             publisher,
             conversation_ping_coalescer: None,
+            notify_policy: None,
         }
+    }
+
+    /// 接入免打扰读取。不接线时行为与接入前完全一致（不过滤任何推送）。
+    pub fn with_notify_policy(mut self, policy: Arc<dyn NotifyPolicyRepository>) -> Self {
+        self.notify_policy = Some(policy);
+        self
     }
 
     pub fn with_conversation_ping_coalesce_window(mut self, window: Duration) -> Self {
@@ -530,6 +540,38 @@ impl PushRouterHandler {
             })
     }
 
+    /// 取该会话中设了免打扰的用户；只针对**即将收到离线推送**的那批人查询。
+    ///
+    /// 查询失败一律按「没人静音」处理（fail-open）：免打扰是偏好不是安全边界，
+    /// 「该静音的响了一声」远好过「该到的推送没到」。
+    async fn muted_offline_users(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        conversation_id: &str,
+        offline_user_ids: &[String],
+    ) -> HashSet<String> {
+        let Some(policy) = self.notify_policy.as_ref() else {
+            return HashSet::new();
+        };
+        if offline_user_ids.is_empty() || conversation_id.trim().is_empty() {
+            return HashSet::new();
+        }
+        match policy
+            .muted_users(ctx, conversation_id, offline_user_ids)
+            .await
+        {
+            Ok(muted) => muted,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    conversation_id = %conversation_id,
+                    "query mute settings failed; sending offline push anyway"
+                );
+                HashSet::new()
+            }
+        }
+    }
+
     async fn publish_targeted_tasks(
         &self,
         ctx: &flare_server_core::context::Ctx,
@@ -538,10 +580,33 @@ impl PushRouterHandler {
         template: PushTaskTemplate<'_>,
         online_only: bool,
     ) -> Result<()> {
+        // 先算出哪些人会走离线推送，再一次性查免打扰——在线用户不查，
+        // 他们的事件走长连接，提不提示由客户端决定。
+        let offline_candidates: Vec<String> = if online_only {
+            Vec::new()
+        } else {
+            user_ids
+                .iter()
+                .filter(|uid| !online_statuses.get(*uid).copied().unwrap_or(false))
+                .cloned()
+                .collect()
+        };
+        let muted = self
+            .muted_offline_users(ctx, template.conversation_id, &offline_candidates)
+            .await;
+
         let mut online_user_ids = Vec::with_capacity(user_ids.len());
         let mut offline_tasks = Vec::new();
         for user_id in user_ids {
             let is_online = online_statuses.get(user_id).copied().unwrap_or(false);
+            if !is_online && muted.contains(user_id) {
+                tracing::debug!(
+                    user_id = %user_id,
+                    conversation_id = %template.conversation_id,
+                    "Skipping offline push for muted conversation"
+                );
+                continue;
+            }
             if online_only && !is_online {
                 tracing::trace!(
                     user_id = %user_id,
@@ -1171,6 +1236,166 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.user_ids.clone())
         }
+    }
+
+    /// 可控的免打扰来源：`muted` 是静音名单，`fail` 用来模拟查询不可用。
+    struct MockNotifyPolicy {
+        muted: Vec<String>,
+        fail: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl NotifyPolicyRepository for MockNotifyPolicy {
+        async fn muted_users(
+            &self,
+            _ctx: &flare_server_core::context::Ctx,
+            _conversation_id: &str,
+            user_ids: &[String],
+        ) -> std::result::Result<HashSet<String>, flare_server_core::error::FlareError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(flare_server_core::error::FlareError::localized(
+                    ErrorCode::ServiceUnavailable,
+                    "boom",
+                ));
+            }
+            let wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
+            Ok(self
+                .muted
+                .iter()
+                .filter(|u| wanted.contains(u.as_str()))
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// 造一个「一在线一离线」的场景，返回 (离线任务的用户列表, 在线任务条数, 策略查询次数)。
+    async fn run_targeted_push(muted: Vec<String>, fail: bool) -> (Vec<String>, usize, usize) {
+        let online = Arc::new(MockOnlineStatusReader {
+            statuses: HashMap::from([
+                ("user-online".to_string(), true),
+                ("user-offline".to_string(), false),
+            ]),
+            tenant_id: "tenant-a".to_string(),
+        });
+        let index = Arc::new(MockConversationOnlineIndexReader {
+            user_ids: vec![],
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = PushRouterHandler::new(online.clone(), index, publisher.clone())
+            .with_notify_policy(Arc::new(MockNotifyPolicy {
+                muted,
+                fail,
+                calls: calls.clone(),
+            }));
+
+        let ctx = Arc::new(Context::root());
+        let user_ids = vec!["user-online".to_string(), "user-offline".to_string()];
+        let statuses = HashMap::from([
+            ("user-online".to_string(), true),
+            ("user-offline".to_string(), false),
+        ]);
+        let headers = HashMap::new();
+        handler
+            .publish_targeted_tasks(
+                &ctx,
+                &user_ids,
+                &statuses,
+                PushTaskTemplate {
+                    message_id: "m-1",
+                    conversation_id: "conversation-1",
+                    tenant_id: "tenant-a",
+                    priority: 5,
+                    expire_at: None,
+                    push_payload: &[],
+                    headers: &headers,
+                    payload_kind: PushTaskPayloadKind::Message as i32,
+                },
+                false,
+            )
+            .await
+            .expect("publish");
+
+        let offline_users: Vec<String> = publisher
+            .offline
+            .lock()
+            .expect("offline lock")
+            .iter()
+            .map(|(_, task)| task.user_id.clone())
+            .collect();
+        let online_count = publisher.online.lock().expect("online lock").len();
+        (offline_users, online_count, calls.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn muted_conversation_gets_no_offline_push() {
+        let (offline_users, online_count, _) =
+            run_targeted_push(vec!["user-offline".to_string()], false).await;
+        assert!(
+            offline_users.is_empty(),
+            "设了免打扰的离线用户不该产生离线推送任务，实际 {offline_users:?}"
+        );
+        // 在线那一路完全不受影响：他们的事件走长连接，提不提示由客户端决定。
+        assert_eq!(online_count, 1);
+    }
+
+    #[tokio::test]
+    async fn unmuted_user_still_gets_offline_push() {
+        let (offline_users, _, _) = run_targeted_push(vec![], false).await;
+        assert_eq!(offline_users, vec!["user-offline".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn mute_lookup_failure_still_sends_push() {
+        // fail-open：免打扰是偏好不是安全边界，「该静音的响一声」远好过「该到的没到」。
+        let (offline_users, _, _) = run_targeted_push(vec!["user-offline".to_string()], true).await;
+        assert_eq!(offline_users, vec!["user-offline".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn online_only_push_never_queries_mute_settings() {
+        // online_only 压根不会产生离线任务，不该为此多打一次查询。
+        let online = Arc::new(MockOnlineStatusReader {
+            statuses: HashMap::from([("user-offline".to_string(), false)]),
+            tenant_id: "tenant-a".to_string(),
+        });
+        let index = Arc::new(MockConversationOnlineIndexReader {
+            user_ids: vec![],
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = PushRouterHandler::new(online, index, publisher).with_notify_policy(
+            Arc::new(MockNotifyPolicy {
+                muted: vec!["user-offline".to_string()],
+                fail: false,
+                calls: calls.clone(),
+            }),
+        );
+        let headers = HashMap::new();
+        handler
+            .publish_targeted_tasks(
+                &Arc::new(Context::root()),
+                &["user-offline".to_string()],
+                &HashMap::from([("user-offline".to_string(), false)]),
+                PushTaskTemplate {
+                    message_id: "m-1",
+                    conversation_id: "conversation-1",
+                    tenant_id: "tenant-a",
+                    priority: 5,
+                    expire_at: None,
+                    push_payload: &[],
+                    headers: &headers,
+                    payload_kind: PushTaskPayloadKind::Message as i32,
+                },
+                true,
+            )
+            .await
+            .expect("publish");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
