@@ -341,7 +341,34 @@ fn print_report(config: &Config, elapsed: Duration, samples: &mut [Sample], fail
     if let Some(first) = failures.first() {
         println!("first_failure_message_id={}", first.message_id);
         println!("first_failure_error={}", first.error);
+        diagnose_failures(success, failures);
     }
+}
+
+/// 全军覆没时给出**能直接照做的**下一步，而不是让人对着一行截断的错误猜。
+///
+/// 最常见的一种：带业务 Hook 档（`start_server.sh` 的 social 档）跑压测——
+/// 本工具用的是合成用户对，它们彼此不是好友、也不在同一个群，于是每条消息都被
+/// PreSend Hook 挡下。此时打印出来的只有 `success=0`，看不出是「压测姿势不对」
+/// 还是「服务端真的坏了」，而这两者的处理方式完全相反。
+fn diagnose_failures(success: usize, failures: &[Failure]) {
+    if success > 0 {
+        return;
+    }
+    let hook_rejected = failures
+        .iter()
+        .filter(|f| f.error.contains("PreSend hook") || f.error.contains("pre-send hook"))
+        .count();
+    if hook_rejected * 2 < failures.len() {
+        return;
+    }
+    println!();
+    println!("diagnosis=all_sends_rejected_by_pre_send_hook");
+    println!("  本工具用的是合成用户对：它们不是好友、也不同群，业务 Hook 档下会被逐条拒绝。");
+    println!("  这不是服务端故障，是压测跑在了带业务 Hook 的实例上。改用其一：");
+    println!("    1) ./scripts/start_server_core.sh   # 业务中立档，不注册业务 Hook");
+    println!("    2) 先给压测用户建立好友/群关系，再用同样的 PERF_PAIRS 跑");
+    println!("  注意：此时的 pre_send_hook 阶段耗时只反映「拒绝路径」，不能当作发信基线。");
 }
 
 async fn wait_for_storage_metrics(
