@@ -4,12 +4,18 @@
 # 与供应链审计（cargo audit 结果稳定）的前提。
 
 # IDE / 本地工具状态
-/.cargo/
 /.idea/
 /.vscode/
 /.cursor/
-/.github/
 .DS_Store
+
+# 注意：`/.cargo/` 与 `/.github/` 曾被列在上面，但它们装的是**项目配置**
+# （cargo 配置 / 审计豁免 / CI workflow），不是本地工具状态。
+# 后果是新增文件被静默忽略——`nightly-e2e.yml` 和 `publish-image.yml`
+# 就这样写完却从没进过仓库，GitHub 上压根不存在这两个 workflow。
+# 只忽略真正属于本地的凭据文件。
+/.cargo/credentials
+/.cargo/credentials.toml
 
 # 运行时数据
 /data/
