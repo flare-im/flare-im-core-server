@@ -92,7 +92,7 @@ NEGOTIATION_HOST=localhost:60051 \
   cargo run -p flare-im-core-examples --example chatroom_client -- user1
 ```
 
-连上后会看到 `✓ 收到 CONNECT_ACK` 与 `✓ 已连接到 localhost:60051`。
+连上后会看到 `✅ 收到 CONNECT_ACK`（SDK 打的）与 `✅ 已连接到 localhost:60051`。
 
 `examples/` 下还有 `integration_client.rs`（业务集成）与
 `perf_message_send.rs`（压测），跑法相同。

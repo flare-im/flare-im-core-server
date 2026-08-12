@@ -98,7 +98,7 @@ NEGOTIATION_HOST=localhost:60051 \
   cargo run -p flare-im-core-examples --example chatroom_client -- user1
 ```
 
-Once connected you'll see `CONNECT_ACK received` and `connected to localhost:60051`.
+Once connected the log shows `收到 CONNECT_ACK` (from the SDK) followed by `✅ 已连接到 localhost:60051` — the example's interactive UI is Chinese; the checkmark line with your host in it is the success marker.
 
 `examples/` also has `integration_client.rs` (business integration) and
 `perf_message_send.rs` (load test); same invocation.
