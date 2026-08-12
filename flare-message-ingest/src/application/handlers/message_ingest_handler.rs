@@ -432,7 +432,9 @@ impl MessageIngestHandler {
             .await?;
 
         // 4. 确保会话存在（Social SyncSignal 内部路由 `sync:{owner}` 仅在线推送，不落会话表）
-        if !submission.message.conversation_id.starts_with("sync:") {
+        if !flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+            &submission.message.conversation_id,
+        ) {
             let ensure_request =
                 build_conversation_ensure_request_from_message(&submission.message, &tenant_id);
             self.measure_stage(

@@ -1663,7 +1663,10 @@ fn event_replay_gap_repair_context(
 
 fn valid_sync_conversation_id(conversation_id: &str) -> bool {
     let conversation_id = conversation_id.trim();
-    !conversation_id.is_empty() && !conversation_id.starts_with("sync:")
+    !conversation_id.is_empty()
+        && !flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+            conversation_id,
+        )
 }
 
 #[cfg(test)]
