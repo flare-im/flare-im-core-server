@@ -21,7 +21,12 @@ fn mute_lookup_never_leaks_into_delivery_recipient_resolution() {
     let root = workspace_root();
     let ingest = fs::read_to_string(root.join(INGEST_SERVICE)).expect("read ingest service");
 
-    for forbidden in ["muted_users", "NotifyPolicyRepository", "notify_policy"] {
+    for forbidden in [
+        "muted_users",
+        "preferences_for",
+        "NotifyPolicyRepository",
+        "notify_policy",
+    ] {
         assert!(
             !ingest.contains(forbidden),
             "投递侧收件人解析不得引入通知偏好（发现 `{forbidden}`）：\
@@ -38,13 +43,17 @@ fn mute_filter_only_suppresses_offline_push() {
     let router = fs::read_to_string(root.join(PUSH_ROUTER)).expect("read push router");
 
     assert!(
-        router.contains("if !is_online && muted.contains(user_id)"),
+        router.contains("if !is_online && preference.muted"),
         "免打扰过滤必须同时要求「离线」与「已静音」——\
          漏掉 !is_online 会把在线用户的实时投递也一起挡掉"
     );
     assert!(
-        router.contains("fn muted_offline_users"),
-        "免打扰查询必须收敛在单一入口 `muted_offline_users`，便于审计其调用时机"
+        router.contains("if !is_online && preference.mention_only"),
+        "「只接收@我」同样必须先要求离线：它抑制的是推送，不是消息投递"
+    );
+    assert!(
+        router.contains("fn notify_preferences"),
+        "通知偏好查询必须收敛在单一入口 `notify_preferences`，便于审计其调用时机"
     );
 }
 
@@ -56,9 +65,16 @@ fn mute_lookup_is_fail_open_and_lazy() {
     let port = fs::read_to_string(root.join(NOTIFY_PORT)).expect("read notify policy port");
 
     assert!(
-        router.contains("HashSet::new()"),
-        "通知偏好查询失败必须退化为空静音集（fail-open）：\
+        router.contains("HashMap::new()"),
+        "通知偏好查询失败必须退化为空偏好表（fail-open）：\
          免打扰是偏好不是安全边界，宁可多响一声也不能吞掉推送"
+    );
+    // 免打扰与「只接收@我」读的是同一批参与者行；分开查会让每条消息的翻页 RPC
+    // 按偏好种类翻倍——加第二种偏好时踩过一次，用源码断言钉住合并后的形状。
+    assert_eq!(
+        router.matches(".preferences_for(").count(),
+        1,
+        "通知偏好只允许有一处查询调用：每加一种偏好就多查一遍，成本按种类翻倍"
     );
     assert!(
         router.contains("if online_only {") && router.contains("let offline_candidates"),

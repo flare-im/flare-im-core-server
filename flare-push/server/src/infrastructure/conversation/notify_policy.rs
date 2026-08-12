@@ -4,7 +4,7 @@
 //! 直读会把两个服务焊死在同一份表结构上。多一次 RPC 换清晰的所有权边界，
 //! 且这条路径只在离线推送时走，本来就在等网络。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use flare_grpc_proto::conversation::ListConversationParticipantsRequest;
@@ -16,7 +16,7 @@ use flare_server_core::error::FlareError;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use crate::domain::repository::NotifyPolicyRepository;
+use crate::domain::repository::{NotifyPolicyRepository, NotifyPreference};
 
 /// 单次拉取的参与者页大小。
 const PAGE_LIMIT: i32 = 200;
@@ -58,26 +58,22 @@ impl ConversationNotifyPolicy {
 }
 
 impl ConversationNotifyPolicy {
-    /// 翻页取参与者，收集满足 `pick` 的用户。
+    /// 翻页枚举参与者并交给 `sink` 收集。
     ///
-    /// 免打扰与「只接收@我」共用这一趟翻页逻辑：两者读的是同一批行，各写一份
-    /// 翻页代码迟早会在页数上限、游标终止条件这些细节上分叉。
-    async fn collect_participants<F>(
+    /// 免打扰、「只接收@我」、大群成员列表读的都是同一批行——各写一次翻页会让
+    /// 每条消息的 RPC 按用途翻倍，也迟早在页数上限、游标终止条件这些细节上分叉。
+    ///
+    /// `sink` 返回 `false` 表示「要的都拿到了，别再翻」。
+    async fn walk_participants<F>(
         &self,
         ctx: &Ctx,
         conversation_id: &str,
-        user_ids: &[String],
-        pick: F,
-    ) -> Result<HashSet<String>, FlareError>
+        mut sink: F,
+    ) -> Result<bool, FlareError>
     where
-        F: Fn(&flare_proto::common::ConversationParticipant) -> bool,
+        F: FnMut(&flare_proto::common::ConversationParticipant) -> bool,
     {
-        if user_ids.is_empty() || conversation_id.trim().is_empty() {
-            return Ok(HashSet::new());
-        }
         let mut client = self.client().await?;
-        let mut wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
-        let mut picked = HashSet::new();
         let mut cursor = String::new();
 
         for _ in 0..MAX_PAGES {
@@ -102,98 +98,76 @@ impl ConversationNotifyPolicy {
                 .into_inner();
 
             let has_more = resp.has_more && !resp.next_cursor.trim().is_empty();
-            for participant in resp.participants {
-                if !wanted.remove(participant.user_id.as_str()) {
-                    continue;
-                }
-                if pick(&participant) {
-                    picked.insert(participant.user_id);
-                }
-            }
-            // 关心的人都已判定完，剩下的页没必要再翻。
-            if wanted.is_empty() || !has_more {
-                break;
-            }
-            cursor = resp.next_cursor;
-        }
-
-        Ok(picked)
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::domain::repository::ConversationMemberReader for ConversationNotifyPolicy {
-    async fn member_ids(
-        &self,
-        ctx: &Ctx,
-        conversation_id: &str,
-        cap: usize,
-    ) -> Result<Option<Vec<String>>, FlareError> {
-        if conversation_id.trim().is_empty() || cap == 0 {
-            return Ok(Some(Vec::new()));
-        }
-        let mut client = self.client().await?;
-        let mut ids = Vec::new();
-        let mut cursor = String::new();
-
-        for _ in 0..MAX_PAGES {
-            let resp = client
-                .list_conversation_participants(request_with_context(
-                    ListConversationParticipantsRequest {
-                        conversation_id: conversation_id.to_string(),
-                        cursor: cursor.clone(),
-                        limit: PAGE_LIMIT,
-                        include_removed: false,
-                        ext: Default::default(),
-                    },
-                    ctx,
-                ))
-                .await
-                .map_err(|e| {
-                    FlareError::localized(
-                        flare_server_core::error::ErrorCode::ServiceUnavailable,
-                        format!("list conversation participants: {e}"),
-                    )
-                })?
-                .into_inner();
-
-            let has_more = resp.has_more && !resp.next_cursor.trim().is_empty();
-            for participant in resp.participants {
-                ids.push(participant.user_id);
-                if ids.len() > cap {
-                    // 超限即放弃，不返回截断结果——见 trait 文档。
-                    return Ok(None);
+            for participant in &resp.participants {
+                if !sink(participant) {
+                    return Ok(true);
                 }
             }
             if !has_more {
-                return Ok(Some(ids));
+                return Ok(true);
             }
             cursor = resp.next_cursor;
         }
-        // 翻到页数上限还没完：同样按「超限」处理。
-        Ok(None)
+        // 翻到页数上限还没完：告诉调用方这次枚举不完整。
+        Ok(false)
+    }
+}
+
+fn preference_of(p: &flare_proto::common::ConversationParticipant) -> NotifyPreference {
+    NotifyPreference {
+        muted: p.muted,
+        mention_only: p.mention_only,
     }
 }
 
 #[async_trait::async_trait]
 impl NotifyPolicyRepository for ConversationNotifyPolicy {
-    async fn muted_users(
+    async fn preferences_for(
         &self,
         ctx: &Ctx,
         conversation_id: &str,
         user_ids: &[String],
-    ) -> Result<HashSet<String>, FlareError> {
-        self.collect_participants(ctx, conversation_id, user_ids, |p| p.muted)
-            .await
+    ) -> Result<HashMap<String, NotifyPreference>, FlareError> {
+        if user_ids.is_empty() || conversation_id.trim().is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
+        let mut out = HashMap::new();
+        self.walk_participants(ctx, conversation_id, |participant| {
+            if wanted.remove(participant.user_id.as_str()) {
+                out.insert(participant.user_id.clone(), preference_of(participant));
+            }
+            // 关心的人都判定完就停：单聊/小范围收件人不必把大群整册翻完。
+            !wanted.is_empty()
+        })
+        .await?;
+        Ok(out)
     }
 
-    async fn mention_only_users(
+    async fn all_participants(
         &self,
         ctx: &Ctx,
         conversation_id: &str,
-        user_ids: &[String],
-    ) -> Result<HashSet<String>, FlareError> {
-        self.collect_participants(ctx, conversation_id, user_ids, |p| p.mention_only)
-            .await
+        cap: usize,
+    ) -> Result<Option<HashMap<String, NotifyPreference>>, FlareError> {
+        if conversation_id.trim().is_empty() || cap == 0 {
+            return Ok(Some(HashMap::new()));
+        }
+        let mut out = HashMap::new();
+        let mut over_cap = false;
+        let complete = self
+            .walk_participants(ctx, conversation_id, |participant| {
+                if out.len() >= cap {
+                    over_cap = true;
+                    return false;
+                }
+                out.insert(participant.user_id.clone(), preference_of(participant));
+                true
+            })
+            .await?;
+        if over_cap || !complete {
+            return Ok(None);
+        }
+        Ok(Some(out))
     }
 }

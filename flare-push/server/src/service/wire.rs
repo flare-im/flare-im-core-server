@@ -29,10 +29,8 @@ pub async fn initialize(
     let policy = Arc::new(crate::infrastructure::ConversationNotifyPolicy::new());
     let route_handler = Arc::new(
         PushRouterHandler::new(online_status.clone(), online_status, publisher.clone())
-            .with_notify_policy(policy.clone())
-            // 同一个实现同时提供免打扰读取与成员枚举：两者读的是同一份参与者数据，
-            // 分成两个连接池只会让会话服务多担一份连接。
-            .with_conversation_members(policy)
+            // 同一个实现同时提供通知偏好与全员枚举：读的是同一份参与者数据。
+            .with_notify_policy(policy)
             .with_conversation_ping_coalesce_window(Duration::from_millis(
                 config.event_ping_coalesce_window_ms,
             )),

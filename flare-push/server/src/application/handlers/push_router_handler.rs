@@ -15,7 +15,7 @@ use futures::stream::{self, StreamExt};
 use prost::Message as _;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::domain::repository::{ConversationMemberReader, NotifyPolicyRepository};
+use crate::domain::repository::{NotifyPolicyRepository, NotifyPreference};
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
 
@@ -240,8 +240,6 @@ pub struct PushRouterHandler {
     conversation_ping_coalescer: Option<Arc<ConversationPingCoalescer>>,
     /// 免打扰读取。未接线时不做任何过滤——保持既有行为，而不是把推送全挡掉。
     notify_policy: Option<Arc<dyn NotifyPolicyRepository>>,
-    /// 大群离线推送用的成员枚举。未接线时退回旧行为（大群只推在线）。
-    conversation_members: Option<Arc<dyn ConversationMemberReader>>,
     /// 超过这个成员数就不做离线扇出。
     ///
     /// 每条消息枚举一次成员是有成本的（按页 RPC），几万人的频道逐条推送更是灾难。
@@ -453,18 +451,11 @@ impl PushRouterHandler {
             publisher,
             conversation_ping_coalescer: None,
             notify_policy: None,
-            conversation_members: None,
             offline_fanout_member_cap: std::env::var("PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_OFFLINE_FANOUT_MEMBER_CAP),
         }
-    }
-
-    /// 接入成员枚举，为大群补上离线推送。不接线时退回旧行为（大群只推在线）。
-    pub fn with_conversation_members(mut self, reader: Arc<dyn ConversationMemberReader>) -> Self {
-        self.conversation_members = Some(reader);
-        self
     }
 
     /// 接入免打扰读取。不接线时行为与接入前完全一致（不过滤任何推送）。
@@ -661,60 +652,29 @@ impl PushRouterHandler {
     ///
     /// 查询失败一律按「没人静音」处理（fail-open）：免打扰是偏好不是安全边界，
     /// 「该静音的响了一声」远好过「该到的推送没到」。
-    /// 「只接收@我」的离线用户子集。查询失败一律返回空集（fail-open）：
+    /// 取这批人的通知偏好。查询失败一律返回空表（fail-open）：
     /// 通知偏好是偏好不是安全边界，宁可多响一声也别把该到的推送吞掉。
-    async fn mention_only_offline_users(
+    async fn notify_preferences(
         &self,
         ctx: &flare_server_core::context::Ctx,
         conversation_id: &str,
-        offline_user_ids: &[String],
-    ) -> HashSet<String> {
+        user_ids: &[String],
+    ) -> HashMap<String, NotifyPreference> {
         let Some(policy) = self.notify_policy.as_ref() else {
-            return HashSet::new();
+            return HashMap::new();
         };
-        if offline_user_ids.is_empty() || conversation_id.trim().is_empty() {
-            return HashSet::new();
+        if user_ids.is_empty() || conversation_id.trim().is_empty() {
+            return HashMap::new();
         }
-        match policy
-            .mention_only_users(ctx, conversation_id, offline_user_ids)
-            .await
-        {
-            Ok(users) => users,
+        match policy.preferences_for(ctx, conversation_id, user_ids).await {
+            Ok(prefs) => prefs,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     conversation_id = %conversation_id,
-                    "query mention-only settings failed; sending offline push anyway"
+                    "query notify preferences failed; sending offline push anyway"
                 );
-                HashSet::new()
-            }
-        }
-    }
-
-    async fn muted_offline_users(
-        &self,
-        ctx: &flare_server_core::context::Ctx,
-        conversation_id: &str,
-        offline_user_ids: &[String],
-    ) -> HashSet<String> {
-        let Some(policy) = self.notify_policy.as_ref() else {
-            return HashSet::new();
-        };
-        if offline_user_ids.is_empty() || conversation_id.trim().is_empty() {
-            return HashSet::new();
-        }
-        match policy
-            .muted_users(ctx, conversation_id, offline_user_ids)
-            .await
-        {
-            Ok(muted) => muted,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    conversation_id = %conversation_id,
-                    "query mute settings failed; sending offline push anyway"
-                );
-                HashSet::new()
+                HashMap::new()
             }
         }
     }
@@ -734,6 +694,7 @@ impl PushRouterHandler {
             template,
             online_only,
             false,
+            None,
         )
         .await
     }
@@ -749,6 +710,8 @@ impl PushRouterHandler {
         template: PushTaskTemplate<'_>,
         online_only: bool,
         deliver_online_to_all: bool,
+        // 已经取到的通知偏好。大群路径枚举成员时顺带拿到了，别再查一遍。
+        prefetched_preferences: Option<&HashMap<String, NotifyPreference>>,
     ) -> Result<()> {
         // 先算出哪些人会走离线推送，再一次性查免打扰——在线用户不查，
         // 他们的事件走长连接，提不提示由客户端决定。
@@ -761,19 +724,23 @@ impl PushRouterHandler {
                 .cloned()
                 .collect()
         };
-        let muted = self
-            .muted_offline_users(ctx, template.conversation_id, &offline_candidates)
-            .await;
-        let mention_only = self
-            .mention_only_offline_users(ctx, template.conversation_id, &offline_candidates)
-            .await;
+        // 一次取回全部偏好：免打扰与「只接收@我」读的是同一批参与者行，
+        // 分两次查会让每条消息的翻页 RPC 直接翻倍。
+        let preferences = match prefetched_preferences {
+            Some(prefs) => prefs.clone(),
+            None => {
+                self.notify_preferences(ctx, template.conversation_id, &offline_candidates)
+                    .await
+            }
+        };
         let mentions = mention_targets(template.payload_kind, template.push_payload);
 
         let mut online_user_ids = Vec::with_capacity(user_ids.len());
         let mut offline_tasks = Vec::new();
         for user_id in user_ids {
             let is_online = online_statuses.get(user_id).copied().unwrap_or(false);
-            if !is_online && muted.contains(user_id) {
+            let preference = preferences.get(user_id).copied().unwrap_or_default();
+            if !is_online && preference.muted {
                 tracing::debug!(
                     user_id = %user_id,
                     conversation_id = %template.conversation_id,
@@ -781,7 +748,7 @@ impl PushRouterHandler {
                 );
                 continue;
             }
-            if !is_online && mention_only.contains(user_id) && !mentions.mentions(user_id) {
+            if !is_online && preference.mention_only && !mentions.mentions(user_id) {
                 tracing::debug!(
                     user_id = %user_id,
                     conversation_id = %template.conversation_id,
@@ -983,6 +950,7 @@ impl PushRouterHandler {
             online_only,
             // 内联事件：在线照发、离线补推，两者不互斥
             true,
+            None,
         )
         .await
     }
@@ -1104,14 +1072,16 @@ impl PushRouterHandler {
         conversation_id: &str,
         template: OfflineFanoutTemplate<'_>,
     ) {
-        let Some(members) = self.conversation_members.as_ref() else {
+        let Some(policy) = self.notify_policy.as_ref() else {
             return;
         };
-        let member_ids = match members
-            .member_ids(ctx, conversation_id, self.offline_fanout_member_cap)
+        // 一次枚举同时拿到成员列表与他们的通知偏好：过滤离线推送本来就要用偏好，
+        // 分两次查等于把大群的翻页成本再付一遍。
+        let participants = match policy
+            .all_participants(ctx, conversation_id, self.offline_fanout_member_cap)
             .await
         {
-            Ok(Some(ids)) => ids,
+            Ok(Some(map)) => map,
             Ok(None) => {
                 tracing::info!(
                     conversation_id = %conversation_id,
@@ -1124,14 +1094,15 @@ impl PushRouterHandler {
                 tracing::warn!(
                     error = %error,
                     conversation_id = %conversation_id,
-                    "Skipping offline fanout: member lookup failed"
+                    "Skipping offline fanout: participant lookup failed"
                 );
                 return;
             }
         };
-        if member_ids.is_empty() {
+        if participants.is_empty() {
             return;
         }
+        let member_ids: Vec<String> = participants.keys().cloned().collect();
 
         let statuses = match self.load_online_statuses(ctx, &member_ids).await {
             Ok(statuses) => statuses,
@@ -1162,7 +1133,7 @@ impl PushRouterHandler {
         let tenant_id = self.online_status.default_tenant_id().to_string();
         let headers = HashMap::new();
         if let Err(error) = self
-            .publish_targeted_tasks(
+            .publish_targeted_tasks_inner(
                 ctx,
                 &offline,
                 &all_offline,
@@ -1177,6 +1148,10 @@ impl PushRouterHandler {
                     payload_kind: PushTaskPayloadKind::Event as i32,
                 },
                 false,
+                // 大群离线补推：在线的人由会话广播承担，这里不再重复发在线任务。
+                false,
+                // 偏好已在上面那次枚举里拿到了，别再查一遍。
+                Some(&participants),
             )
             .await
         {
@@ -1543,18 +1518,23 @@ mod tests {
     struct MockNotifyPolicy {
         muted: Vec<String>,
         mention_only: Vec<String>,
+        /// 大群路径用：`None` 模拟「超过成员上限」。
+        participants: Option<HashMap<String, NotifyPreference>>,
         fail: bool,
         calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
     impl NotifyPolicyRepository for MockNotifyPolicy {
-        async fn muted_users(
+        async fn preferences_for(
             &self,
             _ctx: &flare_server_core::context::Ctx,
             _conversation_id: &str,
             user_ids: &[String],
-        ) -> std::result::Result<HashSet<String>, flare_server_core::error::FlareError> {
+        ) -> std::result::Result<
+            HashMap<String, NotifyPreference>,
+            flare_server_core::error::FlareError,
+        > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 return Err(flare_server_core::error::FlareError::localized(
@@ -1562,28 +1542,31 @@ mod tests {
                     "boom",
                 ));
             }
-            let wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
-            Ok(self
-                .muted
+            Ok(user_ids
                 .iter()
-                .filter(|u| wanted.contains(u.as_str()))
-                .cloned()
+                .map(|user_id| {
+                    (
+                        user_id.clone(),
+                        NotifyPreference {
+                            muted: self.muted.contains(user_id),
+                            mention_only: self.mention_only.contains(user_id),
+                        },
+                    )
+                })
                 .collect())
         }
 
-        async fn mention_only_users(
+        async fn all_participants(
             &self,
             _ctx: &flare_server_core::context::Ctx,
             _conversation_id: &str,
-            user_ids: &[String],
-        ) -> std::result::Result<HashSet<String>, flare_server_core::error::FlareError> {
-            let wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
-            Ok(self
-                .mention_only
-                .iter()
-                .filter(|u| wanted.contains(u.as_str()))
-                .cloned()
-                .collect())
+            _cap: usize,
+        ) -> std::result::Result<
+            Option<HashMap<String, NotifyPreference>>,
+            flare_server_core::error::FlareError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.participants.clone())
         }
     }
 
@@ -1604,6 +1587,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = PushRouterHandler::new(online.clone(), index, publisher.clone())
             .with_notify_policy(Arc::new(MockNotifyPolicy {
+                participants: None,
                 mention_only: Vec::new(),
                 muted,
                 fail,
@@ -1648,28 +1632,10 @@ mod tests {
         (offline_users, online_count, calls.load(Ordering::SeqCst))
     }
 
-    /// 大群成员枚举的可控替身。`None` 模拟「超过上限」。
-    struct MockMemberReader {
-        members: Option<Vec<String>>,
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ConversationMemberReader for MockMemberReader {
-        async fn member_ids(
-            &self,
-            _ctx: &flare_server_core::context::Ctx,
-            _conversation_id: &str,
-            _cap: usize,
-        ) -> std::result::Result<Option<Vec<String>>, flare_server_core::error::FlareError>
-        {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.members.clone())
-        }
-    }
-
     /// 跑一次「大群广播」，返回 (离线任务用户, 在线任务条数)。
-    async fn run_conversation_broadcast(members: Option<Vec<String>>) -> (Vec<String>, usize) {
+    async fn run_conversation_broadcast(
+        members: Option<HashMap<String, NotifyPreference>>,
+    ) -> (Vec<String>, usize) {
         let publisher = Arc::new(MockPushTaskPublisher::default());
         let handler = PushRouterHandler::new(
             Arc::new(MockOnlineStatusReader {
@@ -1683,8 +1649,11 @@ mod tests {
             }),
             publisher.clone(),
         )
-        .with_conversation_members(Arc::new(MockMemberReader {
-            members,
+        .with_notify_policy(Arc::new(MockNotifyPolicy {
+            muted: Vec::new(),
+            mention_only: Vec::new(),
+            participants: members,
+            fail: false,
             calls: Arc::new(AtomicUsize::new(0)),
         }));
 
@@ -1726,10 +1695,10 @@ mod tests {
     /// 大群此前只发在线广播，离线成员一条推送都收不到。
     #[tokio::test]
     async fn large_conversation_broadcast_also_pushes_offline_members() {
-        let (offline, online) = run_conversation_broadcast(Some(vec![
-            "group-online".to_string(),
-            "group-offline".to_string(),
-        ]))
+        let (offline, online) = run_conversation_broadcast(Some(HashMap::from([
+            ("group-online".to_string(), NotifyPreference::default()),
+            ("group-offline".to_string(), NotifyPreference::default()),
+        ])))
         .await;
         assert_eq!(
             offline,
@@ -1775,6 +1744,7 @@ mod tests {
         .with_notify_policy(Arc::new(MockNotifyPolicy {
             muted: Vec::new(),
             mention_only: vec!["user-offline".to_string()],
+            participants: None,
             fail: false,
             calls: Arc::new(AtomicUsize::new(0)),
         }));
@@ -1813,6 +1783,63 @@ mod tests {
             .iter()
             .map(|(_, task)| task.user_id.clone())
             .collect()
+    }
+
+    /// 偏好查询**每条消息只做一次**。
+    ///
+    /// 免打扰与「只接收@我」读的是同一批参与者行；曾经分两个方法各查一次，
+    /// 等于把大群的翻页 RPC 直接翻倍。这条用例钉住合并后的调用次数。
+    #[tokio::test]
+    async fn notify_preferences_are_fetched_once_per_push() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::from([("user-offline".to_string(), false)]),
+                tenant_id: "tenant-a".to_string(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        )
+        .with_notify_policy(Arc::new(MockNotifyPolicy {
+            muted: Vec::new(),
+            mention_only: Vec::new(),
+            participants: None,
+            fail: false,
+            calls: calls.clone(),
+        }));
+
+        let ctx = Arc::new(Context::root());
+        let headers = HashMap::new();
+        handler
+            .publish_targeted_tasks(
+                &ctx,
+                &["user-offline".to_string()],
+                &HashMap::from([("user-offline".to_string(), false)]),
+                PushTaskTemplate {
+                    message_id: "m-1",
+                    conversation_id: "conversation-1",
+                    tenant_id: "tenant-a",
+                    priority: 5,
+                    expire_at: None,
+                    push_payload: &[],
+                    headers: &headers,
+                    payload_kind: PushTaskPayloadKind::Message as i32,
+                },
+                false,
+            )
+            .await
+            .expect("publish");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "一次推送只该查一次通知偏好，实际 {} 次",
+            calls.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
@@ -1959,6 +1986,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = PushRouterHandler::new(online, index, publisher).with_notify_policy(
             Arc::new(MockNotifyPolicy {
+                participants: None,
                 mention_only: Vec::new(),
                 muted: vec!["user-offline".to_string()],
                 fail: false,
