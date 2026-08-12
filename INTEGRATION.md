@@ -230,11 +230,14 @@ The open-source part ships the E2EE pipeline plus a reference implementation:
 cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 
+The demo prints its evidence in Chinese; this is what a successful run looks like:
+
 ```
-server-visible text : "[Encrypted message]"
-server payload      : 323 bytes of ciphertext
-plaintext leaked    : no ✓
-third-party decrypt : failed ✓
+服务端可读文本  : "[Encrypted message]"     # server-visible text
+服务端载荷      : 323 字节密文              # server payload: ciphertext only
+明文是否泄漏    : 否 ✅                     # plaintext leaked: no
+Bob 解出        : 见面地点改到中山路 42 号   # recovered by the key holder, byte-identical
+第三方解密      : 失败 ✅                   # third-party decrypt: failed
 ```
 
 The architecture is **cryptography-agnostic**: `ContentEncryptionInterceptor` swaps
