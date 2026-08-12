@@ -18,9 +18,13 @@ use tonic::transport::Channel;
 
 use crate::domain::repository::NotifyPolicyRepository;
 
-/// 单次拉取的参与者页大小。单聊只有两人；群聊本就没有离线推送
-/// （成员制会话走读扩散、推送侧只解析在线用户），所以这里不需要翻页规模。
+/// 单次拉取的参与者页大小。
 const PAGE_LIMIT: i32 = 200;
+
+/// 最多翻多少页。群聊现在也有离线推送了，成员数可以远超一页——只看第一页会让
+/// 靠后的成员即使设了免打扰照样被推。加个上限是防止超大会话把这条本该轻量的
+/// 旁路查询拖成翻页风暴；真到了上限就按「查不到即未静音」放行（见下方 fail-open）。
+const MAX_PAGES: usize = 16;
 
 #[derive(Default)]
 pub struct ConversationNotifyPolicy {
@@ -65,32 +69,47 @@ impl NotifyPolicyRepository for ConversationNotifyPolicy {
             return Ok(HashSet::new());
         }
         let mut client = self.client().await?;
-        let resp = client
-            .list_conversation_participants(request_with_context(
-                ListConversationParticipantsRequest {
-                    conversation_id: conversation_id.to_string(),
-                    cursor: String::new(),
-                    limit: PAGE_LIMIT,
-                    include_removed: false,
-                    ext: Default::default(),
-                },
-                ctx,
-            ))
-            .await
-            .map_err(|e| {
-                FlareError::localized(
-                    flare_server_core::error::ErrorCode::ServiceUnavailable,
-                    format!("list conversation participants: {e}"),
-                )
-            })?
-            .into_inner();
+        let mut wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
+        let mut muted = HashSet::new();
+        let mut cursor = String::new();
 
-        let wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
-        Ok(resp
-            .participants
-            .into_iter()
-            .filter(|p| p.muted && wanted.contains(p.user_id.as_str()))
-            .map(|p| p.user_id)
-            .collect())
+        for _ in 0..MAX_PAGES {
+            let resp = client
+                .list_conversation_participants(request_with_context(
+                    ListConversationParticipantsRequest {
+                        conversation_id: conversation_id.to_string(),
+                        cursor: cursor.clone(),
+                        limit: PAGE_LIMIT,
+                        include_removed: false,
+                        ext: Default::default(),
+                    },
+                    ctx,
+                ))
+                .await
+                .map_err(|e| {
+                    FlareError::localized(
+                        flare_server_core::error::ErrorCode::ServiceUnavailable,
+                        format!("list conversation participants: {e}"),
+                    )
+                })?
+                .into_inner();
+
+            let has_more = resp.has_more && !resp.next_cursor.trim().is_empty();
+            for participant in resp.participants {
+                if !wanted.remove(participant.user_id.as_str()) {
+                    continue;
+                }
+                if participant.muted {
+                    muted.insert(participant.user_id);
+                }
+            }
+            // 关心的人都已判定完，剩下的页没必要再翻。
+            if wanted.is_empty() || !has_more {
+                break;
+            }
+            cursor = resp.next_cursor;
+        }
+
+        Ok(muted)
     }
 }
