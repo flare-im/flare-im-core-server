@@ -61,8 +61,7 @@ fn mute_lookup_is_fail_open_and_lazy() {
          免打扰是偏好不是安全边界，宁可多响一声也不能吞掉推送"
     );
     assert!(
-        router.contains("if online_only {")
-            && router.contains("let offline_candidates"),
+        router.contains("if online_only {") && router.contains("let offline_candidates"),
         "必须先算出离线候选再查询：在线用户不该触发任何通知偏好查询"
     );
     assert!(
