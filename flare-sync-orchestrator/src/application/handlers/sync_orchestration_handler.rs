@@ -1198,6 +1198,9 @@ where
                     is_archived: req.is_archived,
                     draft: req.draft,
                     base_settings_version: req.base_settings_version,
+                    // 客户端同步协议暂不带该字段：「只接收@我」由业务侧（群通知设置）
+                    // 投影下来，不是客户端直接改的。None = 不修改。
+                    is_mention_only: None,
                 },
             )
             .await?;

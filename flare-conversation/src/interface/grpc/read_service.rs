@@ -155,6 +155,7 @@ impl ConversationReadService for ConversationGrpcHandler {
                     attributes: p.attributes,
                     joined_at: 0,
                     visible_from_seq: p.visible_from_seq,
+                    mention_only: p.mention_only,
                 })
                 .collect(),
             next_cursor: page.next_cursor.unwrap_or_default(),

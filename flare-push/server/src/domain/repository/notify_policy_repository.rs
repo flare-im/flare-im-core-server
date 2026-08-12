@@ -24,4 +24,17 @@ pub trait NotifyPolicyRepository: Send + Sync {
         conversation_id: &str,
         user_ids: &[String],
     ) -> Result<HashSet<String>, FlareError>;
+
+    /// 返回 `user_ids` 中**只接收提到我的消息**的子集。
+    ///
+    /// 与 `muted_users` 分开返回而不是合成一个「该不该推」的布尔：是否该推还取决于
+    /// 这条消息有没有提到本人，而那是消息侧的信息，不该让偏好仓储去解析消息内容。
+    ///
+    /// 同样 fail-open：查不到就当没设，宁可多响一声也别把该到的推送吞掉。
+    async fn mention_only_users(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<HashSet<String>, FlareError>;
 }

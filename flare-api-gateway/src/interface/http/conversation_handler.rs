@@ -90,6 +90,9 @@ pub struct ConversationParticipantHttp {
     /// 由业务方（如群历史可见性策略）在加人时决定是否设值，核心只负责执行。
     #[serde(default)]
     pub visible_from_seq: i64,
+    /// 只接收提到我的消息：其余消息照常投递，但不产生离线推送。
+    #[serde(default)]
+    pub mention_only: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -320,6 +323,7 @@ fn participant_proto_to_http(
         pinned: p.pinned,
         attributes: p.attributes,
         visible_from_seq: p.visible_from_seq,
+        mention_only: p.mention_only,
     }
 }
 
@@ -334,5 +338,6 @@ fn participant_http_to_proto(
         attributes: p.attributes,
         joined_at: 0,
         visible_from_seq: p.visible_from_seq,
+        mention_only: p.mention_only,
     }
 }

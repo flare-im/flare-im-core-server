@@ -253,6 +253,94 @@ struct PushTaskTemplate<'a> {
     payload_kind: i32,
 }
 
+/// 一条消息提到了谁。
+///
+/// 只用于「只接收@我」的推送判定：拿不准时一律按「提到了」处理（fail-open），
+/// 宁可多响一声，也别把真正点名叫人的消息吞掉。
+#[derive(Debug, Default)]
+struct MentionTargets {
+    all: bool,
+    users: HashSet<String>,
+    /// 解析不出内容（纯 ping、非文本、解码失败）——此时不做抑制。
+    unknown: bool,
+}
+
+impl MentionTargets {
+    fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Default::default()
+        }
+    }
+
+    fn mentions(&self, user_id: &str) -> bool {
+        self.unknown || self.all || self.users.contains(user_id)
+    }
+}
+
+fn collect_mentions(content: &flare_proto::common::MessageContent, out: &mut MentionTargets) {
+    use flare_proto::common::message_content::Content;
+    let mentions = match content.content.as_ref() {
+        Some(Content::Text(text)) => &text.mentions,
+        Some(Content::RichText(rich)) => {
+            // 富文本的提及在结构化文档里，这里不解析——拿不准就不抑制，
+            // 让它照常推送，而不是把一条可能点名叫人的消息静默吞掉。
+            let _ = rich;
+            out.unknown = true;
+            return;
+        }
+        Some(Content::Quote(quote)) => {
+            if let Some(inner) = quote.current_content.as_ref() {
+                collect_mentions(inner, out);
+            }
+            return;
+        }
+        _ => return,
+    };
+    for mention in mentions {
+        if mention.r#type == flare_proto::common::MentionType::All as i32 {
+            out.all = true;
+        }
+        if !mention.user_id.is_empty() {
+            out.users.insert(mention.user_id.clone());
+        }
+        out.users.extend(mention.user_ids.iter().cloned());
+    }
+}
+
+/// 从推送载荷里解析这条消息提到了谁。
+fn mention_targets(payload_kind: i32, push_payload: &[u8]) -> MentionTargets {
+    let mut out = MentionTargets::default();
+    let message = match PushTaskPayloadKind::try_from(payload_kind)
+        .unwrap_or(PushTaskPayloadKind::Unspecified)
+    {
+        PushTaskPayloadKind::Message => access_gateway::PushMessageRequest::decode(push_payload)
+            .ok()
+            .and_then(|req| req.messages.into_iter().next()),
+        PushTaskPayloadKind::Event => access_gateway::PushEventRequest::decode(push_payload)
+            .ok()
+            .and_then(|req| {
+                req.events
+                    .into_iter()
+                    .find_map(|event| match event.payload {
+                        Some(flare_proto::common::event::Payload::Message(message)) => {
+                            Some(message)
+                        }
+                        _ => None,
+                    })
+            }),
+        _ => None,
+    };
+    let Some(message) = message else {
+        return MentionTargets::unknown();
+    };
+    let Some(content) = message.content.as_ref() else {
+        return MentionTargets::unknown();
+    };
+    collect_mentions(content, &mut out);
+    out
+}
+
 struct PendingPushTask {
     user_id: String,
     payload: Vec<u8>,
@@ -544,6 +632,36 @@ impl PushRouterHandler {
     ///
     /// 查询失败一律按「没人静音」处理（fail-open）：免打扰是偏好不是安全边界，
     /// 「该静音的响了一声」远好过「该到的推送没到」。
+    /// 「只接收@我」的离线用户子集。查询失败一律返回空集（fail-open）：
+    /// 通知偏好是偏好不是安全边界，宁可多响一声也别把该到的推送吞掉。
+    async fn mention_only_offline_users(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        conversation_id: &str,
+        offline_user_ids: &[String],
+    ) -> HashSet<String> {
+        let Some(policy) = self.notify_policy.as_ref() else {
+            return HashSet::new();
+        };
+        if offline_user_ids.is_empty() || conversation_id.trim().is_empty() {
+            return HashSet::new();
+        }
+        match policy
+            .mention_only_users(ctx, conversation_id, offline_user_ids)
+            .await
+        {
+            Ok(users) => users,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    conversation_id = %conversation_id,
+                    "query mention-only settings failed; sending offline push anyway"
+                );
+                HashSet::new()
+            }
+        }
+    }
+
     async fn muted_offline_users(
         &self,
         ctx: &flare_server_core::context::Ctx,
@@ -580,6 +698,29 @@ impl PushRouterHandler {
         template: PushTaskTemplate<'_>,
         online_only: bool,
     ) -> Result<()> {
+        self.publish_targeted_tasks_inner(
+            ctx,
+            user_ids,
+            online_statuses,
+            template,
+            online_only,
+            false,
+        )
+        .await
+    }
+
+    /// `deliver_online_to_all=true`：所有人都发在线任务，离线者**额外**再补离线推送。
+    /// 用于内联事件——它既是实时投递载体又要触发推送，两者不该二选一。
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_targeted_tasks_inner(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        user_ids: &[String],
+        online_statuses: &HashMap<String, bool>,
+        template: PushTaskTemplate<'_>,
+        online_only: bool,
+        deliver_online_to_all: bool,
+    ) -> Result<()> {
         // 先算出哪些人会走离线推送，再一次性查免打扰——在线用户不查，
         // 他们的事件走长连接，提不提示由客户端决定。
         let offline_candidates: Vec<String> = if online_only {
@@ -594,6 +735,10 @@ impl PushRouterHandler {
         let muted = self
             .muted_offline_users(ctx, template.conversation_id, &offline_candidates)
             .await;
+        let mention_only = self
+            .mention_only_offline_users(ctx, template.conversation_id, &offline_candidates)
+            .await;
+        let mentions = mention_targets(template.payload_kind, template.push_payload);
 
         let mut online_user_ids = Vec::with_capacity(user_ids.len());
         let mut offline_tasks = Vec::new();
@@ -604,6 +749,14 @@ impl PushRouterHandler {
                     user_id = %user_id,
                     conversation_id = %template.conversation_id,
                     "Skipping offline push for muted conversation"
+                );
+                continue;
+            }
+            if !is_online && mention_only.contains(user_id) && !mentions.mentions(user_id) {
+                tracing::debug!(
+                    user_id = %user_id,
+                    conversation_id = %template.conversation_id,
+                    "Skipping offline push: mention-only and this message does not mention the user"
                 );
                 continue;
             }
@@ -619,6 +772,11 @@ impl PushRouterHandler {
             if is_online {
                 online_user_ids.push(user_id.clone());
                 continue;
+            }
+            if deliver_online_to_all {
+                // 在线索引可能滞后：照发一份在线任务，真没连上就自然丢弃；
+                // 离线推送任务在下面照建，两者互不替代。
+                online_user_ids.push(user_id.clone());
             }
 
             let task = PushTaskEnvelope {
@@ -772,12 +930,14 @@ impl PushRouterHandler {
         let tenant_id = self.online_status.default_tenant_id().to_string();
         // 真实在线状态必须查：把所有收件人当成在线会让 `publish_targeted_tasks`
         // 一个离线任务都建不出来——群消息走的正是这条内联事件路径，于是离线群成员
-        // 收不到任何推送通知，只能等下次自己打开 app 拉。单聊的 handle_message
-        // 一直是老实查的，两条路径不该有这个差别。
+        // 收不到任何推送通知，只能等下次自己打开 app 拉。
         //
-        // `online_only` 只决定「离线用户要不要跳过」，不该顺手决定「大家算不算在线」。
+        // 但**在线投递不能因此收窄**：内联事件本身就是实时投递的载体，只按在线状态
+        // 二选一的话，任何被误判成离线的连接（在线索引有滞后）都会当场丢掉实时消息。
+        // 所以下面用 `deliver_online_to_all`：所有人照发在线任务（没连上的天然丢弃），
+        // 被判为离线的**另外**再补一条离线推送任务。宁可多一条推送，不能少一条消息。
         let online_statuses = self.load_online_statuses(ctx, user_ids).await?;
-        self.publish_targeted_tasks(
+        self.publish_targeted_tasks_inner(
             ctx,
             user_ids,
             &online_statuses,
@@ -792,6 +952,8 @@ impl PushRouterHandler {
                 payload_kind: PushTaskPayloadKind::Event as i32,
             },
             online_only,
+            // 内联事件：在线照发、离线补推，两者不互斥
+            true,
         )
         .await
     }
@@ -1240,6 +1402,7 @@ mod tests {
     /// 可控的免打扰来源：`muted` 是静音名单，`fail` 用来模拟查询不可用。
     struct MockNotifyPolicy {
         muted: Vec<String>,
+        mention_only: Vec<String>,
         fail: bool,
         calls: Arc<AtomicUsize>,
     }
@@ -1267,6 +1430,21 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn mention_only_users(
+            &self,
+            _ctx: &flare_server_core::context::Ctx,
+            _conversation_id: &str,
+            user_ids: &[String],
+        ) -> std::result::Result<HashSet<String>, flare_server_core::error::FlareError> {
+            let wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
+            Ok(self
+                .mention_only
+                .iter()
+                .filter(|u| wanted.contains(u.as_str()))
+                .cloned()
+                .collect())
+        }
     }
 
     /// 造一个「一在线一离线」的场景，返回 (离线任务的用户列表, 在线任务条数, 策略查询次数)。
@@ -1286,6 +1464,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = PushRouterHandler::new(online.clone(), index, publisher.clone())
             .with_notify_policy(Arc::new(MockNotifyPolicy {
+                mention_only: Vec::new(),
                 muted,
                 fail,
                 calls: calls.clone(),
@@ -1327,6 +1506,110 @@ mod tests {
             .collect();
         let online_count = publisher.online.lock().expect("online lock").len();
         (offline_users, online_count, calls.load(Ordering::SeqCst))
+    }
+
+    /// 「只接收@我」：没点名的消息不产生离线推送，点名的照常推。
+    ///
+    /// 注意这只影响**离线推送**——消息本身照常投递，时间线不会缺内容。
+    async fn run_mention_only_push(
+        text: &str,
+        mentions: Vec<flare_proto::common::Mention>,
+    ) -> Vec<String> {
+        use flare_proto::common::{Message, MessageContent, TextContent, message_content::Content};
+
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::from([("user-offline".to_string(), false)]),
+                tenant_id: "tenant-a".to_string(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        )
+        .with_notify_policy(Arc::new(MockNotifyPolicy {
+            muted: Vec::new(),
+            mention_only: vec!["user-offline".to_string()],
+            fail: false,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        let req = access_gateway::PushEventRequest {
+            user_ids: vec!["user-offline".to_string()],
+            events: vec![flare_proto::common::Event {
+                conversation_id: "conversation-group".to_string(),
+                conversation_seq: 9,
+                payload: Some(flare_proto::common::event::Payload::Message(Message {
+                    conversation_id: "conversation-group".to_string(),
+                    server_id: "m-9".to_string(),
+                    content: Some(MessageContent {
+                        content: Some(Content::Text(TextContent {
+                            text: text.to_string(),
+                            mentions,
+                        })),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            conversation_id: "conversation-group".to_string(),
+            max_conversation_seq: 9,
+            delivery_mode: flare_proto::common::EventEnvelopeDeliveryMode::PingWithInline as i32,
+            inline_events_truncated: false,
+            options: None,
+        };
+
+        let ctx = Arc::new(Context::root());
+        handler.handle_event(&ctx, req).await.expect("handle_event");
+        publisher
+            .offline
+            .lock()
+            .expect("offline lock")
+            .iter()
+            .map(|(_, task)| task.user_id.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn mention_only_skips_offline_push_when_not_mentioned() {
+        let offline = run_mention_only_push("大家早", Vec::new()).await;
+        assert!(
+            offline.is_empty(),
+            "设了「只接收@我」的人，没点名的消息不该产生离线推送，实际 {offline:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mention_only_still_pushes_when_mentioned() {
+        let offline = run_mention_only_push(
+            "@某人 看一下",
+            vec![flare_proto::common::Mention {
+                r#type: flare_proto::common::MentionType::User as i32,
+                user_id: "user-offline".to_string(),
+                ..Default::default()
+            }],
+        )
+        .await;
+        assert_eq!(
+            offline,
+            vec!["user-offline".to_string()],
+            "点名了就必须推——这条用例防的是把「只接收@我」做成「什么都不接收」"
+        );
+    }
+
+    #[tokio::test]
+    async fn mention_all_counts_as_mentioning_everyone() {
+        let offline = run_mention_only_push(
+            "@所有人 通知",
+            vec![flare_proto::common::Mention {
+                r#type: flare_proto::common::MentionType::All as i32,
+                ..Default::default()
+            }],
+        )
+        .await;
+        assert_eq!(offline, vec!["user-offline".to_string()]);
     }
 
     /// 群消息走「带收件人的内联事件」这条路。这里曾把所有收件人一律当成在线，
@@ -1433,6 +1716,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = PushRouterHandler::new(online, index, publisher).with_notify_policy(
             Arc::new(MockNotifyPolicy {
+                mention_only: Vec::new(),
                 muted: vec!["user-offline".to_string()],
                 fail: false,
                 calls: calls.clone(),

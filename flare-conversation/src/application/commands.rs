@@ -79,6 +79,7 @@ pub struct UpdateConversationCommand {
 #[derive(Debug, Clone)]
 pub struct UpdateConversationUserSettingsCommand {
     pub conversation_id: String,
+    pub is_mention_only: Option<bool>,
     pub is_pinned: Option<bool>,
     pub is_muted: Option<bool>,
     pub is_archived: Option<bool>,

@@ -57,20 +57,27 @@ impl ConversationNotifyPolicy {
     }
 }
 
-#[async_trait::async_trait]
-impl NotifyPolicyRepository for ConversationNotifyPolicy {
-    async fn muted_users(
+impl ConversationNotifyPolicy {
+    /// 翻页取参与者，收集满足 `pick` 的用户。
+    ///
+    /// 免打扰与「只接收@我」共用这一趟翻页逻辑：两者读的是同一批行，各写一份
+    /// 翻页代码迟早会在页数上限、游标终止条件这些细节上分叉。
+    async fn collect_participants<F>(
         &self,
         ctx: &Ctx,
         conversation_id: &str,
         user_ids: &[String],
-    ) -> Result<HashSet<String>, FlareError> {
+        pick: F,
+    ) -> Result<HashSet<String>, FlareError>
+    where
+        F: Fn(&flare_proto::common::ConversationParticipant) -> bool,
+    {
         if user_ids.is_empty() || conversation_id.trim().is_empty() {
             return Ok(HashSet::new());
         }
         let mut client = self.client().await?;
         let mut wanted: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
-        let mut muted = HashSet::new();
+        let mut picked = HashSet::new();
         let mut cursor = String::new();
 
         for _ in 0..MAX_PAGES {
@@ -99,8 +106,8 @@ impl NotifyPolicyRepository for ConversationNotifyPolicy {
                 if !wanted.remove(participant.user_id.as_str()) {
                     continue;
                 }
-                if participant.muted {
-                    muted.insert(participant.user_id);
+                if pick(&participant) {
+                    picked.insert(participant.user_id);
                 }
             }
             // 关心的人都已判定完，剩下的页没必要再翻。
@@ -110,6 +117,29 @@ impl NotifyPolicyRepository for ConversationNotifyPolicy {
             cursor = resp.next_cursor;
         }
 
-        Ok(muted)
+        Ok(picked)
+    }
+}
+
+#[async_trait::async_trait]
+impl NotifyPolicyRepository for ConversationNotifyPolicy {
+    async fn muted_users(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<HashSet<String>, FlareError> {
+        self.collect_participants(ctx, conversation_id, user_ids, |p| p.muted)
+            .await
+    }
+
+    async fn mention_only_users(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<HashSet<String>, FlareError> {
+        self.collect_participants(ctx, conversation_id, user_ids, |p| p.mention_only)
+            .await
     }
 }

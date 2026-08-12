@@ -259,6 +259,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 &ctx,
                 UpdateConversationUserSettingsCommand {
                     conversation_id: req.conversation_id,
+                    is_mention_only: req.is_mention_only,
                     is_pinned: req.is_pinned,
                     is_muted: req.is_muted,
                     is_archived: req.is_archived,
@@ -276,6 +277,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 mute_until: None,
                 draft: settings.draft.unwrap_or_default(),
                 settings_version: settings.settings_version,
+                is_mention_only: settings.is_mention_only,
             }),
         }))
     }

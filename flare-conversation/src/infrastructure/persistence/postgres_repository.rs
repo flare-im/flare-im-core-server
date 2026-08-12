@@ -182,7 +182,9 @@ impl PostgresConversationRepository {
                 COALESCE(p.muted, false) AS muted,
                 COALESCE(p.pinned, false) AS pinned,
                 COALESCE(p.attributes, '{}'::jsonb) AS attributes,
-                COALESCE(p.nickname, '') AS nickname
+                COALESCE(p.nickname, '') AS nickname,
+                COALESCE(p.visible_from_seq, 0) AS visible_from_seq,
+                COALESCE(p.mention_only, false) AS mention_only
             FROM unnest($2::text[]) AS c(conversation_id)
             CROSS JOIN LATERAL (
                 SELECT cp.*
@@ -264,6 +266,7 @@ impl PostgresConversationRepository {
                     pinned: row.get("pinned"),
                     attributes,
                     visible_from_seq: row.get("visible_from_seq"),
+                    mention_only: row.get("mention_only"),
                 });
         }
 
@@ -789,7 +792,8 @@ impl ConversationRepository for PostgresConversationRepository {
         let participant_rows = sqlx::query(
             r#"
             SELECT user_id, roles, muted, pinned, attributes,
-                   COALESCE(visible_from_seq, 0) AS visible_from_seq
+                   COALESCE(visible_from_seq, 0) AS visible_from_seq,
+                   COALESCE(mention_only, false) AS mention_only
             FROM conversation_participants
             WHERE tenant_id = $1 AND conversation_id = $2
             "#,
@@ -818,6 +822,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 pinned,
                 attributes,
                 visible_from_seq: p_row.get("visible_from_seq"),
+                mention_only: p_row.get("mention_only"),
             });
         }
 
@@ -1108,7 +1113,8 @@ impl ConversationRepository for PostgresConversationRepository {
         let participant_rows = sqlx::query(
             r#"
             SELECT user_id, roles, muted, pinned, attributes,
-                   COALESCE(visible_from_seq, 0) AS visible_from_seq
+                   COALESCE(visible_from_seq, 0) AS visible_from_seq,
+                COALESCE(mention_only, false) AS mention_only
             FROM conversation_participants
             WHERE tenant_id = $1 AND conversation_id = $2
             "#,
@@ -1137,6 +1143,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 pinned,
                 attributes,
                 visible_from_seq: p_row.get("visible_from_seq"),
+                mention_only: p_row.get("mention_only"),
             });
         }
 
@@ -1301,6 +1308,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     pinned: row.get("pinned"),
                     attributes,
                     visible_from_seq: row.get("visible_from_seq"),
+                    mention_only: row.get("mention_only"),
                 }
             })
             .collect::<Vec<_>>();
@@ -1729,6 +1737,7 @@ impl ConversationRepository for PostgresConversationRepository {
         let user_id = require_user_id(ctx)?;
 
         let has_patch = patch.is_pinned.is_some()
+            || patch.is_mention_only.is_some()
             || patch.is_muted.is_some()
             || patch.is_archived.is_some()
             || patch.draft.is_some();
@@ -1746,6 +1755,7 @@ impl ConversationRepository for PostgresConversationRepository {
             SET
                 pinned = CASE WHEN $5::bool IS NOT NULL THEN $5 ELSE sp.pinned END,
                 muted = CASE WHEN $6::bool IS NOT NULL THEN $6 ELSE sp.muted END,
+                mention_only = CASE WHEN $9::bool IS NOT NULL THEN $9 ELSE sp.mention_only END,
                 is_archived = CASE WHEN $7::bool IS NOT NULL THEN $7 ELSE sp.is_archived END,
                 draft = CASE
                     WHEN $8::text IS NULL THEN sp.draft
@@ -1759,7 +1769,7 @@ impl ConversationRepository for PostgresConversationRepository {
               AND sp.user_id = $3
               AND NOT COALESCE(sp.is_deleted, false)
               AND ($4 = 0 OR sp.settings_version = $4)
-            RETURNING sp.pinned, sp.muted, sp.is_archived, sp.draft, sp.settings_version
+            RETURNING sp.pinned, sp.muted, sp.mention_only, sp.is_archived, sp.draft, sp.settings_version
             "#,
         )
         .bind(tenant_id)
@@ -1770,6 +1780,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(patch.is_muted)
         .bind(patch.is_archived)
         .bind(patch.draft.as_deref())
+        .bind(patch.is_mention_only)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "update user settings"))?;
@@ -1792,6 +1803,7 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(ConversationUserSettings {
             is_pinned: row.get("pinned"),
             is_muted: row.get("muted"),
+            is_mention_only: row.get("mention_only"),
             is_archived: row.get("is_archived"),
             draft: row.get::<Option<String>, _>("draft"),
             settings_version: row.get::<i64, _>("settings_version").max(0) as u64,

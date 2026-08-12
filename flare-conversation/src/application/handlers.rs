@@ -192,6 +192,7 @@ impl ConversationCommandHandler {
                 ctx,
                 &crate::domain::model::UpdateConversationUserSettingsPatch {
                     conversation_id: command.conversation_id,
+                    is_mention_only: command.is_mention_only,
                     is_pinned: command.is_pinned,
                     is_muted: command.is_muted,
                     is_archived: command.is_archived,

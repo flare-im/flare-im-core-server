@@ -167,6 +167,9 @@ pub struct ConversationUserSettings {
     pub is_pinned: bool,
     pub is_muted: bool,
     pub is_archived: bool,
+    /// 只接收提到我的消息。与 `is_muted` 正交：muted 是「一条都别响」，
+    /// 这个是「只有点名才响」。
+    pub is_mention_only: bool,
     pub draft: Option<String>,
     pub settings_version: u64,
 }
@@ -174,6 +177,7 @@ pub struct ConversationUserSettings {
 #[derive(Clone, Debug)]
 pub struct UpdateConversationUserSettingsPatch {
     pub conversation_id: String,
+    pub is_mention_only: Option<bool>,
     pub is_pinned: Option<bool>,
     pub is_muted: Option<bool>,
     pub is_archived: Option<bool>,
@@ -341,6 +345,8 @@ pub struct ConversationParticipant {
     /// 核心只执行这条下限，不关心它为何被设置——「新成员是否可见入群前消息」是
     /// 业务规则，由业务层在加人时决定写不写当前 seq。
     pub visible_from_seq: i64,
+    /// 只接收提到我的消息：其余消息照常投递，但不产生离线推送。与 `muted` 正交。
+    pub mention_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
