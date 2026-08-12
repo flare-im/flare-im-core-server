@@ -1,0 +1,110 @@
+# Full Flare IM Core stack from a prebuilt image — no Rust toolchain required.
+#
+#   export FLARE_TOKEN_SECRET="$(openssl rand -base64 48 | tr -d '\n' | head -c 64)"
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml up -d
+#
+# The infrastructure (Postgres / NATS / Consul / Redis / RustFS) comes from
+# docker-compose.yml; this file adds the Flare services on top. Keeping them in two files
+# means you can still run the infra alone when developing against a locally built binary.
+#
+# One image serves every service — they differ only by which binary runs, so twelve
+# near-identical images would multiply registry size and version skew for nothing.
+
+x-flare-service: &flare-service
+  image: ${FLARE_IMAGE:-ghcr.io/flare-im/flare-im-core:latest}
+  restart: unless-stopped
+  networks: [flare-network]
+  environment: &flare-env
+    RUST_LOG: ${RUST_LOG:-info}
+    FLARE_CONFIG_DIR: /etc/flare/config
+    # All three gateways must validate against the same secret the client signs with.
+    # No default on purpose: a shipped default secret is a shipped vulnerability —
+    # anyone holding it can forge any user's identity against any deployment that
+    # forgot to change it. Compose fails loudly if FLARE_TOKEN_SECRET is unset.
+    FLARE_API_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
+    ACCESS_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
+    FLARE_ADMIN_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
+    # Inside the compose network services reach each other by service name on the
+    # container-internal port, not through the host-side mapping.
+    CONSUL_HTTP_ADDR: http://consul:8500
+    DATABASE_URL: postgres://flare:flare123@postgres:5432/flare
+    REDIS_URL: redis://redis:6379
+    NATS_URL: nats://nats:4222
+  depends_on:
+    consul: {condition: service_started}
+    postgres: {condition: service_started}
+    nats: {condition: service_started}
+    redis: {condition: service_started}
+
+services:
+  # ── Ingress ────────────────────────────────────────────────────────────────
+  api-gateway:
+    <<: *flare-service
+    command: ["flare-api-gateway"]
+    ports: ["50050:50050"]
+
+  signaling-gateway:
+    <<: *flare-service
+    command: ["flare-signaling-gateway"]
+    # The long-connection port clients actually dial
+    ports: ["60051:60051"]
+
+  admin-gateway:
+    <<: *flare-service
+    command: ["flare-admin-gateway"]
+
+  # ── Signaling ──────────────────────────────────────────────────────────────
+  signaling-online:
+    <<: *flare-service
+    command: ["flare-signaling-online"]
+
+  signaling-route:
+    <<: *flare-service
+    command: ["flare-signaling-route"]
+
+  # ── Messaging ──────────────────────────────────────────────────────────────
+  message-ingest:
+    <<: *flare-service
+    command: ["flare-message-ingest"]
+
+  orchestrator:
+    <<: *flare-service
+    command: ["flare-orchestrator"]
+
+  conversation:
+    <<: *flare-service
+    command: ["flare-conversation"]
+
+  sync-orchestrator:
+    <<: *flare-service
+    command: ["flare-sync-orchestrator"]
+
+  # ── Storage ────────────────────────────────────────────────────────────────
+  storage-writer:
+    <<: *flare-service
+    command: ["flare-storage-writer"]
+
+  storage-reader:
+    <<: *flare-service
+    command: ["flare-storage-reader"]
+
+  # ── Push / capability / media ──────────────────────────────────────────────
+  push-server:
+    <<: *flare-service
+    command: ["flare-push-server"]
+
+  push-worker:
+    <<: *flare-service
+    command: ["flare-push-worker"]
+
+  capability:
+    <<: *flare-service
+    command: ["flare-capability"]
+
+  media:
+    <<: *flare-service
+    command: ["flare-media"]
+
+networks:
+  flare-network:
+    external: false

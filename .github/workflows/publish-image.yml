@@ -1,0 +1,92 @@
+name: Publish image
+
+# Publishes the runtime image to GHCR so evaluators never need a Rust toolchain.
+#
+# Two triggers, deliberately:
+#   - tags  → an immutable version (v1.2.3) plus `latest`
+#   - manual → for testing the pipeline without cutting a release
+#
+# Not on every push to main: an image that moves under people's feet is worse than no
+# image at all — someone debugging against `latest` would be chasing a moving target.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # The workspace depends on four sibling crates by path, so the build context is
+      # the parent directory and every one of them has to be checked out.
+      - name: Check out flare-im-core
+        uses: actions/checkout@v4
+        with:
+          path: flare-im-core
+
+      - name: Check out sibling crates
+        uses: actions/checkout@v4
+        with: { repository: flare-im/flare-proto, path: flare-proto }
+      - uses: actions/checkout@v4
+        with: { repository: flare-im/flare-grpc-proto, path: flare-grpc-proto }
+      - uses: actions/checkout@v4
+        with: { repository: flare-im/flare-core, path: flare-core, ref: dev }
+      - uses: actions/checkout@v4
+        with: { repository: flare-im/flare-server-core, path: flare-server-core }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: flare-im-core/release/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cargo builds are slow and mostly repeat work; without a cache every release
+          # pays the full compile from scratch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Publishing an image that cannot start is worse than not publishing: the failure
+      # surfaces on a user's machine instead of here.
+      - name: Smoke the published image
+        run: |
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          echo "checking $IMAGE"
+          # Every service binary must be present and executable.
+          for bin in flare-api-gateway flare-signaling-gateway flare-message-ingest \
+                     flare-orchestrator flare-conversation flare-storage-writer \
+                     flare-storage-reader flare-push-server flare-capability flare-media; do
+            docker run --rm --entrypoint sh "$IMAGE" -c "command -v $bin >/dev/null" \
+              || { echo "::error::$bin missing from image"; exit 1; }
+          done
+          echo "all service binaries present"
