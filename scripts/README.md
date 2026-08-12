@@ -98,6 +98,7 @@ cargo run --example chatroom_client -- user2
 | 脚本 | 说明 | 用途 |
 |------|------|------|
 | `check_services.sh` | 检查服务状态 | 验证服务是否正常运行 |
+| `check_schema_parity.sh` | 校验全新部署与运行库 schema 一致 | **加表/加列后必跑**；只写 migration 忘了 init.sql 时，老库正常而新部署直接建不起来 |
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
 | `migrate_db.sh` | 数据库迁移 | 初始化数据库表结构 |
 | `smoke_message_flow.sh` | 消息流烟测 | 发送一条消息，检查落库、ledger，并通过读侧读回 |
