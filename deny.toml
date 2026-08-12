@@ -47,4 +47,15 @@ ignore = [
     # 理由与撤销条件见同仓 .cargo/audit.toml（cargo-audit 与 cargo-deny 各读一份配置，
     # 两处必须同步；只改一处会出现「一个门禁绿、另一个红」）。
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2024-0370 proc-macro-error 停止维护（无修复版本）。
+    # 只有 cargo-deny 需要这条：它把 unmaintained 当 error，cargo-audit 只当 warning。
+    #
+    # 它是**编译期**的过程宏辅助库（utoipa 4 的 derive 用），不进任何二进制，
+    # 没有运行时攻击面。链路：proc-macro-error ← utoipa-gen 4.3.1 ← utoipa 4.2.3。
+    # 真正的解法是升 utoipa 5（5.x 已不依赖它），但那是跨 14 个文件 97 处引用、
+    # 还牵动 utoipa-swagger-ui 的框架级迁移，已记入 docs/roadmap/open-items.md。
+    #
+    # 撤销条件：utoipa 升到 5.x 之后。
+    "RUSTSEC-2024-0370",
 ]
