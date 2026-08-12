@@ -42,4 +42,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 [advisories]
 # 已知漏洞一律拒绝。若某条确实不影响本项目用法，
 # 在此列出 ID 并写明豁免理由，不要整体关掉检查。
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071 rsa: Marvin Attack（5.9 medium，上游至今无修复版本）。
+    # 理由与撤销条件见同仓 .cargo/audit.toml（cargo-audit 与 cargo-deny 各读一份配置，
+    # 两处必须同步；只改一处会出现「一个门禁绿、另一个红」）。
+    "RUSTSEC-2023-0071",
+]

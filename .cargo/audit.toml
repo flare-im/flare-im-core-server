@@ -1,0 +1,20 @@
+# cargo-audit 的豁免清单（cargo-deny 读的是 deny.toml，两处都要写）。
+#
+# 只放「查证过确实不影响本项目」的条目，并写清理由与撤销条件。
+# 长期红着的审计等于没有审计——基线必须是绿的，红了才有人看。
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 rsa: Marvin Attack（5.9 medium，上游至今无修复版本）
+    #
+    # 本仓有两条来路，都不构成风险：
+    # 1. **jsonwebtoken（真的会编译）**：FCM 服务账号的 OAuth JWT 走 RS256，
+    #    只用私钥**签名**。Marvin 攻击要求攻击者能反复投喂密文并测量**解密**耗时；
+    #    本仓不存在任何 RSA 解密路径，也不接受外部密文，构不成计时预言机。
+    # 2. **sqlx-mysql（从不编译）**：Cargo 会把未启用的可选依赖也记进 lock。
+    #    本项目只开 postgres feature。
+    #
+    # 撤销条件：引入任何 RSA **解密**用法（密钥交换 / 信封加密），
+    # 或启用 sqlx 的 mysql feature。届时必须删掉这条重新评估。
+    "RUSTSEC-2023-0071",
+]
