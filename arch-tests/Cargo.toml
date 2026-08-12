@@ -1,5 +1,6 @@
 [package]
 name = "flare-im-arch-tests"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 publish = false

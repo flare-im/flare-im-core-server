@@ -23,8 +23,21 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "OpenSSL",
+    # Mozilla CA 根证书库（webpki-roots / webpki-root-certs）用的是**数据**许可，
+    # 纯宽松、无 copyleft、无源码义务，是 rustls 技术栈的普遍构成。
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
+
+# 例外按 crate 逐个开，不整体放行某个协议——这样将来**新**引入一个 MPL 依赖
+# 仍会让门禁变红，而不是被这条悄悄带过。
+[[licenses.exceptions]]
+# option-ext（MPL-2.0，文件级弱 copyleft）只出现在编译期：
+#   option-ext ← dirs ← shellexpand ← rust-embed-impl（proc-macro）
+# 过程宏不进入分发的二进制，而 MPL 的义务附着于分发物，故与分发无关。
+# 即便进了二进制，MPL-2.0 的义务也只及于对 MPL 文件本身的修改，不传染自有代码。
+name = "option-ext"
+allow = ["MPL-2.0"]
 
 [bans]
 # 重复版本先给 warn。收紧成 deny 之前要先把现存的重复依赖清理干净，

@@ -1,5 +1,6 @@
 [package]
 name = "flare-im-capability-core"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 description = "Business-neutral capability contracts shared by Flare IM services and plugins"

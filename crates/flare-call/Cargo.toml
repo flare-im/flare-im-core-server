@@ -1,5 +1,6 @@
 [package]
 name = "flare-call"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 description = "Business-neutral call lifecycle domain and CQRS command handlers for Flare IM"

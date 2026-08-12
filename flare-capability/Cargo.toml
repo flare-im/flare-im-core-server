@@ -1,5 +1,6 @@
 [package]
 name = "flare-capability"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 description = "Flare IM 能力服务：Hook 引擎调度 + 能力扩展协议/适配 + gRPC 服务入口"
