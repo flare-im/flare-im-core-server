@@ -122,6 +122,60 @@ impl ConversationNotifyPolicy {
 }
 
 #[async_trait::async_trait]
+impl crate::domain::repository::ConversationMemberReader for ConversationNotifyPolicy {
+    async fn member_ids(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        cap: usize,
+    ) -> Result<Option<Vec<String>>, FlareError> {
+        if conversation_id.trim().is_empty() || cap == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let mut client = self.client().await?;
+        let mut ids = Vec::new();
+        let mut cursor = String::new();
+
+        for _ in 0..MAX_PAGES {
+            let resp = client
+                .list_conversation_participants(request_with_context(
+                    ListConversationParticipantsRequest {
+                        conversation_id: conversation_id.to_string(),
+                        cursor: cursor.clone(),
+                        limit: PAGE_LIMIT,
+                        include_removed: false,
+                        ext: Default::default(),
+                    },
+                    ctx,
+                ))
+                .await
+                .map_err(|e| {
+                    FlareError::localized(
+                        flare_server_core::error::ErrorCode::ServiceUnavailable,
+                        format!("list conversation participants: {e}"),
+                    )
+                })?
+                .into_inner();
+
+            let has_more = resp.has_more && !resp.next_cursor.trim().is_empty();
+            for participant in resp.participants {
+                ids.push(participant.user_id);
+                if ids.len() > cap {
+                    // 超限即放弃，不返回截断结果——见 trait 文档。
+                    return Ok(None);
+                }
+            }
+            if !has_more {
+                return Ok(Some(ids));
+            }
+            cursor = resp.next_cursor;
+        }
+        // 翻到页数上限还没完：同样按「超限」处理。
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
 impl NotifyPolicyRepository for ConversationNotifyPolicy {
     async fn muted_users(
         &self,

@@ -902,6 +902,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::ServiceEndpoint,
     ),
     env(
+        "PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP",
+        EnvOwner::PushServer,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "PUSH_SERVER_DEFAULT_TENANT_ID",
         EnvOwner::PushServer,
         EnvPurpose::TenantDefaults,

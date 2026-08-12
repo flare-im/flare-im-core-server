@@ -15,7 +15,7 @@ use futures::stream::{self, StreamExt};
 use prost::Message as _;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::domain::repository::NotifyPolicyRepository;
+use crate::domain::repository::{ConversationMemberReader, NotifyPolicyRepository};
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
 
@@ -240,6 +240,13 @@ pub struct PushRouterHandler {
     conversation_ping_coalescer: Option<Arc<ConversationPingCoalescer>>,
     /// 免打扰读取。未接线时不做任何过滤——保持既有行为，而不是把推送全挡掉。
     notify_policy: Option<Arc<dyn NotifyPolicyRepository>>,
+    /// 大群离线推送用的成员枚举。未接线时退回旧行为（大群只推在线）。
+    conversation_members: Option<Arc<dyn ConversationMemberReader>>,
+    /// 超过这个成员数就不做离线扇出。
+    ///
+    /// 每条消息枚举一次成员是有成本的（按页 RPC），几万人的频道逐条推送更是灾难。
+    /// 主流 IM 对超大群也普遍不做逐人推送。超限时明确记日志，而不是悄悄少推一部分人。
+    offline_fanout_member_cap: usize,
 }
 
 struct PushTaskTemplate<'a> {
@@ -341,6 +348,14 @@ fn mention_targets(payload_kind: i32, push_payload: &[u8]) -> MentionTargets {
     out
 }
 
+/// 会话广播之后给离线成员补推所需的最小信息。
+struct OfflineFanoutTemplate<'a> {
+    message_id: &'a str,
+    priority: i32,
+    expire_at: Option<i64>,
+    push_payload: &'a [u8],
+}
+
 struct PendingPushTask {
     user_id: String,
     payload: Vec<u8>,
@@ -348,6 +363,9 @@ struct PendingPushTask {
 }
 
 const PUSH_TASK_PUBLISH_CONCURRENCY: usize = 64;
+
+/// 大群离线扇出的成员数上限（可用 `PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP` 覆盖）。
+const DEFAULT_OFFLINE_FANOUT_MEMBER_CAP: usize = 1000;
 
 fn rewrite_push_payload_user_ids(
     payload_kind: i32,
@@ -435,7 +453,18 @@ impl PushRouterHandler {
             publisher,
             conversation_ping_coalescer: None,
             notify_policy: None,
+            conversation_members: None,
+            offline_fanout_member_cap: std::env::var("PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_OFFLINE_FANOUT_MEMBER_CAP),
         }
+    }
+
+    /// 接入成员枚举，为大群补上离线推送。不接线时退回旧行为（大群只推在线）。
+    pub fn with_conversation_members(mut self, reader: Arc<dyn ConversationMemberReader>) -> Self {
+        self.conversation_members = Some(reader);
+        self
     }
 
     /// 接入免打扰读取。不接线时行为与接入前完全一致（不过滤任何推送）。
@@ -1025,6 +1054,8 @@ impl PushRouterHandler {
 
         // user_ids 在读扩散下不再使用（网关按会话订阅投递）；保持为空避免误导下游。
         let push_payload = req.encode_to_vec();
+        let message_id_for_offline = message_id.clone();
+        let push_payload_for_offline = push_payload.clone();
         let task = PushTaskEnvelope {
             user_id: String::new(),
             message_id,
@@ -1045,7 +1076,116 @@ impl PushRouterHandler {
                     ErrorCode::ServiceUnavailable,
                     "Failed to publish conversation broadcast push task",
                 )
-            })
+            })?;
+
+        // 上面的广播只到在线成员（网关按会话订阅投递）。离线成员此前什么都收不到，
+        // 只能等下次打开 app 自己拉——对群消息来说这等于没有推送通知。
+        self.fanout_offline_push_for_conversation(
+            ctx,
+            &conversation_id,
+            OfflineFanoutTemplate {
+                message_id: &message_id_for_offline,
+                priority,
+                expire_at,
+                push_payload: &push_payload_for_offline,
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    /// 给会话里**离线**的成员补发离线推送任务。
+    ///
+    /// 失败一律只告警不向上抛：在线广播已经发出去了，不该因为补推这一步失败
+    /// 把整条消息的处理判成失败并触发重试——重试会让在线成员收到重复消息。
+    async fn fanout_offline_push_for_conversation(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        conversation_id: &str,
+        template: OfflineFanoutTemplate<'_>,
+    ) {
+        let Some(members) = self.conversation_members.as_ref() else {
+            return;
+        };
+        let member_ids = match members
+            .member_ids(ctx, conversation_id, self.offline_fanout_member_cap)
+            .await
+        {
+            Ok(Some(ids)) => ids,
+            Ok(None) => {
+                tracing::info!(
+                    conversation_id = %conversation_id,
+                    cap = self.offline_fanout_member_cap,
+                    "Skipping offline fanout: conversation exceeds member cap"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    conversation_id = %conversation_id,
+                    "Skipping offline fanout: member lookup failed"
+                );
+                return;
+            }
+        };
+        if member_ids.is_empty() {
+            return;
+        }
+
+        let statuses = match self.load_online_statuses(ctx, &member_ids).await {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    conversation_id = %conversation_id,
+                    "Skipping offline fanout: online status lookup failed"
+                );
+                return;
+            }
+        };
+        let offline: Vec<String> = member_ids
+            .into_iter()
+            .filter(|user_id| !statuses.get(user_id).copied().unwrap_or(false))
+            .collect();
+        if offline.is_empty() {
+            return;
+        }
+
+        // 只喂离线成员、且状态全标 false：在线任务已由上面的会话广播承担，
+        // 这里再发一遍会让在线成员收到重复消息。免打扰/「只接收@我」的过滤
+        // 由 publish_targeted_tasks 统一负责，不在这里重复一套。
+        let all_offline: HashMap<String, bool> = offline
+            .iter()
+            .map(|user_id| (user_id.clone(), false))
+            .collect();
+        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let headers = HashMap::new();
+        if let Err(error) = self
+            .publish_targeted_tasks(
+                ctx,
+                &offline,
+                &all_offline,
+                PushTaskTemplate {
+                    message_id: template.message_id,
+                    conversation_id,
+                    tenant_id: &tenant_id,
+                    priority: template.priority,
+                    expire_at: template.expire_at,
+                    push_payload: template.push_payload,
+                    headers: &headers,
+                    payload_kind: PushTaskPayloadKind::Event as i32,
+                },
+                false,
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                conversation_id = %conversation_id,
+                "Offline fanout failed after conversation broadcast"
+            );
+        }
     }
 
     async fn handle_conversation_ping_without_recipients(
@@ -1506,6 +1646,109 @@ mod tests {
             .collect();
         let online_count = publisher.online.lock().expect("online lock").len();
         (offline_users, online_count, calls.load(Ordering::SeqCst))
+    }
+
+    /// 大群成员枚举的可控替身。`None` 模拟「超过上限」。
+    struct MockMemberReader {
+        members: Option<Vec<String>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ConversationMemberReader for MockMemberReader {
+        async fn member_ids(
+            &self,
+            _ctx: &flare_server_core::context::Ctx,
+            _conversation_id: &str,
+            _cap: usize,
+        ) -> std::result::Result<Option<Vec<String>>, flare_server_core::error::FlareError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.members.clone())
+        }
+    }
+
+    /// 跑一次「大群广播」，返回 (离线任务用户, 在线任务条数)。
+    async fn run_conversation_broadcast(members: Option<Vec<String>>) -> (Vec<String>, usize) {
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                // group-online 在线，group-offline 离线
+                statuses: HashMap::from([("group-online".to_string(), true)]),
+                tenant_id: "tenant-a".to_string(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        )
+        .with_conversation_members(Arc::new(MockMemberReader {
+            members,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        // 大群：读扩散下收件人为空，只带会话 id。
+        let req = access_gateway::PushEventRequest {
+            user_ids: Vec::new(),
+            events: vec![flare_proto::common::Event {
+                conversation_id: "conversation-large".to_string(),
+                conversation_seq: 3,
+                payload: Some(flare_proto::common::event::Payload::Message(
+                    flare_proto::common::Message {
+                        conversation_id: "conversation-large".to_string(),
+                        server_id: "m-3".to_string(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }],
+            conversation_id: "conversation-large".to_string(),
+            max_conversation_seq: 3,
+            delivery_mode: flare_proto::common::EventEnvelopeDeliveryMode::PingWithInline as i32,
+            inline_events_truncated: false,
+            options: None,
+        };
+
+        let ctx = Arc::new(Context::root());
+        handler.handle_event(&ctx, req).await.expect("handle_event");
+        let offline = publisher
+            .offline
+            .lock()
+            .expect("offline lock")
+            .iter()
+            .map(|(_, task)| task.user_id.clone())
+            .collect();
+        let online = publisher.online.lock().expect("online lock").len();
+        (offline, online)
+    }
+
+    /// 大群此前只发在线广播，离线成员一条推送都收不到。
+    #[tokio::test]
+    async fn large_conversation_broadcast_also_pushes_offline_members() {
+        let (offline, online) = run_conversation_broadcast(Some(vec![
+            "group-online".to_string(),
+            "group-offline".to_string(),
+        ]))
+        .await;
+        assert_eq!(
+            offline,
+            vec!["group-offline".to_string()],
+            "离线成员必须补一条离线推送任务，实际 {offline:?}"
+        );
+        // 在线仍走会话广播（一条），不给在线成员再发一份，否则会重复。
+        assert_eq!(online, 1, "在线侧只应有那条会话广播任务");
+    }
+
+    /// 超过成员上限时整体跳过——不做「随机推一部分人」这种更难解释的行为。
+    #[tokio::test]
+    async fn oversized_conversation_skips_offline_fanout() {
+        let (offline, online) = run_conversation_broadcast(None).await;
+        assert!(
+            offline.is_empty(),
+            "超限会话不该产生离线任务，实际 {offline:?}"
+        );
+        assert_eq!(online, 1, "在线广播照常");
     }
 
     /// 「只接收@我」：没点名的消息不产生离线推送，点名的照常推。
