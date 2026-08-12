@@ -770,14 +770,13 @@ impl PushRouterHandler {
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
         let tenant_id = self.online_status.default_tenant_id().to_string();
-        let online_statuses = if online_only {
-            self.load_online_statuses(ctx, user_ids).await?
-        } else {
-            user_ids
-                .iter()
-                .map(|user_id| (user_id.clone(), true))
-                .collect()
-        };
+        // 真实在线状态必须查：把所有收件人当成在线会让 `publish_targeted_tasks`
+        // 一个离线任务都建不出来——群消息走的正是这条内联事件路径，于是离线群成员
+        // 收不到任何推送通知，只能等下次自己打开 app 拉。单聊的 handle_message
+        // 一直是老实查的，两条路径不该有这个差别。
+        //
+        // `online_only` 只决定「离线用户要不要跳过」，不该顺手决定「大家算不算在线」。
+        let online_statuses = self.load_online_statuses(ctx, user_ids).await?;
         self.publish_targeted_tasks(
             ctx,
             user_ids,
@@ -1328,6 +1327,70 @@ mod tests {
             .collect();
         let online_count = publisher.online.lock().expect("online lock").len();
         (offline_users, online_count, calls.load(Ordering::SeqCst))
+    }
+
+    /// 群消息走「带收件人的内联事件」这条路。这里曾把所有收件人一律当成在线，
+    /// 于是一个离线任务都建不出来——离线群成员收不到任何推送通知。
+    /// 这条用例钉住：离线收件人必须产生离线任务。
+    #[tokio::test]
+    async fn inline_event_creates_offline_tasks_for_offline_recipients() {
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::from([
+                    ("user-online".to_string(), true),
+                    ("user-offline".to_string(), false),
+                ]),
+                tenant_id: "tenant-a".to_string(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        );
+
+        let ctx = Arc::new(Context::root());
+        let req = access_gateway::PushEventRequest {
+            user_ids: vec!["user-online".to_string(), "user-offline".to_string()],
+            events: vec![flare_proto::common::Event {
+                conversation_id: "conversation-group".to_string(),
+                conversation_seq: 7,
+                payload: Some(flare_proto::common::event::Payload::Message(
+                    flare_proto::common::Message {
+                        conversation_id: "conversation-group".to_string(),
+                        server_id: "m-7".to_string(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }],
+            conversation_id: "conversation-group".to_string(),
+            max_conversation_seq: 7,
+            delivery_mode: flare_proto::common::EventEnvelopeDeliveryMode::PingWithInline as i32,
+            inline_events_truncated: false,
+            options: None,
+        };
+
+        handler.handle_event(&ctx, req).await.expect("handle_event");
+
+        let offline_users: Vec<String> = publisher
+            .offline
+            .lock()
+            .expect("offline lock")
+            .iter()
+            .map(|(_, task)| task.user_id.clone())
+            .collect();
+        assert_eq!(
+            offline_users,
+            vec!["user-offline".to_string()],
+            "离线收件人必须产生离线推送任务，实际 {offline_users:?}"
+        );
+        assert_eq!(
+            publisher.online.lock().expect("online lock").len(),
+            1,
+            "在线收件人仍走在线任务，不受影响"
+        );
     }
 
     #[tokio::test]
