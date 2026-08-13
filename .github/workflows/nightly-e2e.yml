@@ -49,6 +49,25 @@ jobs:
             flare-im-core
             flare-im-core-sdk
 
+      # 本仓无法单独构建：examples 等成员按**同级目录**依赖 flare-core / flare-proto
+      # 等仓（path 依赖）。ci.yml 早有这一步，nightly 漏了 —— 表现为
+      # `failed to read ../flare-core/Cargo.toml: No such file or directory`。
+      #
+      # 注意路径：本工作流把主仓检出到 flare-im-core/ 子目录，所以同级仓要落在
+      # 工作区根（即 flare-im-core 的上一级），与本地开发的布局一致。
+      - name: 拉取同级仓库
+        working-directory: ${{ github.workspace }}
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-core.git "flare-core"
+          clone https://github.com/flare-im/flare-proto.git "flare-proto"
+          clone https://github.com/flare-im/flare-grpc-proto.git "flare-grpc-proto"
+          clone https://github.com/flare152/flare-server-core.git "flare-server-core"
+
       # 与 ci.yml 同一套：契约由 .proto 生成，构建期需要 protobuf 编译器；
       # rdkafka-sys 会现场编译 librdkafka（C），需要 curl/sasl/ssl/zlib 开发头文件。
       # 这条此前只写在 ci.yml 里，nightly 漏了 —— 表现为「未找到 protoc 编译器」。
