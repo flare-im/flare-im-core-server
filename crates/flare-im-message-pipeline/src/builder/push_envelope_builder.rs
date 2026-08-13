@@ -259,40 +259,40 @@ impl PushEnvelopeBuilder {
         self
     }
 
-    /// 构建推送信封
+    /// 构建推送信封；缺字段时返回错误而不是 panic。
     ///
-    /// # Panics
-    /// 如果未设置 envelope_id、tenant_id 或对应的 payload，将 panic
-    pub fn build(self) -> PushEnvelope {
-        let envelope_id = self.envelope_id.expect("envelope_id is required");
-        let tenant_id = self.tenant_id.expect("tenant_id is required");
+    /// 本 builder 是 `pub` 的（经 crate 根导出），业务侧与插件都能构造它。
+    /// 一个 `pub` 的构造器把「调用方少设了一个字段」变成进程 panic，等于把
+    /// 编程错误升级成一次服务中断——推送链路尤其不该这样。
+    /// 仓内的便捷函数（`build_ack_push` 等）成对设置 kind 与 payload，
+    /// 走不到这些错误分支；它们继续用 [`Self::build`]。
+    pub fn try_build(self) -> Result<PushEnvelope, PushEnvelopeBuildError> {
+        use PushEnvelopeBuildError as E;
+
+        let envelope_id = self.envelope_id.ok_or(E::MissingField("envelope_id"))?;
+        let tenant_id = self.tenant_id.ok_or(E::MissingField("tenant_id"))?;
         let created_at_ms = self.created_at_ms.unwrap_or_else(current_time_ms);
 
         // 构建 payload oneof
         let payload = match self.payload_kind {
             PushPayloadKind::Ack => Some(flare_proto::push_envelope::Payload::Ack(
-                self.ack.expect("ack payload is required for ACK kind"),
+                self.ack.ok_or(E::MissingPayload("Ack"))?,
             )),
             PushPayloadKind::Notification => {
                 Some(flare_proto::push_envelope::Payload::Notification(
-                    self.notification
-                        .expect("notification payload is required for Notification kind"),
+                    self.notification.ok_or(E::MissingPayload("Notification"))?,
                 ))
             }
             PushPayloadKind::Custom => Some(flare_proto::push_envelope::Payload::Custom(
-                self.custom
-                    .expect("custom payload is required for Custom kind"),
+                self.custom.ok_or(E::MissingPayload("Custom"))?,
             )),
             PushPayloadKind::System => Some(flare_proto::push_envelope::Payload::System(
-                self.system
-                    .expect("system payload is required for System kind"),
+                self.system.ok_or(E::MissingPayload("System"))?,
             )),
-            PushPayloadKind::Unspecified => {
-                panic!("payload kind must be specified");
-            }
+            PushPayloadKind::Unspecified => return Err(E::UnspecifiedKind),
         };
 
-        PushEnvelope {
+        Ok(PushEnvelope {
             envelope_id,
             tenant_id,
             trace_id: self.trace_id.unwrap_or_default(),
@@ -304,9 +304,46 @@ impl PushEnvelopeBuilder {
             options: self.options,
             payload,
             headers: self.headers,
+        })
+    }
+
+    /// 构建推送信封。
+    ///
+    /// # Panics
+    /// 缺少 envelope_id / tenant_id / 对应 payload，或未指定 kind 时 panic。
+    /// 不确定字段是否齐全时用 [`Self::try_build`]。
+    pub fn build(self) -> PushEnvelope {
+        match self.try_build() {
+            Ok(envelope) => envelope,
+            Err(err) => panic!("build push envelope: {err}"),
         }
     }
 }
+
+/// 构建推送信封时的字段缺失。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushEnvelopeBuildError {
+    /// 必填字段未设置
+    MissingField(&'static str),
+    /// 已声明 kind 但没给对应的 payload
+    MissingPayload(&'static str),
+    /// 没有声明 payload kind
+    UnspecifiedKind,
+}
+
+impl std::fmt::Display for PushEnvelopeBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(name) => write!(f, "缺少必填字段 {name}"),
+            Self::MissingPayload(kind) => {
+                write!(f, "payload_kind 是 {kind}，但没有设置对应的 payload")
+            }
+            Self::UnspecifiedKind => f.write_str("未指定 payload_kind"),
+        }
+    }
+}
+
+impl std::error::Error for PushEnvelopeBuildError {}
 
 /// 获取当前时间戳（毫秒）
 fn current_time_ms() -> i64 {
@@ -442,5 +479,45 @@ mod tests {
         assert_eq!(envelope.envelope_id, "env-456");
         assert_eq!(envelope.target_type, PushTargetType::All as i32);
         assert_eq!(envelope.payload_kind, PushPayloadKind::Notification as i32);
+    }
+}
+
+#[cfg(test)]
+mod try_build_tests {
+    use super::*;
+
+    #[test]
+    fn missing_required_field_is_an_error_not_a_panic() {
+        // 少一个必填字段就 panic，等于把调用方的编程错误升级成服务中断。
+        let err = PushEnvelopeBuilder::ack()
+            .tenant_id("t1")
+            .ack_payload(AckPayload::default())
+            .try_build()
+            .expect_err("缺 envelope_id 应当返回错误");
+        assert_eq!(err, PushEnvelopeBuildError::MissingField("envelope_id"));
+    }
+
+    #[test]
+    fn kind_without_matching_payload_is_reported() {
+        let err = PushEnvelopeBuilder::notification()
+            .envelope_id("e1")
+            .tenant_id("t1")
+            .try_build()
+            .expect_err("声明了 kind 却没给 payload，应当返回错误");
+        assert_eq!(err, PushEnvelopeBuildError::MissingPayload("Notification"));
+        // 错误要能直接读懂：它会出现在日志里，读的人未必看过这段代码
+        assert!(err.to_string().contains("Notification"));
+    }
+
+    #[test]
+    fn complete_builder_still_produces_the_same_envelope() {
+        let envelope = PushEnvelopeBuilder::ack()
+            .envelope_id("e1")
+            .tenant_id("t1")
+            .ack_payload(AckPayload::default())
+            .try_build()
+            .expect("字段齐全时不该失败");
+        assert_eq!(envelope.envelope_id, "e1");
+        assert_eq!(envelope.tenant_id, "t1");
     }
 }

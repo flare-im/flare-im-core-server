@@ -9,7 +9,7 @@ use flare_server_core::error::Result;
 use prost::Message as ProstMessage;
 use serde_json::to_value;
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use super::operation_store;
 use crate::convert;
@@ -732,7 +732,10 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             if let Some(reader_id) = reader_id {
                 let read_at = chrono::DateTime::from_timestamp(first_read_at, 0)
                     .unwrap_or_else(chrono::Utc::now);
-                let _ = sqlx::query(
+                // 主写（标记已读）已经成功，这条是派生的读记录：失败不该把整个操作回滚成
+                // 「未读」，但也绝不能静默——否则「阅后即焚」到期时会因为查不到读记录而
+                // 不焚，且没有任何线索。失败可见，语义不变。
+                if let Err(err) = sqlx::query(
                     r#"
                     INSERT INTO message_read_records (tenant_id, message_id, user_id, read_at)
                     VALUES ($1, $2, $3, $4)
@@ -745,7 +748,14 @@ impl ArchiveStoreRepository for PostgresMessageStore {
                 .bind(reader_id)
                 .bind(read_at)
                 .execute(&self.pool)
-                .await;
+                .await
+                {
+                    warn!(
+                        %tenant_id, %message_id, %reader_id, error = %err,
+                        "写 message_read_records 失败：已读标记已生效，但读记录缺失，\
+                         阅后即焚的到期判定会因此看不到这次阅读"
+                    );
+                }
             }
             Ok(true)
         } else {
@@ -849,7 +859,10 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         if result.rows_affected() > 0 {
             let burned_at_dt =
                 chrono::DateTime::from_timestamp(burned_at, 0).unwrap_or_else(chrono::Utc::now);
-            let _ = sqlx::query(
+            // 消息本体已标记焚毁（上面那条带 ?），这里是回填读记录上的焚毁时间。
+            // 失败不改变「已焚毁」这个事实，但静默会让读记录与消息状态长期不一致，
+            // 而这是隐私功能——不一致必须留下痕迹。
+            if let Err(err) = sqlx::query(
                 r#"
                 UPDATE message_read_records
                 SET burned_at = COALESCE(burned_at, $3)
@@ -860,7 +873,13 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             .bind(message_id)
             .bind(burned_at_dt)
             .execute(&self.pool)
-            .await;
+            .await
+            {
+                warn!(
+                    %tenant_id, %message_id, error = %err,
+                    "回填 message_read_records.burned_at 失败：消息已焚毁，读记录仍显示未焚"
+                );
+            }
             Ok(true)
         } else {
             Ok(false)

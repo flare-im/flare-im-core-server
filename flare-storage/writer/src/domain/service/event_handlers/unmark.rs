@@ -45,8 +45,10 @@ where
                 map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed")
             })?;
     } else {
+        // 未指定类型 = 清掉全部标记。逐个失败不该让其余几种也取消不掉，所以这里
+        // 不用 ? 中断；但静默会让用户看到标记还在、又查不出任何原因——逐个记下来。
         for mt in ["IMPORTANT", "TODO", "DONE", "CUSTOM"] {
-            let _ = ctx
+            if let Err(err) = ctx
                 .repo
                 .mark_message(
                     ctx.ctx,
@@ -58,7 +60,14 @@ where
                     None,
                     false,
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    tenant_id = %ctx.tenant_id, %message_id, mark_type = %mt,
+                    user_id = %unmark.user_id, error = %err,
+                    "取消标记失败：该类型的标记仍会显示在客户端"
+                );
+            }
         }
     }
     append_event_and_stream(ctx, message_id, event).await

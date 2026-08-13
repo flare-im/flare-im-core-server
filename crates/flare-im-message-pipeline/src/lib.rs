@@ -15,8 +15,8 @@ pub mod service;
 pub mod validation;
 
 pub use builder::{
-    PushEnvelopeBuilder, build_ack_push, build_custom_push, build_notification_push,
-    build_system_push,
+    PushEnvelopeBuildError, PushEnvelopeBuilder, build_ack_push, build_custom_push,
+    build_notification_push, build_system_push,
 };
 pub use extension::{
     ExtensionFailureMode, ExtensionOrchestrator, ExtensionPolicy, ExtensionRouting,
