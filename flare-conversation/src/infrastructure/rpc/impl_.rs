@@ -12,9 +12,16 @@ use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
+
+/// 单次批量拉取的并发上限。
+///
+/// 这里按会话数扇出，会话数由客户端决定（同步一屏会话列表就可能是几百个）。
+/// 不设上限的话，一个用户的一次同步就能给 storage-reader 发去几百个并发请求。
+/// 与 flare-message-ingest 里 MAX_BATCH_SEND_CONCURRENCY 同量级。
+const MAX_SYNC_FANOUT_CONCURRENCY: usize = 32;
 
 /// 存储服务客户端（基于 tonic）
 ///
@@ -196,6 +203,7 @@ impl MessageProvider for StorageReaderClient {
         let _ = self.client().await?;
 
         let mut join_set = JoinSet::new();
+        let fanout_permits = Arc::new(Semaphore::new(MAX_SYNC_FANOUT_CONCURRENCY));
         let service_client = Arc::clone(&self.service_client);
         let storage_service_name = self.service_name.clone();
         let ctx = ctx.clone();
@@ -212,43 +220,59 @@ impl MessageProvider for StorageReaderClient {
             let storage_service_name = storage_service_name.clone();
             let task_ctx = ctx.clone();
 
+            let permit = Arc::clone(&fanout_permits);
             join_set.spawn(async move {
-                let mut service_client_guard = service_client.lock().await;
-
-                let channel: Channel = if let Some(service_client) = service_client_guard.as_mut() {
-                    match flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
-                        &storage_service_name,
-                        service_client,
-                    )
+                // 上限之内才开始干活；超出的任务在这里排队而不是一起压向下游。
+                let _permit = permit
+                    .acquire_owned()
                     .await
-                    {
-                        Ok(ch) => ch,
-                        Err(_e) => {
-                            let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
-                                .ok()
-                                .unwrap_or_else(|| "127.0.0.1:50091".to_string());
-                            let endpoint = Endpoint::from_shared(format!("http://{}", addr))
-                                .map_err(|err| {
-                                    map_infra_error(err, ErrorCode::ConfigurationError, "endpoint")
-                                })?;
-                            endpoint.connect().await.map_err(|err| {
-                                map_infra_error(err, ErrorCode::NetworkError, "connect")
-                            })?
-                        }
-                    }
-                } else {
-                    let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
-                        .ok()
-                        .unwrap_or_else(|| "127.0.0.1:50091".to_string());
-                    let endpoint =
-                        Endpoint::from_shared(format!("http://{}", addr)).map_err(|err| {
-                            map_infra_error(err, ErrorCode::ConfigurationError, "endpoint")
-                        })?;
-                    endpoint
-                        .connect()
+                    .map_err(|err| map_infra_error(err, ErrorCode::InternalError, "semaphore"))?;
+
+                // 这个 guard 只用来做服务发现。此前它一直活到 async 块结束、
+                // **横跨整个 gRPC 往返**——于是这段「并行扇出」实际是串行的：
+                // N 个会话就是 N 次顺序 RPC，而代码看起来是并发的。
+                // 拿到 Channel 就释放（Channel 自带连接池，clone 很便宜）。
+                let channel: Channel = {
+                    let mut service_client_guard = service_client.lock().await;
+                    if let Some(service_client) = service_client_guard.as_mut() {
+                        match flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+                            &storage_service_name,
+                            service_client,
+                        )
                         .await
-                        .map_err(|err| map_infra_error(err, ErrorCode::NetworkError, "connect"))?
+                        {
+                            Ok(ch) => ch,
+                            Err(_e) => {
+                                let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
+                                    .ok()
+                                    .unwrap_or_else(|| "127.0.0.1:50091".to_string());
+                                let endpoint = Endpoint::from_shared(format!("http://{}", addr))
+                                    .map_err(|err| {
+                                        map_infra_error(
+                                            err,
+                                            ErrorCode::ConfigurationError,
+                                            "endpoint",
+                                        )
+                                    })?;
+                                endpoint.connect().await.map_err(|err| {
+                                    map_infra_error(err, ErrorCode::NetworkError, "connect")
+                                })?
+                            }
+                        }
+                    } else {
+                        let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
+                            .ok()
+                            .unwrap_or_else(|| "127.0.0.1:50091".to_string());
+                        let endpoint =
+                            Endpoint::from_shared(format!("http://{}", addr)).map_err(|err| {
+                                map_infra_error(err, ErrorCode::ConfigurationError, "endpoint")
+                            })?;
+                        endpoint.connect().await.map_err(|err| {
+                            map_infra_error(err, ErrorCode::NetworkError, "connect")
+                        })?
+                    }
                 };
+                // 服务发现锁到此为止；下面的 RPC 不再持有它。
 
                 let mut client = StorageReaderServiceClient::new(channel);
                 if after_seq > 0 {
