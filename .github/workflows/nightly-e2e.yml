@@ -49,6 +49,15 @@ jobs:
             flare-im-core
             flare-im-core-sdk
 
+      # 与 ci.yml 同一套：契约由 .proto 生成，构建期需要 protobuf 编译器；
+      # rdkafka-sys 会现场编译 librdkafka（C），需要 curl/sasl/ssl/zlib 开发头文件。
+      # 这条此前只写在 ci.yml 里，nightly 漏了 —— 表现为「未找到 protoc 编译器」。
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler cmake pkg-config \
+            libcurl4-openssl-dev libsasl2-dev libssl-dev zlib1g-dev
+
       - name: 起基础设施
         working-directory: flare-im-core
         run: |
