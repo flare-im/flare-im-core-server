@@ -31,6 +31,9 @@ jobs:
           clone https://github.com/flare-im/flare-proto.git "../flare-proto"
           clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
           clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+          # 文档命令门禁要判定 example 归属（e2ee_demo 在客户端 SDK 仓）。
+          # 不克隆它的话门禁会把「仓没检出」误报成「example 不存在」。
+          clone https://github.com/flare-im/flare-im-core-sdk.git "../flare-im-core-sdk"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -86,6 +89,9 @@ jobs:
           clone https://github.com/flare-im/flare-proto.git "../flare-proto"
           clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
           clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+          # 文档命令门禁要判定 example 归属（e2ee_demo 在客户端 SDK 仓）。
+          # 不克隆它的话门禁会把「仓没检出」误报成「example 不存在」。
+          clone https://github.com/flare-im/flare-im-core-sdk.git "../flare-im-core-sdk"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

@@ -42,7 +42,13 @@ for doc in "$ROOT"/*.md; do
 
     owner="$(echo "$EXAMPLES" | awk -v n="$name" '$1==n {print $2; exit}')"
     if [ -z "$owner" ]; then
-      problems+="  ✗ $(basename "$doc"):$lineno  --example $name —— 整个工作区都找不到它"$'\n'
+      # 分清两种情况：真的没有这个 example，还是它所在的同级仓没被检出。
+      # 后者在 CI 里很常见，报成前者会把人引向完全错误的方向（我自己被误导过一次）。
+      siblings="$(find "$WORKSPACE" -maxdepth 1 -mindepth 1 -type d -name 'flare-*' \
+                    -not -path "$ROOT" 2>/dev/null | wc -l | tr -d ' ')"
+      problems+="  ✗ $(basename "$doc"):$lineno  --example $name —— 在已检出的仓里找不到"$'\n'
+      problems+="      当前工作区有 $siblings 个同级仓。若它属于一个未检出的仓，"$'\n'
+      problems+="      请先克隆该仓再跑本门禁（CI 里就是在工作流里补一条 clone）。"$'\n'
       continue
     fi
 
