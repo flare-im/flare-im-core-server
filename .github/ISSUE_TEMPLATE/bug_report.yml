@@ -1,0 +1,65 @@
+name: Bug 报告 / Bug report
+description: 行为与预期不符 / Something behaves differently than expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        中文或英文都可以。**安全漏洞请不要在这里提** —— 走 [SECURITY.md](../blob/main/SECURITY.md)
+        里的私密渠道，公开的漏洞报告会在修复发布前让所有使用者暴露于风险中。
+
+        Either language is fine. **Do not report security vulnerabilities here** — use the
+        private channels in [SECURITY.md](../blob/main/SECURITY.md); a public report exposes
+        every user until a fix ships.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么 / What happened
+      description: 实际行为，以及你预期的行为。
+      placeholder: |
+        实际：发送后收不到 ACK，客户端一直显示「发送中」。
+        预期：几百毫秒内收到 ACK。
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: |
+        这一项比「你觉得原因是什么」有用得多。能给一段最小复现代码或一条命令最好。
+        A minimal snippet or a single command beats a theory about the cause.
+      placeholder: |
+        1. docker compose -f deploy/docker-compose.yml up -d
+        2. ./scripts/start_server.sh
+        3. cargo run --example two_clients_chat
+        4. 第 3 步在第二条消息处卡住
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境 / Environment
+      description: |
+        版本（commit 或发布号）、操作系统、以及涉及的是哪个仓库/组件。
+        跨仓项目里，「哪一层」往往决定了问题归属。
+      placeholder: |
+        - 组件：flare-im-core（服务端）/ flare-im-core-sdk 1.1.0
+        - commit：a458472
+        - 系统：macOS 15.5 / Ubuntu 24.04
+        - 部署：docker compose（deploy/）
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: |
+        相关片段即可，不必全量。带上 `RUST_LOG=debug` 的输出通常最有用。
+        Trim to the relevant part; `RUST_LOG=debug` output is usually the most useful.
+      render: text
+    validations:
+      required: false

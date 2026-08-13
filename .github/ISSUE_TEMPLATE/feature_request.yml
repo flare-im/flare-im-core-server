@@ -1,0 +1,39 @@
+name: 能力建议 / Feature request
+description: 缺一个能力，或现有设计不够用 / A missing capability, or a design that does not fit
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        中文或英文都可以 / Either language is fine.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题 / What problem are you solving
+      description: |
+        先说场景，不要直接说方案——同一个场景常有比你我先想到的做法更好的解法。
+        Describe the situation first, not the solution: the same need often has a better answer
+        than the one either of us thought of first.
+      placeholder: 我们的客服系统要把历史会话按工单归档，但当前只能按会话拉取。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的做法 / What you have in mind
+      description: 有想法就写，没有也可以留空。
+    validations:
+      required: false
+
+  - type: textarea
+    id: layer
+    attributes:
+      label: 你觉得它属于哪一层 / Which layer do you think it belongs to
+      description: |
+        传输（flare-core）/ 服务端（flare-im-core）/ 客户端核心（flare-im-core-sdk）/ UI Kit / 其他。
+        不确定也没关系，写「不确定」即可——分层判断本来就是维护者的活。
+      placeholder: 不确定
+    validations:
+      required: false
