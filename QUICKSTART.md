@@ -82,13 +82,18 @@ Getting this far means transport, token validation and the service chain all wor
 ./scripts/smoke_opensource.sh
 ```
 
-It runs five real end-to-end cases (send + persist, event bus, full operation surface,
-unread regression, RTC room join) plus the E2EE demo, **without touching any commercial
-component**. Exit code 0 means all passed:
+It runs five real end-to-end cases (send + persist, event bus, full event surface,
+full operation surface, unread regression) plus the E2EE demo, **without touching any
+commercial component**. Exit code 0 means all passed:
 
 ```
 ✓ Open-source stack is self-sufficient: 6/6 passed (no commercial components involved)
 ```
+
+> RTC room join is deliberately not one of the six: it comes from the SFU capability
+> plugin, which does not live in the open-source repos. When that plugin is not running
+> the example skips the step with a note instead of failing — otherwise anyone who cloned
+> only the public repos would think the core path is broken.
 
 No extra secret configuration needed — the examples read the
 `logs/.dev-token-secret` generated in step 2.

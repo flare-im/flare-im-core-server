@@ -16,7 +16,8 @@
 #   - send + local persist
 #   - 事件总线：连接/同步/消息事件的观察
 #   - unread regression
-#   - RTC 房间加入（media-control 链路）
+#   - RTC 房间加入（media-control 链路）—— **仅在 SFU 能力插件在跑时**。
+#     那个插件不在开源仓里，所以它不算进「开源栈自足」的结论；缺席时示例明确跳过。
 #   - 端到端加密：服务端只见密文，仅持钥方可还原
 
 set -u
@@ -48,7 +49,7 @@ fi
 CASES=(
   "e2e_message_ops:send + local persist"
   "e2e_event_observer:event bus (connect/sync)"
-  "e2e_full_event_observer:full event surface + RTC room join"
+  "e2e_full_event_observer:full event surface (RTC join skipped without the SFU plugin)"
   "e2e_full_event_ops:full operation surface"
   "e2e_unread_regression:unread regression"
 )
