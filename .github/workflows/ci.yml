@@ -48,6 +48,11 @@ jobs:
             libcurl4-openssl-dev libsasl2-dev libssl-dev zlib1g-dev
 
 
+      # 文档里的命令要真能跑。这类失效已经出现两次（mint_token / e2ee_demo
+      # 都在同级仓，却被写成本仓可直接执行的样子），且都在新人最先读的文档里。
+      - name: 文档命令与仓库一致
+        run: ./scripts/check_doc_commands.sh
+
       # 格式先查：最快，失败得早，省掉后面的编译时间
       - name: rustfmt
         run: cargo fmt --all -- --check

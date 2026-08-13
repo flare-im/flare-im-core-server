@@ -213,6 +213,8 @@ WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`]
 开源部分自带 E2EE 管线与一个参考实现：
 
 ```bash
+# 例子在同级仓：端到端加密的接口面归客户端 SDK。
+cd ../flare-im-core-sdk
 cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 

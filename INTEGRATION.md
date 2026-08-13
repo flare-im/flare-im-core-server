@@ -227,6 +227,8 @@ centre; transports are gRPC, WebHook or a local plugin. See
 The open-source part ships the E2EE pipeline plus a reference implementation:
 
 ```bash
+# The example lives in the sibling repo — the client SDK owns the E2EE surface.
+cd ../flare-im-core-sdk
 cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 

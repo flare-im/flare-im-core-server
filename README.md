@@ -44,7 +44,7 @@ re-verified daily.
   trace you can query — this is not "trust us, it's reliable".
 - **Sending doesn't block.** The ACK returns at the broker-accepted boundary; storage and
   push converge asynchronously. Users wait for enqueue, not for fsync.
-- **E2EE you can actually demo.** `cargo run --example e2ee_demo` prints, on the spot, that
+- **E2EE you can actually demo.** `cargo run --example e2ee_demo` (in the sibling repo `flare-im-core-sdk`) prints, on the spot, that
   the server only ever sees 323 bytes of ciphertext, that the plaintext never leaked, and
   that a third party fails to decrypt.
 - **Self-hostable and auditable.** Rust, Apache-2.0, protocol and core both in the repo —
