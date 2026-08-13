@@ -89,7 +89,8 @@ docker compose logs -f [service_name]
 - **访问**:
   - API: http://localhost:29000
   - 控制台: http://localhost:29001
-- **数据目录**: `./data/rustfs`
+- **数据目录**: 命名卷 `rustfs-data`（不是 bind mount —— 容器内以 rustfs 用户运行，
+  宿主机建的目录属于另一个 UID，Linux 上会直接 `Permission denied` 起不来）
 
 ### 6. Loki (日志聚合)
 
@@ -149,9 +150,9 @@ RUSTFS_SECRET_KEY=rustfsadmin
 - `./data/consul`: Consul 数据
 - `./data/redis`: Redis 数据
 - `./data/postgres`: PostgreSQL 数据
-- `./data/nats`: NATS JetStream 数据
+- `./data/nats`: NATS JetStream 数据（配置文件是 `./nats.conf`，**不在 data/ 下** ——
+  `/deploy/data/` 整个被 .gitignore 忽略，放进去等于全新检出时缺文件）
 - `./data/kafka`: Kafka（KRaft）数据
-- `./data/rustfs`: RustFS 数据
 - `./data/loki`: Loki 数据
 - `./data/prometheus`: Prometheus 数据
 - `./data/grafana`: Grafana 数据
@@ -159,7 +160,7 @@ RUSTFS_SECRET_KEY=rustfsadmin
 
 >  **提示**: 首次启动前，建议创建数据目录：
 > ```bash
-> mkdir -p data/{consul,redis,postgres,nats,kafka,rustfs,loki,prometheus,grafana,tempo}
+> mkdir -p data/{consul,redis,postgres,nats,kafka,loki,prometheus,grafana,tempo}
 > ```
 
 ---

@@ -173,7 +173,12 @@ services:
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
-      - ./data/rustfs:/data
+      # 用命名卷而不是 bind mount：容器内以 rustfs 用户运行，宿主机新建的目录
+      # 属于另一个 UID，Linux 上的 Docker 会直接
+      # `[FATAL] Server runtime failed: Io error: Permission denied`。
+      # 本地 podman 是 rootless、有 UID 映射所以看不出来，CI 必然踩。
+      # 对象存储的内部布局本来也不需要从宿主机翻看。
+      - rustfs-data:/data
     command: [
       "--address", ":9000",
       "--console-address", ":9001",
@@ -277,3 +282,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+volumes:
+  # 只有 rustfs 走命名卷（见上）。其余服务的 bind mount 保持不变，
+  # 方便直接在宿主机上看数据。
+  rustfs-data:
