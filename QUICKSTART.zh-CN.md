@@ -15,8 +15,12 @@
 ## 1. 起依赖
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d \
+  consul redis postgres nats rustfs
 ```
+
+只需要这五个。compose 里还定义了 Kafka、Grafana、Loki、Prometheus、Tempo——
+真正跑起来之后它们有用，但只为评估核心就把它们拉下来，白白多花几分钟和几 GB。
 
 ## 2. 起服务
 

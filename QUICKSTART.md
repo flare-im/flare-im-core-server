@@ -18,8 +18,13 @@ hand-signing with your own user system (see the end of this page).
 ## 1. Start dependencies
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d \
+  consul redis postgres nats rustfs
 ```
+
+Only these five are required. The compose file also defines Kafka, Grafana, Loki,
+Prometheus and Tempo — useful once you run this for real, but pulling them just to
+evaluate the core costs you several minutes and a few GB for nothing.
 
 ## 2. Start services
 
