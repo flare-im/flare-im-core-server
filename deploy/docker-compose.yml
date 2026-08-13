@@ -139,7 +139,7 @@ services:
       # max_payload 只能经配置文件设置(无对应 CLI flag);data/nats/nats.conf 写 `max_payload: 16MB`。
       # 注:这是支撑"建群一次性大消息"的务实配置;生产更优解是服务端显式建群(消息不带成员表)。
       - "-c"
-      - "/data/nats.conf"
+      - "/etc/nats/nats.conf"
       - "-js"
       - "-sd"
       - "/data"
@@ -147,6 +147,10 @@ services:
       - "8222"
     volumes:
       - ./data/nats:/data
+      # 配置文件必须放在 ./data 之外：/deploy/data/ 整个被 .gitignore 忽略，
+      # 放在里面时全新检出（CI、新机器）根本没有这个文件 —— NATS 启动即退，
+      # 又因 restart: always 陷入崩溃循环，表现成「端口偶尔能连上但服务不在」。
+      - ./nats.conf:/etc/nats/nats.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8222/healthz || exit 1"]
       interval: 10s
@@ -178,6 +182,16 @@ services:
       "--secret-key", "rustfsadmin",
       "/data"
     ]
+    healthcheck:
+      # 没有健康检查时，`compose up --wait` 对它一无所知，崩溃循环也照样算「起来了」。
+      # 不能用 curl -f：S3 对匿名的根访问返回 403，那是**正常**响应，
+      # -f 会把它当失败，于是一个健康的服务被判成 unhealthy。
+      # 这里只判断端点是否应答（连接被拒才算不健康）。
+      test: ["CMD-SHELL", "curl -sS -o /dev/null http://localhost:9000/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
   # ===== Loki - 日志聚合 =====
   loki:

@@ -52,9 +52,14 @@ jobs:
       - name: 起基础设施
         working-directory: flare-im-core
         run: |
-          docker compose -f deploy/docker-compose.yml up -d \
+          # --wait 会等健康检查转绿，并在任一容器退出时直接失败。
+          # 只用「端口能连上」判定是不够的：崩溃循环的容器会在重启窗口里
+          # 接受一次连接，探测就绿了，然后下一步才发现服务其实不在。
+          docker compose -f deploy/docker-compose.yml up -d --wait \
             consul redis postgres nats rustfs
-          # 等端口真的能连上，而不是等 compose 返回 —— 容器起来 ≠ 服务就绪
+
+          # 第二道：健康检查是容器自己的视角，这里验从宿主机能否真的连上
+          # （端口映射写错时容器照样健康）。
           for svc in "Consul 28500" "Redis 26379" "PostgreSQL 25432" \
                      "NATS 24222" "RustFS 29000"; do
             name="${svc% *}"; port="${svc#* }"
@@ -64,6 +69,18 @@ jobs:
               sleep 1
             done
             echo "✓ $name ($port)"
+          done
+
+      # 失败时留下能定位问题的东西。没有这一步的话，一次红只会告诉你
+      # 「某个端口不通」，而真正的原因（镜像启动即退、配置文件缺失）在容器日志里。
+      - name: 基础设施诊断（仅失败时）
+        if: failure()
+        working-directory: flare-im-core
+        run: |
+          docker compose -f deploy/docker-compose.yml ps -a
+          for c in flare-consul flare-redis flare-postgres flare-nats flare-rustfs; do
+            echo "===== $c ====="
+            docker logs --tail 60 "$c" 2>&1 || echo "(容器不存在)"
           done
 
       - name: 起 Flare IM Core
