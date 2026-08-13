@@ -100,7 +100,14 @@ impl ConversationRpcClient for ConversationClient {
                 "Context metadata before gRPC call"
             );
 
-            let mut client = client.lock().await;
+            // 锁内只做 clone，调用在锁外。
+            //
+            // tonic 生成的客户端调用需要 &mut self，所以 Mutex<Client> 的写法会让
+            // **每一次 RPC 都串行**——这条路径在消息入库时被高频调用，串行等于把
+            // 整个会话服务的吞吐压到单个在途请求。
+            // 这类客户端 clone 很廉价：它们共享底层 Channel 的连接池，clone 出来的
+            // 是同一个连接上的新句柄，不会多开连接。
+            let mut client = { client.lock().await.clone() };
             match client.create_conversation(grpc_request).await {
                 Ok(response) => {
                     let inner = response.into_inner();
@@ -184,7 +191,14 @@ impl ConversationRpcClient for ConversationClient {
                 });
                 set_context_metadata(&mut grpc_request, ctx);
 
-                let mut client = client.lock().await;
+                // 锁内只做 clone，调用在锁外。
+                //
+                // tonic 生成的客户端调用需要 &mut self，所以 Mutex<Client> 的写法会让
+                // **每一次 RPC 都串行**——这条路径在消息入库时被高频调用，串行等于把
+                // 整个会话服务的吞吐压到单个在途请求。
+                // 这类客户端 clone 很廉价：它们共享底层 Channel 的连接池，clone 出来的
+                // 是同一个连接上的新句柄，不会多开连接。
+                let mut client = { client.lock().await.clone() };
                 let response = client
                     .list_conversation_participants(grpc_request)
                     .await
@@ -225,7 +239,14 @@ impl ConversationRpcClient for ConversationClient {
             });
             set_context_metadata(&mut grpc_request, ctx);
 
-            let mut client = client.lock().await;
+            // 锁内只做 clone，调用在锁外。
+            //
+            // tonic 生成的客户端调用需要 &mut self，所以 Mutex<Client> 的写法会让
+            // **每一次 RPC 都串行**——这条路径在消息入库时被高频调用，串行等于把
+            // 整个会话服务的吞吐压到单个在途请求。
+            // 这类客户端 clone 很廉价：它们共享底层 Channel 的连接池，clone 出来的
+            // 是同一个连接上的新句柄，不会多开连接。
+            let mut client = { client.lock().await.clone() };
             let response = client
                 .get_conversation_detail(grpc_request)
                 .await
@@ -261,7 +282,14 @@ impl ConversationRpcClient for ConversationClient {
             let mut grpc_request = tonic::Request::new(request);
             set_context_metadata(&mut grpc_request, ctx);
 
-            let mut client = client.lock().await;
+            // 锁内只做 clone，调用在锁外。
+            //
+            // tonic 生成的客户端调用需要 &mut self，所以 Mutex<Client> 的写法会让
+            // **每一次 RPC 都串行**——这条路径在消息入库时被高频调用，串行等于把
+            // 整个会话服务的吞吐压到单个在途请求。
+            // 这类客户端 clone 很廉价：它们共享底层 Channel 的连接池，clone 出来的
+            // 是同一个连接上的新句柄，不会多开连接。
+            let mut client = { client.lock().await.clone() };
             client
                 .mark_conversation_as_read(grpc_request)
                 .await
