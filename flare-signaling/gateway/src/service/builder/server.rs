@@ -142,8 +142,17 @@ pub async fn build_long_connection_server(
     ) {
         Ok(server) => server,
         Err(e) => {
+            // 判据优先看**端口是否真的占用**，而不是错误文本。
+            //
+            // 底层 io::Error 在 flare-core 里被格式化成了字符串，ErrorKind 丢失，
+            // 所以这里原本只能匹配 "Address already in use"——那是**依赖系统 locale
+            // 的英文文案**：换个语言环境或上游改一版措辞，这条降级就静默失效，
+            // 网关不再退回 WS-only 而是直接起不来。
+            // 端口探测与语言、与上游措辞都无关；文本匹配保留为兜底（探测与真正 bind
+            // 之间存在时间窗，端口可能刚好在这期间被占）。
             let error_msg = e.to_string();
-            if error_msg.contains("Address already in use")
+            if quic_port_unavailable(&quic_addr)
+                || error_msg.contains("Address already in use")
                 || error_msg.contains("创建 QUIC 端点失败")
             {
                 warn!(quic_addr = %quic_addr, "QUIC port unavailable, falling back to WebSocket-only mode");
@@ -200,5 +209,54 @@ async fn setup_server_components(
     if let Some(slot) = push_handle_slot {
         let mut guard = slot.lock().await;
         *guard = Some(handle.clone());
+    }
+}
+
+/// QUIC 用的 UDP 端口是否已被占用。
+///
+/// 只做一次绑定尝试并立刻释放：这是个与语言环境无关的结构化判据，
+/// 用来替代对错误文案的字符串匹配。地址解析不了时返回 false —— 那不是
+/// 「端口被占」，该让真正的构建流程去报出真实原因。
+fn quic_port_unavailable(quic_addr: &str) -> bool {
+    use std::net::{ToSocketAddrs, UdpSocket};
+
+    let Ok(mut addrs) = quic_addr.to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    match UdpSocket::bind(addr) {
+        Ok(_socket) => false, // 立刻 drop，端口随即释放
+        Err(err) => err.kind() == std::io::ErrorKind::AddrInUse,
+    }
+}
+
+#[cfg(test)]
+mod quic_port_probe_tests {
+    use super::quic_port_unavailable;
+    use std::net::UdpSocket;
+
+    #[test]
+    fn reports_occupied_port_as_unavailable() {
+        let held = UdpSocket::bind("127.0.0.1:0").expect("bind probe port");
+        let addr = held.local_addr().expect("local addr").to_string();
+        assert!(quic_port_unavailable(&addr), "端口被占用时应判定为不可用");
+    }
+
+    #[test]
+    fn reports_free_port_as_available() {
+        // 先占一个再释放，拿到一个几乎肯定空闲的端口号
+        let addr = {
+            let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe port");
+            probe.local_addr().expect("local addr").to_string()
+        };
+        assert!(!quic_port_unavailable(&addr), "端口空闲时不该判定为占用");
+    }
+
+    #[test]
+    fn unparseable_address_is_not_treated_as_occupied() {
+        // 地址不合法不是「端口被占」，该让后续流程报出真实原因
+        assert!(!quic_port_unavailable("not-an-address"));
     }
 }
