@@ -99,6 +99,12 @@ for entry in "${CASES[@]}"; do
     fail=$((fail+1))
     if is_timeout_rc "$rc"; then
       echo -e "  ${RED}✗${NC} $desc  — 超过 ${CASE_TIMEOUT}s 未结束（多半是连不上服务端，客户端在死等）"
+    elif grep -q "flare-strom-sfu" "/tmp/flare-smoke-$ex.log" 2>/dev/null; then
+      # RTC 走的是能力插件，不在核心服务里。插件没起时报出来的是一句
+      # 「discover media-control service ... timeout」，看不出该去做什么。
+      echo -e "  ${RED}✗${NC} $desc  — SFU 能力插件没在跑"
+      echo -e "      RTC 由插件提供，start_server.sh 只在 ../flare-plugin/flare-strom-sfu"
+      echo -e "      存在时才起它。核心链路是否正常看其余几项。"
     else
       echo -e "  ${RED}✗${NC} $desc  — see /tmp/flare-smoke-$ex.log"
     fi

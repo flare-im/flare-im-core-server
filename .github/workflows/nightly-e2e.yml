@@ -67,6 +67,10 @@ jobs:
           clone https://github.com/flare-im/flare-proto.git "flare-proto"
           clone https://github.com/flare-im/flare-grpc-proto.git "flare-grpc-proto"
           clone https://github.com/flare152/flare-server-core.git "flare-server-core"
+          # 冒烟第 3 项要 RTC 房间加入，走的是 SFU 能力插件。start_server.sh 只在
+          # ../flare-plugin/flare-strom-sfu 存在时才起它，不克隆的话这一项必然
+          # 报「plugin unavailable」，而那并不是核心链路坏了。
+          clone https://github.com/flare-im/flare-plugin.git "flare-plugin"
 
       # 与 ci.yml 同一套：契约由 .proto 生成，构建期需要 protobuf 编译器；
       # rdkafka-sys 会现场编译 librdkafka（C），需要 curl/sasl/ssl/zlib 开发头文件。
