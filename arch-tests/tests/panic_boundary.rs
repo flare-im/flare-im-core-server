@@ -56,7 +56,10 @@ fn strip_inline_test_modules(content: &str) -> String {
             continue;
         }
 
-        if pending_test_cfg && trimmed.starts_with("mod tests") {
+        // 只认 `mod tests` 会漏掉任何自定义命名的测试模块（例如
+        // `mod quic_port_probe_tests`），把测试里的 expect 误判成生产代码违规。
+        // 判据改成「带 #[cfg(test)] 的任意 mod」——这才是「这是测试代码」的真判据。
+        if pending_test_cfg && (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod ")) {
             skipping_test_module = true;
             brace_depth = brace_delta(line);
             if brace_depth <= 0 {
