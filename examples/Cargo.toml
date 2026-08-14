@@ -21,6 +21,11 @@ description = "flare-im-core 的可运行示例客户端"
 name = "hook_rate_limit"
 path = "hook_rate_limit.rs"
 
+# 同上，但演示 PostSend：拿到的是既成事实，只能观察不能否决。
+[[example]]
+name = "hook_audit_log"
+path = "hook_audit_log.rs"
+
 [[example]]
 name = "chatroom_client"
 path = "chatroom_client.rs"
