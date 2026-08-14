@@ -128,6 +128,18 @@ jobs:
           FLARE_SDK_ROOT: ${{ github.workspace }}/flare-im-core-sdk
         run: ./scripts/smoke_opensource.sh
 
+      # 能力插件是「装上就能用」这条承诺的全部内容：注册、权限、转发、注销
+      # 四处任意一处坏掉都不会有信号——单测覆盖不到跨进程链路。
+      # 需要 grpcurl，装它比重写一个 gRPC 客户端便宜。
+      - name: 安装 grpcurl
+        run: |
+          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin grpcurl
+
+      - name: 能力插件生命周期（5 项）
+        working-directory: flare-im-core
+        run: ./scripts/smoke_plugin_lifecycle.sh
+
       # 失败时把日志带出来。端到端失败最耗时的部分是「不知道哪一环断了」，
       # 服务日志能直接指出是验签、编排还是存储。
       - name: 收集日志（仅失败时）
