@@ -37,16 +37,25 @@ for d in "$CLIENT_SDK"/packages/*/; do
   [ "$skip" -eq 0 ] && platform_count=$((platform_count+1))
 done
 
+# 只认 components 这一个字段，不做「取不到就退回数顶层键」的兜底。
+# 那种兜底看着稳，实际会在结构变化时**静默给出一个错误的数字**——
+# 首次接入 CI 时它就返回了顶层键数（8），把一个本来正确的 README 判成不符。
 component_count="$(python3 -c "
-import json
+import json, sys
 d = json.load(open('$DESIGN/spec/components.json', encoding='utf-8'))
-print(len(d) if isinstance(d, list) else len(d.get('components', d)))
-" 2>/dev/null)"
+items = d.get('components') if isinstance(d, dict) else d
+if not isinstance(items, list):
+    sys.exit('components.json 里没有 components 数组')
+print(len(items))
+" 2>&1)"
 
-if [ -z "$component_count" ]; then
-  echo -e "${RED}✗ 读不出组件数（spec/components.json 结构变了？）${NC}"
-  exit 1
-fi
+case "$component_count" in
+  ''|*[!0-9]*)
+    echo -e "${RED}✗ 读不出组件数：$component_count${NC}"
+    echo "   spec/components.json 的结构可能变了——门禁宁可报错也不猜。"
+    exit 1
+    ;;
+esac
 
 fail=0
 check() {
