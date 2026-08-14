@@ -17,6 +17,12 @@ description = "flare-im-core 的可运行示例客户端"
 #
 # 开源插件样例：独立进程、gRPC 接核心，演示 PreSend 的拒绝语义。
 # 想写插件的人此前只有契约、没有能跑的起点。
+# 动态能力插件：独立进程、自注册、核心热发现——与 SFU 同一条路。
+# 与上面两个 hook 样例的区别是「装上就能用」，不必改配置重启核心。
+[[example]]
+name = "capability_link_preview"
+path = "capability_link_preview.rs"
+
 [[example]]
 name = "hook_rate_limit"
 path = "hook_rate_limit.rs"
@@ -62,6 +68,7 @@ chrono = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 uuid = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
