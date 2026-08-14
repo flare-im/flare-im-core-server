@@ -34,6 +34,10 @@ jobs:
           # 文档命令门禁要判定 example 归属（e2ee_demo 在客户端 SDK 仓）。
           # 不克隆它的话门禁会把「仓没检出」误报成「example 不存在」。
           clone https://github.com/flare-im/flare-im-core-sdk.git "../flare-im-core-sdk"
+          # README 数字门禁要数平台 SDK 与 UI 组件。缺了这两个仓，
+          # 门禁会「跳过」而不是「通过」——等于白接。浅克隆，代价很小。
+          clone https://github.com/flare-im/flare-im-core-client-sdk.git "../flare-im-core-client-sdk"
+          clone https://github.com/flare-im/flare-im-design.git "../flare-im-design"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,6 +59,12 @@ jobs:
       # 都在同级仓，却被写成本仓可直接执行的样子），且都在新人最先读的文档里。
       - name: 文档命令与仓库一致
         run: ./scripts/check_doc_commands.sh
+
+      # README 首屏那几个具体数字（平台 SDK 数、UI 组件数）是评估者最先核对的，
+      # 也最容易随时间变假——加一个平台、删一个组件，没有任何机制提醒你回来改。
+      # 数字对不上不会让任何测试变红，但会让读的人开始怀疑其余内容。
+      - name: README 数字与仓库一致
+        run: ./scripts/check_readme_numbers.sh
 
       # 格式先查：最快，失败得早，省掉后面的编译时间
       - name: rustfmt
@@ -92,6 +102,10 @@ jobs:
           # 文档命令门禁要判定 example 归属（e2ee_demo 在客户端 SDK 仓）。
           # 不克隆它的话门禁会把「仓没检出」误报成「example 不存在」。
           clone https://github.com/flare-im/flare-im-core-sdk.git "../flare-im-core-sdk"
+          # README 数字门禁要数平台 SDK 与 UI 组件。缺了这两个仓，
+          # 门禁会「跳过」而不是「通过」——等于白接。浅克隆，代价很小。
+          clone https://github.com/flare-im/flare-im-core-client-sdk.git "../flare-im-core-client-sdk"
+          clone https://github.com/flare-im/flare-im-design.git "../flare-im-design"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
