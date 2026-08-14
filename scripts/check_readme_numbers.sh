@@ -57,12 +57,28 @@ case "$component_count" in
     ;;
 esac
 
+# 同级仓可能停在与本仓不同的分支上。flare-im-design 的 main 与 dev 就相差
+# 4 个组件（111 / 107），CI 按当前分支名克隆，跑 dev 时数出来的是另一个值。
+#
+# 这种情况**不是 README 写错了**，把它判成失败会让本仓的 CI 被另一个仓的
+# 分支状态卡住。所以：数字对不上时先看看同级仓在哪个分支，若与本仓不同，
+# 降级为提示而不是失败。真正的「README 没跟上」仍会被抓到——那时两边同分支。
+DESIGN_BRANCH="$(git -C "$DESIGN" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+SELF_BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+
 fail=0
 check() {
   local file="$1" pattern="$2" actual="$3" label="$4"
   grep -q "$pattern" "$file" 2>/dev/null && return 0
+  local written
+  written="$(grep -oE "[0-9]+ 个${label}|[0-9]+ ${label}" "$file" 2>/dev/null | head -1)"
+  if [ "$DESIGN_BRANCH" != "$SELF_BRANCH" ] && [ "$DESIGN_BRANCH" != "unknown" ]; then
+    echo -e "  ${YELLOW}·${NC} $(basename "$file"): $label 数字为 $written，同级仓 flare-im-design"
+    echo "      当前在 $DESIGN_BRANCH 分支（本仓 $SELF_BRANCH），两边内容不同，跳过判定。"
+    return 0
+  fi
   echo -e "  ${RED}✗${NC} $(basename "$file"): $label 与实际不符（实际 $actual）"
-  grep -oE "[0-9]+ 个${label}|[0-9]+ ${label}" "$file" 2>/dev/null | head -1 | sed 's/^/      README 现写：/'
+  [ -n "$written" ] && echo "      README 现写：$written"
   fail=1
 }
 
