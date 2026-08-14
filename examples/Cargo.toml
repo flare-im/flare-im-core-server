@@ -15,6 +15,12 @@ description = "flare-im-core 的可运行示例客户端"
 # —— 而 start_server.sh 启动成功后打印的正是这条命令，scripts/start_client.sh
 # 也调用它。也就是说，照着服务端自己的指引走，最后一步必然撞墙。
 #
+# 开源插件样例：独立进程、gRPC 接核心，演示 PreSend 的拒绝语义。
+# 想写插件的人此前只有契约、没有能跑的起点。
+[[example]]
+name = "hook_rate_limit"
+path = "hook_rate_limit.rs"
+
 [[example]]
 name = "chatroom_client"
 path = "chatroom_client.rs"
@@ -49,6 +55,7 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
