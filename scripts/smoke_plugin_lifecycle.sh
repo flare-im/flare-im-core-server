@@ -85,6 +85,9 @@ if [ -x "$PLUGIN_BIN" ]; then
   LINK_PREVIEW_TENANT="$TENANT" \
     "$PLUGIN_BIN" >/tmp/flare-plugin-smoke.log 2>&1 &
 else
+  echo -e "${YELLOW}   注意：未找到预编译的插件二进制，回退到 cargo run${NC}"
+  echo "         首次编译可能超过 ${STEP_TIMEOUT}s，届时会误报「插件未注册」。"
+  echo "         预先构建：cargo build --manifest-path examples/Cargo.toml --example capability_link_preview"
   LINK_PREVIEW_ADDR="$PLUGIN_ADDR" \
   CAPABILITY_CORE_ADDR="http://$CAPABILITY_ADDR" \
   LINK_PREVIEW_TENANT="$TENANT" \
@@ -105,7 +108,13 @@ done
 if [ "$registered" -eq 1 ]; then
   note_pass "插件启动后自注册到核心"
 else
-  note_fail "插件未能在 ${STEP_TIMEOUT}s 内注册" "$(tail -3 /tmp/flare-plugin-smoke.log)"
+  # 日志为空是有意义的信号：说明插件进程压根没起来（多半是回退到 cargo run
+  # 且还在编译），而不是起来了但注册失败。两种情况的排查方向完全不同。
+  plugin_log="$(tail -3 /tmp/flare-plugin-smoke.log 2>/dev/null)"
+  if [ -z "$plugin_log" ]; then
+    plugin_log="插件日志为空——进程可能还没起来。若走的是 cargo run 回退路径，多半是仍在编译。"
+  fi
+  note_fail "插件未能在 ${STEP_TIMEOUT}s 内注册" "$plugin_log"
   echo -e "\n${RED}❌ 后续步骤依赖注册成功，中止${NC}"
   exit 1
 fi
