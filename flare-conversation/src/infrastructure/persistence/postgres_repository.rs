@@ -1260,7 +1260,8 @@ impl ConversationRepository for PostgresConversationRepository {
                 COALESCE(attributes, '{{}}'::jsonb) AS attributes,
                 joined_at,
                 COALESCE(nickname, '') AS nickname,
-                COALESCE(visible_from_seq, 0) AS visible_from_seq
+                COALESCE(visible_from_seq, 0) AS visible_from_seq,
+                COALESCE(mention_only, false) AS mention_only
             FROM conversation_participants
             WHERE tenant_id = $1
               AND conversation_id = $2
