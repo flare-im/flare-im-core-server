@@ -1114,7 +1114,7 @@ impl ConversationRepository for PostgresConversationRepository {
             r#"
             SELECT user_id, roles, muted, pinned, attributes,
                    COALESCE(visible_from_seq, 0) AS visible_from_seq,
-                COALESCE(mention_only, false) AS mention_only
+                   COALESCE(mention_only, false) AS mention_only
             FROM conversation_participants
             WHERE tenant_id = $1 AND conversation_id = $2
             "#,
@@ -1950,4 +1950,121 @@ mod last_message_preview_tests {
             (None, None)
         );
     }
+
+    /// SQL 的 SELECT 列与 `row.get("...")` 的列名必须在**同一个函数内**对得上。
+    ///
+    /// 2026-08-16 出过一次：`list_conversation_participants` 的映射读了
+    /// `row.get("mention_only")`，而同一函数的 SELECT 没有列它——加字段时改了结构体、
+    /// 漏了 SQL（同批加入的 `visible_from_seq` 两处都补了）。
+    ///
+    /// 代价远超一次查询失败：`row.get` 缺列是 **panic** 不是 Err，打挂 tokio worker 后，
+    /// 同一服务上**别的**在途 gRPC 调用会被连带打断成 `h2 protocol error`，
+    /// 而调用方（网关扩散）按 best-effort 吞掉——实时投递就这样悄悄降级，
+    /// 且是时序性的、不稳定复现，靠跑 E2E 抓不住。
+    ///
+    /// 所以守卫落在源码层：不连库、确定性、几毫秒。
+    /// **按函数切分是关键**——本文件另有 3 处正确的 `AS mention_only`，
+    /// 全局搜索会被它们盖过去，照样放行这个 bug。
+    #[test]
+    fn row_get_columns_are_selected_in_the_same_function() {
+        let src = include_str!("postgres_repository.rs");
+        // 只看生产代码：测试模块里满是示例字符串，会造成噪声误报。
+        let src = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+
+        let get_call = regex_lite_find_get_calls;
+
+        let mut chunks: Vec<(String, String)> = vec![("<file head>".into(), String::new())];
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            let is_method = line.starts_with("    ")
+                && !line.starts_with("     ")
+                && (trimmed.starts_with("fn ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("pub async fn "));
+            if is_method {
+                let name = trimmed
+                    .trim_start_matches("pub ")
+                    .trim_start_matches("async ")
+                    .trim_start_matches("fn ")
+                    .split('(')
+                    .next()
+                    .unwrap_or("?")
+                    .to_string();
+                chunks.push((name, String::new()));
+            }
+            let body = &mut chunks.last_mut().expect("at least one chunk").1;
+            body.push_str(line);
+            body.push('\n');
+        }
+
+        let mut problems = Vec::new();
+        for (fname, chunk) in &chunks {
+            let wanted = get_call(chunk);
+            if wanted.is_empty() {
+                continue;
+            }
+            // 只跟本函数内联的 SQL 比对（见 sql_literals 的注释）。
+            let sql = sql_literals(chunk);
+            if sql.is_empty() {
+                continue; // 本函数没有内联 SQL，无从比对
+            }
+            for col in wanted {
+                if !sql.contains(&col) {
+                    problems.push(format!(
+                        "{fname}: row.get(\"{col}\") 但同函数的 SQL 里没有这一列"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "SELECT 与 row.get 的列名漂移（改结构体时漏改 SQL）：\n{}",
+            problems.join("\n")
+        );
+    }
+
+    /// 取出一段代码里所有 `.get("X")` 的 X。
+    fn regex_lite_find_get_calls(chunk: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = chunk;
+        while let Some(at) = rest.find(".get(\"") {
+            let after = &rest[at + 6..];
+            match after.find('"') {
+                Some(end) => {
+                    out.push(after[..end].to_string());
+                    rest = &after[end..];
+                }
+                None => break,
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// 只取这段代码里的 **SQL 原始字符串**（`r#"..."#`）拼在一起。
+    ///
+    /// 不能拿整段 Rust 正文来找列名：结构体字面量写的是
+    /// `mention_only: row.get("mention_only")`，字段名本身就含该词，
+    /// 于是「SQL 里没选」也会被自己证明成「选了」——第一版就栽在这儿，
+    /// 把列删掉测试照样绿。
+    fn sql_literals(chunk: &str) -> String {
+        let mut out = String::new();
+        let mut rest = chunk;
+        while let Some(at) = rest.find("r#\"") {
+            let after = &rest[at + 3..];
+            match after.find("\"#") {
+                Some(end) => {
+                    out.push_str(&after[..end]);
+                    out.push('\n');
+                    rest = &after[end + 2..];
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
 }
