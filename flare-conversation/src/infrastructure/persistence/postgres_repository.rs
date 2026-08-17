@@ -2066,5 +2066,4 @@ mod last_message_preview_tests {
         }
         out
     }
-
 }
