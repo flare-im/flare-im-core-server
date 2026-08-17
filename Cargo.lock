@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core-base"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core-infra"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core-messaging"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core-runtime"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "flare-core-transport"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "flare-grpc-proto"
-version = "2.0.1"
+version = "2.1.0"
 dependencies = [
  "flare-proto",
  "prost",
@@ -1994,8 +1994,10 @@ dependencies = [
  "hex",
  "prometheus",
  "prost",
+ "prost-types",
  "rand 0.8.7",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -2212,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "flare-proto"
-version = "2.0.1"
+version = "2.1.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -2313,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "flare-server-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "flare-core-base",
  "flare-core-infra",
