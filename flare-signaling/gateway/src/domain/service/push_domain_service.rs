@@ -136,11 +136,40 @@ impl PushDomainService {
                 participants
             }
         };
-        for user_id in participants.iter() {
-            if let Ok(conns) = self.connection_query.list_user_connections(user_id).await {
-                for conn in conns {
+        // 这个循环**每条消息都会对全部参与者跑一遍**（订阅每次执行是有意的：
+        // 覆盖「成员在首次投递后才上线」的时序漏洞，见上面的注释）。
+        // 所以它的代价直接乘在群规模上——万人群就是每条消息一万次查询。
+        //
+        // 两处优化，都不改变订阅结果、因此不影响送达可靠性：
+        //
+        // 1. 用 `list_user_connection_ids` 而不是 `list_user_connections`：
+        //    后者会为每个连接额外 `get_connection().await` 组装设备/平台字段，
+        //    而这里只用 connection_id，那些字段拿到就丢。
+        // 2. 并发查询而不是串行 await：`join` 是幂等的，并发进入安全。
+        //    并发度设上限而不是无界，避免大群瞬间打出上万个并发任务
+        //    反而拖慢整体（无界并发在这里是「看起来更快」的陷阱）。
+        const SUBSCRIBE_LOOKUP_CONCURRENCY: usize = 64;
+        // 按固定大小分块、块内 join_all 并发，块间串行。
+        //
+        // 没用 `buffer_unordered`：这个函数被 gRPC handler 间接持有，
+        // 闭包同时借用 `&self` 与 `conversation_id` 时编译器推不出足够通用的
+        // 高阶生命周期（"implementation of FnOnce is not general enough"）。
+        // 分块写法等价、且并发上限一样明确，就不为了写法优雅去跟生命周期缠。
+        //
+        // 上限而非无界：大群下无界并发会瞬间铺开上万个任务，
+        // 调度开销反而吃掉收益——那是「看起来更快」的陷阱。
+        let query = &self.connection_query;
+        for chunk in participants.chunks(SUBSCRIBE_LOOKUP_CONCURRENCY) {
+            let looked_up = futures::future::join_all(
+                chunk
+                    .iter()
+                    .map(|user_id| query.list_user_connection_ids(user_id)),
+            )
+            .await;
+            for connection_ids in looked_up.into_iter().flatten() {
+                for connection_id in connection_ids {
                     self.conversation_subscriptions
-                        .join(conversation_id, &conn.connection_id);
+                        .join(conversation_id, &connection_id);
                 }
             }
         }

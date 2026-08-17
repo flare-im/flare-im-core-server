@@ -54,4 +54,13 @@ impl ConnectionQuery for ManagerConnectionQuery {
         let root = Arc::new(Context::root());
         self.query_user_connections(&root, user_id).await
     }
+
+    /// 直接读连接表，跳过读模型组装。
+    ///
+    /// `get_user_connections` 是分片 HashMap 的同步读，代价极低；
+    /// 而默认路径会为每个连接再做一次 `get_connection().await` 去拼
+    /// 设备/平台字段——订阅路径拿到后直接丢掉。
+    async fn list_user_connection_ids(&self, user_id: &str) -> Result<Vec<String>> {
+        Ok(self.manager.get_user_connections(user_id).await)
+    }
 }
