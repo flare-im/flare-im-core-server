@@ -276,11 +276,26 @@ impl MessageIngestService {
                 .allocate_seq(conversation_id, tenant_id)
                 .await;
         };
+        // 细分埋点：`allocate_seq` 此前只有总耗时，看不出 151ms（首触实测）
+        // 是花在这次跨服务 floor 查询上，还是花在后面的 seq 分配上。
+        // 少了这一层，只能靠读代码推断——而推断已经错过一次
+        // （把订阅循环当热点，实测毫无收益）。
+        let floor_start = Instant::now();
         let lookup = tokio::time::timeout(
             SEQ_FLOOR_RPC_TIMEOUT,
             provider.persisted_max_seq(ctx, tenant_id, conversation_id),
         )
         .await;
+        // 用结构化日志而不是 metrics：本 service 没有 metrics 依赖，
+        // 为一条埋点改构造签名（以及所有构造点与测试）不划算。
+        // 首触是低频事件（每会话一次），info 级不会刷屏。
+        tracing::info!(
+            conversation_id = %conversation_id,
+            tenant_id = %tenant_id,
+            floor_rpc_ms = floor_start.elapsed().as_millis() as u64,
+            outcome = if lookup.is_ok() { "ok" } else { "timeout" },
+            "seq floor rpc finished"
+        );
         let floor = match lookup {
             Ok(Ok(floor)) => floor,
             Ok(Err(error)) => {
@@ -316,10 +331,20 @@ impl MessageIngestService {
             }
         };
 
+        let alloc_start = Instant::now();
         let seq = self
             .sequence_allocator
             .allocate_seq_with_floor(conversation_id, tenant_id, floor)
             .await?;
+        // 与上面的 floor_rpc_ms 配对：两条加起来才是首触的完整开销。
+        // 只记总数（`allocate_seq` 阶段）看不出该优化 RPC 还是优化 Redis 写。
+        tracing::info!(
+            conversation_id = %conversation_id,
+            floor,
+            seq,
+            alloc_ms = alloc_start.elapsed().as_millis() as u64,
+            "seq allocated with floor"
+        );
 
         self.seq_floor_state
             .insert(cache_key, SeqFloorState::Checked)
