@@ -104,19 +104,26 @@ async fn invoke_once(
     ))
 }
 
-/// 按 capability 动态调用远程插件：
-/// - 优先健康实例；
-/// - 失败自动降级到下一个实例；
-/// - 全部失败时返回最后一次错误。
-pub async fn dispatch_remote_by_capability_id(
+/// 按 capability 动态调用远程插件，**候选实例由调用方传入**：
+/// 优先健康实例，失败自动降级到下一个，全部失败时返回最后一次错误。
+///
+/// 不在这里自己查路由簿：`list_filtered` 是全表扫描 + 逐个 clone 实例
+/// （含 declared_operations 向量与 labels 哈希），而上层为了判 `seat_model`
+/// 已经查过一次。两处各查一次就是每次分发扫两遍全表 —— 插件多起来后是纯浪费，
+/// 且这种回归**没有任何功能信号**：测试全绿、行为正确，只是慢。
+///
+/// 让调用方传候选，而不是把 seat_model 塞进 `CapabilityDispatchCommand`：
+/// 命令是**请求的描述**，不该携带路由查询的中间结果。
+pub async fn dispatch_remote_with_candidates(
     ctx: &Ctx,
     req: &CapabilityDispatchCommand,
     routes: &Arc<PluginRouteBook>,
+    candidates: Vec<RegisteredPluginInstance>,
     plugin_timeout: Duration,
     health_stale: Duration,
 ) -> Result<CapabilityDispatchResult> {
     let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());
-    let mut candidates = routes.list_filtered(&tenant_id, req.capability_id.as_str());
+    let mut candidates = candidates;
     if candidates.is_empty() {
         return Err(CapabilityError::NotRegistered(format!(
             "no plugin endpoint registered for capability {} (tenant={})",
@@ -182,7 +189,7 @@ mod declaration_tests {
     use flare_grpc_proto::capability::RegisteredPluginInstance;
     use flare_server_core::Context;
 
-    use super::dispatch_remote_by_capability_id;
+    use super::dispatch_remote_with_candidates;
     use crate::domain::capability::{CapabilityDispatchCommand, CapabilityError};
     use crate::infrastructure::capability::PluginRouteBook;
 
@@ -219,10 +226,14 @@ mod declaration_tests {
             payload: None,
             request_id: Some("r1".into()),
         };
-        dispatch_remote_by_capability_id(
+        // 与生产路径一致：调用方先查候选再分发。
+        let book = Arc::new(book);
+        let candidates = book.list_filtered("0", capability_id);
+        dispatch_remote_with_candidates(
             &ctx,
             &req,
-            &Arc::new(book),
+            &book,
+            candidates,
             Duration::from_millis(30),
             Duration::from_secs(30),
         )

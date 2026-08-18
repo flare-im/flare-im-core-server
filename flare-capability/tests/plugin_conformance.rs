@@ -295,3 +295,39 @@ fn every_policy_mutation_records_an_audit_event() {
          授权的授予/吊销/开关一旦无痕，计费争议就无从对账。"
     );
 }
+
+/// 分发路径上路由簿**只查一次**。
+///
+/// `list_filtered` 是全表扫描 + 逐个 clone 实例（含 declared_operations 向量与
+/// labels 哈希）。曾经有一版为了读 seat_model 在上层查一次、路由时又查一次，
+/// 每次分发扫两遍全表 —— 插件多起来后是纯浪费，而且这种回归**没有任何功能信号**，
+/// 测试全绿、行为正确，只是慢。
+///
+/// 所以用源码断言钉住：分发链路里 `list_filtered` 的调用点只允许有确定的几处。
+#[test]
+fn dispatch_path_looks_up_the_route_book_once() {
+    let dispatch =
+        fs::read_to_string(src_root().join("application/handler/capability_dispatch.rs"))
+            .expect("读取分发器");
+    let remote = fs::read_to_string(src_root().join("application/handler/remote_dispatch.rs"))
+        .expect("读取远端分发");
+
+    let in_dispatch = strip_comments(&strip_test_modules(&dispatch))
+        .matches("list_filtered")
+        .count();
+    assert_eq!(
+        in_dispatch, 1,
+        "分发器里 list_filtered 出现 {in_dispatch} 次；应当只查一次并把结果传下去"
+    );
+
+    // 远端分发**一次都不该查**：候选由调用方传入。
+    // 曾经留过一个「调用方没预先查」的兼容入口，但它除了测试没有任何调用方 ——
+    // 死代码留着只会让下一个人以为两条路径都还在用。
+    let in_remote = strip_comments(&strip_test_modules(&remote))
+        .matches("list_filtered")
+        .count();
+    assert_eq!(
+        in_remote, 0,
+        "远端分发里 list_filtered 出现 {in_remote} 次；候选应当全部由调用方传入"
+    );
+}

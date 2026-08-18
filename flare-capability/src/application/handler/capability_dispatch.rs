@@ -23,14 +23,15 @@ use flare_core_base::context::Ctx;
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result, SeatModel,
 };
+use flare_grpc_proto::capability::RegisteredPluginInstance;
+
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 
 /// 取该能力在本租户下注册的计费单位。
 ///
 /// 多个实例注册了同一能力却声明了不同单位时，取**最严格**的那个（per_user）：
 /// 授权判定上宁可多要一次授权，也不能因为某个实例声明宽松就放行。
-fn seat_model_of(routes: &Arc<PluginRouteBook>, tenant: &str, capability_id: &str) -> SeatModel {
-    let instances = routes.list_filtered(tenant, capability_id);
+fn seat_model_of(instances: &[RegisteredPluginInstance]) -> SeatModel {
     if instances.is_empty() {
         // 没有注册记录时不做租户级判定 —— 交给旧路径，最终会在路由阶段
         // 报「未注册」，那个错误比「未安装」更贴近真实原因。
@@ -75,7 +76,12 @@ pub async fn dispatch_capability_command(
     //
     // 之所以租户模型能从第一天就严格：它是新增语义，现存插件一个都没用它，
     // 不存在「升级当天全员被拒」的反转。迁移由各插件自己声明触发。
-    match seat_model_of(plugin_routes, &tenant, &req.capability_id) {
+    // 路由簿只查这一次：既用来判计费单位，也直接当分发候选。
+    // 此前这里查一次、下面路由再查一次，而 list_filtered 是全表扫描 +
+    // 逐个 clone 实例 —— 每次分发扫两遍全表纯属浪费。
+    let candidates = plugin_routes.list_filtered(&tenant, &req.capability_id);
+
+    match seat_model_of(&candidates) {
         SeatModel::Tenant => {
             policy
                 .ensure_tenant_capability_enabled(&tenant, &req.capability_id)
@@ -99,10 +105,11 @@ pub async fn dispatch_capability_command(
         }
     }
 
-    super::dispatch_remote_by_capability_id(
+    super::dispatch_remote_with_candidates(
         ctx,
         req,
         plugin_routes,
+        candidates,
         plugin_timeout,
         plugin_health_stale,
     )
@@ -125,6 +132,7 @@ mod tests {
         CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityDispatchRoute,
         CapabilityPolicyBackend, Result, UserCapabilityGrant,
     };
+
     use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 
     /// 放行一切的策略后端：这些用例验的是**路由选择**，不是授权。
