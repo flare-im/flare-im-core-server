@@ -264,3 +264,27 @@ pub trait CapabilityDispatchRoute: Send + Sync {
         req: &crate::dispatch::CapabilityDispatchCommand,
     ) -> CapabilityResult<crate::dispatch::CapabilityDispatchResult>;
 }
+
+/// 插件健康探针：**把「用哪种协议探活」也变成可注册的数据。**
+///
+/// 通用健康检查器原本内嵌着 `if capability_id == "rtc.media.control"` 与
+/// 一整段 SfuControl 客户端代码 —— 选择依据后来改成了插件声明的标签，
+/// 但实现仍然留在通用路径里。加第二种需要特殊探活语义的插件时，
+/// 还是只能回到那个文件里加分支。
+///
+/// 现在通用侧只做两件事：按插件声明的协议名找探针，找不到就用通用协议。
+///
+/// # 为什么探针拿的是 authority 而不是已建好的连接
+///
+/// 不同协议对连接的要求不同（超时、TLS、复用策略）。把建连交给探针自己，
+/// 通用侧就不必知道任何一种协议的连接细节 —— 这是 kind 专有数据保持
+/// 不透明的必要条件。
+#[async_trait]
+pub trait PluginHealthProbe: Send + Sync {
+    /// 协议名，与插件注册时 `labels["health_protocol"]` 的取值对应。
+    fn protocol(&self) -> &str;
+
+    /// 探活。`Err` 的内容会被记进路由簿的 `last_error`，要能指明原因。
+    async fn probe(&self, grpc_authority: &str, timeout: std::time::Duration)
+    -> Result<(), String>;
+}

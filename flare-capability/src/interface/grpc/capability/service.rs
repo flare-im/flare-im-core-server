@@ -17,8 +17,6 @@ use flare_grpc_proto::capability::{
     SetTenantCapabilitySwitchRequest, SetTenantCapabilitySwitchResponse,
     UserCapabilityGrant as ProtoGrant,
 };
-use flare_grpc_proto::sfu_control::HealthCheckRequest;
-use flare_grpc_proto::sfu_control::sfu_control_client::SfuControlClient;
 use flare_im_contracts::utils::normalize_tenant_id;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
@@ -26,6 +24,7 @@ use tonic::{Request, Response, Status};
 use super::administer::dispatch_hook_administer;
 use crate::application::handler::dispatch_capability_command;
 use crate::application::queries::list_registered_capabilities;
+use crate::domain::capability::PluginHealthProbe;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use crate::infrastructure::capability::plugin_contract::{
@@ -172,7 +171,11 @@ impl CapabilityGrpcServer {
     fn spawn_plugin_health_checker(&self) {
         let routes = Arc::clone(&self.plugin_routes);
         let runtime = Arc::clone(&self.runtime);
+        let registry = self.registry.clone();
         tokio::spawn(async move {
+            // 探针表在装配后即固定，取一次即可；每轮再取会让健康循环
+            // 反复抢注册表的读锁。
+            let probes = registry.health_probes().await;
             let mut ticker = tokio::time::interval(runtime.plugin_health_check_interval);
             loop {
                 ticker.tick().await;
@@ -185,6 +188,7 @@ impl CapabilityGrpcServer {
                             .labels
                             .get(LABEL_HEALTH_PROTOCOL)
                             .map(String::as_str),
+                        &probes,
                         runtime.plugin_call_timeout,
                     )
                     .await;
@@ -233,56 +237,56 @@ fn ts_from_chrono(dt: chrono::DateTime<Utc>) -> Timestamp {
 
 /// 按插件**声明**的健康协议做检查。
 ///
-/// 这里曾经写着 `if capability_id == "rtc.media.control"` —— 一个所有插件共用的
-/// 健康检查器，却认识某个具体能力 id。加第二种需要特殊健康语义的插件时，
-/// 只能继续往这里堆 if。
+/// 这里曾经内嵌着某个具体协议的客户端与一段 `if capability_id == ...`。
+/// 选择依据改成插件声明的标签之后，实现仍然留在通用路径里 —— 加第二种
+/// 特殊探活语义的插件时，还是只能回到这个文件加分支。
 ///
-/// 现在核心不问「你是不是 RTC」，而问「你声明了哪种健康协议」：
-/// 未声明 = 通用协议。插件要特殊语义，就在注册时用标签说出来。
+/// 现在通用侧只做两件事：按声明的协议名找已注册探针，找不到就用通用协议。
+/// 探针由组合根注册，通用侧对任何具体协议一无所知。
 async fn check_plugin_health(
     grpc_authority: &str,
     health_protocol: Option<&str>,
+    probes: &[Arc<dyn PluginHealthProbe>],
     timeout: std::time::Duration,
 ) -> Result<(), String> {
+    if let Some(protocol) = health_protocol
+        && let Some(probe) = probes.iter().find(|p| p.protocol() == protocol)
+    {
+        return probe.probe(grpc_authority, timeout).await;
+    }
+
+    // 声明了协议却没有对应探针：说明部署缺少该 kind 的装配。
+    // 这时**不能**静默走通用协议 —— 那会把「装配缺失」伪装成「健康」。
+    if let Some(protocol) = health_protocol {
+        return Err(format!(
+            "declared health_protocol {protocol} has no registered probe; \
+             deployment is missing this plugin kind's wiring"
+        ));
+    }
+
     let channel = tokio::time::timeout(timeout, resolve_plugin_channel(grpc_authority))
         .await
         .map_err(|_| format!("plugin channel resolve timeout: {grpc_authority}"))??;
+    let mut client = ExtensionPluginClient::new(channel);
+    let request = Request::new(GenericRequest {
+        operation: "flare.capability.v1.health_check".to_string(),
+        metadata: std::collections::HashMap::new(),
+        payload: None,
+        request_id: uuid::Uuid::new_v4().to_string(),
+    });
 
-    if health_protocol == Some(HEALTH_PROTOCOL_SFU_CONTROL) {
-        let mut client = SfuControlClient::new(channel);
-        let request = Request::new(HealthCheckRequest {});
-        let response = tokio::time::timeout(timeout, client.health_check(request))
-            .await
-            .map_err(|_| "sfu health_check timeout".to_string())?
-            .map_err(|e| e.to_string())?
-            .into_inner();
-        if response.draining {
-            Err("sfu health_check: instance is draining".to_string())
-        } else {
-            Ok(())
-        }
+    let response = tokio::time::timeout(timeout, client.call(request))
+        .await
+        .map_err(|_| "plugin health_check timeout".to_string())?
+        .map_err(|e| e.to_string())?
+        .into_inner();
+    if response.ok {
+        Ok(())
     } else {
-        let mut client = ExtensionPluginClient::new(channel);
-        let request = Request::new(GenericRequest {
-            operation: "flare.capability.v1.health_check".to_string(),
-            metadata: std::collections::HashMap::new(),
-            payload: None,
-            request_id: uuid::Uuid::new_v4().to_string(),
-        });
-
-        let response = tokio::time::timeout(timeout, client.call(request))
-            .await
-            .map_err(|_| "plugin health_check timeout".to_string())?
-            .map_err(|e| e.to_string())?
-            .into_inner();
-        if response.ok {
-            Ok(())
-        } else {
-            Err(format!(
-                "plugin health_check returned error: {} {}",
-                response.error_code, response.error_message
-            ))
-        }
+        Err(format!(
+            "plugin health_check returned error: {} {}",
+            response.error_code, response.error_message
+        ))
     }
 }
 

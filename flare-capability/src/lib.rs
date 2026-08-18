@@ -29,7 +29,6 @@ pub mod interface;
 
 pub use flare_im_capability_core as capability_core;
 
-
 // Re-export Hook 引擎常用类型（稳定 crate 根路径）
 pub use application::commands::materialize_hook_execution_plan;
 pub use application::queries::{HookIntegrationChannelDoc, list_hook_integration_channels};

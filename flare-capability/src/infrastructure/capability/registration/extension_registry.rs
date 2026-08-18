@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::domain::capability::{
-    CapabilityDispatchRoute, DynExtensionOperationHandler, PreSendGuard, RecipientResolver,
-    RtcCapability,
+    CapabilityDispatchRoute, DynExtensionOperationHandler, PluginHealthProbe, PreSendGuard,
+    RecipientResolver, RtcCapability,
 };
 use crate::interface::grpc::ExtensionPluginRouter;
 
@@ -26,6 +26,8 @@ pub struct RegistryInner {
     /// 分发路由表：**核心不认识任何具体插件**，只按注册顺序询问谁接管。
     /// 由组合根装配（例如注册 `RtcDispatchRoute`），空表时全部走远端插件路由。
     pub dispatch_routes: Vec<Arc<dyn CapabilityDispatchRoute>>,
+    /// 健康探针表：协议名 → 探针。通用检查器据此选实现，自己不认识任何协议。
+    pub health_probes: Vec<Arc<dyn PluginHealthProbe>>,
 }
 
 impl CapabilityExtensionRegistry {
@@ -54,6 +56,15 @@ impl CapabilityExtensionRegistry {
 
     pub async fn dispatch_routes(&self) -> Vec<Arc<dyn CapabilityDispatchRoute>> {
         self.inner.read().await.dispatch_routes.clone()
+    }
+
+    /// 注册一个健康探针。同名协议后注册的覆盖先注册的由调用方自己保证不冲突。
+    pub async fn register_health_probe(&self, probe: Arc<dyn PluginHealthProbe>) {
+        self.inner.write().await.health_probes.push(probe);
+    }
+
+    pub async fn health_probes(&self) -> Vec<Arc<dyn PluginHealthProbe>> {
+        self.inner.read().await.health_probes.clone()
     }
 
     pub async fn register_pre_send_guard(&self, guard: Arc<dyn PreSendGuard>) {

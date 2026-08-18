@@ -45,10 +45,16 @@ pub async fn init_capability_extension_stack(
     // 「本部署包含 RTC」是装配决策，不是核心知识 —— 换个部署不带 RTC，
     // 这里不注册即可，核心一行都不用改。
     {
-        use crate::infrastructure::capability::routing::RtcDispatchRoute;
+        use crate::infrastructure::capability::routing::{RtcDispatchRoute, SfuControlHealthProbe};
         let rtc_router = registry.rtc_router().await;
         registry
             .register_dispatch_route(Arc::new(RtcDispatchRoute::new(rtc_router)))
+            .await;
+        // 媒体端点在登记时声明 health_protocol=sfu_control；这里注册对应探针。
+        // 漏注册不会静默降级成通用探活 —— 通用检查器会直接把这类实例判为
+        // 「声明的协议没有探针」，因为静默降级等于把装配缺失伪装成健康。
+        registry
+            .register_health_probe(Arc::new(SfuControlHealthProbe))
             .await;
     }
 
