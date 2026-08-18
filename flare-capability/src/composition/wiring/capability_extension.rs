@@ -61,9 +61,18 @@ pub async fn init_capability_extension_stack(
     let runtime = Arc::new(CapabilityRuntimeConfig::from_sources(
         runtime_config_file.as_deref(),
     ));
+    // 审计随 DB 挂载：没有 DB 就没有审计。这本身是合理的降级（开发期不该被
+    // 强制起一个库），但**不能静默** —— 授权的授予/吊销/租户开关一旦无痕，
+    // 计费争议就无从对账，而运维往往到出事才发现这个部署根本没在记。
     let audit = db_pool
         .as_ref()
         .map(|p| Arc::new(PostgresCapabilityAuditLog::new(p.clone())));
+    if audit.is_none() {
+        tracing::warn!(
+            "capability policy audit is DISABLED (no db_pool): grant / revoke / \
+             tenant_switch will leave no trace. Do not run a billed deployment this way."
+        );
+    }
     let rate_limiter = runtime
         .dispatch_max_per_minute
         .filter(|&n| n > 0)

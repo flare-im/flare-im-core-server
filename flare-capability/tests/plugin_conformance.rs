@@ -253,3 +253,45 @@ fn the_scanner_actually_catches_a_violation() {
         "注释被误判成违规，会逼人删掉解释历史的注释"
     );
 }
+
+/// 每一个**策略变更** RPC 都必须留痕。
+///
+/// 今天 grant / revoke / tenant_switch 三处都记了 —— 我第一次核对时曾误判成
+/// 「只有吊销留痕」，因为按函数名向后取了固定行数的窗口，而审计调用落在窗口外。
+/// 这条测试的价值正在于此：把「有没有留痕」变成机器判定，而不是靠人用 grep
+/// 取一段窗口来目测。
+///
+/// 判定方式：策略变更类 RPC 的函数体里必须出现 `record_policy_event`。
+/// 新增第四个变更点却忘了审计时，这里会红。
+#[test]
+fn every_policy_mutation_records_an_audit_event() {
+    let service = src_root().join("interface/grpc/capability/service.rs");
+    // 去注释：否则把审计调用注释掉也能骗过这条门禁。
+    let source = strip_comments(&fs::read_to_string(&service).expect("读取 service.rs"));
+
+    // 策略变更 RPC：改变了「谁能用什么」的持久状态。
+    const MUTATIONS: &[&str] = &[
+        "async fn grant_user_capability",
+        "async fn revoke_user_capability",
+        "async fn set_tenant_capability_switch",
+    ];
+
+    let mut missing = Vec::new();
+    for m in MUTATIONS {
+        let start = source
+            .find(m)
+            .unwrap_or_else(|| panic!("找不到策略变更 RPC：{m}（改名了？测试要跟着改）"));
+        // 取到下一个 `    async fn ` 为止，即该函数的完整体，而不是固定行数窗口。
+        let rest = &source[start + m.len()..];
+        let end = rest.find("\n    async fn ").unwrap_or(rest.len());
+        if !rest[..end].contains("record_policy_event") {
+            missing.push(*m);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "以下策略变更没有留痕：{missing:?}\n\
+         授权的授予/吊销/开关一旦无痕，计费争议就无从对账。"
+    );
+}
