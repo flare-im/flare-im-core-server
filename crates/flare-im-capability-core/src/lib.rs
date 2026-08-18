@@ -23,7 +23,7 @@ pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHa
 pub use grant::UserCapabilityGrant;
 pub use ports::{
     CapabilityDispatchRoute, CapabilityPolicyBackend, PluginHealthProbe, PreSendGuard,
-    PreSendGuardPipeline, RecipientResolver, RtcCapability,
+    PreSendGuardPipeline, RecipientResolver, RtcCapability, SeatModel,
 };
 pub use recipient::{RecipientResolveRequest, RecipientResolveResult};
 pub use rtc::{

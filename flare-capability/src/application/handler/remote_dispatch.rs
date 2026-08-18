@@ -204,6 +204,8 @@ mod declaration_tests {
             manifest_sha256: String::new(),
             declared_operations: declared.iter().map(|s| s.to_string()).collect(),
             unverified: declared.is_empty(),
+            // 这些用例验的是声明边界，不涉及计费单位 —— 留空即旧语义。
+            seat_model: String::new(),
         }
     }
 

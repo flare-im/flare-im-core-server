@@ -195,6 +195,38 @@ pub trait RtcCapability: Send + Sync {
     }
 }
 
+/// 计费/授权单位。
+///
+/// 决定「装了就能用」还是「还要逐人发放」。由插件在注册时声明 ——
+/// 平台不替插件决定它该怎么卖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatModel {
+    /// 装了全员可用：租户开关即安装状态。绝大多数插件属于这一类。
+    Tenant,
+    /// 还需逐人授权：留给有边际成本的（AI 按 token）与需合规隔离的（DLP）。
+    PerUser,
+    /// 未声明：**沿用旧语义**（要求用户授权）。
+    ///
+    /// 单列一个取值而不是默认成 PerUser，是因为两者要区别对待：
+    /// 「明确声明按席位」是产品决策，「没声明」是迁移中间态 —— 前者稳定，
+    /// 后者应当随插件逐个消失。混在一起就看不出还剩多少插件没迁。
+    Unspecified,
+}
+
+impl SeatModel {
+    /// 注册时上报的是字符串（协议里可选），这里做一次归一。
+    ///
+    /// 无法识别的取值按 `Unspecified` 处理而不是报错：注册契约的字段是可选的，
+    /// 一个拼错的取值不该让插件注册失败 —— 它只会退回旧语义，是安全方向。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "tenant" => Self::Tenant,
+            "per_user" => Self::PerUser,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
 #[async_trait]
 pub trait CapabilityPolicyBackend: Send + Sync {
     async fn ensure_dispatch_allowed(
@@ -203,6 +235,26 @@ pub trait CapabilityPolicyBackend: Send + Sync {
         user_id: &str,
         capability_id: &str,
     ) -> CapabilityResult<()>;
+
+    /// 租户级校验：只看「这个租户装没装这个能力」，不看用户授权。
+    ///
+    /// 供 `SeatModel::Tenant` 的插件使用。语义与按人那条的关键差别是
+    /// **租户开关缺失即拒**（没装就是没装），而不是像旧语义那样「不设就放行」。
+    ///
+    /// 这里之所以能从第一天就严格：租户模型是新增语义，现存插件一个都没用它，
+    /// 所以不存在「升级当天全员被拒」的反转风险。迁移由各插件自己声明触发。
+    ///
+    /// 默认实现返回未支持 —— 后端必须显式实现才能承接租户模型的插件。
+    /// 默认返回 Ok 是危险的：那会让没实现的后端**静默放行所有租户级调用**。
+    async fn ensure_tenant_capability_enabled(
+        &self,
+        _tenant_id: &str,
+        _capability_id: &str,
+    ) -> CapabilityResult<()> {
+        Err(CapabilityError::NotSupported(
+            "this policy backend does not implement tenant-scoped entitlement".into(),
+        ))
+    }
 
     async fn list_user_grants(
         &self,

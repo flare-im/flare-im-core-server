@@ -46,6 +46,8 @@ pub fn register_plugin_route(
         manifest_sha256: String::new(),
         declared_operations: Vec::new(),
         unverified: true,
+        // 内部装配的端点不声明计费单位 —— 沿用旧语义（要求用户授权）。
+        seat_model: String::new(),
     };
     plugin_routes.upsert(tenant_id, instance);
     tracing::info!(

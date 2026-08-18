@@ -156,6 +156,8 @@ impl CapabilityGrpcServer {
                 manifest_sha256: String::new(),
                 declared_operations: Vec::new(),
                 unverified: true,
+                // 配置发现来的端点没有清单，也就无从得知计费单位：沿用旧语义。
+                seat_model: String::new(),
             };
             self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
             tracing::trace!(
@@ -634,6 +636,7 @@ impl CapabilityService for CapabilityGrpcServer {
             manifest_sha256: r.manifest_sha256,
             declared_operations,
             unverified,
+            seat_model: r.seat_model,
         };
         self.plugin_routes.upsert(r.tenant_id.as_str(), instance);
         Ok(Response::new(RegisterPluginEndpointResponse {

@@ -128,6 +128,33 @@ impl InMemoryCapabilityGrants {
         false
     }
 
+    /// 租户级校验：只看「装没装」。
+    ///
+    /// 与按人那条的关键差别：**开关缺失即拒**。旧语义里「不设开关」意味着放行，
+    /// 那是为了不打断既有部署；而租户模型是新增的，从第一天就该表达
+    /// 「没装 = 不能用」，否则「安装」这个动作就没有意义。
+    pub fn check_tenant_enabled(&self, tenant_id: &str, capability_id: &str) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        if !self.global_enabled.load(Ordering::Relaxed) {
+            return Err(CapabilityError::PolicyDenied(
+                "global capability switch is disabled".into(),
+            ));
+        }
+        match self
+            .tenant_capability_switches
+            .get(&(tenant_id.clone(), capability_id.to_string()))
+            .map(|v| *v)
+        {
+            Some(true) => Ok(()),
+            Some(false) => Err(CapabilityError::PolicyDenied(format!(
+                "capability {capability_id} is disabled for tenant {tenant_id}"
+            ))),
+            None => Err(CapabilityError::PolicyDenied(format!(
+                "capability {capability_id} is not installed for tenant {tenant_id}"
+            ))),
+        }
+    }
+
     /// dispatch 前校验（tenant 开关 + 用户授权）
     pub fn check_dispatch_allowed(
         &self,
@@ -168,6 +195,14 @@ impl CapabilityPolicyBackend for InMemoryCapabilityGrants {
         capability_id: &str,
     ) -> Result<()> {
         self.check_dispatch_allowed(tenant_id, user_id, capability_id)
+    }
+
+    async fn ensure_tenant_capability_enabled(
+        &self,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> Result<()> {
+        self.check_tenant_enabled(tenant_id, capability_id)
     }
 
     async fn list_user_grants(
@@ -217,5 +252,64 @@ impl CapabilityPolicyBackend for InMemoryCapabilityGrants {
     ) -> Result<()> {
         InMemoryCapabilityGrants::set_tenant_capability(self, tenant_id, capability_id, enabled);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod seat_model_tests {
+    use super::InMemoryCapabilityGrants;
+
+    const CAP: &str = "social.moments.feed";
+
+    /// 租户模型：**开关缺失即拒**。
+    ///
+    /// 这是与旧语义最关键的差别。旧语义里「不设开关」意味着放行——那是为了
+    /// 不打断既有部署；而租户模型的整个意义就是「安装」这个动作要有效力，
+    /// 不设即未安装。
+    #[test]
+    fn tenant_scope_denies_when_never_installed() {
+        let g = InMemoryCapabilityGrants::new();
+        assert!(g.check_tenant_enabled("0", CAP).is_err(), "没装就该拒");
+    }
+
+    #[test]
+    fn tenant_scope_allows_after_install() {
+        let g = InMemoryCapabilityGrants::new();
+        g.set_tenant_capability("0", CAP, true);
+        assert!(g.check_tenant_enabled("0", CAP).is_ok(), "装了就该放行");
+    }
+
+    /// 停用与从未安装都拒，但**理由不同** —— 运维排查时这两者的动作完全不一样：
+    /// 前者去问谁停用了，后者去装。
+    #[test]
+    fn disabled_and_never_installed_report_different_reasons() {
+        let g = InMemoryCapabilityGrants::new();
+        let never = g.check_tenant_enabled("0", CAP).unwrap_err().to_string();
+        g.set_tenant_capability("0", CAP, false);
+        let disabled = g.check_tenant_enabled("0", CAP).unwrap_err().to_string();
+
+        assert!(never.contains("not installed"), "实际: {never}");
+        assert!(disabled.contains("disabled"), "实际: {disabled}");
+        assert_ne!(never, disabled, "两种拒绝必须能区分");
+    }
+
+    /// 租户模型下**不看用户授权** —— 装了就全员可用。
+    #[test]
+    fn tenant_scope_ignores_user_grants() {
+        let g = InMemoryCapabilityGrants::new();
+        g.set_tenant_capability("0", CAP, true);
+        // 谁都没授权，但租户装了 —— 任意用户都该放行。
+        assert!(g.check_tenant_enabled("0", CAP).is_ok());
+        // 而按人那条在同样状态下仍然拒 —— 两条语义确实是分开的。
+        assert!(g.check_dispatch_allowed("0", "anyone", CAP).is_err());
+    }
+
+    /// 全局开关高于一切：关掉后连装过的租户也拒。
+    #[test]
+    fn global_switch_overrides_tenant_install() {
+        let g = InMemoryCapabilityGrants::new();
+        g.set_tenant_capability("0", CAP, true);
+        g.set_global_enabled(false);
+        assert!(g.check_tenant_enabled("0", CAP).is_err());
     }
 }

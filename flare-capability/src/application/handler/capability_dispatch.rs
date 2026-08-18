@@ -21,9 +21,33 @@ use std::time::Duration;
 use flare_core_base::context::Ctx;
 
 use crate::domain::capability::{
-    CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result,
+    CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result, SeatModel,
 };
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
+
+/// 取该能力在本租户下注册的计费单位。
+///
+/// 多个实例注册了同一能力却声明了不同单位时，取**最严格**的那个（per_user）：
+/// 授权判定上宁可多要一次授权，也不能因为某个实例声明宽松就放行。
+fn seat_model_of(routes: &Arc<PluginRouteBook>, tenant: &str, capability_id: &str) -> SeatModel {
+    let instances = routes.list_filtered(tenant, capability_id);
+    if instances.is_empty() {
+        // 没有注册记录时不做租户级判定 —— 交给旧路径，最终会在路由阶段
+        // 报「未注册」，那个错误比「未安装」更贴近真实原因。
+        return SeatModel::Unspecified;
+    }
+    let models: Vec<SeatModel> = instances
+        .iter()
+        .map(|i| SeatModel::parse(&i.seat_model))
+        .collect();
+    if models.contains(&SeatModel::PerUser) {
+        return SeatModel::PerUser;
+    }
+    if models.contains(&SeatModel::Unspecified) {
+        return SeatModel::Unspecified;
+    }
+    SeatModel::Tenant
+}
 
 /// `CapabilityService.Dispatch` 的应用入口：装配端口后调用领域服务。
 pub async fn dispatch_capability_command(
@@ -42,9 +66,27 @@ pub async fn dispatch_capability_command(
 
     // 授权是 fail-closed：拒绝就是拒绝，不降级。
     // （可用性类失败才降级——那发生在下面各后端内部的超时/健康判定里。）
-    policy
-        .ensure_dispatch_allowed(&tenant, &user, &req.capability_id)
-        .await?;
+    //
+    // 走哪条校验由**插件自己声明的计费单位**决定，平台不替插件决定它怎么卖：
+    //
+    //   tenant   装了就全员可用 —— 只看租户开关，且**开关缺失即拒**（没装就是没装）
+    //   per_user 还需逐人授权 —— 旧语义
+    //   未声明   沿用旧语义，让现有插件行为一字不变
+    //
+    // 之所以租户模型能从第一天就严格：它是新增语义，现存插件一个都没用它，
+    // 不存在「升级当天全员被拒」的反转。迁移由各插件自己声明触发。
+    match seat_model_of(plugin_routes, &tenant, &req.capability_id) {
+        SeatModel::Tenant => {
+            policy
+                .ensure_tenant_capability_enabled(&tenant, &req.capability_id)
+                .await?;
+        }
+        SeatModel::PerUser | SeatModel::Unspecified => {
+            policy
+                .ensure_dispatch_allowed(&tenant, &user, &req.capability_id)
+                .await?;
+        }
+    }
 
     for route in registry.dispatch_routes().await {
         if route.matches(&req.capability_id) {

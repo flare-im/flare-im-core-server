@@ -118,6 +118,31 @@ impl PostgresCapabilityPolicy {
         Ok(row.map(|r| r.0).unwrap_or(true))
     }
 
+    /// 取租户开关的**原值**：`None` = 从未安装，`Some(false)` = 装过但停用。
+    ///
+    /// 与 `tenant_capability_disabled` 的区别正是这两者的区分 —— 后者把
+    /// 「没装」和「装了没停用」都当成「不禁止」，那是旧语义。租户模型必须
+    /// 分得清，否则「安装」这个动作没有意义。
+    async fn tenant_capability_switch(
+        &self,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> Result<Option<bool>> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        let row: Option<(bool,)> = sqlx::query_as(
+            r#"
+            SELECT enabled FROM public.capability_tenant_switches
+            WHERE tenant_id = $1 AND capability_id = $2
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(capability_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| CapabilityError::System(e.to_string()))?;
+        Ok(row.map(|(enabled,)| enabled))
+    }
+
     async fn tenant_capability_disabled(
         &self,
         tenant_id: &str,
@@ -168,6 +193,31 @@ impl PostgresCapabilityPolicy {
 
 #[async_trait]
 impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
+    async fn ensure_tenant_capability_enabled(
+        &self,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        if !self.load_global_enabled().await? {
+            return Err(CapabilityError::PolicyDenied(
+                "global capability switch is disabled".into(),
+            ));
+        }
+        match self
+            .tenant_capability_switch(&tenant_id, capability_id)
+            .await?
+        {
+            Some(true) => Ok(()),
+            Some(false) => Err(CapabilityError::PolicyDenied(format!(
+                "capability {capability_id} is disabled for tenant {tenant_id}"
+            ))),
+            None => Err(CapabilityError::PolicyDenied(format!(
+                "capability {capability_id} is not installed for tenant {tenant_id}"
+            ))),
+        }
+    }
+
     async fn ensure_dispatch_allowed(
         &self,
         tenant_id: &str,
