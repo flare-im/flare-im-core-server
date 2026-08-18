@@ -66,6 +66,12 @@ jobs:
       - name: README 数字与仓库一致
         run: ./scripts/check_readme_numbers.sh
 
+      # Hook 契约文档是外部作者照着实现的依据。文档多写一个 operation，
+      # 照做的人永远收不到调用；适配器多派发一个而文档没写，外部作者
+      # 根本不知道有这个扩展点。两个方向都没有运行时信号。
+      - name: Hook 契约文档与适配器一致
+        run: ./scripts/check_hook_contract.sh
+
       # 格式先查：最快，失败得早，省掉后面的编译时间
       - name: rustfmt
         run: cargo fmt --all -- --check

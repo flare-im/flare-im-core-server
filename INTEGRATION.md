@@ -212,6 +212,12 @@ Three registration methods are available — config file, dynamic API (database)
 centre; transports are gRPC, WebHook or a local plugin. See
 [`flare-capability/README.md`](./flare-capability/README.md).
 
+Writing a gRPC hook plugin: [`docs/HOOK-PLUGIN-CONTRACT.md`](./docs/HOOK-PLUGIN-CONTRACT.md)
+is the wire contract — the four operations that actually reach a remote plugin,
+the protobuf payload types, and what `pre_send` must return when it denies.
+Runnable references: [`examples/hook_rate_limit.rs`](./examples/hook_rate_limit.rs)
+and [`examples/hook_audit_log.rs`](./examples/hook_audit_log.rs).
+
 > Hooks have a timeout (5 s by default), so a dead endpoint of yours won't drag the whole
 > message path down with it — but **whether a timeout allows or rejects depends on how you
 > configure it**, and that is worth confirming before production.

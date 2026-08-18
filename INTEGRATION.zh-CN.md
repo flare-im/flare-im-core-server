@@ -200,6 +200,12 @@ Hook 是**同步拦截**：Flare 在关键节点（如 `pre_send`）回调你的
 三种注册方式任选：配置文件、动态 API（数据库）、配置中心；传输侧支持 gRPC、
 WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`](./flare-capability/README.md)。
 
+写一个 gRPC hook 插件：[`docs/HOOK-PLUGIN-CONTRACT.md`](./docs/HOOK-PLUGIN-CONTRACT.md)
+是线上契约——真正会派发给远程插件的四个 operation、protobuf 载荷类型、
+以及 `pre_send` 拒绝时必须回什么。可运行参照：
+[`examples/hook_rate_limit.rs`](./examples/hook_rate_limit.rs)、
+[`examples/hook_audit_log.rs`](./examples/hook_audit_log.rs)。
+
 > Hook 有超时控制（默认 5s），你的接口挂了不会把消息链路一起拖死 ——
 > 但**超时的默认行为是放行还是拒绝，取决于你怎么配**，上生产前务必确认这一项。
 
