@@ -235,6 +235,15 @@ async fn register(core_addr: &str, tenant: &str, authority: &str) -> Result<(), 
             grpc_authority: authority.to_string(),
             labels,
             request_id: uuid::Uuid::new_v4().to_string(),
+            // 注册契约 v2：填满这些字段才是 verified 的实例。
+            // 留空协议上也接受，但实例会被标成 unverified —— 那样
+            // declared_operations 这条边界对它就无从强制了。
+            plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+            api_version: "1".to_string(),
+            manifest_sha256: String::new(),
+            declared_operations: vec![CAPABILITY_ID.to_string()],
+            // 装了就全员可用。链接预览没有按人计费的边际成本。
+            seat_model: "tenant".to_string(),
         })
         .await
         .map_err(|e| format!("注册失败：{e}"))?;
