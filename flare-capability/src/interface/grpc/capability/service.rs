@@ -138,6 +138,13 @@ impl CapabilityGrpcServer {
                 capability_id: ep.capability_id.clone(),
                 grpc_authority: ep.discovery_route_authority(),
                 labels: ep.labels.clone(),
+                // 配置发现来的端点没有清单信息：如实标为 unverified，
+                // 而不是伪造一份声明——否则「已验证」这个状态就失去意义了。
+                plugin_version: String::new(),
+                api_version: String::new(),
+                manifest_sha256: String::new(),
+                declared_operations: Vec::new(),
+                unverified: true,
             };
             self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
             tracing::trace!(
@@ -567,16 +574,48 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.grpc_authority.is_empty() {
             return Err(Status::invalid_argument("grpc_authority required"));
         }
+        // 注册契约 v2：声明缺失时降级为 unverified 而不是拒绝。
+        //
+        // 这里是兼容窗口的关键位置——要求必填的话，核心升级的瞬间所有已部署
+        // 插件都会注册失败。降级 + 告警，让新旧插件能在同一集群共存。
+        let declared_operations = r.declared_operations;
+        let unverified = declared_operations.is_empty();
+        if unverified {
+            tracing::warn!(
+                tenant_id = %r.tenant_id,
+                plugin_id = %r.plugin_id,
+                capability_id = %r.capability_id,
+                "plugin registered without declared_operations;                  running unverified — declaration cannot be enforced"
+            );
+        } else if !declared_operations.iter().any(|op| op == &r.capability_id) {
+            // 声明了却不包含自己注册的 capability_id —— 这是清单与注册对不上，
+            // 属于配置错误，早拒早发现，而不是等第一次调用时报 unknown op。
+            return Err(Status::invalid_argument(format!(
+                "capability_id {} not present in declared_operations {:?}",
+                r.capability_id, declared_operations
+            )));
+        }
+
         let instance = RegisteredPluginInstance {
             plugin_id: r.plugin_id,
             capability_id: r.capability_id,
             grpc_authority: r.grpc_authority,
             labels: r.labels,
+            plugin_version: r.plugin_version,
+            api_version: r.api_version,
+            manifest_sha256: r.manifest_sha256,
+            declared_operations,
+            unverified,
         };
         self.plugin_routes.upsert(r.tenant_id.as_str(), instance);
         Ok(Response::new(RegisterPluginEndpointResponse {
             accepted: true,
-            message: "registered".into(),
+            message: if unverified {
+                "registered (unverified)"
+            } else {
+                "registered"
+            }
+            .into(),
         }))
     }
 
