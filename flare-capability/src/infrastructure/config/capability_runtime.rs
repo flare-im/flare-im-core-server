@@ -195,7 +195,8 @@ impl CapabilityRuntimeConfig {
             .iter()
             .filter(|ep| {
                 let plugin_match = !ep.plugin_id.trim().is_empty();
-                let capability_match = ep.capability_id.trim() == "rtc.media.control";
+                let capability_match = ep.capability_id.trim()
+                    == crate::infrastructure::capability::plugin_contract::MEDIA_CONTROL_CAPABILITY_ID;
                 plugin_match
                     && capability_match
                     && !ep.tenant_id.trim().is_empty()

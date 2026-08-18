@@ -28,6 +28,9 @@ use crate::application::handler::dispatch_capability_command;
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
+use crate::infrastructure::capability::plugin_contract::{
+    HEALTH_PROTOCOL_SFU_CONTROL, LABEL_HEALTH_PROTOCOL,
+};
 use crate::infrastructure::capability::{
     CapabilityExtensionRegistry, DispatchRateLimiter, PluginRouteBook,
 };
@@ -133,11 +136,20 @@ impl CapabilityGrpcServer {
             );
         }
         for ep in endpoints {
+            // 发现来的媒体控制端点同样要声明健康协议 —— 它们是被
+            // `media_control_endpoints()` 按能力 id 选出来的，配置里未必写了标签；
+            // 漏声明会让健康检查静默退化成通用协议，丢掉 draining 语义。
+            // 用 entry().or_insert 而非直接插入：配置里显式写了的以配置为准。
+            let mut labels = ep.labels.clone();
+            labels
+                .entry(LABEL_HEALTH_PROTOCOL.to_string())
+                .or_insert_with(|| HEALTH_PROTOCOL_SFU_CONTROL.to_string());
+
             let instance = RegisteredPluginInstance {
                 plugin_id: ep.plugin_id.clone(),
                 capability_id: ep.capability_id.clone(),
                 grpc_authority: ep.discovery_route_authority(),
-                labels: ep.labels.clone(),
+                labels,
                 // 配置发现来的端点没有清单信息：如实标为 unverified，
                 // 而不是伪造一份声明——否则「已验证」这个状态就失去意义了。
                 plugin_version: String::new(),
@@ -168,7 +180,11 @@ impl CapabilityGrpcServer {
                 for snapshot in snapshots {
                     let result = check_plugin_health(
                         snapshot.instance.grpc_authority.as_str(),
-                        snapshot.instance.capability_id.as_str(),
+                        snapshot
+                            .instance
+                            .labels
+                            .get(LABEL_HEALTH_PROTOCOL)
+                            .map(String::as_str),
                         runtime.plugin_call_timeout,
                     )
                     .await;
@@ -215,16 +231,24 @@ fn ts_from_chrono(dt: chrono::DateTime<Utc>) -> Timestamp {
     }
 }
 
+/// 按插件**声明**的健康协议做检查。
+///
+/// 这里曾经写着 `if capability_id == "rtc.media.control"` —— 一个所有插件共用的
+/// 健康检查器，却认识某个具体能力 id。加第二种需要特殊健康语义的插件时，
+/// 只能继续往这里堆 if。
+///
+/// 现在核心不问「你是不是 RTC」，而问「你声明了哪种健康协议」：
+/// 未声明 = 通用协议。插件要特殊语义，就在注册时用标签说出来。
 async fn check_plugin_health(
     grpc_authority: &str,
-    capability_id: &str,
+    health_protocol: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let channel = tokio::time::timeout(timeout, resolve_plugin_channel(grpc_authority))
         .await
         .map_err(|_| format!("plugin channel resolve timeout: {grpc_authority}"))??;
 
-    if capability_id == "rtc.media.control" {
+    if health_protocol == Some(HEALTH_PROTOCOL_SFU_CONTROL) {
         let mut client = SfuControlClient::new(channel);
         let request = Request::new(HealthCheckRequest {});
         let response = tokio::time::timeout(timeout, client.health_check(request))

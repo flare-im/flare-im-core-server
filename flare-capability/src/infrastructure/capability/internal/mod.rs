@@ -110,7 +110,7 @@ pub(crate) async fn register_discovered_media_plugins(
                     plugin_routes,
                     "0",
                     "media-control",
-                    "rtc.media.control",
+                    crate::infrastructure::capability::plugin_contract::MEDIA_CONTROL_CAPABILITY_ID,
                     rtc,
                     endpoint,
                     "static-env",

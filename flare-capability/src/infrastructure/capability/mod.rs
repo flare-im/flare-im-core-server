@@ -11,6 +11,7 @@
 pub mod adapters;
 pub mod builtin;
 pub mod dispatch;
+pub mod plugin_contract;
 pub mod registration;
 pub mod routing;
 
