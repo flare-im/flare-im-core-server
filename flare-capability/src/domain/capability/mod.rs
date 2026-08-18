@@ -21,7 +21,8 @@ pub use error::{CapabilityError, GuardDecision, GuardRejection, Result};
 pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHandler};
 pub use grant::UserCapabilityGrant;
 pub use ports::{
-    CapabilityPolicyBackend, PreSendGuard, PreSendGuardPipeline, RecipientResolver, RtcCapability,
+    CapabilityDispatchRoute, CapabilityPolicyBackend, PreSendGuard, PreSendGuardPipeline,
+    RecipientResolver, RtcCapability,
 };
 pub use recipient::{RecipientResolveRequest, RecipientResolveResult};
 pub use rtc::{

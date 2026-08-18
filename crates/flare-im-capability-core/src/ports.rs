@@ -234,3 +234,33 @@ pub trait CapabilityPolicyBackend: Send + Sync {
         enabled: bool,
     ) -> CapabilityResult<()>;
 }
+
+/// 能力分发路由：**把「哪些 capability_id 交给哪个后端」变成可注册的数据。**
+///
+/// 在此之前，应用层的分发器里写着 `if capability_id.starts_with("rtc.")` ——
+/// 核心因此认识一个具体的插件种类，每加一类插件都要回来改分发器。这是插件系统
+/// 最典型的老化方式：支持的插件越多，核心越臃肿。
+///
+/// 现在核心只做两件事：按注册顺序问每条路由「这个 id 归你吗」，没人认领就走
+/// 远端插件路由表。核心代码里不该再出现任何具体插件的名字。
+///
+/// # 为什么 `matches` 不是返回前缀字符串
+///
+/// 前缀只是**今天**够用的匹配方式。把判定权交给路由自己，将来按 kind、按版本、
+/// 按租户灰度来选路，都不需要改这个 trait —— 契约一旦有人依赖就改不动了，
+/// 所以这里刻意留出判定自由度。
+#[async_trait]
+pub trait CapabilityDispatchRoute: Send + Sync {
+    /// 路由标识，用于日志与冲突排查（例如 `rtc`）。
+    fn route_id(&self) -> &str;
+
+    /// 该 capability_id 是否由本路由接管。
+    fn matches(&self, capability_id: &str) -> bool;
+
+    /// 接管后的实际分发。
+    async fn dispatch(
+        &self,
+        ctx: &Ctx,
+        req: &crate::dispatch::CapabilityDispatchCommand,
+    ) -> CapabilityResult<crate::dispatch::CapabilityDispatchResult>;
+}

@@ -41,6 +41,17 @@ pub async fn init_capability_extension_stack(
 
     let registry = CapabilityExtensionRegistry::new();
 
+    // 分发路由由**组合根**装配，核心分发器不认识任何具体插件。
+    // 「本部署包含 RTC」是装配决策，不是核心知识 —— 换个部署不带 RTC，
+    // 这里不注册即可，核心一行都不用改。
+    {
+        use crate::infrastructure::capability::routing::RtcDispatchRoute;
+        let rtc_router = registry.rtc_router().await;
+        registry
+            .register_dispatch_route(Arc::new(RtcDispatchRoute::new(rtc_router)))
+            .await;
+    }
+
     let runtime = Arc::new(CapabilityRuntimeConfig::from_sources(
         runtime_config_file.as_deref(),
     ));

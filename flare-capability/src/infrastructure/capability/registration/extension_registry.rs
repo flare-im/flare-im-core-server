@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::domain::capability::{
-    DynExtensionOperationHandler, PreSendGuard, RecipientResolver, RtcCapability,
+    CapabilityDispatchRoute, DynExtensionOperationHandler, PreSendGuard, RecipientResolver,
+    RtcCapability,
 };
 use crate::interface::grpc::ExtensionPluginRouter;
 
@@ -22,6 +23,9 @@ pub struct RegistryInner {
     pub recipient: RecipientResolverRuntime,
     pub rtc: RtcCapabilityRouter,
     pub extension_router: ExtensionPluginRouter,
+    /// 分发路由表：**核心不认识任何具体插件**，只按注册顺序询问谁接管。
+    /// 由组合根装配（例如注册 `RtcDispatchRoute`），空表时全部走远端插件路由。
+    pub dispatch_routes: Vec<Arc<dyn CapabilityDispatchRoute>>,
 }
 
 impl CapabilityExtensionRegistry {
@@ -41,6 +45,15 @@ impl CapabilityExtensionRegistry {
 
     pub async fn rtc_router(&self) -> RtcCapabilityRouter {
         self.inner.read().await.rtc.clone()
+    }
+
+    /// 注册一条分发路由。**顺序即优先级**：先注册的先被询问。
+    pub async fn register_dispatch_route(&self, route: Arc<dyn CapabilityDispatchRoute>) {
+        self.inner.write().await.dispatch_routes.push(route);
+    }
+
+    pub async fn dispatch_routes(&self) -> Vec<Arc<dyn CapabilityDispatchRoute>> {
+        self.inner.read().await.dispatch_routes.clone()
     }
 
     pub async fn register_pre_send_guard(&self, guard: Arc<dyn PreSendGuard>) {
