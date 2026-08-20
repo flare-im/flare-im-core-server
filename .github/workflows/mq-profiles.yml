@@ -1,6 +1,11 @@
 name: MQ Profiles
 
 on:
+  # push 触发是补上的（2026-08-20）：原本只有 pull_request，而本项目是直接推
+  # main/dev、不走 PR —— 于是这个 workflow 从建好那天起一次都没执行过。
+  # 「写了但永远不触发」比红更隐蔽：Actions 页面上干干净净，什么都看不出来。
+  push:
+    branches: [main, dev]
   pull_request:
     paths:
       - "**/*.rs"
@@ -20,6 +25,30 @@ jobs:
       FLARE_MQ_DEFAULT_BACKEND: jetstream
     steps:
       - uses: actions/checkout@v4
+      # 本项目是多仓库结构：workspace 里的 path 依赖指向同级仓库目录。
+      # 单仓 checkout 后这些路径不存在，cargo 连 manifest 都解析不了。
+      #
+      # 这一步是补上的（2026-08-20）。这两个 workflow **从建好那天起就没跑过**：
+      # 触发条件只有 pull_request，而本项目是直接推 main/dev、不走 PR。
+      # 手动 dispatch 一次才发现它们连 `cargo check` 都到不了——
+      # 全部失败在 `failed to read ../flare-core/Cargo.toml`。
+      - name: 拉取同级仓库
+        working-directory: .
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-core.git "../flare-core"
+          clone https://github.com/flare-im/flare-proto.git "../flare-proto"
+          clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
+          clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+
+      - name: 安装 protoc
+        working-directory: .
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -38,6 +67,30 @@ jobs:
       FLARE_MQ_DEFAULT_BACKEND: kafka
     steps:
       - uses: actions/checkout@v4
+      # 本项目是多仓库结构：workspace 里的 path 依赖指向同级仓库目录。
+      # 单仓 checkout 后这些路径不存在，cargo 连 manifest 都解析不了。
+      #
+      # 这一步是补上的（2026-08-20）。这两个 workflow **从建好那天起就没跑过**：
+      # 触发条件只有 pull_request，而本项目是直接推 main/dev、不走 PR。
+      # 手动 dispatch 一次才发现它们连 `cargo check` 都到不了——
+      # 全部失败在 `failed to read ../flare-core/Cargo.toml`。
+      - name: 拉取同级仓库
+        working-directory: .
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-core.git "../flare-core"
+          clone https://github.com/flare-im/flare-proto.git "../flare-proto"
+          clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
+          clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+
+      - name: 安装 protoc
+        working-directory: .
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
