@@ -69,8 +69,26 @@ call() {
 
 # 授权是**持久化**的：上一次跑完留下的授权会让「未授权应被拒」这一步反转。
 # 冒烟必须自带干净起点，否则第二次跑的结果与第一次不同——那样的门禁不可信。
+# 两条授权路径都要清：per_user 的用户授权，以及 tenant 的租户开关。
 call RevokeUserCapability \
   "{\"tenant_id\":\"$TENANT\",\"user_id\":\"$USER_ID\",\"capability_id\":\"$CAPABILITY_ID\"}" >/dev/null 2>&1
+call SetTenantCapabilitySwitch \
+  "{\"tenant_id\":\"$TENANT\",\"capability_id\":\"$CAPABILITY_ID\",\"enabled\":false}" >/dev/null 2>&1
+
+# 授权走哪条路由插件自己声明的 seat_model 决定（tenant / per_user / 未声明）。
+# 这里把它**从示例源码里读出来并断言**，而不是写死在脚本里：2026-08-19 示例补齐 v2
+# 注册字段时改成了 tenant，而这个脚本还在授予用户级权限，于是 nightly 连红两天——
+# dispatch 被 “capability ... is not installed for tenant” 拒掉。
+# 断言写在这里，示例哪天再改 seat_model，红的是这一行，而不是四步之后一句
+# 看不出所以然的「Dispatch 未拿到预期结果」。
+EXAMPLE_SRC="$ROOT/examples/capability_link_preview.rs"
+declared_seat="$(grep -oE 'seat_model: "[a-z_]+"' "$EXAMPLE_SRC" 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')"
+if [ "$declared_seat" != "tenant" ]; then
+  echo -e "${RED}✗ 示例插件声明的 seat_model 是 '${declared_seat:-读不到}'，本脚本按 'tenant' 授权${NC}"
+  echo "  改了示例的 seat_model 就要同步改下面第 3 步的授权路径。"
+  echo "  源码：$EXAMPLE_SRC"
+  exit 1
+fi
 
 echo -e "${YELLOW}能力插件生命周期冒烟（5 步）${NC}"
 
@@ -139,11 +157,14 @@ fi
 
 # ---- 3. 授权 -------------------------------------------------------------
 
-granted="$(call GrantUserCapability "{\"tenant_id\":\"$TENANT\",\"user_id\":\"$USER_ID\",\"capability_id\":\"$CAPABILITY_ID\"}")"
-if echo "$granted" | grep -q "granted"; then
-  note_pass "能力已授予用户"
+# 示例声明 seat_model = tenant：分发只看租户开关，**开关缺失即拒**（没装就是没装）。
+# 这条路径上用户级授权是无效的——给用户授权不会让 dispatch 通过。
+granted="$(call SetTenantCapabilitySwitch \
+  "{\"tenant_id\":\"$TENANT\",\"capability_id\":\"$CAPABILITY_ID\",\"enabled\":true}")"
+if echo "$granted" | grep -qiE '"message"|enabled'; then
+  note_pass "能力已为租户启用（seat_model=tenant）"
 else
-  note_fail "授权失败" "$(echo "$granted" | head -2)"
+  note_fail "租户启用失败" "$(echo "$granted" | head -2)"
 fi
 
 # ---- 4. 经核心 Dispatch，结果应来自插件 -----------------------------------
