@@ -1,5 +1,12 @@
 name: MQ Profiles
 
+# ⚠️ 说明一句实话：这两个 job 目前**编译面是一样的**。
+# `kafka` feature 在每个服务对 flare-server-core 的依赖里都是硬开的，
+# `cargo check --workspace` 因此总会编 rdkafka，与 FLARE_MQ_DEFAULT_BACKEND 无关
+# ——那个环境变量只影响运行时选哪个后端。
+# 所以它现在的真实价值是「整个 workspace 带 --locked 编得过」，不是「两套后端各验一遍」。
+# 要让这个矩阵名副其实，得先把后端做成 cargo feature；那是独立的一次改造。
+
 on:
   # push 触发是补上的（2026-08-20）：原本只有 pull_request，而本项目是直接推
   # main/dev、不走 PR —— 于是这个 workflow 从建好那天起一次都没执行过。
@@ -45,15 +52,22 @@ jobs:
           clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
           clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
 
-      - name: 安装 protoc
-        working-directory: .
-        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
           key: mq-jetstream
+
+      # 与 ci.yml 的「安装构建依赖」保持同一份清单：rdkafka-sys 会现编 librdkafka，
+      # 缺 curl / ssl / zlib / sasl 的开发头就挂在 `#include <curl/curl.h>`。
+      # 注意 kafka feature 在每个服务对 flare-server-core 的依赖里都是硬开的，
+      # 所以**不跑 kafka 的 job 也要装**——JetStream 那个 job 就是这么失败的。
+      - name: 安装构建依赖
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler cmake pkg-config \
+            libcurl4-openssl-dev libsasl2-dev libssl-dev zlib1g-dev
       - name: Check JetStream backend
         run: cargo check --workspace --locked
 
@@ -87,16 +101,21 @@ jobs:
           clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
           clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
 
-      - name: 安装 protoc
-        working-directory: .
-        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
           key: mq-kafka
-      - name: Install Kafka native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libsasl2-dev
+
+      # 与 ci.yml 的「安装构建依赖」保持同一份清单：rdkafka-sys 会现编 librdkafka，
+      # 缺 curl / ssl / zlib / sasl 的开发头就挂在 `#include <curl/curl.h>`。
+      # 注意 kafka feature 在每个服务对 flare-server-core 的依赖里都是硬开的，
+      # 所以**不跑 kafka 的 job 也要装**——JetStream 那个 job 就是这么失败的。
+      - name: 安装构建依赖
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler cmake pkg-config \
+            libcurl4-openssl-dev libsasl2-dev libssl-dev zlib1g-dev
       - name: Check Kafka backend
         run: cargo check --workspace --locked
