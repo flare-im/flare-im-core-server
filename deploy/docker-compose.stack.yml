@@ -67,69 +67,144 @@ services:
   # ── Ingress ────────────────────────────────────────────────────────────────
   api-gateway:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: api-gateway
     command: ["flare-api-gateway"]
     ports: ["50050:50050"]
 
   signaling-gateway:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: signaling-gateway
     command: ["flare-signaling-gateway"]
     # The long-connection port clients actually dial
     ports: ["60051:60051"]
 
   admin-gateway:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: admin-gateway
     command: ["flare-admin-gateway"]
 
   # ── Signaling ──────────────────────────────────────────────────────────────
   signaling-online:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: signaling-online
     command: ["flare-signaling-online"]
 
   signaling-route:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: signaling-route
     command: ["flare-signaling-route"]
 
   # ── Messaging ──────────────────────────────────────────────────────────────
   message-ingest:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: message-ingest
     command: ["flare-message-ingest"]
 
   orchestrator:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: orchestrator
     command: ["flare-orchestrator"]
 
   conversation:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: conversation
     command: ["flare-conversation"]
 
   sync-orchestrator:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: sync-orchestrator
     command: ["flare-sync-orchestrator"]
 
   # ── Storage ────────────────────────────────────────────────────────────────
   storage-writer:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: storage-writer
     command: ["flare-storage-writer"]
 
   storage-reader:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: storage-reader
     command: ["flare-storage-reader"]
 
   # ── Push / capability / media ──────────────────────────────────────────────
   push-server:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: push-server
     command: ["flare-push-server"]
 
   push-worker:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: push-worker
     command: ["flare-push-worker"]
 
   capability:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: capability
     command: ["flare-capability"]
 
   media:
     <<: *flare-service
+    environment:
+      <<: *flare-env
+      # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
+      # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
+      SERVICE_ADVERTISE_HOST: media
     command: ["flare-media"]
 
 networks:
