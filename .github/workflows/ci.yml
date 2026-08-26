@@ -133,3 +133,21 @@ jobs:
 
       - name: cargo deny（许可 / 来源 / 重复依赖）
         run: cargo deny check
+
+  # 部署文档是使用者接触本项目的第一步，而它腐坏时**没有任何信号**：
+  # 改了 compose 文件名、删了某一层、换了变量名，测试全绿、CI 全绿，
+  # 只有照着做的人卡在第一条命令。
+  #
+  # 本仓吃过同类的亏：docker-compose.stack.yml 默认指向一个**从未发布过**的镜像，
+  # 于是里面积了库名写错（连的 /flare、实际建的是 flare2）、中间件地址硬编码
+  # （14 个服务会去连自己容器的 localhost）等好几处，直到真去跑才暴露。
+  deploy-docs:
+    name: 部署文档与 compose 一致
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # runner 自带 docker，无需额外安装；这道门禁只跑 `docker compose config`，
+      # 不拉镜像、不起容器，十几秒即可。
+      - name: 校验部署文档
+        run: ./scripts/check_deploy_docs.sh
