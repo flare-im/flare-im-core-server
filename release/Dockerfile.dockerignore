@@ -64,3 +64,6 @@ flare-im-core-sdk
 flare-sdk-plugin
 flare-plugin
 flare-social
+
+# E2E 测试残留数据（实测某次达 4.6GB，COPY 时把服务器磁盘撑爆）。
+**/temp-data

@@ -23,7 +23,17 @@ ARG RUNTIME_IMAGE=debian:bookworm-slim
 FROM ${RUST_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
+
+# apt 镜像源可覆盖。默认走官方源；在网络到 deb.debian.org 慢的地区（实测某次部署
+# 卡在下载阶段十几分钟零进展）用 --build-arg APT_MIRROR=mirrors.aliyun.com 之类换掉。
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+        for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+            [ -f "$f" ] && sed -i "s|deb.debian.org|$APT_MIRROR|g" "$f"; \
+        done; \
+        grep -rq "$APT_MIRROR" /etc/apt/ || { echo "APT_MIRROR 未生效，源文件格式可能变了"; exit 1; }; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential clang cmake pkg-config \
         libssl-dev libprotobuf-dev protobuf-compiler zlib1g-dev \
@@ -73,7 +83,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM ${RUNTIME_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
+# 运行时阶段同样换源：只换 builder 的话这一步照样会去够不着的官方源。
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+        for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+            [ -f "$f" ] && sed -i "s|deb.debian.org|$APT_MIRROR|g" "$f"; \
+        done; \
+        grep -rq "$APT_MIRROR" /etc/apt/ || { echo "APT_MIRROR 未生效，源文件格式可能变了"; exit 1; }; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 curl netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
