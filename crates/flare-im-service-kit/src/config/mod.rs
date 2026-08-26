@@ -1743,21 +1743,44 @@ where
             )));
         };
         let end = name_start + end_rel;
-        let name = &input[name_start..end];
+        let body = &input[name_start..end];
+
+        // 支持 `${NAME}` 与 `${NAME:-默认值}` 两种写法，语义与 shell 一致：
+        // 前者「必须设置，否则报错」，后者「未设置或为空时取默认值」。
+        //
+        // 加默认值这一档是为了让同一份 base.toml 同时服务两种跑法：本机开发直接用
+        // 默认值（localhost:25432 那套，行为与此前完全一致），容器里由 compose 注入
+        // 环境变量覆盖成服务名。此前没有默认值语法，于是配置文件里根本不敢写占位符
+        // ——写了本机就起不来——中间件地址只能硬编码，容器化部署也就无从谈起。
+        //
+        // 默认值里不能出现 `}`：占位符以第一个 `}` 结束。真需要的话在环境变量里给。
+        let (name, default) = match body.find(":-") {
+            Some(idx) => (&body[..idx], Some(&body[idx + 2..])),
+            None => (body, None),
+        };
+
         if !is_valid_env_placeholder_name(name) {
             return Err(flare_server_core::error::FlareError::system(format!(
                 "invalid environment placeholder '${{{}}}' in {}",
-                name,
+                body,
                 path.display()
             )));
         }
-        let value = lookup(name).ok_or_else(|| {
-            flare_server_core::error::FlareError::system(format!(
-                "environment variable {} required by {} is not set",
-                name,
-                path.display()
-            ))
-        })?;
+
+        // 取值为空串时也走默认值：compose 里未赋值的变量会展开成空串而不是「未设置」，
+        // 按「未设置」处理才符合直觉，否则会得到 `postgres://:@host` 这种连不上的串。
+        let resolved = lookup(name).filter(|value| !value.is_empty());
+        let value = match (resolved, default) {
+            (Some(value), _) => value,
+            (None, Some(default)) => default.to_string(),
+            (None, None) => {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "environment variable {} required by {} is not set",
+                    name,
+                    path.display()
+                )));
+            }
+        };
         output.push_str(&value);
         cursor = end + 1;
     }
@@ -1950,6 +1973,72 @@ mod tests {
             err.to_string().contains("FLARE_TEST_MISSING_SECRET"),
             "error should name the missing variable: {err}"
         );
+    }
+
+    #[test]
+    fn env_placeholders_fall_back_to_inline_default() {
+        let mut value: Value = toml::from_str(
+            r#"
+            [postgres.media]
+            url = "postgres://${FLARE_TEST_PG_USER:-flare}@${FLARE_TEST_PG_HOST:-localhost}:25432/flare2"
+            "#,
+        )
+        .expect("valid toml");
+
+        // 一个设了、一个没设：设的走环境变量，没设的走内联默认值。
+        expand_env_placeholders_in_value_with(&mut value, Path::new("config/test.toml"), |name| {
+            match name {
+                "FLARE_TEST_PG_HOST" => Some("postgres".to_string()),
+                _ => None,
+            }
+        })
+        .expect("defaults make missing variables non-fatal");
+
+        assert_eq!(
+            value
+                .get("postgres")
+                .and_then(|v| v.get("media"))
+                .and_then(|v| v.get("url"))
+                .and_then(Value::as_str),
+            Some("postgres://flare@postgres:25432/flare2")
+        );
+    }
+
+    #[test]
+    fn env_placeholder_empty_value_uses_default() {
+        // compose 里声明但没赋值的变量会展开成空串。若把空串当「已设置」，
+        // 拼出来的会是 `postgres://:@host` 这种连不上的串，所以空串必须走默认值。
+        let mut value = Value::String("${FLARE_TEST_EMPTY:-fallback}".to_string());
+        expand_env_placeholders_in_value_with(&mut value, Path::new("config/test.toml"), |_| {
+            Some(String::new())
+        })
+        .expect("empty value falls back");
+        assert_eq!(value.as_str(), Some("fallback"));
+    }
+
+    #[test]
+    fn env_placeholder_without_default_still_required() {
+        // 加了默认值语法之后，无默认值的写法必须**保持原样报错**——
+        // 否则密钥类占位符会静默变成空串，正是这道校验要防的事。
+        let mut value = Value::String("${FLARE_TEST_STILL_REQUIRED}".to_string());
+        let err = expand_env_placeholders_in_value_with(
+            &mut value,
+            Path::new("config/test.toml"),
+            |_| None,
+        )
+        .expect_err("no default means still required");
+        assert!(
+            err.to_string().contains("FLARE_TEST_STILL_REQUIRED"),
+            "error should name the missing variable: {err}"
+        );
+    }
+
+    #[test]
+    fn env_placeholder_default_may_be_empty() {
+        let mut value = Value::String("redis://${FLARE_TEST_AUTH:-}host".to_string());
+        expand_env_placeholders_in_value_with(&mut value, Path::new("config/test.toml"), |_| None)
+            .expect("empty default is legal");
+        assert_eq!(value.as_str(), Some("redis://host"));
     }
 
     #[test]

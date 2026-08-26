@@ -27,9 +27,33 @@ x-flare-service: &flare-service
     # Inside the compose network services reach each other by service name on the
     # container-internal port, not through the host-side mapping.
     CONSUL_HTTP_ADDR: http://consul:8500
-    DATABASE_URL: postgres://flare:flare123@postgres:5432/flare
-    REDIS_URL: redis://redis:6379
+    # 凭据从 .env 拼装，与基础设施那份 compose 读同一批变量——改一处即可。
+    #
+    # 库名此前写死成 `/flare`，而基础设施建的是 `flare2`（config/base.toml 的默认值
+    # 也是 flare2）。这一栈从没真正起来过（镜像未发布），所以这个错一直没暴露：
+    # 服务会连上实例、然后找不到库。
+    #
+    # 便捷路径按上面几个变量拼；密码里有 @ : / 或空格会拼坏 URL（compose 不做百分号
+    # 转义），所以留了直接覆盖的口子：在 .env 里设 DATABASE_URL 就整条照用。
+    # deploy/up.sh 会在走便捷路径时校验密码是否 URL 安全，早报错好过连不上瞎猜。
+    DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-flare}:${POSTGRES_PASSWORD:-flare123}@postgres:5432/${POSTGRES_DB:-flare2}}
+    # REDIS_PASSWORD 留空就是无密码（本地默认）；设了则连接串带上它。
+    REDIS_URL: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
     NATS_URL: nats://nats:4222
+    #
+    # 上面三个只有 flare-capability 读（DATABASE_URL）。**其余 14 个服务的中间件地址
+    # 来自 config/base.toml**，此前是硬编码的 localhost:25432 那一套——也就是说这一栈
+    # 即使起来了，14 个服务也会去连自己容器的 localhost。这个错一直没暴露，因为镜像
+    # 从未发布、这份 compose 从未真正跑过。
+    #
+    # 现在 base.toml 用 ${VAR:-本机默认值} 写中间件地址：不设就是本机那套（开发行为
+    # 一字不变），容器里由下面这几个变量覆盖成服务名。
+    FLARE_POSTGRES_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-flare}:${POSTGRES_PASSWORD:-flare123}@postgres:5432/${POSTGRES_DB:-flare2}}
+    FLARE_REDIS_URL_BASE: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
+    FLARE_NATS_URL: nats://nats:4222
+    FLARE_KAFKA_BROKERS: kafka:9092
+    FLARE_S3_ENDPOINT: http://rustfs:9000
+    FLARE_CONSUL_ENDPOINT: http://consul:8500
   depends_on:
     consul: {condition: service_started}
     postgres: {condition: service_started}

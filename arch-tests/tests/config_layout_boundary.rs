@@ -228,3 +228,63 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
         .to_path_buf()
 }
+
+/// `base.toml` 里的环境占位符必须**都带内联默认值**。
+///
+/// 中间件地址此前是硬编码的 `localhost:25432` 那一套，因此容器里跑不起来——
+/// 服务会去连自己容器的 localhost。改成占位符之后，本机开发靠的就是这些默认值：
+/// 少写一个 `:-`，配置加载会直接报 "environment variable X is not set"，
+/// 本机与测试全线起不来。
+///
+/// 这条断言很便宜，但挡的是「容器能跑了、本机反而跑不了」这种一改就翻车的方向。
+#[test]
+fn base_config_placeholders_all_carry_defaults() {
+    let root = workspace_root();
+    let base = fs::read_to_string(root.join("config/base.toml")).expect("read base.toml");
+
+    let mut offenders = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = base[cursor..].find("${") {
+        let start = cursor + rel;
+        let end = base[start..]
+            .find('}')
+            .map(|e| start + e)
+            .expect("unclosed placeholder in base.toml");
+        let body = &base[start + 2..end];
+        if !body.contains(":-") {
+            offenders.push(body.to_string());
+        }
+        cursor = end + 1;
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "base.toml 的这些占位符没有内联默认值，本机开发会因为「环境变量未设置」直接起不来：{offenders:?}\n\
+         写法应为 ${{VAR:-本机默认值}}。"
+    );
+}
+
+/// 占位符的默认值必须仍然是**本机 dev 的那一套地址**。
+///
+/// 参数化的前提是「不改变本机行为」。若有人把默认值顺手改成容器里的服务名
+/// （postgres / redis / nats），本机开发和一整套依赖 dev 栈的测试会集体连不上，
+/// 而且报错是连接超时，不会有人一眼想到是配置默认值被动过。
+#[test]
+fn base_config_defaults_still_point_at_local_dev() {
+    let root = workspace_root();
+    let base = fs::read_to_string(root.join("config/base.toml")).expect("read base.toml");
+
+    for expected in [
+        "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}",
+        "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}",
+        "${FLARE_NATS_URL:-nats://127.0.0.1:24222}",
+        "${FLARE_KAFKA_BROKERS:-127.0.0.1:29092}",
+        "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}",
+        "${FLARE_CONSUL_ENDPOINT:-http://localhost:28500}",
+    ] {
+        assert!(
+            base.contains(expected),
+            "base.toml 少了这条本机默认值（被改动过？）：{expected}"
+        );
+    }
+}

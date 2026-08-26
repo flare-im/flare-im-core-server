@@ -1,0 +1,43 @@
+# 本地构建覆盖层 —— 没有预构建镜像时用这个。
+#
+#   cp deploy/.env.example deploy/.env      # 至少填上 FLARE_TOKEN_SECRET
+#   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.stack.yml \
+#                  -f deploy/docker-compose.build.yml up -d
+#
+# 为什么需要它：docker-compose.stack.yml 默认指向
+# `ghcr.io/flare-im/flare-im-core:latest`，而**那个镜像目前并不存在**——
+# 发布 workflow 只在 `push: tags v*` 触发，仓库还没打过 tag。
+# 只留镜像路径的话，「一条命令起服务端」对任何人都是跑不通的。
+#
+# 代价要说清楚：这一层会在本机编译整个 Rust workspace，首次十几分钟起步，
+# 而且需要几个 GB 的构建缓存。有镜像可拉时不要用这一层。
+#
+# 构建上下文是**工作区根目录**（flare-im-core 的父目录）：本仓的 path 依赖指向
+# flare-proto / flare-grpc-proto / flare-core / flare-server-core 这几个同级仓，
+# 上下文只给 flare-im-core 的话 cargo 直接解析失败。
+
+x-flare-build: &flare-build
+  build:
+    context: ../..
+    dockerfile: flare-im-core/release/Dockerfile
+  # 15 个服务共用一个镜像（它们只差跑哪个二进制）。写同一个 tag，
+  # BuildKit 第一次真构建、其余 14 次命中缓存，不会编 15 遍。
+  image: flare-im-core:local
+
+services:
+  api-gateway: {<<: *flare-build}
+  signaling-gateway: {<<: *flare-build}
+  admin-gateway: {<<: *flare-build}
+  signaling-online: {<<: *flare-build}
+  signaling-route: {<<: *flare-build}
+  message-ingest: {<<: *flare-build}
+  orchestrator: {<<: *flare-build}
+  conversation: {<<: *flare-build}
+  sync-orchestrator: {<<: *flare-build}
+  storage-writer: {<<: *flare-build}
+  storage-reader: {<<: *flare-build}
+  push-server: {<<: *flare-build}
+  push-worker: {<<: *flare-build}
+  capability: {<<: *flare-build}
+  media: {<<: *flare-build}

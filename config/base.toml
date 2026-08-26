@@ -12,7 +12,7 @@ port = 50051
 # 注册中心类型：etcd, consul, mesh
 registry_type = "consul"
 # 注册中心端点列表（Consul 默认端口 8500）
-endpoints = ["http://localhost:28500"]
+endpoints = ["${FLARE_CONSUL_ENDPOINT:-http://localhost:28500}"]
 # 命名空间
 namespace = "flare"
 # TTL（秒）
@@ -42,32 +42,32 @@ service_name = "flare-im-core"
 namespace = "default"
 
 [redis.conversation_store]
-url = "redis://localhost:26379/0"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/0"
 namespace = "flare:conversation"
 ttl_seconds = 3600
 
 [redis.token_store]
-url = "redis://localhost:26379/1"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/1"
 namespace = "flare:token"
 ttl_seconds = 7200
 
 [redis.media_metadata]
-url = "redis://localhost:26379/2"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/2"
 namespace = "flare:media"
 ttl_seconds = 3600
 
 [redis.upload_conversations]
-url = "redis://localhost:26379/3"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/3"
 namespace = "flare:media:upload"
 ttl_seconds = 86400
 
 [redis.message_wal]
-url = "redis://localhost:26379/4"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/4"
 namespace = "flare:message:wal"
 ttl_seconds = 86400
 
 [redis.push]
-url = "redis://localhost:26379/5"
+url = "${FLARE_REDIS_URL_BASE:-redis://localhost:26379}/5"
 namespace = "flare:push"
 ttl_seconds = 86400
 
@@ -86,7 +86,7 @@ default_backend = "nats"
 
 # JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_contracts::constants::topics
 [jetstream.push]
-url = "nats://127.0.0.1:24222"
+url = "${FLARE_NATS_URL:-nats://127.0.0.1:24222}"
 client_id = "flare-im"
 timeout_ms = 5000
 retries = 8
@@ -96,7 +96,7 @@ subjects = ["flare.im.push.*"]
 options = { retention = "limits", storage = "file", max_age_seconds = "86400", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
 
 [jetstream.message]
-url = "nats://127.0.0.1:24222"
+url = "${FLARE_NATS_URL:-nats://127.0.0.1:24222}"
 client_id = "flare-message-orchestrator"
 timeout_ms = 5000
 retries = 8
@@ -107,7 +107,7 @@ options = { retention = "limits", storage = "file", max_age_seconds = "604800", 
 
 # Kafka 生产级推荐参数：仅在 mq.default_backend = "kafka" 时作为主 MQ 后端使用。
 [kafka.message]
-brokers = ["127.0.0.1:29092"]
+brokers = ["${FLARE_KAFKA_BROKERS:-127.0.0.1:29092}"]
 client_id = "flare-im-message"
 acks = "all"
 # 本地默认使用 none，避免 librdkafka 未编译 zstd 支持时启动失败；生产环境可在确认镜像支持后改为 zstd/lz4/snappy。
@@ -125,7 +125,7 @@ retention_ms = 604800000
 options = { "delivery.timeout.ms" = "30000", "retries" = "2147483647" }
 
 [kafka.push]
-brokers = ["127.0.0.1:29092"]
+brokers = ["${FLARE_KAFKA_BROKERS:-127.0.0.1:29092}"]
 client_id = "flare-im-push"
 acks = "all"
 # 本地默认使用 none，避免 librdkafka 未编译 zstd 支持时启动失败；生产环境可在确认镜像支持后改为 zstd/lz4/snappy。
@@ -144,7 +144,7 @@ options = { "delivery.timeout.ms" = "15000", "retries" = "2147483647" }
 
 # 消息/媒体/能力等共用 PostgreSQL（init_v2、storage、flare-capability 等均指向此库）
 [postgres.media]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 20
 min_connections = 2
 acquire_timeout_seconds = 10
@@ -152,7 +152,7 @@ idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
 [postgres.storage_writer]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 64
 min_connections = 12
 acquire_timeout_seconds = 5
@@ -160,7 +160,7 @@ idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
 [postgres.storage_reader]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 32
 min_connections = 6
 acquire_timeout_seconds = 5
@@ -168,7 +168,7 @@ idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
 [postgres.conversation]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 32
 min_connections = 6
 acquire_timeout_seconds = 5
@@ -176,7 +176,7 @@ idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
 [postgres.media_metadata]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 16
 min_connections = 2
 acquire_timeout_seconds = 10
@@ -184,7 +184,7 @@ idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
 [postgres.capability]
-url = "postgres://flare:flare123@localhost:25432/flare2"
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 max_connections = 12
 min_connections = 2
 acquire_timeout_seconds = 10
@@ -195,13 +195,13 @@ max_lifetime_seconds = 1800
 # 默认使用 rusFS 对象存储配置
 [object_storage.default]
 profile_type = "s3"
-endpoint = "http://127.0.0.1:29000"
+endpoint = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}"
 access_key = "rustfsadmin"
 secret_key = "rustfsadmin"
 bucket = "flare-media"
 region = "us-east-1"
 use_ssl = false
-cdn_base_url = "http://127.0.0.1:29000/flare-media"
+cdn_base_url = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}/flare-media"
 # 预签名URL过期时间（秒），默认1小时
 presign_url_ttl_seconds = 3600
 use_presign = true
@@ -211,13 +211,13 @@ force_path_style = true
 # MinIO 对象存储配置（备用）
 [object_storage.minio]
 profile_type = "minio"
-endpoint = "http://127.0.0.1:29000"
+endpoint = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}"
 access_key = "minioadmin"
 secret_key = "minioadmin"
 bucket = "flare-media"
 region = "us-east-1"
 use_ssl = false
-cdn_base_url = "http://127.0.0.1:29000/flare-media"
+cdn_base_url = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}/flare-media"
 # 预签名URL过期时间（秒），默认1小时
 presign_url_ttl_seconds = 3600
 use_presign = true
