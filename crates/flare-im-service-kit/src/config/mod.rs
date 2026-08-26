@@ -1475,22 +1475,49 @@ fn apply_mq_env_overrides(cfg: &mut FlareAppConfig) {
 /// // 从指定路径加载配置
 /// let config = load_config(Some("config"));
 /// ```
-pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
-    // 确定配置文件候选路径：优先使用传入路径，再尝试 config / flare-im-core/config（便于从 workspace 根目录运行）
-    let candidates: Vec<PathBuf> = match path {
-        None | Some("config") => vec![
-            PathBuf::from("config"),
-            PathBuf::from("config.toml"),
-            PathBuf::from("flare-im-core/config"),
-        ],
+/// 计算配置候选路径。
+///
+/// 单独抽出来是为了能测：这里的取舍曾经导致过一次很难查的线上式故障。
+fn config_candidates(path: Option<&str>, env_config_path: Option<&str>) -> Vec<PathBuf> {
+    match path {
+        None | Some("config") => env_config_path
+            .into_iter()
+            .map(PathBuf::from)
+            .chain([
+                PathBuf::from("config"),
+                PathBuf::from("config.toml"),
+                PathBuf::from("flare-im-core/config"),
+            ])
+            .collect(),
         Some("./config") => vec![
             PathBuf::from("./config"),
             PathBuf::from("config"),
             PathBuf::from("flare-im-core/config"),
         ],
         Some(p) => vec![PathBuf::from(p)],
-    };
+    }
+}
 
+pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
+    // 确定配置文件候选路径：优先使用传入路径，再尝试 config / flare-im-core/config（便于从 workspace 根目录运行）
+    //
+    // 没传路径时**也要认 FLARE_CONFIG_PATH**。这里曾经只看相对 CWD 的那几个候选，
+    // 于是配置有了两个入口、两种行为：
+    //
+    //   load_app_config_from_env()  → 读 FLARE_CONFIG_PATH（多数服务走这条）
+    //   load_config(None)           → 只找 CWD 下的 config/（注册路径走这条）
+    //
+    // 谁先跑谁定下 APP_CONFIG（OnceLock）。容器里 CWD 是 /home/flare、没有 config/，
+    // 于是先跑注册的服务全部候选落空 → load_with_fallback **静默回退到默认配置**
+    // （只有一条 warn），注册中心地址变成默认的 localhost:28500。
+    // 表现是 api-gateway / admin-gateway 注册失败反复重启，而同一份 base.toml 下
+    // 其余 13 个服务一切正常——排查时极易误判成配置文件或网络问题。
+    let env_config_path = env::var("FLARE_CONFIG_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let candidates = config_candidates(path, env_config_path.as_deref());
     // 使用 OnceLock 确保配置只初始化一次
     APP_CONFIG.get_or_init(|| {
         // 使用备选方案加载配置
@@ -2101,6 +2128,48 @@ mod tests {
                     .iter()
                     .all(|u| u.starts_with("redis://redis:6379/")),
             "redis 基址覆盖后应全部指向容器，实际：{redis_urls:?}"
+        );
+    }
+
+    /// 不传路径时也必须认 `FLARE_CONFIG_PATH`。
+    ///
+    /// 这条守的是一次真实故障：配置有两个入口，
+    ///   `load_app_config_from_env()` 读 FLARE_CONFIG_PATH（多数服务走它），
+    ///   `load_config(None)` 只找 CWD 下的 config/（注册路径走它），
+    /// 谁先跑谁定下 APP_CONFIG（OnceLock）。容器里 CWD 没有 config/，于是先跑注册的
+    /// 服务全部候选落空、**静默回退到默认配置**（只有一条 warn），注册中心地址变成
+    /// 默认的 localhost:28500 —— api-gateway 与 admin-gateway 注册失败反复重启，
+    /// 而同一份 base.toml 下其余 13 个服务一切正常，极易误判成配置文件或网络问题。
+    #[test]
+    fn config_candidates_honour_env_path_when_unspecified() {
+        let with_env = config_candidates(None, Some("/etc/flare/config"));
+        assert_eq!(
+            with_env.first().map(|p| p.to_string_lossy().to_string()),
+            Some("/etc/flare/config".to_string()),
+            "环境变量给的路径必须排在最前，否则容器里会先命中不存在的相对路径"
+        );
+        assert!(
+            with_env.len() > 1,
+            "环境变量路径之后仍要保留相对路径兜底，本机开发不受影响"
+        );
+
+        // 显式传路径时**不能**被环境变量顶掉——调用方明确指定了就以它为准。
+        let explicit = config_candidates(Some("/custom/path"), Some("/etc/flare/config"));
+        assert_eq!(explicit, vec![PathBuf::from("/custom/path")]);
+    }
+
+    /// 没有环境变量时，候选列表必须与历史行为逐项一致。
+    ///
+    /// 参数化的前提是不改变本机行为；这条把「本机开发那条路」钉死。
+    #[test]
+    fn config_candidates_unchanged_without_env() {
+        assert_eq!(
+            config_candidates(None, None),
+            vec![
+                PathBuf::from("config"),
+                PathBuf::from("config.toml"),
+                PathBuf::from("flare-im-core/config"),
+            ]
         );
     }
 

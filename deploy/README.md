@@ -13,26 +13,73 @@
 
 ## 快速开始
 
-### 1. 启动所有中间件
+两条路，按你要做的事选。
+
+### A. 整套服务端跑起来（不需要 Rust 工具链）
 
 ```bash
-cd deploy
+cd flare-im-core
+cp deploy/.env.example deploy/.env
+# 至少填 FLARE_TOKEN_SECRET：openssl rand -base64 48 | tr -d '\n' | head -c 64
+
+docker compose --env-file deploy/.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.stack.yml \
+  -f deploy/docker-compose.build.yml up -d
+```
+
+三层各管一段，分开写是为了能单独用：
+
+| 文件 | 管什么 | 什么时候去掉 |
+|---|---|---|
+| `docker-compose.yml` | 基础设施（11 个容器） | 从不——它是底座 |
+| `docker-compose.stack.yml` | 15 个 Flare 服务 | 只想起中间件、服务跑本机时 |
+| `docker-compose.build.yml` | 本地构建镜像 | 有预构建镜像可拉时，改用 `FLARE_IMAGE=` |
+
+首次本地构建约 10 分钟（编译整个 workspace），镜像约 450MB，装着全部 15 个二进制
+——服务只差跑哪个二进制，拆 15 个镜像会让 registry 体积和版本偏斜翻倍。
+
+**`FLARE_TOKEN_SECRET` 没有默认值，不填直接启动失败。** 发一个默认签名密钥等于发一个
+漏洞：拿到它的人能伪造任意用户身份，而且完全没有症状——服务正常启动、登录正常、
+日志干净。
+
+### B. 只起中间件（服务跑在本机，开发用）
+
+```bash
+cd flare-im-core/deploy
 docker compose up -d
 ```
 
-### 2. 检查服务状态
+再按 `../scripts/start_server.sh` 起服务。这条需要 Rust 1.94+。
+
+### 改账号密码
+
+全部在 `deploy/.env`，不用动任何 yml。基础设施容器和 Flare 服务读的是同一批变量：
 
 ```bash
+POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+REDIS_PASSWORD          # 留空 = 不启用认证；设了则服务端一并要求认证
+RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD
+```
+
+密码里带 `@ : /` 或空格时 compose 拼不出合法 URL（它不做百分号转义），
+这时直接给整条 `DATABASE_URL=` / `REDIS_URL=`。
+
+### 检查服务状态
+
+```bash
+cd flare-im-core/deploy
 docker compose ps
+curl -s http://localhost:28500/v1/agent/services | jq 'keys'   # 看注册了哪些服务
 ```
 
-### 3. 查看日志
+### 查看日志
 
 ```bash
-docker compose logs -f [service_name]
+docker compose logs -f postgres
+docker compose -f docker-compose.yml -f docker-compose.stack.yml logs -f api-gateway
 ```
-
----
 
 ## 包含的服务
 
