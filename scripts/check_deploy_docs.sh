@@ -31,12 +31,22 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # ── 1. 文档点名的 compose 文件都在 ──────────────────────────────────────────
-DOCS=("deploy/README.md" "../README.md" "../README.zh-CN.md")
+# 本仓自己的部署文档是**必需**的；工作区根的两份 README 在单仓 checkout（CI 就是）
+# 里不存在，缺席时跳过而不是判红——它们属于另一个仓，不是本仓能保证的东西。
+REQUIRED_DOCS=("deploy/README.md")
+OPTIONAL_DOCS=("../README.md" "../README.zh-CN.md")
 declare -a referenced=()
-for d in "${DOCS[@]}"; do
-  [ -f "$d" ] || { note_fail "文档不存在：$d"; continue; }
+for d in "${REQUIRED_DOCS[@]}"; do
+  [ -f "$d" ] || { note_fail "缺本仓的部署文档：$d"; continue; }
   # 要连 `../flare-social/` 这样的前缀一起抓：只抓 `deploy/...` 会把业务栈的路径
   # 截成本仓下不存在的路径，然后报一个假的「文件缺失」。
+  while IFS= read -r f; do referenced+=("$f"); done < <(
+    grep -oE '(\.\./[A-Za-z0-9_-]+/)?deploy/docker-compose[a-z.-]*\.yml' "$d" 2>/dev/null | sort -u
+  )
+done
+
+for d in "${OPTIONAL_DOCS[@]}"; do
+  [ -f "$d" ] || continue
   while IFS= read -r f; do referenced+=("$f"); done < <(
     grep -oE '(\.\./[A-Za-z0-9_-]+/)?deploy/docker-compose[a-z.-]*\.yml' "$d" 2>/dev/null | sort -u
   )
