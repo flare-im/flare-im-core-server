@@ -67,7 +67,11 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=80
+      # base.toml 里六个连接池的上限合计 176，业务栈（flare-social 七个服务）再要 ~50。
+      # 这里原本写死 80，一套完整部署跑起来必然耗尽连接：表现是发消息静默失败，
+      # 而服务端日志里 seq 已经分配完、outcome=ok，极具误导性。
+      # scripts/check_pg_connection_budget.sh 会守住这个不等式。
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-300}
       - -c
       - shared_buffers=256MB
       - -c
@@ -83,7 +87,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    mem_limit: 1280m
+    # 300 个连接 × 每连接约 2MB + shared_buffers 256MB，1280m 不够。
+    mem_limit: ${POSTGRES_MEM_LIMIT:-2048m}
 
   nats:
     image: nats:2.10-alpine
@@ -91,6 +96,10 @@ services:
     restart: unless-stopped
     networks:
       - flare-network
+    environment:
+      # nats.conf 用 $$VAR 展开，NATS 对未定义的变量会启动失败，所以默认值必须在这里给。
+      NATS_MAX_FILE_STORE: ${NATS_MAX_FILE_STORE:-10GB}
+      NATS_MAX_MEM_STORE: ${NATS_MAX_MEM_STORE:-256MB}
     ports:
       - "127.0.0.1:24222:4222"
       - "127.0.0.1:28222:8222"
@@ -139,3 +148,33 @@ services:
       - "${RUSTFS_SECRET_KEY:-rustfsadmin}"
       - "/data"
     mem_limit: 384m
+
+  # 升级用的数据库补丁执行器。
+  # init.sql 走 postgres 的 docker-entrypoint-initdb.d，**只在数据目录为空时**执行一次；
+  # 已经在跑的部署升级到新版本后，新增的列永远不会补上，且失败形态是运行期 500
+  # （曾经线上 list_conversations 因为缺 visible_from_seq 整体报错，实时投递静默失效）。
+  # 这些补丁全部是 ADD COLUMN IF NOT EXISTS，可以每次启动都跑。
+  db-migrate:
+    image: timescale/timescaledb:latest-pg16
+    container_name: flare-db-migrate
+    networks:
+      - flare-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-flare123}
+    volumes:
+      - ./sql/patches:/patches:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /patches/*.sql; do
+          [ -e "$$f" ] || continue
+          echo "applying $$f"
+          psql -h postgres -U "${POSTGRES_USER:-flare}" -d "${POSTGRES_DB:-flare2}" \
+               -v ON_ERROR_STOP=1 -f "$$f"
+        done
+        echo "db patches applied"
+    restart: "no"

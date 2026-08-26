@@ -151,3 +151,8 @@ jobs:
       # 不拉镜像、不起容器，十几秒即可。
       - name: 校验部署文档
         run: ./scripts/check_deploy_docs.sh
+
+      # 池上限与 postgres max_connections 分别维护，对不上时的故障形态是
+      # 发消息静默失败（日志里还是 outcome=ok），只有这里能提前发现。
+      - name: 校验数据库连接预算
+        run: ./scripts/check_pg_connection_budget.sh
