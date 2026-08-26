@@ -16,7 +16,10 @@ x-flare-service: &flare-service
   networks: [flare-network]
   environment: &flare-env
     RUST_LOG: ${RUST_LOG:-info}
-    FLARE_CONFIG_DIR: /etc/flare/config
+    # 名字必须是 FLARE_CONFIG_PATH（service-kit 的 runtime.rs 读的是它）。
+    # 曾写成 FLARE_CONFIG_DIR —— 没有任何代码读那个名字，服务会回退到相对 CWD 的
+    # config/，容器里不存在，于是集体「postgres config is required」启动失败。
+    FLARE_CONFIG_PATH: /etc/flare/config
     # All three gateways must validate against the same secret the client signs with.
     # No default on purpose: a shipped default secret is a shipped vulnerability —
     # anyone holding it can forge any user's identity against any deployment that

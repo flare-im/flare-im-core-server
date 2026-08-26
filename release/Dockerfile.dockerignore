@@ -1,0 +1,66 @@
+# 本文件**整份取代**工作区根的 .dockerignore（BuildKit 的 per-Dockerfile 约定：
+# 与 Dockerfile 同目录、同名加 .dockerignore）。所以它必须自成一套，不能只写增量。
+#
+# 上下文必须取工作区根：各仓的 path 依赖指向同级仓，只给单个仓 cargo 会直接
+# `failed to load manifest`（注意它不会退回 registry —— `{ version, path }` 双写
+# 只在 cargo publish 时才换成 registry 版本）。
+#
+# 代价是整个工作区默认都会被送进 daemon。2026-08-20 实测：只排除
+# .git/target/node_modules 时上下文约 30GB，一次构建把宿主机从 15Gi 吃到 3Gi。
+# 所以这里既挡运行时垃圾，也**整仓排除本镜像用不到的仓**。
+
+# ── 版本控制与编译产物 ──
+.git
+**/.git
+**/target
+**/node_modules
+**/.DS_Store
+
+# ── 运行时产物 ──
+**/logs
+**/*.log
+**/deploy/data
+**/*.pid
+
+# ── 各端构建产物 ──
+**/dist
+**/build
+**/.build
+**/.build-xcode
+**/.dart_tool
+**/.gradle
+**/DerivedData
+**/coverage
+
+# ── 证书与本地密钥：绝不进镜像 ──
+certs
+**/certs
+**/*.pem
+**/*.key
+**/.env
+**/.dev-token-secret
+
+# ── 工具目录 ──
+**/.idea
+**/.vscode
+**/.claude
+**/.codegraph
+**/.playwright-mcp
+**/.arts
+**/.planning
+**/.agents
+**/.codex
+**/.cursor
+
+# ── 本镜像用不到的仓（整仓排除）──
+# 服务端只需要 flare-proto / flare-grpc-proto / flare-core / flare-server-core
+# 与本仓自身。下面这些是客户端 SDK、UI kit、官网、社交业务——一个字节都用不上，
+# 合计约 10GB。
+official
+docs
+flare-im-design
+flare-im-core-client-sdk
+flare-im-core-sdk
+flare-sdk-plugin
+flare-plugin
+flare-social

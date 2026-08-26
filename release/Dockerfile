@@ -85,7 +85,11 @@ COPY flare-im-core/config /etc/flare/config
 USER flare
 WORKDIR /home/flare
 
-ENV FLARE_CONFIG_DIR=/etc/flare/config \
+# 变量名必须是 FLARE_CONFIG_PATH —— 加载器（service-kit runtime.rs）读的是它。
+# 这里曾经写成 FLARE_CONFIG_DIR，而那个名字**没有任何代码读**：服务会回退到
+# 「相对 CWD 的 config/」，容器里那个目录不存在，于是每个需要库的服务都以
+# 「postgres config is required」启动失败。镜像从未发布过，所以一直没人撞上。
+ENV FLARE_CONFIG_PATH=/etc/flare/config \
     RUST_LOG=info
 
 # No default CMD: this image carries every service and the compose file names the one to

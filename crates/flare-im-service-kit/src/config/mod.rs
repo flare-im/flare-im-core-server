@@ -2041,6 +2041,69 @@ mod tests {
         assert_eq!(value.as_str(), Some("redis://host"));
     }
 
+    /// 拿**真的** `config/base.toml` 过一遍真的展开逻辑。
+    ///
+    /// 上面那几条测的是展开函数本身；这条测的是「仓库里那份配置文件到底会解析成什么」。
+    /// 两者缺一不可——占位符语法写对了、但 base.toml 里少个 `:-` 或者默认值被人顺手
+    /// 改成容器服务名，单看函数级测试是发现不了的。
+    ///
+    /// 不碰进程环境变量：用自定义 lookup 模拟「没设」与「容器里设了」两种情形，
+    /// 免得与并行跑的其它测试互相干扰。
+    #[test]
+    fn real_base_config_resolves_for_both_local_and_container() {
+        let base_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/base.toml")
+            .canonicalize()
+            .expect("locate config/base.toml");
+        let raw = std::fs::read_to_string(&base_path).expect("read base.toml");
+
+        // ── 情形一：什么都没设（本机开发）→ 必须还是原来那套地址 ──
+        let mut local: Value = toml::from_str(&raw).expect("valid toml");
+        expand_env_placeholders_in_value_with(&mut local, &base_path, |_| None)
+            .expect("本机开发不设任何变量也必须能解析");
+
+        let pg = |cfg: &Value| -> String {
+            cfg.get("postgres")
+                .and_then(|v| v.get("media"))
+                .and_then(|v| v.get("url"))
+                .and_then(Value::as_str)
+                .expect("postgres.media.url")
+                .to_string()
+        };
+        assert_eq!(
+            pg(&local),
+            "postgres://flare:flare123@localhost:25432/flare2",
+            "本机默认值被改动了——依赖 dev 栈的开发流程和测试会集体连不上"
+        );
+
+        // ── 情形二：容器里注入服务名 → 必须解析成容器地址 ──
+        let mut container: Value = toml::from_str(&raw).expect("valid toml");
+        expand_env_placeholders_in_value_with(&mut container, &base_path, |name| match name {
+            "FLARE_POSTGRES_URL" => Some("postgres://u:p@postgres:5432/flare2".to_string()),
+            "FLARE_REDIS_URL_BASE" => Some("redis://redis:6379".to_string()),
+            _ => None,
+        })
+        .expect("容器里只覆盖部分变量，其余仍走默认值");
+
+        assert_eq!(pg(&container), "postgres://u:p@postgres:5432/flare2");
+
+        // 覆盖 redis 基址后，6 个不同 db 序号必须都跟着变（它们共用一个变量）。
+        let redis_urls: Vec<&str> = container
+            .get("redis")
+            .and_then(Value::as_table)
+            .expect("redis table")
+            .values()
+            .filter_map(|v| v.get("url").and_then(Value::as_str))
+            .collect();
+        assert!(
+            !redis_urls.is_empty()
+                && redis_urls
+                    .iter()
+                    .all(|u| u.starts_with("redis://redis:6379/")),
+            "redis 基址覆盖后应全部指向容器，实际：{redis_urls:?}"
+        );
+    }
+
     #[test]
     fn mq_default_backend_accepts_only_canonical_values() {
         let mut config = default_config();
