@@ -156,3 +156,9 @@ jobs:
       # 发消息静默失败（日志里还是 outcome=ok），只有这里能提前发现。
       - name: 校验数据库连接预算
         run: ./scripts/check_pg_connection_budget.sh
+
+      # init.sql 与 migrations/ 各写一份同一个索引却用了不同的名字时，
+      # IF NOT EXISTS 去重不掉，跑过迁移的库会建出两份完全相同的索引：
+      # 查询只用一个，写入维护两个。线上实测撞到两处。
+      - name: 校验重复索引
+        run: ./scripts/check_duplicate_indexes.sh
