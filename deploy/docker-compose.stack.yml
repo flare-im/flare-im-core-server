@@ -10,10 +10,20 @@
 # One image serves every service — they differ only by which binary runs, so twelve
 # near-identical images would multiply registry size and version skew for nothing.
 
+# 容器日志默认无上限。线上跑了几周后 /var/lib/docker/containers 吃掉 3.8G，
+# 单个服务的 json.log 到 1.7G——磁盘打满会让整套部署一起挂，而且事前没有任何信号。
+# 一次投递失败的重试风暴就能在几分钟内写出几万行。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 x-flare-service: &flare-service
   image: ${FLARE_IMAGE:-ghcr.io/flare-im/flare-im-core:latest}
   restart: unless-stopped
   networks: [flare-network]
+  logging: *default-logging
   environment: &flare-env
     RUST_LOG: ${RUST_LOG:-info}
     # 名字必须是 FLARE_CONFIG_PATH（service-kit 的 runtime.rs 读的是它）。

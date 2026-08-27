@@ -2,11 +2,18 @@ networks:
   flare-network:
     driver: bridge
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   consul:
     image: hashicorp/consul:1.17
     container_name: flare-consul
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - flare-network
     ports:
@@ -31,6 +38,7 @@ services:
     image: redis:7-alpine
     container_name: flare-redis
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - flare-network
     ports:
@@ -53,6 +61,7 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: flare-postgres
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - flare-network
     environment:
@@ -94,6 +103,7 @@ services:
     image: nats:2.10-alpine
     container_name: flare-nats
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - flare-network
     environment:
@@ -125,6 +135,7 @@ services:
     image: rustfs/rustfs:latest
     container_name: flare-rustfs
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - flare-network
     ports:

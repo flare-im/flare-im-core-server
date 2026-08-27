@@ -2,6 +2,12 @@ networks:
   flare-network:
     driver: bridge
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   # ===== Consul - 服务注册 / 配置中心 =====
   consul:
@@ -79,6 +85,7 @@ services:
     image: apache/kafka:3.7.0
     container_name: flare-kafka
     restart: always
+    logging: *default-logging
     networks:
       - flare-network
     ports:
@@ -129,12 +136,14 @@ services:
       - ./kafka-topics.sh:/opt/flare/kafka-topics.sh:ro
     command: ["/bin/bash", "/opt/flare/kafka-topics.sh"]
     restart: "no"
+    logging: *default-logging
 
   # ===== NATS JetStream - 消息队列 =====
   nats:
     image: nats:2.10-alpine
     container_name: flare-nats
     restart: always
+    logging: *default-logging
     networks:
       - flare-network
     ports:
@@ -169,6 +178,7 @@ services:
     image: rustfs/rustfs:latest
     container_name: flare-rustfs
     restart: always
+    logging: *default-logging
     networks:
       - flare-network
     ports:

@@ -54,6 +54,15 @@ COPY flare-server-core ./flare-server-core
 COPY flare-im-core ./flare-im-core
 
 WORKDIR /build/flare-im-core
+
+# 编译并发度。默认跟随 CPU 核数；但 rustc 在 release 下每个并行任务都很吃内存，
+# 小内存机器上并行 4 个足以 OOM——而这台机器往往同时跑着整套服务，
+# 一次 OOM 就会波及线上容器。release/scripts/build_release_bundle.sh 因此用 --jobs 1；
+# 镜像构建以前没有对应开关，这里补上。
+#   docker build --build-arg CARGO_BUILD_JOBS=1 ...
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/flare-im-core/target \
     cargo build --release \

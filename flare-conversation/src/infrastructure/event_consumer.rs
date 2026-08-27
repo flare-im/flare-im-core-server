@@ -19,7 +19,9 @@ use prost::Message as _;
 use tracing::{debug, error, info, warn};
 
 use flare_im_contracts::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
-use flare_im_contracts::constants::topics::{TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_EVENTS};
+use flare_im_contracts::constants::topics::{
+    TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS,
+};
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{ConversationParticipant, ConversationType, ConversationVisibility};
@@ -57,6 +59,12 @@ impl NatsConsumerConfig for ReadReceiptConsumerConfig {
         500
     }
     fn enable_durable(&self) -> bool {
+        true
+    }
+    fn deliver_from_new(&self) -> bool {
+        // 这个消费者订阅的 subject 从一条变成两条，durable 名字里含 subject 列表，
+        // 于是会新建一个 durable。流里留着几十万条历史，DeliverAll 会把它们全部重放，
+        // 而未读自增不是幂等的——会把未读数写坏。这里只关心新增量。
         true
     }
     fn stream_specs(&self) -> Vec<NatsStreamSpec> {
@@ -106,6 +114,16 @@ impl ReadReceiptEventConsumer {
             .as_deref()
             .unwrap_or(CONVERSATION_READ_RECEIPT_GROUP_DEFAULT);
 
+        // 会话摘要（last_message_seq / 未读）要靠**消息**事件推进，而消息走的是
+        // TOPIC_MESSAGE_CREATED；这里原本只订阅 TOPIC_MESSAGE_EVENTS，
+        // 后者只承载已读/撤回/编辑这类"事件记录"，从来不带 Message 载荷。
+        // 少订阅这一条的后果是 conversations.last_message_seq 永远为 NULL，
+        // 客户端会话列表的预览永远慢一拍（线上实测）。
+        //
+        // 用"多订阅一条已有 subject"而不是"多发一份消息事件"：JetStream 里多个消费组
+        // 共享同一份已存储的消息，不增加任何发布量。
+        let subjects = vec![subject.to_string(), TOPIC_MESSAGE_CREATED.to_string()];
+
         let consumer_config = ReadReceiptConsumerConfig {
             url: url.to_string(),
             group: group.to_string(),
@@ -117,12 +135,12 @@ impl ReadReceiptEventConsumer {
 
         let fetcher: Box<dyn MessageFetcher + Send> = match config.mq_backend.as_str() {
             "kafka" => Box::new(
-                KafkaMessageFetcher::new(&consumer_config, vec![subject.to_string()]).map_err(
-                    |e| map_infra_error(e, ErrorCode::ConfigurationError, "build Kafka consumer"),
-                )?,
+                KafkaMessageFetcher::new(&consumer_config, subjects.clone()).map_err(|e| {
+                    map_infra_error(e, ErrorCode::ConfigurationError, "build Kafka consumer")
+                })?,
             ),
             "nats" => Box::new(
-                NatsMessageFetcher::new(&consumer_config, vec![subject.to_string()])
+                NatsMessageFetcher::new(&consumer_config, subjects.clone())
                     .await
                     .map_err(|e| {
                         map_infra_error(
@@ -142,9 +160,9 @@ impl ReadReceiptEventConsumer {
         };
 
         info!(
-            subject = %subject,
+            subjects = ?subjects,
             group = %group,
-            "ReadReceipt event consumer subscribed"
+            "Conversation event consumer subscribed"
         );
 
         Ok(Self {
@@ -284,14 +302,23 @@ fn decode_message_event(raw: &[u8]) -> Result<Option<Event>> {
     let mq = MqEnvelope::decode(raw)
         .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "decode MqEnvelope"))?;
 
-    if mq.payload_kind != MqPayloadKind::Event as i32 {
-        return Ok(None);
+    match mq.payload {
+        // TOPIC_MESSAGE_EVENTS 上的"事件记录"（已读 / 撤回 / 编辑）。
+        Some(mq_envelope::Payload::Event(event))
+            if mq.payload_kind == MqPayloadKind::Event as i32 =>
+        {
+            Ok(matches_supported_event(&event).then_some(event))
+        }
+        // TOPIC_MESSAGE_CREATED 上的消息本体：信封直接装 Message，不套 Event。
+        // 包成 Event 交给同一个处理分支，避免把处理逻辑写两遍。
+        Some(mq_envelope::Payload::Message(message)) => Ok(Some(Event {
+            conversation_id: message.conversation_id.clone(),
+            conversation_seq: message.conversation_seq,
+            payload: Some(Payload::Message(message)),
+            ..Default::default()
+        })),
+        _ => Ok(None),
     }
-    if let Some(mq_envelope::Payload::Event(event)) = mq.payload {
-        return Ok(matches_supported_event(&event).then_some(event));
-    }
-
-    Ok(None)
 }
 
 fn decode_conversation_ensure(raw: &[u8]) -> Result<Option<(String, ConversationEnsurePayload)>> {
@@ -584,7 +611,7 @@ mod tests {
     use std::collections::HashMap;
 
     use flare_proto::common::{
-        CustomEvent, Event, EventType, MqEnvelope, MqPayloadKind, ReadReceiptEvent, event,
+        CustomEvent, Event, EventType, Message, MqEnvelope, MqPayloadKind, ReadReceiptEvent, event,
         mq_envelope,
     };
     use prost::Message as _;
@@ -603,6 +630,36 @@ mod tests {
     #[test]
     fn positive_read_seq_advances_conversation_cursor() {
         assert_eq!(read_seq_for_conversation_cursor(42), Some(42));
+    }
+
+    /// 消息本体在 TOPIC_MESSAGE_CREATED 上是**直接装 Message 的信封**，不套 Event。
+    /// 解码器一度只认 Event 信封，于是 conversations.last_message_seq 永远为 NULL：
+    /// 客户端会话列表的预览永远慢一拍，而链路上没有任何报错（跳过分支是 debug! 级）。
+    #[test]
+    fn decode_message_event_accepts_bare_message_envelope() {
+        let message = Message {
+            conversation_id: "conv-1".to_string(),
+            conversation_seq: 42,
+            sender_id: "u-1".to_string(),
+            ..Default::default()
+        };
+        let mq = MqEnvelope {
+            payload_kind: MqPayloadKind::Message as i32,
+            payload: Some(mq_envelope::Payload::Message(message)),
+            ..Default::default()
+        };
+
+        let event = decode_message_event(&mq.encode_to_vec())
+            .expect("decode")
+            .expect("消息信封必须能解出事件，否则会话摘要永远不更新");
+
+        assert_eq!(event.conversation_id, "conv-1");
+        assert_eq!(event.conversation_seq, 42);
+        let Some(event::Payload::Message(m)) = event.payload else {
+            panic!("payload 必须是 Message");
+        };
+        assert_eq!(m.conversation_seq, 42);
+        assert_eq!(m.sender_id, "u-1");
     }
 
     #[test]
