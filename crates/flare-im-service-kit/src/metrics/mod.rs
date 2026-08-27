@@ -306,6 +306,13 @@ pub struct MessageOrchestratorMetrics {
     pub send_total: IntCounterVec,
     /// Batch send 请求大小。
     pub batch_send_size: Histogram,
+    /// 扇出耗时：从摄入时刻到把消息投出去。
+    ///
+    /// **两端都取服务端时钟**，因此不受客户端时钟偏差与跨网 RTT 影响——
+    /// 这正是以前答不上「消息从落库到送达之间那几百毫秒去哪了」的原因：
+    /// `messages.created_at` 存的是客户端时钟，客户端观测又混着网络抖动，
+    /// 两个都不能用来给服务端定责。
+    pub fanout_latency_seconds: HistogramVec,
 }
 
 impl MessageOrchestratorMetrics {
@@ -331,6 +338,19 @@ impl MessageOrchestratorMetrics {
         )
         .expect("Failed to create message_orchestrator_send_total metric");
 
+        let fanout_latency_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "message_orchestrator_fanout_latency_seconds",
+                "Latency from message ingestion to fanout dispatch, measured entirely on server clock",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+            ]),
+            // 低基数：只区分投递方式与规模档，不按租户/会话打标签
+            &["mode", "size_bucket"],
+        )
+        .expect("Failed to create message_orchestrator_fanout_latency_seconds metric");
+
         let batch_send_size = Histogram::with_opts(
             HistogramOpts::new(
                 "message_orchestrator_batch_send_size",
@@ -343,11 +363,13 @@ impl MessageOrchestratorMetrics {
         let _ = REGISTRY.register(Box::new(send_stage_duration_seconds.clone()));
         let _ = REGISTRY.register(Box::new(send_total.clone()));
         let _ = REGISTRY.register(Box::new(batch_send_size.clone()));
+        let _ = REGISTRY.register(Box::new(fanout_latency_seconds.clone()));
 
         Self {
             send_stage_duration_seconds,
             send_total,
             batch_send_size,
+            fanout_latency_seconds,
         }
     }
 
@@ -365,6 +387,98 @@ impl MessageOrchestratorMetrics {
 
     pub fn observe_batch_size(&self, size: usize) {
         self.batch_send_size.observe(size as f64);
+    }
+
+    /// 记录扇出耗时。`ingestion_ts_ms` 是**服务端**摄入时刻（毫秒）。
+    ///
+    /// 传 0 或未来时间会被忽略：客户端可能塞进来一个偏了几十秒的时间戳，
+    /// 把它算进直方图会把分位数彻底污染（实测有客户端时钟慢 34 秒）。
+    pub fn observe_fanout_latency(&self, mode: &str, recipient_count: usize, ingestion_ts_ms: i64) {
+        if ingestion_ts_ms <= 0 {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if now_ms == 0 {
+            return;
+        }
+        let elapsed_ms = now_ms - ingestion_ts_ms;
+        if elapsed_ms < 0 {
+            return;
+        }
+        let size_bucket = match recipient_count {
+            0..=1 => "1",
+            2..=10 => "10",
+            11..=100 => "100",
+            101..=500 => "500",
+            _ => "500+",
+        };
+        self.fanout_latency_seconds
+            .with_label_values(&[mode, size_bucket])
+            .observe(elapsed_ms as f64 / 1000.0);
+    }
+}
+
+#[cfg(test)]
+mod fanout_latency_tests {
+    use super::MessageOrchestratorMetrics;
+
+    /// 荒谬的摄入时刻必须被丢弃，不能污染分位数。
+    ///
+    /// 这条防线是有来由的：`messages.created_at` 存的是**客户端**时钟，
+    /// 实测有客户端慢 34 秒。一旦这种值混进直方图，p50/p90 就全废了，
+    /// 而这个指标的全部意义就是给服务端耗时定责。
+    #[test]
+    fn bogus_ingestion_timestamps_are_ignored() {
+        let m = MessageOrchestratorMetrics::new();
+        let before = m
+            .fanout_latency_seconds
+            .with_label_values(&["inline", "1"])
+            .get_sample_count();
+
+        m.observe_fanout_latency("inline", 1, 0); // 取不到
+        m.observe_fanout_latency("inline", 1, -1); // 非法
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
+        m.observe_fanout_latency("inline", 1, future); // 未来时间（客户端时钟快）
+
+        let after = m
+            .fanout_latency_seconds
+            .with_label_values(&["inline", "1"])
+            .get_sample_count();
+        assert_eq!(after, before, "非法/未来的摄入时刻不能被计入");
+    }
+
+    /// 正常值要被计入，且按收件人规模分桶（低基数）。
+    #[test]
+    fn valid_samples_are_recorded_and_bucketed_by_size() {
+        let m = MessageOrchestratorMetrics::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        m.observe_fanout_latency("inline", 1, now - 10);
+        m.observe_fanout_latency("inline", 300, now - 10);
+
+        assert_eq!(
+            m.fanout_latency_seconds
+                .with_label_values(&["inline", "1"])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            m.fanout_latency_seconds
+                .with_label_values(&["inline", "500"])
+                .get_sample_count(),
+            1,
+            "300 个收件人应落在 500 档"
+        );
     }
 }
 

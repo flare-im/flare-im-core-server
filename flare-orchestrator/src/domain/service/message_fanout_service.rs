@@ -19,6 +19,17 @@ pub struct MessageFanoutService {
     user_sync_index: Option<Arc<dyn UserSyncIndexRepository>>,
     user_sync_compensation: Option<Arc<dyn UserSyncCompensationRepository>>,
     inline_message_push_enabled: bool,
+    /// 扇出耗时指标。全程服务端时钟，见 observe_fanout_latency 的说明。
+    metrics: flare_im_service_kit::metrics::MessageOrchestratorMetrics,
+}
+
+/// 取消息的**服务端**摄入时刻（毫秒），取不到返回 0（调用方据此跳过统计）。
+///
+/// 注意不能用 `message.created_at`：那一列存的是**客户端**时钟，
+/// 客户端时钟偏了服务端就跟着偏（实测有客户端慢 34 秒），
+/// 拿它算服务端耗时会得出负数或荒谬的值。
+pub fn ingestion_ts_from_headers(headers: &std::collections::HashMap<String, String>) -> i64 {
+    flare_im_contracts::utils::extract_timeline_from_extra(headers, 0).ingestion_ts
 }
 
 struct UserSyncCompensationRequest<'a> {
@@ -38,6 +49,7 @@ impl MessageFanoutService {
             user_sync_index: None,
             user_sync_compensation: None,
             inline_message_push_enabled: true,
+            metrics: flare_im_service_kit::metrics::MessageOrchestratorMetrics::default(),
         }
     }
 
@@ -109,6 +121,9 @@ impl MessageFanoutService {
         message: Message,
         recipient_user_ids: Vec<String>,
         large_conversation: bool,
+        // 服务端摄入时刻（毫秒），来自 MQ 信封的 timeline header。
+        // 传 0 表示取不到，指标会跳过这一条。
+        ingestion_ts_ms: i64,
     ) -> Result<()> {
         tracing::trace!(
             conversation_id = %message.conversation_id,
@@ -197,6 +212,8 @@ impl MessageFanoutService {
             } else {
                 recipient_user_ids
             };
+            self.metrics
+                .observe_fanout_latency("ping", recipient_count, ingestion_ts_ms);
             self.push_repository
                 .push_only_message_ping(
                     ctx,
@@ -207,6 +224,10 @@ impl MessageFanoutService {
                 )
                 .await
         } else {
+            // 投出去的这一刻记扇出耗时：ingestion_ts 是摄入时写进 timeline 的服务端时刻，
+            // 与此处的 now 同源，所以这个数字不掺客户端时钟偏差，也不含跨网 RTT。
+            self.metrics
+                .observe_fanout_latency("inline", recipient_count, ingestion_ts_ms);
             self.push_repository
                 .push_only_message_inline_event(ctx, &message, recipient_user_ids, conversation_id)
                 .await
@@ -460,6 +481,7 @@ mod tests {
                 message,
                 vec!["sender-a".to_string(), "peer-b".to_string()],
                 false,
+                0,
             )
             .await
             .expect("fanout should succeed");
@@ -586,7 +608,7 @@ mod tests {
         };
 
         service
-            .persist_and_push_with_recipients(&ctx, message, Vec::new(), true)
+            .persist_and_push_with_recipients(&ctx, message, Vec::new(), true, 0)
             .await
             .expect("fanout should succeed");
 
@@ -686,6 +708,7 @@ mod tests {
                 message,
                 vec!["sender-a".to_string(), "peer-b".to_string()],
                 false,
+                0,
             )
             .await
             .expect("fanout should succeed");
@@ -752,7 +775,7 @@ mod tests {
         };
 
         service
-            .persist_and_push_with_recipients(&ctx, message, Vec::new(), true)
+            .persist_and_push_with_recipients(&ctx, message, Vec::new(), true, 0)
             .await
             .expect("fanout should continue when user sync is deferred");
 
