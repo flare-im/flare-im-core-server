@@ -162,3 +162,8 @@ jobs:
       # 查询只用一个，写入维护两个。线上实测撞到两处。
       - name: 校验重复索引
         run: ./scripts/check_duplicate_indexes.sh
+
+      # allkeys-lru 会淘汰不带 TTL 的会话 seq 高水位键，导致 seq 回退、
+      # 时间线永久错乱。这类故障零信号，只在内存吃紧时才爆发。
+      - name: 校验 Redis 淘汰策略
+        run: ./scripts/check_redis_eviction_policy.sh

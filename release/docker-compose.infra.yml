@@ -45,11 +45,23 @@ services:
       - "127.0.0.1:26379:6379"
     volumes:
       - ./data/redis:/data
+    # ⚠️ 策略必须是 volatile-lru，不能是 allkeys-lru。
+    #
+    # 这个 Redis 里混着两类键：
+    #   - 带 TTL 的缓存/幂等键（线上 1954 个键里 1922 个属于此类）
+    #   - **不带 TTL 的会话 seq 高水位**（seq:<tenant>:<conversation>）
+    #
+    # allkeys-lru 在内存吃紧时会连后者一起淘汰。seq 键一旦被淘汰，下一条消息的
+    # INCR 从 1 重新开始——会话 seq 大幅回退，新消息被排到时间线中间，而且是
+    # **永久错乱**、刷新也不会好。本仓历史上真出过这个故障。
+    #
+    # volatile-lru 只淘汰有 TTL 的键，正好就是那些可再生的缓存；
+    # 不选 noeviction 是因为它会在压力下让写入直接失败，可用性更差。
     command: >
       redis-server
       --appendonly yes
       --maxmemory 384mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
