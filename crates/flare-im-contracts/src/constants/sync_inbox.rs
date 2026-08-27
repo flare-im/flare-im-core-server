@@ -20,6 +20,18 @@ pub fn is_sync_inbox_conversation_id(conversation_id: &str) -> bool {
     conversation_id.starts_with(SYNC_INBOX_CONVERSATION_PREFIX)
 }
 
+/// 从 sync 收件箱会话 ID 反解出收件人；不是 sync 收件箱则返回 `None`。
+///
+/// 收件人就写在 ID 里，**不需要也不能**去会话服务查参与者：
+/// sync 收件箱不是真实会话、没有参与者行，查了必然 NOT_FOUND，
+/// 消息随之被丢弃（线上实测建 499 人群时有 8 个成员因此收不到系统通知）。
+pub fn sync_inbox_recipient(conversation_id: &str) -> Option<&str> {
+    let rest = conversation_id
+        .strip_prefix(SYNC_INBOX_CONVERSATION_PREFIX)?
+        .trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,5 +46,21 @@ mod tests {
     #[test]
     fn real_conversation_ids_are_not_sync_inboxes() {
         assert!(!is_sync_inbox_conversation_id("2AB7E2CE84KN4K377P"));
+    }
+
+    #[test]
+    fn recipient_is_read_back_from_the_id() {
+        assert_eq!(sync_inbox_recipient("sync:42"), Some("42"));
+        assert_eq!(
+            sync_inbox_recipient(&sync_inbox_conversation_id("u-7")),
+            Some("u-7")
+        );
+    }
+
+    #[test]
+    fn non_sync_or_empty_ids_have_no_recipient() {
+        assert_eq!(sync_inbox_recipient("2AB7E2CE84KN4K377P"), None);
+        assert_eq!(sync_inbox_recipient("sync:"), None);
+        assert_eq!(sync_inbox_recipient("sync:   "), None);
     }
 }

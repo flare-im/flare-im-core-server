@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::constants::sync_inbox::sync_inbox_recipient;
 use flare_proto::common::EventType;
 use flare_server_core::error::Result;
 use tracing::{debug, warn};
@@ -59,6 +60,19 @@ impl RecipientRepository for RecipientRepositoryImpl {
         sender_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
         Box::pin(async move {
+            // sync 收件箱的收件人就写在 ID 里（sync:<user_id>）。
+            // 必须在这里短路：它不是真实会话、没有参与者行，落到下面的
+            // get_conversation_members 必然 NOT_FOUND，消息随之被丢弃——
+            // 线上实测建 499 人群时有 8 个成员因此收不到系统通知。
+            // 顺带省掉一次会话服务的 RPC。
+            if let Some(recipient) = sync_inbox_recipient(conversation_id) {
+                debug!(
+                    conversation_id = %conversation_id,
+                    "Sync inbox recipient resolved from conversation id"
+                );
+                return Ok(vec![recipient.to_string()]);
+            }
+
             match conversation_type {
                 ConversationType::Single => {
                     if let Some(recipient_id) =
@@ -242,5 +256,21 @@ mod tests {
             RecipientRepositoryImpl::explicit_single_chat_recipient(None, "user-a"),
             None
         );
+    }
+
+    /// sync 收件箱的收件人必须从会话 ID 直接解析，绝不能去查会话参与者。
+    ///
+    /// 它不是真实会话、没有参与者行，一旦落到 get_conversation_members 就是
+    /// NOT_FOUND，消息被静默丢弃——线上实测建 499 人群时有 8 个成员因此
+    /// 收不到系统通知。这个测试锁住「ID 即收件人」这条捷径。
+    #[test]
+    fn sync_inbox_recipient_comes_from_the_id_not_from_participants() {
+        use flare_im_contracts::constants::sync_inbox::{
+            sync_inbox_conversation_id, sync_inbox_recipient,
+        };
+        let cid = sync_inbox_conversation_id("351364692347715584");
+        assert_eq!(sync_inbox_recipient(&cid), Some("351364692347715584"));
+        // 真实会话不能被误判成 sync 收件箱，否则会跳过真正的成员解析
+        assert_eq!(sync_inbox_recipient("2AXK6MVC000H827SKV"), None);
     }
 }
