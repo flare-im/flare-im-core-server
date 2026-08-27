@@ -52,6 +52,27 @@ export FLARE_DOCKER_CARGO_REGISTRY_MIRROR='sparse+https://mirrors.ustc.edu.cn/cr
 ./release/scripts/build_linux_bundle_docker.sh --jobs 1
 ```
 
+### 直接构建运行时镜像
+
+`release/Dockerfile` 从源码编译出一体化运行时镜像（上下文必须取工作区根，
+各仓是同级 path 依赖）。它接受三个参数，都是为"构建机在国内 / 内存小"准备的：
+
+```bash
+docker build \
+  --build-arg APT_MIRROR=mirrors.aliyun.com \
+  --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
+  --build-arg CARGO_BUILD_JOBS=2 \
+  -f flare-im-core/release/Dockerfile -t flare-im-core:dev .
+```
+
+三个都不加时的实测症状（都不会明确告诉你缺了什么）：
+
+| 缺哪个 | 症状 |
+| --- | --- |
+| `APT_MIRROR` | 卡在 apt 下载，十几分钟零进展 |
+| `CARGO_REGISTRY_MIRROR` | 卡在 `Updating crates.io index`，反复 `spurious network error` |
+| `CARGO_BUILD_JOBS` | 并发跟随核数；4 核 3.7G 机器上足以 OOM，而这台机器往往同时跑着整套服务 |
+
 生成目录默认位于：
 
 ```bash

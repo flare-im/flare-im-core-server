@@ -560,7 +560,7 @@ COMMENT ON COLUMN conversations.attributes IS '会话属性（JSON）';
 COMMENT ON COLUMN conversations.created_at IS '创建时间';
 COMMENT ON COLUMN conversations.updated_at IS '更新时间';
 COMMENT ON COLUMN conversations.last_message_seq IS '最后一条消息的 seq（未读数计算）';
-COMMENT ON COLUMN conversations.member_count IS '成员数';
+COMMENT ON COLUMN conversations.member_count IS '⚠️ 未维护，恒为默认值 0——没有任何写入路径会更新它。服务端所有读路径都实时 COUNT(*) conversation_participants 算成员数，不读这一列。别把它当权威数据。';
 COMMENT ON COLUMN conversations.channel_id IS '路由频道：单聊库中为空（读模型组装对端 user_id）；群/频道等为消息 channel_id（如群业务 ID）';
 CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated ON conversations(tenant_id, updated_at DESC);
 

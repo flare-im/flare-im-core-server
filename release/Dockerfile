@@ -41,6 +41,18 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
 
 ENV PROTOC=/usr/bin/protoc
 
+# crates.io 镜像源。和上面的 APT_MIRROR 是同一类问题：在到 crates.io 慢的地区，
+# 构建会卡在 "Updating crates.io index" 反复报 spurious network error
+# （实测某次十分钟零进展）。默认走官方源，不影响其它地区。
+#   docker build --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ ...
+ARG CARGO_REGISTRY_MIRROR=
+RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
+        mkdir -p "${CARGO_HOME:-/usr/local/cargo}" && \
+        printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+%s"\n' \
+            "$CARGO_REGISTRY_MIRROR" > "${CARGO_HOME:-/usr/local/cargo}/config.toml" && \
+        echo "cargo 镜像源已设为 $CARGO_REGISTRY_MIRROR"; \
+    fi
+
 WORKDIR /build
 
 # Sibling crates are path dependencies of this workspace, so the build context is the
