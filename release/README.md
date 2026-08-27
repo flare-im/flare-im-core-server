@@ -65,6 +65,31 @@ docker build \
   -f flare-im-core/release/Dockerfile -t flare-im-core:dev .
 ```
 
+⚠️ **改了源码却发现镜像里还是旧二进制**：builder 阶段可能整段命中缓存。
+症状是构建日志**零 `Compiling` 行、`DONE 0.1s`**，两个 tag 的镜像 ID 不同
+（只差 manifest）但**二进制完全相同**——于是"构建成功、已滚动、容器全 Up"
+而线上跑的还是旧代码。强制重编：
+
+```bash
+docker build --no-cache-filter builder ...   # 只让 builder 跳过缓存，运行时层仍复用
+```
+
+验证二进制到底换没换，两个办法：
+
+```bash
+# 1) 对比 md5：两个 tag 相同就是没重编
+docker run --rm --entrypoint sh <img> -c 'md5sum /usr/local/bin/<bin>'
+# 2) 查特征字符串（只对新增/改动日志文案有效）
+docker run --rm --entrypoint sh <img> -c "grep -ac '<日志文案>' /usr/local/bin/<bin>"
+```
+
+第二个办法**不能用 `strings`**——运行时镜像里没有这个命令，用它会全返回 0
+而看起来"改动都不在"。而且要先拿一个**已知存在**的字符串验证方法本身，
+否则分不清"改动没进去"和"检查方法坏了"。
+
+纯逻辑改动（不新增字符串）只能靠**运行时行为**验证——
+别停在"构建成功 + 容器 Up"，那不等于改动生效。
+
 三个都不加时的实测症状（都不会明确告诉你缺了什么）：
 
 | 缺哪个 | 症状 |
