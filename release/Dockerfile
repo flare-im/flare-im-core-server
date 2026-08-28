@@ -46,6 +46,13 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
 
 ENV PROTOC=/usr/bin/protoc
 
+# 跨架构模拟构建（arm64 开发机 → amd64 服务器）时 rustc 会在 QEMU 下栈溢出：
+#   qemu: uncaught target signal 11 (Segmentation fault) - core dumped
+# rustc 自己会提示 RUST_MIN_STACK。原生构建不受影响，设着无害。
+# flare-social 的 Dockerfile 早就有这行，这里一直缺——而"在开发机上构建
+# 再推镜像"恰恰是这台 40G 生产机唯一可行的交付方式，缺了它这条路直接走不通。
+ENV RUST_MIN_STACK=16777216
+
 # crates.io 镜像源。和上面的 APT_MIRROR 是同一类问题：在到 crates.io 慢的地区，
 # 构建会卡在 "Updating crates.io index" 反复报 spurious network error
 # （实测某次十分钟零进展）。默认走官方源，不影响其它地区。

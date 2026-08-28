@@ -15,6 +15,11 @@ import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 # 这几个是构建机环境相关的开关，缺了会有真实后果（卡网络 / OOM）
 REQUIRED = ["APT_MIRROR", "CARGO_REGISTRY_MIRROR", "CARGO_BUILD_JOBS"]
+# 这些不是 build-arg 而是必须设的 ENV：跨架构模拟构建时 rustc 会在 QEMU 下
+# 栈溢出段错误，而"开发机构建 + 推镜像"是 40G 生产机唯一可行的交付方式。
+# flare-social 的 Dockerfile 早就有 RUST_MIN_STACK，flare-im-core 的一直缺，
+# 直到真的去跨架构构建才暴露——这种跨文件漂移正是门禁该管的。
+REQUIRED_ENV = ["RUST_MIN_STACK"]
 
 targets = []
 # 必须匹配 Dockerfile* 而不是精确的 "Dockerfile"：
@@ -38,7 +43,9 @@ if not targets:
 bad = []
 for df, text in targets:
     declared = set(re.findall(r'^ARG\s+([A-Z_]+)', text, re.M))
+    env_set = set(re.findall(r'^ENV\s+([A-Z_]+)\s*=', text, re.M))
     missing = [a for a in REQUIRED if a not in declared]
+    missing += [e for e in REQUIRED_ENV if e not in env_set]
     if missing:
         bad.append((df.relative_to(root), missing))
 

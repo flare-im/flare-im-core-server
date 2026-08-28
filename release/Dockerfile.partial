@@ -39,6 +39,9 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
 
 ENV PROTOC=/usr/bin/protoc
 
+# 跨架构模拟构建时 rustc 会在 QEMU 下栈溢出，见 release/Dockerfile 的说明。
+ENV RUST_MIN_STACK=16777216
+
 ARG CARGO_REGISTRY_MIRROR=
 RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
         mkdir -p "${CARGO_HOME:-/usr/local/cargo}" && \
