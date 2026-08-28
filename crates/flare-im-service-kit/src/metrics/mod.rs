@@ -251,6 +251,18 @@ impl StorageWriterMetrics {
             .with_label_values(&[stage, result])
             .inc();
     }
+
+    /// 记录一次批量落库的批大小。
+    pub fn observe_batch_size(&self, size: usize) {
+        self.batch_size.observe(size as f64);
+    }
+
+    /// 记录一次 Redis 更新耗时（秒）。
+    pub fn observe_redis_update(&self, seconds: f64) {
+        if seconds >= 0.0 {
+            self.redis_update_duration_seconds.observe(seconds);
+        }
+    }
 }
 
 impl Default for StorageWriterMetrics {
@@ -294,6 +306,32 @@ impl Default for PushWorkerMetrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 扇出耗时的收件人规模分档。独立成函数是为了能直接测，
+/// 不必构造整个 metrics 结构——`new()` 会往全局 REGISTRY 注册，
+/// 而只有进程内第一个实例注册得上，在测试里构造实例会把注册"抢"走、
+/// 打破依赖全局导出的其它测试。
+pub fn fanout_size_bucket(recipient_count: usize) -> &'static str {
+    match recipient_count {
+        0..=1 => "1",
+        2..=10 => "10",
+        11..=100 => "100",
+        101..=500 => "500",
+        _ => "500+",
+    }
+}
+
+/// 由摄入时刻算出扇出耗时（秒）；时间戳非法或落在未来时返回 `None`。
+///
+/// 客户端时钟可能偏几十秒（实测有慢 34 秒的），这种值一旦进直方图
+/// 就会把分位数带偏，而这个指标的全部意义就是给服务端耗时定责。
+pub fn fanout_elapsed_secs(now_ms: i64, ingestion_ts_ms: i64) -> Option<f64> {
+    if ingestion_ts_ms <= 0 || now_ms <= 0 {
+        return None;
+    }
+    let elapsed = now_ms - ingestion_ts_ms;
+    (elapsed >= 0).then(|| elapsed as f64 / 1000.0)
 }
 
 /// Message Orchestrator send-path 指标。
@@ -394,91 +432,54 @@ impl MessageOrchestratorMetrics {
     /// 传 0 或未来时间会被忽略：客户端可能塞进来一个偏了几十秒的时间戳，
     /// 把它算进直方图会把分位数彻底污染（实测有客户端时钟慢 34 秒）。
     pub fn observe_fanout_latency(&self, mode: &str, recipient_count: usize, ingestion_ts_ms: i64) {
-        if ingestion_ts_ms <= 0 {
-            return;
-        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        if now_ms == 0 {
+        let Some(secs) = fanout_elapsed_secs(now_ms, ingestion_ts_ms) else {
             return;
-        }
-        let elapsed_ms = now_ms - ingestion_ts_ms;
-        if elapsed_ms < 0 {
-            return;
-        }
-        let size_bucket = match recipient_count {
-            0..=1 => "1",
-            2..=10 => "10",
-            11..=100 => "100",
-            101..=500 => "500",
-            _ => "500+",
         };
         self.fanout_latency_seconds
-            .with_label_values(&[mode, size_bucket])
-            .observe(elapsed_ms as f64 / 1000.0);
+            .with_label_values(&[mode, fanout_size_bucket(recipient_count)])
+            .observe(secs);
     }
 }
 
 #[cfg(test)]
 mod fanout_latency_tests {
-    use super::MessageOrchestratorMetrics;
+    use super::{fanout_elapsed_secs, fanout_size_bucket};
 
     /// 荒谬的摄入时刻必须被丢弃，不能污染分位数。
     ///
-    /// 这条防线是有来由的：`messages.created_at` 存的是**客户端**时钟，
-    /// 实测有客户端慢 34 秒。一旦这种值混进直方图，p50/p90 就全废了，
-    /// 而这个指标的全部意义就是给服务端耗时定责。
+    /// 这条防线是有来由的：`messages.created_at` 曾原样存**客户端**时钟，
+    /// 实测有客户端慢 34 秒。这种值进了直方图，p50/p90 就全废了。
     #[test]
-    fn bogus_ingestion_timestamps_are_ignored() {
-        let m = MessageOrchestratorMetrics::new();
-        let before = m
-            .fanout_latency_seconds
-            .with_label_values(&["inline", "1"])
-            .get_sample_count();
-
-        m.observe_fanout_latency("inline", 1, 0); // 取不到
-        m.observe_fanout_latency("inline", 1, -1); // 非法
-        let future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            + 60_000;
-        m.observe_fanout_latency("inline", 1, future); // 未来时间（客户端时钟快）
-
-        let after = m
-            .fanout_latency_seconds
-            .with_label_values(&["inline", "1"])
-            .get_sample_count();
-        assert_eq!(after, before, "非法/未来的摄入时刻不能被计入");
+    fn bogus_ingestion_timestamps_yield_no_sample() {
+        assert_eq!(fanout_elapsed_secs(1_000_000, 0), None, "取不到时丢弃");
+        assert_eq!(fanout_elapsed_secs(1_000_000, -1), None, "非法值丢弃");
+        assert_eq!(
+            fanout_elapsed_secs(1_000_000, 1_060_000),
+            None,
+            "未来时刻丢弃"
+        );
+        assert_eq!(fanout_elapsed_secs(0, 1_000), None, "拿不到当前时间时丢弃");
     }
 
-    /// 正常值要被计入，且按收件人规模分桶（低基数）。
     #[test]
-    fn valid_samples_are_recorded_and_bucketed_by_size() {
-        let m = MessageOrchestratorMetrics::new();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+    fn normal_elapsed_is_converted_to_seconds() {
+        assert_eq!(fanout_elapsed_secs(1_000_250, 1_000_000), Some(0.25));
+        assert_eq!(fanout_elapsed_secs(1_000_000, 1_000_000), Some(0.0));
+    }
 
-        m.observe_fanout_latency("inline", 1, now - 10);
-        m.observe_fanout_latency("inline", 300, now - 10);
-
-        assert_eq!(
-            m.fanout_latency_seconds
-                .with_label_values(&["inline", "1"])
-                .get_sample_count(),
-            1
-        );
-        assert_eq!(
-            m.fanout_latency_seconds
-                .with_label_values(&["inline", "500"])
-                .get_sample_count(),
-            1,
-            "300 个收件人应落在 500 档"
-        );
+    /// 标签必须低基数：按规模分档，不按具体人数打标签。
+    #[test]
+    fn recipient_count_is_bucketed_not_labeled_verbatim() {
+        assert_eq!(fanout_size_bucket(0), "1");
+        assert_eq!(fanout_size_bucket(1), "1");
+        assert_eq!(fanout_size_bucket(7), "10");
+        assert_eq!(fanout_size_bucket(99), "100");
+        assert_eq!(fanout_size_bucket(300), "500");
+        assert_eq!(fanout_size_bucket(9999), "500+");
     }
 }
 
@@ -591,6 +592,53 @@ impl AccessGatewayMetrics {
             online_cache_hit_total,
             online_cache_miss_total,
         }
+    }
+
+    /// 记录一次向某用户的推送投递结果。
+    ///
+    /// 这几个指标以前**只有声明、没有任何写入路径**：注册进了 Prometheus，
+    /// 于是 /metrics 里永远是 0。运维在故障时看到 push_success_total 0
+    /// 会直接断定「推送全挂」，而实际推送好好的——比没有这个指标更糟。
+    pub fn record_push_result(&self, tenant_id: &str, ok: i32, fail: i32) {
+        if ok > 0 {
+            self.push_success_total
+                .with_label_values(&[tenant_id])
+                .inc_by(ok as u64);
+            self.messages_pushed_total
+                .with_label_values(&[tenant_id])
+                .inc_by(ok as u64);
+        }
+        if fail > 0 {
+            self.push_failure_total
+                .with_label_values(&["delivery_failed", tenant_id])
+                .inc_by(fail as u64);
+        }
+    }
+
+    /// 记录一次推送投递耗时（秒）。
+    pub fn observe_push_latency(&self, tenant_id: &str, seconds: f64) {
+        if seconds < 0.0 {
+            return;
+        }
+        self.push_latency_seconds
+            .with_label_values(&[tenant_id])
+            .observe(seconds);
+    }
+
+    /// 记录在线状态缓存命中/未命中。
+    pub fn record_online_cache(&self, hit: bool) {
+        if hit {
+            self.online_cache_hit_total.inc();
+        } else {
+            self.online_cache_miss_total.inc();
+        }
+    }
+
+    /// 记录收到的客户端 ACK。
+    pub fn record_client_ack(&self, tenant_id: &str) {
+        self.client_ack_received_total
+            .with_label_values(&[tenant_id])
+            .inc();
     }
 }
 

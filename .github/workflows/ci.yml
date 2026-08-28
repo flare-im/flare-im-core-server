@@ -167,3 +167,9 @@ jobs:
       # 时间线永久错乱。这类故障零信号，只在内存吃紧时才爆发。
       - name: 校验 Redis 淘汰策略
         run: ./scripts/check_redis_eviction_policy.sh
+
+      # 注册进 Prometheus 却没人写的指标，/metrics 里永远是 0。
+      # 运维在故障时看到 push_success_total 0 会断定"推送全挂"，
+      # 而实际推送好好的——比压根没有这个指标更糟。
+      - name: 校验死指标
+        run: ./scripts/check_dead_metrics.sh

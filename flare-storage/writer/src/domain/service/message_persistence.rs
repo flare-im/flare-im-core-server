@@ -417,6 +417,11 @@ where
     /// 批量持久化
     #[instrument(skip(self, ctx, prepared), fields(batch_size = prepared.len()))]
     pub async fn persist_batch(&self, ctx: &Ctx, prepared: Vec<PreparedMessage>) -> Result<()> {
+        // batch_size 这个指标以前只有声明没有写入路径：注册进了 Prometheus，
+        // /metrics 里永远是 0，看的人会以为批量落库从没发生过。
+        if let Some(m) = &self.metrics {
+            m.observe_batch_size(prepared.len());
+        }
         if prepared.is_empty() {
             return Ok(());
         }

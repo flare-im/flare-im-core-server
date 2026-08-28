@@ -116,11 +116,14 @@ pub async fn initialize(
         .as_ref()
         .map(|client| Arc::new(RedisHotCacheRepository::new(client.clone(), &config)));
 
+    // metrics 要早于第一个使用者构造：WAL 清理仓储也要记 Redis 更新耗时。
+    let metrics = Arc::new(StorageWriterMetrics::new());
+
     let wal_cleanup_repo = match (&redis_client, &config.wal_hash_key) {
-        (Some(client), Some(key)) => Some(Arc::new(RedisWalCleanupRepository::new(
-            client.clone(),
-            key.clone(),
-        ))),
+        (Some(client), Some(key)) => Some(Arc::new(
+            RedisWalCleanupRepository::new(client.clone(), key.clone())
+                .with_metrics(Some(metrics.clone())),
+        )),
         _ => None,
     };
 
@@ -139,8 +142,6 @@ pub async fn initialize(
                 )
             })?,
     );
-
-    let metrics = Arc::new(StorageWriterMetrics::new());
 
     // 使用具体类型创建 domain_service
     let write_ledger_repo: Arc<dyn MessageWriteLedgerRepository> = archive_repo.clone();

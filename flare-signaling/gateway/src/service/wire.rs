@@ -145,6 +145,7 @@ pub async fn initialize(
         connection_query.clone(),
         conversation_subscriptions.clone(),
         conversation_read_pool.clone(),
+        metrics.clone(),
     ));
 
     // 11. 通话信令生命周期桥：gateway runtime -> flare-call FSM -> capability route hint。

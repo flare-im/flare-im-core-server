@@ -70,6 +70,8 @@ pub struct PushDomainService {
     conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
     /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。**有界 FIFO**，防长跑泄漏。
     resolved_conversations: std::sync::RwLock<ResolvedConversations>,
+    /// 推送投递指标。这一组以前只有声明没有写入路径，见 record_push_result 的说明。
+    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
 }
 
 pub struct EventEnvelopePushRequest<'a> {
@@ -89,12 +91,14 @@ impl PushDomainService {
         connection_query: Arc<dyn ConnectionQuery>,
         conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
         conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
     ) -> Self {
         Self {
             push_port,
             connection_query,
             conversation_subscriptions,
             conversation_read,
+            metrics,
             resolved_conversations: std::sync::RwLock::new(ResolvedConversations::new(
                 std::env::var("GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY")
                     .ok()
@@ -475,6 +479,8 @@ impl PushDomainService {
         payload_type: i32,
         log_kind: &'static str,
     ) -> Result<(String, i32, i32, i32)> {
+        let started = std::time::Instant::now();
+        let tenant_id = tx.tenant_id().unwrap_or("0").to_string();
         let connections = self.get_filtered_connections(tx, &user_id, options).await?;
         if connections.is_empty() {
             info!(user_id = %user_id, "push: user has no matching online connection");
@@ -489,6 +495,9 @@ impl PushDomainService {
                 payload.as_slice(),
             )
             .await?;
+        self.metrics.record_push_result(&tenant_id, ok, fail);
+        self.metrics
+            .observe_push_latency(&tenant_id, started.elapsed().as_secs_f64());
         info!(
             user_id = %user_id,
             pushed = ok,
@@ -816,6 +825,7 @@ mod tests {
             connection_query,
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
         );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root());
         let user_ids = vec!["u1".to_string()];
