@@ -84,7 +84,11 @@ WORKDIR /build/flare-im-core
 # 一次 OOM 就会波及线上容器。release/scripts/build_release_bundle.sh 因此用 --jobs 1；
 # 镜像构建以前没有对应开关，这里补上。
 #   docker build --build-arg CARGO_BUILD_JOBS=1 ...
-ARG CARGO_BUILD_JOBS
+#
+# 默认值必须是 `default` 而不是留空：ENV 会把未传的 ARG 设成空串，而 cargo
+# 拒绝解析空串（error: could not parse ``），于是不传这个 build-arg 时构建
+# 100% 失败——报错还指向 cargo build 那一大行，看着像是编译错误。
+ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
