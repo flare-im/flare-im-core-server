@@ -196,11 +196,40 @@ impl PushDomainService {
             .conversation_subscriptions
             .local_subscribers(conversation_id);
         if connection_ids.is_empty() {
+            // 本节点没有订阅该会话的在线连接。这不是错误（成员可能在别的网关节点，
+            // 或全部离线），但**必须可见**：投递计数为 0 时要能一眼分清
+            // "没有订阅者"和"发出去了但全失败"，否则排查只能靠猜。
+            tracing::info!(
+                conversation_id = %conversation_id,
+                "push: 本节点无该会话的在线订阅者，跳过投递"
+            );
+            self.metrics
+                .record_push_result(tx.tenant_id().unwrap_or("0"), 0, 0);
             return Ok((0, 0));
         }
-        self.push_port
+        // 埋点必须在**这里**：统一读扩散上线后，实时投递走的是会话级订阅广播，
+        // 而不是按用户查在线连接的 push_encoded_payload_to_user。
+        // 先把埋点加在后者身上，指标一直是空的——代码在、路径不通。
+        let started = std::time::Instant::now();
+        let tenant_id = tx.tenant_id().unwrap_or("0").to_string();
+        let result = self
+            .push_port
             .push_payload_to_connections(tx, &connection_ids, payload_type, payload.to_vec())
-            .await
+            .await;
+        if let Ok((ok, fail)) = &result {
+            self.metrics.record_push_result(&tenant_id, *ok, *fail);
+            self.metrics
+                .observe_push_latency(&tenant_id, started.elapsed().as_secs_f64());
+            tracing::info!(
+                conversation_id = %conversation_id,
+                subscribers = connection_ids.len(),
+                delivered = *ok,
+                failed = *fail,
+                elapsed_ms = started.elapsed().as_millis(),
+                "push: 会话级投递完成"
+            );
+        }
+        result
     }
 
     /// 统一读扩散投递业务消息：编码 `MessagePush`（与 [`Self::push_message_push_to_users`] 一致）→
