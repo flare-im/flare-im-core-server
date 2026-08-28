@@ -178,3 +178,8 @@ jobs:
       # 却从没调用 serve_prometheus_metrics——指标有人写有人注册，就是没出口。
       - name: 校验指标端点已暴露
         run: ./scripts/check_metrics_endpoint_served.sh
+
+      # Docker 对未声明的 --build-arg 只警告不报错、静默忽略：
+      # 照文档传了 CARGO_BUILD_JOBS 却毫无作用，小内存构建机照样 OOM。
+      - name: 校验 Dockerfile 构建参数
+        run: ./scripts/check_dockerfile_build_args.sh
