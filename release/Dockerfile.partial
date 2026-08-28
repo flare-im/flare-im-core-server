@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1
+#
+# 增量镜像：只重编受改动影响的服务，产物叠到已有的完整镜像上。
+#
+# 为什么需要它：全量重编 15 个二进制的构建缓存峰值约 8GB，而生产机
+# 40G 盘扣掉生产数据/镜像/源码后只剩 4~5GB——实测会在编译中途撞上磁盘熔断。
+# 绝大多数改动只影响少数服务，没必要每次都付全量的代价。
+#
+#   docker build -f flare-im-core/release/Dockerfile.partial \
+#     --build-arg BASE_IMAGE=flare-im-core:r6 \
+#     --build-arg BUILD_PACKAGES="-p flare-signaling-gateway -p flare-storage-writer" \
+#     -t flare-im-core:r7 .
+#
+# 注意：BASE_IMAGE 必须是**同一份源码基线**产出的完整镜像，否则会把新旧
+# 二进制混在一起。基线不确定时老老实实走 release/Dockerfile 全量构建。
+
+ARG RUST_IMAGE=rust:1.94.1-bookworm
+ARG BASE_IMAGE
+
+FROM ${RUST_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+        for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+            [ -f "$f" ] && sed -i "s|deb.debian.org|$APT_MIRROR|g" "$f"; \
+        done; \
+        # 这行不只是校验：循环最后一条是 `[ -f ] && sed`，而 sources.list
+        # 在 rust 镜像里并不存在 → 该行返回 1 → 整个 if 块退出码 1 →
+        # 后面的 `&& apt-get update` 直接短路，RUN 失败且看不出原因。
+        # 有它兜底才把退出码带回 0。
+        grep -rq "$APT_MIRROR" /etc/apt/ || { echo "APT_MIRROR 未生效，源文件格式可能变了"; exit 1; }; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential clang cmake pkg-config \
+        libssl-dev libprotobuf-dev protobuf-compiler zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PROTOC=/usr/bin/protoc
+
+ARG CARGO_REGISTRY_MIRROR=
+RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
+        mkdir -p "${CARGO_HOME:-/usr/local/cargo}" && \
+        printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+%s"\n' \
+            "$CARGO_REGISTRY_MIRROR" > "${CARGO_HOME:-/usr/local/cargo}/config.toml"; \
+    fi
+
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+WORKDIR /build
+COPY flare-proto ./flare-proto
+COPY flare-grpc-proto ./flare-grpc-proto
+COPY flare-core ./flare-core
+COPY flare-server-core ./flare-server-core
+COPY flare-im-core ./flare-im-core
+
+WORKDIR /build/flare-im-core
+
+# 只编指定的包。缓存挂载与全量构建共用，两者能互相复用依赖编译结果。
+ARG BUILD_PACKAGES
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/flare-im-core/target \
+    test -n "$BUILD_PACKAGES" || { echo "必须指定 BUILD_PACKAGES"; exit 1; } \
+    && cargo build --release ${BUILD_PACKAGES} \
+    && mkdir -p /out \
+    && for p in $(echo "$BUILD_PACKAGES" | tr ' ' '\n' | grep -v '^-p$' | grep -v '^$'); do \
+         cp "target/release/$p" /out/ || { echo "找不到产物 target/release/$p"; exit 1; }; \
+       done \
+    && ls -la /out
+
+# ── 叠加到已有完整镜像 ───────────────────────────────────────────────────────
+FROM ${BASE_IMAGE}
+COPY --from=builder /out/ /usr/local/bin/

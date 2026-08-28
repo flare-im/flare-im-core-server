@@ -31,6 +31,11 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
         for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
             [ -f "$f" ] && sed -i "s|deb.debian.org|$APT_MIRROR|g" "$f"; \
         done; \
+        # ⚠️ 这行不能删：它不只是校验，还兜住了退出码。
+        # 上面循环最后一条是 `[ -f "$f" ] && sed`，而 sources.list 在 rust 镜像里
+        # 并不存在 → 该行返回 1 → 整个 if 块退出码就是 1 → 后面的
+        # `&& apt-get update` 被短路，RUN 失败且报错完全看不出原因。
+        # （实测：照抄这段却漏掉本行的 Dockerfile.partial 就是这么挂的。）
         grep -rq "$APT_MIRROR" /etc/apt/ || { echo "APT_MIRROR 未生效，源文件格式可能变了"; exit 1; }; \
     fi \
     && apt-get update \

@@ -17,9 +17,14 @@ root = pathlib.Path(sys.argv[1])
 REQUIRED = ["APT_MIRROR", "CARGO_REGISTRY_MIRROR", "CARGO_BUILD_JOBS"]
 
 targets = []
-for df in sorted(root.rglob("Dockerfile")):
+# 必须匹配 Dockerfile* 而不是精确的 "Dockerfile"：
+# 仓里还有 Dockerfile.bundle / Dockerfile.partial 这类变体，
+# 只扫精确名会漏掉它们——判据漏扫和判据写错一样，都会报绿。
+for df in sorted(root.rglob("Dockerfile*")):
     sp = str(df)
     if "/target/" in sp or "/dist/" in sp or "/node_modules/" in sp:
+        continue
+    if sp.endswith(".dockerignore"):
         continue
     text = df.read_text(errors="replace")
     # 只管从源码编译 Rust 的镜像；纯运行时镜像不需要这些

@@ -52,6 +52,71 @@ export FLARE_DOCKER_CARGO_REGISTRY_MIRROR='sparse+https://mirrors.ustc.edu.cn/cr
 ./release/scripts/build_linux_bundle_docker.sh --jobs 1
 ```
 
+### ⚠️ 40G 的生产机装不下本仓的 Rust 构建
+
+实测结论，别再试了：
+
+| 尝试 | 结果 |
+| --- | --- |
+| 全量重编 15 个二进制 | 编到 488 个 crate 时磁盘剩 1.5G，被熔断中止 |
+| 只重编 4 个受影响的服务 | 编到 123 个 crate 就撞线——**没省下来** |
+
+为什么定向构建也不行：4 个服务和 15 个服务**共享同一批依赖**，
+真正吃磁盘的是那 500 多个依赖 crate 的编译产物，不是最后几个链接步骤。
+而且为腾空间 `docker builder prune` 会把 cargo 缓存一起清掉，
+下一次构建从零开始，反而更吃磁盘——越清越糟。
+
+**正确做法：在别处构建，只把镜像推过去。**
+
+```bash
+# 1) 在开发机构建（跨架构时加 --platform linux/amd64）
+podman build --platform linux/amd64 --build-arg CARGO_BUILD_JOBS=4 \
+  -f flare-im-core/release/Dockerfile -t flare-im-core:<tag> .
+
+# 2) 导出并推送（631MB 镜像压缩后约 200MB）
+podman save flare-im-core:<tag> | gzip | \
+  ssh <server> 'gunzip | docker load'
+
+# 3) 服务器上只需切 tag 重启，不需要任何构建空间
+```
+
+生产机的磁盘账（40G）：生产数据约 2.8G + 运行镜像约 1.8G + 构建源码树约 1.2G，
+可用只剩 3~5G，而一次冷构建峰值要 8G——差一倍，靠清理补不上。
+
+### 小盘机器上的增量构建（仅在构建机上有意义）
+
+全量重编 15 个二进制的构建缓存峰值约 **8GB**。40G 的机器扣掉生产数据、
+运行镜像和源码树之后通常只剩 4~5GB——**实测会在编译中途撞上磁盘不足**，
+而这台机器同时跑着整套生产容器，磁盘打满是要命的。
+
+绝大多数改动只影响少数服务，用 `Dockerfile.partial` 只重编它们，
+产物叠到已有的完整镜像上：
+
+```bash
+docker build \
+  --build-arg BASE_IMAGE=flare-im-core:<上一个完整镜像的 tag> \
+  --build-arg BUILD_PACKAGES="-p flare-signaling-gateway -p flare-storage-writer" \
+  --build-arg APT_MIRROR=mirrors.aliyun.com \
+  --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
+  --build-arg CARGO_BUILD_JOBS=2 \
+  -f flare-im-core/release/Dockerfile.partial -t flare-im-core:<新tag> .
+```
+
+⚠️ `BASE_IMAGE` 必须是**同一份源码基线**产出的完整镜像。基线不确定时
+（比如中间改过共享 crate 又没全量重编过）老老实实走全量，
+否则新旧二进制混在一起，问题极难查。
+
+**构建时务必给磁盘设熔断**，别指望构建自己会礼貌退出：
+
+```bash
+# 低于 1.5G 就杀掉构建，保住正在跑的服务
+while pgrep -f 'docker build' >/dev/null; do
+  [ "$(df -BM / | awk 'NR==2{gsub("M","",$4); print $4}')" -lt 1500 ] && \
+    { pkill -f 'docker build'; docker builder prune -f; break; }
+  sleep 60
+done
+```
+
 ### 直接构建运行时镜像
 
 `release/Dockerfile` 从源码编译出一体化运行时镜像（上下文必须取工作区根，
