@@ -47,6 +47,9 @@ pub struct ApplicationContext {
     pub call_signal_bridge: Arc<CallSignalBridge>,
     pub gateway_id: String,
     pub region: Option<String>,
+    /// 指标端点配置。带进上下文是为了让 startup 能真正起 serve_prometheus_metrics
+    /// —— 网关此前只注册指标、从不暴露。
+    pub metrics_config: flare_im_service_kit::metrics::MetricsEndpointConfig,
 }
 
 /// 构建应用上下文
@@ -194,6 +197,7 @@ pub async fn initialize(
 
     info!("Application context initialized successfully");
     Ok(ApplicationContext {
+        metrics_config: access_config.metrics.clone(),
         long_connection_server,
         grpc_services: GrpcServices {
             access_gateway_handler: access_gateway_grpc_handler,

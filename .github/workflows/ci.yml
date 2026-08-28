@@ -173,3 +173,8 @@ jobs:
       # 而实际推送好好的——比压根没有这个指标更糟。
       - name: 校验死指标
         run: ./scripts/check_dead_metrics.sh
+
+      # 网关曾经注册了指标、还打了 "Prometheus metrics initialized" 日志，
+      # 却从没调用 serve_prometheus_metrics——指标有人写有人注册，就是没出口。
+      - name: 校验指标端点已暴露
+        run: ./scripts/check_metrics_endpoint_served.sh

@@ -23,6 +23,11 @@ pub struct AccessGatewayConfig {
     pub default_svid: String,      // 默认 SVID（新增，默认 "svid.im"）
     pub use_route_service: bool,   // 是否使用 Route 服务（新增，默认 true）
     pub default_tenant_id: String, // 默认租户ID（新增，默认 "0"）
+    /// Prometheus 指标端点。网关此前**注册了指标却从不暴露**：
+    /// wire.rs 里只打了一句 "Prometheus metrics initialized" 日志，
+    /// 没有像 ingest/orchestrator/storage-writer 那样起 serve_prometheus_metrics，
+    /// 于是整个网关侧观测面（连接数、推送成功/失败/耗时）无处可读。
+    pub metrics: flare_im_service_kit::metrics::MetricsEndpointConfig,
     pub auth_provider: AuthProviderConfig,
     pub token_secret: Option<String>,
     pub token_issuer: String,
@@ -210,7 +215,26 @@ impl AccessGatewayConfig {
             .or(service.sync_pull_tenant_burst)
             .unwrap_or(sync_pull_defaults.tenant_burst);
 
+        // 指标端点：与 ingest/orchestrator/storage-writer 同一套约定
+        // （*_METRICS_ENABLED / _ADDRESS / _PORT / _PATH），默认开启。
+        let metrics = {
+            let enabled = env_bool("ACCESS_GATEWAY_METRICS_ENABLED").unwrap_or(true);
+            let address = std::env::var("ACCESS_GATEWAY_METRICS_ADDRESS")
+                .unwrap_or_else(|_| "0.0.0.0".to_string());
+            let port = std::env::var("ACCESS_GATEWAY_METRICS_PORT")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(19183);
+            let path = std::env::var("ACCESS_GATEWAY_METRICS_PATH")
+                .unwrap_or_else(|_| "/metrics".to_string());
+            let mut cfg = flare_im_service_kit::metrics::MetricsEndpointConfig::new(address, port)
+                .with_path(path);
+            cfg.enabled = enabled;
+            cfg
+        };
+
         Ok(Self {
+            metrics,
             signaling_service,
             route_service,
             message_service,
