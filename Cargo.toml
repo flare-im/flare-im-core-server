@@ -187,3 +187,31 @@ tokio-test = "0.4"
 parking_lot = "0.12"
 image = "0.24"
 moka = { version = "0.12", features = ["future"] }
+
+
+# release profile。
+#
+# 之前完全没配，用 cargo 默认。加这几项的实测收益要说清楚，别夸大：
+#   strip = true      最终二进制 18.4MB → 去符号，只影响产物不影响构建峰值
+#   incremental=false release 本就默认关闭，显式写出来防止有人误开
+#   codegen-units=16  cargo 的 release 默认值，写出来是为了防止有人改小
+#                     （改成 1 会显著拉长编译时间，而这台机器已经很紧张）
+#
+# ⚠️ 这些**解决不了**生产机装不下构建的问题。实测 target/release 共 1857MB，
+# 其中 deps 占 1697MB（786 个依赖 crate 的 .rlib 905MB + .rmeta 698MB），
+# 那是编译过程的必需中间态，任何 profile 配置都消不掉。
+# 构建必须放在别的机器上，见 release/README.md。
+#
+# 注意：**不设** panic = "abort"。服务端多处依赖 panic 展开后由 tokio 任务边界
+# 捕获，只让单个任务失败而不是整进程退出；改成 abort 会把"一个请求处理出错"
+# 变成"整个服务挂掉"，这是语义变更，不能为了省磁盘顺手加上。
+[profile.release]
+strip = true
+codegen-units = 16
+incremental = false
+
+# 需要符号表排查线上崩溃时用这个，别去动上面的 release。
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = 1
