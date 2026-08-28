@@ -23,25 +23,22 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
     // 仅填 last_message_time 会导致无最近消息预览时为空 → ts=0，增量同步在客户端游标非零时会误过滤掉整行。
     let updated_at_for_sync = last_message_time.or(summary.server_cursor_ts);
 
-    let member_preview =
-        if summary.conversation_type == crate::domain::model::ConversationType::Single {
-            Vec::new()
-        } else {
-            summary
-                .member_preview
-                .into_iter()
-                .map(|p| flare_proto::common::ConversationParticipant {
-                    user_id: p.user_id,
-                    roles: p.roles,
-                    muted: p.muted,
-                    pinned: p.pinned,
-                    attributes: p.attributes,
-                    joined_at: 0,
-                    visible_from_seq: p.visible_from_seq,
-                    mention_only: p.mention_only,
-                })
-                .collect()
-        };
+    // 单聊同样下发 member_preview（恒 2 人）：客户端靠它解析对端，
+    // 因为单聊行的 channel_id / display_name 在库里恒为空。清空会让端上标题退化成「会话」。
+    let member_preview = summary
+        .member_preview
+        .into_iter()
+        .map(|p| flare_proto::common::ConversationParticipant {
+            user_id: p.user_id,
+            roles: p.roles,
+            muted: p.muted,
+            pinned: p.pinned,
+            attributes: p.attributes,
+            joined_at: 0,
+            visible_from_seq: p.visible_from_seq,
+            mention_only: p.mention_only,
+        })
+        .collect();
 
     let max_seq = summary.last_message_seq.unwrap_or(0).max(0) as u64;
     let visible_after_seq = summary.visible_after_seq.max(0) as u64;
@@ -247,8 +244,8 @@ pub fn domain_to_proto_conversation(conversation: Conversation) -> ProtoConversa
 mod tests {
     use super::{domain_to_conversation_detail, proto_summary};
     use crate::domain::model::{
-        Conversation, ConversationLifecycleState, ConversationSummary, ConversationType,
-        ConversationVisibility,
+        Conversation, ConversationLifecycleState, ConversationParticipant, ConversationSummary,
+        ConversationType, ConversationVisibility,
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -262,6 +259,45 @@ mod tests {
         });
 
         assert_eq!(proto.conversation_type, "single");
+    }
+
+    fn test_participant(user_id: &str) -> ConversationParticipant {
+        ConversationParticipant {
+            user_id: user_id.to_string(),
+            roles: Vec::new(),
+            muted: false,
+            pinned: false,
+            attributes: HashMap::new(),
+            visible_from_seq: 0,
+            mention_only: false,
+        }
+    }
+
+    /// 单聊必须下发 member_preview：`channel_id` / `display_name` 对单聊恒为空，
+    /// 客户端只能靠它解析对端。曾经在这里把单聊清成空 Vec，桌面端单聊标题
+    /// 恒显示「会话」、在线状态恒显示「离线」、头像也拿不到——三个现象同一个根因。
+    #[test]
+    fn proto_summary_keeps_member_preview_for_single_conversation() {
+        let proto = proto_summary(ConversationSummary {
+            conversation_id: "1ACMMFNV3ETSP55A4X".to_string(),
+            conversation_type: ConversationType::Single,
+            member_preview: vec![
+                test_participant("351004571536982016"),
+                test_participant("351004578893791232"),
+            ],
+            ..test_summary()
+        });
+
+        let peers: Vec<&str> = proto
+            .member_preview
+            .iter()
+            .map(|p| p.user_id.as_str())
+            .collect();
+        assert_eq!(
+            peers,
+            vec!["351004571536982016", "351004578893791232"],
+            "单聊 member_preview 被清空，客户端将无法解析对端"
+        );
     }
 
     #[test]

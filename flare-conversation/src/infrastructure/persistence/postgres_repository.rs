@@ -154,14 +154,19 @@ impl PostgresConversationRepository {
     }
 
     /// 摘要只带非单聊成员预览和版本，完整成员由独立成员同步按需/空闲拉取。
-    async fn fill_non_single_member_preview(
+    /// 为会话摘要填充成员预览与真实人数。
+    ///
+    /// 单聊**必须**一起填：它只有 2 个成员，对下面的 `LIMIT 10` LATERAL 是零成本，
+    /// 而这是客户端得知「对端是谁」的唯一通道——单聊的 `channel_id`/`display_name`
+    /// 在库里恒为空（同一行被两端共用，装不下各自的对端），客户端全靠 member_preview
+    /// 解析对端来渲染标题和头像。曾经把单聊排除在外，桌面端单聊标题因此恒显示「会话」。
+    async fn fill_member_preview(
         pool: &PgPool,
         tenant_id: &str,
         summaries: &mut [ConversationSummary],
     ) -> Result<()> {
         let need_participants: Vec<String> = summaries
             .iter()
-            .filter(|s| !matches!(s.conversation_type, ConversationType::Single))
             .map(|s| s.conversation_id.clone())
             .collect();
 
@@ -562,7 +567,7 @@ impl ConversationRepository for PostgresConversationRepository {
         }
 
         Self::fill_single_chat_channel_ids(&self.pool, tenant_id, &user_id, &mut summaries).await?;
-        Self::fill_non_single_member_preview(&self.pool, tenant_id, &mut summaries).await?;
+        Self::fill_member_preview(&self.pool, tenant_id, &mut summaries).await?;
 
         // 按server_cursor_ts降序排序
         summaries.sort_by(|a, b| {
@@ -1561,7 +1566,7 @@ impl ConversationRepository for PostgresConversationRepository {
         if let Some(uid) = user_id {
             Self::fill_single_chat_channel_ids(&self.pool, tenant_id, uid, &mut summaries).await?;
         }
-        Self::fill_non_single_member_preview(&self.pool, tenant_id, &mut summaries).await?;
+        Self::fill_member_preview(&self.pool, tenant_id, &mut summaries).await?;
 
         // 查询总数（用于分页）
         // 注意：总数查询可能较慢，生产环境建议：

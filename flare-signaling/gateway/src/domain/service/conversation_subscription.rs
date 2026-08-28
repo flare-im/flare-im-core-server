@@ -86,8 +86,22 @@ impl ConversationSubscriptionRegistry {
             .remove(connection_id)
             .unwrap_or_default();
         if conversations.is_empty() {
+            // 断连时该连接在反向索引里没有记录。正常路径下不该出现——
+            // 它意味着 join 只写了 by_conversation 没写 by_connection，
+            // 或者 remove 被调了两次。任其静默会让 by_conversation 里
+            // 留下永不清除的陈旧 connection_id：每次投递都要遍历它们，
+            // 且订阅数随重连单调增长。
+            tracing::debug!(
+                connection_id = %connection_id,
+                "断连清理：该连接没有订阅记录（可能已清理过）"
+            );
             return;
         }
+        tracing::info!(
+            connection_id = %connection_id,
+            conversations = conversations.len(),
+            "断连清理：移除该连接的会话订阅"
+        );
         let mut conv = write_recovered(&self.by_conversation);
         for cid in conversations {
             if let Some(set) = conv.get_mut(&cid) {
