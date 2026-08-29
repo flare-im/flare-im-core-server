@@ -1461,11 +1461,21 @@ fn merge_sync_summary_channel_id(
     hint.channel_id.clone()
 }
 
+/// 会话类型以**会话自身**为准，消息里的只在会话没给出类型时兜底。
+///
+/// 反过来（让消息覆盖会话）是失败开放：`conversation_type` 是 Message 上的字段，
+/// 任何一条填错或没填的消息都会把整个会话的类型翻转——而客户端拿它做的是
+/// 不可逆的判断。实测一条 conversation_type 缺省的群消息，就让群会话在同步下发时
+/// 被标成单聊，客户端据此把会话 ID 从 2A… 改写成 1A…（canonicalize_single_chat_conversation），
+/// 群名、成员、标题全部失效，而服务端 conversations 表里类型一直是正确的。
+///
+/// hint 来自 conversation 服务的 bootstrap，是权威值；消息里的那份是冗余副本。
+/// 冗余副本不该压过权威来源。
 fn merge_sync_summary_conversation_type(from_message: i32, hint: i32) -> i32 {
-    if from_message > 0 {
-        return from_message;
+    if hint > 0 {
+        return hint;
     }
-    hint
+    from_message
 }
 
 /// 从消息 content 派生会话列表预览文本:文本类取正文,媒体/卡片等取占位标签。
@@ -1678,6 +1688,30 @@ mod tests {
     };
     use flare_server_core::context::Context;
     use std::sync::Mutex;
+
+    /// 会话类型必须以会话自身为准，不能被单条消息翻转。
+    ///
+    /// 曾经是消息优先：一条 conversation_type 缺省的群消息，就让群会话在同步下发时
+    /// 被标成单聊，客户端据此把会话 ID 从 2A… 改写成 1A…，群名/成员/标题全部失效——
+    /// 而服务端 conversations 表里类型一直是对的。这属于失败开放：
+    /// 冗余副本（消息上的字段）压过了权威来源（会话）。
+    #[test]
+    fn conversation_type_prefers_conversation_over_message() {
+        const SINGLE: i32 = 1;
+        const GROUP: i32 = 2;
+
+        // 群会话 + 一条类型缺省被填成单聊的消息 → 仍必须是群
+        assert_eq!(
+            merge_sync_summary_conversation_type(SINGLE, GROUP),
+            GROUP,
+            "单条消息把群会话翻成了单聊，客户端会据此改写会话 ID"
+        );
+        // 会话没给类型时，才用消息里的兜底
+        assert_eq!(merge_sync_summary_conversation_type(GROUP, 0), GROUP);
+        assert_eq!(merge_sync_summary_conversation_type(SINGLE, 0), SINGLE);
+        // 两边都没有 → 保持未知，不臆断
+        assert_eq!(merge_sync_summary_conversation_type(0, 0), 0);
+    }
 
     #[derive(Default)]
     struct MockInfra {
