@@ -104,7 +104,12 @@ services:
       - -c
       - wal_buffers=16MB
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flare}"]
+      # 必须带 -d：pg_isready 不指定库时默认连**与用户同名**的库（flare），
+      # 而实际库是 flare2 → 每次探测都在 postgres 日志里留一条
+      # `FATAL: database "flare" does not exist`（10s 一条）。探测本身仍会
+      # 报 healthy（连得上服务端就算通），所以问题只表现为日志噪声——
+      # 但它会淹没真正的数据库错误。
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flare} -d ${POSTGRES_DB:-flare2}"]
       interval: 10s
       timeout: 5s
       retries: 10
