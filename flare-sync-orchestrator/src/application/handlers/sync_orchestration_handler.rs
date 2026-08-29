@@ -1446,19 +1446,21 @@ fn conversation_type_label(value: i32) -> &'static str {
 /// 单聊的对端路由以 Conversation Bootstrap 从成员表解析出的 channel_id 为准；
 /// 最新消息体里的 channel_id 可能来自历史坏数据或旧客户端，不能覆盖它。
 fn merge_sync_summary_channel_id(
-    conversation_type: i32,
     from_message: &str,
     hint: &ConversationSyncRoutingHint,
 ) -> String {
-    if conversation_type == flare_proto::common::ConversationType::Single as i32
-        && !hint.channel_id.is_empty()
-    {
+    // 与 conversation_type 同理：channel_id 也以**会话自身**为准，
+    // 消息上那份只在会话没给出时兜底。
+    //
+    // 曾经只对单聊做了这个保护，群聊/频道走的是「消息优先」——于是一条
+    // channel_id 缺省的群消息就把群会话的 channel_id 污染成了某个 user_id
+    // （实测群会话 channel_id 从群 ID 351949143293296640 变成了我自己的
+    // user_id），而 channel_id 对群聊就是群 ID：端上据此查群名，
+    // 查不到就退化成「会话」——冷启正确、收到一条消息后退化，极难定位。
+    if !hint.channel_id.is_empty() {
         return hint.channel_id.clone();
     }
-    if !from_message.is_empty() {
-        return from_message.to_string();
-    }
-    hint.channel_id.clone()
+    from_message.to_string()
 }
 
 /// 会话类型以**会话自身**为准，消息里的只在会话没给出类型时兜底。
@@ -1556,7 +1558,7 @@ fn snapshot_row_to_summary(
     let conversation_type =
         merge_sync_summary_conversation_type(type_from_msg, hint.conversation_type);
     let channel_from_msg = latest.map(|m| m.channel_id.as_str()).unwrap_or_default();
-    let channel_id = merge_sync_summary_channel_id(conversation_type, channel_from_msg, hint);
+    let channel_id = merge_sync_summary_channel_id(channel_from_msg, hint);
     let visible_after_seq = hint.visible_after_conversation_seq;
     let last_read_seq = normalize_participant_read_seq(
         max_seq,
@@ -1688,6 +1690,30 @@ mod tests {
     };
     use flare_server_core::context::Context;
     use std::sync::Mutex;
+
+    /// channel_id 必须以会话自身为准，不能被单条消息污染。
+    ///
+    /// channel_id 对群聊就是群 ID，端上据此查群名。曾经只对单聊做了这个保护，
+    /// 群聊走「消息优先」——一条 channel_id 缺省的群消息就把群会话的
+    /// channel_id 污染成了某个 user_id，群名查不到、标题退化成「会话」。
+    /// 现象是冷启正确、收到一条消息后退化，极难定位。
+    #[test]
+    fn channel_id_prefers_conversation_over_message() {
+        let hint = ConversationSyncRoutingHint {
+            channel_id: "351949143293296640".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_sync_summary_channel_id("351898438163496960", &hint),
+            "351949143293296640",
+            "消息里的 channel_id 覆盖了会话自身的群 ID"
+        );
+
+        // 会话没给出时才用消息兜底
+        let empty = ConversationSyncRoutingHint::default();
+        assert_eq!(merge_sync_summary_channel_id("from-msg", &empty), "from-msg");
+        assert_eq!(merge_sync_summary_channel_id("", &empty), "");
+    }
 
     /// 会话类型必须以会话自身为准，不能被单条消息翻转。
     ///
