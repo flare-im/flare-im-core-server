@@ -109,7 +109,19 @@ impl ApplicationBootstrap {
                         let _ = shutdown_rx.await;
                     })
                     .await
-                    .map_err(|e| format!("gRPC server error: {}", e).into())
+                    .map_err(|e| {
+                        // tonic 的 transport error 把真因（AddrInUse / 权限 / TLS 等）
+                        // 藏在 source() 链里，只 `{}` 打顶层就只剩一句
+                        // "transport error"——服务崩溃重启 83 次却查不出为什么。
+                        let mut detail = e.to_string();
+                        let mut cause: Option<&(dyn std::error::Error + 'static)> =
+                            std::error::Error::source(&e);
+                        while let Some(c) = cause {
+                            detail.push_str(&format!(" <- {c}"));
+                            cause = c.source();
+                        }
+                        format!("gRPC server error: {detail} (address={address_clone})").into()
+                    })
             });
 
         runtime

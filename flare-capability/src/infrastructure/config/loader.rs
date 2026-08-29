@@ -393,6 +393,19 @@ impl ConfigLoader for ConfigCenterLoader {
                         );
                         Ok(HookConfig::default())
                     }
+                    // consul 对「键不存在」返回 404，而 KV 客户端把它包成 Err 而不是
+                    // Ok(None)——于是「钩子未配置」这个完全正常的状态每 30 秒打一条
+                    // ERROR。运维看到 ERROR 会当成服务异常排查，而它其实无害
+                    // （下面的 watcher 收到 Err 只是 warn 并跳过，配置照常从数据库加载）。
+                    // 在调用侧把 404 归位到已有的「未配置」语义上。
+                    Err(e) if e.to_string().contains("404") => {
+                        debug!(
+                            endpoint = %self.endpoint,
+                            config_key = %self.config_key,
+                            "consul 中没有钩子配置（键不存在），使用默认值"
+                        );
+                        Ok(HookConfig::default())
+                    }
                     Err(e) => {
                         error!(
                             endpoint = %self.endpoint,
