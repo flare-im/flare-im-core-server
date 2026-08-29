@@ -163,6 +163,7 @@ impl PushDomainService {
         // 上限而非无界：大群下无界并发会瞬间铺开上万个任务，
         // 调度开销反而吃掉收益——那是「看起来更快」的陷阱。
         let query = &self.connection_query;
+        let mut joined_total = 0usize;
         for chunk in participants.chunks(SUBSCRIBE_LOOKUP_CONCURRENCY) {
             let looked_up = futures::future::join_all(
                 chunk
@@ -174,9 +175,20 @@ impl PushDomainService {
                 for connection_id in connection_ids {
                     self.conversation_subscriptions
                         .join(conversation_id, &connection_id);
+                    joined_total += 1;
                 }
             }
         }
+        // 这条日志是排查「消息发出去了但某人收不到」的第一落点：
+        // participants 是该会话的成员数，joined 是本节点为他们补上的订阅数。
+        // joined=0 而 participants>0 有两种解释——成员都在别的网关节点，
+        // 或者成员确实全部离线；配合后面那条「跳过投递 / 投递完成」就能定位。
+        tracing::debug!(
+            conversation_id = %conversation_id,
+            participants = participants.len(),
+            joined = joined_total,
+            "push: 会话成员订阅补齐"
+        );
     }
 
     /// 统一读扩散投递：把已编码载荷扇给**本节点**订阅该会话的在线连接。
