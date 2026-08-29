@@ -1589,12 +1589,13 @@ fn snapshot_row_to_summary(
             .unwrap_or(0),
         channel_id,
         participant_version: hint.participant_version,
-        member_preview: if conversation_type == flare_proto::common::ConversationType::Single as i32
-        {
-            Vec::new()
-        } else {
-            hint.member_preview.clone()
-        },
+        // 单聊同样下发 member_preview（恒 2 人）：单聊行的 channel_id / display_name
+        // 装不下各自的对端，客户端只能靠它解析「对端是谁」。清空会让端上标题
+        // 退化成「会话」、在线状态恒「离线」、头像取不到。
+        //
+        // ⚠️ 这是第三处——仓储层与 conversation 的 gRPC 转换层各有一处同样的排除。
+        // 冷启走的是本文件的 bundle 同步路径，只修那两处的话客户端照旧拿不到。
+        member_preview: hint.member_preview.clone(),
         attributes: ext,
     }
 }
