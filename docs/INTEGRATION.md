@@ -155,7 +155,7 @@ with the bridge, WASM and storage already wired — copy it first, then swap in 
 runtime.
 
 Other platform packages live in
-[`flare-im-core-client-sdk`](../flare-im-core-client-sdk): Swift (iOS), Kotlin (Android),
+[`flare-im-core-client-sdk`](../../flare-im-core-client-sdk): Swift (iOS), Kotlin (Android),
 Dart (Flutter), ArkTS/Cangjie (HarmonyOS). Same contract, naming idiomatic per language.
 
 ### Ready-made UI
@@ -165,7 +165,7 @@ npm install @flare-im/vue-ui     # 111 components, Vue 3
 ```
 
 The four native platforms (Flutter / SwiftUI / Compose) implement the same component
-contract; see [`flare-im-design`](../flare-im-design). Not using it is fine — the SDK does
+contract; see [`flare-im-design`](../../flare-im-design). Not using it is fine — the SDK does
 not depend on it.
 
 ---
@@ -210,13 +210,13 @@ Hooks are **synchronous interceptors**: Flare calls your endpoint at key points 
 
 Three registration methods are available — config file, dynamic API (database), or config
 centre; transports are gRPC, WebHook or a local plugin. See
-[`flare-capability/README.md`](./flare-capability/README.md).
+[`flare-capability/README.md`](../flare-capability/README.md).
 
-Writing a gRPC hook plugin: [`docs/HOOK-PLUGIN-CONTRACT.md`](./docs/HOOK-PLUGIN-CONTRACT.md)
+Writing a gRPC hook plugin: [`docs/HOOK-PLUGIN-CONTRACT.md`](./HOOK-PLUGIN-CONTRACT.md)
 is the wire contract — the four operations that actually reach a remote plugin,
 the protobuf payload types, and what `pre_send` must return when it denies.
-Runnable references: [`examples/hook_rate_limit.rs`](./examples/hook_rate_limit.rs)
-and [`examples/hook_audit_log.rs`](./examples/hook_audit_log.rs).
+Runnable references: [`examples/hook_rate_limit.rs`](../examples/hook_rate_limit.rs)
+and [`examples/hook_audit_log.rs`](../examples/hook_audit_log.rs).
 
 > Hooks have a timeout (5 s by default), so a dead endpoint of yours won't drag the whole
 > message path down with it — but **whether a timeout allows or rejects depends on how you

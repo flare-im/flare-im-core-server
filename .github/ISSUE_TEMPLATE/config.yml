@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: 安全漏洞（请勿公开提交） / Security vulnerability (do not file publicly)
-    url: https://github.com/flare-im/flare-im-core-server/blob/main/SECURITY.md
+    url: https://github.com/flare-im/flare-im-core-server/blob/main/.github/SECURITY.md
     about: 走私密渠道披露。公开报告会在修复发布前让所有使用者暴露于风险中。
   - name: 文档 / Documentation
     url: https://github.com/flare-im/flare-im-core-server/tree/main/docs
     about: 集成方式、架构与 API 说明先在这里找。
   - name: 贡献指南 / Contributing
-    url: https://github.com/flare-im/flare-im-core-server/blob/main/CONTRIBUTING.md
+    url: https://github.com/flare-im/flare-im-core-server/blob/main/.github/CONTRIBUTING.md
     about: 改动该去哪个仓、提交前要跑什么。

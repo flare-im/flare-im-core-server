@@ -5,11 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        中文或英文都可以。**安全漏洞请不要在这里提** —— 走 [SECURITY.md](../blob/main/SECURITY.md)
+        中文或英文都可以。**安全漏洞请不要在这里提** —— 走 [SECURITY.md](../blob/main/.github/SECURITY.md)
         里的私密渠道，公开的漏洞报告会在修复发布前让所有使用者暴露于风险中。
 
         Either language is fine. **Do not report security vulnerabilities here** — use the
-        private channels in [SECURITY.md](../blob/main/SECURITY.md); a public report exposes
+        private channels in [SECURITY.md](../blob/main/.github/SECURITY.md); a public report exposes
         every user until a fix ships.
 
   - type: textarea

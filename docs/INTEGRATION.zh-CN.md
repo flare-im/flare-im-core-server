@@ -146,7 +146,7 @@ await client.login({ userId, token });   // token 同样来自你的登录接口
 把 bridge / WASM / 存储都装好了，直接拿到可用的 client —— 可以先照着它抄，
 再按自己的运行时替换。
 
-其他平台包见 [`flare-im-core-client-sdk`](../flare-im-core-client-sdk)：
+其他平台包见 [`flare-im-core-client-sdk`](../../flare-im-core-client-sdk)：
 iOS(Swift) / Android(Kotlin) / Flutter(Dart) / 鸿蒙(ArkTS)。
 契约一致，命名按各语言习惯。
 
@@ -157,7 +157,7 @@ npm install @flare-im/vue-ui     # 111 个组件，Vue 3
 ```
 
 原生四端（Flutter / SwiftUI / Compose）同一套组件契约，见
-[`flare-im-design`](../flare-im-design)。不想用也行，SDK 不依赖它。
+[`flare-im-design`](../../flare-im-design)。不想用也行，SDK 不依赖它。
 
 ---
 
@@ -198,13 +198,13 @@ Hook 是**同步拦截**：Flare 在关键节点（如 `pre_send`）回调你的
 或拒绝，拒绝的消息不会落库也不会投递。
 
 三种注册方式任选：配置文件、动态 API（数据库）、配置中心；传输侧支持 gRPC、
-WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`](./flare-capability/README.md)。
+WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`](../flare-capability/README.md)。
 
-写一个 gRPC hook 插件：[`docs/HOOK-PLUGIN-CONTRACT.md`](./docs/HOOK-PLUGIN-CONTRACT.md)
+写一个 gRPC hook 插件：[`docs/HOOK-PLUGIN-CONTRACT.md`](./HOOK-PLUGIN-CONTRACT.md)
 是线上契约——真正会派发给远程插件的四个 operation、protobuf 载荷类型、
 以及 `pre_send` 拒绝时必须回什么。可运行参照：
-[`examples/hook_rate_limit.rs`](./examples/hook_rate_limit.rs)、
-[`examples/hook_audit_log.rs`](./examples/hook_audit_log.rs)。
+[`examples/hook_rate_limit.rs`](../examples/hook_rate_limit.rs)、
+[`examples/hook_audit_log.rs`](../examples/hook_audit_log.rs)。
 
 > Hook 有超时控制（默认 5s），你的接口挂了不会把消息链路一起拖死 ——
 > 但**超时的默认行为是放行还是拒绝，取决于你怎么配**，上生产前务必确认这一项。

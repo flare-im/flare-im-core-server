@@ -48,8 +48,8 @@ RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不�
 Flare IM Core 是 Flare IM 的服务端通信核心工作区，负责消息编排、会话同步、在线状态、信令路由、存储读写、推送、媒资与能力扩展。它面向生产级 IM 场景设计，保持业务中立：用户、好友、群资料、业务权限和产品规则由业务系统或插件提供，Core 只消费清晰的身份、会话、成员、Hook 与能力合同。
 
 
-> **上手路径**：[QUICKSTART.md](./QUICKSTART.zh-CN.md)（五分钟跑通，含一条命令的自证）
-> → [INTEGRATION.md](./INTEGRATION.zh-CN.md)（接进你自己的业务：用户体系、客户端、部署、E2EE）
+> **上手路径**：[QUICKSTART.md](./docs/QUICKSTART.zh-CN.md)（五分钟跑通，含一条命令的自证）
+> → [INTEGRATION.md](./docs/INTEGRATION.zh-CN.md)（接进你自己的业务：用户体系、客户端、部署、E2EE）
 
 ## 核心亮点
 
@@ -99,7 +99,7 @@ flowchart TB
 
 **绿色的部分开箱可用，黄色的三处需要你接。** 其中只有「签发 token」是必做的 ——
 另外两处不接也能跑，只是没有昵称头像、没有发送权限校验。
-怎么接见 [INTEGRATION.md](./INTEGRATION.zh-CN.md)。
+怎么接见 [INTEGRATION.md](./docs/INTEGRATION.zh-CN.md)。
 
 ## 关于边界：不含账号体系
 
@@ -118,7 +118,7 @@ PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
 ConversationLifecycle / ConversationMember / GetConversationParticipants。
 
 这与 Sendbird / Twilio Conversations 的「自带身份」模型一致，区别是
-Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](.github/GOVERNANCE.md)。
 
 ## 服务拓扑
 
@@ -305,11 +305,11 @@ make stop   # 停止全部 Core 服务
 
 | 想做什么 | 去哪里 |
 |---|---|
-| **五分钟跑起来** | [QUICKSTART](https://github.com/flare-im/flare-im-core-server/blob/main/QUICKSTART.md) —— 起服务、手签 token、调通接口，**不需要自建用户体系** |
+| **五分钟跑起来** | [QUICKSTART](https://github.com/flare-im/flare-im-core-server/blob/main/docs/QUICKSTART.md) —— 起服务、手签 token、调通接口，**不需要自建用户体系** |
 | 接入自己的用户系统 | 实现 `TokenValidator`（`CoreJwtTokenValidator` 本地验签 / `HttpHookTokenValidator` 调你的接口） |
 | 加自己的业务规则 | `flare-im-hooks` 的 9 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember / GetConversationParticipants |
 | 做界面 | [`@flare-im/vue-ui`](https://www.npmjs.com/package/@flare-im/vue-ui) —— 107 个组件，四端一致的契约 |
-| 报安全问题 | [SECURITY.md](SECURITY.md)，**请勿开公开 issue** |
+| 报安全问题 | [SECURITY.md](.github/SECURITY.md)，**请勿开公开 issue** |
 
 ## 需要账号体系与社交能力时
 
@@ -320,5 +320,5 @@ make stop   # 停止全部 Core 服务
 
 咨询：`flare1522@163.com`
 
-> 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-im-core-server/blob/main/GOVERNANCE.md)。
+> 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-im-core-server/blob/main/.github/GOVERNANCE.md)。
 > 简言之：**已开源的不会被收回，鉴权与 hooks 契约永远开源、不会为逼迫付费而阉割。**

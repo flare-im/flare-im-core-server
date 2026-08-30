@@ -2,6 +2,15 @@
 
 本目录是 `flare-im-core` 的主文档入口，面向架构设计、生产接入、消息可靠性、第三方集成和测试运维。旧目录 `../doc/` 暂时保留为历史设计材料和深度参考，本次不修改。
 
+## 快速上手 / 指南
+
+不属于下面 01–11 的编号设计文档，是从这里开始跑通和接入的实操指南：
+
+| 指南 | 文档 | 说明 |
+|------|------|------------|
+| 快速开始 | [QUICKSTART.md](QUICKSTART.md)（[中文](QUICKSTART.zh-CN.md)） | 五分钟起服务、手签 token、调通接口并自证，不需要自建用户体系。 |
+| 接入指南 | [INTEGRATION.md](INTEGRATION.md)（[中文](INTEGRATION.zh-CN.md)） | 把 Core 接进自己的业务：用户体系、客户端、部署、E2EE、Hook 扩展点。 |
+
 ## 阅读顺序
 
 1. [架构与技术栈总览](01-architecture-overview.md)

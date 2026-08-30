@@ -33,8 +33,8 @@ re-verified daily.
 ![Reliability](https://img.shields.io/badge/Reliability-WAL%20%2B%20Ledger-4CAF50)
 ![Sync](https://img.shields.io/badge/Sync-seq%20%2F%20cursor-FF9800)
 
-> **Getting started**: [QUICKSTART.md](./QUICKSTART.md) (five minutes, ends with a
-> self-check) → [INTEGRATION.md](./INTEGRATION.md) (wire it into your own product:
+> **Getting started**: [QUICKSTART.md](./docs/QUICKSTART.md) (five minutes, ends with a
+> self-check) → [INTEGRATION.md](./docs/INTEGRATION.md) (wire it into your own product:
 > identity, clients, deployment, E2EE)
 
 ## Why use it
@@ -89,7 +89,7 @@ flowchart TB
 
 **Green is ready to use; the three yellow boxes are yours to wire.** Only "issue a token"
 is mandatory — skip the other two and it still runs, you just won't have display names or
-send-permission checks. See [INTEGRATION.md](./INTEGRATION.md).
+send-permission checks. See [INTEGRATION.md](./docs/INTEGRATION.md).
 
 ## On the boundary: no identity system included
 
@@ -109,7 +109,7 @@ MessageReaction / ConversationLifecycle / ConversationMember / GetConversationPa
 
 This is the same "bring your own identity" model as Sendbird or Twilio Conversations —
 the difference being that Flare is self-hostable and its protocol and core are auditable.
-Details in [GOVERNANCE.md](GOVERNANCE.md).
+Details in [GOVERNANCE.md](.github/GOVERNANCE.md).
 
 ## Service topology
 
@@ -159,19 +159,19 @@ flowchart LR
 
 | Document | What it answers |
 |---|---|
-| [QUICKSTART.md](./QUICKSTART.md) | Get it running in five minutes and prove it works |
-| [INTEGRATION.md](./INTEGRATION.md) | Wire it into your product: identity, clients, deployment, E2EE |
-| [GOVERNANCE.md](GOVERNANCE.md) | What is open source, what is commercial, and why |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
-| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
+| [QUICKSTART.md](./docs/QUICKSTART.md) | Get it running in five minutes and prove it works |
+| [INTEGRATION.md](./docs/INTEGRATION.md) | Wire it into your product: identity, clients, deployment, E2EE |
+| [GOVERNANCE.md](.github/GOVERNANCE.md) | What is open source, what is commercial, and why |
+| [CONTRIBUTING.md](.github/CONTRIBUTING.md) | How to contribute |
+| [SECURITY.md](.github/SECURITY.md) | Reporting vulnerabilities |
 
-中文文档：[README](./README.zh-CN.md) · [QUICKSTART](./QUICKSTART.zh-CN.md) ·
-[INTEGRATION](./INTEGRATION.zh-CN.md)
+中文文档：[README](./README.zh-CN.md) · [QUICKSTART](./docs/QUICKSTART.zh-CN.md) ·
+[INTEGRATION](./docs/INTEGRATION.zh-CN.md)
 
 ## When you need identity and social features
 
 Friends, group governance and moments are available as a commercial layer speaking the
-same protocol — the interfaces above do not change. See [GOVERNANCE.md](GOVERNANCE.md).
+same protocol — the interfaces above do not change. See [GOVERNANCE.md](.github/GOVERNANCE.md).
 
 ## License
 
