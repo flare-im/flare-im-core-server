@@ -275,7 +275,18 @@ impl GatewayRouter {
                         self.connect_channel(uri, "static Access Gateway fallback")
                             .await?
                     } else {
-                        return Err(flare_server_core::error::FlareError::system(format!(
+                        // ServiceUnavailable 而不是 system：网关实例查不到是**瞬时可恢复**
+                        // 状态——滚动重启时 push-worker 可能比网关早起来几秒，此时网关
+                        // 还没完成 consul 注册。system 不在 is_retryable 列表里，于是
+                        // push-worker 把它判成 non-retryable、消息直接进 DLQ 丢掉。
+                        // 实测 r16 部署时因此丢了 2 条（push-worker 早启动 1 秒）。
+                        // ServiceUnavailable 会走 Nack → broker 重投，网关注册完成后自然成功。
+                        // ⚠️ 必须用 localized：FlareError 只有 Localized 变体带 ErrorCode，
+                        // 其余变体 code() 返回 None → is_retryable() 恒 false。
+                        // 用 ::system 构造的话，无论语义如何都会被判成不可重试。
+                        return Err(flare_server_core::error::FlareError::localized(
+                            flare_server_core::error::ErrorCode::ServiceUnavailable,
+                            format!(
                             "Gateway instance not found: gateway_id={}. Available instances: {}",
                             gateway_id,
                             instances
@@ -659,4 +670,36 @@ fn users_offline_error(user_ids: Vec<String>) -> FlareError {
     )
     .details(format!("offline_users={user_ids:?}"))
     .build_error()
+}
+
+
+#[cfg(test)]
+mod tests {
+    /// 「网关实例未找到」必须是**可重试**错误。
+    ///
+    /// 滚动重启时 push-worker 可能比网关早起来几秒，此时网关还没完成 consul
+    /// 注册。若这个错误被判成不可重试，push-worker 会把消息直接丢进 DLQ——
+    /// 而根因只是"网关还没起来"，等几秒就好。实测 r16 部署时因此丢了 2 条消息。
+    ///
+    /// ⚠️ FlareError 只有 Localized 变体带 ErrorCode，其余 code() 返回 None、
+    /// is_retryable() 恒 false。所以构造时必须用 localized 而不是 system。
+    #[test]
+    fn gateway_not_found_is_retryable() {
+        use flare_server_core::error::{ErrorCode, FlareError};
+
+        let err = FlareError::localized(
+            ErrorCode::ServiceUnavailable,
+            "Gateway instance not found: gateway_id=x",
+        );
+        assert!(
+            err.is_retryable(),
+            "网关未就绪被判成不可重试，消息会被直接丢进 DLQ"
+        );
+
+        let legacy = FlareError::system("Gateway instance not found: gateway_id=x");
+        assert!(
+            !legacy.is_retryable(),
+            "system 变体不带 ErrorCode，预期不可重试（说明为何必须改用 localized）"
+        );
+    }
 }
