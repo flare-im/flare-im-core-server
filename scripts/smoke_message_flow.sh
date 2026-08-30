@@ -20,7 +20,28 @@ minimum_durability="SEND_ACK_DURABILITY_BROKER_ACCEPTED"
 accepted_durability_pattern="^(SEND_ACK_DURABILITY_BROKER_ACCEPTED|SEND_ACK_DURABILITY_PERSISTED)$"
 minimum_ledger_state="archive_persisted"
 accepted_ledger_state_pattern="^(archive_persisted|storage_persisted|wal_cleaned|ack_published)$"
-conversation_id="${SMOKE_CONVERSATION_ID:-single:${sender_id}:${recipient_id}}"
+# 单聊会话 ID 必须是 CID 格式：TypePrefix(1) + Version(1) + OpaqueID，
+# 即 `1A{Crockford-Base32}`。此前默认值写的是 `single:a:b`，
+# 服务端 flare-core::common::conversation 会拒绝：
+#   INVALID_PARAMETER: Unsupported CID version: i, expected 'A'
+# 表现为消息能落库、但 conversation 服务每次消费都报错刷屏，
+# 且 StorageReader 查不到——看起来像部署坏了，实际是冒烟数据不合规。
+#
+# 与 flare-core 的 generate_single_chat_conversation_id 保持一致：
+#   SHA256("DM:v1:{min_user}:{max_user}") 取前 10 字节 → Crockford Base32 → 加 "1A"
+generate_single_chat_cid() {
+    # 排序在 python 里做：shell 的字符串比较在 zsh/dash 下写法不一致
+    python3 - "$1" "$2" <<'PYCID'
+import hashlib, sys
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+a, b = sys.argv[1], sys.argv[2]
+lo, hi = (a, b) if a <= b else (b, a)
+digest = hashlib.sha256(f"DM:v1:{lo}:{hi}".encode()).digest()[:10]
+bits = int.from_bytes(digest, "big")
+print("1A" + "".join(CROCKFORD[(bits >> s) & 31] for s in range(75, -1, -5)))
+PYCID
+}
+conversation_id="${SMOKE_CONVERSATION_ID:-$(generate_single_chat_cid "$sender_id" "$recipient_id")}"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
