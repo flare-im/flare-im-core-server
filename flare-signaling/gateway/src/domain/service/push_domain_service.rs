@@ -70,6 +70,10 @@ pub struct PushDomainService {
     conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
     /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。**有界 FIFO**，防长跑泄漏。
     resolved_conversations: std::sync::RwLock<ResolvedConversations>,
+    /// 大群上次全量补订阅的时刻。仅对超过 LARGE_GROUP_THRESHOLD 的会话记录，
+    /// 用于把 O(成员数) 的遍历从「每条消息」降到「每 30 秒一次」。
+    large_group_last_sweep:
+        std::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>,
     /// 推送投递指标。这一组以前只有声明没有写入路径，见 record_push_result 的说明。
     metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
 }
@@ -99,6 +103,7 @@ impl PushDomainService {
             conversation_subscriptions,
             conversation_read,
             metrics,
+            large_group_last_sweep: std::sync::RwLock::new(std::collections::HashMap::new()),
             resolved_conversations: std::sync::RwLock::new(ResolvedConversations::new(
                 std::env::var("GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY")
                     .ok()
@@ -152,6 +157,41 @@ impl PushDomainService {
         // 2. 并发查询而不是串行 await：`join` 是幂等的，并发进入安全。
         //    并发度设上限而不是无界，避免大群瞬间打出上万个并发任务
         //    反而拖慢整体（无界并发在这里是「看起来更快」的陷阱）。
+        // 大群节流：成员数超过这个阈值时，不再每条消息都全量遍历成员。
+        //
+        // 全量遍历每次执行是有意的——它覆盖「首投递后才上线的连接」（多端/重连/
+        // 多实例），跳过会漏送。但代价是 O(成员数) 次在线查询，**每条消息一次**：
+        // 500 人群无所谓，10 万人群就是每条消息 10 万次查询，按 64 并发要跑 1562 轮。
+        //
+        // 折中：小群保持原语义（成本可忽略，实时性最强）；大群按时间节流，
+        // 窗口内复用上次的订阅结果。漏送风险由两条兜底覆盖——
+        // 连接建立时的 eager subscribe 会订阅该用户全部会话，
+        // 且离线成员本就靠版本号增量拉补齐。
+        const LARGE_GROUP_THRESHOLD: usize = 2_000;
+        const LARGE_GROUP_RESUBSCRIBE_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(30);
+
+        if participants.len() >= LARGE_GROUP_THRESHOLD {
+            let now = std::time::Instant::now();
+            let skip = self
+                .large_group_last_sweep
+                .read()
+                .ok()
+                .and_then(|m| m.get(conversation_id).copied())
+                .is_some_and(|last| now.duration_since(last) < LARGE_GROUP_RESUBSCRIBE_INTERVAL);
+            if skip {
+                tracing::debug!(
+                    conversation_id = %conversation_id,
+                    participants = participants.len(),
+                    "push: 大群订阅节流，复用上次结果"
+                );
+                return;
+            }
+            if let Ok(mut m) = self.large_group_last_sweep.write() {
+                m.insert(conversation_id.to_string(), now);
+            }
+        }
+
         const SUBSCRIBE_LOOKUP_CONCURRENCY: usize = 64;
         // 按固定大小分块、块内 join_all 并发，块间串行。
         //
