@@ -43,6 +43,9 @@ pub fn build_flare_server(
         .with_authenticator(authenticator)
         .with_auth_timeout(Duration::from_secs(access_config.auth_timeout_secs))
         .with_max_connections(access_config.max_connections)
+        // 握手闸门：不设的话用 flare-core 默认 1024，会先于 fd 和
+        // max_connections 成为接入瓶颈（压测实测连接数恒定在 1038）。
+        .with_max_handshake_concurrency(access_config.max_handshake_concurrency)
         .with_connection_timeout(Duration::from_secs(access_config.connection_timeout_secs))
         .with_heartbeat(
             HeartbeatConfig::new()

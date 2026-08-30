@@ -55,6 +55,12 @@ pub struct AccessGatewayConfig {
     pub heartbeat_timeout_secs: u64,
     /// 认证超时（秒），默认 30，连接建立后须在此时间内完成认证
     pub auth_timeout_secs: u64,
+    /// 并发握手上限。flare-core 默认 1024——它是**握手闸门**而不是连接总数：
+    /// 同一时刻最多 N 个连接在做握手，握完即释放名额。网关此前从不设置它，
+    /// 于是无论 fd 和 max_connections 调到多大，接入速率都被 1024 卡住
+    /// （压测实测：fd 给到 30 万、max_connections 给到 25 万，网关持有的
+    /// 连接数仍恒定在 1038 = 1024 + 基线）。
+    pub max_handshake_concurrency: usize,
     /// 下行发送超时（秒），默认 10，单帧发送超过此时长则放弃并记录
     pub send_timeout_secs: u64,
     /// 同步拉取限流开关，默认开启
@@ -192,6 +198,12 @@ impl AccessGatewayConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
+        // 默认从 flare-core 的 1024 提到 16384：握手是短暂动作，闸门开大不会
+        // 常驻占用资源，但闸门太小会直接封死接入速率上限。
+        let max_handshake_concurrency = std::env::var("ACCESS_GATEWAY_MAX_HANDSHAKE_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(16384);
         let send_timeout_secs = std::env::var("ACCESS_GATEWAY_SEND_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -259,6 +271,7 @@ impl AccessGatewayConfig {
             heartbeat_interval_secs,
             heartbeat_timeout_secs,
             auth_timeout_secs,
+            max_handshake_concurrency,
             send_timeout_secs,
             sync_pull_rate_limit_enabled,
             sync_pull_user_requests_per_second,
