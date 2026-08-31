@@ -437,14 +437,26 @@ impl ConversationRepository for PostgresConversationRepository {
                 LIMIT 1
             ) message_tail ON TRUE
             LEFT JOIN LATERAL (
+                -- 未读数**封顶**再计数：不封顶就是对整条时间线做 COUNT。
+                -- 线上实测：webtest2 有个会话未读 845,203 条，单次 COUNT 304ms，
+                -- 而 bootstrap 每次都要重算，是首屏 1.25s 里最大的一块
+                -- （封顶 1000 后同一查询 5.07ms，60 倍）。
+                --
+                -- 语义变化：重算出的未读数在上限处饱和。IM 前端本来就显示 "99+"，
+                -- 且外层 GREATEST 里已持久化的 sp.unread_count 不受影响、仍作下限，
+                -- 所以真实计数没有丢失，只是这条兜底重算不再为精确性扫全表。
                 SELECT COUNT(1)::INT AS unread_count
-                FROM messages m
-                WHERE m.tenant_id = s.tenant_id
-                  AND m.conversation_id = s.conversation_id
-                  -- 看不到的消息不该计入未读，否则新成员一进群就顶着一堆读不到的红点。
-                  AND m.seq > GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.visible_from_seq, 0))
-                  AND m.sender_id <> $2
-                  AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                FROM (
+                    SELECT 1
+                    FROM messages m
+                    WHERE m.tenant_id = s.tenant_id
+                      AND m.conversation_id = s.conversation_id
+                      -- 看不到的消息不该计入未读，否则新成员一进群就顶着一堆读不到的红点。
+                      AND m.seq > GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.visible_from_seq, 0))
+                      AND m.sender_id <> $2
+                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                    LIMIT $4
+                ) capped
             ) unread_tail ON TRUE
             WHERE s.tenant_id = $1
               AND sp.tenant_id = $1
@@ -471,6 +483,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(tenant_id)
         .bind(&user_id)
         .bind(updated_after)
+        .bind(MAX_RECOMPUTED_UNREAD)
         .fetch_all(&*self.pool)
         .await
         .map_err(|e| {
@@ -2191,6 +2204,18 @@ pub(crate) fn encode_participant_cursor(
     )
 }
 
+/// 会话摘要里**重算**未读数时的计数上限。
+///
+/// 不封顶就是对整条时间线做 COUNT：线上实测 webtest2 有个会话未读 845,203 条，
+/// 单次 COUNT 304ms，而 ConversationBootstrap 每次都要重算——它是首屏
+/// 1.25s 里最大的一块（封顶 1000 后同一查询 5.07ms，60 倍）。
+/// bootstrap 又是 sync_snapshot 的主体，网关侧实测单次 1328–1447ms。
+///
+/// 语义：重算值在此饱和。IM 前端本就显示 "99+"；且外层
+/// `GREATEST(sp.unread_count, unread_tail.unread_count)` 中已持久化的
+/// `sp.unread_count` 不受影响仍作下限，精确计数并未因此丢失。
+pub(crate) const MAX_RECOMPUTED_UNREAD: i64 = 1000;
+
 /// 成员分页的页大小上限。
 ///
 /// 上限 500 会把十万人群的成员遍历切成 200 次**串行**往返。
@@ -2259,6 +2284,33 @@ mod participant_page_limit_tests {
         }
         assert_eq!(parse_participant_cursor(None), ParticipantPageCursor::default());
         assert_eq!(parse_participant_cursor(Some("  ")), ParticipantPageCursor::default());
+    }
+
+    #[test]
+    fn unread_recount_must_stay_capped() {
+        use super::MAX_RECOMPUTED_UNREAD;
+        assert!(
+            (1..=10_000).contains(&MAX_RECOMPUTED_UNREAD),
+            "上限须在合理区间：太小会让未读显示失真，太大等于没封顶"
+        );
+
+        // 只断言常量不够——把 SQL 里的 LIMIT 删掉常量照样在。直接对 SQL 断言。
+        let source = include_str!("postgres_repository.rs");
+        let lateral = source
+            .split("LEFT JOIN LATERAL (\n                -- 未读数**封顶**再计数")
+            .nth(1)
+            .expect("未读 LATERAL 存在")
+            .split(") unread_tail ON TRUE")
+            .next()
+            .expect("LATERAL 结束");
+        assert!(
+            lateral.contains("LIMIT $4"),
+            "未读重算必须封顶，否则对整条时间线做 COUNT（实测 845K 未读时 304ms/次）"
+        );
+        assert!(
+            lateral.contains("FROM (") && lateral.contains(") capped"),
+            "必须先 LIMIT 成子查询再 COUNT；直接给 COUNT 加 LIMIT 不起作用"
+        );
     }
 
     #[test]
