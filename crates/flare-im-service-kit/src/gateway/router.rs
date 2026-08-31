@@ -287,14 +287,15 @@ impl GatewayRouter {
                         return Err(flare_server_core::error::FlareError::localized(
                             flare_server_core::error::ErrorCode::ServiceUnavailable,
                             format!(
-                            "Gateway instance not found: gateway_id={}. Available instances: {}",
-                            gateway_id,
-                            instances
-                                .iter()
-                                .map(|i| i.instance_id.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )));
+                                "Gateway instance not found: gateway_id={}. Available instances: {}",
+                                gateway_id,
+                                instances
+                                    .iter()
+                                    .map(|i| i.instance_id.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
                     }
                 }
             }
@@ -671,7 +672,6 @@ fn users_offline_error(user_ids: Vec<String>) -> FlareError {
     .details(format!("offline_users={user_ids:?}"))
     .build_error()
 }
-
 
 #[cfg(test)]
 mod tests {
