@@ -143,9 +143,21 @@ impl MessageFanoutService {
         // 统一读扩散：大群也始终内联 event 投递（经会话级 publish + 网关在线订阅广播），不再发空收件人 ping。
         // 仅当显式关闭内联推送时才回退 notify+pull ping。
         let use_notify_pull_ping = !self.inline_message_push_enabled;
-        self.push_repository
+        // 分段计时：单条扇出实测约 143ms（在途 36 ÷ 排空 252/s），而 Redis 只占
+        // 0.073ms，必须知道时间具体花在哪一段，否则优化只能靠猜。
+        // 复用既有的 send_stage 直方图，不新增指标面。
+        let t_persist = std::time::Instant::now();
+        let persist_result = self
+            .push_repository
             .persistence_only_message(ctx, message.clone(), conversation_id.clone())
-            .await?;
+            .await;
+        self.metrics.observe_send_stage(
+            "orch_persist_publish",
+            if persist_result.is_ok() { "ok" } else { "err" },
+            t_persist.elapsed(),
+        );
+        persist_result?;
+        let t_sync = std::time::Instant::now();
         if let Some(user_sync_index) = &self.user_sync_index {
             let sync_result = if large_conversation {
                 user_sync_index
@@ -198,6 +210,9 @@ impl MessageFanoutService {
                 .await;
             }
         }
+        self.metrics
+            .observe_send_stage("orch_sync_index", "ok", t_sync.elapsed());
+        let t_push = std::time::Instant::now();
         if use_notify_pull_ping {
             tracing::info!(
                 conversation_id = %conversation_id,
@@ -214,7 +229,8 @@ impl MessageFanoutService {
             };
             self.metrics
                 .observe_fanout_latency("ping", recipient_count, ingestion_ts_ms);
-            self.push_repository
+            let r = self
+                .push_repository
                 .push_only_message_ping(
                     ctx,
                     &message,
@@ -222,15 +238,25 @@ impl MessageFanoutService {
                     conversation_id,
                     large_conversation,
                 )
-                .await
+                .await;
+            self.metrics
+                .observe_send_stage("orch_push_ping", "ok", t_push.elapsed());
+            r
         } else {
             // 投出去的这一刻记扇出耗时：ingestion_ts 是摄入时写进 timeline 的服务端时刻，
             // 与此处的 now 同源，所以这个数字不掺客户端时钟偏差，也不含跨网 RTT。
             self.metrics
                 .observe_fanout_latency("inline", recipient_count, ingestion_ts_ms);
-            self.push_repository
+            let r = self
+                .push_repository
                 .push_only_message_inline_event(ctx, &message, recipient_user_ids, conversation_id)
-                .await
+                .await;
+            self.metrics.observe_send_stage(
+                "orch_push_publish",
+                if r.is_ok() { "ok" } else { "err" },
+                t_push.elapsed(),
+            );
+            r
         }
     }
 
