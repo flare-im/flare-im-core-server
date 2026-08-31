@@ -127,7 +127,19 @@ enum ConversationPingCoalesceDecision {
 
 struct ConversationPingCoalescer {
     window: Duration,
-    state: AsyncMutex<HashMap<ConversationPingCoalesceKey, ConversationPingCoalesceEntry>>,
+    /// 空闲条目的清理间隔。取窗口的 10 倍并兜底 30s：清理本身要遍历整张表，
+    /// 每次 observe 都扫会把 O(1) 变成 O(n)。
+    sweep_interval: Duration,
+    state: AsyncMutex<ConversationPingCoalesceState>,
+}
+
+/// 合流状态：条目表 + 上次清理时刻。
+///
+/// 两者必须在同一把锁下，否则清理与 observe 之间会出现窗口，让刚写入的
+/// pending 被当成空闲条目清掉。
+struct ConversationPingCoalesceState {
+    entries: HashMap<ConversationPingCoalesceKey, ConversationPingCoalesceEntry>,
+    last_sweep: Instant,
 }
 
 struct ConversationPingCoalesceEntry {
@@ -136,11 +148,26 @@ struct ConversationPingCoalesceEntry {
     pending: Option<access_gateway::PushEventRequest>,
 }
 
+impl ConversationPingCoalesceEntry {
+    /// 条目是否已经和"不存在"等价。
+    ///
+    /// observe 对缺失的键返回 SendNow；对 elapsed >= window 且没有挂起 ping 的
+    /// 条目同样返回 SendNow。两者决策完全一致，所以这种条目可以安全丢弃——
+    /// 清理不会改变任何行为，只是不再无限占着内存。
+    fn is_idle(&self, now: Instant, window: Duration) -> bool {
+        !self.scheduled && self.pending.is_none() && now.duration_since(self.last_sent) >= window
+    }
+}
+
 impl ConversationPingCoalescer {
     fn new(window: Duration) -> Self {
         Self {
             window,
-            state: AsyncMutex::new(HashMap::new()),
+            sweep_interval: (window * 10).max(Duration::from_secs(30)),
+            state: AsyncMutex::new(ConversationPingCoalesceState {
+                entries: HashMap::new(),
+                last_sweep: Instant::now(),
+            }),
         }
     }
 
@@ -155,8 +182,17 @@ impl ConversationPingCoalescer {
 
         let now = Instant::now();
         let mut state = self.state.lock().await;
-        let Some(entry) = state.get_mut(&key) else {
-            state.insert(
+
+        // 摊销清理：条目只增不减的话，每个出现过的会话都会永久占一条，
+        // 进程活多久就涨多久。空闲条目与缺失键决策相同，丢掉不改变行为。
+        if now.duration_since(state.last_sweep) >= self.sweep_interval {
+            let window = self.window;
+            state.entries.retain(|_, entry| !entry.is_idle(now, window));
+            state.last_sweep = now;
+        }
+
+        let Some(entry) = state.entries.get_mut(&key) else {
+            state.entries.insert(
                 key,
                 ConversationPingCoalesceEntry {
                     last_sent: now,
@@ -192,7 +228,7 @@ impl ConversationPingCoalescer {
         key: &ConversationPingCoalesceKey,
     ) -> Option<access_gateway::PushEventRequest> {
         let mut state = self.state.lock().await;
-        let entry = state.get_mut(key)?;
+        let entry = state.entries.get_mut(key)?;
         entry.scheduled = false;
         let pending = entry.pending.take();
         if pending.is_some() {
@@ -1417,6 +1453,102 @@ fn unsupported_push_target<T>(target: &str) -> Result<T> {
         format!("push target type `{target}` is not supported"),
     )
     .build_error())
+}
+
+#[cfg(test)]
+mod coalescer_gc_tests {
+    use super::*;
+
+    fn key(cid: &str) -> ConversationPingCoalesceKey {
+        ConversationPingCoalesceKey::new("0", cid)
+    }
+
+    fn ping() -> access_gateway::PushEventRequest {
+        access_gateway::PushEventRequest::default()
+    }
+
+    /// 条目表只增不减的话，每个出现过的会话都会永久占一条。
+    #[tokio::test]
+    async fn idle_entries_are_swept_instead_of_accumulating_forever() {
+        let mut c = ConversationPingCoalescer::new(Duration::from_millis(1));
+        c.sweep_interval = Duration::ZERO; // 每次 observe 都清理，免去测试里的等待
+
+        for i in 0..50 {
+            c.observe(key(&format!("2A{i:016}")), ping()).await;
+        }
+        // 让所有条目越过窗口变为空闲
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // 再来一次 observe 触发清理
+        c.observe(key("2Atrigger"), ping()).await;
+
+        let remaining = c.state.lock().await.entries.len();
+        assert!(remaining <= 2, "空闲条目应被清理，实际仍留 {remaining} 条");
+    }
+
+    /// 清理的正当性全靠这条：空闲条目与缺失键的决策必须一致。
+    /// 若两者不同，清理就是在改变行为，而不只是回收内存。
+    #[tokio::test]
+    async fn sweeping_does_not_change_the_decision() {
+        let window = Duration::from_millis(1);
+
+        // 不清理：条目留着但已过窗口
+        let mut kept = ConversationPingCoalescer::new(window);
+        kept.sweep_interval = Duration::from_secs(3600);
+        kept.observe(key("2Asame"), ping()).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let with_stale_entry = kept.observe(key("2Asame"), ping()).await;
+
+        // 清理：同样的时序，但条目已被回收
+        let mut swept = ConversationPingCoalescer::new(window);
+        swept.sweep_interval = Duration::ZERO;
+        swept.observe(key("2Asame"), ping()).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let after_sweep = swept.observe(key("2Asame"), ping()).await;
+
+        assert!(matches!(
+            with_stale_entry,
+            ConversationPingCoalesceDecision::SendNow
+        ));
+        assert!(matches!(
+            after_sweep,
+            ConversationPingCoalesceDecision::SendNow
+        ));
+    }
+
+    /// 挂起中的 ping 一旦被清理就永远发不出去了。
+    ///
+    /// 危险窗口很窄但真实存在：pending 只在 elapsed < window 时写入，延时任务
+    /// 要等窗口走完才来 take_pending。这中间条目已经"过期"却仍挂着 ping——
+    /// 清理谓词若只看时间不看 pending，就会在这一刻把通知丢掉。
+    /// 测试必须把条目摆进这个状态，否则只是在验证一个不会发生的场景。
+    #[tokio::test]
+    async fn entries_with_a_queued_ping_survive_the_sweep() {
+        let window = Duration::from_millis(50);
+        let mut c = ConversationPingCoalescer::new(window);
+        c.sweep_interval = Duration::ZERO;
+
+        let k = key("2Apending");
+        c.observe(k.clone(), ping()).await; // 建条目
+        let decision = c.observe(k.clone(), ping()).await; // 窗口内 → 挂起
+        assert!(matches!(
+            decision,
+            ConversationPingCoalesceDecision::ScheduleAfter(_)
+        ));
+
+        // 越过窗口：条目此刻既"过期"又挂着 ping，正是延时任务尚未取走的那一瞬
+        tokio::time::sleep(window * 2).await;
+        assert!(
+            c.state.lock().await.entries[&k].pending.is_some(),
+            "前置条件不成立：条目没挂住 ping，后面的断言就测不到东西"
+        );
+
+        c.observe(key("2Aother"), ping()).await; // 触发清理
+
+        assert!(
+            c.take_pending(&k).await.is_some(),
+            "挂起的 ping 被清理掉了，这条通知将永久丢失"
+        );
+    }
 }
 
 #[cfg(test)]
