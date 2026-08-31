@@ -817,6 +817,20 @@ impl PushRouterHandler {
                 online_user_ids.push(user_id.clone());
             }
 
+            // 离线任务是**每个用户一条**，载荷必须收敛成"只含本人"。
+            //
+            // 原本直接复制 template.push_payload，而该 payload 里带着全量收件人
+            // 名单：10 万人的群就是 10 万份、每份各含 10 万个用户 ID 的副本。
+            // 线上实测 flare:im:push:offline:outbox 里 12,902 条占了 1.18GB
+            // （约 91KB/条），把 Redis 顶满后 volatile-lru 又淘汰不掉 stream，
+            // 于是所有写入被拒（OOM command not allowed），整个 IM 瘫痪。
+            //
+            // 收件人就是本人，名单里留别人既无用又是纯开销。
+            let push_payload = rewrite_push_payload_user_ids(
+                template.payload_kind,
+                template.push_payload,
+                std::slice::from_ref(user_id),
+            )?;
             let task = PushTaskEnvelope {
                 user_id: user_id.clone(),
                 message_id: template.message_id.to_string(),
@@ -824,7 +838,7 @@ impl PushRouterHandler {
                 tenant_id: template.tenant_id.to_string(),
                 priority: template.priority,
                 expire_at: template.expire_at,
-                push_payload: template.push_payload.to_vec(),
+                push_payload,
                 headers: template.headers.clone(),
                 payload_kind: template.payload_kind,
             };
@@ -2458,6 +2472,75 @@ mod online_fanout_chunking_tests {
         assert!(
             (1..=10_000).contains(&ONLINE_FANOUT_CHUNK),
             "分片过大等于没分片：单条信封会重新随群规模膨胀"
+        );
+    }
+}
+
+#[cfg(test)]
+mod offline_payload_scoping_tests {
+    use super::*;
+    use prost::Message as _;
+
+    fn payload_with_recipients(n: usize) -> Vec<u8> {
+        access_gateway::PushMessageRequest {
+            user_ids: (0..n).map(|i| format!("user{i:08}")).collect(),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// 离线任务是每人一条，载荷必须只含本人。
+    ///
+    /// 原实现直接复制 template.push_payload，而它带着全量收件人名单：
+    /// 10 万人的群 = 10 万份、每份各含 10 万个 ID 的副本。线上实测
+    /// flare:im:push:offline:outbox 里 12,902 条占 1.18GB（约 91KB/条），
+    /// 把 Redis 顶满后写入全被拒（OOM command not allowed），整个 IM 瘫痪。
+    #[test]
+    fn offline_payload_keeps_only_the_target_user() {
+        let bulk = payload_with_recipients(100_000);
+        let scoped = rewrite_push_payload_user_ids(
+            PushTaskPayloadKind::Message as i32,
+            &bulk,
+            std::slice::from_ref(&"user00000042".to_string()),
+        )
+        .expect("重写应成功");
+
+        let decoded =
+            access_gateway::PushMessageRequest::decode(scoped.as_slice()).expect("可解码");
+        assert_eq!(
+            decoded.user_ids,
+            vec!["user00000042".to_string()],
+            "离线载荷只应留下收件人本人"
+        );
+        assert!(
+            scoped.len() * 100 < bulk.len(),
+            "收敛后应小两个数量级：原 {} 字节，现 {} 字节",
+            bulk.len(),
+            scoped.len()
+        );
+    }
+
+    /// 单条大小必须与群规模脱钩——这是整条修复的目的。
+    #[test]
+    fn offline_payload_size_is_independent_of_group_size() {
+        let target = "user00000001".to_string();
+        let small = rewrite_push_payload_user_ids(
+            PushTaskPayloadKind::Message as i32,
+            &payload_with_recipients(10),
+            std::slice::from_ref(&target),
+        )
+        .expect("重写应成功");
+        let huge = rewrite_push_payload_user_ids(
+            PushTaskPayloadKind::Message as i32,
+            &payload_with_recipients(100_000),
+            std::slice::from_ref(&target),
+        )
+        .expect("重写应成功");
+
+        assert_eq!(
+            small.len(),
+            huge.len(),
+            "10 人群与 10 万人群产出的离线载荷必须一样大"
         );
     }
 }
