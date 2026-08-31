@@ -26,6 +26,23 @@ pub struct EventHandler {
     event_domain_service: Arc<EventDomainService>,
 }
 
+/// 慢事件扇出日志阈值（毫秒），env `FLARE_EVENT_SLOW_LOG_MS`，默认 200。
+fn event_slow_log_threshold_ms() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        parse_event_slow_log_ms(std::env::var("FLARE_EVENT_SLOW_LOG_MS").ok().as_deref())
+    })
+}
+
+/// 纯函数便于测试：非法值回落默认，不能回落成 0（那会给每条事件写一行日志）。
+fn parse_event_slow_log_ms(raw: Option<&str>) -> u64 {
+    const DEFAULT_MS: u64 = 200;
+    match raw {
+        Some(v) => v.trim().parse::<u64>().unwrap_or(DEFAULT_MS),
+        None => DEFAULT_MS,
+    }
+}
+
 impl EventHandler {
     pub fn new(event_domain_service: Arc<EventDomainService>) -> Self {
         Self {
@@ -83,22 +100,62 @@ impl EventHandler {
         conversation_id = %event.conversation_id,
     ))]
     async fn handle_general_event(&self, ctx: &Ctx, tenant_id: &str, event: Event) -> Result<()> {
+        // 分段计时：十万人群的一条已读回执实测端到端 52 秒，而 orchestrator CPU
+        // 只有 0.6%、Redis 累计 1.27s、Postgres 全程空闲——即"在等"，但等在哪
+        // 这条链路上没有任何数字。两人单聊同样的事件只要 15ms，所以耗时随接收者
+        // 规模增长。先量出是三步里的哪一步，别再靠猜。
+        let started = std::time::Instant::now();
+
         // 1. 校验事件
         self.event_domain_service
             .validate_event(ctx, tenant_id, &event)
             .await?;
+        let validate_ms = started.elapsed().as_millis() as u64;
 
         // 2. 分配序列号
+        let allocate_started = std::time::Instant::now();
         let event_with_seq = self
             .event_domain_service
             .allocate_seq(ctx, tenant_id, event)
             .await?;
+        let allocate_ms = allocate_started.elapsed().as_millis() as u64;
 
         // 3. 推送事件
+        let push_started = std::time::Instant::now();
         self.event_domain_service
             .push_event(ctx, event_with_seq.clone(), PersistenceMode::Auto)
             .await?;
+        let push_ms = push_started.elapsed().as_millis() as u64;
+
+        let total_ms = started.elapsed().as_millis() as u64;
+        if total_ms >= event_slow_log_threshold_ms() {
+            tracing::info!(
+                conversation_id = %event_with_seq.conversation_id,
+                event_type = event_with_seq.r#type,
+                validate_ms,
+                allocate_ms,
+                push_ms,
+                total_ms,
+                "slow event fanout"
+            );
+        }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_event_slow_log_ms;
+
+    #[test]
+    fn slow_log_threshold_rejects_garbage_without_falling_back_to_zero() {
+        assert_eq!(parse_event_slow_log_ms(None), 200);
+        assert_eq!(parse_event_slow_log_ms(Some("500")), 500);
+        assert_eq!(parse_event_slow_log_ms(Some(" 500 ")), 500);
+        assert_eq!(parse_event_slow_log_ms(Some("0")), 0);
+        assert_eq!(parse_event_slow_log_ms(Some("abc")), 200);
+        assert_eq!(parse_event_slow_log_ms(Some("")), 200);
+        assert_eq!(parse_event_slow_log_ms(Some("-1")), 200);
     }
 }
