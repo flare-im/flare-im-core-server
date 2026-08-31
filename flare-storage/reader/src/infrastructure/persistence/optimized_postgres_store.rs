@@ -26,7 +26,7 @@ use crate::infrastructure::persistence::event_stream_row::proto_event_from_event
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use flare_im_contracts::Ctx;
-use flare_proto::common::ContentVisibility;
+use flare_proto::common::{ContentVisibility, MessageStatus};
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
 // use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
@@ -1065,7 +1065,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             && is_recalled
         {
             separated.push("status = ");
-            separated.push_bind(6i32); // MessageStatus::Recalled
+            separated.push_bind(MessageStatus::Recalled as i32);
             has_updates = true;
         }
         if updates.recalled_at.is_some() {
@@ -1343,10 +1343,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     );
                     if val {
                         query.push(" AND status = ");
-                        query.push_bind(6i32);
+                        query.push_bind(MessageStatus::Recalled as i32);
                     } else {
                         query.push(" AND status != ");
-                        query.push_bind(6i32);
+                        query.push_bind(MessageStatus::Recalled as i32);
                     }
                 }
                 "seq_after" | "after_seq" | "conversation_seq_after" => {

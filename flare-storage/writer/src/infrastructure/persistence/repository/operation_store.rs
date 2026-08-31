@@ -1,6 +1,6 @@
 use base64::Engine;
 use chrono::Utc;
-use flare_proto::common::{Event, EventType};
+use flare_proto::common::{Event, EventType, MessageStatus};
 use flare_server_core::error::Result;
 use prost::Message as ProstMessage;
 use serde_json::{Value, json};
@@ -8,16 +8,27 @@ use sqlx::{Pool, Postgres, Row};
 
 const MESSAGE_PIN_SCOPE_SELF: i32 = 1;
 
-/// init_v2: messages.status 为 INT（MessageStatus 枚举值）
+/// FSM 状态名 → `messages.status`（proto `MessageStatus` 的枚举值）。
+///
+/// 取值一律从 proto 枚举现算，不写字面量：这张表原先把 RECALLED 映射成 6，
+/// 而 6 是 DELETED、5 才是 RECALLED；读写两侧用的是同一套错值，服务端内部
+/// 自洽，于是没人发现。暴露它的是客户端——SDK 按 `status == RECALLED` 判
+/// `is_recalled`，从服务端全量同步时读到 6 判定为 false，撤回过的消息会带着
+/// 原文重新显示（换设备、重装、清缓存后必现）。
+///
+/// 硬删与软删都落 DELETED：proto 只有一个 DELETED，删除的作用域由
+/// MessageDeleteEvent 承载。软删实际走 `update_message_visibility`，压根不改
+/// 这一列，"DELETED_SOFT" 只是保持映射完整。
 fn fsm_state_to_status_int(fsm_state: &str) -> i32 {
-    match fsm_state.to_uppercase().as_str() {
-        "CREATED" | "INIT" => 1,
-        "SENT" | "EDITED" | "DELIVERED" | "READ" | "FAILED" => 2,
-        "RECALLED" => 6,
-        "DELETED_HARD" => 7,
-        "DELETED_SOFT" => 8,
-        _ => 2,
-    }
+    let status = match fsm_state.to_uppercase().as_str() {
+        "CREATED" | "INIT" => MessageStatus::Created,
+        "SENT" | "EDITED" | "DELIVERED" | "READ" => MessageStatus::Sent,
+        "FAILED" => MessageStatus::Failed,
+        "RECALLED" => MessageStatus::Recalled,
+        "DELETED_HARD" | "DELETED_SOFT" => MessageStatus::Deleted,
+        _ => MessageStatus::Sent,
+    };
+    status as i32
 }
 
 /// init_v2: message_visibility.visibility_status 为 INT（0=VISIBLE, 1=HIDDEN, 2=DELETED）
@@ -437,5 +448,71 @@ impl OperationStore {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 撤回必须落 RECALLED，不能落 DELETED。
+    ///
+    /// 这两个值只差 1，而且读写两侧一起写错时服务端完全自洽——只有从服务端
+    /// 全量同步的客户端会把撤回过的消息当成正常消息重新显示出来。断言写死
+    /// 期望值（而不是同样用枚举现算），否则枚举变了这条测试会跟着变，等于没测。
+    #[test]
+    fn recall_maps_to_recalled_not_deleted() {
+        assert_eq!(fsm_state_to_status_int("RECALLED"), 5);
+        assert_ne!(
+            fsm_state_to_status_int("RECALLED"),
+            fsm_state_to_status_int("DELETED_HARD"),
+            "撤回与删除必须是可区分的两个状态"
+        );
+    }
+
+    #[test]
+    fn delete_maps_to_deleted_within_the_proto_enum() {
+        // proto MessageStatus 只有一个 DELETED=6，没有 7/8；
+        // 硬删软删的区别由 MessageDeleteEvent 承载，不靠 status 编码。
+        assert_eq!(fsm_state_to_status_int("DELETED_HARD"), 6);
+        assert_eq!(fsm_state_to_status_int("DELETED_SOFT"), 6);
+    }
+
+    #[test]
+    fn failed_is_not_collapsed_into_sent() {
+        assert_eq!(fsm_state_to_status_int("FAILED"), 4);
+        assert_eq!(fsm_state_to_status_int("SENT"), 2);
+    }
+
+    #[test]
+    fn every_mapped_state_stays_inside_the_proto_enum() {
+        // 越界值（此前的 7、8）会让按 proto 解码 status 的一侧拿到未知变体。
+        let valid = [
+            MessageStatus::Created as i32,
+            MessageStatus::Sent as i32,
+            MessageStatus::Persisted as i32,
+            MessageStatus::Failed as i32,
+            MessageStatus::Recalled as i32,
+            MessageStatus::Deleted as i32,
+        ];
+        for state in [
+            "CREATED",
+            "INIT",
+            "SENT",
+            "EDITED",
+            "DELIVERED",
+            "READ",
+            "FAILED",
+            "RECALLED",
+            "DELETED_HARD",
+            "DELETED_SOFT",
+            "SOMETHING_UNKNOWN",
+        ] {
+            let mapped = fsm_state_to_status_int(state);
+            assert!(
+                valid.contains(&mapped),
+                "{state} 映射成了 proto 枚举之外的 {mapped}"
+            );
+        }
     }
 }
