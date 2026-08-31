@@ -196,6 +196,10 @@ max_lifetime_seconds = 1800
 [object_storage.default]
 profile_type = "s3"
 endpoint = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}"
+# 只用于生成预签名 URL（浏览器直传/直读要能连上），服务自身从不连接它。
+# 反代部署下与 endpoint 必然不同：服务走内网、浏览器走公网。
+# 不设则回落到 endpoint，行为与以前一致。
+public_endpoint = "${FLARE_S3_PUBLIC_ENDPOINT:-}"
 access_key = "rustfsadmin"
 secret_key = "rustfsadmin"
 bucket = "flare-media"
@@ -212,6 +216,7 @@ force_path_style = true
 [object_storage.minio]
 profile_type = "minio"
 endpoint = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}"
+public_endpoint = "${FLARE_S3_PUBLIC_ENDPOINT:-}"
 access_key = "minioadmin"
 secret_key = "minioadmin"
 bucket = "flare-media"

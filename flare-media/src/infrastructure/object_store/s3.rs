@@ -19,6 +19,10 @@ use flare_im_service_kit::config::ObjectStoreConfig;
 #[derive(Clone)]
 pub struct S3ObjectStore {
     client: S3Client,
+    /// 只用于生成预签名 URL 的 client（配了 public_endpoint 时才与 `client` 不同）。
+    /// 预签名是纯离线计算，它从不发起连接——正因如此，服务自身可以继续走内网
+    /// 明文端点，而浏览器拿到公网 HTTPS 地址。
+    presign_client: S3Client,
     bucket: String,
     base_url: Option<String>,
     cdn_base_url: Option<String>,
@@ -75,6 +79,28 @@ impl S3ObjectStore {
         }
         let s3_config = s3_builder.build();
         let client = S3Client::from_conf(s3_config);
+
+        // 对外端点单独建一个 client：签名里的 host 取自它，所以浏览器拿到的
+        // URL 指向公网；而下面的桶检查仍用内网的 `client`，不需要公网 TLS。
+        let public_endpoint = cfg
+            .public_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let presign_client = match public_endpoint.clone() {
+            Some(ep) => {
+                let mut b = S3ConfigBuilder::from(&aws_cfg)
+                    .region(region.clone())
+                    .endpoint_url(ep);
+                if force_path_style {
+                    b = b.force_path_style(true);
+                }
+                S3Client::from_conf(b.build())
+            }
+            None => client.clone(),
+        };
+
         if endpoint.is_some() {
             Self::ensure_bucket_exists(&client, &bucket, &region_name).await?;
         }
@@ -86,7 +112,8 @@ impl S3ObjectStore {
         let bucket_root_prefix = normalize_prefix(&cfg.bucket_root_prefix);
         let upload_prefix = normalize_prefix(&cfg.upload_prefix);
 
-        let base_url = match endpoint {
+        // base_url 是回给客户端的地址，优先用对外端点。
+        let base_url = match resolve_client_facing_endpoint(&public_endpoint, &endpoint) {
             Some(ep) => {
                 let trimmed = ep.trim_end_matches('/');
                 let url = if force_path_style {
@@ -104,6 +131,7 @@ impl S3ObjectStore {
 
         Ok(Self {
             client,
+            presign_client,
             bucket,
             base_url,
             cdn_base_url: cfg.cdn_base_url.clone(),
@@ -238,7 +266,7 @@ impl S3ObjectStore {
 
         // 生成预签名GET URL
         let presigned = self
-            .client
+            .presign_client
             .get_object()
             .bucket(&self.bucket)
             .key(&key)
@@ -422,7 +450,7 @@ impl MediaObjectRepository for S3ObjectStore {
         );
 
         let presigned = self
-            .client
+            .presign_client
             .get_object()
             .bucket(&self.bucket)
             .key(object_path)
@@ -455,7 +483,7 @@ impl MediaObjectRepository for S3ObjectStore {
         expires_in: i64,
     ) -> Result<String> {
         let presigned = self
-            .client
+            .presign_client
             .put_object()
             .bucket(&self.bucket)
             .key(object_path)
@@ -515,7 +543,7 @@ impl MediaObjectRepository for S3ObjectStore {
         expires_in: i64,
     ) -> Result<String> {
         let presigned = self
-            .client
+            .presign_client
             .upload_part()
             .bucket(&self.bucket)
             .key(object_path)
@@ -645,4 +673,74 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 }
 
+/// 回给客户端的端点：有对外端点就用它，否则回落到服务自用的端点。
+///
+/// 抽成纯函数是为了能直接测——走 `from_config` 的话，本机没有对象存储时
+/// 构造会在桶检查那步失败，断言根本执行不到，测试会假绿。
+fn resolve_client_facing_endpoint(
+    public_endpoint: &Option<String>,
+    endpoint: &Option<String>,
+) -> Option<String> {
+    public_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| endpoint.clone())
+}
+
 pub type S3ObjectStoreRef = Arc<S3ObjectStore>;
+
+#[cfg(test)]
+mod public_endpoint_tests {
+    use super::resolve_client_facing_endpoint;
+
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    /// 预签名 URL 是回给浏览器的，必须指向对外端点；服务自身仍走内网。
+    ///
+    /// 两者共用一个配置时只能二选一：填内网地址浏览器直传连不上（127.0.0.1
+    /// 在浏览器里是它自己），填公网地址则服务启动时的桶检查要走公网 TLS，
+    /// 自签证书下直接起不来——aws-sdk-s3 的 default-https-client 用的是编译进
+    /// 二进制的 webpki 根证书，挂 CA、设 SSL_CERT_FILE/AWS_CA_BUNDLE 都无效。
+    #[test]
+    fn public_endpoint_wins_for_client_facing_urls() {
+        assert_eq!(
+            resolve_client_facing_endpoint(
+                &s("https://cdn.example.com"),
+                &s("http://127.0.0.1:29000")
+            ),
+            s("https://cdn.example.com"),
+        );
+    }
+
+    /// 没配对外端点时行为不变，老部署不受影响。
+    #[test]
+    fn falls_back_to_the_private_endpoint_when_unset() {
+        assert_eq!(
+            resolve_client_facing_endpoint(&None, &s("http://127.0.0.1:29000")),
+            s("http://127.0.0.1:29000"),
+        );
+    }
+
+    /// 空串和纯空白按"没配"处理：环境变量没设时模板会展开成空串，
+    /// 若当成有效值，base_url 会变成空的，客户端拿到一个相对路径。
+    #[test]
+    fn blank_public_endpoint_is_treated_as_unset() {
+        for blank in ["", "   "] {
+            assert_eq!(
+                resolve_client_facing_endpoint(&s(blank), &s("http://127.0.0.1:29000")),
+                s("http://127.0.0.1:29000"),
+                "空白对外端点应回落，输入 {blank:?}"
+            );
+        }
+    }
+
+    /// 两个都没有时返回 None（走 AWS 官方端点那条分支）。
+    #[test]
+    fn none_when_neither_is_configured() {
+        assert_eq!(resolve_client_facing_endpoint(&None, &None), None);
+    }
+}

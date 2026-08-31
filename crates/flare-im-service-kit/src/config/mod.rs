@@ -203,9 +203,22 @@ impl PostgresInstanceConfig {
 pub struct ObjectStoreConfig {
     /// 存储类型（如 minio, s3, oss 等）
     pub profile_type: String,
-    /// 存储服务端点
+    /// 存储服务端点（服务自身访问对象存储用，通常是内网地址）
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// 对外端点：只用于生成预签名 URL，服务自身从不连接它。
+    ///
+    /// 反代部署下这两个地址必然不同：浏览器要拿到公网可达的 URL，而服务自己
+    /// 走内网更短也更可靠。此前两者共用 `endpoint`，于是只能二选一——
+    /// 填内网地址浏览器直传失败（127.0.0.1 连不上），填公网地址则服务自身
+    /// 启动时的桶检查要走公网 TLS，自签证书下直接起不来
+    /// （aws-sdk-s3 的 default-https-client 用编译进二进制的 webpki 根证书，
+    /// 挂 CA、设 SSL_CERT_FILE/AWS_CA_BUNDLE 都没用）。
+    ///
+    /// 分开是安全的：SigV4 签的是 method、路径、query 和 host 等头部，
+    /// **不含 scheme**，而预签名是纯离线计算，不需要连通性。
+    #[serde(default)]
+    pub public_endpoint: Option<String>,
     /// 访问密钥
     #[serde(default)]
     pub access_key: Option<String>,
