@@ -9,6 +9,36 @@ use flare_im_contracts::Ctx;
 use flare_server_core::error::{FlareError, Result};
 
 const DEFAULT_TENANT_ID: &str = "0";
+/// 单个 Redis pipeline 里最多塞多少个用户的 EVAL。
+///
+/// 线上事故：十万人群里**一条已读回执**触发 recipient_count=100000 的扇出，
+/// 这里把十万个 EVAL 塞进同一个 pipe.atomic()，而每个 EVAL 都重发一遍完整
+/// Lua 脚本正文（约 700B）——单个 pipeline 缓冲区约 70MB，
+/// 结果是 `broken pipe` + flare-orchestrator 在 512m 上被 cgroup OOM 杀掉，
+/// NATS 重投后再次 OOM，形成循环（实测重启 7 次）。
+///
+/// 每个用户只操作自己的三个键，彼此完全独立，跨十万用户的 MULTI/EXEC
+/// 拿不到任何有意义的保证；分片后仍保留**片内** atomic。
+/// 跨片的部分失败由调用方的 user_sync 补偿队列兜底。
+const RECORD_CHANGE_CHUNK_DEFAULT: usize = 500;
+
+/// 拆成纯函数是为了能测：0 或非法值必须回落到默认值。
+/// 若回落成 0，chunks(0) 会 panic；若回落成极大值，等于没分片、OOM 照旧。
+fn parse_record_change_chunk(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(RECORD_CHANGE_CHUNK_DEFAULT)
+}
+
+fn record_change_chunk_size() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        parse_record_change_chunk(
+            std::env::var("FLARE_USER_SYNC_INDEX_CHUNK").ok().as_deref(),
+        )
+    })
+}
+
 const RECORD_CONVERSATION_CHANGE_SCRIPT: &str = r#"
 local version = redis.call('INCR', KEYS[1])
 local member = tostring(version) .. ':' .. ARGV[1]
@@ -232,32 +262,36 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
         let max_changes = self.max_changes_per_user.to_string();
         let ttl = self.change_ttl_seconds.to_string();
 
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        for user_id in &user_ids {
-            pipe.cmd("EVAL")
-                .arg(RECORD_CONVERSATION_CHANGE_SCRIPT)
-                .arg(3)
-                .arg(Self::version_key(&tenant_id, user_id))
-                .arg(Self::changes_key(&tenant_id, user_id))
-                .arg(Self::conversation_state_key(
-                    &tenant_id,
-                    user_id,
-                    conversation_id,
-                ))
-                .arg(conversation_id)
-                .arg(&seq)
-                .arg(&occurred_at)
-                .arg(&max_changes)
-                .arg(&ttl);
-        }
+        let chunk_size = record_change_chunk_size();
+        for chunk in user_ids.chunks(chunk_size) {
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            for user_id in chunk {
+                pipe.cmd("EVAL")
+                    .arg(RECORD_CONVERSATION_CHANGE_SCRIPT)
+                    .arg(3)
+                    .arg(Self::version_key(&tenant_id, user_id))
+                    .arg(Self::changes_key(&tenant_id, user_id))
+                    .arg(Self::conversation_state_key(
+                        &tenant_id,
+                        user_id,
+                        conversation_id,
+                    ))
+                    .arg(conversation_id)
+                    .arg(&seq)
+                    .arg(&occurred_at)
+                    .arg(&max_changes)
+                    .arg(&ttl);
+            }
 
-        let _: Vec<redis::Value> = pipe.query_async(&mut conn).await.map_err(|err| {
-            FlareError::system(format!(
-                "Redis user sync index batch record failed tenant_id={tenant_id} conversation_id={conversation_id} user_count={}: {err}",
-                user_ids.len()
-            ))
-        })?;
+            let _: Vec<redis::Value> = pipe.query_async(&mut conn).await.map_err(|err| {
+                FlareError::system(format!(
+                    "Redis user sync index batch record failed tenant_id={tenant_id} conversation_id={conversation_id} user_count={} chunk_size={}: {err}",
+                    user_ids.len(),
+                    chunk.len()
+                ))
+            })?;
+        }
 
         Ok(())
     }
@@ -337,6 +371,59 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{RECORD_CHANGE_CHUNK_DEFAULT, parse_record_change_chunk};
+
+    #[test]
+    fn chunk_size_never_falls_back_to_zero_or_unbounded() {
+        assert_eq!(parse_record_change_chunk(None), RECORD_CHANGE_CHUNK_DEFAULT);
+        assert_eq!(parse_record_change_chunk(Some("1000")), 1000);
+        assert_eq!(parse_record_change_chunk(Some(" 1000 ")), 1000);
+        // 0 必须被拒：slice::chunks(0) 直接 panic
+        assert_eq!(parse_record_change_chunk(Some("0")), RECORD_CHANGE_CHUNK_DEFAULT);
+        assert_eq!(parse_record_change_chunk(Some("abc")), RECORD_CHANGE_CHUNK_DEFAULT);
+        assert_eq!(parse_record_change_chunk(Some("")), RECORD_CHANGE_CHUNK_DEFAULT);
+        assert_eq!(parse_record_change_chunk(Some("-1")), RECORD_CHANGE_CHUNK_DEFAULT);
+    }
+
+    #[test]
+    fn record_conversation_change_actually_chunks_the_pipeline() {
+        // 上面两个测试只覆盖纯函数与 chunks() 算术——把 record_conversation_change
+        // 里的分片删掉它们照样绿。这里直接对源码断言，守住修复本身：
+        // 必须按 chunk 建 pipeline，而不是在全量 user_ids 上建一个。
+        let source = include_str!("redis_user_sync_index.rs");
+        let body = source
+            .split_once("async fn record_conversation_change")
+            .expect("函数存在")
+            .1
+            .split_once("async fn record_conversation_version_bump")
+            .expect("下一个函数存在")
+            .0;
+        assert!(
+            body.contains("user_ids.chunks(chunk_size)"),
+            "record_conversation_change 必须分片遍历 user_ids"
+        );
+        assert!(
+            body.contains("for user_id in chunk"),
+            "EVAL 必须只对当前分片累加，不能对全量 user_ids"
+        );
+        assert!(
+            !body.contains("for user_id in &user_ids"),
+            "回归：又把全量 user_ids 塞进单个 pipeline 了"
+        );
+    }
+
+    #[test]
+    fn hundred_thousand_recipients_are_split_into_many_pipelines() {
+        // 回归：十万人群的一条已读回执曾把十万个 EVAL 塞进同一个 pipeline
+        // （约 70MB），orchestrator 在 512m 上被 OOM。
+        let users: Vec<String> = (0..100_000).map(|i| format!("u{i}")).collect();
+        let size = parse_record_change_chunk(None);
+        let chunks: Vec<_> = users.chunks(size).collect();
+        assert_eq!(chunks.len(), 200);
+        assert!(chunks.iter().all(|c| c.len() <= size));
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 100_000);
+    }
+
     use super::*;
 
     #[test]
