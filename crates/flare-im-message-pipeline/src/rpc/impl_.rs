@@ -185,7 +185,11 @@ impl ConversationRpcClient for ConversationClient {
                 let mut grpc_request = tonic::Request::new(ListConversationParticipantsRequest {
                     conversation_id: conversation_id.clone(),
                     cursor: cursor.clone(),
-                    limit: 500,
+                    // 这里是**串行**游标循环：页大小直接决定往返次数。
+                    // 500 时十万人群要 200 次往返，实测一条已读回执因此耗时 47 秒。
+                    // 服务端每页代价由固定开销主导（5000 行 61ms vs 500 行 68ms），
+                    // 所以放大页大小几乎是纯收益。服务端 clamp 同步放到 5000。
+                    limit: 5000,
                     include_removed: false,
                     ext: Default::default(),
                 });

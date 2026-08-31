@@ -1188,7 +1188,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or_default()
             .max(0);
-        let limit = limit.clamp(1, 500);
+        let limit = clamp_participant_page_limit(limit);
 
         if !is_internal {
             let user_id = require_user_id(ctx)?;
@@ -2070,5 +2070,47 @@ mod last_message_preview_tests {
             }
         }
         out
+    }
+}
+
+/// 成员分页的页大小上限。
+///
+/// 上限 500 会把十万人群的成员遍历切成 200 次**串行**往返。
+/// 线上实测：一条已读回执在十万人群里端到端 47 秒，全部落在这条成员遍历上
+/// （orchestrator CPU 全程 0.6%，纯等待）。每页要跑三个查询——
+/// COUNT(*) 41.6ms、MAX(updated_at) 34.8ms、
+/// 列表 71ms（首页）→181ms（尾页 OFFSET 99500），200 页合计约 40.5 秒。
+///
+/// 而每页代价由固定开销主导，与行数几乎无关：实测取 5000 行 61ms，
+/// 比取 500 行的 68ms 还快。放到 5000 后页数 200 → 20。
+/// OFFSET 分页本身仍是 O(offset)，页数降下来后影响已不显著；
+/// 换 keyset 游标是后续可做的进一步优化。
+pub(crate) const MAX_PARTICIPANT_PAGE_LIMIT: i32 = 5000;
+
+pub(crate) fn clamp_participant_page_limit(limit: i32) -> i32 {
+    limit.clamp(1, MAX_PARTICIPANT_PAGE_LIMIT)
+}
+
+#[cfg(test)]
+mod participant_page_limit_tests {
+    use super::{MAX_PARTICIPANT_PAGE_LIMIT, clamp_participant_page_limit};
+
+    #[test]
+    fn page_limit_stays_large_enough_to_avoid_hundreds_of_round_trips() {
+        // 回归门禁：上限若掉回 500，十万人群的成员遍历会退回 200 次串行往返
+        // （实测一条已读回执 47 秒）。
+        assert!(
+            MAX_PARTICIPANT_PAGE_LIMIT >= 5000,
+            "页大小上限不能调小：十万人群会退回数百次串行往返"
+        );
+        // 十万人群的往返次数必须控制在 20 次量级
+        let round_trips = (100_000 + MAX_PARTICIPANT_PAGE_LIMIT - 1) / MAX_PARTICIPANT_PAGE_LIMIT;
+        assert!(round_trips <= 20, "十万人群往返次数 {round_trips} 次，过多");
+
+        assert_eq!(clamp_participant_page_limit(0), 1);
+        assert_eq!(clamp_participant_page_limit(-5), 1);
+        assert_eq!(clamp_participant_page_limit(500), 500);
+        assert_eq!(clamp_participant_page_limit(5000), 5000);
+        assert_eq!(clamp_participant_page_limit(99_999), MAX_PARTICIPANT_PAGE_LIMIT);
     }
 }
