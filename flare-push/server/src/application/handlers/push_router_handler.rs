@@ -396,6 +396,12 @@ struct PendingPushTask {
     online: bool,
 }
 
+/// 单条在线推送信封最多携带多少个用户 ID。
+///
+/// 决定"单条消息大小"与"群规模"是否解耦。1000 个 ID 约 16–24KB，远低于 NATS
+/// 的 max_payload，也不会让 push-server 的内存随群规模线性膨胀。
+const ONLINE_FANOUT_CHUNK: usize = 1000;
+
 const PUSH_TASK_PUBLISH_CONCURRENCY: usize = 64;
 
 /// 大群离线扇出的成员数上限（可用 `PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP` 覆盖）。
@@ -831,14 +837,20 @@ impl PushRouterHandler {
             });
         }
 
-        let mut tasks =
-            Vec::with_capacity(offline_tasks.len() + usize::from(!online_user_ids.is_empty()));
-        if !online_user_ids.is_empty() {
-            let push_payload = rewrite_push_payload_user_ids(
-                template.payload_kind,
-                template.push_payload,
-                &online_user_ids,
-            )?;
+        // 在线推送按 ONLINE_FANOUT_CHUNK 分片，不把整份在线名单塞进一条信封。
+        //
+        // 原实现是 `request.user_ids = online_user_ids` —— 一条消息带走全群在线
+        // 用户 ID。10 万人的群单条就是 1.6MB；线上实测 FLARE_PUSH 里 12,503 条
+        // 占了 1.07GB（平均 86KB/条），既把 NATS 的 1GB 配额顶穿，也让
+        // push-server 反复 OOM。
+        //
+        // 分片后每条信封只带一批用户，单条大小与群规模脱钩。分区键仍用
+        // conversation_id，同一条消息的各分片落在同一主题上，保持投递顺序。
+        let online_chunks = online_user_ids.chunks(ONLINE_FANOUT_CHUNK).len();
+        let mut tasks = Vec::with_capacity(offline_tasks.len() + online_chunks);
+        for chunk in online_user_ids.chunks(ONLINE_FANOUT_CHUNK) {
+            let push_payload =
+                rewrite_push_payload_user_ids(template.payload_kind, template.push_payload, chunk)?;
             let task = PushTaskEnvelope {
                 user_id: String::new(),
                 message_id: template.message_id.to_string(),
@@ -2398,5 +2410,54 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod online_fanout_chunking_tests {
+    use super::*;
+
+    /// 单条信封的大小必须与群规模脱钩。
+    ///
+    /// 原实现把整份在线名单塞进一条消息：10 万人群单条 1.6MB，线上实测
+    /// FLARE_PUSH 里 12,503 条占 1.07GB（平均 86KB/条），既顶穿 NATS 的 1GB
+    /// 配额，也让 push-server 反复 OOM 重启。
+    #[test]
+    fn envelope_count_scales_with_group_but_each_stays_bounded() {
+        for members in [1usize, 999, 1000, 1001, 100_000] {
+            let ids: Vec<String> = (0..members).map(|i| format!("u{i:08}")).collect();
+            let chunks: Vec<_> = ids.chunks(ONLINE_FANOUT_CHUNK).collect();
+
+            assert_eq!(
+                chunks.len(),
+                members.div_ceil(ONLINE_FANOUT_CHUNK),
+                "{members} 人应切成 ceil(n/{ONLINE_FANOUT_CHUNK}) 片"
+            );
+            for c in &chunks {
+                assert!(
+                    c.len() <= ONLINE_FANOUT_CHUNK,
+                    "任何一片都不得超过 {ONLINE_FANOUT_CHUNK}，否则大小又跟群规模挂钩了"
+                );
+            }
+            // 分片不能丢人，也不能重复投递
+            let total: usize = chunks.iter().map(|c| c.len()).sum();
+            assert_eq!(total, members, "分片后用户总数必须守恒");
+        }
+    }
+
+    /// 空名单不产生任何信封——否则每条消息都会多出一条空推送。
+    #[test]
+    fn empty_online_list_produces_no_envelope() {
+        let ids: Vec<String> = Vec::new();
+        assert_eq!(ids.chunks(ONLINE_FANOUT_CHUNK).len(), 0);
+    }
+
+    /// 分片大小必须真的有界，不能被改成一个等同于"不分片"的巨值。
+    #[test]
+    fn chunk_size_is_actually_bounded() {
+        assert!(
+            (1..=10_000).contains(&ONLINE_FANOUT_CHUNK),
+            "分片过大等于没分片：单条信封会重新随群规模膨胀"
+        );
     }
 }
