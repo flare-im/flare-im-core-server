@@ -3,7 +3,7 @@
 //! DATA 通道载荷为 [`flare_proto::common::DataPacket`]（`common/data.proto`）：`SYNC_REQUEST` / `SYNC_RESPONSE` / `USER_CUSTOM`。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use flare_core::common::ErrorCode;
@@ -147,15 +147,32 @@ impl SendDataDomainService {
         match cmd.packet.payload.as_ref() {
             Some(DataPayload::SyncRequest(sync)) => {
                 let sync = sync.clone();
+                let sync_payload = sync_payload_name(sync.payload.as_ref());
                 tracing::trace!(
                     connection_id = %cmd.connection_id,
-                    sync_payload = sync_payload_name(sync.payload.as_ref()),
+                    sync_payload,
                     "DATA SYNC_REQUEST → forward"
                 );
+                // 单次 sync_request 的服务端耗时。客户端引导阶段会**串行**发十几次
+                // sync_request，每次的服务端耗时直接叠加成首屏时延（线上实测响应间隔
+                // p50 407ms、max 2189ms，而 TCP RTT 只有 1ms）。此前这条链路上一个
+                // 耗时数字都没有，只能看到客户端在等、看不到等在哪个 sync 变体上。
+                let started = Instant::now();
                 let sync_res = self
                     .sync_service
                     .execute(tx, cmd.connection_id.as_str(), sync)
-                    .await?;
+                    .await;
+                let elapsed_ms = started.elapsed().as_millis();
+                if elapsed_ms >= sync_slow_log_threshold_ms() {
+                    tracing::info!(
+                        connection_id = %cmd.connection_id,
+                        sync_payload,
+                        elapsed_ms = elapsed_ms as u64,
+                        ok = sync_res.is_ok(),
+                        "slow sync_request"
+                    );
+                }
+                let sync_res = sync_res?;
                 let out = DataPacket {
                     payload: Some(DataPayload::SyncResponse(sync_res)),
                 };
@@ -281,6 +298,25 @@ impl SendDataDomainService {
     }
 }
 
+/// 慢 `sync_request` 日志阈值（毫秒），env `FLARE_SYNC_SLOW_LOG_MS`，默认 100。
+/// 设为 0 则每次都记（排障用，生产别开）。
+fn sync_slow_log_threshold_ms() -> u128 {
+    static VALUE: OnceLock<u128> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        parse_slow_log_ms(std::env::var("FLARE_SYNC_SLOW_LOG_MS").ok().as_deref())
+    })
+}
+
+/// 拆成纯函数是为了能测：非法值必须回落到默认阈值，而不是变成 0
+/// （0 等于给每条 sync_request 都写一行日志，生产上会把真正的错误淹掉）。
+fn parse_slow_log_ms(raw: Option<&str>) -> u128 {
+    const DEFAULT_MS: u128 = 100;
+    match raw {
+        Some(v) => v.trim().parse::<u128>().unwrap_or(DEFAULT_MS),
+        None => DEFAULT_MS,
+    }
+}
+
 fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
     match payload {
         Some(SyncPayload::SingleConversation(_)) => "single_conversation",
@@ -305,6 +341,20 @@ fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_log_threshold_defaults_and_rejects_garbage() {
+        assert_eq!(parse_slow_log_ms(None), 100);
+        assert_eq!(parse_slow_log_ms(Some("250")), 250);
+        assert_eq!(parse_slow_log_ms(Some(" 250 ")), 250);
+        // 0 是合法的显式取值（排障时全量记录）
+        assert_eq!(parse_slow_log_ms(Some("0")), 0);
+        // 非法值必须回落到默认，绝不能变成 0：那会给每条 sync_request 写一行日志
+        assert_eq!(parse_slow_log_ms(Some("abc")), 100);
+        assert_eq!(parse_slow_log_ms(Some("")), 100);
+        assert_eq!(parse_slow_log_ms(Some("-5")), 100);
+    }
+
     use crate::domain::ports::{IPushPort, ISyncPort};
     use async_trait::async_trait;
     use flare_proto::common::{Sync as ClientSync, SyncRes, TypingStatePacket};
