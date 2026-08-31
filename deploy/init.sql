@@ -616,6 +616,9 @@ COMMENT ON COLUMN conversation_participants.created_at IS '创建时间';
 COMMENT ON COLUMN conversation_participants.updated_at IS '更新时间';
 CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_user ON conversation_participants(tenant_id, user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_conv ON conversation_participants(tenant_id, conversation_id);
+-- 成员预览 LATERAL 与成员分页 keyset 游标都按 (joined_at, user_id) 排序取数；
+-- 没有这个索引就会退化成对全会话成员做 top-N heapsort（十万人群实测 106ms/会话）。
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_conv_joined ON conversation_participants(tenant_id, conversation_id, joined_at, user_id);
 
 -- ============================================================================
 -- 7. Sync 游标（common/sync.proto）
