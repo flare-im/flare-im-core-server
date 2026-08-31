@@ -60,14 +60,20 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory 384mb
+      --maxmemory ${REDIS_MAXMEMORY:-1200mb}
       --maxmemory-policy volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    mem_limit: 512m
+    # maxmemory 必须低于 mem_limit（约 80%）：Redis 的实际 RSS 会高于
+    # maxmemory（碎片、复制缓冲、客户端输出缓冲都不计入）。
+    #
+    # 线上事故：384mb/512m 这档在真实数据量下顶满，累计驱逐 103,716 个 key。
+    # 被 volatile-lru 丢掉的是 seq 高水位、在线索引、幂等键这类 IM 状态，
+    # 后果是"新消息排进历史中间"这类不易归因的问题，且全程无告警。
+    mem_limit: ${REDIS_MEM_LIMIT:-1536m}
 
   postgres:
     image: timescale/timescaledb:latest-pg16
@@ -146,7 +152,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    mem_limit: 384m
+    # ⚠️ 铁律：NATS_MAX_MEM_STORE 必须显著小于这里的 mem_limit。
+    # JetStream 会按配额去涨，而这个配额只覆盖内存流，连接缓冲与 file-store
+    # 索引都不算在内——配额贴着容器上限就等于安排一次 OOM。
+    #
+    # 线上事故：部署侧把 NATS_MAX_MEM_STORE 调成 2G 而这里还是 384m，
+    # nats-server 被 cgroup OOM 杀了 34 次（dmesg: CONSTRAINT_MEMCG,
+    # anon-rss 恰好 384MB）。默认 256MB 配 1g，留约 4 倍余量。
+    mem_limit: 1g
 
   rustfs:
     image: rustfs/rustfs:latest

@@ -146,6 +146,14 @@ impl OnlineStatusService {
             .collect())
     }
 
+    /// 单次 SSCAN 取回的成员数。给大了等于把 SMEMBERS 的问题原样搬过来，
+    /// 给小了则往返次数过多；1024 是常见折中。
+    const ONLINE_SCAN_BATCH: usize = 1024;
+
+    /// 一个会话最多取多少在线成员。超出即截断并告警——宁可少推一部分，
+    /// 也不能让单个超大群把推送进程撑爆。
+    const ONLINE_SCAN_HARD_CAP: usize = 200_000;
+
     async fn redis_conversation_online_user_ids(
         &self,
         manager: &ConnectionManager,
@@ -155,22 +163,108 @@ impl OnlineStatusService {
         let tenant_id = ctx.tenant_id().unwrap_or_else(|| self.default_tenant_id());
         let key = format!("conv:online:{tenant_id}:{conversation_id}");
         let mut conn = manager.clone();
-        let mut user_ids: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|err| {
-                FlareError::system(format!(
-                    "query redis conversation online index {key}: {err}"
-                ))
-            })?;
-        user_ids.retain(|user_id| !user_id.trim().is_empty());
+
+        // 用 SSCAN 游标分批，不用 SMEMBERS。
+        //
+        // SMEMBERS 会把整个集合一次性拉进 Vec：500 万人的群就是一次调用分配
+        // 几百 MB，并发几条消息就是 GB 级。线上实测 push-server 因此涨到
+        // 13.4GB，触发的是**全局** OOM（CONSTRAINT_NONE），把 NATS 和 Redis
+        // 一起拖下水——NATS 因此重启了 34 次。
+        //
+        // SMEMBERS 还会阻塞 Redis 的单线程：大集合期间所有其他命令排队，
+        // 表现为整个 IM 的 seq 分配、在线查询集体变慢。
+        let mut user_ids: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+        let mut truncated = false;
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SSCAN")
+                .arg(&key)
+                .arg(cursor)
+                .arg("COUNT")
+                .arg(Self::ONLINE_SCAN_BATCH)
+                .query_async(&mut conn)
+                .await
+                .map_err(|err| {
+                    FlareError::system(format!("scan redis conversation online index {key}: {err}"))
+                })?;
+            user_ids.extend(batch.into_iter().filter(|id| !id.trim().is_empty()));
+            cursor = next;
+            if user_ids.len() >= Self::ONLINE_SCAN_HARD_CAP {
+                truncated = true;
+                break;
+            }
+            // SSCAN 以游标回到 0 表示遍历完成
+            if cursor == 0 {
+                break;
+            }
+        }
+
         user_ids.sort();
         user_ids.dedup();
+        if truncated {
+            user_ids.truncate(Self::ONLINE_SCAN_HARD_CAP);
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                cap = Self::ONLINE_SCAN_HARD_CAP,
+                "会话在线成员超过上限，本次推送已截断"
+            );
+        }
         Ok(user_ids)
     }
 
     pub fn default_tenant_id(&self) -> &str {
         &self.config.default_tenant_id
+    }
+}
+
+#[cfg(test)]
+mod online_index_scan_tests {
+    use super::*;
+
+    /// 会话在线索引必须用游标分批读，不能整集合一次性进内存。
+    ///
+    /// SMEMBERS 对 500 万人的群一次分配几百 MB，并发几条消息就是 GB 级：
+    /// 线上实测 push-server 涨到 13.4GB 触发全局 OOM，把 NATS 一起拖死
+    /// （NATS 因此重启 34 次）。它还会阻塞 Redis 单线程，拖慢全局 seq 分配。
+    ///
+    /// 断言源码而不是行为，是因为这条性质无法从返回值上观察到——
+    /// 换回 SMEMBERS 结果完全一样，只有内存曲线会爆。
+    #[test]
+    fn conversation_online_index_uses_cursor_scan_not_smembers() {
+        let src = include_str!("online_status_service.rs");
+        let body = src
+            .split("async fn redis_conversation_online_user_ids")
+            .nth(1)
+            .expect("函数应存在");
+        let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+
+        assert!(
+            body.contains("\"SSCAN\""),
+            "会话在线索引必须用 SSCAN 游标分批读取"
+        );
+        assert!(
+            !body.contains("\"SMEMBERS\""),
+            "不得用 SMEMBERS：整集合一次性进内存，大群会直接把推送进程撑爆"
+        );
+    }
+
+    /// 必须有硬上限：光有分批而没有上限，超大群照样能把内存堆满，
+    /// 只是从"一次分配几百 MB"变成"分很多次堆到几百 MB"。
+    #[test]
+    fn scan_has_a_hard_cap_and_batches_are_bounded() {
+        assert!(
+            OnlineStatusService::ONLINE_SCAN_HARD_CAP > 0
+                && OnlineStatusService::ONLINE_SCAN_HARD_CAP <= 1_000_000,
+            "上限要存在且在合理量级"
+        );
+        assert!(
+            OnlineStatusService::ONLINE_SCAN_BATCH > 0
+                && OnlineStatusService::ONLINE_SCAN_BATCH <= 10_000,
+            "单批过大等于把 SMEMBERS 的问题原样搬过来"
+        );
+        assert!(
+            OnlineStatusService::ONLINE_SCAN_BATCH < OnlineStatusService::ONLINE_SCAN_HARD_CAP,
+            "单批不该超过总上限"
+        );
     }
 }
