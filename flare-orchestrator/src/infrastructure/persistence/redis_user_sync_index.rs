@@ -20,6 +20,16 @@ const DEFAULT_TENANT_ID: &str = "0";
 /// 每个用户只操作自己的三个键，彼此完全独立，跨十万用户的 MULTI/EXEC
 /// 拿不到任何有意义的保证；分片后仍保留**片内** atomic。
 /// 跨片的部分失败由调用方的 user_sync 补偿队列兜底。
+/// 复用同一个 `Script` 以拿到稳定的 SHA1，配合 EVALSHA 使用。
+///
+/// 用 EVAL 时**每个用户**都要重发一遍脚本正文（约 700B）：十万人群一次已读回执
+/// 就是约 70MB 的构造与传输，实测单次耗时约 48 秒。EVALSHA 只发 40 字节的 sha，
+/// 同一次扇出的传输量降到约 1/17。
+fn record_change_script() -> &'static redis::Script {
+    static SCRIPT: std::sync::OnceLock<redis::Script> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(|| redis::Script::new(RECORD_CONVERSATION_CHANGE_SCRIPT))
+}
+
 const RECORD_CHANGE_CHUNK_DEFAULT: usize = 500;
 
 /// 拆成纯函数是为了能测：0 或非法值必须回落到默认值。
@@ -263,34 +273,58 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
         let ttl = self.change_ttl_seconds.to_string();
 
         let chunk_size = record_change_chunk_size();
+        let script_sha = record_change_script().get_hash().to_string();
         for chunk in user_ids.chunks(chunk_size) {
-            let mut pipe = redis::pipe();
-            pipe.atomic();
-            for user_id in chunk {
-                pipe.cmd("EVAL")
-                    .arg(RECORD_CONVERSATION_CHANGE_SCRIPT)
-                    .arg(3)
-                    .arg(Self::version_key(&tenant_id, user_id))
-                    .arg(Self::changes_key(&tenant_id, user_id))
-                    .arg(Self::conversation_state_key(
-                        &tenant_id,
-                        user_id,
-                        conversation_id,
-                    ))
-                    .arg(conversation_id)
-                    .arg(&seq)
-                    .arg(&occurred_at)
-                    .arg(&max_changes)
-                    .arg(&ttl);
-            }
+            // Redis 重启或 SCRIPT FLUSH 之后脚本缓存会空，EVALSHA 返回 NOSCRIPT。
+            // 这时加载一次脚本再重试**当前分片**；只重试一次，避免异常下打转。
+            let mut reloaded = false;
+            loop {
+                let mut pipe = redis::pipe();
+                pipe.atomic();
+                for user_id in chunk {
+                    pipe.cmd("EVALSHA")
+                        .arg(&script_sha)
+                        .arg(3)
+                        .arg(Self::version_key(&tenant_id, user_id))
+                        .arg(Self::changes_key(&tenant_id, user_id))
+                        .arg(Self::conversation_state_key(
+                            &tenant_id,
+                            user_id,
+                            conversation_id,
+                        ))
+                        .arg(conversation_id)
+                        .arg(&seq)
+                        .arg(&occurred_at)
+                        .arg(&max_changes)
+                        .arg(&ttl);
+                }
 
-            let _: Vec<redis::Value> = pipe.query_async(&mut conn).await.map_err(|err| {
-                FlareError::system(format!(
-                    "Redis user sync index batch record failed tenant_id={tenant_id} conversation_id={conversation_id} user_count={} chunk_size={}: {err}",
-                    user_ids.len(),
-                    chunk.len()
-                ))
-            })?;
+                match pipe.query_async::<Vec<redis::Value>>(&mut conn).await {
+                    Ok(_) => break,
+                    Err(err)
+                        if !reloaded && err.kind() == redis::ErrorKind::NoScriptError =>
+                    {
+                        reloaded = true;
+                        let _: String = redis::cmd("SCRIPT")
+                            .arg("LOAD")
+                            .arg(RECORD_CONVERSATION_CHANGE_SCRIPT)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(|err| {
+                                FlareError::system(format!(
+                                    "Redis user sync index script load failed tenant_id={tenant_id} conversation_id={conversation_id}: {err}"
+                                ))
+                            })?;
+                    }
+                    Err(err) => {
+                        return Err(FlareError::system(format!(
+                            "Redis user sync index batch record failed tenant_id={tenant_id} conversation_id={conversation_id} user_count={} chunk_size={}: {err}",
+                            user_ids.len(),
+                            chunk.len()
+                        )));
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -404,7 +438,21 @@ mod tests {
         );
         assert!(
             body.contains("for user_id in chunk"),
-            "EVAL 必须只对当前分片累加，不能对全量 user_ids"
+            "EVALSHA 必须只对当前分片累加，不能对全量 user_ids"
+        );
+        assert!(
+            body.contains("EVALSHA"),
+            "必须用 EVALSHA：EVAL 会给每个用户重发一遍脚本正文"
+        );
+        assert!(
+            !body.contains(r#"cmd("EVAL")"#),
+            "回归：改回 EVAL 了，脚本正文会被逐用户重发"
+        );
+        // 脚本正文在函数体里只应出现一次——即 NOSCRIPT 之后的那次 SCRIPT LOAD。
+        assert_eq!(
+            body.matches("RECORD_CONVERSATION_CHANGE_SCRIPT").count(),
+            1,
+            "脚本正文只应用于 SCRIPT LOAD，不应出现在逐用户的命令里"
         );
         assert!(
             !body.contains("for user_id in &user_ids"),
