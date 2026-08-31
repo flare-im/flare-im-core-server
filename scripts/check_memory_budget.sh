@@ -60,8 +60,11 @@ if [ "$s" -le 0 ] || [ "$l" -le 0 ]; then
 else
     if [ "$s" -ge "$l" ]; then
         bad "REDIS_MAXMEMORY=${r_max} ≥ 容器上限 ${r_lim}：Redis 的 RSS 高于 maxmemory，必被 OOM"
-    elif [ $(( s * 100 / l )) -gt 85 ]; then
-        bad "REDIS_MAXMEMORY=${r_max} 占上限 ${r_lim} 的 $(( s * 100 / l ))%，碎片与输出缓冲会顶穿"
+    elif [ $(( s * 100 / l )) -gt 70 ]; then
+        # 阈值定在 70% 是有来由的：线上 maxmemory 1200mb / 容器 1536m（78%）
+        # 这一档被 cgroup OOM 杀过。实测碎片率 1.12，RSS 显著高于 used_memory，
+        # 再加复制缓冲与客户端输出缓冲，78% 的余量不够。
+        bad "REDIS_MAXMEMORY=${r_max} 占上限 ${r_lim} 的 $(( s * 100 / l ))%，超过 70%——碎片与输出缓冲会顶穿（78% 那档已被 OOM 杀过）"
     else
         ok "Redis maxmemory ${r_max} / 上限 ${r_lim}（占 $(( s * 100 / l ))%）"
     fi

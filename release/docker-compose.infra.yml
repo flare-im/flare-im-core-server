@@ -60,15 +60,16 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory ${REDIS_MAXMEMORY:-1200mb}
+      --maxmemory ${REDIS_MAXMEMORY:-1000mb}
       --maxmemory-policy volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # maxmemory 必须低于 mem_limit（约 80%）：Redis 的实际 RSS 会高于
-    # maxmemory（碎片、复制缓冲、客户端输出缓冲都不计入）。
+    # maxmemory 必须显著低于 mem_limit（约 65%，不是 80%）：Redis 的实际 RSS
+    # 高于 used_memory（实测碎片率 1.12），复制缓冲与客户端输出缓冲也不计入
+    # maxmemory。线上 1200mb/1536m（78%）这一档被 cgroup OOM 杀过。
     #
     # 线上事故：384mb/512m 这档在真实数据量下顶满，累计驱逐 103,716 个 key。
     # 被 volatile-lru 丢掉的是 seq 高水位、在线索引、幂等键这类 IM 状态，
