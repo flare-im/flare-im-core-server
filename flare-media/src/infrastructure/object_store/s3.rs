@@ -134,7 +134,7 @@ impl S3ObjectStore {
             presign_client,
             bucket,
             base_url,
-            cdn_base_url: cfg.cdn_base_url.clone(),
+            cdn_base_url: normalize_optional_url(&cfg.cdn_base_url),
             upload_prefix,
             bucket_root_prefix,
             force_path_style,
@@ -673,6 +673,18 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 }
 
+/// 空串一律当成「没配」。
+///
+/// TOML 里 `${VAR:-}` 在环境变量缺省时会展开成空串而不是消失，直接当成有效值用会
+/// 拼出相对路径这种半可用的地址——比彻底没配更难查。
+fn normalize_optional_url(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
 /// 回给客户端的端点：有对外端点就用它，否则回落到服务自用的端点。
 ///
 /// 抽成纯函数是为了能直接测——走 `from_config` 的话，本机没有对象存储时
@@ -693,6 +705,7 @@ pub type S3ObjectStoreRef = Arc<S3ObjectStore>;
 
 #[cfg(test)]
 mod public_endpoint_tests {
+    use super::normalize_optional_url;
     use super::resolve_client_facing_endpoint;
 
     fn s(v: &str) -> Option<String> {
@@ -742,5 +755,21 @@ mod public_endpoint_tests {
     #[test]
     fn none_when_neither_is_configured() {
         assert_eq!(resolve_client_facing_endpoint(&None, &None), None);
+    }
+
+    /// `cdn_base_url` 是回给客户端的地址，空串必须当成「没配」。
+    ///
+    /// base.toml 里写的是 `${FLARE_S3_CDN_BASE_URL:-}`，环境变量不设时会展开成
+    /// 空串而不是消失。若把它当有效值，`build_full_url("", key)` 会拼出相对路径，
+    /// 客户端拿到一个半可用的地址——比彻底没配更难查。
+    #[test]
+    fn blank_cdn_base_url_is_treated_as_unset() {
+        assert_eq!(normalize_optional_url(&None), None);
+        assert_eq!(normalize_optional_url(&s("")), None);
+        assert_eq!(normalize_optional_url(&s("   ")), None);
+        assert_eq!(
+            normalize_optional_url(&s(" https://cdn.example.com/flare-media ")),
+            s("https://cdn.example.com/flare-media")
+        );
     }
 }

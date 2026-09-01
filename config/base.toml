@@ -205,7 +205,13 @@ secret_key = "rustfsadmin"
 bucket = "flare-media"
 region = "us-east-1"
 use_ssl = false
-cdn_base_url = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}/flare-media"
+# cdn_base_url 是**回给客户端**的地址，默认必须留空：只有真挂了 CDN 才配它。
+# 这里曾经默认拼 FLARE_S3_ENDPOINT——那是服务自己连对象存储的**内网**地址
+# （反代部署下必然是 127.0.0.1:29000）。结果每条图片/文件消息都持久化了一个
+# 浏览器根本连不上的 http://127.0.0.1:29000/... ，表现是「自己刚发的图片是坏的，
+# 要等消息从服务端同步回来、走预签名路径才显示」，且库里的历史数据也一起脏了。
+# 留空后客户端用 url 字段（预签名或 public_endpoint 直链），二者都对外可达。
+cdn_base_url = "${FLARE_S3_CDN_BASE_URL:-}"
 # 预签名URL过期时间（秒），默认1小时
 presign_url_ttl_seconds = 3600
 use_presign = true
@@ -222,7 +228,13 @@ secret_key = "minioadmin"
 bucket = "flare-media"
 region = "us-east-1"
 use_ssl = false
-cdn_base_url = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}/flare-media"
+# cdn_base_url 是**回给客户端**的地址，默认必须留空：只有真挂了 CDN 才配它。
+# 这里曾经默认拼 FLARE_S3_ENDPOINT——那是服务自己连对象存储的**内网**地址
+# （反代部署下必然是 127.0.0.1:29000）。结果每条图片/文件消息都持久化了一个
+# 浏览器根本连不上的 http://127.0.0.1:29000/... ，表现是「自己刚发的图片是坏的，
+# 要等消息从服务端同步回来、走预签名路径才显示」，且库里的历史数据也一起脏了。
+# 留空后客户端用 url 字段（预签名或 public_endpoint 直链），二者都对外可达。
+cdn_base_url = "${FLARE_S3_CDN_BASE_URL:-}"
 # 预签名URL过期时间（秒），默认1小时
 presign_url_ttl_seconds = 3600
 use_presign = true
