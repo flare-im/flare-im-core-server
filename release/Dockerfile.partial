@@ -49,7 +49,11 @@ RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
             "$CARGO_REGISTRY_MIRROR" > "${CARGO_HOME:-/usr/local/cargo}/config.toml"; \
     fi
 
-ARG CARGO_BUILD_JOBS
+# 必须给默认值。留空时 `ENV CARGO_BUILD_JOBS=` 会把空串传给 cargo，
+# 而 cargo 只接受 `default` 或数字，于是构建必然失败：
+#   error: could not parse ``. Number of parallel jobs should be `default` or a number.
+# 报错信息里那个空反引号极不显眼，很容易被当成别的问题。
+ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 WORKDIR /build

@@ -247,9 +247,31 @@ impl MessageFanoutService {
             // 与此处的 now 同源，所以这个数字不掺客户端时钟偏差，也不含跨网 RTT。
             self.metrics
                 .observe_fanout_latency("inline", recipient_count, ingestion_ts_ms);
+            // 大会话同样不能把整份收件人名单塞进一条内联事件 —— 上面的 ping 路径
+            // 早就这么做了，inline 这条却漏了，两条路径对同一个阈值处理不一致。
+            //
+            // 后果实测：2 万人的会话一条消息就产生一条 1.6MB 的
+            // flare.im.push.events 信封；push-server 处理它的工作量与群规模成正比，
+            // 超过 ack_wait(30s) 就被重投，重投又再生成一遍 —— 自我放大，
+            // 表现为 push-server 恒定满核、内存持续爬升、日志完全静默、
+            // 消费者 30 秒确认 0 条却落后几十万条。清空队列能好，一有大群消息就复发。
+            //
+            // 收件人为空时 push-server 走 publish_event_broadcast_task：发**一条**
+            // 按会话广播的任务，各网关节点用本地订阅表过滤投递，
+            // 代价 O(在线/节点)，与群人数无关。离线成员靠会话版本号增量拉兜底。
+            let inline_recipient_user_ids = if large_conversation {
+                Vec::new()
+            } else {
+                recipient_user_ids
+            };
             let r = self
                 .push_repository
-                .push_only_message_inline_event(ctx, &message, recipient_user_ids, conversation_id)
+                .push_only_message_inline_event(
+                    ctx,
+                    &message,
+                    inline_recipient_user_ids,
+                    conversation_id,
+                )
                 .await;
             self.metrics.observe_send_stage(
                 "orch_push_publish",
@@ -697,6 +719,81 @@ mod tests {
         assert!(
             event.payload.is_some(),
             "inline event must carry message payload for read-fanout broadcast"
+        );
+    }
+
+    /// 大会话即使**带着**收件人名单，内联事件也不能把名单塞进去。
+    ///
+    /// 上面那条用例传的是空名单，覆盖不到真正出事的路径：ping 分支早就按
+    /// large_conversation 丢弃名单了，inline 分支却无条件透传，两条路径对同一个
+    /// 阈值处理不一致。
+    ///
+    /// 线上后果：2 万人会话的一条消息产生一条 1.6MB 的 push.events 信封；
+    /// push-server 处理它的工作量与群规模成正比，超过 ack_wait(30s) 就被重投，
+    /// 重投再生成一遍 —— 自我放大。表现为恒定满核、内存爬升、日志静默、
+    /// 消费者 30 秒确认 0 条却落后几十万条，清空队列能好但一有大群消息就复发。
+    #[tokio::test]
+    async fn large_conversation_inline_event_drops_materialized_recipients() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let producer = Arc::new(CapturingProducer {
+            sends: Mutex::new(Vec::new()),
+            events: Some(events.clone()),
+        });
+        let repository = MqPushRepository::new(producer.clone());
+        let service = MessageFanoutService::new(repository)
+            .with_user_sync_index(Arc::new(RecordingUserSyncIndex::new(events.clone())));
+        let ctx: Ctx = Arc::new(
+            Context::with_request_id("req-large-inline-recipients")
+                .with_trace_id("trace-large-inline-recipients")
+                .with_tenant_id("tenant-a")
+                .with_user_id("sender-a"),
+        );
+        let message = Message {
+            server_id: "message-large-b".to_string(),
+            conversation_id: "conversation-large-b".to_string(),
+            conversation_type: ProtoConversationType::Group as i32,
+            channel_id: "conversation-large-b".to_string(),
+            sender_id: "sender-a".to_string(),
+            conversation_seq: 888,
+            created_at: 1_700_000_000_888,
+            content: Some(flare_proto::common::MessageContent {
+                content: Some(message_content::Content::Text(TextContent {
+                    text: "roster must not ride along".to_string(),
+                    mentions: vec![],
+                })),
+            }),
+            ..Message::default()
+        };
+
+        // 物化了一整份收件人名单 —— 正是大群会出现的形态
+        let recipients: Vec<String> = (0..2_000).map(|i| format!("loaduser{i:06}")).collect();
+
+        service
+            .persist_and_push_with_recipients(&ctx, message, recipients, true, 0)
+            .await
+            .expect("fanout should succeed");
+
+        let captured = producer
+            .sends
+            .lock()
+            .expect("capture producer poisoned")
+            .clone();
+        let push = captured
+            .iter()
+            .find(|send| send.topic == TOPIC_PUSH_EVENTS)
+            .expect("inline event must be published");
+        let push_envelope =
+            MqEnvelope::decode(push.payload.as_slice()).expect("decode inline event envelope");
+        assert_eq!(
+            push_envelope.recipient_user_ids,
+            Vec::<String>::new(),
+            "大会话的内联事件不得携带物化收件人：整份名单会让单条信封涨到 MB 级，\
+             push-server 处理不完就被重投，进而自我放大"
+        );
+        assert!(
+            push.payload.len() < 64 * 1024,
+            "单条信封必须与群规模脱钩，实际 {} 字节",
+            push.payload.len()
         );
     }
 
