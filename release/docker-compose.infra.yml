@@ -60,14 +60,28 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory ${REDIS_MAXMEMORY:-1000mb}
+      --appendfsync everysec
+      --save ""
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 512mb
+      --maxmemory ${REDIS_MAXMEMORY:-900mb}
       --maxmemory-policy volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # maxmemory 必须显著低于 mem_limit（约 65%，不是 80%）：Redis 的实际 RSS
+    # ⚠️ 周期性 RDB 快照必须关掉（--save ""），由 AOF everysec 承担持久化。
+    # 线上事故：默认的 `save 60 10000` 让 Redis 每约 75 秒 BGSAVE 一次，
+    # fork 出一个约等于数据集大小的进程，写入期间 COW 页累积把 cgroup 顶爆，
+    # redis-server 被 OOM 杀掉、重启加载 RDB 7 秒，期间全服务 BusyLoadingError，
+    # 用户表现是发消息失败（allocate seq failed ... broken pipe）。
+    # AOF 重写按增长触发（翻倍且 >512mb），fork 频率远低于每 60 秒一次。
+    #
+    # 另：切换到 AOF 前必须确认 appendonlydir 不是陈旧的——本次切换时 Redis
+    # 从 14 小时前的旧 AOF 加载，键数 173 万→2.5 万，seq 高水位随之回退并撞号。
+    #
+    # maxmemory 必须显著低于 mem_limit（约 59%，不是 80%）：Redis 的实际 RSS
     # 高于 used_memory（实测碎片率 1.12），复制缓冲与客户端输出缓冲也不计入
     # maxmemory。线上 1200mb/1536m（78%）这一档被 cgroup OOM 杀过。
     #
