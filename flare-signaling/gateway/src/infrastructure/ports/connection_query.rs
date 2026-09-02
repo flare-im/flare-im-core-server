@@ -63,4 +63,9 @@ impl ConnectionQuery for ManagerConnectionQuery {
     async fn list_user_connection_ids(&self, user_id: &str) -> Result<Vec<String>> {
         Ok(self.manager.get_user_connections(user_id).await)
     }
+
+    /// 分片 HashMap 的点查，代价与 `get_user_connections` 同量级。
+    async fn connection_exists(&self, connection_id: &str) -> bool {
+        self.manager.get_connection(connection_id).await.is_some()
+    }
 }

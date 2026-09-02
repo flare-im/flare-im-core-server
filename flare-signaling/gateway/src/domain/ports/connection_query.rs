@@ -35,4 +35,16 @@ pub trait ConnectionQuery: Send + Sync {
             .map(|info| info.connection_id)
             .collect())
     }
+
+    /// 该连接是否仍在本网关上。
+    ///
+    /// 会话订阅表只增不减：连接断开后 `ensure_conversation_members_subscribed`
+    /// 可能在下一次投递时把它重新 join 回来（连接表要等心跳回收才摘条目），
+    /// 而它的断开事件已经过去了——没有任何东西会再移除它。投递路径据此就地对账。
+    ///
+    /// 默认 `true`（保守：拿不准就别摘订阅，宁可多投一次）。
+    async fn connection_exists(&self, connection_id: &str) -> bool {
+        let _ = connection_id;
+        true
+    }
 }

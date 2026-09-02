@@ -231,6 +231,40 @@ impl PushDomainService {
         );
     }
 
+    /// 取该会话在本节点仍然存在的订阅连接，顺带把已消失的从订阅表摘掉，返回 `(存活, 摘除数)`。
+    ///
+    /// 订阅表只增不减是个陷阱：连接断开时 `handle_disconnect` 会清一次，但连接表要等心跳
+    /// 回收（分钟级）才摘条目，这期间任何一次投递都会经
+    /// `ensure_conversation_members_subscribed` 把这条**已死**的连接重新 join 回来——
+    /// 而它的断开事件已经过去了，再没有任何东西会移除它。于是每跑一个客户端就永久留一个
+    /// 幽灵：每条消息都要为它白扇一次，而 push 层对解析不到的连接既不计成功也不计失败，
+    /// `subscribers - delivered - failed` 的差额就是这些幽灵，日志上看不出来。
+    async fn live_subscribers(&self, conversation_id: &str) -> (Vec<String>, usize) {
+        let subscribed = self
+            .conversation_subscriptions
+            .local_subscribers(conversation_id);
+        let mut live = Vec::with_capacity(subscribed.len());
+        let mut pruned = 0usize;
+        for connection_id in subscribed {
+            if self.connection_query.connection_exists(&connection_id).await {
+                live.push(connection_id);
+            } else {
+                self.conversation_subscriptions
+                    .leave(conversation_id, &connection_id);
+                pruned += 1;
+            }
+        }
+        if pruned > 0 {
+            tracing::debug!(
+                conversation_id = %conversation_id,
+                pruned,
+                remaining = live.len(),
+                "push: 摘除已消失连接的会话订阅"
+            );
+        }
+        (live, pruned)
+    }
+
     /// 统一读扩散投递：把已编码载荷扇给**本节点**订阅该会话的在线连接。
     /// 复杂度 O(本节点在线成员)，与群总人数无关；无本地订阅者直接跳过（返回 (0,0)）。
     /// 跨节点由"会话 publish 命中所有有订阅者的节点"达成（上层 MQ 主题广播，F2 接入）。
@@ -244,9 +278,7 @@ impl PushDomainService {
         // 确定性 bootstrap：首次投递该会话时解析参与者并订阅本节点在线成员（缓存，每会话一次）。
         self.ensure_conversation_members_subscribed(tx, conversation_id)
             .await;
-        let connection_ids = self
-            .conversation_subscriptions
-            .local_subscribers(conversation_id);
+        let (connection_ids, pruned) = self.live_subscribers(conversation_id).await;
         if connection_ids.is_empty() {
             // 本节点没有订阅该会话的在线连接。这不是错误（成员可能在别的网关节点，
             // 或全部离线），但**必须可见**：投递计数为 0 时要能一眼分清
@@ -275,6 +307,7 @@ impl PushDomainService {
             tracing::info!(
                 conversation_id = %conversation_id,
                 subscribers = connection_ids.len(),
+                pruned,
                 delivered = *ok,
                 failed = *fail,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -870,6 +903,8 @@ mod tests {
 
     struct StaticConnectionQuery {
         connections: Vec<ConnectionInfo>,
+        /// 仍然存在的连接 id；空集合表示「全部存在」（兼容既有用例）。
+        live: Option<std::collections::HashSet<String>>,
     }
 
     #[async_trait]
@@ -885,12 +920,20 @@ mod tests {
         async fn list_user_connections(&self, _user_id: &str) -> Result<Vec<ConnectionInfo>> {
             Ok(self.connections.clone())
         }
+
+        async fn connection_exists(&self, connection_id: &str) -> bool {
+            match &self.live {
+                Some(live) => live.contains(connection_id),
+                None => true,
+            }
+        }
     }
 
     #[tokio::test]
     async fn push_event_envelope_sets_window_and_delivery_contract() {
         let push_port = Arc::new(CapturingPushPort::default());
         let connection_query = Arc::new(StaticConnectionQuery {
+            live: None,
             connections: vec![
                 ConnectionInfo::new(
                     "conn-1".to_string(),
@@ -951,6 +994,46 @@ mod tests {
             EventEnvelopeDeliveryMode::PingWithInline as i32
         );
         assert!(!envelope.inline_events_truncated);
+    }
+
+    #[tokio::test]
+    async fn conversation_delivery_prunes_subscriptions_of_gone_connections() {
+        // 订阅表只增不减：连接断开后下一次投递会把它重新 join 回来，而断开事件已经过去，
+        // 于是每条消息都要为幽灵做一次无效扇出，且 push 层对解析不到的连接既不计成功
+        // 也不计失败——计数对不上还看不出来。投递必须就地把它们摘掉。
+        let push_port = Arc::new(CapturingPushPort::default());
+        let subscriptions =
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
+        subscriptions.join("c1", "conn-live");
+        subscriptions.join("c1", "conn-ghost-1");
+        subscriptions.join("c1", "conn-ghost-2");
+        let connection_query = Arc::new(StaticConnectionQuery {
+            connections: Vec::new(),
+            live: Some(std::collections::HashSet::from(["conn-live".to_string()])),
+        });
+        let service = PushDomainService::new(
+            push_port.clone(),
+            connection_query,
+            subscriptions.clone(),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+        );
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+
+        let _ = &ctx;
+        let (live, pruned) = service.live_subscribers("c1").await;
+
+        assert_eq!(
+            live,
+            vec!["conn-live".to_string()],
+            "只应投给仍然存在的那条连接"
+        );
+        assert_eq!(pruned, 2, "两条幽灵连接必须被计入摘除数，让日志计数对得上");
+        assert_eq!(
+            subscriptions.local_subscribers("c1"),
+            vec!["conn-live".to_string()],
+            "已经不存在的连接必须从订阅表摘掉，否则每条消息都要为它白跑一次"
+        );
     }
 
     #[test]
