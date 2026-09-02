@@ -67,13 +67,19 @@ WORKDIR /build/flare-im-core
 
 # 只编指定的包。缓存挂载与全量构建共用，两者能互相复用依赖编译结果。
 ARG BUILD_PACKAGES
+# 默认 release（strip=true，产物小）。排查线上问题需要符号表时传
+# --build-arg CARGO_PROFILE=release-debug —— 工作区早就定义了这个 profile
+# （inherits release + strip=false + debug=1），但这里写死 --release 一直用不上，
+# 于是线上 perf 只能解出 libc 的 malloc/cfree，业务帧全是裸地址。
+# 注意产物目录随 profile 变：target/<profile>/。
+ARG CARGO_PROFILE=release
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/flare-im-core/target \
     test -n "$BUILD_PACKAGES" || { echo "必须指定 BUILD_PACKAGES"; exit 1; } \
-    && cargo build --release ${BUILD_PACKAGES} \
+    && cargo build --profile ${CARGO_PROFILE} ${BUILD_PACKAGES} \
     && mkdir -p /out \
     && for p in $(echo "$BUILD_PACKAGES" | tr ' ' '\n' | grep -v '^-p$' | grep -v '^$'); do \
-         cp "target/release/$p" /out/ || { echo "找不到产物 target/release/$p"; exit 1; }; \
+         cp "target/${CARGO_PROFILE}/$p" /out/ || { echo "找不到产物 target/${CARGO_PROFILE}/$p"; exit 1; }; \
        done \
     && ls -la /out
 

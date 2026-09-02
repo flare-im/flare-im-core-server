@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use flare_grpc_proto::access_gateway;
 use flare_proto::common::EventEnvelopeDeliveryMode;
 use flare_proto::common::{
-    Ack, AckPayload, CustomData, CustomPayload, NotificationKind, NotificationMessage,
+    Ack, AckPayload, CustomData, CustomPayload, EventType, NotificationKind, NotificationMessage,
     NotificationPayload, NotificationPriority, PushAck, PushEnvelope, PushTaskEnvelope,
     PushTaskPayloadKind, SystemPayload, ack, notification_message, push_envelope,
 };
@@ -925,6 +925,23 @@ impl PushRouterHandler {
         Ok(())
     }
 
+    /// 整批事件都是已读回执时，只推在线、绝不生成离线任务。
+    ///
+    /// 离线用户拿到别人的已读回执毫无用处：它不该弹通知，读状态下次同步自然会带到。
+    /// 但它走的是和普通消息一样的扇出，于是在大群里按成员数放大——
+    /// 线上实测：一次登录客户端标记已读产生 11 条回执事件，在 10 万人的会话里
+    /// 被展开成 25,613 条离线信封；push-server 随后满核空转，perf 显示时间全花在
+    /// 反复 decode PushEventRequest 的 user_ids 重复字段上。
+    ///
+    /// 必须**整批**都是回执才成立：一批里混着真实消息事件时照常走离线推送，
+    /// 否则会把该弹的通知一起吞掉。
+    fn events_are_read_receipts_only(req: &access_gateway::PushEventRequest) -> bool {
+        !req.events.is_empty()
+            && req.events.iter().all(|event| {
+                EventType::try_from(event.r#type) == Ok(EventType::EventReadReceipt)
+            })
+    }
+
     fn pure_conversation_ping(req: &access_gateway::PushEventRequest) -> Option<(String, u64)> {
         if !req.events.is_empty() {
             return None;
@@ -1413,7 +1430,8 @@ impl PushRouterHandler {
             return Ok(());
         }
 
-        let online_only = Self::pure_conversation_ping(&req).is_some();
+        let online_only = Self::pure_conversation_ping(&req).is_some()
+            || Self::events_are_read_receipts_only(&req);
         self.publish_event_to_user_batch(ctx, &req, &req.user_ids, online_only)
             .await
     }
@@ -2477,6 +2495,65 @@ mod online_fanout_chunking_tests {
 }
 
 #[cfg(test)]
+mod read_receipt_online_only_tests {
+    use super::*;
+
+    fn event(kind: EventType) -> flare_proto::common::Event {
+        flare_proto::common::Event {
+            r#type: kind as i32,
+            conversation_id: "2ALOADGRP000000001".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn request(events: Vec<flare_proto::common::Event>) -> access_gateway::PushEventRequest {
+        access_gateway::PushEventRequest {
+            events,
+            user_ids: (0..10).map(|i| format!("user{i:04}")).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 已读回执绝不能生成离线推送。
+    ///
+    /// 离线用户拿到别人的已读回执毫无用处（不该弹通知，读状态下次同步自然带到），
+    /// 但它走的是和普通消息一样的扇出，在大群里按成员数放大。
+    ///
+    /// 线上实测：**一次登录**客户端标记已读产生 11 条回执事件，在 10 万人的会话里
+    /// 被展开成 25,613 条离线信封，push-server 随后恒定满核 —— perf 显示时间全花在
+    /// 反复 decode PushEventRequest 的 user_ids 重复字段上。清空队列能好，
+    /// **下一次登录立刻复发**。
+    #[test]
+    fn read_receipts_never_produce_offline_tasks() {
+        assert!(
+            PushRouterHandler::events_are_read_receipts_only(&request(vec![event(
+                EventType::EventReadReceipt
+            )])),
+            "纯已读回执必须判为只推在线"
+        );
+    }
+
+    /// 混了真实消息事件时必须照常走离线推送，否则会把该弹的通知一起吞掉。
+    #[test]
+    fn a_real_message_in_the_batch_keeps_offline_push() {
+        assert!(
+            !PushRouterHandler::events_are_read_receipts_only(&request(vec![
+                event(EventType::EventReadReceipt),
+                event(EventType::EventMessage),
+            ])),
+            "批次里只要有一条真实消息，就不能整批降级成只推在线"
+        );
+    }
+
+    /// 空批次不属于「纯回执」，交给既有的 pure_conversation_ping 判定。
+    #[test]
+    fn empty_batch_is_not_read_receipt_only() {
+        assert!(!PushRouterHandler::events_are_read_receipts_only(&request(
+            vec![]
+        )));
+    }
+}
+
 mod offline_payload_scoping_tests {
     use super::*;
     use prost::Message as _;
