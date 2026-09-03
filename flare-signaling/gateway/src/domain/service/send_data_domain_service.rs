@@ -85,12 +85,15 @@ impl TypingAggregator {
         }
         entry.users.retain(|_, ts| now.duration_since(*ts) < ttl);
 
-        let throttled = self.emit_window.is_zero()
+        // 命名要照着含义来：这是「本次允许发射吗」，不是「被节流了吗」。
+        // 原来叫 throttled 而判断写成 `if typing && !throttled { fold }` ——
+        // 读起来像"没被节流就折叠"，与实际行为相反，迟早有人照字面改错。
+        let may_emit = self.emit_window.is_zero()
             || entry
                 .last_emit
                 .is_none_or(|last| now.duration_since(last) >= self.emit_window);
-        // stop 立即发射（及时反映停止）；typing 受窗口节流。
-        if typing && !throttled {
+        // stop 立即发射（及时反映停止）；typing 在窗口内折叠。
+        if typing && !may_emit {
             return None;
         }
         entry.last_emit = Some(now);
