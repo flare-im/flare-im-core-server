@@ -357,6 +357,26 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_ADMIN_GATEWAY_AUTH_APP_CREDENTIALS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_AUTH_HOOK_ISSUE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_AUTH_REFRESH_GRACE_SECS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
         "FLARE_API_GATEWAY_AUTH_HOOK_SECRET",
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,
@@ -373,6 +393,26 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env(
         "FLARE_API_GATEWAY_AUTH_HOOK_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS",
+        EnvOwner::ApiGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_API_GATEWAY_AUTH_DEV_ISSUE",
+        EnvOwner::ApiGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_API_GATEWAY_AUTH_HOOK_ISSUE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_API_GATEWAY_AUTH_REFRESH_GRACE_SECS",
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,
     ),

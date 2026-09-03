@@ -6,6 +6,7 @@ use axum::{
 use std::sync::Arc;
 use utoipa::OpenApi;
 
+use super::auth_handler;
 use super::auth_middleware::gateway_auth_middleware;
 use super::conversation_handler;
 use super::media_handler;
@@ -54,6 +55,8 @@ use flare_im_service_kit::clients::GrpcClients;
         presence_handler::batch_get_user_presence,
         presence_handler::kick_device,
         presence_handler::logout_presence,
+        auth_handler::issue_token,
+        auth_handler::refresh_token,
     ),
     components(
         schemas(
@@ -119,6 +122,8 @@ use flare_im_service_kit::clients::GrpcClients;
             super::presence_handler::KickDeviceHttpResponse,
             super::presence_handler::LogoutPresenceHttpRequest,
             super::presence_handler::LogoutPresenceHttpResponse,
+            super::auth_handler::IssueTokenHttpRequest,
+            super::auth_handler::IssuedTokenHttp,
         )
     ),
     tags(
@@ -277,7 +282,14 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
     // 主路由
+    // 签发/刷新是"拿 token 之前"的接口，不能套 bearer 中间件；自己的鉴权（app 凭据 / 联调开关 /
+    // 刷新用旧 token）在 handler 里做。生命周期实现不在网关（GATEWAY_SPEC 第 3 节）。
+    let auth_router = Router::new()
+        .route("/tokens", post(auth_handler::issue_token))
+        .route("/tokens/refresh", post(auth_handler::refresh_token));
+
     Router::new()
+        .nest("/api/v1/auth", auth_router)
         .nest("/api/v1/medias", media_public_router.merge(media_router))
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)

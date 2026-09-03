@@ -6,7 +6,10 @@ use flare_im_service_kit::{
     service_names::API_GATEWAY,
 };
 use flare_server_core::error::{AnyhowContext, Result};
-use flare_server_core::{TokenService, auth::build_token_validator};
+use flare_server_core::{
+    TokenService,
+    auth::{build_token_issuer, build_token_validator},
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -65,11 +68,28 @@ impl ApplicationBootstrap {
         )
         .context("failed to initialize gateway auth validator")?;
         info!(auth_mode = ?settings.auth.mode, "Gateway auth validator initialized");
+        let token_issuer = crate::interface::http::auth_handler::TokenIssuerHandle(
+            build_token_issuer(&settings.auth, token_service.clone())
+                .context("failed to initialize gateway token issuer")?,
+        );
+        if settings.auth.dev_issue {
+            tracing::warn!(
+                "AUTH_DEV_ISSUE is enabled: POST /api/v1/auth/tokens issues a token for ANY userId \
+                 without credentials. Local/dev only — anyone reaching this gateway can impersonate any user."
+            );
+        }
+        info!(
+            app_credentials = settings.auth.app_credentials.len(),
+            dev_issue = settings.auth.dev_issue,
+            issuer_ready = token_issuer.0.is_some(),
+            "Gateway token issuer initialized"
+        );
 
         let app = create_public_router(clients)
             .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(auth_validator))
+            .layer(axum::Extension(token_issuer))
             .layer(axum::Extension(token_service))
             .layer(
                 ServiceBuilder::new()

@@ -24,6 +24,7 @@ fn crate_surface_and_runtime_service_contract_are_api_gateway() {
 #[test]
 fn public_router_exposes_bff_routes_and_keeps_admin_out() {
     for route in [
+        ".nest(\"/api/v1/auth\"",
         ".nest(\"/api/v1/medias\"",
         ".nest(\"/api/v1/messages\"",
         ".nest(\"/api/v1/conversations\"",
@@ -51,6 +52,20 @@ fn protected_api_groups_are_wrapped_by_gateway_auth() {
         auth_layers, 4,
         "media/message/conversation/presence API groups must all be protected"
     );
+}
+
+/// 签发/刷新接口在拿到 token 之前调用，不能套 bearer 中间件；生命周期实现必须在 server-core。
+#[test]
+fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {
+    let auth_router = function_body(ROUTER_RS, "let auth_router = Router::new()");
+    assert!(auth_router.contains("/tokens"));
+    assert!(auth_router.contains("/tokens/refresh"));
+    assert!(!auth_router.contains("gateway_auth_middleware"));
+    let handler = include_str!("../src/interface/http/auth_handler.rs");
+    assert!(handler.contains("TokenIssuer"));
+    assert!(!handler.contains("TokenService::"), "网关不得自己签发，只能调 TokenIssuer");
+    assert!(handler.contains("settings.auth.dev_issue"));
+    assert!(handler.contains("constant_time_eq"));
 }
 
 #[test]

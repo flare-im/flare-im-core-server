@@ -1,3 +1,4 @@
+pub mod auth_handler;
 mod auth_middleware;
 mod conversation_handler;
 mod media_handler;

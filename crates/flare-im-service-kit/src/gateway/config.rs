@@ -1,4 +1,4 @@
-use flare_server_core::auth::{AuthProviderConfig, AuthProviderMode};
+use flare_server_core::auth::{AppCredential, AuthProviderConfig, AuthProviderMode};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use serde::Deserialize;
 use std::str::FromStr;
@@ -206,6 +206,15 @@ impl GatewaySettings {
             ),
             hook_secret: env_value(&mut source, scope, "AUTH_HOOK_SECRET")
                 .filter(|value| !value.trim().is_empty()),
+            hook_issue_url: env_value(&mut source, scope, "AUTH_HOOK_ISSUE_URL")
+                .filter(|value| !value.trim().is_empty()),
+            dev_issue: parse_env(&mut source, scope, "AUTH_DEV_ISSUE", "false")?,
+            app_credentials: match env_value(&mut source, scope, "AUTH_APP_CREDENTIALS") {
+                Some(raw) if !raw.trim().is_empty() => AppCredential::parse_list(&raw)
+                    .map_err(|err| config_error(format!("AUTH_APP_CREDENTIALS: {err}")))?,
+                _ => Vec::new(),
+            },
+            refresh_grace_secs: parse_env(&mut source, scope, "AUTH_REFRESH_GRACE_SECS", "604800")?,
         };
 
         let rate_limit = RateLimitConfig {
@@ -290,6 +299,14 @@ impl GatewaySettings {
             if self.auth.hook_secret_header.trim().is_empty() {
                 return Err(config_error("AUTH_HOOK_SECRET_HEADER cannot be empty"));
             }
+            if let Some(issue_url) = self.auth.hook_issue_url.as_deref()
+                && !(issue_url.starts_with("http://") || issue_url.starts_with("https://"))
+            {
+                return Err(config_error("AUTH_HOOK_ISSUE_URL must be http:// or https://"));
+            }
+        }
+        if self.auth.refresh_grace_secs == 0 {
+            return Err(config_error("AUTH_REFRESH_GRACE_SECS cannot be 0"));
         }
 
         // 验证限流配置
