@@ -49,18 +49,25 @@ impl ApplicationBootstrap {
             Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
         info!("gRPC clients initialized");
 
-        let token_service = Arc::new(TokenService::new(
-            require_secure_token_secret(
-                "FLARE_API_GATEWAY_TOKEN_SECRET",
-                gateway_config.token_secret.as_deref(),
-                "services.api_gateway.token_secret",
-            )?,
-            gateway_config
-                .token_issuer
-                .clone()
-                .unwrap_or_else(|| "flare-im-core".to_string()),
-            gateway_config.token_ttl_seconds.unwrap_or(3600),
-        ));
+        let token_service = {
+            let base = TokenService::new(
+                require_secure_token_secret(
+                    "FLARE_API_GATEWAY_TOKEN_SECRET",
+                    gateway_config.token_secret.as_deref(),
+                    "services.api_gateway.token_secret",
+                )?,
+                gateway_config
+                    .token_issuer
+                    .clone()
+                    .unwrap_or_else(|| "flare-im-core".to_string()),
+                gateway_config.token_ttl_seconds.unwrap_or(3600),
+            );
+            // 刷新令牌有效期（长效，支撑 7x24 免重登）。缺省 30 天。
+            let refresh_ttl = gateway_config
+                .refresh_token_ttl_seconds
+                .unwrap_or(flare_server_core::auth::DEFAULT_REFRESH_TTL_SECS);
+            Arc::new(base.with_refresh_ttl(refresh_ttl))
+        };
         let auth_validator = build_token_validator(
             &settings.auth,
             token_service.clone(),

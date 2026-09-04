@@ -399,6 +399,9 @@ pub struct ApiGatewayServiceConfig {
     /// JWT Token 过期时间（秒）
     #[serde(default)]
     pub token_ttl_seconds: Option<u64>,
+    /// 刷新令牌有效期（秒，长效）。缺省 30 天。接入令牌过期后凭刷新令牌换新，支撑 7x24 免重登。
+    #[serde(default)]
+    pub refresh_token_ttl_seconds: Option<u64>,
     /// 额外信任的 JWT 发行方（如业务系统登录 token，用于 API Gateway 鉴权）
     #[serde(default)]
     pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,

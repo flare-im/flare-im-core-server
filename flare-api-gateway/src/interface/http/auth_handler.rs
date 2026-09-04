@@ -50,6 +50,11 @@ pub struct IssuedTokenHttp {
     pub tenant_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// 长效刷新令牌：接入令牌过期后凭它换新（发到 `/tokens/refresh` 的 Bearer 头），无需重登。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_at: Option<u64>,
 }
 
 impl From<IssuedToken> for IssuedTokenHttp {
@@ -60,6 +65,8 @@ impl From<IssuedToken> for IssuedTokenHttp {
             user_id: value.user_id,
             tenant_id: value.tenant_id,
             device_id: value.device_id,
+            refresh_token: value.refresh_token,
+            refresh_expires_at: value.refresh_expires_at,
         }
     }
 }
