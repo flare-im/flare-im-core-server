@@ -34,6 +34,9 @@ pub struct AccessGatewayConfig {
     pub token_ttl_seconds: u64,
     pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
     pub token_store_redis_url: Option<String>,
+    /// 撤销键空间的 namespace：**必须与 api-gateway 的 token_store profile 一致**，
+    /// 否则两边读写不同 key，建连时查不到 api-gateway 写的撤销位。
+    pub token_store_namespace: Option<String>,
     // ACK上报配置（使用 gRPC，无需 JetStream）
     pub use_ack_report: bool,
     // 跨地区网关路由配置
@@ -260,6 +263,7 @@ impl AccessGatewayConfig {
             token_ttl_seconds,
             trusted_token_issuers,
             token_store_redis_url: token_profile.as_ref().map(|p| p.url.clone()),
+            token_store_namespace: token_profile.as_ref().and_then(|p| p.namespace.clone()),
             use_ack_report,
             gateway_id,
             region,

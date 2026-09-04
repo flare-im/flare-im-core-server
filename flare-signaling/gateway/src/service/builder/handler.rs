@@ -25,7 +25,7 @@ type SharedAuthenticator = Arc<dyn flare_core::server::auth::Authenticator + Sen
 pub async fn build_authenticator(
     config: &AccessGatewayConfig,
 ) -> flare_server_core::error::Result<SharedAuthenticator> {
-    use tracing::warn;
+    use tracing::{info, warn};
 
     let token_validator = match config.auth_provider.mode {
         AuthProviderMode::CoreJwt => {
@@ -41,9 +41,19 @@ pub async fn build_authenticator(
             );
 
             if let Some(store_url) = &config.token_store_redis_url {
-                match RedisTokenStore::new(store_url) {
+                // 建连撤销检查复用 TokenService::validate_token 里的 is_revoked。
+                // namespace 必须与 api-gateway 的 token_store 一致，否则读不到它写的撤销位。
+                let store_result = match config.token_store_namespace.as_deref() {
+                    Some(ns) => RedisTokenStore::with_namespace(store_url, ns),
+                    None => RedisTokenStore::new(store_url),
+                };
+                match store_result {
                     Ok(store) => {
                         token_service = token_service.with_store(Arc::new(store));
+                        info!(
+                            namespace = config.token_store_namespace.as_deref().unwrap_or("flare"),
+                            "token store attached: connect-time revocation check enabled"
+                        );
                     }
                     Err(err) => {
                         warn!(
