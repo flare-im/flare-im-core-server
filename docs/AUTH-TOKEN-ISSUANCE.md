@@ -51,3 +51,22 @@ Per `GATEWAY_SPEC.md` the gateway owns no token lifecycle: issue/refresh/revoke 
 Unit tests for issue/refresh/rotation/grace/revocation in server-core; gateway route and handler tests;
 SDK login-without-token and refresh scheduling tests; production check on 118.107.9.221 (gateway image
 rebuilt with `AUTH_DEV_ISSUE=true`, web and iOS simulator log in with a user id only); flare-social e2e regression.
+
+## 6. Token validation: core-standalone / third-party / hybrid
+
+Beyond issuance, **validation** is also dual-mode and composable. Gateways obtain a `TokenValidator`
+via `build_token_validator(&auth, token_service, trusted_issuers)`.
+
+| Shape | Config | Behavior |
+|---|---|---|
+| **Core standalone** | `AUTH_MODE=core_jwt`, no hook | Local HS256 validation of core-signed tokens (+ `trusted_token_issuers`). Zero network. |
+| **Third-party hook (pure delegation)** | `AUTH_MODE=http_hook` + `AUTH_HOOK_URL` | Every token is POSTed to the business hook; the business owns the whole token flow. |
+| **Hybrid (core-local + third-party fallback)** | `AUTH_MODE=core_jwt` + `AUTH_HOOK_URL` | `ChainedTokenValidator`: local first (core JWT + trusted issuers, zero network for tokens it recognizes), falling back to the hook only for tokens it cannot validate locally (third-party opaque tokens). One deployment validates its own tokens AND third-party tokens. |
+
+**Validation hook contract**: `POST {AUTH_HOOK_URL}` with header `{AUTH_HOOK_SECRET_HEADER}` →
+`{ "active", "userId", "tenantId?", "deviceId?", "appId?", "expiresAt?", "scopes", "metadata" }`.
+`active=false`/401/403 → reject; 5xx/timeout → `ProviderUnavailable` (retryable, never a permanent reject).
+
+**Refresh tokens**: `core_jwt` issues a short access token + a long refresh token (`token_use=refresh`,
+`refresh_token_ttl_seconds`, default 30d); the refresh endpoint accepts the refresh token, mints a new access
+token and rotates the refresh token. In `http_hook` mode the business hook owns refresh.
