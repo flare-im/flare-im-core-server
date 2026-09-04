@@ -342,7 +342,7 @@ const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.te
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
+                                'userIds', mr.user_ids,
                                 'count', mr.count
                             )
                         )
@@ -569,7 +569,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
+                                'userIds', mr.user_ids,
                                 'count', mr.count
                             )
                         )
@@ -616,7 +616,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
+                                'userIds', mr.user_ids,
                                 'count', mr.count
                             )
                         )
@@ -802,7 +802,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
+                                'userIds', mr.user_ids,
                                 'count', mr.count
                             )
                         )
@@ -951,7 +951,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     SELECT jsonb_agg(
                         jsonb_build_object(
                             'emoji', mr.emoji,
-                            'user_ids', mr.user_ids,
+                            'userIds', mr.user_ids,
                             'count', mr.count
                         )
                     )
@@ -1254,7 +1254,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     SELECT jsonb_agg(
                         jsonb_build_object(
                             'emoji', mr.emoji,
-                            'user_ids', mr.user_ids,
+                            'userIds', mr.user_ids,
                             'count', mr.count
                         )
                         ORDER BY mr.last_updated ASC
@@ -2147,7 +2147,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'emoji', mr.emoji,
-                                'user_ids', mr.user_ids,
+                                'userIds', mr.user_ids,
                                 'count', mr.count
                             )
                         )
