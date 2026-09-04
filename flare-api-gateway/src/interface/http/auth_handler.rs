@@ -163,7 +163,8 @@ pub struct RevokeUserHttpRequest {
 
 /// 强制注销某用户：撤销其全部令牌 + 广播踢人信号让各长连接网关立即关闭其活连接（撤销即断）。
 ///
-/// 授权同签发：`x-app-id`/`x-app-secret`（业务后端）或联调开关。撤销位写入共享 token store，
+/// 授权：**只认 app 凭据** `x-app-id`/`x-app-secret`（业务后端/管理端），**绝不走 dev-issue**——
+/// 撤销是特权操作，即使联调开关开着也必须带正确凭据。撤销位写入共享 token store，
 /// 各网关建连时读到即拒；踢人信号经 redis pubsub 让在线连接立刻掉线。
 #[utoipa::path(
     post,
@@ -183,7 +184,8 @@ pub async fn revoke_user(
     headers: HeaderMap,
     Json(request): Json<RevokeUserHttpRequest>,
 ) -> Response {
-    if let Err(err) = authorize_issue(&settings, &headers) {
+    // 特权操作：只认 app 凭据，不接受 dev-issue 联调开关。
+    if let Err(err) = authorize_admin(&settings, &headers) {
         return auth_error_response(err, GATEWAY_NAME);
     }
     let user_id = request.user_id.trim();
@@ -247,6 +249,31 @@ pub(crate) fn authorize_issue(settings: &GatewaySettings, headers: &HeaderMap) -
             "both x-app-id and x-app-secret are required".into(),
         )),
         (None, None) if settings.auth.dev_issue => Ok(()),
+        (None, None) => Err(AuthError::MissingToken),
+    }
+}
+
+/// 特权操作（撤销等）授权：**只认 app 凭据，绝不接受 dev-issue 联调开关**。
+/// 与 `authorize_issue` 的唯一区别是不带凭据时一律拒（不看 `dev_issue`）。
+pub(crate) fn authorize_admin(settings: &GatewaySettings, headers: &HeaderMap) -> Result<(), AuthError> {
+    let app_id = header_str(headers, APP_ID_HEADER);
+    let app_secret = header_str(headers, APP_SECRET_HEADER);
+    match (app_id, app_secret) {
+        (Some(app_id), Some(app_secret)) => {
+            let matched = settings.auth.app_credentials.iter().any(|cred| {
+                cred.app_id == app_id
+                    && constant_time_eq(cred.secret.as_bytes(), app_secret.as_bytes())
+            });
+            if matched {
+                Ok(())
+            } else {
+                warn!(app_id = %app_id, "admin op rejected: unknown app credential");
+                Err(AuthError::Forbidden("unknown app credential".into()))
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => Err(AuthError::InvalidToken(
+            "both x-app-id and x-app-secret are required".into(),
+        )),
         (None, None) => Err(AuthError::MissingToken),
     }
 }
