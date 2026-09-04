@@ -28,7 +28,7 @@
 - 在 gateway 内写消息顺序、未读数、好友关系、群权限等业务规则。
 - 在 gateway 中绕过 orchestrator 直接写 storage。
 - 在 HTTP 请求体中信任 `user_id`、`tenant_id` 作为权威身份。
-- 在 gateway 中签发、刷新、撤销或存储 token。
+- 在 gateway 内实现 token 的签发、刷新、撤销或存储逻辑。网关只暴露 `/api/v1/auth/tokens`、`/api/v1/auth/tokens/refresh` 两条路由并做入站鉴权（app 凭据 / 联调开关 / bearer），生命周期实现在 `flare-server-core::auth::issuer`（见 docs/AUTH-TOKEN-ISSUANCE.zh-CN.md）。
 
 ## 3. 路由规范
 
@@ -58,7 +58,7 @@ REST 命名规则：
 
 ### 4.1 入站认证
 
-网关从请求中提取认证材料，但具体 token 校验、刷新、撤销、会话存储必须下沉到 `flare-server-core` auth provider 或业务认证系统。Gateway 只消费标准 principal，不拥有 token 生命周期。
+网关从请求中提取认证材料，但具体 token 校验、签发、刷新、撤销、会话存储必须下沉到 `flare-server-core` auth provider / `TokenIssuer` 或业务认证系统。Gateway 只消费标准 principal，不拥有 token 生命周期；客户端也不再本地签发（core-only 形态由 SDK 向网关取 token，social / 自建业务由应用取）。
 
 网关从以下来源恢复上下文：
 
