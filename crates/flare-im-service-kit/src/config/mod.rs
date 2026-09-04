@@ -402,6 +402,10 @@ pub struct ApiGatewayServiceConfig {
     /// 刷新令牌有效期（秒，长效）。缺省 30 天。接入令牌过期后凭刷新令牌换新，支撑 7x24 免重登。
     #[serde(default)]
     pub refresh_token_ttl_seconds: Option<u64>,
+    /// 令牌撤销/轮换存储的 redis profile 名（对应 `[redis.<name>]`）。缺省用约定名 `token_store`。
+    /// 接上后：刷新令牌轮换会作废旧的、校验会查撤销位；不配且无 `token_store` profile 则为无状态（撤销为空操作）。
+    #[serde(default)]
+    pub token_store: Option<String>,
     /// 额外信任的 JWT 发行方（如业务系统登录 token，用于 API Gateway 鉴权）
     #[serde(default)]
     pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,

@@ -8,14 +8,14 @@ use flare_im_service_kit::{
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::{
     TokenService,
-    auth::{build_token_issuer, build_token_validator},
+    auth::{RedisTokenStore, build_token_issuer, build_token_validator},
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::interface::http::create_public_router;
 
@@ -66,7 +66,29 @@ impl ApplicationBootstrap {
             let refresh_ttl = gateway_config
                 .refresh_token_ttl_seconds
                 .unwrap_or(flare_server_core::auth::DEFAULT_REFRESH_TTL_SECS);
-            Arc::new(base.with_refresh_ttl(refresh_ttl))
+            let mut base = base.with_refresh_ttl(refresh_ttl);
+            // 接上 token 撤销/轮换存储：刷新令牌轮换后旧的立即作废、校验查撤销位。
+            // 约定用 `[redis.token_store]`（可经 services.api_gateway.token_store 改名）；
+            // 没有该 profile 则退化为无状态（撤销为空操作，与历史行为一致）。
+            let store_profile = gateway_config.token_store.as_deref().unwrap_or("token_store");
+            match app_config.redis_profile(store_profile) {
+                Some(redis) => {
+                    let namespace = redis.namespace.clone().unwrap_or_else(|| "flare".to_string());
+                    match RedisTokenStore::with_namespace(&redis.url, namespace) {
+                        Ok(store) => {
+                            base = base.with_store(Arc::new(store));
+                            info!(profile = store_profile, "token store attached: refresh-token rotation-revoke enabled");
+                        }
+                        Err(err) => {
+                            warn!(%err, profile = store_profile, "failed to build token store; token revoke/rotation disabled (stateless)");
+                        }
+                    }
+                }
+                None => {
+                    info!(profile = store_profile, "no token_store redis profile; token revoke/rotation disabled (stateless)");
+                }
+            }
+            Arc::new(base)
         };
         let auth_validator = build_token_validator(
             &settings.auth,
