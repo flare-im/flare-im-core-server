@@ -57,6 +57,7 @@ use flare_im_service_kit::clients::GrpcClients;
         presence_handler::logout_presence,
         auth_handler::issue_token,
         auth_handler::refresh_token,
+        auth_handler::revoke_user,
     ),
     components(
         schemas(
@@ -123,6 +124,7 @@ use flare_im_service_kit::clients::GrpcClients;
             super::presence_handler::LogoutPresenceHttpRequest,
             super::presence_handler::LogoutPresenceHttpResponse,
             super::auth_handler::IssueTokenHttpRequest,
+        auth_handler::RevokeUserHttpRequest,
             super::auth_handler::IssuedTokenHttp,
         )
     ),
@@ -286,7 +288,8 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
     // 刷新用旧 token）在 handler 里做。生命周期实现不在网关（GATEWAY_SPEC 第 3 节）。
     let auth_router = Router::new()
         .route("/tokens", post(auth_handler::issue_token))
-        .route("/tokens/refresh", post(auth_handler::refresh_token));
+        .route("/tokens/refresh", post(auth_handler::refresh_token))
+        .route("/revoke", post(auth_handler::revoke_user));
 
     Router::new()
         .nest("/api/v1/auth", auth_router)

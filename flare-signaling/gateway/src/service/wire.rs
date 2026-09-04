@@ -84,6 +84,19 @@ pub async fn initialize(
     // 4. 构建连接管理器
     let connection_manager = Arc::new(ConnectionManager::new());
 
+    // 4b. 撤销即断：若配了 token_store，订阅 kick 频道，收到撤销的 user_id 就关本地该用户连接。
+    if let Some(redis_url) = access_config.token_store_redis_url.clone() {
+        let namespace = access_config
+            .token_store_namespace
+            .clone()
+            .unwrap_or_else(|| "flare".to_string());
+        crate::service::revoke_subscriber::spawn_revoke_subscriber(
+            redis_url,
+            namespace,
+            connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
+        );
+    }
+
     // 5. 连接查询和端口
     let connection_query: Arc<dyn ConnectionQuery> = Arc::new(ManagerConnectionQuery::new(
         connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,

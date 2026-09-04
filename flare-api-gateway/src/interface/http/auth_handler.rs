@@ -16,6 +16,7 @@ use tracing::{info, instrument, warn};
 
 use flare_im_service_kit::gateway::GatewaySettings;
 use flare_im_service_kit::gateway_auth::{auth_error_response, extract_bearer_token};
+use flare_server_core::TokenService;
 use flare_server_core::auth::{AuthError, IssuedToken, TokenIssueRequest, TokenIssuer};
 use flare_server_core::http::ApiResponse;
 
@@ -152,6 +153,77 @@ pub async fn refresh_token(
         }
         Err(err) => auth_error_response(err, GATEWAY_NAME),
     }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeUserHttpRequest {
+    pub user_id: String,
+}
+
+/// 强制注销某用户：撤销其全部令牌 + 广播踢人信号让各长连接网关立即关闭其活连接（撤销即断）。
+///
+/// 授权同签发：`x-app-id`/`x-app-secret`（业务后端）或联调开关。撤销位写入共享 token store，
+/// 各网关建连时读到即拒；踢人信号经 redis pubsub 让在线连接立刻掉线。
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/revoke",
+    tag = "Auth",
+    request_body = RevokeUserHttpRequest,
+    responses(
+        (status = 200, description = "已撤销并广播踢人"),
+        (status = 401, description = "缺少或错误的 app 凭据，且未开联调"),
+        (status = 501, description = "无本地 token store（http_hook 委托业务方，或未配 token_store）"),
+    )
+)]
+#[instrument(skip_all, fields(user_id = %request.user_id))]
+pub async fn revoke_user(
+    Extension(settings): Extension<GatewaySettings>,
+    Extension(token_service): Extension<Arc<TokenService>>,
+    headers: HeaderMap,
+    Json(request): Json<RevokeUserHttpRequest>,
+) -> Response {
+    if let Err(err) = authorize_issue(&settings, &headers) {
+        return auth_error_response(err, GATEWAY_NAME);
+    }
+    let user_id = request.user_id.trim();
+    if user_id.is_empty() {
+        return auth_error_response(
+            AuthError::InvalidToken("userId is required".into()),
+            GATEWAY_NAME,
+        );
+    }
+    if !token_service.has_store() {
+        // 无撤销存储：撤销/踢人无处落地，明确告知（http_hook 形态由业务方负责）。
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ApiResponse::<()>::error(
+                StatusCode::NOT_IMPLEMENTED.as_u16() as i32,
+                "REVOKE_UNAVAILABLE",
+                "no token store configured; revocation requires services.api_gateway.token_store",
+            )),
+        )
+            .into_response();
+    }
+    // 撤销窗口覆盖到刷新令牌有效期，确保被撤销的令牌在其可能存活的全程都被拒。
+    let ttl = token_service.refresh_ttl();
+    if let Err(err) = token_service.revoke_user(user_id, ttl) {
+        warn!(%err, "revoke_user failed");
+        return auth_error_response(
+            AuthError::ProviderUnavailable(err.to_string()),
+            GATEWAY_NAME,
+        );
+    }
+    // 广播踢人信号（best-effort：失败不影响撤销本身，只是活连接要等自然超时/重连被拒）。
+    if let Err(err) = token_service.publish_kick(user_id) {
+        warn!(%err, "publish_kick failed; revocation still applied");
+    }
+    info!(user_id, "user revoked and kick signal broadcast");
+    Json(ApiResponse::success(serde_json::json!({
+        "revoked": true,
+        "userId": user_id,
+    })))
+    .into_response()
 }
 
 /// 签发鉴权：app 凭据优先；没带凭据时看联调开关。

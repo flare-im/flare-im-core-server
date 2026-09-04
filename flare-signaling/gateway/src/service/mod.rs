@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod builder;
 pub mod display;
 pub mod startup;
+pub(crate) mod revoke_subscriber;
 mod wire;
 
 pub use bootstrap::ApplicationBootstrap;
