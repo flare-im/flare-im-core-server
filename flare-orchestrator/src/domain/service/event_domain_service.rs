@@ -207,6 +207,13 @@ where
             return Ok(recipients);
         }
 
+        // 成员制（大）会话统一读扩散：永不物化收件人 → 空列表，投递走会话级广播、
+        // 变更发现走会话级 version（见 persist_and_push_with_recipients 的 version bump）。
+        // 与消息路径 needs_member_lookup 语义一致，避免十万群事件/已读回执做 O(成员) 成员拉取与 per-member 写。
+        if is_member_based_conversation(&event.conversation_id) {
+            return Ok(Vec::new());
+        }
+
         let event_type = EventType::try_from(event.r#type).unwrap_or(EventType::Unspecified);
         let mut members = self
             .recipient_repository
@@ -341,17 +348,34 @@ where
             .persistence_only_event(ctx, event.clone(), conversation_id.clone())
             .await?;
         let sync_result = if let Some(user_sync_index) = &self.user_sync_index {
-            Some(
-                user_sync_index
-                    .record_conversation_change(
-                        ctx,
-                        &recipient_user_ids,
-                        &conversation_id,
-                        event.conversation_seq,
-                        event.created_at,
-                    )
-                    .await,
-            )
+            if is_member_based_conversation(&conversation_id) {
+                // 大会话：会话级 version bump（O(1)），客户端靠会话 version 增量发现变更，
+                // 不做 O(成员) 的 per-member sync 写——这是消除十万群 read-fanout 瓶颈的核心。
+                Some(
+                    user_sync_index
+                        .record_conversation_version_bump(
+                            ctx,
+                            &conversation_id,
+                            event.conversation_seq,
+                            event.created_at,
+                        )
+                        .await
+                        .map(|_| ()),
+                )
+            } else {
+                // 单聊/临时：精确 per-member 写（成员少，O(N) 廉价）。
+                Some(
+                    user_sync_index
+                        .record_conversation_change(
+                            ctx,
+                            &recipient_user_ids,
+                            &conversation_id,
+                            event.conversation_seq,
+                            event.created_at,
+                        )
+                        .await,
+                )
+            }
         } else {
             None
         };
@@ -470,6 +494,18 @@ fn resolve_recipients_from_event_payload(event: &Event) -> Option<Vec<String>> {
     }
 }
 
+/// 成员制（大）会话判定：按 CID 前缀，与消息路径 `needs_member_lookup` 语义一致。
+///
+/// 群(2)/AI(3)/系统(4)/客服(5)/频道(7)/广播(8) 走会话级读扩散：事件/已读回执不物化收件人、
+/// 不做 O(成员) 的 per-member sync 写，改会话级 version bump + 广播，客户端靠会话 version 增量发现。
+/// 单聊(1)/临时(6) 成员少，仍走精确 per-member 物化（O(N) 廉价）。
+fn is_member_based_conversation(conversation_id: &str) -> bool {
+    matches!(
+        conversation_id.trim().as_bytes().first(),
+        Some(b'2' | b'3' | b'4' | b'5' | b'7' | b'8')
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +530,20 @@ mod tests {
         };
 
         assert!(resolve_recipients_from_event_payload(&event).is_none());
+    }
+
+    #[test]
+    fn member_based_conversation_by_cid_prefix() {
+        // 成员制大会话（走会话级读扩散，不做 O(成员) per-member 写）
+        assert!(is_member_based_conversation("2AW1QQ2SKVWFEPJRXN")); // 群
+        assert!(is_member_based_conversation("7ACHANNELXXXXXXXXX")); // 频道
+        assert!(is_member_based_conversation("8ABROADCASTXXXXXXX")); // 广播
+        assert!(is_member_based_conversation("3AAIXXXXXXXXXXXXXX")); // AI
+        assert!(is_member_based_conversation("4ASYSXXXXXXXXXXXXX")); // 系统
+        assert!(is_member_based_conversation("5ACUSTOMERXXXXXXXX")); // 客服
+        // 非成员制（仍走精确 per-member 物化）
+        assert!(!is_member_based_conversation("1ADW0CVC4ESXQ0046R")); // 单聊
+        assert!(!is_member_based_conversation("6ATEMPXXXXXXXXXXXX")); // 临时
+        assert!(!is_member_based_conversation("")); // 空
     }
 }
