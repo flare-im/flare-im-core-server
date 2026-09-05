@@ -1595,10 +1595,17 @@ fn snapshot_row_to_summary(
         updated_at: item.last_message_at,
         created_at: 0,
         labels: Vec::new(),
+        // ext 来自最新消息的 attributes（见上 `ext.extend(msg.attributes)`），消息从不携带
+        // member_count，故 `ext["member_count"]` 恒缺失 → 旧代码 unwrap_or(0) 恒 0。
+        // 客户端(flare-im-core-sdk conversation.rs)对 member_count=0 会兜底 `.max(member_preview.len())`，
+        // 而大群 member_preview 已按 MEMBER_PREVIEW_LIMIT 截断 → 冷启的十万群头部显示成"10 位成员"。
+        // participant_version 在冷启摘要里被仓储层置为真实成员数（postgres_repository：
+        // `summary.participant_version = COUNT(*)`），用它作权威兜底。
         member_count: ext
             .get("member_count")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0),
+            .filter(|&c| c > 0)
+            .unwrap_or_else(|| i32::try_from(hint.participant_version).unwrap_or(0)),
         channel_id,
         participant_version: hint.participant_version,
         // 单聊同样下发 member_preview（恒 2 人）：单聊行的 channel_id / display_name
@@ -2182,6 +2189,53 @@ mod tests {
             summary.attributes.get("peer_read_seq").map(String::as_str),
             Some("3")
         );
+    }
+
+    #[test]
+    fn snapshot_summary_member_count_falls_back_to_participant_version() {
+        // 冷启摘要的 ext 来自最新消息 attributes，不含 member_count → 旧代码恒 0，
+        // 客户端会兜底成截断预览长度(如 10)，十万群显示成"10 位成员"。
+        // participant_version 由仓储层置为真实成员数，作权威兜底。
+        let item = SnapshotConversationRow {
+            conversation_id: "2Abiggroup".to_string(),
+            last_conversation_seq: 5,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            participant_version: 100_000,
+            member_preview: vec![ConversationParticipant::default(); 10],
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &hint);
+
+        assert_eq!(summary.member_count, 100_000);
+    }
+
+    #[test]
+    fn snapshot_summary_member_count_prefers_explicit_ext_over_participant_version() {
+        let mut message = Message {
+            server_id: "m1".to_string(),
+            conversation_seq: 10,
+            ..Default::default()
+        };
+        message
+            .attributes
+            .insert("member_count".to_string(), "42".to_string());
+        let item = SnapshotConversationRow {
+            conversation_id: "2Agroup".to_string(),
+            messages: vec![message],
+            last_conversation_seq: 10,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            participant_version: 100_000,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &hint);
+
+        assert_eq!(summary.member_count, 42);
     }
 
     #[test]
