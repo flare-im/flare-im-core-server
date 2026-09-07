@@ -8,7 +8,7 @@ maxmemory<mem_limit),这个**计算**该给每个容器分多少——一台新�
   1. 三铁律:∑mem_limit ≤ 物理×0.92;maxmemory < 容器上限(Dragonfly RSS 高于 maxmemory);
      进程内配额(NATS_MAX_MEM_STORE)显著低于容器上限。违反任一都被 cgroup 全局 OOM。
   2. PostgreSQL 是弹性大头:拿走"其余都分完后"的剩余预算,盘缓存越大命中越高。
-     shared_buffers=PG 上限×0.25(封顶 8G),effective_cache_size≈(PG 上限+宿主余量)×0.75。
+     shared_buffers=PG 上限×0.25(封顶 8G),effective_cache_size=物理内存×0.6(整机可缓存量提示)。
   3. Dragonfly 内存轻(实测闲置 36MB、10 万群扇出峰值 ~1.3GB),按峰值+余量缩放,不要
      像旧配置给 8G 上限只用 36MB——mem_limit 是上限不是预留,但会挤占"合计≤物理"的额度。
   4. push-server 曾无界扇出涨到 13.4GB 触发全局 OOM,必须硬顶;网关/编排类按角色定额。
@@ -28,28 +28,30 @@ import sys
 
 # 角色定额(MB):随机器缩放的只有 PG(弹性剩余)与 KV(按峰值缩放);其余固定。
 # 值来自实测峰值 + 安全余量(见 flare-oom-cascade-and-memory-budget / push-offline-envelope)。
+# 定额取自生产 118.107.9.221 实测用量 + 安全余量。OOM 历史服务(push-*)保留事故后
+# 的实战安全阀,绝不按空载用量下调(空载 3.9MB 不代表突发峰值)。
 FIXED_INFRA = {
-    "consul": 256,    # 实测 125MB
-    "rustfs": 768,    # 实测 235MB,对象操作留头
-    "nats": 1024,     # 实测 84MB,JetStream 内存流;NATS_MAX_MEM_STORE=上限×0.4
+    "consul": 256,    # 实测 114MB
+    "rustfs": 512,    # 实测 160MB
+    "nats": 1024,     # 实测 56MB,JetStream 内存流;NATS_MAX_MEM_STORE=上限×0.4
 }
 # 业务服务(svc-*):扇出/连接缓冲驱动,定额不随机器缩放。
 APP_SERVICES = {
     "admin-gateway": 256,
     "api-gateway": 256,
     "capability": 256,
-    "conversation": 512,     # 未读/会话读写
-    "media": 256,
-    "message-ingest": 512,   # 发送主链 + seq floor 缓存
+    "conversation": 256,     # 实测 66MB
+    "media": 512,            # 上传缓冲,留头
+    "message-ingest": 384,   # 发送主链 + seq floor 缓存,实测 110MB
     "orchestrator": 512,     # 实测峰值 260MB,256m 会 OOM
-    "push-server": 1024,     # 曾 13.4GB 无界扇出,硬顶
-    "push-worker": 512,
-    "signaling-gateway": 512,
+    "push-server": 1536,     # 曾 13.4GB 无界扇出,事故后实战安全阀,勿降
+    "push-worker": 1536,     # 同上,勿降
+    "signaling-gateway": 768,  # 连接缓冲,实测 57MB
     "signaling-online": 256,
     "signaling-route": 256,
-    "storage-reader": 384,
-    "storage-writer": 384,
-    "sync-orchestrator": 384,
+    "storage-reader": 256,
+    "storage-writer": 256,
+    "sync-orchestrator": 256,
 }
 
 PG_SHARED_BUFFERS_CAP_MB = 8192   # 超过 8G 收益递减(PG 官方经验)
@@ -93,7 +95,9 @@ def plan(phys_mb: int, nproc: int, max_connections: int):
 
     # KV(Dragonfly):按机器缩放但夹在 [2G, 4G];maxmemory = 上限×0.8。
     kv_limit = max(KV_MIN_MB, min(KV_MAX_MB, int(phys_mb * 0.15)))
-    kv_maxmemory = int(kv_limit * 0.8)
+    # maxmemory ≤ mem_limit×0.7:与 check_memory_budget.sh 门禁阈值一致(RSS/碎片/缓冲高于
+    # maxmemory,留 30% 余量);Dragonfly 无 Redis BGSAVE big-fork,但仍需缓冲余量。
+    kv_maxmemory = int(kv_limit * 0.7)
 
     # PostgreSQL:拿剩余全部弹性预算。
     pg_limit = usable - fixed_total - kv_limit
@@ -118,8 +122,10 @@ def plan(phys_mb: int, nproc: int, max_connections: int):
 
     # PG 内存参数(由 PG 上限推导)。
     shared_buffers = min(PG_SHARED_BUFFERS_CAP_MB, int(pg_limit * 0.25))
-    # effective_cache_size 是规划器提示(不占 RAM):PG 上限 + 宿主页缓存可用量的估计。
-    effective_cache = int((pg_limit + host_reserve * 0.5) * 0.75) + shared_buffers
+    # effective_cache_size 是规划器提示、不占 RAM:应反映**整机**可缓存量(shared_buffers +
+    # 内核页缓存),标准取物理内存 50-75%。取 60%,鼓励规划器走索引扫描;绝不能只按 PG
+    # 分片算(会严重低估,让规划器错选顺序扫)。
+    effective_cache = max(int(phys_mb * 0.6), shared_buffers * 3)
     maintenance_work_mem = min(512, max(64, int(pg_limit * 0.05)))
     # work_mem 会被每连接的每个排序/哈希节点各用一份:上限=(PG上限-shared_buffers)/最大连接/并发节点估计。
     work_mem = max(4, min(32, (pg_limit - shared_buffers) // max_connections // 2))

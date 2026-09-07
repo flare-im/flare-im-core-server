@@ -54,8 +54,8 @@ fi
 # ── 2. Redis：maxmemory vs 容器上限 ──
 # 默认值必须与实际部署一致，否则门禁校验的是一个没人用的数字。
 # 900mb / 1536m = 59%，给 BGSAVE / AOF-rewrite 的 COW 留出余量。
-r_max="${REDIS_MAXMEMORY:-900mb}"
-r_lim="${REDIS_MEM_LIMIT:-1536m}"
+r_max="${REDIS_MAXMEMORY:-1792mb}"
+r_lim="${REDIS_MEM_LIMIT:-2560m}"
 s=$(to_mb "$r_max"); l=$(to_mb "$r_lim")
 if [ "$s" -le 0 ] || [ "$l" -le 0 ]; then
     bad "Redis 内存配置解析失败（maxmemory='${r_max}' limit='${r_lim}'）"

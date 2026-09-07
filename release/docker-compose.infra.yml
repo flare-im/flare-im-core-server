@@ -32,7 +32,7 @@ services:
       -bind=0.0.0.0
       -data-dir=/consul/data
       -log-level=WARN
-    mem_limit: 192m
+    mem_limit: 256m
 
   # KV / 缓存后端：Dragonfly(多核 shard-per-thread、RESP 线协议兼容)。
   # 保留服务名 redis → 各服务连接串零改动;单节点吃满所有核,消除单聊/群扇出/在线态/
@@ -56,11 +56,11 @@ services:
     #     无 TTL 的 seq 键**永不被淘汰**(强于 redis volatile-lru;后者仍会淘汰有 TTL 的键)。
     #   - Dragonfly 无 AOF、用快照(--snapshot_cron);seq 另有 allocate_seq_with_floor 从 PG 存储
     #     max 自愈(见 memory seq-floor-self-heal),KV 丢 seq 可恢复,快照+自愈双兜底。
-    #   - maxmemory 显著低于 mem_limit(默认 6g/8g=75%),留 fork/缓冲余量;Dragonfly shard-per-thread
+    #   - maxmemory 显著低于 mem_limit(默认 1792m/2560m=70%),留缓冲余量;Dragonfly shard-per-thread
     #     无 Redis 的单进程 BGSAVE fork 尖峰问题,旧 RDB fork OOM 事故不复存在。
     command:
       - "--logtostderr"
-      - "--maxmemory=${REDIS_MAXMEMORY:-6gb}"
+      - "--maxmemory=${REDIS_MAXMEMORY:-1792mb}"
       - "--dir=/data"
       - "--dbfilename=dump"
       - "--snapshot_cron=${REDIS_SNAPSHOT_CRON:-*/2 * * * *}"
@@ -69,7 +69,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    mem_limit: ${REDIS_MEM_LIMIT:-8g}
+    mem_limit: ${REDIS_MEM_LIMIT:-2560m}
 
   postgres:
     image: timescale/timescaledb:latest-pg16
@@ -96,15 +96,26 @@ services:
       # scripts/check_pg_connection_budget.sh 会守住这个不等式。
       - max_connections=${POSTGRES_MAX_CONNECTIONS:-300}
       - -c
-      - shared_buffers=256MB
+      # 内存参数按机器规格由 scripts/plan_mem_budget.py 计算(物理内存/核数 → 最优 mem_limit
+      # + shared_buffers/effective_cache_size 等),部署时写进 .env 覆盖下面的默认。默认值是
+      # 中档基线(约 8-16G 机型)。effective_cache_size 是规划器提示、不占 RAM,应反映整机
+      # 可缓存量(shared_buffers + 内核页缓存,取物理内存 ~60%)——只按 shared_buffers 估会
+      # 严重低估、让规划器错选顺序扫。
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-768MB}
       - -c
-      - effective_cache_size=1024MB
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-9600MB}
       - -c
-      - work_mem=4MB
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
       - -c
-      - maintenance_work_mem=64MB
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
       - -c
-      - wal_buffers=16MB
+      - wal_buffers=${POSTGRES_WAL_BUFFERS:-32MB}
+      - -c
+      # WAL 压缩:减少 WAL I/O(pglz),CPU 开销可忽略。
+      - wal_compression=${POSTGRES_WAL_COMPRESSION:-on}
+      - -c
+      # pg_stat_statements:慢查询定位的唯一手段(与 timescaledb 一起预加载)。
+      - shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-timescaledb,pg_stat_statements}
     healthcheck:
       # 必须带 -d：pg_isready 不指定库时默认连**与用户同名**的库（flare），
       # 而实际库是 flare2 → 每次探测都在 postgres 日志里留一条
@@ -115,8 +126,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    # 300 个连接 × 每连接约 2MB + shared_buffers 256MB，1280m 不够。
-    mem_limit: ${POSTGRES_MEM_LIMIT:-2048m}
+    # 300 连接 × ~2MB + shared_buffers 768MB + maintenance 256MB,3072m 足够;
+    # 更大机型经 .env 提额(见 scripts/plan_mem_budget.py 按物理内存计算)。
+    mem_limit: ${POSTGRES_MEM_LIMIT:-3072m}
 
   nats:
     image: nats:2.10-alpine
@@ -184,7 +196,7 @@ services:
       - "--secret-key"
       - "${RUSTFS_SECRET_KEY:-rustfsadmin}"
       - "/data"
-    mem_limit: 384m
+    mem_limit: 512m
 
   # 升级用的数据库补丁执行器。
   # init.sql 走 postgres 的 docker-entrypoint-initdb.d，**只在数据目录为空时**执行一次；
