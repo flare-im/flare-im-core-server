@@ -26,6 +26,10 @@ const PAGE_LIMIT: i32 = 200;
 /// 旁路查询拖成翻页风暴；真到了上限就按「查不到即未静音」放行（见下方 fail-open）。
 const MAX_PAGES: usize = 16;
 
+/// all_participants 单次有界拉取的 cap 上界:cap+1 必须能装进服务端单页(clamp 上限 5000),
+/// 否则单页无法判定是否超限,回退多页 walk。与 conversation 侧 MAX_PARTICIPANT_PAGE_LIMIT 对齐。
+const MAX_SINGLE_FETCH_CAP: usize = 5000;
+
 #[derive(Default)]
 pub struct ConversationNotifyPolicy {
     channel: Arc<Mutex<Option<Channel>>>,
@@ -158,6 +162,48 @@ impl NotifyPolicyRepository for ConversationNotifyPolicy {
         if conversation_id.trim().is_empty() || cap == 0 {
             return Ok(Some(HashMap::new()));
         }
+        // 大群短路:单次有界拉取 cap+1 行即可判定是否超限,超限直接返回 None 跳过离线扇出,
+        // 不再逐条消息多页翻册 + 累积到 cap 的 HashMap 去重新发现"超限"(成员数不随消息变,
+        // 十万群原本每条消息 5 次分页往返)。配合服务端 skip_meta,单次调用零 O(成员) 聚合。
+        // cap+1 超过服务端单页上限时回退多页 walk 以保正确性。
+        if cap < MAX_SINGLE_FETCH_CAP {
+            let mut client = self.client().await?;
+            let resp = client
+                .list_conversation_participants(request_with_context(
+                    ListConversationParticipantsRequest {
+                        conversation_id: conversation_id.to_string(),
+                        cursor: String::new(),
+                        limit: (cap + 1) as i32,
+                        include_removed: false,
+                        ext: std::collections::HashMap::from([(
+                            "skip_meta".to_string(),
+                            "1".to_string(),
+                        )]),
+                    },
+                    ctx,
+                ))
+                .await
+                .map_err(|e| {
+                    FlareError::localized(
+                        flare_server_core::error::ErrorCode::ServiceUnavailable,
+                        format!("list conversation participants: {e}"),
+                    )
+                })?
+                .into_inner();
+            // 多取的第 cap+1 行出现,或还有更多页 → 超限,跳过离线扇出。
+            if resp.participants.len() > cap
+                || (resp.has_more && !resp.next_cursor.trim().is_empty())
+            {
+                return Ok(None);
+            }
+            let out = resp
+                .participants
+                .iter()
+                .map(|p| (p.user_id.clone(), preference_of(p)))
+                .collect();
+            return Ok(Some(out));
+        }
+        // cap 极大(≥ 服务端单页上限):回退多页 walk。
         let mut out = HashMap::new();
         let mut over_cap = false;
         let complete = self
