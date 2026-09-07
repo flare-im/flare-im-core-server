@@ -14,7 +14,7 @@
 
 **0 丢失的形式化定义**（验收以此为准，混沌测试按此编写）：
 
-> 任意**单**组件故障（Redis / MQ / PostgreSQL / 任一服务实例）下，已返回 `BROKER_ACCEPTED` 的消息最终必达全部端。唯一允许的丢失窗口 = Redis AOF 刷盘间隔（≤1s）内 ingest 进程崩溃 **且** broker 拒绝的复合故障。
+> 任意**单**组件故障（KV / MQ / PostgreSQL / 任一服务实例）下，已返回 `BROKER_ACCEPTED` 的消息最终必达全部端。0 丢失的骨架是 broker-accepted ACK + WAL fail-closed 契约（持久消息 WAL 写失败绝不返回 `BROKER_ACCEPTED`）。KV 后端为 Dragonfly、快照持久化（无 AOF），故 KV 层未持久化写的丢失窗口取决于快照间隔而非 AOF 刷盘间隔；因此持久性边界以 broker 接受为准，不依赖 KV 单点的落盘时机。
 
 ## 1. 体检结论：本规划要解决的问题
 
@@ -23,9 +23,9 @@
 | # | 问题 | 证据 | 影响 |
 |---|------|------|------|
 | 1 | push server 逐收件人**串行** `is_online` gRPC，且每次只查 1 个 user_id（proto 的 `user_ids` 本身是数组）；每用户克隆完整 `push_payload` | `flare-push/server/src/application/handlers/push_router_handler.rs`（message/event/notification 三处循环） | 1000 人群一条消息 = 1000 次串行 RTT + 1000 份 payload 拷贝，push 消费吞吐被钉死 |
-| 2 | seq 热路径单条 INCR（每消息 1 次 Redis RTT）；`allocate_batch` 号段能力已实现但未接入 | `crates/flare-im-seq/src/sequence_allocator.rs`、ingest `prepare_and_allocate_seq` | Redis 单分片 ~10w QPS 成为全系统发送 TPS 天花板 |
+| 2 | seq 热路径单条 INCR（每消息 1 次 KV RTT）；`allocate_batch` 号段能力已实现但未接入 | `crates/flare-im-seq/src/sequence_allocator.rs`、ingest `prepare_and_allocate_seq` | KV 后端已切 Dragonfly（多核 shard-per-thread），单节点吃满所有核，早先「单分片 ~10w QPS 天花板」的单线程约束已抬高；号段接入仍能进一步削减每消息 RTT |
 | 3 | 纯写扩散：ingest 物化 `recipient_user_ids` 进 MqEnvelope | ingest `get_recipient_user_ids` | 万人群信封携带万个 user_id，下行 O(成员数) 信封 |
-| 4 | WAL 介质为 Redis，但 Redis 不可用时的行为无契约（fail-closed or 降级？） | ingest WAL 错误分支 | "0 丢失"在故障窗口内语义不明 |
+| 4 | WAL 介质为 KV（Dragonfly，服务名 redis），但 KV 不可用时的行为无契约（fail-closed or 降级？） | ingest WAL 错误分支 | "0 丢失"在故障窗口内语义不明 |
 | 5 | DLQ 是终点不是闭环：无重放工具、无 depth 告警 | `*.dlq` topics | 进 DLQ 的消息事实上丢失 |
 | 6 | 缺用户级一级游标：跨会话同步靠会话级水位逐一对账 | `user_sync_cursor` 仅存会话维度 | 3000 会话用户的心跳/重连成本高，大群 ping 风暴会放大为多次拉取 |
 | 7 | 离线推送 outbox 已持久化但无消费者（厂商通道未接） | `flare-push/worker/src/infrastructure/offline_outbox.rs` | 任务不丢 ≠ 送达 |
@@ -103,7 +103,7 @@ flowchart TB
 |---|------|--------|----|------|
 | 0.1 | push server 批量 `is_online` + 消除 per-user payload 克隆 | W2 | 1 天 | push_router_handler 三处循环；proto 已支持批量 |
 | 0.2 | seq 号段接入热路径（ingest 持有每会话号段，耗尽再 INCRBY） | W2 | 2-3 天 | `allocate_batch` 已有 |
-| 0.3 | WAL fail-closed 契约：Redis 不可用时持久消息拒发、临时消息降级 TRANSIENT；部署确认 Redis AOF everysec | W3 | 1-2 天 | ingest WAL 错误分支 + arch-tests |
+| 0.3 | WAL fail-closed 契约：KV 不可用时持久消息拒发、临时消息降级 TRANSIENT；KV 后端 Dragonfly 用快照持久化（无 AOF），部署确认快照策略与 noeviction | W3 | 1-2 天 | ingest WAL 错误分支 + arch-tests |
 | 0.4 | OTLP 实装（server-core telemetry 一次配置全员生效）+ SLO 仪表：send P99 / broker-accepted / 端到端投递 | W4 | 3-4 天 | flare-core-infra telemetry |
 | 0.5 | 工程卫生：工作树分批提交、flare-call 接线收尾、PUSH_ENVELOPE topic 5→1 收尾 | W4 | 2-3 天 | — |
 

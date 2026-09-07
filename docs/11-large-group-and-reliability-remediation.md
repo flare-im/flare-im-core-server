@@ -170,14 +170,16 @@ if let Some(idx) = &self.user_sync_index {
 **方案**：config 先逻辑命名 profile，部署时物理隔离：
 
 ```toml
-[redis.seq]       # 强一致，独占，开 AOF everysec，不与他人争内存
-[redis.wal]       # 关键，AOF everysec
+[redis.seq]       # 强一致，独占，不与他人争内存
+[redis.wal]       # 关键，持久化优先
 [redis.presence]  # 可重建，可用 cluster
 [redis.sync]      # user_version/会话版本，可重建
-[redis.cache]     # 会话尾部热缓存，可丢，可用 LRU maxmemory
+[redis.cache]     # 会话尾部热缓存，可丢
 ```
 
 各 crate 从对应 profile 取连接（service-kit 已有 `redis_profile(name)`，按用途传 name 即可）。
+
+> KV 后端已切 Dragonfly（多核 shard-per-thread、RESP 兼容，服务名仍为 `redis`）：多核吃满已缓解「单 Redis 单线程争抢」；持久化为快照（无 AOF），无 TTL 的 seq/wal 键由 noeviction 保护（强于 Redis `volatile-lru`）。上面的 profile 拆分仍用于隔离故障域，AOF/LRU 等 Redis 专有旋钮由 Dragonfly 的快照与 noeviction/cache_mode 对应。
 
 **成本**：1 周（含部署）。**收益**：cache 打满不影响 seq；presence 抖动不拖垮发送。
 
@@ -185,12 +187,12 @@ if let Some(idx) = &self.user_sync_index {
 
 ### P8（中）WAL fail-closed 契约落地
 
-**根因**：WAL 介质 Redis，但 Redis 不可用时 ingest 行为未定义——继续发（破坏 0 丢失承诺）还是拒发（需明确降级语义）未在代码/契约固化。
+**根因**：WAL 介质为 KV（Dragonfly，服务名 redis），但 KV 不可用时 ingest 行为未定义——继续发（破坏 0 丢失承诺）还是拒发（需明确降级语义）未在代码/契约固化。
 
 **方案**：在 ingest 写 WAL 分支显式区分：
 - **持久消息** + WAL 写失败 → **fail-closed 拒发**，返回错误让客户端重试（绝不返回 BROKER_ACCEPTED）。
 - **临时消息**（push_only）→ 降级为 `TRANSIENT_ACCEPTED` 放行（本就不承诺存储恢复）。
-- 部署确认 Redis-WAL 开 **AOF everysec**（这是 0 丢失定义里 ≤1s 窗口的数学来源）。
+- KV 后端 Dragonfly 用快照持久化（无 AOF），0 丢失不再依赖 AOF 刷盘窗口，而由 broker-accepted ACK + 本条 fail-closed 契约共同保证（持久消息 WAL 写失败绝不返回 BROKER_ACCEPTED）；部署确认 Dragonfly 快照策略与 noeviction。
 
 新增契约 `wal_fail_closed_for_durable`（断言持久消息路径在 WAL 错误时不产出 BROKER_ACCEPTED）。
 

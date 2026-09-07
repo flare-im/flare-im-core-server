@@ -123,10 +123,10 @@ ALTER TABLE messages SET (
 );
 ```
 
-同时会尝试为 30 天前的消息增加 columnstore policy：
+同时会尝试为 2 天前的消息增加 columnstore policy：
 
 ```sql
-CALL add_columnstore_policy('messages', after => INTERVAL '30 days');
+CALL add_columnstore_policy('messages', after => INTERVAL '2 days');
 ```
 
 `init.sql` 已兼容不支持 `add_columnstore_policy` 的 TimescaleDB 版本：如果函数不可用，会打印 notice 并跳过，不影响本地初始化。
@@ -218,7 +218,7 @@ SELECT set_chunk_time_interval('messages', INTERVAL '6 hours');
 SELECT compress_chunk(chunk)
 FROM timescaledb_information.chunks
 WHERE hypertable_name = 'messages'
-  AND range_start < NOW() - INTERVAL '30 days';
+  AND range_start < NOW() - INTERVAL '2 days';
 ```
 
 不同 TimescaleDB 版本对 compression / columnstore API 命名不同，本地以 `init.sql` 兼容逻辑为准。

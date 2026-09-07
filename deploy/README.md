@@ -90,10 +90,10 @@ docker compose -f docker-compose.yml -f docker-compose.stack.yml logs -f api-gat
 - **访问**: http://localhost:28500
 - **数据目录**: `./data/consul`
 
-### 2. Redis / Dragonfly (缓存)
+### 2. Dragonfly (KV / 缓存，服务名仍为 redis)
 
 - **端口**: 26379
-- **用途**: 缓存、在线状态存储（默认使用 Redis 单节点，亦可替换为 DragonflyDB）
+- **用途**: 缓存、在线状态、发送侧 WAL、ACK 状态、seq 高水位。默认后端为 Dragonfly（多核 shard-per-thread、RESP 线协议兼容），服务名与连接串保持 `redis`，各服务零改动；多核吃满，消除单线程 KV 中枢瓶颈。快照持久化（无 AOF），无 TTL 的 seq 键由 noeviction 保护。
 - **访问**: redis://localhost:26379
 - **数据目录**: `./data/redis`
 

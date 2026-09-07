@@ -9,7 +9,7 @@
 | 服务 | 端口 | 用途 |
 |------|------|------|
 | Consul | `28500` | 服务注册发现。 |
-| Redis | `26379` | WAL、ACK、presence、缓存。 |
+| Dragonfly（服务名/连接串仍为 `redis`） | `26379` | WAL、ACK、presence、缓存、seq 高水位。RESP 兼容、多核 shard-per-thread；快照持久化（无 AOF），无 TTL 的 seq 键由 noeviction 保护。 |
 | PostgreSQL / TimescaleDB | `25432` | 消息、事件、会话、媒体、ledger。 |
 | NATS JetStream | `24222` / `28222` | 默认 MQ。 |
 | Kafka | `29092` | 可选 MQ 后端。 |
@@ -358,6 +358,7 @@ GROUP BY write_state;
 ## 生产前检查清单
 
 - Rust release build 可用，未因未使用的 MQ 后端依赖阻断。
+- 按机器规格核对容器内存预算：`scripts/check_memory_budget.sh` 校验现状（每容器都设 `mem_limit`、上限之和不超过物理内存），`scripts/plan_mem_budget.py` 按物理内存/核数计算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`、`effective_cache_size`、`work_mem`、`maintenance_work_mem` 等），结果经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值。
 - PostgreSQL 总连接池小于 `max_connections`，并为每个服务设置明确 pool size。
 - JetStream/Kafka durable、retry、DLQ 配置确认。
 - `flare-dlq-replay` dry-run 与受控重放演练通过，DLQ replay headers 可在链路追踪中检索。

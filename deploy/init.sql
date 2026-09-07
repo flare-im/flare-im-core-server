@@ -940,7 +940,7 @@ ALTER TABLE messages SET (
 DO $$
 BEGIN
     BEGIN
-        CALL add_columnstore_policy('messages', after => INTERVAL '30 days');
+        CALL add_columnstore_policy('messages', after => INTERVAL '2 days');
     EXCEPTION WHEN undefined_function OR syntax_error THEN
         RAISE NOTICE 'add_columnstore_policy not available, skip';
     END;

@@ -149,7 +149,7 @@ flowchart LR
     PushServer --> PushWorker["flare-push/worker"]
     StorageWriter --> Postgres[("PostgreSQL / TimescaleDB")]
     StorageWriter --> EventStream[("Durable Event Stream")]
-    StorageWriter --> Redis[("Redis hot cache / WAL / presence")]
+    StorageWriter --> Redis[("Dragonfly hot cache / WAL / presence<br/>服务名仍为 redis")]
     Conversation --> Postgres
     Conversation --> Redis
     Online --> Redis
@@ -249,7 +249,7 @@ Core 使用强类型 `MessageContent` 和 `Event` 表达稳定语义，`attribut
 | 业务系统接入 | gRPC Hook + typed gRPC；HTTP/OpenAPI 作为 facade |
 | MQ | NATS JetStream 默认，本地也拉起 Kafka；生产同链路二选一 |
 | 存储 | PostgreSQL / TimescaleDB、SQLx |
-| 缓存与状态 | Redis |
+| 缓存与状态 | Dragonfly（多核、RESP 兼容，服务名/连接串仍为 redis） |
 | 对象存储 | S3 兼容存储，本地 RustFS |
 | 发现与配置 | Consul 默认，可扩展到 etcd/mesh |
 | 观测 | tracing、Prometheus、Grafana、Loki、Tempo |

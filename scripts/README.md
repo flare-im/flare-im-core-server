@@ -102,6 +102,8 @@ cargo run --example chatroom_client -- user2
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
 | `migrate_db.sh` | 数据库迁移 | 初始化数据库表结构 |
 | `smoke_message_flow.sh` | 消息流烟测 | 发送一条消息，检查落库、ledger，并通过读侧读回 |
+| `check_memory_budget.sh` | 校验容器内存预算现状 | 每容器都设 `mem_limit`、上限之和不超过物理内存 |
+| `plan_mem_budget.py` | 计算最优内存预算 | 按物理内存/核数推算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`/`effective_cache_size` 等），经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值 |
 
 ---
 

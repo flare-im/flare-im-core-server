@@ -17,7 +17,7 @@ $EDITOR release/deploy.env
 保留必需组件：
 
 - `consul`: 服务注册发现
-- `redis`: 在线状态、token、WAL/cache
+- `redis`（后端为 Dragonfly）: 在线状态、token、WAL/cache、seq 高水位。多核 shard-per-thread、RESP 兼容，服务名/连接串不变；快照持久化（无 AOF），noeviction 保护无 TTL 的 seq 键
 - `postgres/timescaledb`: 消息、账本、会话、媒体元数据主存储
 - `nats/jetstream`: 默认 MQ 后端
 - `rustfs`: 必需对象存储

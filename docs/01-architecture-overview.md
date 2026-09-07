@@ -148,7 +148,7 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 | 存储 | 用途 |
 |------|------|
 | PostgreSQL / TimescaleDB | 消息归档、事件流、会话、媒体、Capability、ledger、审计查询。 |
-| Redis | 在线状态、会话热状态、发送侧 WAL、ACK 状态、缓存。 |
+| Dragonfly（KV，服务名/连接串仍为 `redis`） | 在线状态、会话热状态、发送侧 WAL、ACK 状态、缓存、seq 高水位。RESP 线协议兼容，多核 shard-per-thread 消除了单线程 KV 中枢瓶颈；无 TTL 的 seq 键由 noeviction 保护。 |
 | NATS JetStream | 默认消息队列，本地开发与压测主路径。 |
 | Kafka | 可选生产 MQ 后端，同链路与 JetStream 二选一。 |
 | S3 compatible object store | 媒资对象、上传与下载 URL，本地使用 RustFS。 |
@@ -162,7 +162,7 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 | Axum + utoipa | HTTP gateway | 外部三方、管理后台、低频后台和临时适配的 OpenAPI facade。 |
 | JetStream / Kafka | MQ 抽象 | 解耦写入、推送、同步，支持重放和 DLQ。 |
 | SQLx + PostgreSQL | 持久化 | 强一致写、索引查询、可审计。 |
-| Redis | 热状态/WAL/ACK | 低延迟状态访问和短期恢复边界。 |
+| Dragonfly（RESP 兼容，服务名 `redis`） | 热状态/WAL/ACK/seq | 低延迟状态访问和短期恢复边界；多核吃满，消除单线程 KV 天花板。 |
 | Prometheus + tracing | 观测 | stage latency、MQ ack、写入 ledger、trace 排障。 |
 
 ## DDD/CQRS 落点

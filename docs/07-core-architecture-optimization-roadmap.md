@@ -36,7 +36,7 @@ flowchart LR
     Orchestrator --> MQPush["push topics"]
     MQStorage --> Writer["flare-storage/writer"]
     Writer --> PG[("PostgreSQL / TimescaleDB")]
-    Writer --> Redis[("Redis hot cache / WAL / idempotency")]
+    Writer --> Redis[("Dragonfly hot cache / WAL / idempotency<br/>服务名仍为 redis")]
     MQPush --> Push["flare-push/server"]
     Push --> SGW
 ```
@@ -173,13 +173,15 @@ PostgreSQL / TimescaleDB：
 - `message_write_ledger`：写入阶段诊断和最终幂等。
 - conversation tables：会话、成员、设置、游标等关系元数据。
 
-Redis：
+KV（Dragonfly，多核 shard-per-thread、RESP 兼容，服务名/连接串仍为 `redis`）：
 
-- seq allocator backend。
+- seq allocator backend（无 TTL 的 seq 高水位键由 noeviction 保护）。
 - sending/writer WAL。
 - hot cache。
 - idempotency window。
 - presence and short-lived connection state。
+
+多核吃满消除了单线程 KV 中枢瓶颈；单条热 seq key 仍映射到单 shard，因此按 conversation 分片与批量号段的优化依然适用。
 
 MQ：
 
