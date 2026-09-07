@@ -28,7 +28,7 @@
 ### 3.1 签发 `POST /api/v1/auth/tokens`
 
 ```json
-{ "userId": "hugo", "tenantId": "0", "deviceId": "ios-abc", "ttlSecs": 3600 }
+{ "userId": "flare", "tenantId": "0", "deviceId": "ios-abc", "ttlSecs": 3600 }
 ```
 
 谁能调：
@@ -41,7 +41,7 @@
 响应：
 
 ```json
-{ "token": "eyJ…", "expiresAt": 1788452076, "userId": "hugo", "tenantId": "0" }
+{ "token": "eyJ…", "expiresAt": 1788452076, "userId": "flare", "tenantId": "0" }
 ```
 
 ### 3.2 刷新 `POST /api/v1/auth/tokens/refresh`

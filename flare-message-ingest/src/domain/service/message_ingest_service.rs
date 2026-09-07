@@ -72,7 +72,11 @@ enum SeqFloorState {
 /// floor 查询失败后的重试退避窗口。
 const SEQ_FLOOR_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 /// floor 查询 RPC 上限：超时即降级普通 `INCR`，发送主链绝不被存储黑洞拖死。
-const SEQ_FLOOR_RPC_TIMEOUT: Duration = Duration::from_millis(800);
+/// 2000ms 而非早期 800ms：head 查询已改按 created_at DESC(压缩友好)、稳态 <1ms,但高压
+/// 下 PG 饱和仍可能抬到数百 ms;800ms 曾在压测中被打穿(实测 86 次降级)。2s 给足余量,
+/// 首触是每会话一次的低频事件、多等 1s 无碍,却能保证冷键(flush 后)在高压下也能自愈、
+/// 不退回 plain INCR 从 1 起算撞号。
+const SEQ_FLOOR_RPC_TIMEOUT: Duration = Duration::from_millis(2000);
 /// floor 状态缓存容量上限（约数百万会话进程的内存保险丝）。
 const SEQ_FLOOR_CACHE_CAPACITY: u64 = 200_000;
 

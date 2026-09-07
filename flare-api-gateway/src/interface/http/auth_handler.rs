@@ -361,7 +361,7 @@ mod tests {
             builder = builder.header(*k, *v);
         }
         builder
-            .body(Body::from(r#"{"userId":"hugo","tenantId":"0","deviceId":"ios-1"}"#))
+            .body(Body::from(r#"{"userId":"flare","tenantId":"0","deviceId":"ios-1"}"#))
             .unwrap()
     }
 
@@ -378,10 +378,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         let token = json["data"]["token"].as_str().unwrap();
         let claims = service().validate_token(token).expect("网关自己的校验器必须认这枚 token");
-        assert_eq!(claims.sub, "hugo");
+        assert_eq!(claims.sub, "flare");
         assert_eq!(claims.tenant_id.as_deref(), Some("0"));
         assert_eq!(claims.device_id.as_deref(), Some("ios-1"));
-        assert_eq!(json["data"]["userId"], "hugo");
+        assert_eq!(json["data"]["userId"], "flare");
     }
 
     #[tokio::test]
@@ -417,7 +417,7 @@ mod tests {
         let (status, json) = call(app(cfg.clone(), core_issuer()), req).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_ne!(json["data"]["token"].as_str().unwrap(), token);
-        assert_eq!(json["data"]["userId"], "hugo");
+        assert_eq!(json["data"]["userId"], "flare");
 
         let req = Request::builder()
             .method("POST")

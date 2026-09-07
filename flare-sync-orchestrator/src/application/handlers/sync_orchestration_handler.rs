@@ -2254,14 +2254,14 @@ mod tests {
             ..Default::default()
         };
         let hint = ConversationSyncRoutingHint {
-            channel_id: "hugo1".to_string(),
+            channel_id: "flare1".to_string(),
             conversation_type: flare_proto::common::ConversationType::Single as i32,
             ..Default::default()
         };
 
         let summary = snapshot_row_to_summary(&item, &hint);
 
-        assert_eq!(summary.channel_id, "hugo1");
+        assert_eq!(summary.channel_id, "flare1");
     }
 
     #[test]

@@ -2031,10 +2031,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 WHERE tenant_id = $1 AND conversation_id = $2
             ) e
             LEFT JOIN LATERAL (
+                -- 按 created_at DESC(= 压缩 hypertable 的 orderby 列)取最新一条:
+                -- 可走 chunk 时间排除 + 压缩段 min/max 元数据,O(1) 级;而 ORDER BY seq DESC
+                -- 因 seq 不在压缩 orderby,压缩 chunk 需全解压再排序(十万群实测 76-510ms,
+                -- 曾致 seq floor RPC 800ms 超时降级 plain INCR)。max_seq 仍取与 ev_max 的
+                -- GREATEST:events 是持久事件流的权威高水位(含所有消息 seq + 事件 seq),
+                -- 即便"最新 by 时间"与"最高 seq"因时钟偏斜偶有出入,ev_max 也兜住不会偏低。
                 SELECT seq, server_id, timestamp
                 FROM messages
                 WHERE tenant_id = $1 AND conversation_id = $2
-                ORDER BY seq DESC NULLS LAST
+                ORDER BY created_at DESC NULLS LAST
                 LIMIT 1
             ) m ON TRUE
             "#,
