@@ -34,8 +34,11 @@ services:
       -log-level=WARN
     mem_limit: 192m
 
+  # KV / 缓存后端：Dragonfly(多核 shard-per-thread、RESP 线协议兼容)。
+  # 保留服务名 redis → 各服务连接串零改动;单节点吃满所有核,消除单聊/群扇出/在线态/
+  # 序列号/缓存共用的单线程 Redis 中枢瓶颈(Redis 单线程只能吃 1 核)。
   redis:
-    image: redis:7-alpine
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
     container_name: flare-redis
     restart: unless-stopped
     logging: *default-logging
@@ -45,50 +48,28 @@ services:
       - "127.0.0.1:26379:6379"
     volumes:
       - ./data/redis:/data
-    # ⚠️ 策略必须是 volatile-lru，不能是 allkeys-lru。
-    #
-    # 这个 Redis 里混着两类键：
-    #   - 带 TTL 的缓存/幂等键（线上 1954 个键里 1922 个属于此类）
-    #   - **不带 TTL 的会话 seq 高水位**（seq:<tenant>:<conversation>）
-    #
-    # allkeys-lru 在内存吃紧时会连后者一起淘汰。seq 键一旦被淘汰，下一条消息的
-    # INCR 从 1 重新开始——会话 seq 大幅回退，新消息被排到时间线中间，而且是
-    # **永久错乱**、刷新也不会好。本仓历史上真出过这个故障。
-    #
-    # volatile-lru 只淘汰有 TTL 的键，正好就是那些可再生的缓存；
-    # 不选 noeviction 是因为它会在压力下让写入直接失败，可用性更差。
-    command: >
-      redis-server
-      --appendonly yes
-      --appendfsync everysec
-      --save ""
-      --auto-aof-rewrite-percentage 100
-      --auto-aof-rewrite-min-size 512mb
-      --maxmemory ${REDIS_MAXMEMORY:-900mb}
-      --maxmemory-policy volatile-lru
+    ulimits:
+      memlock: -1
+    # ⚠️ seq 高水位安全(承接原 volatile-lru + AOF 的意图,方式更优):
+    #   - 混存两类键:带 TTL 的缓存/幂等键、**不带 TTL 的会话 seq 高水位**(seq:<tenant>:<conv>)。
+    #   - Dragonfly 默认 noeviction(不开 --cache_mode)→ 内存满时写 OOM、**不淘汰任何键**,
+    #     无 TTL 的 seq 键**永不被淘汰**(强于 redis volatile-lru;后者仍会淘汰有 TTL 的键)。
+    #   - Dragonfly 无 AOF、用快照(--snapshot_cron);seq 另有 allocate_seq_with_floor 从 PG 存储
+    #     max 自愈(见 memory seq-floor-self-heal),KV 丢 seq 可恢复,快照+自愈双兜底。
+    #   - maxmemory 显著低于 mem_limit(默认 6g/8g=75%),留 fork/缓冲余量;Dragonfly shard-per-thread
+    #     无 Redis 的单进程 BGSAVE fork 尖峰问题,旧 RDB fork OOM 事故不复存在。
+    command:
+      - "--logtostderr"
+      - "--maxmemory=${REDIS_MAXMEMORY:-6gb}"
+      - "--dir=/data"
+      - "--dbfilename=dump"
+      - "--snapshot_cron=${REDIS_SNAPSHOT_CRON:-*/2 * * * *}"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -p 6379 ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # ⚠️ 周期性 RDB 快照必须关掉（--save ""），由 AOF everysec 承担持久化。
-    # 线上事故：默认的 `save 60 10000` 让 Redis 每约 75 秒 BGSAVE 一次，
-    # fork 出一个约等于数据集大小的进程，写入期间 COW 页累积把 cgroup 顶爆，
-    # redis-server 被 OOM 杀掉、重启加载 RDB 7 秒，期间全服务 BusyLoadingError，
-    # 用户表现是发消息失败（allocate seq failed ... broken pipe）。
-    # AOF 重写按增长触发（翻倍且 >512mb），fork 频率远低于每 60 秒一次。
-    #
-    # 另：切换到 AOF 前必须确认 appendonlydir 不是陈旧的——本次切换时 Redis
-    # 从 14 小时前的旧 AOF 加载，键数 173 万→2.5 万，seq 高水位随之回退并撞号。
-    #
-    # maxmemory 必须显著低于 mem_limit（约 59%，不是 80%）：Redis 的实际 RSS
-    # 高于 used_memory（实测碎片率 1.12），复制缓冲与客户端输出缓冲也不计入
-    # maxmemory。线上 1200mb/1536m（78%）这一档被 cgroup OOM 杀过。
-    #
-    # 线上事故：384mb/512m 这档在真实数据量下顶满，累计驱逐 103,716 个 key。
-    # 被 volatile-lru 丢掉的是 seq 高水位、在线索引、幂等键这类 IM 状态，
-    # 后果是"新消息排进历史中间"这类不易归因的问题，且全程无告警。
-    mem_limit: ${REDIS_MEM_LIMIT:-1536m}
+    mem_limit: ${REDIS_MEM_LIMIT:-8g}
 
   postgres:
     image: timescale/timescaledb:latest-pg16

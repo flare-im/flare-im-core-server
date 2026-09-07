@@ -97,16 +97,22 @@ if command -v docker >/dev/null 2>&1 && docker inspect flare-redis >/dev/null 2>
         note "无法读取运行中的 Redis 配置，跳过运行态核对"
     fi
 
-    # 周期性 RDB 快照 + 未开 AOF：每次 save 都 fork 一个与数据集等量的进程，
-    # 写入期间 COW 页累积会把 cgroup 顶爆（线上就是 save 60 10000 每约 75 秒一次）。
-    run_save=$(docker exec flare-redis redis-cli CONFIG GET save 2>/dev/null | tail -1 | tr -d '\r')
-    run_aof=$(docker exec flare-redis redis-cli CONFIG GET appendonly 2>/dev/null | tail -1 | tr -d '\r')
-    if [ -n "$run_save" ] && echo "$run_save" | grep -qE '(^| )60 '; then
-        bad "Redis 开着 60 秒级 RDB 快照（save='${run_save}'）：每约 75 秒 fork 一个约等于数据集大小的进程，COW 会顶爆 cgroup"
-    elif [ "$run_aof" = "no" ] && [ -n "$run_save" ]; then
-        note "Redis 未开 AOF 且有周期快照（save='${run_save}'）：确认 fork 频率与 COW 余量"
+    # 持久化核对(区分后端)。
+    #   Redis:周期性 RDB save 每次 fork 一个与数据集等量的进程,COW 顶爆 cgroup(线上事故 save 60)。
+    #   Dragonfly:shard-per-thread 快照,无 Redis 单进程 BGSAVE big-fork 的 COW 尖峰;且无 AOF。
+    server_info=$(docker exec flare-redis redis-cli INFO server 2>/dev/null | tr -d '\r')
+    if echo "$server_info" | grep -qi 'dragonfly'; then
+        ok "KV=Dragonfly:快照持久化(无 Redis BGSAVE big-fork 的 COW 顶爆风险);seq 另有 PG floor 自愈"
     else
-        ok "Redis 持久化：appendonly=${run_aof:-?} save='${run_save}'"
+        run_save=$(docker exec flare-redis redis-cli CONFIG GET save 2>/dev/null | tail -1 | tr -d '\r')
+        run_aof=$(docker exec flare-redis redis-cli CONFIG GET appendonly 2>/dev/null | tail -1 | tr -d '\r')
+        if [ -n "$run_save" ] && echo "$run_save" | grep -qE '(^| )60 '; then
+            bad "Redis 开着 60 秒级 RDB 快照（save='${run_save}'）：每约 75 秒 fork 一个约等于数据集大小的进程，COW 会顶爆 cgroup"
+        elif [ "$run_aof" = "no" ] && [ -n "$run_save" ]; then
+            note "Redis 未开 AOF 且有周期快照（save='${run_save}'）：确认 fork 频率与 COW 余量"
+        else
+            ok "Redis 持久化：appendonly=${run_aof:-?} save='${run_save}'"
+        fi
     fi
 fi
 
