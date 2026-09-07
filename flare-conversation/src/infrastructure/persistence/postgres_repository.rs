@@ -1251,9 +1251,12 @@ impl ConversationRepository for PostgresConversationRepository {
         // 原本每页都跑一遍——十万人群 20 页就白花约 1.5 秒。
         let (total, participant_version) = match page_cursor.carried {
             Some(carried) => carried,
-            // 扇出等内部调用只取 user_id、不看 total/version → 跳过两次 O(成员) 聚合
-            // (COUNT(*) + MAX(updated_at) 各聚合整张成员表,十万群实测各约 16-42ms/次,每条群消息一遍)。
-            None if skip_metadata => (0, 0),
+            // 扇出/推送/同步/网关订阅等内部调用(Service/System actor)只取 user_id、
+            // 不看 total/version → 跳过两次 O(成员) 聚合(COUNT(*) + MAX(updated_at) 各聚合整张
+            // 成员表,十万群实测各约 16-42ms/次,每条群消息一遍;pg_stat_statements 实测二者
+            // 合计约占 DB 总耗时 30%)。skip_metadata 是调用方显式opt-in;is_internal 兜底所有
+            // 内部调用方——它们一律忽略 total/version,只有真实用户态分页才需要。
+            None if skip_metadata || is_internal => (0, 0),
             None => {
                 let total: i64 = sqlx::query_scalar(&count_sql)
                     .bind(tenant_id)
