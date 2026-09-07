@@ -191,7 +191,12 @@ impl ConversationRpcClient for ConversationClient {
                     // 所以放大页大小几乎是纯收益。服务端 clamp 同步放到 5000。
                     limit: 5000,
                     include_removed: false,
-                    ext: Default::default(),
+                    // 扇出只取 user_id,不看 total/version → 让服务端跳过首页两次 O(成员) 聚合
+                    // (COUNT(*) + MAX(updated_at)),十万群每条消息省两次全表聚合。
+                    ext: std::collections::HashMap::from([(
+                        "skip_meta".to_string(),
+                        "1".to_string(),
+                    )]),
                 });
                 set_context_metadata(&mut grpc_request, ctx);
 

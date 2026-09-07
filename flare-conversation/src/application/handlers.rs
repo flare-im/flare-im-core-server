@@ -359,6 +359,7 @@ impl ConversationQueryHandler {
                 query.cursor.as_deref(),
                 query.limit,
                 query.include_removed,
+                query.skip_metadata,
             )
             .await
     }

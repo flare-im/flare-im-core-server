@@ -725,9 +725,17 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         cursor: Option<&str>,
         limit: i32,
         include_removed: bool,
+        skip_metadata: bool,
     ) -> Result<crate::domain::model::ConversationParticipantsPage> {
         self.conversation_repo
-            .list_conversation_participants(ctx, conversation_id, cursor, limit, include_removed)
+            .list_conversation_participants(
+                ctx,
+                conversation_id,
+                cursor,
+                limit,
+                include_removed,
+                skip_metadata,
+            )
             .await
     }
 

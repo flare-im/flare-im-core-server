@@ -79,6 +79,7 @@ pub trait ConversationRepository: Send + Sync {
         cursor: Option<&str>,
         limit: i32,
         include_removed: bool,
+        skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage>;
     async fn search_conversations(
         &self,

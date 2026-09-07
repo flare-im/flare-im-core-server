@@ -1175,6 +1175,7 @@ impl ConversationRepository for PostgresConversationRepository {
         cursor: Option<&str>,
         limit: i32,
         include_removed: bool,
+        skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         // 受信内部调用（Service/System actor，如网关读扩散成员订阅 bootstrap）跳过"调用者须为成员"的鉴权，
@@ -1250,6 +1251,9 @@ impl ConversationRepository for PostgresConversationRepository {
         // 原本每页都跑一遍——十万人群 20 页就白花约 1.5 秒。
         let (total, participant_version) = match page_cursor.carried {
             Some(carried) => carried,
+            // 扇出等内部调用只取 user_id、不看 total/version → 跳过两次 O(成员) 聚合
+            // (COUNT(*) + MAX(updated_at) 各聚合整张成员表,十万群实测各约 16-42ms/次,每条群消息一遍)。
+            None if skip_metadata => (0, 0),
             None => {
                 let total: i64 = sqlx::query_scalar(&count_sql)
                     .bind(tenant_id)

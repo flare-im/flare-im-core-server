@@ -137,6 +137,12 @@ impl ConversationReadService for ConversationGrpcHandler {
                     },
                     limit: if req.limit > 0 { req.limit } else { 200 },
                     include_removed: req.include_removed,
+                    // 扇出等内部调用可经 ext["skip_meta"]="1" 免去首页 total/version 聚合。
+                    skip_metadata: req
+                        .ext
+                        .get("skip_meta")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false),
                 },
             )
             .await

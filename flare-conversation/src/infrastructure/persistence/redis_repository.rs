@@ -275,6 +275,7 @@ impl ConversationRepository for RedisConversationRepository {
         _cursor: Option<&str>,
         _limit: i32,
         _include_removed: bool,
+        _skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage> {
         Err(redis_not_supported("list_conversation_participants"))
     }

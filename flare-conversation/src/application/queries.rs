@@ -42,6 +42,9 @@ pub struct ListConversationParticipantsQuery {
     pub cursor: Option<String>,
     pub limit: i32,
     pub include_removed: bool,
+    /// 跳过首页 total/version 元数据计算(COUNT(*) + MAX(updated_at) 各聚合整张成员表)。
+    /// 群消息扇出只取 user_id、不看 total/version,置真可省去十万群每条消息两次 O(成员) 聚合。
+    pub skip_metadata: bool,
 }
 
 /// 同步消息查询
