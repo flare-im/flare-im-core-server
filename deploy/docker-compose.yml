@@ -35,8 +35,11 @@ services:
       -log-level=INFO
 
   # ===== Redis - 缓存 / 路由 =====
+  # KV / 缓存后端：Dragonfly（多核 shard-per-thread、RESP 线协议兼容)。
+  # 保留服务名 redis → 应用与各服务连接串不变;Dragonfly 单节点吃满所有核,消除 Redis
+  # 单线程天花板(消息扇出/在线态/序列号/缓存共用的中枢不再受单核限制)。
   redis:
-    image: redis:7-alpine
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
     container_name: flare-redis
     networks:
       - flare-network
@@ -44,15 +47,18 @@ services:
       - "26379:6379"
     volumes:
       - ./data/redis:/data
-    # REDIS_PASSWORD 留空 → 不启用认证（本地开发默认）；设了 → 服务端一并要求认证。
-    # 只改连接串不改服务端，等于密码根本没生效——这里两边必须同源。
-    command: >
-      sh -c 'exec redis-server --appendonly yes
-      ${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ulimits:
+      memlock: -1
+    # 列表形式确保每个 flag 是独立 exec arg。maxmemory 6G;快照落同一挂载卷。
+    # 如需认证:追加一行 - "--requirepass=你的密码"。
+    command:
+      - "--logtostderr"
+      - "--maxmemory=6gb"
+      - "--dir=/data"
+      - "--dbfilename=dump"
+      - "--snapshot_cron=*/5 * * * *"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
+      test: ["CMD-SHELL", "redis-cli -p 6379 ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
