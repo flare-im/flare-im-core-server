@@ -1895,23 +1895,60 @@ impl ConversationRepository for PostgresConversationRepository {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         let precise_unread_threshold = self.config.large_conversation_precise_unread_threshold;
 
+        // 步骤 1：推进会话 last_message_seq(PK 定位,O(1)),始终执行。
+        // 未读是派生量,不与 seq 推进强绑事务;seq 推进是消息顺序的关键,单独保证。
         sqlx::query(
             r#"
-            WITH conv_upd AS (
-                UPDATE conversations c
-                SET
-                    last_message_seq = GREATEST(COALESCE(c.last_message_seq, 0), $1),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE c.tenant_id = $2 AND c.conversation_id = $3
-                RETURNING 1
-            ),
-            member_stats AS (
-                SELECT COUNT(*)::INT AS member_count
-                FROM conversation_participants
-                WHERE tenant_id = $2
-                  AND conversation_id = $3
-                  AND NOT COALESCE(is_deleted, false)
+            UPDATE conversations
+            SET last_message_seq = GREATEST(COALESCE(last_message_seq, 0), $1),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE tenant_id = $2 AND conversation_id = $3
+            "#,
+        )
+        .bind(seq)
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to advance conversation seq")
+        })?;
+
+        // 步骤 2：大群短路判定——有界计数,最多读「阈值+1」行即停(LIMIT)。
+        // 不对全群 COUNT(*)(O(成员) 扫描,实测 10 万群病态计划钉核),也不依赖不可靠的
+        // conversations.member_count(实测大群该列为 0)。超阈值即大群:发送热路径不物化
+        // per-member 未读,交由读时计算(见 get_unread_count / 客户端会话列表)。
+        if precise_unread_threshold > 0 {
+            let capped: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)::BIGINT
+                FROM (
+                    SELECT 1
+                    FROM conversation_participants
+                    WHERE tenant_id = $1
+                      AND conversation_id = $2
+                      AND NOT COALESCE(is_deleted, false)
+                    LIMIT $3
+                ) capped
+                "#,
             )
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(i64::from(precise_unread_threshold) + 1)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to probe conversation size")
+            })?;
+            if capped > i64::from(precise_unread_threshold) {
+                return Ok(());
+            }
+        }
+
+        // 步骤 3：小群/单聊——精确物化每个成员未读(排除发送者、mute 6/7/8、已读下限)。
+        // 成员数已 ≤ 阈值,这条 UPDATE 的行数有上界,不随大群规模膨胀。
+        sqlx::query(
+            r#"
             UPDATE conversation_participants sp
             SET
                 unread_count = CASE
@@ -1921,11 +1958,9 @@ impl ConversationRepository for PostgresConversationRepository {
                     ELSE COALESCE(sp.unread_count, 0) + 1
                 END,
                 updated_at = CURRENT_TIMESTAMP
-            FROM member_stats
             WHERE sp.tenant_id = $2
               AND sp.conversation_id = $3
               AND NOT COALESCE(sp.is_deleted, false)
-              AND ($6 <= 0 OR member_stats.member_count <= $6)
             "#,
         )
         .bind(seq)
@@ -1933,7 +1968,6 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .bind(sender_id)
         .bind(status)
-        .bind(precise_unread_threshold)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -2310,6 +2344,23 @@ mod participant_page_limit_tests {
         assert!(
             lateral.contains("FROM (") && lateral.contains(") capped"),
             "必须先 LIMIT 成子查询再 COUNT；直接给 COUNT 加 LIMIT 不起作用"
+        );
+    }
+
+    #[test]
+    fn apply_message_event_large_group_probe_must_be_bounded() {
+        // 发送热路径判定大群不得对全群做无界 COUNT(*):10 万群每条消息会 O(成员) 扫描
+        // (实测陈旧统计下病态计划 39 分钟钉核)。必须用「LIMIT 阈值+1」有界探测,读至多 阈值+1 行。
+        let source = include_str!("postgres_repository.rs");
+        // 运行时拼接 needle,避免本断言的字面量被 include_str! 读进来命中自己。
+        let unbounded_count = format!("SELECT COUNT(*)::{} AS member_count", "INT");
+        assert!(
+            !source.contains(&unbounded_count),
+            "apply_message_event 不得用无界 member_stats COUNT 判定大群规模"
+        );
+        assert!(
+            source.contains("Failed to probe conversation size"),
+            "大群判定须用有界 LIMIT 探测块(读至多 阈值+1 行),该探测必须存在"
         );
     }
 

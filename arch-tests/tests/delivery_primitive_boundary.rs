@@ -117,11 +117,17 @@ fn large_conversation_unread_updates_are_threshold_guarded() {
         root.join("flare-conversation/src/infrastructure/persistence/postgres_repository.rs"),
     )
     .expect("read conversation postgres repository");
+    // 未读写扩散必须仍受成员数阈值守卫,且守卫为「有界探测」——不得对全群成员做无界 COUNT
+    // (旧实现 member_stats COUNT 会让大群每条消息 O(成员) 扫描,实测病态计划钉核)。
     assert!(
-        postgres_repository.contains("member_stats")
-            && postgres_repository.contains("large_conversation_precise_unread_threshold")
-            && postgres_repository.contains("member_stats.member_count <= $6"),
-        "message-event unread write diffusion must remain guarded by member-count threshold"
+        postgres_repository.contains("large_conversation_precise_unread_threshold")
+            && postgres_repository.contains("Failed to probe conversation size"),
+        "message-event unread write diffusion must remain guarded by a bounded member-count probe"
+    );
+    let unbounded_member_count = format!("member_stats.member_count <= {}", "$6");
+    assert!(
+        !postgres_repository.contains(&unbounded_member_count),
+        "unread guard must not scan all members via unbounded COUNT; use the LIMIT-bounded probe"
     );
 }
 
