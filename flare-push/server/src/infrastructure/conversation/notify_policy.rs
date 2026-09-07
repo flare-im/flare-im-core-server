@@ -84,7 +84,12 @@ impl ConversationNotifyPolicy {
                         cursor: cursor.clone(),
                         limit: PAGE_LIMIT,
                         include_removed: false,
-                        ext: Default::default(),
+                        // 只按 sink 消费 participants(偏好),不看 total/version →
+                        // 让服务端首页跳过 COUNT(*)+MAX(updated_at) 两次 O(成员) 聚合。
+                        ext: std::collections::HashMap::from([(
+                            "skip_meta".to_string(),
+                            "1".to_string(),
+                        )]),
                     },
                     ctx,
                 ))
