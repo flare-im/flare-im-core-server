@@ -46,3 +46,6 @@ logs/
 
 # 本地开发证书(用 flare-core 的 rcgen 自生成,勿提交)
 certs/
+
+# 代码索引工具的本机缓存（随每次索引变动，不进仓）
+/.codegraph/

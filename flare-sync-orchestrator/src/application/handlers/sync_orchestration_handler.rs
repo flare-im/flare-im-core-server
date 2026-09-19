@@ -1445,10 +1445,7 @@ fn conversation_type_label(value: i32) -> &'static str {
 ///
 /// 单聊的对端路由以 Conversation Bootstrap 从成员表解析出的 channel_id 为准；
 /// 最新消息体里的 channel_id 可能来自历史坏数据或旧客户端，不能覆盖它。
-fn merge_sync_summary_channel_id(
-    from_message: &str,
-    hint: &ConversationSyncRoutingHint,
-) -> String {
+fn merge_sync_summary_channel_id(from_message: &str, hint: &ConversationSyncRoutingHint) -> String {
     // 与 conversation_type 同理：channel_id 也以**会话自身**为准，
     // 消息上那份只在会话没给出时兜底。
     //
@@ -1718,7 +1715,10 @@ mod tests {
 
         // 会话没给出时才用消息兜底
         let empty = ConversationSyncRoutingHint::default();
-        assert_eq!(merge_sync_summary_channel_id("from-msg", &empty), "from-msg");
+        assert_eq!(
+            merge_sync_summary_channel_id("from-msg", &empty),
+            "from-msg"
+        );
         assert_eq!(merge_sync_summary_channel_id("", &empty), "");
     }
 

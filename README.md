@@ -8,7 +8,7 @@ again, already written and auditable.
 
 ```bash
 git clone … && cd flare-im-core
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up -d
 ./scripts/start_server.sh && ./scripts/smoke_opensource.sh
 ```
 

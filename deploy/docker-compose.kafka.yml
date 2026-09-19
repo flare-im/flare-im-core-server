@@ -1,0 +1,74 @@
+# Kafka middleware variant.
+#
+# Use with the common middleware base:
+#   docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
+#
+# Do not combine this file with docker-compose.nats.yml for one runtime. Flare IM
+# Core selects one MQ backend via FLARE_MQ_DEFAULT_BACKEND / mq.default_backend.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  # ===== Kafka - 消息队列（KRaft 无 Zookeeper） =====
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: flare-kafka
+    restart: always
+    logging: *default-logging
+    networks:
+      - flare-network
+    ports:
+      - "29092:29092"
+    environment:
+      # JVM
+      KAFKA_HEAP_OPTS: "-Xms512M -Xmx512M"
+
+      # KRaft
+      CLUSTER_ID: 4LZEfdh1SPSb9z7J1Hf0sw
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # Listener
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Storage
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # 单节点必须
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+    volumes:
+      - ./data/kafka:/var/lib/kafka/data
+
+  # ===== Kafka topic 初始化 =====
+  # Flare IM Core 运行时 Kafka / JetStream 二选一；本服务只在选择 Kafka 时用于预建 topic。
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: flare-kafka-init
+    networks:
+      - flare-network
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      FLARE_KAFKA_MESSAGE_PARTITIONS: "12"
+      FLARE_KAFKA_PUSH_PARTITIONS: "12"
+      FLARE_KAFKA_REPLICATION_FACTOR: "1"
+      FLARE_KAFKA_MIN_INSYNC_REPLICAS: "1"
+    volumes:
+      - ./kafka-topics.sh:/opt/flare/kafka-topics.sh:ro
+    command: ["/bin/bash", "/opt/flare/kafka-topics.sh"]
+    restart: "no"
+    logging: *default-logging
+
+networks:
+  flare-network:
+    external: false

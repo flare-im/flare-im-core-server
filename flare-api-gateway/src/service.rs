@@ -70,14 +70,23 @@ impl ApplicationBootstrap {
             // 接上 token 撤销/轮换存储：刷新令牌轮换后旧的立即作废、校验查撤销位。
             // 约定用 `[redis.token_store]`（可经 services.api_gateway.token_store 改名）；
             // 没有该 profile 则退化为无状态（撤销为空操作，与历史行为一致）。
-            let store_profile = gateway_config.token_store.as_deref().unwrap_or("token_store");
+            let store_profile = gateway_config
+                .token_store
+                .as_deref()
+                .unwrap_or("token_store");
             match app_config.redis_profile(store_profile) {
                 Some(redis) => {
-                    let namespace = redis.namespace.clone().unwrap_or_else(|| "flare".to_string());
+                    let namespace = redis
+                        .namespace
+                        .clone()
+                        .unwrap_or_else(|| "flare".to_string());
                     match RedisTokenStore::with_namespace(&redis.url, namespace) {
                         Ok(store) => {
                             base = base.with_store(Arc::new(store));
-                            info!(profile = store_profile, "token store attached: refresh-token rotation-revoke enabled");
+                            info!(
+                                profile = store_profile,
+                                "token store attached: refresh-token rotation-revoke enabled"
+                            );
                         }
                         Err(err) => {
                             warn!(%err, profile = store_profile, "failed to build token store; token revoke/rotation disabled (stateless)");
@@ -85,7 +94,10 @@ impl ApplicationBootstrap {
                     }
                 }
                 None => {
-                    info!(profile = store_profile, "no token_store redis profile; token revoke/rotation disabled (stateless)");
+                    info!(
+                        profile = store_profile,
+                        "no token_store redis profile; token revoke/rotation disabled (stateless)"
+                    );
                 }
             }
             Arc::new(base)

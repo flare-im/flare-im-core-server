@@ -1,0 +1,52 @@
+# NATS / JetStream middleware variant.
+#
+# Use with the common middleware base:
+#   docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
+#
+# Do not combine this file with docker-compose.kafka.yml for one runtime. Flare IM
+# Core selects one MQ backend via FLARE_MQ_DEFAULT_BACKEND / mq.default_backend.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  # ===== NATS JetStream - 消息队列 =====
+  nats:
+    image: nats:2.10-alpine
+    container_name: flare-nats
+    restart: always
+    logging: *default-logging
+    networks:
+      - flare-network
+    ports:
+      - "24222:4222"  # NATS client
+      - "28222:8222"  # NATS monitoring
+    command:
+      # 超大群建群:首条消息携带整张成员表(10万≈1MB),需提高 NATS 单消息上限(默认 1MB)。
+      # max_payload 只能经配置文件设置(无对应 CLI flag);data/nats/nats.conf 写 `max_payload: 16MB`。
+      # 注:这是支撑"建群一次性大消息"的务实配置;生产更优解是服务端显式建群(消息不带成员表)。
+      - "-c"
+      - "/etc/nats/nats.conf"
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    volumes:
+      - ./data/nats:/data
+      # 配置文件必须放在 ./data 之外：/deploy/data/ 整个被 .gitignore 忽略，
+      # 放在里面时全新检出（CI、新机器）根本没有这个文件 —— NATS 启动即退，
+      # 又因 restart: always 陷入崩溃循环，表现成「端口偶尔能连上但服务不在」。
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  flare-network:
+    external: false

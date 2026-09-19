@@ -16,8 +16,8 @@ use flare_proto::common::{CustomData, DataPacket, RealtimeControlPacket, TypingA
 use prost::Message;
 
 use crate::application::commands::SendDataCommand;
-use crate::domain::ports::{IDataCommandPort, IPushPort};
-use crate::domain::service::{ConversationSubscriptionRegistry, SyncService};
+use crate::domain::ports::IDataCommandPort;
+use crate::domain::service::{IRealtimeBroadcastPort, RealtimeControlRelay, SyncService};
 
 const TYPING_EMIT_MS_ENV: &str = "FLARE_GATEWAY_TYPING_COALESCE_MS";
 const DEFAULT_TYPING_EMIT_MS: u64 = 1000;
@@ -122,10 +122,11 @@ impl TypingAggregator {
 pub struct SendDataDomainService {
     data_port: Arc<dyn IDataCommandPort>,
     sync_service: Arc<SyncService>,
-    /// 轻量信令直转地基：会话级在线订阅注册表（与读扩散投递共享同一实例）。
-    conversation_subscriptions: Arc<ConversationSubscriptionRegistry>,
-    /// 直接向连接写 DATA 帧（typing/presence 直转，绕开 NATS/持久化/ACK）。
-    push_port: Arc<dyn IPushPort>,
+    /// 轻量信令直转（本节点的会话在线订阅集合内）。与对等节点收到 `RelayRealtimeControl` 后走的是
+    /// **同一份实现**：两边的语义必须逐字相同。
+    relay: Arc<RealtimeControlRelay>,
+    /// 把同一帧广播给其余网关节点。订阅表是本节点局部的，不广播就只有同节点的人能看见。
+    broadcast: Arc<dyn IRealtimeBroadcastPort>,
     /// typing 聚合器（超大群"N 人正在输入" + 风暴防护）。
     typing_aggregator: TypingAggregator,
 }
@@ -134,14 +135,14 @@ impl SendDataDomainService {
     pub fn new(
         data_port: Arc<dyn IDataCommandPort>,
         sync_service: Arc<SyncService>,
-        conversation_subscriptions: Arc<ConversationSubscriptionRegistry>,
-        push_port: Arc<dyn IPushPort>,
+        relay: Arc<RealtimeControlRelay>,
+        broadcast: Arc<dyn IRealtimeBroadcastPort>,
     ) -> Self {
         Self {
             data_port,
             sync_service,
-            conversation_subscriptions,
-            push_port,
+            relay,
+            broadcast,
             typing_aggregator: TypingAggregator::from_env(),
         }
     }
@@ -206,6 +207,9 @@ impl SendDataDomainService {
     ///   （含正在输入者自身，客户端按自身 user_id 过滤显示）；窗口内折叠则不发。
     /// - presence/custom：原样直转给**其他**在线订阅者（排除发送方）。
     ///
+    /// 直转之后还要**广播给其余网关节点**：订阅表是本节点局部的，只发本地的话，对端在另一台网关上
+    /// 就永远看不到这条信号。广播的频率由聚合窗口决定（默认 1 条/秒/会话），不由按键决定。
+    ///
     /// 不调 `ensure_conversation_members_subscribed`（高频，依赖消息活动已建立的订阅；
     /// 未订阅者收不到属有损语义）。
     async fn relay_realtime_control(
@@ -244,24 +248,21 @@ impl SendDataDomainService {
             _ => (packet.encode_to_vec(), false),
         };
 
-        let targets: Vec<String> = self
-            .conversation_subscriptions
-            .local_subscribers(&conversation_id)
-            .into_iter()
-            .filter(|connection_id| include_sender || connection_id != sender_connection_id)
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
-        let payload_type = flare_core::common::protocol::payload_command::Type::Data as i32;
-        if let Err(error) = self
-            .push_port
-            .push_payload_to_connections(tx, &targets, payload_type, relay_payload)
-            .await
-        {
-            // 有损 ephemeral：失败仅 trace，不回报发送方。
-            tracing::trace!(%conversation_id, ?error, "realtime control relay push failed (ignored)");
-        }
+        self.relay
+            .relay_locally(
+                tx,
+                &conversation_id,
+                relay_payload.clone(),
+                if include_sender {
+                    None
+                } else {
+                    Some(sender_connection_id)
+                },
+            )
+            .await;
+        // 本节点没有订阅者不代表别处没有：广播与本地投递数无关，否则「两个人各在一台网关上」
+        // 这个最常见的情形恰好一条都收不到。
+        self.broadcast.broadcast(&conversation_id, relay_payload).await;
     }
 
     /// 解析轻量信令的会话 ID：优先 RealtimeControlPacket.conversation_id，回退 typing 内层 conversation_id。
@@ -305,9 +306,8 @@ impl SendDataDomainService {
 /// 设为 0 则每次都记（排障用，生产别开）。
 fn sync_slow_log_threshold_ms() -> u128 {
     static VALUE: OnceLock<u128> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        parse_slow_log_ms(std::env::var("FLARE_SYNC_SLOW_LOG_MS").ok().as_deref())
-    })
+    *VALUE
+        .get_or_init(|| parse_slow_log_ms(std::env::var("FLARE_SYNC_SLOW_LOG_MS").ok().as_deref()))
 }
 
 /// 拆成纯函数是为了能测：非法值必须回落到默认阈值，而不是变成 0
@@ -344,6 +344,8 @@ fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 直转与广播的断言要自己造订阅表；生产路径上它由组合根注入。
+    use crate::domain::service::ConversationSubscriptionRegistry;
 
     #[test]
     fn slow_log_threshold_defaults_and_rejects_garbage() {
@@ -415,6 +417,41 @@ mod tests {
         }
     }
 
+    /// 记下每一次跨节点广播。广播是这轮修的东西，所以必须能被断言，而不是「看起来发了」。
+    #[derive(Default)]
+    struct CapturingBroadcast {
+        calls: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    #[async_trait]
+    impl IRealtimeBroadcastPort for CapturingBroadcast {
+        async fn broadcast(&self, conversation_id: &str, packet: Vec<u8>) {
+            self.calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .push((conversation_id.to_string(), packet));
+        }
+    }
+
+    /// 组装一个「本地直转 + 跨节点广播」都可观察的服务。
+    fn service_with(
+        registry: Arc<ConversationSubscriptionRegistry>,
+    ) -> (
+        SendDataDomainService,
+        Arc<CapturingPushPort>,
+        Arc<CapturingBroadcast>,
+    ) {
+        let push = Arc::new(CapturingPushPort::default());
+        let broadcast = Arc::new(CapturingBroadcast::default());
+        let service = SendDataDomainService::new(
+            Arc::new(NoopDataPort),
+            Arc::new(SyncService::new(Arc::new(NoopSyncPort))),
+            Arc::new(RealtimeControlRelay::new(registry, push.clone())),
+            broadcast.clone(),
+        );
+        (service, push, broadcast)
+    }
+
     struct NoopDataPort;
     #[async_trait]
     impl IDataCommandPort for NoopDataPort {
@@ -464,13 +501,7 @@ mod tests {
         registry.join("conv-1", "conn-b");
         registry.join("conv-1", "conn-c");
 
-        let push = Arc::new(CapturingPushPort::default());
-        let service = SendDataDomainService::new(
-            Arc::new(NoopDataPort),
-            Arc::new(SyncService::new(Arc::new(NoopSyncPort))),
-            registry,
-            push.clone(),
-        );
+        let (service, push, broadcast) = service_with(registry);
 
         let cmd = SendDataCommand::new(
             "conn-sender".to_string(),
@@ -513,6 +544,95 @@ mod tests {
         assert_eq!(agg.conversation_id, "conv-1");
         assert_eq!(agg.typing_count, 1);
         assert_eq!(agg.typing_user_ids, vec!["u-sender".to_string()]);
+
+        // 同一帧还要广播给其余网关节点，否则对端在另一台网关上就永远看不到。
+        let broadcasts = broadcast.calls.lock().expect("broadcast mutex poisoned");
+        assert_eq!(broadcasts.len(), 1, "exactly one cross-node broadcast");
+        assert_eq!(broadcasts[0].0, "conv-1");
+        assert_eq!(
+            broadcasts[0].1, payload,
+            "peers get the same frame the local subscribers got"
+        );
+    }
+
+    #[tokio::test]
+    async fn typing_is_broadcast_even_when_this_node_has_nobody_to_tell() {
+        // 这正是本轮要修的那个场景：Alice 在 A 节点、Bob 在 B 节点。A 节点除了 Alice 自己没有别人，
+        // 从前就到此为止——于是 Bob 永远看不到 Alice 在打字。
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("conv-1", "conn-sender");
+        let (service, _push, broadcast) = service_with(registry);
+
+        let cmd = SendDataCommand::new(
+            "conn-sender".to_string(),
+            typing_packet("conv-1", "u-sender", true),
+            0,
+        );
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        service.execute(&ctx, &cmd).await.expect("relay ok");
+
+        let broadcasts = broadcast.calls.lock().expect("broadcast mutex poisoned");
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "a node with no other local subscriber must still tell its peers"
+        );
+        assert_eq!(broadcasts[0].0, "conv-1");
+    }
+
+    #[tokio::test]
+    async fn a_folded_typing_keystroke_is_neither_relayed_nor_broadcast() {
+        // 聚合窗口内折叠的那些不发：广播频率由窗口决定（默认 1 条/秒/会话），不由按键决定。
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("conv-1", "conn-sender");
+        registry.join("conv-1", "conn-b");
+        let (service, push, broadcast) = service_with(registry);
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+
+        for _ in 0..5 {
+            let cmd = SendDataCommand::new(
+                "conn-sender".to_string(),
+                typing_packet("conv-1", "u-sender", true),
+                0,
+            );
+            service.execute(&ctx, &cmd).await.expect("relay ok");
+        }
+
+        assert_eq!(
+            push.calls.lock().expect("calls mutex poisoned").len(),
+            1,
+            "five keystrokes, one relay"
+        );
+        assert_eq!(
+            broadcast.calls.lock().expect("broadcast mutex poisoned").len(),
+            1,
+            "five keystrokes, one broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signal_without_a_conversation_goes_nowhere() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("conv-1", "conn-b");
+        let (service, push, broadcast) = service_with(registry);
+
+        let cmd = SendDataCommand::new(
+            "conn-sender".to_string(),
+            typing_packet("", "u-sender", true),
+            0,
+        );
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        service.execute(&ctx, &cmd).await.expect("relay ok");
+
+        assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
+        assert!(
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .is_empty(),
+            "an unaddressed frame must not be broadcast either"
+        );
     }
 
     #[test]
@@ -553,17 +673,13 @@ mod tests {
         );
     }
 
+    /// 发送方是本节点唯一订阅者时：本地没人可发（发送方自己被排除），但**对等节点仍要收到**——
+    /// 「本节点没人」和「没人」是两回事，这正是这轮修掉的那个假设。
     #[tokio::test]
-    async fn typing_with_no_other_subscribers_is_noop() {
+    async fn a_signal_with_no_local_audience_still_reaches_the_peers() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
         registry.join("conv-1", "conn-sender");
-        let push = Arc::new(CapturingPushPort::default());
-        let service = SendDataDomainService::new(
-            Arc::new(NoopDataPort),
-            Arc::new(SyncService::new(Arc::new(NoopSyncPort))),
-            registry,
-            push.clone(),
-        );
+        let (service, push, broadcast) = service_with(registry);
         let packet = DataPacket {
             payload: Some(DataPayload::RealtimeControl(RealtimeControlPacket {
                 control_type: "typing".to_string(),
@@ -578,7 +694,12 @@ mod tests {
         service.execute(&ctx, &cmd).await.expect("noop ok");
         assert!(
             push.calls.lock().expect("calls mutex poisoned").is_empty(),
-            "no relay when sender is the only subscriber"
+            "no local relay when the sender is this node's only subscriber"
+        );
+        assert_eq!(
+            broadcast.calls.lock().expect("broadcast mutex poisoned").len(),
+            1,
+            "peers may have subscribers this node knows nothing about"
         );
     }
 }

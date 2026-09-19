@@ -144,6 +144,41 @@ pub async fn initialize(
     let route_grpc_pool = Arc::new(SignalingRouteGrpcPool::new());
     let storage_sync_pool = Arc::new(StorageSyncGrpcPool::new());
 
+    // 8.5 轻量信令直转：一份实现，上行路径与对等节点的 RelayRealtimeControl 共用。
+    let realtime_relay = Arc::new(crate::domain::service::RealtimeControlRelay::new(
+        conversation_subscriptions.clone(),
+        push_port.clone(),
+    ));
+    // 广播给其余网关节点。会话订阅表是本节点局部的，不广播的话，对端在另一台网关上就永远看不到
+    // 「正在输入」。没有注册中心时没有对等节点可广播，本地直转已经覆盖了全部在线订阅者。
+    let realtime_broadcast: Arc<dyn crate::domain::service::IRealtimeBroadcastPort> = {
+        let service_name = flare_im_service_kit::service_names::get_service_name(
+            flare_im_service_kit::service_names::ACCESS_GATEWAY,
+        );
+        match flare_im_service_kit::discovery::build_gateway_router_from_app_config(
+            app_config,
+            &service_name,
+            None,
+        )
+        .await
+        {
+            Ok(router) => Arc::new(
+                crate::infrastructure::ports::GatewayRealtimeBroadcast::new(
+                    router,
+                    gateway_id.clone(),
+                ),
+            ),
+            Err(err) => {
+                // 有损信号不值得让网关起不来：退回单节点行为并说清楚，而不是静默。
+                tracing::warn!(
+                    ?err,
+                    "realtime control cross-node relay disabled: gateway router unavailable"
+                );
+                Arc::new(crate::domain::service::NoRealtimeBroadcast)
+            }
+        }
+    };
+
     // 9. 长连接处理器
     let connection_handler = build_long_connection_handler(
         connection_handler_app.clone(),
@@ -151,8 +186,8 @@ pub async fn initialize(
         route_grpc_pool,
         storage_sync_pool,
         access_config.sync_pull_rate_limit_config(),
-        conversation_subscriptions.clone(),
-        push_port.clone(),
+        realtime_relay.clone(),
+        realtime_broadcast,
     );
 
     // 10. 推送领域服务
@@ -197,6 +232,7 @@ pub async fn initialize(
     let access_gateway_grpc_handler = Arc::new(AccessGatewayHandler::new(
         Arc::new(PushHandler::new(push_domain_service.clone())),
         Arc::new(ConnectionQueryHandler::new(connection_port.clone())),
+        realtime_relay,
     ));
     debug!("gRPC handlers built successfully");
 

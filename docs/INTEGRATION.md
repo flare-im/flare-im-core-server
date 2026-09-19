@@ -175,7 +175,7 @@ not depend on it.
 ### Minimum viable
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d   # Postgres / NATS / Consul
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up -d
 ./scripts/start_server.sh
 ```
 

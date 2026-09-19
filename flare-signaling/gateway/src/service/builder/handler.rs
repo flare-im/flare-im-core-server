@@ -87,8 +87,8 @@ pub fn build_long_connection_handler(
     route_pool: Arc<SignalingRouteGrpcPool>,
     storage_sync_pool: Arc<StorageSyncGrpcPool>,
     sync_pull_rate_limit_config: SyncPullRateLimitConfig,
-    conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
-    push_port: Arc<dyn crate::domain::ports::IPushPort>,
+    realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
+    realtime_broadcast: Arc<dyn crate::domain::service::IRealtimeBroadcastPort>,
 ) -> Arc<LongConnectionHandler> {
     let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> =
         Arc::new(RouterMessageCommandPort::new(route_pool.clone()));
@@ -116,8 +116,8 @@ pub fn build_long_connection_handler(
         Arc::new(SendDataDomainService::new(
             data_port,
             sync_service,
-            conversation_subscriptions,
-            push_port,
+            realtime_relay,
+            realtime_broadcast,
         )),
         Arc::new(SendAckDomainService::new(ack_port)),
         context_resolver,

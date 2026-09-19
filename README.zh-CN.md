@@ -7,7 +7,7 @@
 
 ```bash
 git clone … && cd flare-im-core
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up -d
 ./scripts/start_server.sh && ./scripts/smoke_opensource.sh
 ```
 
@@ -247,7 +247,7 @@ Core 使用强类型 `MessageContent` 和 `Event` 表达稳定语义，`attribut
 | RPC | Tonic gRPC、Protobuf (`flare-proto` / `flare-grpc-proto`) |
 | HTTP API | Axum、utoipa OpenAPI |
 | 业务系统接入 | gRPC Hook + typed gRPC；HTTP/OpenAPI 作为 facade |
-| MQ | NATS JetStream 默认，本地也拉起 Kafka；生产同链路二选一 |
+| MQ | NATS JetStream 默认；本地 Kafka 通过独立 compose 变体启动，生产同链路二选一 |
 | 存储 | PostgreSQL / TimescaleDB、SQLx |
 | 缓存与状态 | Dragonfly（多核、RESP 兼容，服务名/连接串仍为 redis） |
 | 对象存储 | S3 兼容存储，本地 RustFS |
@@ -258,7 +258,7 @@ Core 使用强类型 `MessageContent` 和 `Event` 表达稳定语义，`attribut
 
 ```bash
 cd deploy
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 
 cd ..
 make start-core

@@ -229,7 +229,10 @@ pub async fn revoke_user(
 }
 
 /// 签发鉴权：app 凭据优先；没带凭据时看联调开关。
-pub(crate) fn authorize_issue(settings: &GatewaySettings, headers: &HeaderMap) -> Result<(), AuthError> {
+pub(crate) fn authorize_issue(
+    settings: &GatewaySettings,
+    headers: &HeaderMap,
+) -> Result<(), AuthError> {
     let app_id = header_str(headers, APP_ID_HEADER);
     let app_secret = header_str(headers, APP_SECRET_HEADER);
     match (app_id, app_secret) {
@@ -255,7 +258,10 @@ pub(crate) fn authorize_issue(settings: &GatewaySettings, headers: &HeaderMap) -
 
 /// 特权操作（撤销等）授权：**只认 app 凭据，绝不接受 dev-issue 联调开关**。
 /// 与 `authorize_issue` 的唯一区别是不带凭据时一律拒（不看 `dev_issue`）。
-pub(crate) fn authorize_admin(settings: &GatewaySettings, headers: &HeaderMap) -> Result<(), AuthError> {
+pub(crate) fn authorize_admin(
+    settings: &GatewaySettings,
+    headers: &HeaderMap,
+) -> Result<(), AuthError> {
     let app_id = header_str(headers, APP_ID_HEADER);
     let app_secret = header_str(headers, APP_SECRET_HEADER);
     match (app_id, app_secret) {
@@ -321,7 +327,10 @@ mod tests {
 
     fn settings(extra: &[(&str, &str)]) -> GatewaySettings {
         let mut env: HashMap<String, String> = HashMap::new();
-        env.insert("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS".into(), format!("console:{APP_SECRET}"));
+        env.insert(
+            "FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS".into(),
+            format!("console:{APP_SECRET}"),
+        );
         for (k, v) in extra {
             env.insert((*k).to_string(), (*v).to_string());
         }
@@ -341,13 +350,18 @@ mod tests {
     }
 
     fn core_issuer() -> Option<Arc<dyn TokenIssuer>> {
-        Some(Arc::new(CoreJwtTokenIssuer::new(service(), std::time::Duration::from_secs(60))))
+        Some(Arc::new(CoreJwtTokenIssuer::new(
+            service(),
+            std::time::Duration::from_secs(60),
+        )))
     }
 
     async fn call(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
     }
@@ -361,14 +375,20 @@ mod tests {
             builder = builder.header(*k, *v);
         }
         builder
-            .body(Body::from(r#"{"userId":"flare","tenantId":"0","deviceId":"ios-1"}"#))
+            .body(Body::from(
+                r#"{"userId":"flare","tenantId":"0","deviceId":"ios-1"}"#,
+            ))
             .unwrap()
     }
 
     #[tokio::test]
     async fn without_credentials_and_without_dev_issue_is_unauthorized() {
         let (status, _) = call(app(settings(&[]), core_issuer()), issue_req(&[])).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "默认不能凭 userId 白拿 token");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "默认不能凭 userId 白拿 token"
+        );
     }
 
     #[tokio::test]
@@ -377,7 +397,9 @@ mod tests {
         let (status, json) = call(app(cfg, core_issuer()), issue_req(&[])).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let token = json["data"]["token"].as_str().unwrap();
-        let claims = service().validate_token(token).expect("网关自己的校验器必须认这枚 token");
+        let claims = service()
+            .validate_token(token)
+            .expect("网关自己的校验器必须认这枚 token");
         assert_eq!(claims.sub, "flare");
         assert_eq!(claims.tenant_id.as_deref(), Some("0"));
         assert_eq!(claims.device_id.as_deref(), Some("ios-1"));
@@ -394,12 +416,23 @@ mod tests {
         assert_eq!(ok.0, StatusCode::OK);
         let bad = call(
             app(settings(&[]), core_issuer()),
-            issue_req(&[(APP_ID_HEADER, "console"), (APP_SECRET_HEADER, "wrong-secret-wrong-secret")]),
+            issue_req(&[
+                (APP_ID_HEADER, "console"),
+                (APP_SECRET_HEADER, "wrong-secret-wrong-secret"),
+            ]),
         )
         .await;
         assert_eq!(bad.0, StatusCode::FORBIDDEN);
-        let half = call(app(settings(&[]), core_issuer()), issue_req(&[(APP_ID_HEADER, "console")])).await;
-        assert_eq!(half.0, StatusCode::UNAUTHORIZED, "只带 app id 不带 secret 不算凭据");
+        let half = call(
+            app(settings(&[]), core_issuer()),
+            issue_req(&[(APP_ID_HEADER, "console")]),
+        )
+        .await;
+        assert_eq!(
+            half.0,
+            StatusCode::UNAUTHORIZED,
+            "只带 app id 不带 secret 不算凭据"
+        );
     }
 
     #[tokio::test]

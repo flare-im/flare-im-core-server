@@ -24,17 +24,24 @@ cp deploy/.env.example deploy/.env
 
 docker compose --env-file deploy/.env \
   -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.nats.yml \
   -f deploy/docker-compose.stack.yml \
   -f deploy/docker-compose.build.yml up -d
 ```
 
-三层各管一段，分开写是为了能单独用：
+四层各管一段，分开写是为了能单独用：
 
 | 文件 | 管什么 | 什么时候去掉 |
 |---|---|---|
-| `docker-compose.yml` | 基础设施（11 个容器） | 从不——它是底座 |
+| `docker-compose.yml` | 公共最小中间件（Consul / Dragonfly / PostgreSQL / RustFS） | 从不——它是底座 |
+| `docker-compose.nats.yml` | NATS JetStream MQ 变体 | 选择 Kafka 时换成 `docker-compose.kafka.yml` |
+| `docker-compose.kafka.yml` | Kafka MQ 变体和 topic 初始化 | 选择 NATS 时不用 |
+| `docker-compose.observability.yml` | Loki / Prometheus / Tempo / Grafana | 不需要本地观测栈时 |
 | `docker-compose.stack.yml` | 15 个 Flare 服务 | 只想起中间件、服务跑本机时 |
 | `docker-compose.build.yml` | 本地构建镜像 | 有预构建镜像可拉时，改用 `FLARE_IMAGE=` |
+
+NATS 和 Kafka 是运行时互斥的 MQ 后端：同一次启动只叠一个 MQ 文件。默认服务配置使用
+NATS；使用 Kafka 时同时设置 `FLARE_MQ_DEFAULT_BACKEND=kafka`。
 
 首次本地构建约 10 分钟（编译整个 workspace），镜像约 450MB，装着全部 15 个二进制
 ——服务只差跑哪个二进制，拆 15 个镜像会让 registry 体积和版本偏斜翻倍。
@@ -47,10 +54,18 @@ docker compose --env-file deploy/.env \
 
 ```bash
 cd flare-im-core/deploy
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
 再按 `../scripts/start_server.sh` 起服务。这条需要 Rust 1.94+。
+
+Kafka 版本：
+
+```bash
+cd flare-im-core/deploy
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
+export FLARE_MQ_DEFAULT_BACKEND=kafka
+```
 
 ### 改账号密码
 
@@ -111,9 +126,10 @@ docker compose -f docker-compose.yml -f docker-compose.stack.yml logs -f api-gat
   - 消息表使用超表（Hypertable）按 `created_at` 分区
   - 支持消息、会话、媒体、Hook、Capability、ACK 审计等核心表
 
-### 4. 消息队列（NATS JetStream + Apache Kafka）
+### 4. 消息队列（NATS JetStream 或 Apache Kafka）
 
-> 二者同时拉起；测试时在应用配置中切换 `mq.default_backend`（或各服务引用的 profile）即可分别走 NATS / Kafka。
+> 二者按 compose 组合互斥启动；测试时在应用配置中切换 `mq.default_backend`
+>（或设置 `FLARE_MQ_DEFAULT_BACKEND=nats|kafka`）即可分别走 NATS / Kafka。
 
 **NATS JetStream**
 
@@ -217,8 +233,14 @@ RUSTFS_SECRET_KEY=rustfsadmin
 ### 1. 启动服务
 
 ```bash
-# 启动所有服务
-docker compose up -d
+# 启动最小中间件 + NATS
+docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
+
+# 启动最小中间件 + Kafka
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
+
+# 额外启动观测栈
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 
 # 启动特定服务
 docker compose up -d redis postgres
@@ -238,10 +260,11 @@ docker compose down -v
 
 ```bash
 # 查看所有日志
-docker compose logs -f
+docker compose -f docker-compose.yml -f docker-compose.nats.yml logs -f
 
 # 查看特定服务日志
-docker compose logs -f nats kafka
+docker compose -f docker-compose.yml -f docker-compose.nats.yml logs -f nats
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml logs -f kafka
 ```
 
 ### 5. 访问 RustFS 控制台

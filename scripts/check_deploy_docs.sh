@@ -69,16 +69,28 @@ check_combo() {
   fi
 }
 
-check_combo "仅基础设施" -f deploy/docker-compose.yml
-check_combo "基础设施 + 服务栈（预构建镜像）" \
-  -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml
-check_combo "基础设施 + 服务栈 + 本地构建" \
-  -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml -f deploy/docker-compose.build.yml
+check_combo "公共最小中间件" -f deploy/docker-compose.yml
+check_combo "公共最小中间件 + NATS" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml
+check_combo "公共最小中间件 + Kafka" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.kafka.yml
+check_combo "公共最小中间件 + 观测栈" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.observability.yml
+check_combo "NATS 中间件 + 服务栈（预构建镜像）" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
+  -f deploy/docker-compose.stack.yml
+check_combo "Kafka 中间件 + 服务栈（预构建镜像）" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.kafka.yml \
+  -f deploy/docker-compose.stack.yml
+check_combo "NATS 中间件 + 服务栈 + 本地构建" \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
+  -f deploy/docker-compose.stack.yml -f deploy/docker-compose.build.yml
 
 # 业务栈是同级仓，缺席时不判红（开源使用者可能只拿了 IM 核）
 if [ -f ../flare-social/deploy/docker-compose.social.yml ]; then
   check_combo "基础设施 + 服务栈 + 业务服务端" \
-    -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml \
+    -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
+    -f deploy/docker-compose.stack.yml \
     -f ../flare-social/deploy/docker-compose.social.yml
 else
   echo "  · 跳过业务栈组合（同级仓 flare-social 不在）"
@@ -86,7 +98,8 @@ fi
 
 # ── 3. 缺签名密钥必须失败 ───────────────────────────────────────────────────
 if (unset FLARE_TOKEN_SECRET; docker compose -f deploy/docker-compose.yml \
-      -f deploy/docker-compose.stack.yml config >/dev/null 2>&1); then
+      -f deploy/docker-compose.nats.yml -f deploy/docker-compose.stack.yml \
+      config >/dev/null 2>&1); then
   note_fail "不设 FLARE_TOKEN_SECRET 竟然通过了 —— 默认签名密钥等于默认漏洞，这个护栏不能丢"
 else
   note_ok "缺 FLARE_TOKEN_SECRET 时拒绝启动"

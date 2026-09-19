@@ -50,8 +50,6 @@ fn devices_index_key(prefix: &str, user_id: &str) -> String {
     format!("{prefix}-index:{user_id}")
 }
 
-
-
 impl PresenceRepository for RedisPresenceRepository {
     async fn list_devices(
         &self,
@@ -223,9 +221,6 @@ mod tests {
             !source.contains(r#"cmd("KEYS")"#),
             "presence 读取不能用 KEYS：它阻塞整个 Redis"
         );
-        assert!(
-            source.contains("smembers"),
-            "应通过每用户设备索引集合读取"
-        );
+        assert!(source.contains("smembers"), "应通过每用户设备索引集合读取");
     }
 }

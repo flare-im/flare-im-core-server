@@ -285,13 +285,27 @@ impl GatewaySettings {
         }
 
         // http_hook 模式必须配 hook_url（业务方拥有整套验证）。
-        if self.auth.mode == AuthProviderMode::HttpHook && self.auth.hook_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        if self.auth.mode == AuthProviderMode::HttpHook
+            && self
+                .auth
+                .hook_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
             return Err(config_error(
                 "AUTH_HOOK_URL is required in the gateway env scope when AUTH_MODE=http_hook",
             ));
         }
         // hook_url 一旦配置（http_hook 模式；或 core_jwt 模式下作为三方验证兜底层），格式与相关项都要合法。
-        if let Some(hook_url) = self.auth.hook_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(hook_url) = self
+            .auth
+            .hook_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             if !(hook_url.starts_with("http://") || hook_url.starts_with("https://")) {
                 return Err(config_error("AUTH_HOOK_URL must be http:// or https://"));
             }
@@ -303,10 +317,17 @@ impl GatewaySettings {
             }
         }
         // hook_issue_url 一旦配置就要合法（http_hook 签发委托）。
-        if let Some(issue_url) = self.auth.hook_issue_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        if let Some(issue_url) = self
+            .auth
+            .hook_issue_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             && !(issue_url.starts_with("http://") || issue_url.starts_with("https://"))
         {
-            return Err(config_error("AUTH_HOOK_ISSUE_URL must be http:// or https://"));
+            return Err(config_error(
+                "AUTH_HOOK_ISSUE_URL must be http:// or https://",
+            ));
         }
         if self.auth.refresh_grace_secs == 0 {
             return Err(config_error("AUTH_REFRESH_GRACE_SECS cannot be 0"));

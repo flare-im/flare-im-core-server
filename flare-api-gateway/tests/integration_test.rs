@@ -63,7 +63,10 @@ fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {
     assert!(!auth_router.contains("gateway_auth_middleware"));
     let handler = include_str!("../src/interface/http/auth_handler.rs");
     assert!(handler.contains("TokenIssuer"));
-    assert!(!handler.contains("TokenService::"), "网关不得自己签发，只能调 TokenIssuer");
+    assert!(
+        !handler.contains("TokenService::"),
+        "网关不得自己签发，只能调 TokenIssuer"
+    );
     assert!(handler.contains("settings.auth.dev_issue"));
     assert!(handler.contains("constant_time_eq"));
 }

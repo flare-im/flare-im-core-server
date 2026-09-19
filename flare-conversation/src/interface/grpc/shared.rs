@@ -21,7 +21,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         .map(|dt| dt.timestamp_millis());
     // Sync 编排器用 `updated_at` 做会话列表排序与增量游标过滤，必须与「会话/成员变更时间」一致。
     // 仅填 last_message_time 会导致无最近消息预览时为空 → ts=0，增量同步在客户端游标非零时会误过滤掉整行。
-    let updated_at_for_sync = last_message_time.or(summary.server_cursor_ts);
+    let updated_at_for_sync = last_message_time.max(summary.server_cursor_ts);
 
     // 单聊同样下发 member_preview（恒 2 人）：客户端靠它解析对端，
     // 因为单聊行的 channel_id / display_name 在库里恒为空。清空会让端上标题退化成「会话」。
@@ -312,6 +312,39 @@ mod tests {
         let last_message = proto.last_message.expect("last message preview");
         assert_eq!(last_message.message_id, "m1");
         assert_eq!(last_message.text, "hello preview");
+    }
+
+    #[test]
+    fn proto_summary_sync_watermark_includes_settings_changes_after_last_message() {
+        let proto = proto_summary(ConversationSummary {
+            last_message_time: Some(chrono::DateTime::from_timestamp_millis(1_000).unwrap()),
+            server_cursor_ts: Some(2_000),
+            is_pinned: true,
+            settings_version: 1,
+            ..test_summary()
+        });
+        assert_eq!(proto.updated_at, 2_000);
+        assert_eq!(proto.last_message.unwrap().created_at, 1_000);
+        assert!(proto.is_pinned);
+        assert_eq!(proto.user_settings_version, 1);
+    }
+
+    #[test]
+    fn proto_summary_sync_watermark_keeps_newer_message_and_missing_values() {
+        for (message_ms, settings_ms, expected) in [
+            (Some(3_000), Some(2_000), 3_000),
+            (None, Some(2_000), 2_000),
+            (Some(3_000), None, 3_000),
+            (None, None, 0),
+        ] {
+            let proto = proto_summary(ConversationSummary {
+                last_message_time: message_ms
+                    .map(|ms| chrono::DateTime::from_timestamp_millis(ms).unwrap()),
+                server_cursor_ts: settings_ms,
+                ..test_summary()
+            });
+            assert_eq!(proto.updated_at, expected);
+        }
     }
 
     #[test]

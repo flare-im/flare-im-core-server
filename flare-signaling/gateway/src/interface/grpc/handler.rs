@@ -16,7 +16,7 @@ use flare_grpc_proto::access_gateway::{
     ConnectionInfo as ProtoConnectionInfo, DeliverToConversationRequest, GetUserConnectionsRequest,
     GetUserConnectionsResponse, PushAckRequest, PushAckResponse, PushCustomRequest,
     PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
-    PushResponse,
+    PushResponse, PushResult, RelayRealtimeControlRequest,
 };
 use flare_im_contracts::require_context;
 use prost_types::Timestamp;
@@ -31,16 +31,20 @@ use tracing::debug;
 pub struct AccessGatewayHandler {
     push_handler: Arc<PushHandler>,
     connection_query_handler: Arc<ConnectionQueryHandler>,
+    /// 轻量信令直转：与上行路径用的是同一个实例，所以两条入口的语义逐字相同。
+    realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
 }
 
 impl AccessGatewayHandler {
     pub fn new(
         push_handler: Arc<PushHandler>,
         connection_query_handler: Arc<ConnectionQueryHandler>,
+        realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
     ) -> Self {
         Self {
             push_handler,
             connection_query_handler,
+            realtime_relay,
         }
     }
 }
@@ -98,6 +102,32 @@ impl AccessGateway for AccessGatewayHandler {
                 Status::internal(e.to_string())
             })?;
         Ok(Response::new(response))
+    }
+
+    /// 另一个网关节点转来的轻量信令：只发给**本节点**订阅该会话的在线连接。
+    ///
+    /// 不再向外广播——广播由收到上行帧的那个节点做一次，这里再广播就会无限转圈。
+    /// 连接 id 是节点本地的，所以对端节点没有「发送方」可排除，全发。
+    async fn relay_realtime_control(
+        &self,
+        request: Request<RelayRealtimeControlRequest>,
+    ) -> Result<Response<PushResponse>, Status> {
+        let ctx = require_context(&request)?;
+        let req = request.into_inner();
+        let delivered = self
+            .realtime_relay
+            .relay_locally(&ctx, &req.conversation_id, req.packet, None)
+            .await;
+        // 投递数是给排查用的：0 表示「本节点没有该会话的在线订阅者」，不是失败。
+        Ok(Response::new(PushResponse {
+            result: Some(PushResult {
+                pushed_device_count: delivered as i32,
+                offline_pending_count: 0,
+                window_id: String::new(),
+                at: Some(Timestamp::from(std::time::SystemTime::now())),
+            }),
+            user_results: Vec::new(),
+        }))
     }
 
     async fn push_event(

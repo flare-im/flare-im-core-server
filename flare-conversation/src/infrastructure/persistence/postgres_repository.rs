@@ -1918,7 +1918,11 @@ impl ConversationRepository for PostgresConversationRepository {
         .execute(&*self.pool)
         .await
         .map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "Failed to advance conversation seq")
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to advance conversation seq",
+            )
         })?;
 
         // 步骤 2：大群短路判定——有界计数,最多读「阈值+1」行即停(LIMIT)。
@@ -1945,7 +1949,11 @@ impl ConversationRepository for PostgresConversationRepository {
             .fetch_one(&*self.pool)
             .await
             .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "Failed to probe conversation size")
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to probe conversation size",
+                )
             })?;
             if capped > i64::from(precise_unread_threshold) {
                 return Ok(());
@@ -2309,7 +2317,10 @@ mod participant_page_limit_tests {
         let parsed = parse_participant_cursor(Some("1500"));
         assert_eq!(parsed.legacy_offset, 1500);
         assert!(parsed.keyset.is_none());
-        assert!(parsed.carried.is_none(), "旧游标没有带 total/version，必须重算");
+        assert!(
+            parsed.carried.is_none(),
+            "旧游标没有带 total/version，必须重算"
+        );
         assert_eq!(parse_participant_cursor(Some("-5")).legacy_offset, 0);
     }
 
@@ -2323,8 +2334,14 @@ mod participant_page_limit_tests {
                 "游标 {bad:?} 应退回首页"
             );
         }
-        assert_eq!(parse_participant_cursor(None), ParticipantPageCursor::default());
-        assert_eq!(parse_participant_cursor(Some("  ")), ParticipantPageCursor::default());
+        assert_eq!(
+            parse_participant_cursor(None),
+            ParticipantPageCursor::default()
+        );
+        assert_eq!(
+            parse_participant_cursor(Some("  ")),
+            ParticipantPageCursor::default()
+        );
     }
 
     #[test]
@@ -2387,6 +2404,9 @@ mod participant_page_limit_tests {
         assert_eq!(clamp_participant_page_limit(-5), 1);
         assert_eq!(clamp_participant_page_limit(500), 500);
         assert_eq!(clamp_participant_page_limit(5000), 5000);
-        assert_eq!(clamp_participant_page_limit(99_999), MAX_PARTICIPANT_PAGE_LIMIT);
+        assert_eq!(
+            clamp_participant_page_limit(99_999),
+            MAX_PARTICIPANT_PAGE_LIMIT
+        );
     }
 }

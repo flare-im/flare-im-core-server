@@ -246,7 +246,11 @@ impl PushDomainService {
         let mut live = Vec::with_capacity(subscribed.len());
         let mut pruned = 0usize;
         for connection_id in subscribed {
-            if self.connection_query.connection_exists(&connection_id).await {
+            if self
+                .connection_query
+                .connection_exists(&connection_id)
+                .await
+            {
                 live.push(connection_id);
             } else {
                 self.conversation_subscriptions

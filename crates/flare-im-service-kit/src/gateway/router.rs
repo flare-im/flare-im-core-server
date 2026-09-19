@@ -22,7 +22,7 @@ use flare_grpc_proto::access_gateway::access_gateway_client::AccessGatewayClient
 use flare_grpc_proto::access_gateway::{
     DeliverToConversationRequest, PushAckRequest, PushAckResponse, PushCustomRequest,
     PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
-    PushResponse,
+    PushResponse, RelayRealtimeControlRequest,
 };
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
@@ -354,6 +354,53 @@ impl GatewayRouter {
         );
 
         Ok(client)
+    }
+
+    /// 轻量信令跨节点直转：把一条已聚合的 RealtimeControl 帧**广播给其余网关节点**，各节点再发给
+    /// 自己的本地订阅者。发起节点已经转给过自己的连接了，所以这里跳过 `skip_gateway_id`。
+    ///
+    /// best-effort，而且比消息更松：typing / presence 是有损的瞬时信号，单节点失败只记 trace，
+    /// 既不重试也不回报发送方——重试一条已经过时的「正在输入」没有意义。
+    pub async fn broadcast_relay_realtime_control(
+        &self,
+        request: RelayRealtimeControlRequest,
+        skip_gateway_id: Option<&str>,
+    ) {
+        let gateway_ids: Vec<String> = match self.service_discover {
+            Some(ref sd) => peer_gateway_ids(
+                sd.get_instances()
+                    .await
+                    .into_iter()
+                    .map(|inst| inst.instance_id),
+                skip_gateway_id,
+            ),
+            None => Vec::new(),
+        };
+        // 没有服务发现就是单实例部署：本节点的直转已经覆盖了全部在线订阅者，没有对等节点要广播。
+        if gateway_ids.is_empty() {
+            return;
+        }
+        for gateway_id in gateway_ids {
+            match self.get_or_create_client(&gateway_id).await {
+                Ok(mut client) => {
+                    if let Err(e) = client
+                        .relay_realtime_control(tonic::Request::new(request.clone()))
+                        .await
+                    {
+                        tracing::trace!(
+                            gateway_id = %gateway_id,
+                            error = %e,
+                            "relay_realtime_control to gateway failed (ephemeral, ignored)"
+                        );
+                    }
+                }
+                Err(e) => tracing::trace!(
+                    gateway_id = %gateway_id,
+                    error = %e,
+                    "relay_realtime_control: get gateway client failed (ephemeral, ignored)"
+                ),
+            }
+        }
     }
 
     /// 统一读扩散：把会话消息**广播到所有网关节点**，各节点按本地会话订阅过滤投递。
@@ -700,6 +747,58 @@ mod tests {
         assert!(
             !legacy.is_retryable(),
             "system 变体不带 ErrorCode，预期不可重试（说明为何必须改用 localized）"
+        );
+    }
+}
+
+/// 广播目标：服务发现给出的实例去掉自己。
+///
+/// 发起节点已经转给过自己的本地订阅者，再收一遍就是**重复投递**——同一条「正在输入」在同一台设备上
+/// 出现两次。单独提出来是为了让这一条能被断言：循环体是管道，这里才是判断。
+fn peer_gateway_ids(
+    instances: impl Iterator<Item = String>,
+    skip_gateway_id: Option<&str>,
+) -> Vec<String> {
+    instances
+        .filter(|id| !id.is_empty() && Some(id.as_str()) != skip_gateway_id)
+        .collect()
+}
+
+#[cfg(test)]
+mod realtime_broadcast_tests {
+    use super::peer_gateway_ids;
+
+    #[test]
+    fn the_originating_node_is_not_one_of_its_own_peers() {
+        let instances = ["gw-a", "gw-b", "gw-c"].map(String::from);
+        assert_eq!(
+            peer_gateway_ids(instances.into_iter(), Some("gw-b")),
+            vec!["gw-a".to_string(), "gw-c".to_string()],
+            "broadcasting to itself would deliver the same signal twice on its own connections"
+        );
+    }
+
+    #[test]
+    fn without_a_local_id_every_instance_is_a_peer() {
+        let instances = ["gw-a", "gw-b"].map(String::from);
+        assert_eq!(
+            peer_gateway_ids(instances.into_iter(), None),
+            vec!["gw-a".to_string(), "gw-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_single_instance_deployment_has_no_peers() {
+        let instances = ["gw-a".to_string()];
+        assert!(peer_gateway_ids(instances.into_iter(), Some("gw-a")).is_empty());
+    }
+
+    #[test]
+    fn an_instance_without_an_id_is_not_a_target() {
+        let instances = ["", "gw-b"].map(String::from);
+        assert_eq!(
+            peer_gateway_ids(instances.into_iter(), Some("gw-a")),
+            vec!["gw-b".to_string()]
         );
     }
 }

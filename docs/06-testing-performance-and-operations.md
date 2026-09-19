@@ -4,7 +4,7 @@
 
 ## 本地依赖
 
-`deploy/docker-compose.yml` 拉起本地中间件：
+`deploy/docker-compose.yml` 是公共最小中间件；再叠一个 MQ 变体文件拉起本地依赖：
 
 | 服务 | 端口 | 用途 |
 |------|------|------|
@@ -12,18 +12,18 @@
 | Dragonfly（服务名/连接串仍为 `redis`） | `26379` | WAL、ACK、presence、缓存、seq 高水位。RESP 兼容、多核 shard-per-thread；快照持久化（无 AOF），无 TTL 的 seq 键由 noeviction 保护。 |
 | PostgreSQL / TimescaleDB | `25432` | 消息、事件、会话、媒体、ledger。 |
 | NATS JetStream | `24222` / `28222` | 默认 MQ。 |
-| Kafka | `29092` | 可选 MQ 后端。 |
+| Kafka | `29092` | 可选 MQ 后端，与 NATS 启动组合互斥。 |
 | RustFS | `29000` / `29001` | S3 兼容对象存储。 |
-| Prometheus | `29090` | 指标。 |
-| Grafana | `23000` | Dashboard。 |
-| Loki | `3100` | 日志。 |
-| Tempo | `3200` / `4317` / `4318` | Trace。 |
+| Prometheus | `29090` | 指标，可选观测栈。 |
+| Grafana | `23000` | Dashboard，可选观测栈。 |
+| Loki | `3100` | 日志，可选观测栈。 |
+| Tempo | `3200` / `4317` / `4318` | Trace，可选观测栈。 |
 
 启动：
 
 ```bash
 cd flare-im-core/deploy
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
 启动 Core 服务：

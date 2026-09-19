@@ -43,9 +43,7 @@ fn parse_record_change_chunk(raw: Option<&str>) -> usize {
 fn record_change_chunk_size() -> usize {
     static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
-        parse_record_change_chunk(
-            std::env::var("FLARE_USER_SYNC_INDEX_CHUNK").ok().as_deref(),
-        )
+        parse_record_change_chunk(std::env::var("FLARE_USER_SYNC_INDEX_CHUNK").ok().as_deref())
     })
 }
 
@@ -301,9 +299,7 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
 
                 match pipe.query_async::<Vec<redis::Value>>(&mut conn).await {
                     Ok(_) => break,
-                    Err(err)
-                        if !reloaded && err.kind() == redis::ErrorKind::NoScriptError =>
-                    {
+                    Err(err) if !reloaded && err.kind() == redis::ErrorKind::NoScriptError => {
                         reloaded = true;
                         let _: String = redis::cmd("SCRIPT")
                             .arg("LOAD")
@@ -413,10 +409,22 @@ mod tests {
         assert_eq!(parse_record_change_chunk(Some("1000")), 1000);
         assert_eq!(parse_record_change_chunk(Some(" 1000 ")), 1000);
         // 0 必须被拒：slice::chunks(0) 直接 panic
-        assert_eq!(parse_record_change_chunk(Some("0")), RECORD_CHANGE_CHUNK_DEFAULT);
-        assert_eq!(parse_record_change_chunk(Some("abc")), RECORD_CHANGE_CHUNK_DEFAULT);
-        assert_eq!(parse_record_change_chunk(Some("")), RECORD_CHANGE_CHUNK_DEFAULT);
-        assert_eq!(parse_record_change_chunk(Some("-1")), RECORD_CHANGE_CHUNK_DEFAULT);
+        assert_eq!(
+            parse_record_change_chunk(Some("0")),
+            RECORD_CHANGE_CHUNK_DEFAULT
+        );
+        assert_eq!(
+            parse_record_change_chunk(Some("abc")),
+            RECORD_CHANGE_CHUNK_DEFAULT
+        );
+        assert_eq!(
+            parse_record_change_chunk(Some("")),
+            RECORD_CHANGE_CHUNK_DEFAULT
+        );
+        assert_eq!(
+            parse_record_change_chunk(Some("-1")),
+            RECORD_CHANGE_CHUNK_DEFAULT
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 # Full Flare IM Core stack from a prebuilt image — no Rust toolchain required.
 #
 #   export FLARE_TOKEN_SECRET="$(openssl rand -base64 48 | tr -d '\n' | head -c 64)"
-#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml up -d
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
+#                  -f deploy/docker-compose.stack.yml up -d
 #
-# The infrastructure (Postgres / NATS / Consul / Redis / RustFS) comes from
-# docker-compose.yml; this file adds the Flare services on top. Keeping them in two files
-# means you can still run the infra alone when developing against a locally built binary.
+# The common infrastructure (Postgres / Consul / Redis / RustFS) comes from
+# docker-compose.yml. Add exactly one MQ variant file (docker-compose.nats.yml or
+# docker-compose.kafka.yml), then add this file for the Flare services.
 #
 # One image serves every service — they differ only by which binary runs, so twelve
 # near-identical images would multiply registry size and version skew for nothing.
@@ -63,6 +64,7 @@ x-flare-service: &flare-service
     # 一字不变），容器里由下面这几个变量覆盖成服务名。
     FLARE_POSTGRES_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-flare}:${POSTGRES_PASSWORD:-flare123}@postgres:5432/${POSTGRES_DB:-flare2}}
     FLARE_REDIS_URL_BASE: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
+    FLARE_MQ_DEFAULT_BACKEND: ${FLARE_MQ_DEFAULT_BACKEND:-nats}
     FLARE_NATS_URL: nats://nats:4222
     FLARE_KAFKA_BROKERS: kafka:9092
     FLARE_S3_ENDPOINT: http://rustfs:9000
@@ -70,7 +72,6 @@ x-flare-service: &flare-service
   depends_on:
     consul: {condition: service_started}
     postgres: {condition: service_started}
-    nats: {condition: service_started}
     redis: {condition: service_started}
 
 services:

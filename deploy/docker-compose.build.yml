@@ -2,6 +2,7 @@
 #
 #   cp deploy/.env.example deploy/.env      # 至少填上 FLARE_TOKEN_SECRET
 #   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.nats.yml \
 #                  -f deploy/docker-compose.stack.yml \
 #                  -f deploy/docker-compose.build.yml up -d
 #

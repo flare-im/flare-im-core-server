@@ -937,9 +937,10 @@ impl PushRouterHandler {
     /// 否则会把该弹的通知一起吞掉。
     fn events_are_read_receipts_only(req: &access_gateway::PushEventRequest) -> bool {
         !req.events.is_empty()
-            && req.events.iter().all(|event| {
-                EventType::try_from(event.r#type) == Ok(EventType::EventReadReceipt)
-            })
+            && req
+                .events
+                .iter()
+                .all(|event| EventType::try_from(event.r#type) == Ok(EventType::EventReadReceipt))
     }
 
     fn pure_conversation_ping(req: &access_gateway::PushEventRequest) -> Option<(String, u64)> {

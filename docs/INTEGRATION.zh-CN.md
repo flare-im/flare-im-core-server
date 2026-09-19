@@ -166,7 +166,7 @@ npm install @flare-im/vue-ui     # 111 个组件，Vue 3
 ### 最小可用
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d   # Postgres / NATS / Consul
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up -d
 ./scripts/start_server.sh
 ```
 

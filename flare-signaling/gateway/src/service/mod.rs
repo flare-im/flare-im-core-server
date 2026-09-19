@@ -3,8 +3,8 @@
 pub mod bootstrap;
 pub mod builder;
 pub mod display;
-pub mod startup;
 pub(crate) mod revoke_subscriber;
+pub mod startup;
 mod wire;
 
 pub use bootstrap::ApplicationBootstrap;
