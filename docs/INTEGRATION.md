@@ -191,6 +191,63 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up
 Services are stateless — scale horizontally by adding replicas; session routing goes
 through Consul discovery.
 
+### Tenants
+
+Every identity, conversation and message carries a `tenant_id` (default `"0"`; `""` and
+`"default"` normalize to it). The core is **not** the source of truth for tenants — a
+control plane (or your own admin system) is. The core only holds a **projection** and
+enforces three things from it.
+
+**Projection protocol.** The capability service implements
+`flare.control.v1.TenantProjection` (`flare-grpc-proto/proto/control_plane.proto`):
+
+| RPC | Core behaviour |
+|---|---|
+| `UpsertTenant(TenantProjectionUpsert)` | Writes the `tenants` row **only if `version` is greater than the stored one**; returns `ProjectionAck{accepted, current_version}`. Same or older versions are ignored, not errors. `im_tenant_id` must match `^[0-9A-Za-z_-]{1,32}$`; `version` must be `>= 1`. |
+| `GetVersions(GetVersionsRequest)` | Reconciliation: the `tenant_version` the core holds per tenant (`features_version` is always `0`). |
+| `UpsertFeatureFlags` | `UNIMPLEMENTED` — the core has capability switches (`CapabilityService.SetTenantCapabilitySwitch`), not product feature flags. |
+
+`deploy/init.sql` seeds tenant `"0"` as `active`, so a single-tenant deployment never has
+to push a projection.
+
+**Admission policy.** The signaling gateway checks the projection *after* the token is
+valid:
+
+- `suspended` / `deleting` → the connection is rejected with `TENANT_UNAVAILABLE`, whatever
+  the policy.
+- No projection for the tenant (or the projection database is unreachable) →
+  `ACCESS_GATEWAY_TENANT_POLICY` (or `services.access_gateway.tenant_policy`) decides:
+  `lenient` (default) admits, `strict` rejects. Use `strict` in production and `lenient`
+  for single-tenant / development setups. `strict` refuses to start without a projection
+  database.
+- The projection database is `services.access_gateway.postgres` (profile
+  `[postgres.tenant_runtime]` in `config/base.toml`) or
+  `ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL`. Without it the gateway does not enforce
+  tenant status at all.
+
+Gateways, ingest and sync read the projection through a process-local cache: at most one
+database read per tenant per second, bounded to 1024 tenants; unknown tenants and failed
+reads are cached for the same interval.
+
+**Quota keys.** `TenantQuota.core` is the only part of the quota the core enforces; `0`
+means "not limited by the tenant, fall back to the global config":
+
+| Key | Enforced by | Falls back to |
+|---|---|---|
+| `core.send_qps` | message-ingest `SendRateLimiter` (tenant scope) | `services.message_ingest.send_rate_limit_tenant_per_second` |
+| `core.sync_pull_qps` | signaling-gateway `SyncPullLimiter` (tenant scope) | `services.access_gateway.sync_pull_tenant_requests_per_second` |
+| `core.max_online_devices_per_user` | stored in the projection; not enforced by the core yet | — |
+
+`max_users`, `max_groups` and `max_group_members` are stored verbatim for the business
+layer and are not enforced by the core.
+
+**Suspending a tenant.** Push the projection with `status = SUSPENDED` (new connections
+are refused from the next cache refresh), then call `OnlineService.KickTenant{tenant_id,
+reason}`: the online service pages through `tenant:sessions:{tenant}` in Redis, removes
+every session and publishes each user id on the gateways' revoke channel
+(`{redis.token_store.namespace}:kick`) so open sockets are closed. The response carries
+the number of `(user, device)` pairs kicked.
+
 ---
 
 ## 4. What you implement

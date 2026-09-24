@@ -211,24 +211,26 @@ impl ThreadRepository for PostgresThreadRepository {
         let mut has_updates = false;
         let mut separated = query.separated(", ");
 
+        // `Separated::push_bind` 会在占位符前再插一个分隔符（生成 `title = , $1`），
+        // 列名后的绑定必须用 `push_bind_unseparated`。
         if let Some(title) = title {
             separated.push("title = ");
-            separated.push_bind(title);
+            separated.push_bind_unseparated(title);
             has_updates = true;
         }
         if let Some(is_pinned) = is_pinned {
             separated.push("is_pinned = ");
-            separated.push_bind(is_pinned);
+            separated.push_bind_unseparated(is_pinned);
             has_updates = true;
         }
         if let Some(is_locked) = is_locked {
             separated.push("is_locked = ");
-            separated.push_bind(is_locked);
+            separated.push_bind_unseparated(is_locked);
             has_updates = true;
         }
         if let Some(is_archived) = is_archived {
             separated.push("is_archived = ");
-            separated.push_bind(is_archived);
+            separated.push_bind_unseparated(is_archived);
             has_updates = true;
         }
 
@@ -237,7 +239,7 @@ impl ThreadRepository for PostgresThreadRepository {
         }
 
         separated.push("updated_at = ");
-        separated.push_bind(Utc::now());
+        separated.push_bind_unseparated(Utc::now());
 
         query.push(" WHERE tenant_id = ");
         query.push_bind(tenant_id);

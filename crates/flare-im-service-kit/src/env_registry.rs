@@ -635,6 +635,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Database,
     ),
     env(
+        "FLARE_TENANT_TEST_DATABASE_URL",
+        EnvOwner::Shared,
+        EnvPurpose::TestOnly,
+    ),
+    env(
         "MESSAGE_INGEST_HOOKS_CONFIG",
         EnvOwner::MessageIngest,
         EnvPurpose::ConfigPath,
