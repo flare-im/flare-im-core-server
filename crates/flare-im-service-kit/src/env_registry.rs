@@ -1398,6 +1398,41 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::Capability,
         EnvPurpose::TenantDefaults,
     ),
+    env(
+        "ACCESS_GATEWAY_MAX_HANDSHAKE_CONCURRENCY",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_METRICS_ADDRESS",
+        EnvOwner::AccessGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "ACCESS_GATEWAY_METRICS_PATH",
+        EnvOwner::AccessGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "ACCESS_GATEWAY_METRICS_PORT",
+        EnvOwner::AccessGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_EVENT_SLOW_LOG_MS",
+        EnvOwner::Orchestrator,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_SYNC_SLOW_LOG_MS",
+        EnvOwner::AccessGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_USER_SYNC_INDEX_CHUNK",
+        EnvOwner::Orchestrator,
+        EnvPurpose::RuntimeTuning,
+    ),
 ];
 
 pub fn registered_env_var(key: &str) -> Option<&'static EnvVarSpec> {
