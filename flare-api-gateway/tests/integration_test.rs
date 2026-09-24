@@ -61,7 +61,11 @@ fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {
     assert!(auth_router.contains("/tokens"));
     assert!(auth_router.contains("/tokens/refresh"));
     assert!(!auth_router.contains("gateway_auth_middleware"));
-    let handler = include_str!("../src/interface/http/auth_handler.rs");
+    // 只看生产代码:文件末尾的单元测试模块自己会 new 一个 TokenService 当夹具,不算网关签发。
+    let handler = include_str!("../src/interface/http/auth_handler.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
     assert!(handler.contains("TokenIssuer"));
     assert!(
         !handler.contains("TokenService::"),
