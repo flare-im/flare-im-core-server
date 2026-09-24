@@ -233,7 +233,7 @@ require_success = true
 error_policy = "fail_fast"
 
 [pre_send.selector]
-tenants = ["0"]
+# tenants 省略或为空 = 匹配所有租户；只对部分租户生效时写 tenants = ["tenant-a", "tenant-b"]
 conversation_types = ["single", "group"]
 message_types = ["text", "image", "custom"]
 

@@ -306,3 +306,78 @@ impl HookConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod selector_config_tests {
+    use super::*;
+
+    fn parse(toml_src: &str) -> HookConfig {
+        toml::from_str(toml_src).expect("hook config toml")
+    }
+
+    #[test]
+    fn omitted_or_empty_tenants_selects_every_tenant() {
+        let cfg = parse(
+            r#"
+[[pre_send]]
+name = "a"
+[pre_send.selector]
+conversation_types = ["single"]
+[pre_send.transport]
+type = "local"
+target = "noop"
+
+[[pre_send]]
+name = "b"
+[pre_send.selector]
+tenants = []
+[pre_send.transport]
+type = "local"
+target = "noop"
+"#,
+        );
+        for def in &cfg.pre_send {
+            assert!(
+                matches!(def.selector().tenants, MatchRule::Any),
+                "{}",
+                def.name
+            );
+            assert!(def.selector().tenants.matches(Some("0")));
+            assert!(def.selector().tenants.matches(Some("acme")));
+        }
+    }
+
+    #[test]
+    fn listed_tenants_become_exact_match() {
+        let cfg = parse(
+            r#"
+[[pre_send]]
+name = "a"
+[pre_send.selector]
+tenants = ["0"]
+[pre_send.transport]
+type = "local"
+target = "noop"
+"#,
+        );
+        let tenants = cfg.pre_send[0].selector().tenants;
+        assert!(tenants.matches(Some("0")));
+        assert!(!tenants.matches(Some("acme")));
+    }
+
+    #[test]
+    fn shipped_social_hook_config_matches_every_tenant() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/hooks.social.toml");
+        let content = std::fs::read_to_string(&root).expect("config/hooks.social.toml");
+        let cfg = parse(&content);
+        assert!(!cfg.pre_send.is_empty());
+        for def in &cfg.pre_send {
+            assert!(
+                def.selector().tenants.matches(Some("acme")),
+                "{} must not be pinned to tenant \"0\"",
+                def.name
+            );
+        }
+    }
+}
