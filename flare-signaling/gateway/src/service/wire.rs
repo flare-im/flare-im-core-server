@@ -162,12 +162,10 @@ pub async fn initialize(
         )
         .await
         {
-            Ok(router) => Arc::new(
-                crate::infrastructure::ports::GatewayRealtimeBroadcast::new(
-                    router,
-                    gateway_id.clone(),
-                ),
-            ),
+            Ok(router) => Arc::new(crate::infrastructure::ports::GatewayRealtimeBroadcast::new(
+                router,
+                gateway_id.clone(),
+            )),
             Err(err) => {
                 // 有损信号不值得让网关起不来：退回单节点行为并说清楚，而不是静默。
                 tracing::warn!(

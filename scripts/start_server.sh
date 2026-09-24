@@ -6,7 +6,7 @@
 #   - single: 启动单网关模式（默认，仅启动一个 access-gateway 实例）
 #   - multi:  启动多网关模式（启动多个 access-gateway 实例）
 #   - trace|debug: 第二参数，全量跟踪（RUST_LOG=trace；debug 为历史别名，仅排障）
-#   - 默认: 未设置环境变量 RUST_LOG 时使用「业务 debug + 第三方降噪」，避免 logs/ 暴涨
+#   - 默认: 未设置环境变量 RUST_LOG 时使用「业务 info + 第三方降噪」，避免 logs/ 暴涨
 #
 # Hook 配置档（推荐专用脚本）：
 #   ./scripts/start_server_core.sh    — config/hooks.core.toml，不注册业务 Hook
@@ -36,6 +36,12 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
+LOG_PYTHON="$(command -v python3 || true)"
+if [ -z "$LOG_PYTHON" ]; then
+  echo "python3 not found: scripts/lib/rotating_service.py needs it to write bounded service logs" >&2
+  exit 1
+fi
+ROTATING_SERVICE="$SCRIPT_DIR/lib/rotating_service.py"
 LOCAL_GATEWAY_TOKEN_SECRET_FILE="$LOGS_DIR/.dev-token-secret"
 
 cleanup_launchctl_dev_labels() {
@@ -120,12 +126,14 @@ start_detached_process() {
     local log_file="$2"
     shift 2
 
+    # Wrapper PID remains the service handle; signals are forwarded to the child.
+    set -- "$LOG_PYTHON" "$ROTATING_SERVICE" --log "$log_file" -- "$@"
     DETACHED_PID=""
     if [ "${FLARE_USE_LAUNCHCTL:-0}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
         launchctl remove "$label" >/dev/null 2>&1 || true
         # 提高每个服务进程的 fd 上限（launchd 任务默认 soft 256；网关大群需上万连接）。
         # hard 为 unlimited，受 kern.maxfilesperproc 限制；取一个安全高值，失败不阻断启动。
-        launchctl submit -l "$label" -o "$log_file" -e "$log_file" -- \
+        launchctl submit -l "$label" -o /dev/null -e /dev/null -- \
             /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@"
 
         local waited=0
@@ -140,7 +148,7 @@ start_detached_process() {
         return 1
     fi
 
-    nohup /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null > "$log_file" 2>&1 &
+    nohup /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null >/dev/null 2>&1 &
     DETACHED_PID=$!
     return 0
 }
@@ -246,19 +254,19 @@ core_binaries_ready() {
     return 0
 }
 
-echo -e "${YELLOW}🧹 清除之前的日志...${NC}"
-# 清除之前的日志
-rm -rf "$LOGS_DIR"/*.log
-echo -e "${GREEN}   ✓ 清除完成${NC}"
+echo -e "${YELLOW}📋 准备有界日志目录...${NC}"
+# 日志由 rotating_service.py 管理；不要 unlink 运行中服务仍持有的文件。
+mkdir -p "$LOGS_DIR"
+echo -e "${GREEN}   ✓ 日志目录已准备${NC}"
 echo ""
 
 # 解析参数
 GATEWAY_MODE="${1:-single}"  # 默认单网关模式
 VERBOSE_LOG_MODE=""           # 第二参数 trace|debug 时启用全量 RUST_LOG=trace（仅排障）
 
-# 与 flare-server-core `default_env_filter` 同类项对齐：默认业务 debug，ORM/MQ/gRPC 栈降噪。
+# 与 flare-server-core `default_env_filter` 同类项对齐：默认业务 info，ORM/MQ/gRPC 栈降噪。
 # 勿默认 trace：会覆盖 TOML 降噪并让 sqlx 等把 logs/ 撑到数 GB。
-IM_CORE_DEFAULT_RUST_LOG='debug,hyper=warn,reqwest=warn,h2=warn,rdkafka=warn,tower=warn,tokio=warn,sqlx=warn,tantivy=warn,async_nats=warn,tonic=warn,redis=warn'
+IM_CORE_DEFAULT_RUST_LOG='info,hyper=warn,reqwest=warn,h2=warn,rdkafka=warn,tower=warn,tokio=warn,sqlx=warn,tantivy=warn,async_nats=warn,tonic=warn,redis=warn'
 
 if [ "$GATEWAY_MODE" != "single" ] && [ "$GATEWAY_MODE" != "multi" ]; then
     echo -e "${RED}错误: 无效的参数 '$GATEWAY_MODE'${NC}"
@@ -266,7 +274,7 @@ if [ "$GATEWAY_MODE" != "single" ] && [ "$GATEWAY_MODE" != "multi" ]; then
     echo "  - single: 启动单网关模式（默认）"
     echo "  - multi:  启动多网关模式"
     echo "  - trace|debug: 第二参数，全量跟踪（RUST_LOG=trace；debug 为历史别名）"
-    echo "  - 默认: 未设置环境变量 RUST_LOG 时使用业务 debug + 第三方降噪"
+    echo "  - 默认: 未设置环境变量 RUST_LOG 时使用业务 info + 第三方降噪"
     exit 1
 fi
 

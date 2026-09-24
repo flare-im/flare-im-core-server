@@ -262,7 +262,9 @@ impl SendDataDomainService {
             .await;
         // 本节点没有订阅者不代表别处没有：广播与本地投递数无关，否则「两个人各在一台网关上」
         // 这个最常见的情形恰好一条都收不到。
-        self.broadcast.broadcast(&conversation_id, relay_payload).await;
+        self.broadcast
+            .broadcast(&conversation_id, relay_payload)
+            .await;
     }
 
     /// 解析轻量信令的会话 ID：优先 RealtimeControlPacket.conversation_id，回退 typing 内层 conversation_id。
@@ -604,7 +606,11 @@ mod tests {
             "five keystrokes, one relay"
         );
         assert_eq!(
-            broadcast.calls.lock().expect("broadcast mutex poisoned").len(),
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .len(),
             1,
             "five keystrokes, one broadcast"
         );
@@ -697,7 +703,11 @@ mod tests {
             "no local relay when the sender is this node's only subscriber"
         );
         assert_eq!(
-            broadcast.calls.lock().expect("broadcast mutex poisoned").len(),
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .len(),
             1,
             "peers may have subscribers this node knows nothing about"
         );

@@ -593,3 +593,13 @@ cargo run --example business_push_client
 # 自定义 RUST_LOG 再开调试（例如只看 sqlx）
 RUST_LOG=info,sqlx=trace ./scripts/start_server.sh single debug
 ```
+
+## 本地服务日志容量限制
+
+`start_server.sh` 默认使用业务 `info` 和 `async_nats=warn` 等第三方降噪过滤。显式设置的 `RUST_LOG` 仍优先；修改过滤后需要重启服务才会生效。
+
+所有由此脚本启动的核心服务通过 `lib/rotating_service.py` 写入 stdout/stderr。每个日志文件默认最多 20 MiB，保留 `.1`～`.3` 三份历史，每个服务合计最多 80 MiB。写入按字节计数，因此超长单行也不会突破文件上限。旧的大日志在接管时仅保留末尾 20 MiB。
+
+可在启动前设置 `FLARE_LOG_MAX_BYTES`（正整数，单位字节）和 `FLARE_LOG_BACKUPS`（非负整数）。PID 文件记录日志包装进程；停止信号会转发给服务进程组，15 秒未退出则终止进程组。日志 `.lock` 文件用于防止多个包装进程写同一文件，不应在运行中删除。启动服务需要 Python 3。直接运行二进制、其他启动脚本或手动重定向不会自动获得此轮转保护。
+
+验证：`python3 scripts/lib/test_rotating_service.py`。

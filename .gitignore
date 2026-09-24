@@ -49,3 +49,6 @@ certs/
 
 # 代码索引工具的本机缓存（随每次索引变动，不进仓）
 /.codegraph/
+
+# Python bytecode from scripts/lib tests
+__pycache__/
