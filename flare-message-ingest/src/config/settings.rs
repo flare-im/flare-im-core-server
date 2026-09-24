@@ -120,6 +120,8 @@ pub struct MessageIngestConfig {
     pub send_rate_limit_max_tracked_keys: usize,
     /// WAL 后 MQ publish 阶段超时（毫秒），0 表示不启用额外阶段超时。
     pub send_publish_timeout_ms: u64,
+    /// 租户运行时投影库（`tenants` 表，读 `quota.core.send_qps`）；`None` = 配额回落全局限流配置。
+    pub tenant_runtime_postgres_url: Option<String>,
 }
 
 fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
@@ -608,6 +610,16 @@ impl MessageIngestConfig {
                     .and_then(|service| service.send_publish_timeout_ms)
             })
             .unwrap_or(5000);
+        let tenant_runtime_postgres_url = env::var("MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                let profile = service_config
+                    .as_ref()
+                    .and_then(|service| service.postgres.as_deref())?;
+                app.and_then(|cfg| cfg.postgres_profile(profile))
+                    .map(|profile| profile.url.clone())
+            });
 
         Self {
             mq_backend,
@@ -662,6 +674,7 @@ impl MessageIngestConfig {
             send_rate_limit_window_ms,
             send_rate_limit_max_tracked_keys,
             send_publish_timeout_ms,
+            tenant_runtime_postgres_url,
         }
     }
 

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_proto::common::{
     ContentVisibility, MessageRetentionPolicy, RetentionMode, RetentionTrigger, SendAckDurability,
 };
@@ -55,6 +56,8 @@ pub struct MessageIngestHandler {
     idempotency: Option<Arc<dyn crate::domain::repository::IngestIdempotencyStore>>,
     /// 发送入口限流（可选）：按 tenant / tenant+sender / tenant+conversation 保护摄入边界。
     send_rate_limiter: Option<Arc<SendRateLimiter>>,
+    /// 租户投影：`quota.core.send_qps` 优先于全局 tenant 阈值（0 = 回落）。
+    tenant_runtime: TenantRuntimeCache,
     /// WAL 后 MQ publish 阶段超时。持久消息超时后返回 WalAccepted，交给 WAL replay 恢复。
     send_publish_timeout: Option<Duration>,
 }
@@ -74,6 +77,7 @@ impl MessageIngestHandler {
             wal_cleanup_permits: Arc::new(Semaphore::new(MAX_BACKGROUND_WAL_CLEANUP_CONCURRENCY)),
             idempotency: None,
             send_rate_limiter: None,
+            tenant_runtime: TenantRuntimeCache::disabled(),
             send_publish_timeout: None,
         }
     }
@@ -84,6 +88,11 @@ impl MessageIngestHandler {
         store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>,
     ) -> Self {
         self.idempotency = Some(store);
+        self
+    }
+
+    pub fn with_tenant_runtime(mut self, tenant_runtime: TenantRuntimeCache) -> Self {
+        self.tenant_runtime = tenant_runtime;
         self
     }
 
@@ -328,7 +337,8 @@ impl MessageIngestHandler {
 
         if let Some(limiter) = self.send_rate_limiter.as_ref() {
             let rate_limit_start = Instant::now();
-            if let Err(error) = limiter.check(&tenant_id, &cmd.message) {
+            let tenant_send_qps = self.tenant_runtime.core_quota(&tenant_id).await.send_qps;
+            if let Err(error) = limiter.check(&tenant_id, tenant_send_qps, &cmd.message) {
                 self.metrics.observe_send_stage(
                     "rate_limit",
                     "rejected",

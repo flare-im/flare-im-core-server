@@ -3,6 +3,10 @@
 //! This is a per-process fixed-window guard for immediate backpressure at the
 //! send boundary. The keys are tenant-scoped so the same sender/conversation id
 //! in different tenants cannot interfere with each other.
+//!
+//! The tenant-wide threshold comes first from the control-plane projection
+//! (`quota.core.send_qps`, passed per call by the caller; `0` = not projected /
+//! unlimited) and only then falls back to the global `tenant_per_second`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,6 +35,8 @@ pub struct SendRateLimitConfig {
 }
 
 impl SendRateLimitConfig {
+    /// Whether the global configuration alone limits anything. A tenant quota from
+    /// the projection can still apply when this is `false`, as long as `enabled`.
     pub fn is_effective(&self) -> bool {
         self.enabled
             && (self.tenant_per_second > 0
@@ -94,15 +100,26 @@ impl SendRateLimiter {
         }
     }
 
-    pub fn check(&self, tenant_id: &str, message: &Message) -> Result<()> {
-        if !self.config.is_effective() {
+    /// `tenant_send_qps`: the tenant's projected `quota.core.send_qps`; `0` falls back to
+    /// the global `tenant_per_second`.
+    pub fn check(&self, tenant_id: &str, tenant_send_qps: u32, message: &Message) -> Result<()> {
+        if !self.config.enabled {
             return Ok(());
         }
-        self.check_at_millis(Self::now_millis(), tenant_id, message)
+        if !self.config.is_effective() && tenant_send_qps == 0 {
+            return Ok(());
+        }
+        self.check_at_millis(Self::now_millis(), tenant_id, tenant_send_qps, message)
     }
 
-    fn check_at_millis(&self, now_ms: u64, tenant_id: &str, message: &Message) -> Result<()> {
-        let checks = self.build_checks(tenant_id, message);
+    fn check_at_millis(
+        &self,
+        now_ms: u64,
+        tenant_id: &str,
+        tenant_send_qps: u32,
+        message: &Message,
+    ) -> Result<()> {
+        let checks = self.build_checks(tenant_id, tenant_send_qps, message);
         if checks.is_empty() {
             return Ok(());
         }
@@ -142,8 +159,13 @@ impl SendRateLimiter {
         Ok(())
     }
 
-    fn build_checks(&self, tenant_id: &str, message: &Message) -> Vec<RateLimitCheck> {
-        if !self.config.is_effective() {
+    fn build_checks(
+        &self,
+        tenant_id: &str,
+        tenant_send_qps: u32,
+        message: &Message,
+    ) -> Vec<RateLimitCheck> {
+        if !self.config.enabled {
             return Vec::new();
         }
 
@@ -152,11 +174,16 @@ impl SendRateLimiter {
         let conversation = non_empty_or(&message.conversation_id, "_");
         let mut checks = Vec::with_capacity(3);
 
-        if self.config.tenant_per_second > 0 {
+        let tenant_limit = if tenant_send_qps > 0 {
+            tenant_send_qps
+        } else {
+            self.config.tenant_per_second
+        };
+        if tenant_limit > 0 {
             checks.push(RateLimitCheck {
                 key: format!("tenant:{tenant}"),
                 scope: RateLimitScope::Tenant,
-                limit: self.config.tenant_per_second,
+                limit: tenant_limit,
             });
         }
         if self.config.tenant_sender_per_second > 0 {
@@ -254,8 +281,8 @@ mod tests {
         });
         let msg = message("u1", "c1");
 
-        limiter.check_at_millis(0, "tenant-a", &msg).unwrap();
-        limiter.check_at_millis(0, "tenant-a", &msg).unwrap();
+        limiter.check_at_millis(0, "tenant-a", 0, &msg).unwrap();
+        limiter.check_at_millis(0, "tenant-a", 0, &msg).unwrap();
     }
 
     #[test]
@@ -268,10 +295,10 @@ mod tests {
         });
         let msg = message("u1", "c1");
 
-        limiter.check_at_millis(10, "tenant-a", &msg).unwrap();
-        limiter.check_at_millis(20, "tenant-a", &msg).unwrap();
+        limiter.check_at_millis(10, "tenant-a", 0, &msg).unwrap();
+        limiter.check_at_millis(20, "tenant-a", 0, &msg).unwrap();
         let err = limiter
-            .check_at_millis(30, "tenant-a", &msg)
+            .check_at_millis(30, "tenant-a", 0, &msg)
             .expect_err("third request should be rate limited");
 
         assert_eq!(err.code(), Some(ErrorCode::MessageRateLimitExceeded));
@@ -289,9 +316,9 @@ mod tests {
         let first = message("u1", "c1");
         let second = message("u2", "c1");
 
-        limiter.check_at_millis(10, "tenant-a", &first).unwrap();
-        assert!(limiter.check_at_millis(20, "tenant-a", &second).is_err());
-        limiter.check_at_millis(20, "tenant-b", &second).unwrap();
+        limiter.check_at_millis(10, "tenant-a", 0, &first).unwrap();
+        assert!(limiter.check_at_millis(20, "tenant-a", 0, &second).is_err());
+        limiter.check_at_millis(20, "tenant-b", 0, &second).unwrap();
     }
 
     #[test]
@@ -304,8 +331,56 @@ mod tests {
         });
         let msg = message("u1", "c1");
 
-        limiter.check_at_millis(999, "tenant-a", &msg).unwrap();
-        assert!(limiter.check_at_millis(999, "tenant-a", &msg).is_err());
-        limiter.check_at_millis(1000, "tenant-a", &msg).unwrap();
+        limiter.check_at_millis(999, "tenant-a", 0, &msg).unwrap();
+        assert!(limiter.check_at_millis(999, "tenant-a", 0, &msg).is_err());
+        limiter.check_at_millis(1000, "tenant-a", 0, &msg).unwrap();
+    }
+
+    #[test]
+    fn tenant_quota_overrides_global_tenant_threshold() {
+        let limiter = SendRateLimiter::new(SendRateLimitConfig {
+            enabled: true,
+            tenant_per_second: 1_000,
+            window_ms: 1000,
+            ..Default::default()
+        });
+        let msg = message("u1", "c1");
+
+        limiter.check_at_millis(10, "tenant-a", 2, &msg).unwrap();
+        limiter.check_at_millis(20, "tenant-a", 2, &msg).unwrap();
+        let err = limiter
+            .check_at_millis(30, "tenant-a", 2, &msg)
+            .expect_err("projected quota of 2/s must win over the global 1000/s");
+        assert_eq!(err.code(), Some(ErrorCode::MessageRateLimitExceeded));
+        assert!(err.reason().contains("rate limit"));
+        // 无配额的租户仍按全局阈值。
+        limiter.check_at_millis(30, "tenant-b", 0, &msg).unwrap();
+    }
+
+    #[test]
+    fn tenant_quota_applies_when_global_config_limits_nothing() {
+        let limiter = SendRateLimiter::new(SendRateLimitConfig {
+            enabled: true,
+            window_ms: 1000,
+            ..Default::default()
+        });
+        assert!(!limiter.config.is_effective());
+        let msg = message("u1", "c1");
+
+        limiter.check("tenant-a", 0, &msg).unwrap();
+        limiter.check("tenant-a", 0, &msg).unwrap();
+        limiter.check_at_millis(10, "tenant-a", 1, &msg).unwrap();
+        assert!(limiter.check_at_millis(20, "tenant-a", 1, &msg).is_err());
+    }
+
+    #[test]
+    fn disabled_config_ignores_tenant_quota() {
+        let limiter = SendRateLimiter::new(SendRateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let msg = message("u1", "c1");
+        limiter.check("tenant-a", 1, &msg).unwrap();
+        limiter.check("tenant-a", 1, &msg).unwrap();
     }
 }

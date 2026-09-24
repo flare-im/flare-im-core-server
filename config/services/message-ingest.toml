@@ -22,6 +22,9 @@ metrics_enabled = true
 metrics_address = "0.0.0.0"
 metrics_port = 19180
 metrics_path = "/metrics"
+# 租户投影库（base.toml [postgres.tenant_runtime]）：tenant 维度阈值先取投影 quota.core.send_qps
+# （0 = 回落下面的全局值）；可用 MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL 覆盖，不配置则只用全局值。
+postgres = "tenant_runtime"
 send_rate_limit_enabled = true
 send_rate_limit_tenant_per_second = 50000
 send_rate_limit_tenant_sender_per_second = 1000

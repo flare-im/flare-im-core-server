@@ -187,6 +187,20 @@ pub async fn initialize(
         ingest_metrics.clone(),
     )
     .with_idempotency(idempotency_store);
+    // 租户运行时投影（tenants 表）：发送限流的 tenant 阈值先取投影 quota.core.send_qps。
+    let tenant_runtime = match config.tenant_runtime_postgres_url.as_deref() {
+        Some(url) => flare_im_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
+            .await
+            .map_err(flare_server_core::error::FlareError::system)?,
+        None => {
+            tracing::info!(
+                "tenant runtime database not configured; send quotas fall back to global rate limits"
+            );
+            flare_im_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
+        }
+    };
+    message_ingest_handler = message_ingest_handler.with_tenant_runtime(tenant_runtime.clone());
+
     let send_rate_limit_config = SendRateLimitConfig {
         enabled: config.send_rate_limit_enabled,
         tenant_per_second: config.send_rate_limit_tenant_per_second,
@@ -195,7 +209,10 @@ pub async fn initialize(
         window_ms: config.send_rate_limit_window_ms,
         max_tracked_keys: config.send_rate_limit_max_tracked_keys,
     };
-    if send_rate_limit_config.is_effective() {
+    // 全局阈值全 0 但投影可用时限流器仍要在：租户配额可能随时投影进来。
+    if send_rate_limit_config.is_effective()
+        || (send_rate_limit_config.enabled && tenant_runtime.is_enabled())
+    {
         message_ingest_handler = message_ingest_handler
             .with_send_rate_limiter(Arc::new(SendRateLimiter::new(send_rate_limit_config)));
     }
