@@ -75,7 +75,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
             .into_inner()
             .im_tenant_ids
             .into_iter()
-            .map(|id| flare_im_contracts::utils::normalize_tenant_id(id))
+            .map(flare_im_contracts::utils::normalize_tenant_id)
             .collect();
         let versions = tenant_projection_versions(self.repository.as_ref(), &ids)
             .await

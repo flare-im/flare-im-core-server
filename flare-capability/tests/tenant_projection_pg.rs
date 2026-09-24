@@ -124,7 +124,7 @@ async fn projection_round_trips_through_postgres() {
     assert!(projected_at.is_some());
 
     // GetVersions：按 id 过滤与全量都含它；init.sql 预置的 "0" 也在全量里。
-    let filtered = repo.versions(&[tenant.clone()]).await.unwrap();
+    let filtered = repo.versions(std::slice::from_ref(&tenant)).await.unwrap();
     assert_eq!(filtered, vec![(tenant.clone(), 6)]);
     let all = repo.versions(&[]).await.unwrap();
     assert!(all.iter().any(|(id, v)| id == &tenant && *v == 6));

@@ -441,35 +441,6 @@ impl ConversationRepository for RedisConversationRepository {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_record_without_tenant_reads_as_default_tenant() {
-        let payload = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0}"#;
-        let record = RedisConversationRepository::parse_record(payload).unwrap();
-        assert_eq!(record.tenant_id, "0");
-
-        let with_tenant = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0,"tenant_id":"acme"}"#;
-        assert_eq!(
-            RedisConversationRepository::parse_record(with_tenant)
-                .unwrap()
-                .tenant_id,
-            "acme"
-        );
-    }
-
-    #[test]
-    fn tenant_index_key_and_member_shape() {
-        assert_eq!(
-            RedisConversationRepository::tenant_sessions_key("acme"),
-            "tenant:sessions:acme"
-        );
-        assert_eq!(tenant_session_member("u1", "d1"), "u1:d1");
-    }
-}
-
 /// 在线状态发布者实现（基于 Redis Pub/Sub）
 pub struct RedisPresencePublisher {
     client: Arc<redis::Client>,
@@ -552,5 +523,34 @@ impl crate::domain::repository::PresencePublisher for RedisPresencePublisher {
                 flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_record_without_tenant_reads_as_default_tenant() {
+        let payload = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0}"#;
+        let record = RedisConversationRepository::parse_record(payload).unwrap();
+        assert_eq!(record.tenant_id, "0");
+
+        let with_tenant = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0,"tenant_id":"acme"}"#;
+        assert_eq!(
+            RedisConversationRepository::parse_record(with_tenant)
+                .unwrap()
+                .tenant_id,
+            "acme"
+        );
+    }
+
+    #[test]
+    fn tenant_index_key_and_member_shape() {
+        assert_eq!(
+            RedisConversationRepository::tenant_sessions_key("acme"),
+            "tenant:sessions:acme"
+        );
+        assert_eq!(tenant_session_member("u1", "d1"), "u1:d1");
     }
 }
