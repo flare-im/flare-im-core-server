@@ -12,6 +12,9 @@ use tokio::time::interval;
 /// ACK归档记录
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AckArchiveRecord {
+    /// 租户ID（主键的一部分；缺省 "0"）
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
     /// 消息ID
     pub message_id: String,
     /// 用户ID
@@ -28,6 +31,10 @@ pub struct AckArchiveRecord {
     pub metadata: Option<serde_json::Value>,
     /// 归档时间
     pub archived_at: i64,
+}
+
+fn default_tenant_id() -> String {
+    "0".to_string()
 }
 
 /// ACK归档器
@@ -93,11 +100,12 @@ impl AckArchiver {
         // 构建批量插入语句
         let mut query_builder = sqlx::QueryBuilder::new(
             "INSERT INTO ack_archive_records 
-             (message_id, user_id, ack_type, ack_status, timestamp, importance_level, metadata, archived_at)"
+             (tenant_id, message_id, user_id, ack_type, ack_status, timestamp, importance_level, metadata, archived_at)"
         );
 
         query_builder.push_values(batch, |mut b, record| {
-            b.push_bind(&record.message_id)
+            b.push_bind(&record.tenant_id)
+                .push_bind(&record.message_id)
                 .push_bind(&record.user_id)
                 .push_bind(&record.ack_type)
                 .push_bind(&record.ack_status)
@@ -118,6 +126,7 @@ impl AckArchiver {
     /// 查询归档的ACK记录
     pub async fn query_archived_acks(
         &self,
+        tenant_id: &str,
         message_id: Option<&str>,
         user_id: Option<&str>,
         start_time: Option<i64>,
@@ -125,9 +134,10 @@ impl AckArchiver {
         limit: Option<u32>,
     ) -> Result<Vec<AckArchiveRecord>, Box<dyn std::error::Error>> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            "SELECT message_id, user_id, ack_type, ack_status, timestamp, importance_level, metadata, archived_at 
-             FROM ack_archive_records WHERE 1=1"
+            "SELECT tenant_id, message_id, user_id, ack_type, ack_status, timestamp, importance_level, metadata, archived_at 
+             FROM ack_archive_records WHERE tenant_id = "
         );
+        query_builder.push_bind(tenant_id);
 
         if let Some(msg_id) = message_id {
             query_builder.push(" AND message_id = ").push_bind(msg_id);
@@ -215,6 +225,7 @@ mod tests {
         let archiver = AckArchiver::new(db_pool, 100);
 
         let record = AckArchiveRecord {
+            tenant_id: "0".to_string(),
             message_id: "test_msg_1".to_string(),
             user_id: "user_1".to_string(),
             ack_type: "client".to_string(),
@@ -233,6 +244,7 @@ mod tests {
 
         // 查询归档记录
         let records = archiver.query_archived_acks(
+            "0",
             Some("test_msg_1"),
             Some("user_1"),
             None,

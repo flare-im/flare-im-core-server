@@ -24,26 +24,35 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- ============================================================================
 
 DROP TABLE IF EXISTS tenants CASCADE;
+-- 租户投影（真源在控制面；核经 flare.control.v1.TenantProjection 接收，只按 version 幂等写入，业务路径只读）
 CREATE TABLE tenants (
     tenant_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'deleting')),
     config JSONB DEFAULT '{}'::jsonb,
     quota JSONB DEFAULT '{}'::jsonb,
+    version BIGINT NOT NULL DEFAULT 0,
+    projected_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE tenants IS '租户表（多租户隔离）';
-COMMENT ON COLUMN tenants.tenant_id IS '租户 ID（主键）';
+COMMENT ON TABLE tenants IS '租户投影表（真源在控制面，核只按 version 幂等写入）';
+COMMENT ON COLUMN tenants.tenant_id IS '租户 ID（主键；数据面 im_tenant_id，默认租户 "0"）';
 COMMENT ON COLUMN tenants.name IS '租户名称';
 COMMENT ON COLUMN tenants.description IS '租户描述';
-COMMENT ON COLUMN tenants.status IS '状态：active / suspended / deleted';
-COMMENT ON COLUMN tenants.config IS '租户配置（JSON）';
-COMMENT ON COLUMN tenants.quota IS '租户配额（JSON）';
+COMMENT ON COLUMN tenants.status IS '状态：active / suspended / deleting（suspended 与 deleting 都拒绝新连接）';
+COMMENT ON COLUMN tenants.config IS '控制面透传的 settings_json（品牌 / locale 等，核不解释）';
+COMMENT ON COLUMN tenants.quota IS '租户配额 JSON：{max_users, max_groups, max_group_members, core{send_qps, sync_pull_qps, max_online_devices_per_user}}；0 = 不限';
+COMMENT ON COLUMN tenants.version IS '控制面全局单调版本；收到的 version 不大于本值即丢弃';
+COMMENT ON COLUMN tenants.projected_at IS '最近一次接受投影的时间';
 COMMENT ON COLUMN tenants.created_at IS '创建时间';
 COMMENT ON COLUMN tenants.updated_at IS '更新时间';
 CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+-- 默认租户预置为 active：单租户 / 开发环境无需先推投影即可使用
+INSERT INTO tenants (tenant_id, name, status)
+VALUES ('0', 'default', 'active')
+ON CONFLICT (tenant_id) DO NOTHING;
 
 DROP TABLE IF EXISTS alert_rules CASCADE;
 CREATE TABLE alert_rules (
@@ -454,7 +463,8 @@ CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON messa
 DROP TABLE IF EXISTS thread_participants CASCADE;
 DROP TABLE IF EXISTS threads CASCADE;
 CREATE TABLE threads (
-    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT '0',
+    id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     root_message_id TEXT NOT NULL,
     title TEXT,
@@ -469,9 +479,11 @@ CREATE TABLE threads (
     is_archived BOOLEAN NOT NULL DEFAULT FALSE,
     extra JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, id)
 );
 COMMENT ON TABLE threads IS '话题/子线程（ThreadInfo）；与 PostgresThreadRepository 当前查询列对齐';
+COMMENT ON COLUMN threads.tenant_id IS '租户 ID（主键的一部分）';
 COMMENT ON COLUMN threads.id IS '话题 ID，通常等于 root_message_id';
 COMMENT ON COLUMN threads.conversation_id IS '所属会话 ID';
 COMMENT ON COLUMN threads.root_message_id IS '根消息 server_id（话题入口）';
@@ -488,7 +500,7 @@ COMMENT ON COLUMN threads.is_archived IS '是否归档';
 COMMENT ON COLUMN threads.extra IS '扩展属性';
 COMMENT ON COLUMN threads.created_at IS '创建时间';
 COMMENT ON COLUMN threads.updated_at IS '更新时间';
-CREATE INDEX IF NOT EXISTS idx_threads_conversation_id ON threads(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_threads_conversation_id ON threads(tenant_id, conversation_id);
 CREATE INDEX IF NOT EXISTS idx_threads_root_message_id ON threads(root_message_id);
 CREATE INDEX IF NOT EXISTS idx_threads_creator_id ON threads(creator_id);
 CREATE INDEX IF NOT EXISTS idx_threads_last_reply_at ON threads(last_reply_at DESC);
@@ -496,6 +508,7 @@ CREATE INDEX IF NOT EXISTS idx_threads_is_pinned ON threads(is_pinned) WHERE is_
 CREATE INDEX IF NOT EXISTS idx_threads_is_archived ON threads(is_archived) WHERE is_archived = FALSE;
 
 CREATE TABLE thread_participants (
+    tenant_id TEXT NOT NULL DEFAULT '0',
     thread_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     first_participated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -503,9 +516,10 @@ CREATE TABLE thread_participants (
     reply_count INT NOT NULL DEFAULT 0,
     is_muted BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (thread_id, user_id)
+    PRIMARY KEY (tenant_id, thread_id, user_id)
 );
 COMMENT ON TABLE thread_participants IS '话题参与者表；用于话题通知、参与者数与静音状态';
+COMMENT ON COLUMN thread_participants.tenant_id IS '租户 ID（主键的一部分）';
 COMMENT ON COLUMN thread_participants.thread_id IS '话题 ID';
 COMMENT ON COLUMN thread_participants.user_id IS '用户 ID';
 COMMENT ON COLUMN thread_participants.first_participated_at IS '首次参与时间';
@@ -513,8 +527,7 @@ COMMENT ON COLUMN thread_participants.last_participated_at IS '最后参与时�
 COMMENT ON COLUMN thread_participants.reply_count IS '该用户在此话题的回复数';
 COMMENT ON COLUMN thread_participants.is_muted IS '是否静音';
 COMMENT ON COLUMN thread_participants.updated_at IS '更新时间';
-CREATE INDEX IF NOT EXISTS idx_thread_participants_thread_id ON thread_participants(thread_id);
-CREATE INDEX IF NOT EXISTS idx_thread_participants_user_id ON thread_participants(user_id);
+CREATE INDEX IF NOT EXISTS idx_thread_participants_user_id ON thread_participants(tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_thread_participants_last_participated_at ON thread_participants(last_participated_at DESC);
 
 -- ============================================================================
@@ -743,7 +756,8 @@ CREATE INDEX IF NOT EXISTS idx_media_references_tenant_scope_lookup
 
 DROP TABLE IF EXISTS ack_archive_records CASCADE;
 CREATE TABLE ack_archive_records (
-    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT '0',
+    id BIGSERIAL NOT NULL,
     message_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     ack_type TEXT NOT NULL,
@@ -751,9 +765,11 @@ CREATE TABLE ack_archive_records (
     timestamp BIGINT NOT NULL,
     importance_level SMALLINT NOT NULL DEFAULT 1 CHECK (importance_level BETWEEN 1 AND 3),
     metadata JSONB,
-    archived_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+    archived_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    PRIMARY KEY (tenant_id, id)
 );
 COMMENT ON TABLE ack_archive_records IS 'ACK 归档记录表，用于审计和分析 ACK 日志';
+COMMENT ON COLUMN ack_archive_records.tenant_id IS '租户 ID（主键的一部分）';
 COMMENT ON COLUMN ack_archive_records.message_id IS '消息 ID';
 COMMENT ON COLUMN ack_archive_records.user_id IS '用户 ID';
 COMMENT ON COLUMN ack_archive_records.ack_type IS 'ACK 类型';
@@ -762,11 +778,11 @@ COMMENT ON COLUMN ack_archive_records.timestamp IS 'ACK 时间戳';
 COMMENT ON COLUMN ack_archive_records.importance_level IS '重要性等级：1=低 2=中 3=高';
 COMMENT ON COLUMN ack_archive_records.metadata IS '扩展元数据';
 COMMENT ON COLUMN ack_archive_records.archived_at IS '归档时间戳';
-CREATE INDEX IF NOT EXISTS idx_ack_archive_message_id ON ack_archive_records(message_id);
-CREATE INDEX IF NOT EXISTS idx_ack_archive_user_id ON ack_archive_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_message_id ON ack_archive_records(tenant_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_user_id ON ack_archive_records(tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_ack_archive_timestamp_desc ON ack_archive_records(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_ack_archive_importance_level ON ack_archive_records(importance_level);
-CREATE INDEX IF NOT EXISTS idx_ack_archive_message_user_type ON ack_archive_records(message_id, user_id, ack_type);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_message_user_type ON ack_archive_records(tenant_id, message_id, user_id, ack_type);
 
 -- ============================================================================
 -- 10. Hook 引擎 + Capability 策略（flare-capability）
