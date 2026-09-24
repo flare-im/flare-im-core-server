@@ -10,6 +10,7 @@ pub mod health;
 pub mod metrics;
 pub mod runtime;
 pub mod service_helper;
+pub mod tenant_runtime;
 pub mod tracing;
 
 pub use flare_im_contracts::{Ctx, service_names};
@@ -49,4 +50,8 @@ pub use runtime::{
     build_service_runtime_plan, load_app_config_from_env, resolve_config_path,
 };
 pub use service_helper::ServiceHelper;
+pub use tenant_runtime::{
+    TenantAccessPolicy, TenantLookup, TenantRuntimeCache, TenantRuntimeCacheOptions,
+    TenantRuntimeSource,
+};
 pub use tracing::init_tracing_from_config;

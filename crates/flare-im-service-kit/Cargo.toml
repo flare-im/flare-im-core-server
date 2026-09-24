@@ -24,6 +24,7 @@ flare-im-contracts = { version = "1.0.3", path = "../flare-im-contracts" }
 flare-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
 hex = { workspace = true }
+moka = { workspace = true }
 once_cell = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -33,6 +34,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

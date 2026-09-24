@@ -7,6 +7,11 @@ use crate::Ctx;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod tenant;
+pub use tenant::{
+    TenantCoreQuota, TenantQuota, TenantRuntimeSnapshot, TenantStatus, is_valid_tenant_id,
+};
+
 pub type ConversationId = String;
 pub type UserId = String;
 pub type MessageId = String;

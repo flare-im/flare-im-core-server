@@ -7,8 +7,10 @@ use std::sync::Arc;
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 use crate::infrastructure::config::CapabilityRuntimeConfig;
+use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
 use crate::interface::grpc::{
     CapabilityGrpcServer, ExtensionPluginRouter, HookServiceServer, ImHookPluginServer,
+    TenantProjectionGrpcServer,
 };
 
 /// 应用上下文：接口层 gRPC 依赖 + 能力注册表 + 策略后端。
@@ -29,4 +31,6 @@ pub struct ApplicationContext {
     pub capability_grpc: CapabilityGrpcServer,
     /// runtime 配置快照（供插件装配阶段读取配置文件/环境融合后的结果）。
     pub capability_runtime: Arc<CapabilityRuntimeConfig>,
+    /// 控制面租户投影接收端（`flare.control.v1.TenantProjection`）；仅当配置了 PostgreSQL。
+    pub tenant_projection: Option<TenantProjectionGrpcServer<PostgresTenantProjectionRepository>>,
 }

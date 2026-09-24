@@ -16,6 +16,11 @@ use flare_server_core::context::{Context, Ctx};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use tokio::time::timeout;
 
+pub mod tenant_projection;
+pub use tenant_projection::{
+    TenantProjectionOutcome, TenantProjectionRecord, TenantProjectionValidationError,
+};
+
 /// Hook执行模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExecutionMode {

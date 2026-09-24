@@ -11,6 +11,8 @@ use std::sync::Arc;
 use flare_server_core::error::Result;
 
 use crate::infrastructure::capability::PluginRouteBook;
+use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
+use crate::interface::grpc::TenantProjectionGrpcServer;
 
 use crate::composition::process_config::CapabilityServiceConfig;
 use crate::composition::runtime_context::ApplicationContext;
@@ -35,12 +37,19 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
                 .runtime_config_file
                 .clone()
                 .or_else(|| config.config_file.clone()),
-            db_pool,
+            db_pool.clone(),
             hook.hook_governance.clone(),
             Arc::clone(&plugin_routes),
         )
         .await?;
     let capability_runtime = capability_grpc.runtime_config();
+
+    // 租户投影只在有库时可用：没有库就没有 `tenants` 表可写，控制面推送会得到 Unimplemented 的路由缺席错误。
+    let tenant_projection = db_pool.as_ref().map(|pool| {
+        TenantProjectionGrpcServer::new(Arc::new(PostgresTenantProjectionRepository::new(
+            Arc::clone(pool),
+        )))
+    });
 
     let extension_router = capability_registry.extension_router().await;
     let im_hook_plugin = ImHookPluginServer::new(
@@ -59,5 +68,6 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         capability_policy,
         capability_grpc,
         capability_runtime,
+        tenant_projection,
     })
 }

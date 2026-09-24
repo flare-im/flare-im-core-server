@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "flare-grpc-proto"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "flare-proto",
  "prost",
@@ -2080,6 +2080,7 @@ dependencies = [
  "flare-proto",
  "flare-server-core",
  "hex",
+ "moka",
  "once_cell",
  "prometheus",
  "prost",
@@ -2089,6 +2090,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

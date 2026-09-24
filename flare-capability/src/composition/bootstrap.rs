@@ -68,6 +68,7 @@ impl ApplicationBootstrap {
         let im_hook_plugin = context.im_hook_plugin;
         let capability_grpc = context.capability_grpc;
         let extension_router = context.extension_router;
+        let tenant_projection = context.tenant_projection;
 
         let runtime = runtime_plan
             .service_runtime()
@@ -98,11 +99,23 @@ impl ApplicationBootstrap {
                         ),
                     );
 
-                info!("HookPlugin + ExtensionPlugin (router) + CapabilityService registered");
+                let tenant_projection_service = tenant_projection.map(|server| {
+                    ContextLayer::new().allow_missing().layer(
+                        flare_grpc_proto::control::tenant_projection_server::TenantProjectionServer::new(
+                            server,
+                        ),
+                    )
+                });
+
+                info!(
+                    tenant_projection = tenant_projection_service.is_some(),
+                    "HookPlugin + ExtensionPlugin (router) + CapabilityService registered"
+                );
                 let server = Server::builder()
                     .add_service(hook_plugin_service)
                     .add_service(extension_plugin_service)
-                    .add_service(capability_service);
+                    .add_service(capability_service)
+                    .add_optional_service(tenant_projection_service);
 
                 server
                     .serve_with_shutdown(address_clone, async {

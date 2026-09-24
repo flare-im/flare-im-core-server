@@ -4,6 +4,7 @@ pub mod capability;
 pub mod extensions;
 pub mod hooks;
 pub mod shared;
+pub mod tenant_projection;
 
 pub use capability::{
     CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot,
@@ -11,3 +12,4 @@ pub use capability::{
 pub use extensions::ExtensionPluginRouter;
 pub use flare_grpc_proto::capability::capability_service_server::CapabilityServiceServer;
 pub use hooks::{HookServiceServer, ImHookPluginServer};
+pub use tenant_projection::TenantProjectionGrpcServer;
