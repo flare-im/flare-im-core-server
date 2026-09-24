@@ -179,6 +179,26 @@ pub async fn initialize(
         }
     };
 
+    // 8.6 租户运行时投影（tenants 表）：认证闸门 + sync 拉取配额共用一份缓存。
+    // 没配库就退化为「不校验状态、配额回落全局」；strict 无库已在配置层拒绝启动。
+    let tenant_runtime = match access_config.tenant_runtime_postgres_url.as_deref() {
+        Some(url) => flare_im_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
+            .await
+            .map_err(flare_server_core::error::FlareError::system)?,
+        None => {
+            info!(
+                policy = access_config.tenant_policy.as_str(),
+                "tenant runtime database not configured; tenant status is not enforced and quotas fall back to global limits"
+            );
+            flare_im_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
+        }
+    };
+    info!(
+        enabled = tenant_runtime.is_enabled(),
+        policy = access_config.tenant_policy.as_str(),
+        "tenant runtime cache ready"
+    );
+
     // 9. 长连接处理器
     let connection_handler = build_long_connection_handler(
         connection_handler_app.clone(),
@@ -186,6 +206,7 @@ pub async fn initialize(
         route_grpc_pool,
         storage_sync_pool,
         access_config.sync_pull_rate_limit_config(),
+        tenant_runtime.clone(),
         realtime_relay.clone(),
         realtime_broadcast,
     );
@@ -208,7 +229,7 @@ pub async fn initialize(
     ));
 
     // 12. 认证器
-    let authenticator = build_authenticator(&access_config).await?;
+    let authenticator = build_authenticator(&access_config, tenant_runtime).await?;
 
     // 13. 长连接服务器
     debug!(ws_port = %port_config.ws_port, quic_port = %port_config.quic_port, "Building long connection server");

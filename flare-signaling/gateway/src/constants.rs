@@ -15,6 +15,8 @@ pub const ENV_DEFAULT_TENANT_ID: &str = "ACCESS_GATEWAY_DEFAULT_TENANT_ID";
 pub const DEFAULT_TENANT_ID: &str = "0";
 /// Token 验证失败时的提示文案
 pub const AUTH_FAILURE_MSG_TOKEN_INVALID: &str = "Token 无效或已过期";
+/// 租户被停用 / 删除中 / 严格模式下未投影时的拒连错误码（原样下发给客户端）
+pub const AUTH_FAILURE_MSG_TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
 
 /// Router `RouteMessage` / `RouteEvent` / `RouteAck` / `RouteData` 默认 SVID（与 `router.proto` 约定一致）
 pub const DEFAULT_ROUTE_SVID: &str = "svid.im";

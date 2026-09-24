@@ -14,6 +14,7 @@ use crate::infrastructure::ports::{
     RouterMessageCommandPort, SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
 };
 use crate::interface::link::LongConnectionHandler;
+use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_server_core::auth::{
     AuthProviderMode, RedisTokenStore, TokenService, build_core_jwt_token_validator,
     build_http_hook_token_validator,
@@ -21,9 +22,10 @@ use flare_server_core::auth::{
 
 type SharedAuthenticator = Arc<dyn flare_core::server::auth::Authenticator + Send + Sync>;
 
-/// 构建认证器
+/// 构建认证器（token 校验 + 租户投影闸门）
 pub async fn build_authenticator(
     config: &AccessGatewayConfig,
+    tenant_runtime: TenantRuntimeCache,
 ) -> flare_server_core::error::Result<SharedAuthenticator> {
     use tracing::{info, warn};
 
@@ -76,6 +78,8 @@ pub async fn build_authenticator(
 
     Ok(Arc::new(crate::application::handlers::AuthHandler::new(
         token_validator,
+        tenant_runtime,
+        config.tenant_policy,
     )))
 }
 
@@ -87,6 +91,7 @@ pub fn build_long_connection_handler(
     route_pool: Arc<SignalingRouteGrpcPool>,
     storage_sync_pool: Arc<StorageSyncGrpcPool>,
     sync_pull_rate_limit_config: SyncPullRateLimitConfig,
+    tenant_runtime: TenantRuntimeCache,
     realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
     realtime_broadcast: Arc<dyn crate::domain::service::IRealtimeBroadcastPort>,
 ) -> Arc<LongConnectionHandler> {
@@ -99,7 +104,8 @@ pub fn build_long_connection_handler(
 
     let sync_service = Arc::new(
         SyncService::new(sync_port)
-            .with_pull_limiter(Arc::new(SyncPullLimiter::new(sync_pull_rate_limit_config))),
+            .with_pull_limiter(Arc::new(SyncPullLimiter::new(sync_pull_rate_limit_config)))
+            .with_tenant_runtime(tenant_runtime),
     );
     let send_event_service = Arc::new(SendEventDomainService::new(event_port));
 

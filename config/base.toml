@@ -191,6 +191,15 @@ acquire_timeout_seconds = 10
 idle_timeout_seconds = 300
 max_lifetime_seconds = 1800
 
+# 租户运行时投影（tenants 表）：网关 / ingest 每租户每秒最多一次点查，2 个连接足够
+[postgres.tenant_runtime]
+url = "${FLARE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
+max_connections = 2
+min_connections = 0
+acquire_timeout_seconds = 5
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+
 # 对象存储配置 - 简化为单一配置，通过环境变量或部署时配置选择具体后端
 # 默认使用 rusFS 对象存储配置
 [object_storage.default]

@@ -125,6 +125,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::RuntimeTuning,
     ),
     env(
+        "ACCESS_GATEWAY_TENANT_POLICY",
+        EnvOwner::AccessGateway,
+        EnvPurpose::TenantDefaults,
+    ),
+    env(
+        "ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL",
+        EnvOwner::AccessGateway,
+        EnvPurpose::Database,
+    ),
+    env(
         "ACCESS_GATEWAY_SYNC_PULL_TENANT_BURST",
         EnvOwner::AccessGateway,
         EnvPurpose::RuntimeTuning,
@@ -618,6 +628,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "MESSAGE_INGEST_EXTENSION_TENANT_ALLOWLIST",
         EnvOwner::MessageIngest,
         EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL",
+        EnvOwner::MessageIngest,
+        EnvPurpose::Database,
     ),
     env(
         "MESSAGE_INGEST_HOOKS_CONFIG",

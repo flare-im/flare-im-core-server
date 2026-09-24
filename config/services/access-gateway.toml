@@ -26,7 +26,17 @@ compression_algorithm = "gzip"  # 可选值: none, gzip, zstd（默认: none）
 enable_encryption = false  # 是否启用加密（默认: false）
 encryption_key = "01234567890123456789012345678901"  # 32字节密钥或64字符hex字符串（请在生产环境中修改为安全的密钥）
 
+# 租户投影（控制面 → 核 tenants 表）：token 合法后再看租户状态。
+# postgres 指向 base.toml 的 [postgres.tenant_runtime]（可用 ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL 覆盖）；
+# 不配置则不校验租户状态、sync 配额回落全局阈值。
+postgres = "tenant_runtime"
+# 未知租户（本地无投影）策略：lenient = 放行（默认，单租户/开发无需先推投影）；strict = 拒绝（生产），
+# strict 下投影库不可达也拒绝。suspended / deleting 的租户在两种策略下都拒绝，错误码 TENANT_UNAVAILABLE。
+# 可用 ACCESS_GATEWAY_TENANT_POLICY 覆盖。
+tenant_policy = "lenient"
+
 # Sync 拉取限流（tenant + user 双令牌桶，防登录风暴叠加大群 ping 拉取风暴）
+# 租户阈值先取投影 quota.core.sync_pull_qps（0 = 回落下面的全局 tenant 值）
 # sync_pull_rate_limit_enabled = true
 # sync_pull_user_requests_per_second = 20
 # sync_pull_user_burst = 60

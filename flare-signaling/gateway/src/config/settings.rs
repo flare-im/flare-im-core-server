@@ -9,6 +9,7 @@ use flare_im_service_kit::config::{
     TrustedTokenIssuerConfig,
 };
 use flare_im_service_kit::gateway::require_secure_token_secret;
+use flare_im_service_kit::tenant_runtime::TenantAccessPolicy;
 use flare_server_core::auth::AuthProviderMode;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
@@ -76,6 +77,10 @@ pub struct AccessGatewayConfig {
     pub sync_pull_tenant_requests_per_second: u32,
     /// 单租户同步拉取突发容量
     pub sync_pull_tenant_burst: u32,
+    /// 未知租户（本地无投影）接入策略；默认宽松，生产开严格。
+    pub tenant_policy: TenantAccessPolicy,
+    /// 租户运行时投影库（`tenants` 表）；`None` = 不校验租户状态、配额回落全局。
+    pub tenant_runtime_postgres_url: Option<String>,
 }
 
 impl AccessGatewayConfig {
@@ -230,6 +235,37 @@ impl AccessGatewayConfig {
             .or(service.sync_pull_tenant_burst)
             .unwrap_or(sync_pull_defaults.tenant_burst);
 
+        // 租户投影：策略 env > toml > lenient；库 env > toml profile > 无。
+        let tenant_policy = match TenantAccessPolicy::from_env("ACCESS_GATEWAY_TENANT_POLICY")
+            .map_err(config_error)?
+        {
+            Some(policy) => policy,
+            None => match service.tenant_policy.as_deref() {
+                Some(raw) => TenantAccessPolicy::parse(raw).ok_or_else(|| {
+                    config_error(format!(
+                        "services.access_gateway.tenant_policy must be `lenient` or `strict`, got `{raw}`"
+                    ))
+                })?,
+                None => TenantAccessPolicy::default(),
+            },
+        };
+        let tenant_runtime_postgres_url =
+            std::env::var("ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL")
+                .ok()
+                .and_then(non_empty)
+                .or_else(|| {
+                    service
+                        .postgres
+                        .as_deref()
+                        .and_then(|name| app.postgres_profile(name))
+                        .map(|profile| profile.url.clone())
+                });
+        if tenant_policy == TenantAccessPolicy::Strict && tenant_runtime_postgres_url.is_none() {
+            return Err(config_error(
+                "tenant_policy=strict requires a tenant runtime database (services.access_gateway.postgres or ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL)",
+            ));
+        }
+
         // 指标端点：与 ingest/orchestrator/storage-writer 同一套约定
         // （*_METRICS_ENABLED / _ADDRESS / _PORT / _PATH），默认开启。
         let metrics = {
@@ -282,6 +318,8 @@ impl AccessGatewayConfig {
             sync_pull_user_burst,
             sync_pull_tenant_requests_per_second,
             sync_pull_tenant_burst,
+            tenant_policy,
+            tenant_runtime_postgres_url,
         })
     }
 }

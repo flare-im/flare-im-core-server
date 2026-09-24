@@ -1,34 +1,72 @@
 use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
 use flare_core::server::{AuthResult, Authenticator};
+use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
 use flare_server_core::auth::{AuthenticatedPrincipal, TokenValidationRequest, TokenValidator};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 use crate::constants::{
-    AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID, ENV_DEFAULT_TENANT_ID,
-    METADATA_KEY_DEVICE_ID, METADATA_KEY_TENANT_ID, METADATA_KEY_USER_ID,
+    AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID,
+    ENV_DEFAULT_TENANT_ID, METADATA_KEY_DEVICE_ID, METADATA_KEY_TENANT_ID, METADATA_KEY_USER_ID,
 };
 
 pub struct AuthHandler {
     token_validator: Arc<dyn TokenValidator>,
     default_tenant_id: String,
+    /// 租户投影：token 合法后再看租户能不能接入。
+    tenant_runtime: TenantRuntimeCache,
+    tenant_policy: TenantAccessPolicy,
 }
 
 impl AuthHandler {
-    pub fn new(token_validator: Arc<dyn TokenValidator>) -> Self {
-        Self::with_default_tenant_id(token_validator, default_tenant_id())
+    pub fn new(
+        token_validator: Arc<dyn TokenValidator>,
+        tenant_runtime: TenantRuntimeCache,
+        tenant_policy: TenantAccessPolicy,
+    ) -> Self {
+        Self::with_default_tenant_id(
+            token_validator,
+            default_tenant_id(),
+            tenant_runtime,
+            tenant_policy,
+        )
     }
 
     pub fn with_default_tenant_id(
         token_validator: Arc<dyn TokenValidator>,
         default_tenant_id: impl Into<String>,
+        tenant_runtime: TenantRuntimeCache,
+        tenant_policy: TenantAccessPolicy,
     ) -> Self {
         Self {
             token_validator,
             default_tenant_id: default_tenant_id.into(),
+            tenant_runtime,
+            tenant_policy,
         }
+    }
+
+    /// 租户闸门：`suspended` / `deleting` 一律拒；未投影或投影库不可用按策略（宽松放行、严格拒绝）。
+    async fn tenant_admits(&self, tenant_id: &str, connection_id: &str) -> bool {
+        let lookup = self.tenant_runtime.lookup(tenant_id).await;
+        let admitted = lookup.admits_connection(self.tenant_policy);
+        if !admitted {
+            let reason = match &lookup {
+                TenantLookup::Known(snapshot) => snapshot.status.as_str(),
+                TenantLookup::Unknown => "unknown",
+                TenantLookup::Unavailable => "unavailable",
+            };
+            warn!(
+                connection_id = %connection_id,
+                tenant_id = %tenant_id,
+                tenant_state = reason,
+                policy = self.tenant_policy.as_str(),
+                "connection rejected: tenant unavailable"
+            );
+        }
+        admitted
     }
 
     /// 验证 token（由 server-core auth provider 统一处理 JWT / Hook / SSO）。
@@ -129,6 +167,11 @@ impl Authenticator for AuthHandler {
             Some(principal) => {
                 let user_id = principal.user_id.clone();
                 let tenant_id = self.resolve_tenant_id(&principal);
+                if !self.tenant_admits(&tenant_id, connection_id).await {
+                    return Ok(AuthResult::failure(
+                        AUTH_FAILURE_MSG_TENANT_UNAVAILABLE.to_string(),
+                    ));
+                }
                 let device_id =
                     match self.resolve_bound_device_id(&principal, device_info, connection_id) {
                         Ok(device_id) => device_id,
@@ -177,10 +220,55 @@ fn default_tenant_id() -> String {
 mod tests {
     use super::*;
     use flare_core::common::DevicePlatform;
+    use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
+    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
     use flare_server_core::auth::{AuthError, AuthenticatedPrincipal};
+    use std::sync::Mutex;
 
     struct StaticTokenValidator {
         principal: Option<AuthenticatedPrincipal>,
+    }
+
+    /// 内存租户投影：`None` = 未投影。
+    struct StaticTenants(Mutex<HashMap<String, TenantStatus>>);
+
+    #[async_trait]
+    impl TenantRuntimeSource for StaticTenants {
+        async fn load(&self, tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(tenant_id)
+                .map(|status| TenantRuntimeSnapshot {
+                    tenant_id: tenant_id.to_string(),
+                    status: *status,
+                    quota: Default::default(),
+                    version: 1,
+                }))
+        }
+    }
+
+    fn tenants(rows: &[(&str, TenantStatus)]) -> TenantRuntimeCache {
+        TenantRuntimeCache::with_source(
+            Arc::new(StaticTenants(Mutex::new(
+                rows.iter().map(|(id, s)| (id.to_string(), *s)).collect(),
+            ))),
+            TenantRuntimeCacheOptions::default(),
+        )
+    }
+
+    fn handler(
+        principal: Option<AuthenticatedPrincipal>,
+        tenant_runtime: TenantRuntimeCache,
+        policy: TenantAccessPolicy,
+    ) -> AuthHandler {
+        AuthHandler::with_default_tenant_id(
+            Arc::new(StaticTokenValidator { principal }),
+            "tenant-default",
+            tenant_runtime,
+            policy,
+        )
     }
 
     #[async_trait]
@@ -209,11 +297,10 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_injects_principal_context() {
-        let handler = AuthHandler::with_default_tenant_id(
-            Arc::new(StaticTokenValidator {
-                principal: Some(principal(Some("device-a"))),
-            }),
-            "tenant-default",
+        let handler = handler(
+            Some(principal(Some("device-a"))),
+            TenantRuntimeCache::disabled(),
+            TenantAccessPolicy::Lenient,
         );
         let device = DeviceInfo::new("device-a".to_string(), DevicePlatform::Web);
 
@@ -241,11 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_rejects_device_binding_mismatch() {
-        let handler = AuthHandler::with_default_tenant_id(
-            Arc::new(StaticTokenValidator {
-                principal: Some(principal(Some("device-a"))),
-            }),
-            "tenant-default",
+        let handler = handler(
+            Some(principal(Some("device-a"))),
+            TenantRuntimeCache::disabled(),
+            TenantAccessPolicy::Lenient,
         );
         let device = DeviceInfo::new("device-b".to_string(), DevicePlatform::Web);
 
@@ -265,11 +351,10 @@ mod tests {
     async fn authenticate_uses_default_tenant_when_principal_has_none() {
         let mut principal = principal(None);
         principal.tenant_id = None;
-        let handler = AuthHandler::with_default_tenant_id(
-            Arc::new(StaticTokenValidator {
-                principal: Some(principal),
-            }),
-            "tenant-default",
+        let handler = handler(
+            Some(principal),
+            TenantRuntimeCache::disabled(),
+            TenantAccessPolicy::Lenient,
         );
 
         let result = handler
@@ -282,6 +367,87 @@ mod tests {
         assert_eq!(
             metadata.get(METADATA_KEY_TENANT_ID).map(String::as_str),
             Some("tenant-default")
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_and_deleting_tenants_are_rejected_regardless_of_policy() {
+        for status in [TenantStatus::Suspended, TenantStatus::Deleting] {
+            for policy in [TenantAccessPolicy::Lenient, TenantAccessPolicy::Strict] {
+                let handler = handler(
+                    Some(principal(Some("device-a"))),
+                    tenants(&[("tenant-a", status)]),
+                    policy,
+                );
+                let result = handler
+                    .authenticate("token", "conn-a", None, None)
+                    .await
+                    .expect("auth result");
+                assert!(!result.authenticated, "{status:?}/{policy:?}");
+                assert_eq!(
+                    result.error_message.as_deref(),
+                    Some(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_tenant_is_admitted_under_strict() {
+        let handler = handler(
+            Some(principal(Some("device-a"))),
+            tenants(&[("tenant-a", TenantStatus::Active)]),
+            TenantAccessPolicy::Strict,
+        );
+        let result = handler
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .expect("auth result");
+        assert!(result.authenticated);
+    }
+
+    #[tokio::test]
+    async fn unknown_tenant_follows_policy() {
+        let lenient = handler(
+            Some(principal(Some("device-a"))),
+            tenants(&[]),
+            TenantAccessPolicy::Lenient,
+        );
+        assert!(
+            lenient
+                .authenticate("token", "conn-a", None, None)
+                .await
+                .unwrap()
+                .authenticated
+        );
+
+        let strict = handler(
+            Some(principal(Some("device-a"))),
+            tenants(&[]),
+            TenantAccessPolicy::Strict,
+        );
+        let result = strict
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .unwrap();
+        assert!(!result.authenticated);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_token_is_still_reported_as_token_error_not_tenant() {
+        let handler = handler(None, tenants(&[]), TenantAccessPolicy::Strict);
+        let result = handler
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .unwrap();
+        assert!(!result.authenticated);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(AUTH_FAILURE_MSG_TOKEN_INVALID)
         );
     }
 }

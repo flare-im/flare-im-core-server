@@ -355,6 +355,13 @@ pub struct AccessGatewayServiceConfig {
     /// 单租户同步拉取突发容量
     #[serde(default)]
     pub sync_pull_tenant_burst: Option<u32>,
+    /// 租户运行时投影所在的 PostgreSQL profile（`base.toml` 中 `[postgres.*]`，读 `tenants` 表）；
+    /// 可被 `ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL` 覆盖。不配置则不校验租户状态、配额回落全局。
+    #[serde(default)]
+    pub postgres: Option<String>,
+    /// 未知租户接入策略：`lenient`（默认，放行）/ `strict`（拒绝）；可被 `ACCESS_GATEWAY_TENANT_POLICY` 覆盖。
+    #[serde(default)]
+    pub tenant_policy: Option<String>,
 }
 
 /// API Gateway 服务配置（业务系统和三方 HTTP facade）
@@ -661,6 +668,10 @@ pub struct MessageOrchestratorServiceConfig {
     /// WAL 存储
     #[serde(default)]
     pub wal_store: Option<String>,
+    /// 租户运行时投影所在的 PostgreSQL profile（读 `tenants` 表的 quota.core）；
+    /// 可被 `MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL` 覆盖。不配置则配额回落全局限流配置。
+    #[serde(default)]
+    pub postgres: Option<String>,
     /// WAL 哈希键
     #[serde(default)]
     pub wal_hash_key: Option<String>,

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use flare_core::common::ErrorCode;
 use flare_core::common::error::{FlareError, Result};
 use flare_im_contracts::Ctx;
+use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::{Sync, SyncRes};
 
@@ -16,6 +17,8 @@ use crate::domain::service::SyncPullLimiter;
 pub struct SyncService {
     port: Arc<dyn ISyncPort>,
     pull_limiter: Option<Arc<SyncPullLimiter>>,
+    /// 租户投影：`quota.core.sync_pull_qps` 优先于全局 tenant 阈值（0 = 回落）。
+    tenant_runtime: TenantRuntimeCache,
 }
 
 impl SyncService {
@@ -23,11 +26,17 @@ impl SyncService {
         Self {
             port,
             pull_limiter: None,
+            tenant_runtime: TenantRuntimeCache::disabled(),
         }
     }
 
     pub fn with_pull_limiter(mut self, limiter: Arc<SyncPullLimiter>) -> Self {
         self.pull_limiter = Some(limiter);
+        self
+    }
+
+    pub fn with_tenant_runtime(mut self, tenant_runtime: TenantRuntimeCache) -> Self {
+        self.tenant_runtime = tenant_runtime;
         self
     }
 
@@ -41,7 +50,15 @@ impl SyncService {
         {
             let tenant_id = tx.tenant_id().unwrap_or("0");
             let user_id = tx.user_id().unwrap_or(connection_id);
-            if !limiter.try_acquire(tenant_id, user_id).await {
+            let tenant_sync_pull_qps = self
+                .tenant_runtime
+                .core_quota(tenant_id)
+                .await
+                .sync_pull_qps;
+            if !limiter
+                .try_acquire(tenant_id, user_id, tenant_sync_pull_qps)
+                .await
+            {
                 return Err(FlareError::localized(
                     ErrorCode::MessageRateLimitExceeded,
                     "sync pull rate limit exceeded",
