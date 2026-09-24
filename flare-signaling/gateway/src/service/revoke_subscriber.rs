@@ -34,7 +34,7 @@ async fn run_subscriber(
     redis_url: &str,
     channel: &str,
     connection_manager: &Arc<dyn ConnectionManagerTrait>,
-) -> anyhow::Result<()> {
+) -> flare_server_core::error::Result<()> {
     let client = redis::Client::open(redis_url)?;
     let mut pubsub = client.get_async_pubsub().await?;
     pubsub.subscribe(channel).await?;

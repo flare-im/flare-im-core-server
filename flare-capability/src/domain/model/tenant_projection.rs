@@ -21,17 +21,41 @@ pub struct TenantProjectionRecord {
 }
 
 /// 校验失败原因（映射为 gRPC `InvalidArgument`）。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// 手写 `Display` 而不派生 thiserror：IM 生产代码统一走 flare_server_core 的错误基座，
+/// 架构测试 `error_boundary` 禁止在这里引入第二套错误宏。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TenantProjectionValidationError {
-    #[error("im_tenant_id must match ^[0-9A-Za-z_-]{{1,32}}$ (got `{0}`)")]
     InvalidTenantId(String),
-    #[error("status must be ACTIVE / SUSPENDED / DELETING (got {0})")]
     InvalidStatus(i32),
-    #[error("version must be >= 1")]
     ZeroVersion,
-    #[error("settings_json must be a JSON object: {0}")]
     InvalidSettings(String),
 }
+
+impl std::fmt::Display for TenantProjectionValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTenantId(id) => {
+                write!(
+                    f,
+                    "im_tenant_id must match ^[0-9A-Za-z_-]{{1,32}}$ (got `{id}`)"
+                )
+            }
+            Self::InvalidStatus(status) => {
+                write!(
+                    f,
+                    "status must be ACTIVE / SUSPENDED / DELETING (got {status})"
+                )
+            }
+            Self::ZeroVersion => f.write_str("version must be >= 1"),
+            Self::InvalidSettings(reason) => {
+                write!(f, "settings_json must be a JSON object: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TenantProjectionValidationError {}
 
 impl TenantProjectionRecord {
     /// 从 `flare.control.v1.TenantProjectionUpsert` 构造并校验。
