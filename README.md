@@ -49,7 +49,7 @@ re-verified daily.
   that a third party fails to decrypt.
 - **Self-hostable and auditable.** Rust, Apache-2.0, protocol and core both in the repo —
   not a box you can only trust.
-- **6 platform SDKs + 111 UI components.** TypeScript (shared by Web / Tauri / Electron),
+- **6 platform SDKs + 154 UI components.** TypeScript (shared by Web / Tauri / Electron),
   Swift, Kotlin, Dart, HarmonyOS ArkTS / Cangjie — all generated from one `sdk-spec`.
 
 ## Where does my code go
@@ -63,7 +63,7 @@ flowchart TB
     end
 
     subgraph client["✓ Open source: client"]
-        ui["flare-im-design<br/>111 UI components · 4 platforms"]
+        ui["flare-im-design<br/>154 UI components · 4 platforms"]
         sdk["Platform SDKs<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust client engine<br/>send queue · local store · sync · E2EE"]
     end

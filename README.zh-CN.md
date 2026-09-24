@@ -31,7 +31,7 @@ RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不�
   看得到 323 字节密文、明文未泄漏、第三方解密失败。
 - **可自托管、可审计**：Rust 实现，Apache-2.0，协议与核心都在仓库里 ——
   不是一个你只能相信的黑盒。
-- **6 个平台 SDK + 111 个 UI 组件**：TypeScript（Web / Tauri / Electron 共用）、
+- **6 个平台 SDK + 154 个 UI 组件**：TypeScript（Web / Tauri / Electron 共用）、
   Swift、Kotlin、Dart、鸿蒙 ArkTS / 仓颉，接口契约由同一份 sdk-spec 生成。
 
 
@@ -73,7 +73,7 @@ flowchart TB
     end
 
     subgraph client["✓ 开源：客户端"]
-        ui["flare-im-design<br/>111 个 UI 组件 · 四端"]
+        ui["flare-im-design<br/>154 个 UI 组件 · 四端"]
         sdk["平台 SDK<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust 客户端引擎<br/>发送队列 · 本地存储 · 同步 · E2EE"]
     end
