@@ -251,6 +251,7 @@ mod online_index_scan_tests {
     /// 必须有硬上限：光有分批而没有上限，超大群照样能把内存堆满，
     /// 只是从"一次分配几百 MB"变成"分很多次堆到几百 MB"。
     #[test]
+    #[allow(clippy::assertions_on_constants)] // 这条测试就是要钉住常量的量级
     fn scan_has_a_hard_cap_and_batches_are_bounded() {
         assert!(
             OnlineStatusService::ONLINE_SCAN_HARD_CAP > 0

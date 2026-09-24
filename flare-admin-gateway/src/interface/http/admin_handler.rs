@@ -882,6 +882,7 @@ mod tests {
                 hook_timeout_ms: 800,
                 hook_secret_header: "x-flare-auth-hook-secret".to_string(),
                 hook_secret: Some("secret-value".to_string()),
+                ..AuthProviderConfig::default()
             },
             rate_limit: RateLimitConfig {
                 enabled: true,

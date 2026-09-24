@@ -2555,9 +2555,9 @@ mod read_receipt_online_only_tests {
     }
 }
 
+#[cfg(test)]
 mod offline_payload_scoping_tests {
     use super::*;
-    use prost::Message as _;
 
     fn payload_with_recipients(n: usize) -> Vec<u8> {
         access_gateway::PushMessageRequest {

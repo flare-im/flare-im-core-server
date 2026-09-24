@@ -84,7 +84,7 @@ impl PresenceRepository for RedisPresenceRepository {
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "redis hgetall pipeline"))?;
 
         let mut stale: Vec<String> = Vec::new();
-        for (device_id, map) in device_ids.iter().zip(maps.into_iter()) {
+        for (device_id, map) in device_ids.iter().zip(maps) {
             // 索引里有、哈希已不存在：设备记录被删或过期了。顺手把索引清干净，
             // 否则索引只增不减，读取代价会随历史设备累积。
             if map.is_empty() {

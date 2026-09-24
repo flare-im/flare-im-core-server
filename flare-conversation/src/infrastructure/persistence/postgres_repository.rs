@@ -2389,6 +2389,7 @@ mod participant_page_limit_tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // 钉的就是常量的量级
     fn page_limit_stays_large_enough_to_avoid_hundreds_of_round_trips() {
         // 回归门禁：上限若掉回 500，十万人群的成员遍历会退回 200 次串行往返
         // （实测一条已读回执 47 秒）。
