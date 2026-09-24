@@ -8,6 +8,7 @@ use flare_grpc_proto::signaling::online::{
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
 use flare_im_contracts::ConnectionEvent;
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
@@ -214,9 +215,19 @@ where
         })?;
         let priority_vo = DevicePriority::from_i32(device_priority);
         let token_vo = TokenVersion::from(token_version);
+        // 租户来自网关透传的 Login metadata（tenant_id / x-tenant-id），缺省归一到 "0"。
+        let tenant_id = normalize_tenant_id(
+            request
+                .metadata
+                .get("tenant_id")
+                .or_else(|| request.metadata.get("x-tenant-id"))
+                .map(String::as_str)
+                .unwrap_or_default(),
+        );
         let params = ConnectionCreateParams {
             user_id: user_vo.clone(),
             device_id: device_vo.clone(),
+            tenant_id: tenant_id.clone(),
             device_platform: device_platform.to_string(),
             server_id: request.server_id.clone(),
             gateway_id: gateway_id.clone(),
@@ -260,6 +271,7 @@ where
 
         info!(
             user_id = %user_id,
+            tenant_id = %tenant_id,
             conversation_id = %conversation_id,
             device_id = %device_id,
             gateway_id = %gateway_id,
@@ -488,6 +500,24 @@ impl ConversationRepository for NoopConversationRepository {
         _ctx: &Context,
     ) -> flare_server_core::error::Result<Vec<Connection>> {
         Ok(vec![])
+    }
+    async fn scan_tenant_sessions(
+        &self,
+        _tenant_id: &str,
+        _cursor: u64,
+        _count: usize,
+    ) -> flare_server_core::error::Result<(u64, Vec<String>)> {
+        Ok((0, vec![]))
+    }
+    async fn unindex_tenant_session(
+        &self,
+        _tenant_id: &str,
+        _member: &str,
+    ) -> flare_server_core::error::Result<()> {
+        Ok(())
+    }
+    async fn broadcast_user_kick(&self, _user_id: &str) -> flare_server_core::error::Result<()> {
+        Ok(())
     }
 }
 

@@ -24,6 +24,8 @@ pub struct Connection {
     conversation_id: ConnectionId,
     user_id: UserId,
     device_id: DeviceId,
+    /// 数据面租户 ID（默认 "0"）；`tenant:sessions:{tenant}` 索引按它维护
+    tenant_id: String,
 
     // === 连接信息 ===
     device_platform: String, // ios/android/web/pc
@@ -48,6 +50,7 @@ pub struct Connection {
 pub struct ConnectionCreateParams {
     pub user_id: UserId,
     pub device_id: DeviceId,
+    pub tenant_id: String,
     pub device_platform: String,
     pub server_id: String,
     pub gateway_id: String,
@@ -73,6 +76,7 @@ impl Connection {
             conversation_id: conversation_id.clone(),
             user_id: params.user_id.clone(),
             device_id: params.device_id.clone(),
+            tenant_id: params.tenant_id,
             device_platform: params.device_platform,
             server_id: params.server_id,
             gateway_id: params.gateway_id,
@@ -105,6 +109,7 @@ impl Connection {
         conversation_id: ConnectionId,
         user_id: UserId,
         device_id: DeviceId,
+        tenant_id: String,
         device_platform: String,
         server_id: String,
         gateway_id: String,
@@ -118,6 +123,7 @@ impl Connection {
             conversation_id,
             user_id,
             device_id,
+            tenant_id,
             device_platform,
             server_id,
             gateway_id,
@@ -258,6 +264,11 @@ impl Connection {
         &self.device_id
     }
 
+    /// 获取租户ID
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
     /// 获取设备平台
     pub fn device_platform(&self) -> &str {
         &self.device_platform
@@ -363,6 +374,7 @@ impl std::fmt::Debug for Connection {
             .field("conversation_id", &self.conversation_id)
             .field("user_id", &self.user_id)
             .field("device_id", &self.device_id)
+            .field("tenant_id", &self.tenant_id)
             .field("device_platform", &self.device_platform)
             .field("server_id", &self.server_id)
             .field("gateway_id", &self.gateway_id)
@@ -381,6 +393,7 @@ impl Clone for Connection {
             conversation_id: self.conversation_id.clone(),
             user_id: self.user_id.clone(),
             device_id: self.device_id.clone(),
+            tenant_id: self.tenant_id.clone(),
             device_platform: self.device_platform.clone(),
             server_id: self.server_id.clone(),
             gateway_id: self.gateway_id.clone(),
@@ -428,6 +441,7 @@ mod tests {
         Connection::create(ConnectionCreateParams {
             user_id: UserId::new("test_user".to_string()).unwrap(),
             device_id: DeviceId::new("test_device".to_string()).unwrap(),
+            tenant_id: "0".to_string(),
             device_platform: "ios".to_string(),
             server_id: "server1".to_string(),
             gateway_id: "gateway1".to_string(),

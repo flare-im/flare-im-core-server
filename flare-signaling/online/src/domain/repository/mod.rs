@@ -38,6 +38,33 @@ pub trait ConversationRepository: Send + Sync {
         &self,
         ctx: &flare_server_core::context::Context,
     ) -> Result<Vec<Connection>>;
+
+    /// 分页读取租户在线索引 `tenant:sessions:{tenant}`（成员形如 `{user}:{device}`）。
+    /// 返回 `(next_cursor, members)`；`next_cursor == 0` 表示扫完。
+    async fn scan_tenant_sessions(
+        &self,
+        tenant_id: &str,
+        cursor: u64,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)>;
+
+    /// 从租户在线索引移除一个成员（会话已不存在的陈旧项）。
+    async fn unindex_tenant_session(&self, tenant_id: &str, member: &str) -> Result<()>;
+
+    /// 通知各网关关闭该用户的全部长连接（撤销即断的 kick 频道）。
+    async fn broadcast_user_kick(&self, user_id: &str) -> Result<()>;
+}
+
+/// `tenant:sessions:{tenant}` 的成员编码：`{user}:{device}`。
+pub fn tenant_session_member(user_id: &str, device_id: &str) -> String {
+    format!("{user_id}:{device_id}")
+}
+
+/// 反解 `{user}:{device}`；user_id 不含 `:`，按首个分隔符切分。
+pub fn parse_tenant_session_member(member: &str) -> Option<(&str, &str)> {
+    member
+        .split_once(':')
+        .filter(|(user, device)| !user.is_empty() && !device.is_empty())
 }
 
 /// 订阅仓库接口

@@ -316,6 +316,18 @@ where
         Ok(Response::new(response))
     }
 
+    pub async fn handle_kick_tenant(
+        &self,
+        request: Request<KickTenantRequest>,
+    ) -> Result<Response<KickTenantResponse>, Status> {
+        let response = self
+            .user_handler
+            .kick_tenant(request.into_inner())
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
+    }
+
     pub async fn handle_get_device(
         &self,
         request: Request<GetDeviceRequest>,

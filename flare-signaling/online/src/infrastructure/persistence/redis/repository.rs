@@ -9,11 +9,17 @@ use serde::{Deserialize, Serialize};
 use crate::config::OnlineConfig;
 use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::repository::ConversationRepository;
+use crate::domain::repository::{ConversationRepository, tenant_session_member};
 use crate::domain::value_object::{ConnectionId, DeviceId, DevicePriority, TokenVersion, UserId};
 use flare_server_core::context::Context as SrvContext;
 
 const CONNECTION_KEY_PREFIX: &str = "session";
+/// 租户在线索引：`tenant:sessions:{tenant}` = SET of `{user}:{device}`，TTL 与 `session:{user}` 同步续期。
+const TENANT_SESSIONS_KEY_PREFIX: &str = "tenant:sessions";
+
+fn default_tenant_id() -> String {
+    flare_im_contracts::utils::DEFAULT_TENANT_ID.to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RedisConnectionRecord {
@@ -25,20 +31,70 @@ struct RedisConnectionRecord {
     last_seen: i64,
     device_priority: i32,
     token_version: i64,
+    /// 老记录没有这个字段：按默认租户 "0" 读。
+    #[serde(default = "default_tenant_id")]
+    tenant_id: String,
 }
 
 pub struct RedisConversationRepository {
     client: Arc<redis::Client>,
+    /// kick 频道所在实例（token_store profile），与 signaling-gateway 的订阅端一致。
+    kick_client: Arc<redis::Client>,
     config: Arc<OnlineConfig>,
 }
 
 impl RedisConversationRepository {
     pub fn new(client: Arc<redis::Client>, config: Arc<OnlineConfig>) -> Self {
-        Self { client, config }
+        let kick_client = if config.kick_redis_url == config.redis_url {
+            client.clone()
+        } else {
+            match redis::Client::open(config.kick_redis_url.as_str()) {
+                Ok(kick_client) => Arc::new(kick_client),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "invalid kick redis url; KickTenant will publish on the session redis instead"
+                    );
+                    client.clone()
+                }
+            }
+        };
+        Self {
+            client,
+            kick_client,
+            config,
+        }
     }
 
     fn connection_key(&self, user_id: &str) -> String {
         format!("{}:{}", CONNECTION_KEY_PREFIX, user_id)
+    }
+
+    fn tenant_sessions_key(tenant_id: &str) -> String {
+        format!("{}:{}", TENANT_SESSIONS_KEY_PREFIX, tenant_id)
+    }
+
+    fn ttl(&self) -> i64 {
+        self.config.redis_ttl_seconds as i64
+    }
+
+    /// 会话删除后同步索引：同一 (user, device) 若还有其他会话则保留成员。
+    fn unindex_if_last(
+        pipe: &mut redis::Pipeline,
+        user_id: &str,
+        remaining: &[RedisConnectionRecord],
+        removed: &RedisConnectionRecord,
+    ) {
+        let still_online = remaining.iter().any(|r| {
+            r.device_id == removed.device_id && r.conversation_id != removed.conversation_id
+        });
+        if !still_online {
+            pipe.srem(
+                Self::tenant_sessions_key(&removed.tenant_id),
+                tenant_session_member(user_id, &removed.device_id),
+            )
+            .ignore();
+        }
     }
 
     async fn connection(&self) -> Result<ConnectionManager> {
@@ -55,6 +111,7 @@ impl RedisConversationRepository {
 
     fn record_from_connection(session: &Connection) -> RedisConnectionRecord {
         RedisConnectionRecord {
+            tenant_id: session.tenant_id().to_string(),
             conversation_id: session.id().as_str().to_string(),
             gateway_id: session.gateway_id().to_string(),
             server_id: session.server_id().to_string(),
@@ -95,6 +152,7 @@ impl RedisConversationRepository {
             conversation_id,
             user_id.clone(),
             device_id,
+            record.tenant_id,
             record.device_platform,
             record.server_id,
             record.gateway_id,
@@ -130,14 +188,23 @@ impl ConversationRepository for RedisConversationRepository {
                 e
             ))
         })?;
-        let _: usize = conn
+        let tenant_key = Self::tenant_sessions_key(&record.tenant_id);
+        let ttl = self.ttl();
+        // 会话哈希与租户索引同一管道写入、同一 TTL：索引永远不比会话活得久。
+        let _: () = redis::pipe()
+            .atomic()
             .hset(&key, session.id().as_str(), value)
-            .await
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
-            })?;
-        let _: bool = conn
-            .expire(&key, self.config.redis_ttl_seconds as i64)
+            .ignore()
+            .expire(&key, ttl)
+            .ignore()
+            .sadd(
+                &tenant_key,
+                tenant_session_member(session.user_id().as_str(), &record.device_id),
+            )
+            .ignore()
+            .expire(&tenant_key, ttl)
+            .ignore()
+            .query_async(&mut conn)
             .await
             .map_err(|e| {
                 flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
@@ -152,12 +219,18 @@ impl ConversationRepository for RedisConversationRepository {
     ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
-        let _: usize = conn
-            .hdel(&key, conversation_id.as_str())
-            .await
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
-            })?;
+        let records = self.load_user_records(&mut conn, user_id.as_str()).await?;
+        let mut pipe = redis::pipe();
+        pipe.atomic().hdel(&key, conversation_id.as_str()).ignore();
+        if let Some(removed) = records
+            .iter()
+            .find(|r| r.conversation_id == conversation_id.as_str())
+        {
+            Self::unindex_if_last(&mut pipe, user_id.as_str(), &records, removed);
+        }
+        let _: () = pipe.query_async(&mut conn).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
         tracing::info!(conversation_id = %conversation_id.as_ref(), user_id = %user_id.as_ref(), "session removed from redis");
         Ok(())
     }
@@ -186,14 +259,17 @@ impl ConversationRepository for RedisConversationRepository {
                 e
             ))
         })?;
-        let _: usize = conn
+        let ttl = self.ttl();
+        // 心跳同时给租户索引续期，否则索引会先于活跃会话过期。
+        let _: () = redis::pipe()
+            .atomic()
             .hset(&key, conversation_id.as_str(), value)
-            .await
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
-            })?;
-        let _: bool = conn
-            .expire(&key, self.config.redis_ttl_seconds as i64)
+            .ignore()
+            .expire(&key, ttl)
+            .ignore()
+            .expire(Self::tenant_sessions_key(&record.tenant_id), ttl)
+            .ignore()
+            .query_async(&mut conn)
             .await
             .map_err(|e| {
                 flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
@@ -262,28 +338,36 @@ impl ConversationRepository for RedisConversationRepository {
     ) -> Result<()> {
         let mut conn = self.connection().await?;
         let key = self.connection_key(user_id.as_str());
+        let records = self.load_user_records(&mut conn, user_id.as_str()).await?;
+        let mut pipe = redis::pipe();
+        pipe.atomic();
 
         if let Some(device_ids) = device_ids {
-            let values: HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
-            })?;
-
-            for (conversation_id, payload) in values {
-                let record = Self::parse_record(&payload)?;
-                if device_ids.iter().any(|d| d.as_str() == record.device_id) {
-                    let _: usize = conn.hdel(&key, conversation_id).await.map_err(|e| {
-                        flare_server_core::error::FlareError::system(format!(
-                            "operation failed: {}",
-                            e
-                        ))
-                    })?;
-                }
+            for record in records
+                .iter()
+                .filter(|r| device_ids.iter().any(|d| d.as_str() == r.device_id))
+            {
+                pipe.hdel(&key, &record.conversation_id).ignore();
+                pipe.srem(
+                    Self::tenant_sessions_key(&record.tenant_id),
+                    tenant_session_member(user_id.as_str(), &record.device_id),
+                )
+                .ignore();
             }
         } else {
-            let _: usize = conn.del(&key).await.map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
-            })?;
+            pipe.del(&key).ignore();
+            for record in &records {
+                pipe.srem(
+                    Self::tenant_sessions_key(&record.tenant_id),
+                    tenant_session_member(user_id.as_str(), &record.device_id),
+                )
+                .ignore();
+            }
         }
+
+        let _: () = pipe.query_async(&mut conn).await.map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+        })?;
 
         Ok(())
     }
@@ -308,6 +392,81 @@ impl ConversationRepository for RedisConversationRepository {
         let user_id_vo = UserId::new(user_id.to_string())
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         self.get_user_connections(&user_id_vo).await
+    }
+
+    async fn scan_tenant_sessions(
+        &self,
+        tenant_id: &str,
+        cursor: u64,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)> {
+        let mut conn = self.connection().await?;
+        let (next, members): (u64, Vec<String>) = redis::cmd("SSCAN")
+            .arg(Self::tenant_sessions_key(tenant_id))
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(count.max(1))
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
+        Ok((next, members))
+    }
+
+    async fn unindex_tenant_session(&self, tenant_id: &str, member: &str) -> Result<()> {
+        let mut conn = self.connection().await?;
+        let _: usize = conn
+            .srem(Self::tenant_sessions_key(tenant_id), member)
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
+        Ok(())
+    }
+
+    async fn broadcast_user_kick(&self, user_id: &str) -> Result<()> {
+        let mut conn = ConnectionManager::new(self.kick_client.as_ref().clone())
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("redis connection: {}", e))
+            })?;
+        let _: () = conn
+            .publish(&self.config.kick_channel, user_id)
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
+            })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_record_without_tenant_reads_as_default_tenant() {
+        let payload = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0}"#;
+        let record = RedisConversationRepository::parse_record(payload).unwrap();
+        assert_eq!(record.tenant_id, "0");
+
+        let with_tenant = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","last_seen":1,"device_priority":2,"token_version":0,"tenant_id":"acme"}"#;
+        assert_eq!(
+            RedisConversationRepository::parse_record(with_tenant)
+                .unwrap()
+                .tenant_id,
+            "acme"
+        );
+    }
+
+    #[test]
+    fn tenant_index_key_and_member_shape() {
+        assert_eq!(
+            RedisConversationRepository::tenant_sessions_key("acme"),
+            "tenant:sessions:acme"
+        );
+        assert_eq!(tenant_session_member("u1", "d1"), "u1:d1");
     }
 }
 

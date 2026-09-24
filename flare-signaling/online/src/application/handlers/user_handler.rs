@@ -7,7 +7,7 @@ use std::sync::Arc;
 use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, GetDeviceRequest, GetDeviceResponse,
     GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest, KickDeviceResponse,
-    ListUserDevicesRequest, ListUserDevicesResponse,
+    KickTenantRequest, KickTenantResponse, ListUserDevicesRequest, ListUserDevicesResponse,
 };
 use flare_server_core::context::Context;
 
@@ -49,6 +49,10 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
 
     pub async fn kick_device(&self, request: KickDeviceRequest) -> Result<KickDeviceResponse> {
         self.inner.kick_device(request).await
+    }
+
+    pub async fn kick_tenant(&self, request: KickTenantRequest) -> Result<KickTenantResponse> {
+        self.inner.kick_tenant(request).await
     }
 
     pub async fn get_device(

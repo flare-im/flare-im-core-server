@@ -13,6 +13,10 @@ redis = "conversation_store"
 online_ttl_seconds = 3600
 presence_prefix = "presence:user"
 
+# 租户在线索引 tenant:sessions:{tenant}（SET of "{user}:{device}"）与 session:{user} 同 TTL 续期；
+# KickTenant 按它分页踢出，并向网关的撤销即断频道 `{redis.token_store.namespace}:kick` 发用户 ID
+# 让 signaling-gateway 关掉 socket。可用 SIGNALING_ONLINE_KICK_REDIS_URL / SIGNALING_ONLINE_KICK_CHANNEL 覆盖。
+
 [services.signaling_online.server]
 address = "0.0.0.0"
 port = 50061

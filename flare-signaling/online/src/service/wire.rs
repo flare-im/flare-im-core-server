@@ -195,6 +195,13 @@ impl OnlineService for WiredOnlineHandler {
         self.handle_kick_device(request).await
     }
 
+    async fn kick_tenant(
+        &self,
+        request: Request<KickTenantRequest>,
+    ) -> std::result::Result<Response<KickTenantResponse>, Status> {
+        self.handle_kick_tenant(request).await
+    }
+
     async fn get_device(
         &self,
         request: Request<GetDeviceRequest>,

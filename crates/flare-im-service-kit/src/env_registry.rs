@@ -1197,6 +1197,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::RuntimeTuning,
     ),
     env(
+        "SIGNALING_ONLINE_KICK_CHANNEL",
+        EnvOwner::SignalingOnline,
+        EnvPurpose::Redis,
+    ),
+    env(
+        "SIGNALING_ONLINE_KICK_REDIS_URL",
+        EnvOwner::SignalingOnline,
+        EnvPurpose::Redis,
+    ),
+    env(
         "SIGNALING_ONLINE_PRESENCE_PREFIX",
         EnvOwner::SignalingOnline,
         EnvPurpose::Redis,
