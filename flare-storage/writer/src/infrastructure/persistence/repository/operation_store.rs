@@ -84,10 +84,23 @@ impl OperationStore {
         _recall_reason: Option<&str>,
     ) -> Result<()> {
         let status_int = fsm_state_to_status_int(fsm_state);
-        sqlx::query(
+        // 空 id 一律不落库:撤回/删除事件里 server_msg_id 为空(钩子拒发、本地失败的消息)时,
+        // 原来的 `client_msg_id = ''` 会命中所有 client_msg_id 为空串的历史行——线上一条 UPDATE
+        // 重写了整个压测分块(百万行),几十条并发把磁盘吃掉 24G。
+        if message_id.trim().is_empty() {
+            tracing::warn!(
+                tenant_id,
+                fsm_state,
+                "message status update skipped: empty message id"
+            );
+            return Ok(());
+        }
+        // 先按 server_id 走 (tenant_id, server_id) 索引;`OR client_msg_id` 会让计划退化成全表扫,
+        // 只有 server_id 没命中时才用 client_msg_id 兜底(这条没有可用索引,是慢路径,但此前每次都慢)。
+        let by_server = sqlx::query(
             r#"
             UPDATE messages SET status = $1
-            WHERE tenant_id = $2 AND (server_id = $3 OR client_msg_id = $3)
+            WHERE tenant_id = $2 AND server_id = $3
             "#,
         )
         .bind(status_int)
@@ -95,6 +108,25 @@ impl OperationStore {
         .bind(message_id)
         .execute(&self.pool)
         .await?;
+        if by_server.rows_affected() == 0 {
+            tracing::warn!(
+                tenant_id,
+                message_id,
+                fsm_state,
+                "message status update: no row by server_id, falling back to client_msg_id"
+            );
+            sqlx::query(
+                r#"
+                UPDATE messages SET status = $1
+                WHERE tenant_id = $2 AND client_msg_id = $3 AND client_msg_id <> ''
+                "#,
+            )
+            .bind(status_int)
+            .bind(tenant_id)
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
