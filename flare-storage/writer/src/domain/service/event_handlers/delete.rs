@@ -26,7 +26,10 @@ where
     let message_id = delete.server_msg_id.as_str();
     // 同 recall:没有 server_msg_id 的删除没有可删的行,空 id 传下去曾命中全部历史行。
     if message_id.trim().is_empty() {
-        tracing::warn!(tenant_id = ctx.tenant_id, event_id = %event.event_id, "delete without server_msg_id ignored");
+        tracing::warn!(
+            tenant_id = ctx.tenant_id,
+            "delete without server_msg_id ignored"
+        );
         return Ok(());
     }
     match delete.delete_type.unwrap_or(0) {

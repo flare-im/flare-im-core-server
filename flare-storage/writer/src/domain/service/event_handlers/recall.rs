@@ -19,7 +19,10 @@ where
     // 没有 server_msg_id 的撤回(消息根本没落库:钩子拒发、发送失败)无事可做;
     // 空 id 传下去曾让状态更新命中全部历史行。直接 ack,别让 MQ 重投。
     if message_id.trim().is_empty() {
-        tracing::warn!(tenant_id = ctx.tenant_id, event_id = %event.event_id, "recall without server_msg_id ignored");
+        tracing::warn!(
+            tenant_id = ctx.tenant_id,
+            "recall without server_msg_id ignored"
+        );
         return Ok(());
     }
     let reason = (!recall.reason.is_empty()).then_some(recall.reason.as_str());
