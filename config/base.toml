@@ -209,8 +209,9 @@ endpoint = "${FLARE_S3_ENDPOINT:-http://127.0.0.1:29000}"
 # 反代部署下与 endpoint 必然不同：服务走内网、浏览器走公网。
 # 不设则回落到 endpoint，行为与以前一致。
 public_endpoint = "${FLARE_S3_PUBLIC_ENDPOINT:-}"
-access_key = "rustfsadmin"
-secret_key = "rustfsadmin"
+# 凭据从环境变量来(部署时与对象存储那侧的 RUSTFS_ACCESS_KEY/SECRET_KEY 同值);默认值只给本机 dev 用。
+access_key = "${FLARE_S3_ACCESS_KEY:-rustfsadmin}"
+secret_key = "${FLARE_S3_SECRET_KEY:-rustfsadmin}"
 bucket = "flare-media"
 region = "us-east-1"
 use_ssl = false
