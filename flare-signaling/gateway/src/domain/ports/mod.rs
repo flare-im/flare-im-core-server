@@ -5,6 +5,7 @@ mod context_resolver;
 mod data_port;
 mod event_prot;
 mod message_port;
+mod participant_source;
 mod push_port;
 mod sync_port;
 
@@ -14,6 +15,7 @@ pub use connection_query::ConnectionQuery;
 pub use data_port::IDataCommandPort;
 pub use event_prot::IEventCommandPort;
 pub use message_port::IMessageCommandPort;
+pub use participant_source::ConversationParticipantSource;
 pub use push_port::IPushPort;
 pub use sync_port::ISyncPort;
 

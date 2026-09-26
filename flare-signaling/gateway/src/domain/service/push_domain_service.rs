@@ -13,12 +13,34 @@ use prost::Message as ProstMessage;
 use tracing::{info, instrument};
 
 use crate::domain::model::{ConnectionInfo, DomainPushResult};
-use crate::domain::ports::{ConnectionQuery, IPushPort};
+use crate::domain::ports::{ConnectionQuery, ConversationParticipantSource, IPushPort};
 
 const USER_PUSH_FANOUT_CONCURRENCY: usize = 64;
 
 /// 默认"已 bootstrap 会话"缓存容量上限。长跑网关会服务大量不同会话，无界缓存会缓慢泄漏 → 终致 OOM。
 const DEFAULT_RESOLVED_CONVERSATIONS_CAPACITY: usize = 100_000;
+
+/// 成员名单缓存的有效期。过期后下一次投递重新解析成员并与本节点订阅对账。
+///
+/// 成员变化（拉人 / 踢人 / 退群）不会通知到网关：会话服务只落库。以前名单解析一次就永久沿用，
+/// 于是「在线时被拉进群」的成员永远订阅不上（连接建立时的 eager 订阅早于入群），只能靠补拉
+/// 晚几分钟看到消息；「在线时被移出」的成员反过来一直留在订阅里，继续实时收到群消息。
+/// 拉人 / 踢人本身会带一条群系统消息，它投递时名单通常已过期，于是当场刷新。
+const DEFAULT_PARTICIPANTS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+/// 大群重新解析一次要分页拉全部成员，代价随人数增长，有效期放长。
+const DEFAULT_LARGE_GROUP_PARTICIPANTS_TTL: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// 大群节流：成员数超过这个阈值时，不再每条消息都全量遍历成员（见 `ensure_conversation_members_subscribed`）。
+const LARGE_GROUP_THRESHOLD: usize = 2_000;
+
+fn env_secs(name: &str, default: std::time::Duration) -> std::time::Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(default)
+}
 
 /// 有界的"已 bootstrap 会话"集合：FIFO 淘汰最旧条目，封顶内存。被淘汰的（冷）会话下次投递会**幂等重 bootstrap**
 /// （`join` 幂等、`list_participants` 只读重取），故淘汰仅是极少的重做成本，不影响正确性。
@@ -28,7 +50,8 @@ const DEFAULT_RESOLVED_CONVERSATIONS_CAPACITY: usize = 100_000;
 /// 连接被订阅、之后上线的连接永不订阅"导致实时下行漏送。
 struct ResolvedConversations {
     order: std::collections::VecDeque<String>,
-    participants: std::collections::HashMap<String, std::sync::Arc<Vec<String>>>,
+    participants:
+        std::collections::HashMap<String, (std::sync::Arc<Vec<String>>, std::time::Instant)>,
     capacity: usize,
 }
 
@@ -42,8 +65,28 @@ impl ResolvedConversations {
         }
     }
 
+    #[cfg(test)]
     fn get(&self, conversation_id: &str) -> Option<std::sync::Arc<Vec<String>>> {
-        self.participants.get(conversation_id).cloned()
+        self.participants
+            .get(conversation_id)
+            .map(|(participants, _)| participants.clone())
+    }
+
+    /// 仍在有效期内的名单；过期或没有则 `None`（调用方重新解析）。有效期按名单大小取。
+    fn get_fresh(
+        &self,
+        conversation_id: &str,
+        now: std::time::Instant,
+        ttl: std::time::Duration,
+        large_group_ttl: std::time::Duration,
+    ) -> Option<std::sync::Arc<Vec<String>>> {
+        let (participants, resolved_at) = self.participants.get(conversation_id)?;
+        let ttl = if participants.len() >= LARGE_GROUP_THRESHOLD {
+            large_group_ttl
+        } else {
+            ttl
+        };
+        (now.saturating_duration_since(*resolved_at) < ttl).then(|| participants.clone())
     }
 
     fn insert(&mut self, conversation_id: String, participants: Vec<String>) {
@@ -55,8 +98,10 @@ impl ResolvedConversations {
                 }
             }
         }
-        self.participants
-            .insert(conversation_id, std::sync::Arc::new(participants));
+        self.participants.insert(
+            conversation_id,
+            (std::sync::Arc::new(participants), std::time::Instant::now()),
+        );
     }
 }
 
@@ -66,14 +111,17 @@ pub struct PushDomainService {
     connection_query: Arc<dyn ConnectionQuery>,
     /// 会话级在线订阅注册表（统一读扩散地基）：会话 publish 命中本节点时扇给本节点订阅连接。
     conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
-    /// Conversation 读池：首次投递某会话时解析参与者，订阅本节点在线成员（确定性 bootstrap）。
-    conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+    /// 会话成员来源（生产是 Conversation 读池）：投递时解析在册成员，订阅本节点在线成员并对账。
+    conversation_read: Arc<dyn ConversationParticipantSource>,
     /// 已解析+订阅过成员的会话（每会话每网关一次成员解析，缓存避免每消息查成员）。**有界 FIFO**，防长跑泄漏。
     resolved_conversations: std::sync::RwLock<ResolvedConversations>,
     /// 大群上次全量补订阅的时刻。仅对超过 LARGE_GROUP_THRESHOLD 的会话记录，
     /// 用于把 O(成员数) 的遍历从「每条消息」降到「每 30 秒一次」。
     large_group_last_sweep:
         std::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>,
+    /// 成员名单缓存有效期（普通会话 / 大群），见 [`DEFAULT_PARTICIPANTS_TTL`]。
+    participants_ttl: std::time::Duration,
+    large_group_participants_ttl: std::time::Duration,
     /// 推送投递指标。这一组以前只有声明没有写入路径，见 record_push_result 的说明。
     metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
 }
@@ -94,7 +142,7 @@ impl PushDomainService {
         push_port: Arc<dyn IPushPort>,
         connection_query: Arc<dyn ConnectionQuery>,
         conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
-        conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+        conversation_read: Arc<dyn ConversationParticipantSource>,
         metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
     ) -> Self {
         Self {
@@ -104,6 +152,11 @@ impl PushDomainService {
             conversation_read,
             metrics,
             large_group_last_sweep: std::sync::RwLock::new(std::collections::HashMap::new()),
+            participants_ttl: env_secs("GATEWAY_PARTICIPANTS_TTL_SECS", DEFAULT_PARTICIPANTS_TTL),
+            large_group_participants_ttl: env_secs(
+                "GATEWAY_LARGE_GROUP_PARTICIPANTS_TTL_SECS",
+                DEFAULT_LARGE_GROUP_PARTICIPANTS_TTL,
+            ),
             resolved_conversations: std::sync::RwLock::new(ResolvedConversations::new(
                 std::env::var("GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY")
                     .ok()
@@ -113,17 +166,36 @@ impl PushDomainService {
         }
     }
 
+    /// 覆盖成员名单有效期（测试用；生产走环境变量）。
+    pub fn with_participants_ttl(
+        mut self,
+        ttl: std::time::Duration,
+        large_group_ttl: std::time::Duration,
+    ) -> Self {
+        self.participants_ttl = ttl;
+        self.large_group_participants_ttl = large_group_ttl;
+        self
+    }
+
     /// 确定性 bootstrap：首次投递某会话时解析参与者，订阅其在**本节点**的在线连接。
     /// 每次投递前确保参与者的**当前在线连接**都已订阅（join 幂等）。
     /// 参与者列表每会话每网关仅解析一次（缓存跳过 `list_participants` RPC），
     /// 但订阅每次执行——覆盖"会话在连接后创建"以及"成员连接在首投递后才上线
     ///（多端登录/断线重连/客户端多实例）"的订阅时序漏洞。best-effort。
     async fn ensure_conversation_members_subscribed(&self, tx: &Ctx, conversation_id: &str) {
-        let cached = self
-            .resolved_conversations
-            .read()
-            .ok()
-            .and_then(|cache| cache.get(conversation_id));
+        // sync 收件箱不是真实会话、没有成员行：订阅在连接建立时就做了，查成员必然 NOT_FOUND。
+        if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(conversation_id)
+        {
+            return;
+        }
+        let cached = self.resolved_conversations.read().ok().and_then(|cache| {
+            cache.get_fresh(
+                conversation_id,
+                std::time::Instant::now(),
+                self.participants_ttl,
+                self.large_group_participants_ttl,
+            )
+        });
         let participants = match cached {
             Some(participants) => participants,
             None => {
@@ -167,7 +239,6 @@ impl PushDomainService {
         // 窗口内复用上次的订阅结果。漏送风险由两条兜底覆盖——
         // 连接建立时的 eager subscribe 会订阅该用户全部会话，
         // 且离线成员本就靠版本号增量拉补齐。
-        const LARGE_GROUP_THRESHOLD: usize = 2_000;
         const LARGE_GROUP_RESUBSCRIBE_INTERVAL: std::time::Duration =
             std::time::Duration::from_secs(30);
 
@@ -203,6 +274,14 @@ impl PushDomainService {
         // 上限而非无界：大群下无界并发会瞬间铺开上万个任务，
         // 调度开销反而吃掉收益——那是「看起来更快」的陷阱。
         let query = &self.connection_query;
+        // 对账基线取在查询之前：查询期间才建立的连接（eager 订阅刚 join）不在基线里，不会被误摘。
+        let subscribed_before: std::collections::HashSet<String> = self
+            .conversation_subscriptions
+            .local_subscribers(conversation_id)
+            .into_iter()
+            .collect();
+        let mut member_connections = std::collections::HashSet::new();
+        let mut lookup_failed = false;
         let mut joined_total = 0usize;
         for chunk in participants.chunks(SUBSCRIBE_LOOKUP_CONCURRENCY) {
             let looked_up = futures::future::join_all(
@@ -211,12 +290,27 @@ impl PushDomainService {
                     .map(|user_id| query.list_user_connection_ids(user_id)),
             )
             .await;
-            for connection_ids in looked_up.into_iter().flatten() {
+            for connection_ids in looked_up {
+                let Ok(connection_ids) = connection_ids else {
+                    lookup_failed = true;
+                    continue;
+                };
                 for connection_id in connection_ids {
                     self.conversation_subscriptions
                         .join(conversation_id, &connection_id);
                     joined_total += 1;
+                    member_connections.insert(connection_id);
                 }
+            }
+        }
+        // 订阅里不属于任何在册成员的连接：这个人已经被移出 / 退出了，不能再实时收到这个会话。
+        // 名单为空（解析异常的会话）或有成员的连接查询失败时不摘：宁可多投一次，也不误摘在册成员。
+        let mut left_total = 0usize;
+        if !participants.is_empty() && !lookup_failed {
+            for connection_id in subscribed_before.difference(&member_connections) {
+                self.conversation_subscriptions
+                    .leave(conversation_id, connection_id);
+                left_total += 1;
             }
         }
         // 这条日志是排查「消息发出去了但某人收不到」的第一落点：
@@ -227,8 +321,18 @@ impl PushDomainService {
             conversation_id = %conversation_id,
             participants = participants.len(),
             joined = joined_total,
+            left = left_total,
+            lookup_failed,
             "push: 会话成员订阅补齐"
         );
+        if left_total > 0 {
+            // 摘掉的是「已不在会话里」的成员连接，属于权限收口，要能在 info 级别看到。
+            tracing::info!(
+                conversation_id = %conversation_id,
+                left = left_total,
+                "push: 摘除已不在会话里的成员连接"
+            );
+        }
     }
 
     /// 取该会话在本节点仍然存在的订阅连接，顺带把已消失的从订阅表摘掉，返回 `(存活, 摘除数)`。
@@ -1081,5 +1185,297 @@ mod tests {
             EventEnvelopeDeliveryMode::Ping as i32
         );
         assert!(envelope.inline_events_truncated);
+    }
+
+    // ── 成员名单有效期与订阅对账 ──────────────────────────────────────────────
+    //
+    // 成员变化不会通知到网关。以前名单解析一次就永久沿用：在线时被拉进群的人永远订阅不上，
+    // 在线时被移出的人一直留在订阅里。下面几条钉住「过期重解析 + 对账」的行为。
+
+    /// 可改写的成员名单，记录被查询的次数。
+    #[derive(Default)]
+    struct FakeParticipants {
+        members: Mutex<std::collections::HashMap<String, Vec<String>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeParticipants {
+        fn set(&self, conversation_id: &str, members: &[&str]) {
+            self.members.lock().expect("members mutex poisoned").insert(
+                conversation_id.to_string(),
+                members.iter().map(|m| m.to_string()).collect(),
+            );
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ConversationParticipantSource for FakeParticipants {
+        async fn list_participants(&self, _tx: &Ctx, conversation_id: &str) -> Result<Vec<String>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self
+                .members
+                .lock()
+                .expect("members mutex poisoned")
+                .get(conversation_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
+    /// 每个用户在本节点的连接；`failing` 里的用户查询报错。
+    #[derive(Default)]
+    struct UserConnections {
+        by_user: std::collections::HashMap<String, Vec<String>>,
+        failing: Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl UserConnections {
+        fn with(pairs: &[(&str, &str)]) -> Self {
+            let mut by_user = std::collections::HashMap::<String, Vec<String>>::new();
+            for (user, connection) in pairs {
+                by_user
+                    .entry(user.to_string())
+                    .or_default()
+                    .push(connection.to_string());
+            }
+            Self {
+                by_user,
+                failing: Mutex::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConnectionQuery for UserConnections {
+        async fn query_user_connections(
+            &self,
+            _tx: &Ctx,
+            _user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_user_connections(&self, _user_id: &str) -> Result<Vec<ConnectionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_user_connection_ids(&self, user_id: &str) -> Result<Vec<String>> {
+            if self
+                .failing
+                .lock()
+                .expect("failing mutex poisoned")
+                .contains(user_id)
+            {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::ServiceUnavailable,
+                    "connection table down",
+                )
+                .build_error());
+            }
+            Ok(self.by_user.get(user_id).cloned().unwrap_or_default())
+        }
+
+        async fn connection_exists(&self, _connection_id: &str) -> bool {
+            true
+        }
+    }
+
+    /// 记录每次会话级投递实际扇到的连接。
+    #[derive(Default)]
+    struct RecordingPushPort {
+        deliveries: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RecordingPushPort {
+        fn last(&self) -> Vec<String> {
+            self.deliveries
+                .lock()
+                .expect("deliveries mutex poisoned")
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[async_trait]
+    impl IPushPort for RecordingPushPort {
+        async fn push_message_to_user(
+            &self,
+            _tx: &Ctx,
+            _user_id: &str,
+            _message: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn push_message_to_connection(
+            &self,
+            _tx: &Ctx,
+            _connection_id: &str,
+            _message: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn push_payload_to_connection(
+            &self,
+            _tx: &Ctx,
+            _connection_id: &str,
+            _payload_type: i32,
+            _payload: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn push_payload_to_user(
+            &self,
+            _tx: &Ctx,
+            _user_id: &str,
+            _payload_type: i32,
+            _payload: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn push_payload_to_connections(
+            &self,
+            _tx: &Ctx,
+            connection_ids: &[String],
+            _payload_type: i32,
+            _payload: Vec<u8>,
+        ) -> Result<(i32, i32)> {
+            let mut delivered = connection_ids.to_vec();
+            delivered.sort();
+            self.deliveries
+                .lock()
+                .expect("deliveries mutex poisoned")
+                .push(delivered);
+            Ok((connection_ids.len() as i32, 0))
+        }
+    }
+
+    struct MemberHarness {
+        service: PushDomainService,
+        participants: Arc<FakeParticipants>,
+        connections: Arc<UserConnections>,
+        subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
+        push: Arc<RecordingPushPort>,
+    }
+
+    impl MemberHarness {
+        fn new(connections: UserConnections, ttl: std::time::Duration) -> Self {
+            let participants = Arc::new(FakeParticipants::default());
+            let connections = Arc::new(connections);
+            let subscriptions =
+                Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
+            let push = Arc::new(RecordingPushPort::default());
+            let service = PushDomainService::new(
+                push.clone(),
+                connections.clone(),
+                subscriptions.clone(),
+                participants.clone(),
+                Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            )
+            .with_participants_ttl(ttl, ttl);
+            Self {
+                service,
+                participants,
+                connections,
+                subscriptions,
+                push,
+            }
+        }
+
+        async fn deliver(&self, conversation_id: &str) -> Vec<String> {
+            let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+            let before = self.push.deliveries.lock().expect("mutex").len();
+            self.service
+                .deliver_to_conversation(&ctx, conversation_id, 1, b"payload")
+                .await
+                .expect("deliver");
+            if self.push.deliveries.lock().expect("mutex").len() == before {
+                return Vec::new();
+            }
+            self.push.last()
+        }
+    }
+
+    // 建群时推送第一条系统消息，名单里只有群主；之后在线的 bob 被拉进群。
+    #[tokio::test]
+    async fn a_member_added_while_online_is_reached_once_the_list_expires() {
+        let h = MemberHarness::new(
+            UserConnections::with(&[("owner", "c-owner"), ("bob", "c-bob")]),
+            std::time::Duration::ZERO,
+        );
+        h.participants.set("g1", &["owner"]);
+        assert_eq!(h.deliver("g1").await, ["c-owner"]);
+
+        h.participants.set("g1", &["owner", "bob"]);
+        assert_eq!(h.deliver("g1").await, ["c-bob", "c-owner"]);
+    }
+
+    #[tokio::test]
+    async fn the_member_list_is_reused_within_its_ttl() {
+        let h = MemberHarness::new(
+            UserConnections::with(&[("owner", "c-owner"), ("bob", "c-bob")]),
+            std::time::Duration::from_secs(3600),
+        );
+        h.participants.set("g1", &["owner"]);
+        h.deliver("g1").await;
+        h.participants.set("g1", &["owner", "bob"]);
+        // 有效期内沿用缓存：不重查，bob 要等名单过期（或下次重连的 eager 订阅）。
+        assert_eq!(h.deliver("g1").await, ["c-owner"]);
+        assert_eq!(h.participants.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_member_removed_while_online_stops_receiving() {
+        let h = MemberHarness::new(
+            UserConnections::with(&[("owner", "c-owner"), ("bob", "c-bob")]),
+            std::time::Duration::ZERO,
+        );
+        h.participants.set("g1", &["owner", "bob"]);
+        assert_eq!(h.deliver("g1").await, ["c-bob", "c-owner"]);
+
+        h.participants.set("g1", &["owner"]);
+        assert_eq!(h.deliver("g1").await, ["c-owner"]);
+        assert!(
+            !h.subscriptions
+                .local_subscribers("g1")
+                .contains(&"c-bob".to_string())
+        );
+    }
+
+    // 连接表查询失败时分不清「没有连接」和「查不到」，宁可多投一次也不摘在册成员。
+    #[tokio::test]
+    async fn a_failed_connection_lookup_never_unsubscribes_anyone() {
+        let h = MemberHarness::new(
+            UserConnections::with(&[("owner", "c-owner"), ("bob", "c-bob")]),
+            std::time::Duration::ZERO,
+        );
+        h.participants.set("g1", &["owner", "bob"]);
+        h.deliver("g1").await;
+
+        h.connections
+            .failing
+            .lock()
+            .expect("failing mutex poisoned")
+            .insert("owner".to_string());
+        assert_eq!(h.deliver("g1").await, ["c-bob", "c-owner"]);
+    }
+
+    #[tokio::test]
+    async fn the_sync_inbox_is_delivered_without_a_member_lookup() {
+        let h = MemberHarness::new(UserConnections::default(), std::time::Duration::ZERO);
+        let inbox = flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id("u1");
+        h.subscriptions.join(&inbox, "c-u1");
+
+        assert_eq!(h.deliver(&inbox).await, ["c-u1"]);
+        assert_eq!(h.participants.calls(), 0);
+        assert_eq!(h.subscriptions.local_subscribers(&inbox), ["c-u1"]);
     }
 }

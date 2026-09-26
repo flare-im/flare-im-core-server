@@ -102,6 +102,17 @@ impl ConversationReadGrpcPool {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::domain::ports::ConversationParticipantSource for ConversationReadGrpcPool {
+    async fn list_participants(
+        &self,
+        tx: &flare_im_contracts::Ctx,
+        conversation_id: &str,
+    ) -> Result<Vec<String>> {
+        ConversationReadGrpcPool::list_participants(self, tx, conversation_id).await
+    }
+}
+
 impl Default for ConversationReadGrpcPool {
     fn default() -> Self {
         Self::new()
