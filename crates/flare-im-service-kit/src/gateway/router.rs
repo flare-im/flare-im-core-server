@@ -408,8 +408,12 @@ impl GatewayRouter {
     /// 离线成员靠版本号增量拉兜底）。无服务发现实例时走静态 fallback 单端点。
     pub async fn broadcast_deliver_to_conversation(
         &self,
+        ctx: &flare_server_core::context::Ctx,
         request: DeliverToConversationRequest,
     ) -> Result<()> {
+        // Reject unscoped work before opening a channel. Gateway conversation
+        // subscriptions are tenant-scoped; a fresh bare Request loses that scope.
+        let request = conversation_delivery_request(ctx, request)?;
         let gateway_ids: Vec<String> = match self.service_discover {
             Some(ref sd) => sd
                 .get_instances()
@@ -423,14 +427,11 @@ impl GatewayRouter {
         if gateway_ids.is_empty() {
             // 无服务发现实例：单端点（get_or_create_client 内部回退 static_fallback_endpoint）。
             let mut client = self.get_or_create_client("__static_fallback__").await?;
-            client
-                .deliver_to_conversation(tonic::Request::new(request))
-                .await
-                .map_err(|e| {
-                    flare_server_core::error::FlareError::system(format!(
-                        "deliver_to_conversation failed: {e}"
-                    ))
-                })?;
+            client.deliver_to_conversation(request).await.map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "deliver_to_conversation failed: {e}"
+                ))
+            })?;
             return Ok(());
         }
 
@@ -438,7 +439,10 @@ impl GatewayRouter {
             match self.get_or_create_client(&gateway_id).await {
                 Ok(mut client) => {
                     if let Err(e) = client
-                        .deliver_to_conversation(tonic::Request::new(request.clone()))
+                        .deliver_to_conversation(conversation_delivery_request(
+                            ctx,
+                            request.get_ref().clone(),
+                        )?)
                         .await
                     {
                         warn!(
@@ -722,6 +726,39 @@ fn users_offline_error(user_ids: Vec<String>) -> FlareError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_delivery_preserves_tenant_and_request_context() {
+        use super::*;
+        use flare_server_core::context::Context;
+        for tenant in ["tenant-a", "tenant-b"] {
+            let ctx = Arc::new(Context::with_request_id("delivery-request").with_tenant_id(tenant));
+            let req = conversation_delivery_request(
+                &ctx,
+                DeliverToConversationRequest {
+                    conversation_id: "same-conversation".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(req.metadata().get("x-tenant-id").unwrap(), tenant);
+            assert_eq!(
+                req.metadata().get("x-request-id").unwrap(),
+                "delivery-request"
+            );
+            assert_eq!(req.get_ref().conversation_id, "same-conversation");
+        }
+        assert!(
+            conversation_delivery_request(&Arc::new(Context::root()), Default::default()).is_err()
+        );
+        assert!(
+            conversation_delivery_request(
+                &Arc::new(Context::root().with_tenant_id("")),
+                Default::default()
+            )
+            .is_err()
+        );
+    }
+
     /// 「网关实例未找到」必须是**可重试**错误。
     ///
     /// 滚动重启时 push-worker 可能比网关早起来几秒，此时网关还没完成 consul
@@ -749,6 +786,25 @@ mod tests {
             "system 变体不带 ErrorCode，预期不可重试（说明为何必须改用 localized）"
         );
     }
+}
+
+fn conversation_delivery_request(
+    ctx: &flare_server_core::context::Ctx,
+    request: DeliverToConversationRequest,
+) -> Result<tonic::Request<DeliverToConversationRequest>> {
+    if ctx
+        .tenant_id()
+        .is_none_or(|tenant| tenant.trim().is_empty())
+    {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "conversation delivery requires tenant context",
+        )
+        .build_error());
+    }
+    Ok(flare_server_core::client::request_with_context(
+        request, ctx,
+    ))
 }
 
 /// 广播目标：服务发现给出的实例去掉自己。

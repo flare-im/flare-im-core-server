@@ -1003,7 +1003,7 @@ impl PushRouterHandler {
         push_req.user_ids = user_ids.to_vec();
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
         // 真实在线状态必须查：把所有收件人当成在线会让 `publish_targeted_tasks`
         // 一个离线任务都建不出来——群消息走的正是这条内联事件路径，于是离线群成员
         // 收不到任何推送通知，只能等下次自己打开 app 拉。
@@ -1058,7 +1058,7 @@ impl PushRouterHandler {
         push_req.user_ids = user_ids.to_vec();
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
         let online_statuses = user_ids
             .iter()
             .map(|user_id| (user_id.clone(), true))
@@ -1098,7 +1098,7 @@ impl PushRouterHandler {
             .map(|o| o.expire_at_ms)
             .filter(|expire_at| *expire_at > 0);
         let message_id = Self::event_message_id(&req);
-        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
 
         // user_ids 在读扩散下不再使用（网关按会话订阅投递）；保持为空避免误导下游。
         let push_payload = req.encode_to_vec();
@@ -1210,7 +1210,7 @@ impl PushRouterHandler {
             .iter()
             .map(|user_id| (user_id.clone(), false))
             .collect();
-        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
         let headers = HashMap::new();
         if let Err(error) = self
             .publish_targeted_tasks_inner(
@@ -1291,10 +1291,7 @@ impl PushRouterHandler {
                 .await;
         };
 
-        let tenant_id = ctx
-            .tenant_id()
-            .unwrap_or_else(|| self.online_status.default_tenant_id())
-            .to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
         let key = ConversationPingCoalesceKey::new(tenant_id, conversation_id.clone());
         let pending =
             pending_conversation_ping_request(&req, &conversation_id, max_conversation_seq);
@@ -1358,6 +1355,13 @@ impl PushRouterHandler {
         });
     }
 
+    // An explicitly scoped request must never be published under the deployment's
+    // default tenant. Worker delivery and gateway subscriptions use this field.
+    fn request_tenant_id<'a>(&'a self, ctx: &'a flare_server_core::context::Ctx) -> &'a str {
+        ctx.tenant_id()
+            .unwrap_or_else(|| self.online_status.default_tenant_id())
+    }
+
     pub async fn handle_message(
         &self,
         ctx: &flare_server_core::context::Ctx,
@@ -1375,7 +1379,7 @@ impl PushRouterHandler {
 
         let push_payload = req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.online_status.default_tenant_id().to_string();
+        let tenant_id = self.request_tenant_id(ctx).to_string();
         let online_statuses = self.load_online_statuses(ctx, &req.user_ids).await?;
         self.publish_targeted_tasks(
             ctx,
@@ -1867,6 +1871,87 @@ mod tests {
             .collect();
         let online = publisher.online.lock().expect("online lock").len();
         (offline, online)
+    }
+
+    /// 大群此前只发在线广播，离线成员一条推送都收不到。
+    #[tokio::test]
+    async fn all_push_routes_preserve_request_tenant_instead_of_deployment_default() {
+        for route in ["message", "targeted_event", "online_index", "broadcast"] {
+            let publisher = Arc::new(MockPushTaskPublisher::default());
+            let handler = PushRouterHandler::new(
+                Arc::new(MockOnlineStatusReader {
+                    statuses: HashMap::new(),
+                    tenant_id: "0".to_string(),
+                }),
+                Arc::new(MockConversationOnlineIndexReader {
+                    user_ids: vec!["same-user".to_string()],
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                publisher.clone(),
+            )
+            .with_notify_policy(Arc::new(MockNotifyPolicy {
+                muted: vec![],
+                mention_only: vec![],
+                participants: Some(HashMap::from([(
+                    "same-user".to_string(),
+                    NotifyPreference::default(),
+                )])),
+                fail: false,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }));
+            for tenant in ["tenant-a", "tenant-b"] {
+                let ctx = Arc::new(Context::root().with_tenant_id(tenant));
+                let request = access_gateway::PushEventRequest {
+                    conversation_id: "conversation-large".to_string(),
+                    events: vec![flare_proto::common::Event {
+                        conversation_id: "conversation-large".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                match route {
+                    "message" => handler
+                        .handle_message(
+                            &ctx,
+                            access_gateway::PushMessageRequest {
+                                user_ids: vec!["same-user".to_string()],
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap(),
+                    "targeted_event" => handler
+                        .publish_event_to_user_batch(
+                            &ctx,
+                            &request,
+                            &["same-user".to_string()],
+                            false,
+                        )
+                        .await
+                        .unwrap(),
+                    "online_index" => handler
+                        .publish_event_to_online_index_batch(
+                            &ctx,
+                            &request,
+                            &["same-user".to_string()],
+                        )
+                        .await
+                        .unwrap(),
+                    "broadcast" => handler.handle_event(&ctx, request).await.unwrap(),
+                    _ => unreachable!(),
+                }
+                let online = std::mem::take(&mut *publisher.online.lock().unwrap());
+                let offline = std::mem::take(&mut *publisher.offline.lock().unwrap());
+                assert!(!online.is_empty() || !offline.is_empty(), "{route}");
+                if route == "broadcast" {
+                    assert_eq!(online.len(), 1);
+                    assert_eq!(offline.len(), 1, "offline fanout retains tenant too");
+                }
+                for (_, task) in online.into_iter().chain(offline) {
+                    assert_eq!(task.tenant_id, tenant, "{route}");
+                }
+            }
+        }
     }
 
     /// 大群此前只发在线广播，离线成员一条推送都收不到。

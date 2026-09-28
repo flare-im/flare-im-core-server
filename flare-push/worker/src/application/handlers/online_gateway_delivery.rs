@@ -127,7 +127,7 @@ impl GatewayPushExecutor {
     /// 本地会话订阅表过滤投递（O(在线/节点)，与群人数无关）。`target_user_id`/`strategy` 在读扩散下不再需要。
     pub async fn push_message(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         _target_user_id: &str,
         _strategy: PushStrategy,
         push: PushMessageRequest,
@@ -160,7 +160,7 @@ impl GatewayPushExecutor {
                 })),
             };
             self.gateway_router
-                .broadcast_deliver_to_conversation(request)
+                .broadcast_deliver_to_conversation(ctx, request)
                 .await?;
         }
         Ok(())
@@ -172,7 +172,7 @@ impl GatewayPushExecutor {
     /// `target_user_id`/`strategy` 在读扩散下不再需要。
     pub async fn push_event(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         _target_user_id: &str,
         _strategy: PushStrategy,
         push: PushEventRequest,
@@ -197,7 +197,7 @@ impl GatewayPushExecutor {
                 })),
             };
             self.gateway_router
-                .broadcast_deliver_to_conversation(request)
+                .broadcast_deliver_to_conversation(ctx, request)
                 .await?;
             return Ok(());
         }
@@ -226,7 +226,7 @@ impl GatewayPushExecutor {
                 })),
             };
             self.gateway_router
-                .broadcast_deliver_to_conversation(request)
+                .broadcast_deliver_to_conversation(ctx, request)
                 .await?;
         }
         Ok(())
