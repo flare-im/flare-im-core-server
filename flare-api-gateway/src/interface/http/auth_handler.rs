@@ -84,6 +84,7 @@ impl From<IssuedToken> for IssuedTokenHttp {
     responses(
         (status = 200, description = "签发成功", body = ApiResponse<IssuedTokenHttp>),
         (status = 401, description = "缺少或错误的 app 凭据，且未开联调签发"),
+        (status = 403, description = "凭据无效或请求租户与凭据绑定租户不一致"),
         (status = 501, description = "签发已委托给业务认证系统（http_hook 未配 issue URL）"),
     )
 )]
@@ -97,9 +98,26 @@ pub async fn issue_token(
     let Some(issuer) = issuer.0 else {
         return delegated_response();
     };
-    if let Err(err) = authorize_issue(&settings, &headers) {
-        return auth_error_response(err, GATEWAY_NAME);
-    }
+    let bound_tenant = match authorize_issue(&settings, &headers) {
+        Ok(tenant) => tenant,
+        Err(err) => return auth_error_response(err, GATEWAY_NAME),
+    };
+    let tenant_id = match bound_tenant {
+        Some(tenant) => {
+            if request
+                .tenant_id
+                .as_ref()
+                .is_some_and(|requested| requested != &tenant)
+            {
+                return auth_error_response(
+                    AuthError::Forbidden("tenantId does not match app credential".into()),
+                    GATEWAY_NAME,
+                );
+            }
+            Some(tenant)
+        }
+        None => request.tenant_id,
+    };
     if request.user_id.trim().is_empty() {
         return auth_error_response(
             AuthError::InvalidToken("userId is required".into()),
@@ -109,7 +127,7 @@ pub async fn issue_token(
     match issuer
         .issue(TokenIssueRequest {
             user_id: request.user_id,
-            tenant_id: request.tenant_id,
+            tenant_id,
             device_id: request.device_id,
             ttl_secs: request.ttl_secs,
         })
@@ -232,17 +250,22 @@ pub async fn revoke_user(
 pub(crate) fn authorize_issue(
     settings: &GatewaySettings,
     headers: &HeaderMap,
-) -> Result<(), AuthError> {
+) -> Result<Option<String>, AuthError> {
     let app_id = header_str(headers, APP_ID_HEADER);
     let app_secret = header_str(headers, APP_SECRET_HEADER);
     match (app_id, app_secret) {
         (Some(app_id), Some(app_secret)) => {
-            let matched = settings.auth.app_credentials.iter().any(|cred| {
+            let matched = settings.auth.app_credentials.iter().find(|cred| {
                 cred.app_id == app_id
                     && constant_time_eq(cred.secret.as_bytes(), app_secret.as_bytes())
             });
-            if matched {
-                Ok(())
+            if let Some(credential) = matched {
+                if credential.tenant_id.trim().is_empty() {
+                    return Err(AuthError::Forbidden(
+                        "app credential has no tenant binding".into(),
+                    ));
+                }
+                Ok(Some(credential.tenant_id.clone()))
             } else {
                 warn!(app_id = %app_id, "token issue rejected: unknown app credential");
                 Err(AuthError::Forbidden("unknown app credential".into()))
@@ -251,7 +274,7 @@ pub(crate) fn authorize_issue(
         (Some(_), None) | (None, Some(_)) => Err(AuthError::InvalidToken(
             "both x-app-id and x-app-secret are required".into(),
         )),
-        (None, None) if settings.auth.dev_issue => Ok(()),
+        (None, None) if settings.auth.dev_issue => Ok(None),
         (None, None) => Err(AuthError::MissingToken),
     }
 }
@@ -329,7 +352,7 @@ mod tests {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert(
             "FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS".into(),
-            format!("console:{APP_SECRET}"),
+            format!("console:0:{APP_SECRET}"),
         );
         for (k, v) in extra {
             env.insert((*k).to_string(), (*v).to_string());
@@ -436,6 +459,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credentials_bind_issuance_and_refresh_to_the_configured_tenant() {
+        for dev in ["false", "true"] {
+            let cfg = settings(&[("FLARE_API_GATEWAY_AUTH_DEV_ISSUE", dev)]);
+            for tenant in [Some("other"), Some(""), None, Some("0")] {
+                let mut body = serde_json::json!({"userId": "same-user"});
+                if let Some(tenant) = tenant {
+                    body["tenantId"] = tenant.into();
+                }
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/tokens")
+                    .header("content-type", "application/json")
+                    .header(APP_ID_HEADER, "console")
+                    .header(APP_SECRET_HEADER, APP_SECRET)
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let (status, json) = call(app(cfg.clone(), core_issuer()), request).await;
+                if tenant.is_some_and(|t| t != "0") {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+                    assert!(json["data"]["token"].is_null());
+                    continue;
+                }
+                assert_eq!(status, StatusCode::OK, "{json}");
+                let claims = service()
+                    .validate_token(json["data"]["token"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(claims.tenant_id.as_deref(), Some("0"));
+                let refresh = json["data"]["refreshToken"].as_str().unwrap();
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/tokens/refresh")
+                    .header("authorization", format!("Bearer {refresh}"))
+                    .header("content-type", "application/json")
+                    .header("x-tenant-id", "other")
+                    .body(Body::from(r#"{"tenantId":"other"}"#))
+                    .unwrap();
+                let (status, json) = call(app(cfg.clone(), core_issuer()), request).await;
+                assert_eq!(status, StatusCode::OK, "{json}");
+                assert_eq!(json["data"]["tenantId"], "0");
+                let claims = service()
+                    .validate_token(json["data"]["token"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(claims.tenant_id.as_deref(), Some("0"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn refresh_rotates_and_rejects_garbage() {
         let cfg = settings(&[("FLARE_API_GATEWAY_AUTH_DEV_ISSUE", "true")]);
         let (_, json) = call(app(cfg.clone(), core_issuer()), issue_req(&[])).await;
@@ -451,6 +522,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_ne!(json["data"]["token"].as_str().unwrap(), token);
         assert_eq!(json["data"]["userId"], "flare");
+        assert_eq!(json["data"]["tenantId"], "0");
 
         let req = Request::builder()
             .method("POST")

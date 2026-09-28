@@ -168,6 +168,9 @@ generate_local_token_secret() {
 }
 
 ensure_local_gateway_token_secrets() {
+    # Optional FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS is inherited unchanged:
+    # app_id:tenant_id:secret (comma-separated). Do not reuse the signing secret.
+    # Gateway config rejects the old app_id:secret format at startup.
     if [ -n "${FLARE_API_GATEWAY_TOKEN_SECRET:-}" ] && [ -n "${ACCESS_GATEWAY_TOKEN_SECRET:-}" ]; then
         return 0
     fi

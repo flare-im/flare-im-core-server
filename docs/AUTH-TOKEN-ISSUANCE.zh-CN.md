@@ -33,8 +33,10 @@
 
 谁能调：
 
-1. **业务后端（生产）**：带 `x-app-id` + `x-app-secret`，与网关配置的 app 凭据匹配（`FLARE_API_GATEWAY_APP_CREDENTIALS="app1:secret1,app2:secret2"`）。
+1. **业务后端（生产）**：带 `x-app-id` + `x-app-secret`，与网关配置的 app 凭据匹配（`FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS="app1:tenant1:secret1,app2:tenant2:secret2"`）。
    这是服务端到服务端调用，客户端永远不持有 app secret。
+   tenantId 缺省时使用凭据绑定租户；不一致（包括空值）返回 403，即使联调开关开启也不能越权。
+   secret 至少 16 字节；空租户、重复 app_id、旧双字段格式均拒绝启动。密钥不得与 token 签名密钥复用。
 2. **开发/示例（联调）**：`FLARE_API_GATEWAY_AUTH_DEV_ISSUE=true` 时允许不带凭据直接按 userId 签发。
    默认关闭；开启时启动日志 WARN 醒目提示，且受网关限流。示例 App 的「只输用户 ID 登录」走这条。
 
@@ -51,6 +53,7 @@
 - token 签名与 issuer 必须合法；`exp` 允许已过期但不超过 `refresh_grace_secs`（默认 7 天）；
 - 若配置了 `TokenStore`（Redis），旧 `jti` 必须未被撤销，签发新 token 后撤销旧 `jti`（轮换）；
 - 新 token 继承 `sub / tenant_id / device_id`，`exp = now + ttl`。
+- 刷新不接受请求体或 `x-tenant-id` 覆盖租户，租户来自已验签的刷新凭证。
 
 ### 3.3 `http_hook` 模式
 

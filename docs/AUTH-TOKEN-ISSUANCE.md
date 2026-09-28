@@ -25,12 +25,16 @@ Per `GATEWAY_SPEC.md` the gateway owns no token lifecycle: issue/refresh/revoke 
 `TokenIssuer` in server-core; the gateway does inbound auth, validation and rate limiting.
 
 - `POST /api/v1/auth/tokens` body `{userId, tenantId?, deviceId?, ttlSecs?}`. Callers: a business backend
-  with `x-app-id` + `x-app-secret` (`FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS="app:secret,..."`), or, for
+  with `x-app-id` + `x-app-secret` (`FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS="app:tenant:secret,..."`), or, for
   local development only, a gateway started with `FLARE_API_GATEWAY_AUTH_DEV_ISSUE=true` (default false,
   loud startup warning). Response `{token, expiresAt, userId, tenantId?, deviceId?}`.
+  The credential owns `tenantId`: omission uses its configured tenant; a mismatched or empty value
+  returns 403 even with dev issuance enabled. Duplicate app IDs, empty tenants and old two-field
+  credentials are rejected at startup. Secrets must contain at least 16 bytes.
 - `POST /api/v1/auth/tokens/refresh` with `Authorization: Bearer <current token>`. Signature and issuer must
   verify; `exp` may be past by at most `AUTH_REFRESH_GRACE_SECS` (default 7 days); with a token store the old
   `jti` must not be revoked and is revoked after rotation. The new token keeps `sub/tenant_id/device_id`.
+  Neither a request-body tenant nor an `x-tenant-id` header changes the refresh token's signed tenant.
 - In `http_hook` auth mode both calls are forwarded to `AUTH_HOOK_ISSUE_URL` with the hook secret header;
   without that URL the endpoints answer `501 TOKEN_ISSUE_DELEGATED`.
 
