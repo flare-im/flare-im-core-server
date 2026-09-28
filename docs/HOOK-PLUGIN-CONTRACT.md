@@ -106,6 +106,41 @@ announcing would be a way to take the system down from outside.
 
 ## 7. Context
 
+### HTTP Hook signature
+
+When a webhook transport secret is configured, requests carry
+`Flare-Signature: t=<unix-seconds>,v1=<hex(HMAC-SHA256(secret, timestamp + "." + raw-body))>`.
+The signing secret is never sent. The old `x-flare-signature` plaintext header is
+removed. Custom headers cannot override either signature header or Content-Type.
+Unsigned endpoints remain possible only when no secret was configured.
+
+Verify the **raw request bytes**, before JSON parsing, and reject timestamps outside
+the allowed clock skew. Example receiver logic (Python standard library):
+
+```python
+import hashlib
+import hmac
+import time
+
+def verify_hook(secret: bytes, raw_body: bytes, signature: str) -> bool:
+    try:
+        parts = signature.split(",")
+        if len(parts) != 2 or not parts[0].startswith("t=") or not parts[1].startswith("v1="):
+            return False
+        timestamp = parts[0][2:]
+        if not timestamp.isascii() or not timestamp.isdecimal():
+            return False
+        if abs(int(time.time()) - int(timestamp)) > 300:
+            return False
+        expected = hmac.new(secret, timestamp.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, parts[1][3:])
+    except (TypeError, ValueError, OverflowError):
+        return False
+```
+
+Timestamp validation limits replay lifetime; receivers should additionally deduplicate
+side effects by message/event identity. TLS remains required outside local tests.
+
 `HookInvocationContext` carries tenant, user and trace identity. Flare calls you
 out of process, so nothing restores this for you — read it from the request.
 

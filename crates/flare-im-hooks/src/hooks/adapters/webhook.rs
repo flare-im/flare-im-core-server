@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Ctx;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use super::super::config::HookDefinition;
 use super::super::types::{
@@ -176,20 +179,151 @@ struct WebhookStatus {
     message: Option<String>,
 }
 
-fn build_headers(
+fn signed_request<T: Serialize>(
     request_builder: reqwest::RequestBuilder,
     secret: &Option<String>,
     headers: &HashMap<String, String>,
-) -> reqwest::RequestBuilder {
+    payload: &T,
+) -> Result<reqwest::RequestBuilder> {
+    // Serialize once: the signature covers exactly the bytes sent, including map order.
+    let body = serde_json::to_vec(payload).map_err(|_| {
+        ErrorBuilder::new(
+            ErrorCode::SerializationError,
+            "failed to serialize hook request",
+        )
+        .build_error()
+    })?;
     let mut builder = request_builder;
-    builder = builder.header("content-type", "application/json");
-    if let Some(secret) = secret {
-        builder = builder.header("x-flare-signature", secret);
-    }
     for (key, value) in headers {
+        if key.eq_ignore_ascii_case("flare-signature")
+            || key.eq_ignore_ascii_case("x-flare-signature")
+            || key.eq_ignore_ascii_case("content-type")
+        {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "hook transport headers cannot override signature or content type",
+            )
+            .build_error());
+        }
         builder = builder.header(key, value);
     }
-    builder
+    builder = builder.header("content-type", "application/json");
+    if let Some(secret) = secret {
+        if secret.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "hook signing secret is empty",
+            )
+            .build_error());
+        }
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| {
+                ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "system clock precedes Unix epoch",
+                )
+                .build_error()
+            })?
+            .as_secs();
+        builder = builder.header(
+            "Flare-Signature",
+            signature(secret.as_bytes(), timestamp, &body),
+        );
+    }
+    Ok(builder.body(body))
+}
+
+fn signature(secret: &[u8], timestamp: u64, body: &[u8]) -> String {
+    // HMAC accepts keys of any length; configuration rejects empty secrets above.
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret).expect("HMAC supports arbitrary key lengths");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    format!(
+        "t={timestamp},v1={}",
+        hex::encode(mac.finalize().into_bytes())
+    )
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    #[test]
+    fn signature_matches_independent_hmac_sha256_vector() {
+        assert_eq!(
+            signature(b"test-secret", 1_700_000_000, br#"{"message":"hello"}"#),
+            "t=1700000000,v1=543eae34d92c82da22df2744e174c470175e5d72cec71947502699d5cb85672a"
+        );
+    }
+
+    #[test]
+    fn signature_binds_body_timestamp_and_secret() {
+        let original = signature(b"a-secret", 100, b"body");
+        assert_ne!(original, signature(b"a-secret", 101, b"body"));
+        assert_ne!(original, signature(b"a-secret", 100, b"tampered"));
+        assert_ne!(original, signature(b"other-secret", 100, b"body"));
+    }
+
+    #[test]
+    fn outbound_signature_covers_exact_body_and_never_contains_secret() {
+        let secret = "not-in-the-headers";
+        let request = signed_request(
+            Client::new().post("http://127.0.0.1/hook"),
+            &Some(secret.into()),
+            &HashMap::new(),
+            &serde_json::json!({"message":"hello"}),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let header = request.headers()["flare-signature"].to_str().unwrap();
+        let timestamp = header
+            .split(',')
+            .next()
+            .unwrap()
+            .strip_prefix("t=")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            header,
+            signature(
+                secret.as_bytes(),
+                timestamp,
+                request.body().unwrap().as_bytes().unwrap()
+            )
+        );
+        assert!(!header.contains(secret));
+        assert!(!request.headers().contains_key("x-flare-signature"));
+    }
+
+    #[test]
+    fn reserved_headers_cannot_reintroduce_plaintext_or_override_signature() {
+        for header in ["X-Flare-Signature", "FLARE-SIGNATURE", "Content-Type"] {
+            let headers = HashMap::from([(header.to_owned(), "secret".to_owned())]);
+            assert!(
+                signed_request(
+                    Client::new().post("http://127.0.0.1/hook"),
+                    &Some("secret".into()),
+                    &headers,
+                    &()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            signed_request(
+                Client::new().post("http://127.0.0.1/hook"),
+                &Some(String::new()),
+                &HashMap::new(),
+                &()
+            )
+            .is_err()
+        );
+    }
 }
 
 fn webhook_context(ctx: &Ctx) -> WebhookContextPayload {
@@ -237,8 +371,11 @@ impl PreSendHook for WebhookPreSendHook {
         };
 
         let builder = self.client.post(&self.endpoint);
-        let builder = build_headers(builder, &self.secret, &self.headers);
-        let response = builder.json(&request_body).send().await;
+        let builder = match signed_request(builder, &self.secret, &self.headers, &request_body) {
+            Ok(builder) => builder,
+            Err(error) => return PreSendDecision::Reject { error },
+        };
+        let response = builder.send().await;
 
         match response {
             Ok(resp) => match resp.json::<PreSendWebhookResponse>().await {
@@ -318,8 +455,11 @@ impl PostSendHook for WebhookPostSendHook {
         };
 
         let builder = self.client.post(&self.endpoint);
-        let builder = build_headers(builder, &self.secret, &self.headers);
-        match builder.json(&request_body).send().await {
+        let builder = match signed_request(builder, &self.secret, &self.headers, &request_body) {
+            Ok(builder) => builder,
+            Err(error) => return HookOutcome::Failed(error),
+        };
+        match builder.send().await {
             Ok(resp) if resp.status().is_success() => HookOutcome::Completed,
             Ok(resp) => {
                 let err =
@@ -364,8 +504,11 @@ impl DeliveryHook for WebhookDeliveryHook {
             metadata: self.static_metadata.clone(),
         };
         let builder = self.client.post(&self.endpoint);
-        let builder = build_headers(builder, &self.secret, &self.headers);
-        match builder.json(&request_body).send().await {
+        let builder = match signed_request(builder, &self.secret, &self.headers, &request_body) {
+            Ok(builder) => builder,
+            Err(error) => return HookOutcome::Failed(error),
+        };
+        match builder.send().await {
             Ok(resp) if resp.status().is_success() => HookOutcome::Completed,
             Ok(resp) => {
                 let err =
@@ -410,9 +553,12 @@ impl RecallHook for WebhookRecallHook {
             metadata: self.static_metadata.clone(),
         };
         let builder = self.client.post(&self.endpoint);
-        let builder = build_headers(builder, &self.secret, &self.headers);
+        let builder = match signed_request(builder, &self.secret, &self.headers, &request_body) {
+            Ok(builder) => builder,
+            Err(error) => return HookOutcome::Failed(error),
+        };
 
-        match builder.json(&request_body).send().await {
+        match builder.send().await {
             Ok(resp) if resp.status().is_success() => HookOutcome::Completed,
             Ok(resp) => {
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "webhook recall failed")
