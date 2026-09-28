@@ -15,7 +15,7 @@
 
 | 环境变量 | 说明 | 默认 |
 |----------|------|------|
-| `PUSH_PROXY_LISTEN` | gRPC 监听地址 | `0.0.0.0:50090` |
+| `PUSH_PROXY_LISTEN` | gRPC 监听地址 | `0.0.0.0:50091` |
 | `PUSH_PROXY_JETSTREAM_URL` | JetStream 地址 | 同 push 配置或 `nats://127.0.0.1:24222` |
 | `PUSH_PROXY_PUSH_REQUEST_TOPIC` | 消息推送入站 Topic | `flare.im.push.messages` |
 | `PUSH_PROXY_PUSH_ENVELOPE_TOPIC` | 通知/自定义统一信封 Topic | `flare.im.push.envelope` |
@@ -32,7 +32,7 @@
 cargo run -p flare-push-proxy
 
 # 指定监听端口与 JetStream
-PUSH_PROXY_LISTEN=0.0.0.0:50090 \
+PUSH_PROXY_LISTEN=0.0.0.0:50091 \
 PUSH_PROXY_JETSTREAM_URL=nats://127.0.0.1:24222 \
 cargo run -p flare-push-proxy
 ```

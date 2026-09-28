@@ -106,6 +106,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p flare-storage-writer \
         -p flare-storage-reader \
         -p flare-push-server \
+        -p flare-push-proxy \
         -p flare-push-worker \
         -p flare-capability \
         -p flare-media \

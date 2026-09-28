@@ -36,7 +36,7 @@ pub struct ApplicationContext {
 pub async fn initialize(
     app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
-    let config = Arc::new(PushWorkerConfig::from_app_config(app_config));
+    let config = Arc::new(PushWorkerConfig::from_app_config(app_config)?);
 
     // 1. 创建 DLQ 发布器
     let dlq = Arc::new(DlqPublisher::new(config.clone()).await?);

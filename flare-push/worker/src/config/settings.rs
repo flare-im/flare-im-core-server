@@ -8,6 +8,7 @@ use flare_im_contracts::constants::topics::{
 };
 use flare_im_service_kit::config::FlareAppConfig;
 use flare_im_service_kit::metrics::MetricsEndpointConfig;
+use flare_server_core::error::{FlareError, Result};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -23,15 +24,28 @@ pub enum OfflineDeliveryBackend {
 }
 
 impl OfflineDeliveryBackend {
-    fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
+    fn parse(value: &str) -> Result<Self> {
+        Ok(match value.trim().to_ascii_lowercase().as_str() {
             "outbox" => Self::Outbox,
             "getui" => Self::Getui,
             "fcm" | "firebase" => Self::Fcm,
             "apns" | "apple" => Self::Apns,
             "disabled" | "off" | "none" => Self::Disabled,
-            other => panic!("unsupported PUSH_WORKER_OFFLINE_DELIVERY_BACKEND={other}"),
+            _ => {
+                return Err(FlareError::system(
+                    "unsupported PUSH_WORKER_OFFLINE_DELIVERY_BACKEND",
+                ));
+            }
+        })
+    }
+
+    fn validate_environment(self, environment: &str) -> Result<Self> {
+        if environment.trim().eq_ignore_ascii_case("production") && self == Self::Outbox {
+            return Err(FlareError::system(
+                "FLARE_ENV=production forbids offline outbox: configure fcm/apns/getui or explicitly disabled",
+            ));
         }
+        Ok(self)
     }
 }
 
@@ -113,7 +127,7 @@ fn default_signaling_online_grpc_endpoint(app: &FlareAppConfig) -> String {
 }
 
 impl PushWorkerConfig {
-    pub fn from_app_config(app: &FlareAppConfig) -> Self {
+    pub fn from_app_config(app: &FlareAppConfig) -> Result<Self> {
         let service = app.push_worker_service();
         let jetstream_name = service.jetstream.as_deref().unwrap_or("push");
         let jetstream_profile = app.jetstream_profile(jetstream_name);
@@ -198,7 +212,9 @@ impl PushWorkerConfig {
         let offline_delivery_backend = env::var("PUSH_WORKER_OFFLINE_DELIVERY_BACKEND")
             .ok()
             .map(|value| OfflineDeliveryBackend::parse(&value))
-            .unwrap_or(OfflineDeliveryBackend::Outbox);
+            .transpose()?
+            .unwrap_or(OfflineDeliveryBackend::Outbox)
+            .validate_environment(&env::var("FLARE_ENV").unwrap_or_default())?;
         let offline_outbox_redis_url = resolve_offline_outbox_redis_url(
             env::var("PUSH_WORKER_OFFLINE_REDIS_URL").ok(),
             app.redis_profile("push").map(|profile| profile.url.clone()),
@@ -266,7 +282,7 @@ impl PushWorkerConfig {
             MetricsEndpointConfig::new(metrics_address, metrics_port).with_path(metrics_path);
         metrics.enabled = metrics_enabled;
 
-        Self {
+        Ok(Self {
             mq_backend,
             jetstream_url,
             jetstream_timeout_ms,
@@ -303,7 +319,7 @@ impl PushWorkerConfig {
             getui_request_timeout_ms,
             event_ping_debounce_window_ms,
             metrics,
-        }
+        })
     }
 }
 
@@ -407,13 +423,41 @@ mod tests {
     #[test]
     fn offline_delivery_backend_is_explicit() {
         assert_eq!(
-            OfflineDeliveryBackend::parse("getui"),
+            OfflineDeliveryBackend::parse("getui").unwrap(),
             OfflineDeliveryBackend::Getui
         );
         assert_eq!(
-            OfflineDeliveryBackend::parse("off"),
+            OfflineDeliveryBackend::parse("off").unwrap(),
             OfflineDeliveryBackend::Disabled
         );
+    }
+
+    #[test]
+    fn production_never_silently_parks_offline_notifications() {
+        assert!(
+            OfflineDeliveryBackend::Outbox
+                .validate_environment("production")
+                .is_err()
+        );
+        assert!(
+            OfflineDeliveryBackend::Outbox
+                .validate_environment(" Production ")
+                .is_err()
+        );
+        assert!(
+            OfflineDeliveryBackend::Outbox
+                .validate_environment("development")
+                .is_ok()
+        );
+        for backend in [
+            OfflineDeliveryBackend::Fcm,
+            OfflineDeliveryBackend::Apns,
+            OfflineDeliveryBackend::Getui,
+            OfflineDeliveryBackend::Disabled,
+        ] {
+            assert!(backend.validate_environment("production").is_ok());
+        }
+        assert!(OfflineDeliveryBackend::parse("typo").is_err());
     }
 
     #[test]

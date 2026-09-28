@@ -194,6 +194,13 @@ services:
       SERVICE_ADVERTISE_HOST: push-server
     command: ["flare-push-server"]
 
+  push-proxy:
+    <<: *flare-service
+    environment:
+      <<: *flare-env
+      SERVICE_ADVERTISE_HOST: push-proxy
+    command: ["flare-push-proxy"]
+
   push-worker:
     <<: *flare-service
     environment:
@@ -201,6 +208,14 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: push-worker
+      FLARE_ENV: ${FLARE_ENV:-development}
+      PUSH_WORKER_OFFLINE_DELIVERY_BACKEND: ${PUSH_WORKER_OFFLINE_DELIVERY_BACKEND:-outbox}
+      PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON: ${PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON:-}
+      PUSH_WORKER_APNS_TEAM_ID: ${PUSH_WORKER_APNS_TEAM_ID:-}
+      PUSH_WORKER_APNS_KEY_ID: ${PUSH_WORKER_APNS_KEY_ID:-}
+      PUSH_WORKER_APNS_PRIVATE_KEY: ${PUSH_WORKER_APNS_PRIVATE_KEY:-}
+      PUSH_WORKER_APNS_TOPIC: ${PUSH_WORKER_APNS_TOPIC:-}
+      PUSH_WORKER_APNS_SANDBOX: ${PUSH_WORKER_APNS_SANDBOX:-false}
     command: ["flare-push-worker"]
 
   capability:

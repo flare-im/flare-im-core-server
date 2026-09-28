@@ -17,7 +17,7 @@ PUSH_WORKER_OFFLINE_DELIVERY_BACKEND=fcm   # outbox | getui | fcm | apns | disab
 | `apns` | iOS 原生 | 需要 VoIP 来电、Live Activity、Critical Alert —— 这些**只有原生 APNs 支持** |
 | `fcm` | Android + 经 FCM 转发的 iOS | 海外为主的产品，一套接入覆盖两端 |
 | `getui` | 国内 Android 全家桶 | 国内产品：小米/华为/OPPO/vivo 等厂商通道由个推聚合 |
-| `outbox` | —— | 只落库不投递，由外部系统消费 |
+| `outbox` | —— | 只落库不投递，由外部系统消费；`FLARE_ENV=production` 时拒绝启动 |
 | `disabled` | —— | 关闭离线推送 |
 
 > 一个 worker 实例只跑一个后端。要同时覆盖多个通道，就起多个实例、各配各的后端 ——

@@ -19,7 +19,7 @@ impl ApplicationBootstrap {
             &service_config.runtime,
             PUSH_PROXY,
             "PUSH_PROXY",
-            50090,
+            50091,
         )?;
         info!(address = %runtime_plan.address, "Push Proxy listen address");
 

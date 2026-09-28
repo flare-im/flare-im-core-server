@@ -8,6 +8,11 @@ Offline push delivery. When a user is offline, messages pass through this worker
 
 ## Choosing the delivery backend
 
+Set `FLARE_ENV=production` in production. The worker rejects the default `outbox`
+backend before connecting to MQ: it persists notifications but does not deliver them.
+Configure a real provider, or explicitly select `disabled` if offline delivery is not offered.
+This startup check does not replace sandbox device-delivery acceptance tests.
+
 ```bash
 PUSH_WORKER_OFFLINE_DELIVERY_BACKEND=fcm   # outbox | getui | fcm | apns | disabled
 ```

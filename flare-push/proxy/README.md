@@ -15,7 +15,7 @@ Exposes the **PushService** gRPC API (`push_service.proto`), writing the push re
 
 | Environment variable | Description | Default |
 |----------|------|------|
-| `PUSH_PROXY_LISTEN` | gRPC listen address | `0.0.0.0:50090` |
+| `PUSH_PROXY_LISTEN` | gRPC listen address | `0.0.0.0:50091` |
 | `PUSH_PROXY_JETSTREAM_URL` | JetStream address | Same as the push config or `nats://127.0.0.1:24222` |
 | `PUSH_PROXY_PUSH_REQUEST_TOPIC` | Message-push inbound topic | `flare.im.push.messages` |
 | `PUSH_PROXY_PUSH_ENVELOPE_TOPIC` | Notification/custom unified envelope topic | `flare.im.push.envelope` |
@@ -32,7 +32,7 @@ It can also be indirectly influenced at bootstrap via the JetStream config refer
 cargo run -p flare-push-proxy
 
 # Specify the listen port and JetStream
-PUSH_PROXY_LISTEN=0.0.0.0:50090 \
+PUSH_PROXY_LISTEN=0.0.0.0:50091 \
 PUSH_PROXY_JETSTREAM_URL=nats://127.0.0.1:24222 \
 cargo run -p flare-push-proxy
 ```
