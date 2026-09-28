@@ -163,10 +163,7 @@ impl Default for HookConfigLoader {
 impl HookConfigLoader {
     pub fn new() -> Self {
         Self {
-            candidate_paths: vec![
-                PathBuf::from("config/hooks.toml"),
-                PathBuf::from("config/hooks.d"),
-            ],
+            candidate_paths: Vec::new(),
         }
     }
 
@@ -176,18 +173,55 @@ impl HookConfigLoader {
     }
 
     pub fn load(&self) -> Result<HookConfig> {
-        for path in &self.candidate_paths {
-            if path.is_dir() {
-                if let Ok(cfg) = self.load_from_directory(path) {
-                    return Ok(cfg);
-                }
-            } else if path.is_file()
-                && let Ok(cfg) = self.load_from_file(path)
-            {
-                return Ok(cfg);
-            }
+        if self.candidate_paths.is_empty() {
+            let config: HookConfig = toml::from_str(include_str!(
+                "../../../../config/hooks.core.toml"
+            ))
+            .map_err(|_| {
+                ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "invalid embedded core hook profile",
+                )
+                .build_error()
+            })?;
+            Self::log_loaded(&config, "embedded:hooks.core.toml", "core");
+            return Ok(config);
         }
-        Ok(HookConfig::default())
+        let mut merged = HookConfig::default();
+        for path in &self.candidate_paths {
+            let config = if path.is_dir() {
+                self.load_from_directory(path)?
+            } else if path.is_file() {
+                self.load_from_file(path)?
+            } else {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "explicit hook config path does not exist or is not readable",
+                )
+                .details(format!("path={}", path.display()))
+                .build_error());
+            };
+            Self::log_loaded(&config, &path.display().to_string(), "configured");
+            merged.merge(config);
+        }
+        Ok(merged)
+    }
+
+    fn log_loaded(config: &HookConfig, source: &str, profile: &str) {
+        tracing::info!(
+            source,
+            profile,
+            pre_send = config.pre_send.len(),
+            post_send = config.post_send.len(),
+            delivery = config.delivery.len(),
+            recall = config.recall.len(),
+            "hooks loaded: {} (profile={})",
+            config.pre_send.len()
+                + config.post_send.len()
+                + config.delivery.len()
+                + config.recall.len(),
+            profile
+        );
     }
 
     fn load_from_file(&self, path: &Path) -> Result<HookConfig> {
@@ -205,10 +239,6 @@ impl HookConfigLoader {
 
     fn load_from_directory(&self, dir: &Path) -> Result<HookConfig> {
         let mut merged = HookConfig::default();
-        if !dir.exists() {
-            return Ok(merged);
-        }
-
         let mut entries = fs::read_dir(dir)
             .map_err(|err| {
                 ErrorBuilder::new(
@@ -218,8 +248,15 @@ impl HookConfigLoader {
                 .details(format!("path={}, err={err}", dir.display()))
                 .build_error()
             })?
-            .filter_map(|entry| entry.ok())
-            .collect::<Vec<_>>();
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|err| {
+                ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "failed to enumerate hook config dir",
+                )
+                .details(format!("path={}, err={err}", dir.display()))
+                .build_error()
+            })?;
         entries.sort_by_key(|entry| entry.path());
 
         for entry in entries {

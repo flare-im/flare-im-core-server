@@ -92,6 +92,14 @@ Hooks are **not** self-registering: the operator wires them in, unlike capabilit
 plugins which announce themselves. See `config/hooks.business.example.toml` in
 this repository for the shape (endpoint, priority, timeout, error policy).
 
+An explicitly configured file or directory is mandatory: a missing path, unreadable
+file, malformed TOML or unreadable directory entry aborts startup. Multiple explicit
+sources are merged in their configured order (directory files sort by name). No
+implicit `config/hooks.toml` path can shadow the supplied Social profile. With no
+configured source, the embedded empty `hooks.core.toml` profile is used. Startup logs
+the source, profile and hook counts; the dispatcher also logs its installed counts.
+Container deployments use `MESSAGE_INGEST_HOOKS_CONFIG=/etc/flare/config/hooks.toml`.
+
 That asymmetry is deliberate. A hook sits in the critical path of every message
 and can reject traffic; letting an arbitrary process insert itself there by
 announcing would be a way to take the system down from outside.

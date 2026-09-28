@@ -145,6 +145,7 @@ WORKDIR /home/flare
 # 「相对 CWD 的 config/」，容器里那个目录不存在，于是每个需要库的服务都以
 # 「postgres config is required」启动失败。镜像从未发布过，所以一直没人撞上。
 ENV FLARE_CONFIG_PATH=/etc/flare/config \
+    MESSAGE_INGEST_HOOKS_CONFIG=/etc/flare/config/hooks.toml \
     RUST_LOG=info
 
 # No default CMD: this image carries every service and the compose file names the one to

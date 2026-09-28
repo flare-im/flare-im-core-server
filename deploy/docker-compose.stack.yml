@@ -133,6 +133,7 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: message-ingest
+      MESSAGE_INGEST_HOOKS_CONFIG: /etc/flare/config/hooks.toml
     command: ["flare-message-ingest"]
 
   orchestrator:
