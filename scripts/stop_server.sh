@@ -34,6 +34,7 @@ cleanup_launchctl_dev_labels() {
             flare-signaling-route \
             flare-capability \
             flare-conversation \
+            flare-message-ingest \
             flare-message-orchestrator \
             flare-storage-writer \
             flare-storage-reader \
@@ -87,6 +88,7 @@ CORE_SERVICES=(
     "signaling-route"
     "capability"
     "conversation"
+    "message-ingest"
     "message-orchestrator"
     "storage-writer"
     "storage-reader"

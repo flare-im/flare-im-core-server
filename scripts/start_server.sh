@@ -116,42 +116,9 @@ free_listen_port() {
     kill -9 $pids 2>/dev/null || true
 }
 
-launchctl_label_pid() {
-    local label="$1"
-    launchctl list 2>/dev/null | awk -v label="$label" '$3 == label { print $1; exit }'
-}
-
-start_detached_process() {
-    local label="$1"
-    local log_file="$2"
-    shift 2
-
-    # Wrapper PID remains the service handle; signals are forwarded to the child.
-    set -- "$LOG_PYTHON" "$ROTATING_SERVICE" --log "$log_file" -- "$@"
-    DETACHED_PID=""
-    if [ "${FLARE_USE_LAUNCHCTL:-0}" != "0" ] && command -v launchctl >/dev/null 2>&1; then
-        launchctl remove "$label" >/dev/null 2>&1 || true
-        # 提高每个服务进程的 fd 上限（launchd 任务默认 soft 256；网关大群需上万连接）。
-        # hard 为 unlimited，受 kern.maxfilesperproc 限制；取一个安全高值，失败不阻断启动。
-        launchctl submit -l "$label" -o /dev/null -e /dev/null -- \
-            /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@"
-
-        local waited=0
-        while [ "$waited" -lt 10 ]; do
-            DETACHED_PID=$(launchctl_label_pid "$label")
-            if [ -n "$DETACHED_PID" ] && [ "$DETACHED_PID" != "-" ]; then
-                return 0
-            fi
-            sleep 1
-            waited=$((waited + 1))
-        done
-        return 1
-    fi
-
-    nohup /bin/sh -c 'cd "$1" && shift; ulimit -n 60000 2>/dev/null || true; exec "$@"' sh "$PROJECT_ROOT" "$@" </dev/null >/dev/null 2>&1 &
-    DETACHED_PID=$!
-    return 0
-}
+# Keep one launch path: launchctl does not inherit this shell's environment.
+# Old launchctl jobs are still cleaned above, but new services use nohup.
+source "$SCRIPT_DIR/lib/dev_process.sh"
 
 generate_local_token_secret() {
     if command -v openssl >/dev/null 2>&1; then
@@ -570,9 +537,9 @@ for service in "${CORE_SERVICES[@]}"; do
             PACKAGE="flare-signaling-online"
             BIN_NAME="flare-signaling-online"
             # 优先使用命令行参数，其次使用配置文件，最后使用默认值
-            SIGNALING_ONLINE_HOST=${SIGNALING_ONLINE_SERVICE_HOST:-$(grep -E '^\s*address\s*=' "$PROJECT_ROOT/config/services/signaling-online.toml" | sed -E 's/.*=\s*"([^"]*)".*/\1/' | head -1)}
+            SIGNALING_ONLINE_HOST=${SIGNALING_ONLINE_SERVICE_HOST:-$(grep -E '^[[:space:]]*address[[:space:]]*=' "$PROJECT_ROOT/config/services/signaling-online.toml" | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' | head -1)}
             SIGNALING_ONLINE_HOST=${SIGNALING_ONLINE_HOST:-"0.0.0.0"}
-            SIGNALING_ONLINE_PORT=${SIGNALING_ONLINE_SERVICE_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/signaling-online.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            SIGNALING_ONLINE_PORT=${SIGNALING_ONLINE_SERVICE_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/signaling-online.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             SIGNALING_ONLINE_PORT=${SIGNALING_ONLINE_PORT:-50061}
             ONLINE_SERVICE_ENDPOINT=${ONLINE_SERVICE_ENDPOINT:-"http://${SIGNALING_ONLINE_HOST}:${SIGNALING_ONLINE_PORT}"}
             # 直接设置环境变量
@@ -585,9 +552,9 @@ for service in "${CORE_SERVICES[@]}"; do
             PACKAGE="flare-signaling-route"
             BIN_NAME="flare-signaling-route"
             # 优先使用命令行参数，其次使用配置文件，最后使用默认值
-            SIGNALING_ROUTE_HOST=${SIGNALING_ROUTE_SERVICE_HOST:-$(grep -E '^\s*address\s*=' "$PROJECT_ROOT/config/services/signaling-route.toml" | sed -E 's/.*=\s*"([^"]*)".*/\1/' | head -1)}
+            SIGNALING_ROUTE_HOST=${SIGNALING_ROUTE_SERVICE_HOST:-$(grep -E '^[[:space:]]*address[[:space:]]*=' "$PROJECT_ROOT/config/services/signaling-route.toml" | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' | head -1)}
             SIGNALING_ROUTE_HOST=${SIGNALING_ROUTE_HOST:-"0.0.0.0"}
-            SIGNALING_ROUTE_PORT=${SIGNALING_ROUTE_SERVICE_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/signaling-route.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            SIGNALING_ROUTE_PORT=${SIGNALING_ROUTE_SERVICE_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/signaling-route.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             SIGNALING_ROUTE_PORT=${SIGNALING_ROUTE_PORT:-50062}
             ROUTE_SERVICE_ENDPOINT=${ROUTE_SERVICE_ENDPOINT:-"http://${SIGNALING_ROUTE_HOST}:${SIGNALING_ROUTE_PORT}"}
             # 直接设置环境变量
@@ -654,13 +621,13 @@ for service in "${CORE_SERVICES[@]}"; do
         "api-gateway")
             PACKAGE="flare-api-gateway"
             BIN_NAME="flare-api-gateway"
-            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             MESSAGE_INGEST_PORT=${MESSAGE_INGEST_PORT:-50182}
-            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             MESSAGE_ORCH_PORT=${MESSAGE_ORCH_PORT:-50181}
-            CONVERSATION_PORT=${CONVERSATION_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/conversation.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            CONVERSATION_PORT=${CONVERSATION_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/conversation.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             CONVERSATION_PORT=${CONVERSATION_PORT:-50090}
-            MEDIA_PORT=${MEDIA_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/media.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+            MEDIA_PORT=${MEDIA_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/media.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
             MEDIA_PORT=${MEDIA_PORT:-60081}
             export FLARE_API_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK="${FLARE_API_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_INGEST_PORT}}"
             export FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK="${FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK:-http://127.0.0.1:${MESSAGE_ORCH_PORT}}"
@@ -679,11 +646,11 @@ for service in "${CORE_SERVICES[@]}"; do
     
     # message-ingest/message-orchestrator：启动前确保端口未被残留进程占用
     if [ "$service" = "message-ingest" ]; then
-        ingest_port=${MESSAGE_INGEST_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        ingest_port=${MESSAGE_INGEST_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/message-ingest.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
         ingest_port=${ingest_port:-50182}
         free_listen_port "$ingest_port"
     elif [ "$service" = "message-orchestrator" ]; then
-        orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^\s*port\s*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -1)}
+        orch_port=${MESSAGE_ORCH_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/message-orchestrator.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
         orch_port=${orch_port:-50181}
         free_listen_port "$orch_port"
     fi
@@ -715,7 +682,7 @@ for service in "${CORE_SERVICES[@]}"; do
     [ -n "${FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK=$FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK")
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）
-    start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" /usr/bin/env "${env_args[@]}" "$CARGO_TARGET_BIN_DIR/$BIN_NAME"
+    start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" "$CARGO_TARGET_BIN_DIR/$BIN_NAME" "${env_args[@]}"
     service_pid="$DETACHED_PID"
     
     # 清理环境变量
@@ -877,7 +844,7 @@ if [ "$GATEWAY_MODE" == "single" ]; then
         "PORT=$DEFAULT_WS_PORT"
         "GRPC_PORT=$DEFAULT_GRPC_PORT"
     )
-    start_detached_process "flare-access-gateway-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway"
+    start_detached_process "flare-access-gateway-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
     gateway_pid="$DETACHED_PID"
     echo $gateway_pid > "$pid_file"
     sleep 3
@@ -958,7 +925,7 @@ else
             "GRPC_PORT=$grpc_port"
             "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
         )
-        start_detached_process "flare-access-gateway-$gateway_key-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" /usr/bin/env "${gateway_env_args[@]}" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway"
+        start_detached_process "flare-access-gateway-$gateway_key-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
         gateway_pid="$DETACHED_PID"
         echo $gateway_pid > "$pid_file"
         sleep 3
