@@ -26,7 +26,9 @@ use tokio::{net::TcpListener, sync::oneshot};
 use crate::config::ServiceMetricsSection;
 
 mod grpc;
+mod http;
 pub use grpc::{GrpcMetricsLayer, GrpcMetricsService, TRANSPORT_ERROR_CODE, UNKNOWN_METHOD};
+pub use http::{HttpMetricsLayer, HttpMetricsService, UNMATCHED_ROUTE};
 
 /// 全局指标注册表
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);

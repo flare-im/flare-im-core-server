@@ -275,7 +275,9 @@ GROUP BY write_state;
 `grpc_server_handled_total{service,method,code}`（请求量与错误率）、`grpc_server_handling_seconds{service,method}`
 （到响应头的耗时）、`grpc_server_in_flight_requests{service}`（饱和度）。返回 `Unimplemented` 的未知路径统一记为
 `method="_unknown"`，不随客户端输入增长序列数；流式调用在响应头之后的错误记为 `Ok`，细节看 trace。
-API/Admin 两个 HTTP 网关尚无请求级指标，只有身份指标。
+API/Admin 两个 HTTP 网关挂 `HttpMetricsLayer`：`http_server_requests_total{service,route,method,status}`、
+`http_server_request_duration_seconds{service,route,method}`、`http_server_in_flight_requests{service}`。`route` 是路由模板
+（如 `/api/v1/media/files/{file_id}`），未匹配的请求统一为 `_unmatched`，非标准方法归为 `OTHER`。
 
 - 日志格式：`FLARE_LOG_FORMAT=json`（或 `[logging] format = "json"`）输出一行一个 JSON 事件，字段平铺并带当前 span，
   不含 ANSI 转义；默认 `text`。写错格式名拒绝启动。

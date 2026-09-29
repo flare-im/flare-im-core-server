@@ -69,6 +69,9 @@ impl ApplicationBootstrap {
         info!("Admin Gateway Console public-key verifier initialized");
 
         let app = create_admin_router(clients)
+            .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
+                ADMIN_GATEWAY,
+            ))
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(control_verifier))

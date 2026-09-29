@@ -185,6 +185,9 @@ impl ApplicationBootstrap {
         };
 
         let app = create_public_router(clients)
+            .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
+                API_GATEWAY,
+            ))
             .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(tenant_guard))
