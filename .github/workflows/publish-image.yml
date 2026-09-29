@@ -40,9 +40,9 @@ jobs:
       - uses: actions/checkout@v4
         with: { repository: flare-im/flare-grpc-proto, path: flare-grpc-proto }
       - uses: actions/checkout@v4
-        with: { repository: flare-im/flare-core, path: flare-core, ref: dev }
+        with: { repository: flare-im/flare-core, path: flare-core }
       - uses: actions/checkout@v4
-        with: { repository: flare-im/flare-server-core, path: flare-server-core }
+        with: { repository: flare152/flare-server-core, path: flare-server-core }
 
       - uses: docker/setup-buildx-action@v3
 
