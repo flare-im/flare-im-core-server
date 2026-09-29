@@ -18,7 +18,8 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     pub async fn run_from_env() -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
-        flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let _tracing =
+            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
         let config = capability_config_from_env(app_config);
         info!(

@@ -56,4 +56,4 @@ pub use tenant_runtime::{
     TenantAccessPolicy, TenantLookup, TenantRuntimeCache, TenantRuntimeCacheOptions,
     TenantRuntimeSource,
 };
-pub use tracing::init_tracing_from_config;
+pub use tracing::{TracingGuard, init_tracing_from_config};

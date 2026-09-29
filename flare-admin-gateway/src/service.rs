@@ -21,7 +21,8 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
         let app_config = flare_im_service_kit::load_config(Some("config"));
-        flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let _tracing =
+            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Admin)?;
         let admin_config = app_config.admin_gateway_service();

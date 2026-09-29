@@ -8,9 +8,14 @@
 //!   `OTEL_SERVICE_NAME`，未设置时用可执行文件名。
 //!
 //! JSON 日志与 OTLP 是同一个全局 subscriber 上的两个 layer，可同时开启。
+//! 返回的 [TracingGuard] 须持有到服务退出：释放时导出批处理队列里最后一批 span。
+
+use std::time::Duration;
 
 use flare_server_core::error::{FlareError, Result};
 use flare_server_core::{LogFormat, LoggingSubscriberOptions, OtlpTracingOptions};
+
+const OTLP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 const LOG_FORMAT_ENV: &str = "FLARE_LOG_FORMAT";
 const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
@@ -22,7 +27,7 @@ const OTLP_SERVICE_NAME_ENV: &str = "OTEL_SERVICE_NAME";
 /// 已存在全局 subscriber 时静默跳过，重复调用安全。
 pub fn init_tracing_from_config(
     logging_config: Option<&crate::config::LoggingConfig>,
-) -> Result<()> {
+) -> Result<TracingGuard> {
     let plan = resolve_tracing_plan(logging_config, |key| std::env::var(key).ok())?;
     flare_server_core::init_tracing_subscriber(Some(&plan.logging), plan.otlp.as_ref())
         .map_err(|error| FlareError::system(format!("tracing initialization failed: {error}")))?;
@@ -34,7 +39,36 @@ pub fn init_tracing_from_config(
             "tracing initialized with OTLP exporter"
         );
     }
-    Ok(())
+    Ok(TracingGuard {
+        otlp_enabled: plan.otlp.is_some(),
+    })
+}
+
+/// 服务生命周期内持有；释放时关闭 OTLP exporter 并导出剩余 span（最多等待 5 秒）。
+#[must_use = "hold the guard until the service stops so the last spans are exported"]
+#[derive(Debug)]
+pub struct TracingGuard {
+    otlp_enabled: bool,
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if !self.otlp_enabled {
+            return;
+        }
+        let shutdown = || flare_server_core::shutdown_tracing(OTLP_SHUTDOWN_TIMEOUT);
+        // exporter 的 gRPC 通道由 tokio 运行时驱动：多线程运行时里让出当前工作线程，
+        // 否则（单线程或无运行时）直接调用，最坏情况按超时返回，不会挂死退出流程。
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(shutdown)
+            }
+            _ => shutdown(),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "OTLP exporter shutdown did not complete");
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +202,25 @@ mod tests {
     fn blank_otlp_endpoint_keeps_exporter_off() {
         let plan = resolve_tracing_plan(None, env_of(&[(OTLP_ENDPOINT_ENV, "  ")])).expect("plan");
         assert!(plan.otlp.is_none());
+    }
+
+    // 未安装 OTLP provider 时关闭是空操作；这里只证明释放守卫在两种运行时与无运行时下都不会 panic。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_release_is_safe_on_multi_thread_runtime() {
+        drop(TracingGuard { otlp_enabled: true });
+    }
+
+    #[tokio::test]
+    async fn guard_release_is_safe_on_current_thread_runtime() {
+        drop(TracingGuard { otlp_enabled: true });
+    }
+
+    #[test]
+    fn guard_release_is_safe_without_runtime() {
+        drop(TracingGuard { otlp_enabled: true });
+        drop(TracingGuard {
+            otlp_enabled: false,
+        });
     }
 
     #[test]

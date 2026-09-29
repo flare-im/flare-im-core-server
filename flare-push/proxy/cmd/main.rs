@@ -3,6 +3,6 @@ use flare_server_core::error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing_from_config(None)?;
+    let _tracing = init_tracing_from_config(None)?;
     flare_push_proxy::ApplicationBootstrap::run().await
 }
