@@ -14,10 +14,20 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # Flare IM Core 服务
+  # Flare IM Core 已实际启动 /metrics 的服务。目标名使用
+  # docker-compose.stack.yml 的服务名；端口与 config/services/*.toml 一致。
+  # 其他服务接入 serve_prometheus_metrics 后再增加抓取目标。
+  - job_name: 'message-ingest'
+    static_configs:
+      - targets: ['message-ingest:19180']
+        labels:
+          service: 'message-ingest'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
   - job_name: 'message-orchestrator'
     static_configs:
-      - targets: ['message-orchestrator:9091']
+      - targets: ['orchestrator:19181']
         labels:
           service: 'message-orchestrator'
     metrics_path: '/metrics'
@@ -25,65 +35,27 @@ scrape_configs:
 
   - job_name: 'storage-writer'
     static_configs:
-      - targets: ['storage-writer:9091']
+      - targets: ['storage-writer:19182']
         labels:
           service: 'storage-writer'
     metrics_path: '/metrics'
     scrape_interval: 15s
 
-  - job_name: 'storage-reader'
-    static_configs:
-      - targets: ['storage-reader:9091']
-        labels:
-          service: 'storage-reader'
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
-  - job_name: 'push-server'
-    static_configs:
-      - targets: ['push-server:9091']
-        labels:
-          service: 'push-server'
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
-  - job_name: 'push-worker'
-    static_configs:
-      - targets: ['push-worker:9091']
-        labels:
-          service: 'push-worker'
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
+  # Signaling Gateway 目前以 ACCESS_GATEWAY_METRICS_PORT 默认监听 19183。
   - job_name: 'access-gateway'
     static_configs:
-      - targets: ['access-gateway:9091']
+      - targets: ['signaling-gateway:19183']
         labels:
           service: 'access-gateway'
     metrics_path: '/metrics'
     scrape_interval: 15s
 
-  - job_name: 'api-gateway'
+  # Push Worker 的入口已配置，但 SEC-07 事件来源门禁未解除时进程默认暂停。
+  - job_name: 'push-worker'
     static_configs:
-      - targets: ['api-gateway:9091']
+      - targets: ['push-worker:19186']
         labels:
-          service: 'api-gateway'
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
-  - job_name: 'signaling-online'
-    static_configs:
-      - targets: ['signaling-online:9091']
-        labels:
-          service: 'signaling-online'
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
-  - job_name: 'signaling-route'
-    static_configs:
-      - targets: ['signaling-route:9091']
-        labels:
-          service: 'signaling-route'
+          service: 'push-worker'
     metrics_path: '/metrics'
     scrape_interval: 15s
 
