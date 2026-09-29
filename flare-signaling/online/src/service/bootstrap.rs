@@ -42,6 +42,8 @@ impl ApplicationBootstrap {
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let grpc_metrics =
+            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let online_handler = context.online_handler.clone();
 
         info!(
@@ -62,6 +64,7 @@ impl ApplicationBootstrap {
                     .layer(OnlineServiceServer::new(online_handler));
 
                 Server::builder()
+                    .layer(grpc_metrics)
                     .add_service(online_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;

@@ -42,6 +42,8 @@ impl ApplicationBootstrap {
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let grpc_metrics =
+            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
 
         info!(
@@ -62,6 +64,7 @@ impl ApplicationBootstrap {
                     .layer(StorageReaderServiceServer::new(handler));
 
                 Server::builder()
+                    .layer(grpc_metrics)
                     .add_service(storage_reader_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;

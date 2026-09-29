@@ -271,6 +271,11 @@ GROUP BY write_state;
 | 19187–19197 | api-gateway、admin-gateway、capability、conversation、media、push-proxy、push-server、signaling-online、signaling-route、storage-reader、sync-orchestrator | `[services.<name>.metrics]`，由共享运行时挂载 |
 
 每个出口至少导出 `flare_service_info{service,version}` 与 `flare_service_start_time_seconds`。
+全部 11 个 gRPC 服务进程在 tonic Server 上挂 `GrpcMetricsLayer`，导出黄金信号：
+`grpc_server_handled_total{service,method,code}`（请求量与错误率）、`grpc_server_handling_seconds{service,method}`
+（到响应头的耗时）、`grpc_server_in_flight_requests{service}`（饱和度）。返回 `Unimplemented` 的未知路径统一记为
+`method="_unknown"`，不随客户端输入增长序列数；流式调用在响应头之后的错误记为 `Ok`，细节看 trace。
+API/Admin 两个 HTTP 网关尚无请求级指标，只有身份指标。
 
 - 日志格式：`FLARE_LOG_FORMAT=json`（或 `[logging] format = "json"`）输出一行一个 JSON 事件，字段平铺并带当前 span，
   不含 ANSI 转义；默认 `text`。写错格式名拒绝启动。

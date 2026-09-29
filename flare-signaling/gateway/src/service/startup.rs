@@ -65,6 +65,7 @@ pub async fn start_services(
     // 创建 ServiceRuntime（使用简化模式 + 服务注册）。指标端点随共享运行时挂载：
     // 网关此前只在 wire.rs 打了一句 "Prometheus metrics initialized"，却从没真正起
     // serve_prometheus_metrics，连接数、推送成功/失败/耗时注册了却无处可读。
+    let grpc_metrics = flare_im_service_kit::metrics::GrpcMetricsLayer::new(ACCESS_GATEWAY);
     let runtime = flare_im_service_kit::ImServiceRuntimePlan {
         service_name: ACCESS_GATEWAY.to_string(),
         address: grpc_addr,
@@ -85,6 +86,7 @@ pub async fn start_services(
                 .layer(AccessGatewayServer::new((*handler).clone()));
 
             let result = Server::builder()
+                .layer(grpc_metrics)
                 .add_service(service)
                 .serve_with_shutdown(addr, async {
                     let _ = shutdown_rx.await;

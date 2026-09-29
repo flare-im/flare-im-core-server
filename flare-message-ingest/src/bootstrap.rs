@@ -42,6 +42,8 @@ impl ApplicationBootstrap {
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let grpc_metrics =
+            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let send_grpc = context.message_send_grpc.clone();
         let config = context.config.clone();
         let wal_replay_handler = context.wal_replay_handler.clone();
@@ -68,6 +70,7 @@ impl ApplicationBootstrap {
                     .layer(MessageSendServiceServer::new(send_grpc));
 
                 Server::builder()
+                    .layer(grpc_metrics)
                     .add_service(send_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;

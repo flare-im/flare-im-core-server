@@ -20,12 +20,15 @@ impl ApplicationBootstrap {
         )?;
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let grpc_metrics =
+            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
 
         let handler = SyncOrchestratorGrpcHandler::new();
         let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
             "sync-orchestrator-grpc",
             move |shutdown_rx| async move {
                 Server::builder()
+                    .layer(grpc_metrics)
                     .add_service(SyncServiceServer::new(handler))
                     .serve_with_shutdown(address, async {
                         let _ = shutdown_rx.await;

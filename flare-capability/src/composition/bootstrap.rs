@@ -58,6 +58,8 @@ impl ApplicationBootstrap {
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let grpc_metrics =
+            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         info!(
             address = %address,
             port = %address.port(),
@@ -112,6 +114,7 @@ impl ApplicationBootstrap {
                     "HookPlugin + ExtensionPlugin (router) + CapabilityService registered"
                 );
                 let server = Server::builder()
+                    .layer(grpc_metrics)
                     .add_service(hook_plugin_service)
                     .add_service(extension_plugin_service)
                     .add_service(capability_service)
