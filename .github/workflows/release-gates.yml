@@ -12,12 +12,22 @@ on:
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "deploy/**"
+      - "release/**"
+      - "tools/flare-migrate/**"
       - "docs/06-testing-performance-and-operations.md"
       - "scripts/chaos/**"
       - ".github/workflows/release-gates.yml"
   workflow_dispatch:
 
 jobs:
+  core-migrator-image-shape:
+    name: Core one-shot migrator image shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the isolated migrator build context
+        run: python3 tools/flare-migrate/test_image.py
+
   large-group-primitives:
     name: Large group primitives
     runs-on: ubuntu-latest

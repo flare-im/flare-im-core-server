@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Core migration ledger source tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/flare-migrate -p test_unit.py -v
+
       # 本项目是多仓库结构，各仓的 path 依赖指向同级仓库目录。
       # 单仓 checkout 后这些路径不存在，cargo 会直接解析失败，
       # 所以这里按开发时的布局把依赖仓拉到同级位置。
