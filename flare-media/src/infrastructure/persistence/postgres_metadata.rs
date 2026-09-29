@@ -3,7 +3,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_service_kit::config::PostgresInstanceConfig;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use serde_json::Value;
@@ -18,8 +17,13 @@ use crate::domain::repository::{MediaMetadataStore, MediaReferenceStore};
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
+#[cfg(test)]
+#[path = "postgres_metadata_tests.rs"]
+mod tests;
+
 #[derive(Debug, FromRow)]
 struct MediaAssetRow {
+    owner_id: Option<String>,
     file_id: String,
     file_name: String,
     mime_type: String,
@@ -71,6 +75,7 @@ impl TryFrom<MediaAssetRow> for MediaFileMetadata {
         };
 
         Ok(MediaFileMetadata {
+            owner_id: row.owner_id,
             file_id: row.file_id,
             file_name: row.file_name,
             mime_type: row.mime_type,
@@ -139,7 +144,7 @@ impl TryFrom<MediaReferenceRow> for MediaReference {
         };
 
         Ok(MediaReference {
-            tenant_id: normalize_tenant_id(row.tenant_id),
+            tenant_id: row.tenant_id,
             reference_id: row.reference_id,
             file_id: row.file_id,
             namespace: row.namespace,
@@ -216,15 +221,14 @@ impl PostgresMetadataStore {
 
 #[async_trait::async_trait]
 impl MediaMetadataStore for PostgresMetadataStore {
-    async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()> {
+    async fn save_metadata(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        metadata: &MediaFileMetadata,
+    ) -> Result<()> {
         let metadata_json = Self::metadata_to_json(&metadata.metadata)?;
 
-        // 从 metadata 中提取 tenant_id；默认租户统一归一为 0。
-        let tenant_id = metadata
-            .metadata
-            .get("tenant_id")
-            .map(normalize_tenant_id)
-            .unwrap_or_else(|| "0".to_string());
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
 
         sqlx::query(
             r#"
@@ -243,9 +247,10 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 reference_count,
                 status,
                 grace_expires_at,
-                access_type
+                access_type,
+                owner_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (tenant_id, file_id) DO UPDATE SET
                 file_name = EXCLUDED.file_name,
                 mime_type = EXCLUDED.mime_type,
@@ -262,7 +267,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 access_type = EXCLUDED.access_type
             "#,
         )
-        .bind(&tenant_id)
+        .bind(tenant_id)
         .bind(&metadata.file_id)
         .bind(&metadata.file_name)
         .bind(&metadata.mime_type)
@@ -277,6 +282,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
         .bind(MediaAssetRow::status_to_str(metadata.status))
         .bind(metadata.grace_expires_at)
         .bind(MediaAssetRow::access_type_to_str(metadata.access_type))
+        .bind(&metadata.owner_id)
         .execute(self.pool())
         .await
         .map_err(|e| {
@@ -295,10 +301,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<Option<MediaFileMetadata>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let row = sqlx::query_as::<_, MediaAssetRow>(
             r#"
             SELECT
+                owner_id,
                 file_id,
                 file_name,
                 mime_type,
@@ -336,10 +343,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         sha256: &str,
     ) -> Result<Option<MediaFileMetadata>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let row = sqlx::query_as::<_, MediaAssetRow>(
             r#"
             SELECT
+                owner_id,
                 file_id,
                 file_name,
                 mime_type,
@@ -387,7 +395,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2")
             .bind(tenant_id)
             .bind(file_id)
@@ -413,10 +421,17 @@ impl MediaMetadataStore for PostgresMetadataStore {
         Ok(())
     }
 
-    async fn list_orphaned_assets(&self, before: DateTime<Utc>) -> Result<Vec<MediaFileMetadata>> {
+    async fn list_orphaned_assets(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<MediaFileMetadata>> {
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let rows = sqlx::query_as::<_, MediaAssetRow>(
             r#"
             SELECT
+                owner_id,
                 file_id,
                 file_name,
                 mime_type,
@@ -432,10 +447,11 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 grace_expires_at,
                 access_type
             FROM media_assets
-            WHERE reference_count = 0
+            WHERE tenant_id = $1
+              AND reference_count = 0
               AND status = 'pending'
               AND grace_expires_at IS NOT NULL
-              AND grace_expires_at <= $1
+              AND grace_expires_at <= $2
               AND (
                     LOWER(COALESCE(metadata->>'media_lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
                  OR LOWER(COALESCE(metadata->>'lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
@@ -445,9 +461,13 @@ impl MediaMetadataStore for PostgresMetadataStore {
                  OR LOWER(COALESCE(metadata->>'namespace', '')) IN ('message', 'messages', 'im_message', 'im-message')
                  OR LOWER(COALESCE(metadata->>'business_tag', '')) IN ('message', 'messages', 'im_message', 'im-message')
               )
+            ORDER BY grace_expires_at, file_id
+            LIMIT $3
             "#,
         )
+        .bind(tenant_id)
         .bind(before)
+        .bind(i64::from(limit))
         .fetch_all(self.pool())
         .await
         .map_err(|e| {
@@ -468,7 +488,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
         status: MediaAssetStatus,
         grace_expires_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         sqlx::query(
             r#"
             UPDATE media_assets
@@ -500,7 +520,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
 impl MediaReferenceStore for PostgresMetadataStore {
     async fn create_reference(&self, reference: &MediaReference) -> Result<bool> {
         let metadata_json = Self::metadata_to_json(&reference.metadata)?;
-        let tenant_id = normalize_tenant_id(&reference.tenant_id);
+        let tenant_id = crate::domain::service::validate_tenant(&reference.tenant_id)?;
         if tenant_id.is_empty() {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::InvalidParameter,
@@ -525,7 +545,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
             ON CONFLICT (tenant_id, reference_id) DO NOTHING
             "#,
         )
-        .bind(&tenant_id)
+        .bind(tenant_id)
         .bind(&reference.reference_id)
         .bind(&reference.file_id)
         .bind(&reference.namespace)
@@ -552,7 +572,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         reference_id: &str,
     ) -> Result<bool> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let result =
             sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND reference_id = $2")
                 .bind(tenant_id)
@@ -575,7 +595,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<Option<String>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let row =
             sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2 RETURNING reference_id")
                 .bind(tenant_id)
@@ -606,7 +626,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<u64> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let result =
             sqlx::query("DELETE FROM media_references WHERE tenant_id = $1 AND file_id = $2")
                 .bind(tenant_id)
@@ -629,7 +649,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<Vec<MediaReference>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let rows = sqlx::query_as::<_, MediaReferenceRow>(
             r#"
             SELECT
@@ -667,7 +687,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<u64> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let row = sqlx::query(
             "SELECT COUNT(*) as count FROM media_references WHERE tenant_id = $1 AND file_id = $2",
         )
@@ -697,7 +717,7 @@ impl MediaReferenceStore for PostgresMetadataStore {
         owner_id: &str,
         business_tag: Option<&str>,
     ) -> Result<bool> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
         let count: i64 = if let Some(tag) = business_tag {
             sqlx::query_scalar(
                 "SELECT COUNT(*) FROM media_references WHERE tenant_id = $1 AND file_id = $2 AND namespace = $3 AND owner_id = $4 AND business_tag = $5"

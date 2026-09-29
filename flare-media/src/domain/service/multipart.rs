@@ -9,9 +9,13 @@ impl MediaService {
     pub async fn initiate_multipart_upload(
         &self,
         ctx: &Context,
-        init: MultipartUploadInit,
+        mut init: MultipartUploadInit,
     ) -> Result<MultipartUploadSession> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
+        let tenant_id = require_tenant(ctx)?;
+        let owner_id = tenant::require_owner(ctx)?;
+        init.metadata
+            .insert("tenant_id".to_string(), tenant_id.to_string());
 
         let Some(store) = &self.upload_conversation_store else {
             return Err(flare_server_core::flare_err!(
@@ -31,6 +35,7 @@ impl MediaService {
 
         let session = UploadSession {
             upload_id: upload_id.clone(),
+            tenant_id: tenant_id.to_string(),
             file_id: None,
             file_name: init.file_name,
             mime_type: init.mime_type,
@@ -49,7 +54,7 @@ impl MediaService {
             head_tail_sha256: None,
             full_sha256: None,
             total_parts: None,
-            user_id: init.user_id,
+            user_id: owner_id.to_string(),
             namespace: init.namespace,
             business_tag: init.business_tag,
             trace_id: init.trace_id,
@@ -100,6 +105,7 @@ impl MediaService {
             )
         })?;
 
+        Self::authorize_upload_session(ctx, &session)?;
         if session.status != UploadSessionStatus::Pending {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::InvalidParameter,
@@ -195,6 +201,7 @@ impl MediaService {
             )
         })?;
 
+        Self::authorize_upload_session(ctx, &session)?;
         if session.uploaded_chunks.is_empty() {
             return Err(flare_server_core::flare_err_details!(
                 ErrorCode::InvalidParameter,
@@ -222,6 +229,7 @@ impl MediaService {
             });
 
         let context = UploadContext {
+            tenant_id: require_tenant(ctx)?,
             file_id: &file_id,
             file_name: &session.file_name,
             mime_type: &session.mime_type,
@@ -263,9 +271,13 @@ impl MediaService {
         };
 
         if let Some(mut session) = store.get_session(upload_id).await? {
+            Self::authorize_upload_session(ctx, &session)?;
             session.status = UploadSessionStatus::Aborted;
             session.updated_at = Utc::now();
             store.upsert_session(&session).await.ok();
+        } else {
+            // Never derive a filesystem path from an unowned/nonexistent session id.
+            return Ok(());
         }
 
         self.cleanup_chunks(upload_id).await?;

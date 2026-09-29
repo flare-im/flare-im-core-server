@@ -15,16 +15,31 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use sha2::{Digest, Sha256};
 
 use crate::domain::ports::IPushPort;
 use crate::domain::service::ConversationSubscriptionRegistry;
+
+/// Bind the short-lived peer relay token to the exact target and encoded frame.
+/// A captured token cannot be reused to deliver a different conversation or
+/// packet during its validity window. The source still must authenticate the
+/// physical connection before signing; this digest is not an identity source.
+pub(crate) fn relay_body_request_id(conversation_id: &str, packet: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"flare-realtime-relay-v1\0");
+    digest.update((conversation_id.len() as u64).to_be_bytes());
+    digest.update(conversation_id.as_bytes());
+    digest.update((packet.len() as u64).to_be_bytes());
+    digest.update(packet);
+    format!("relay:{:x}", digest.finalize())
+}
 
 /// 把一条已编码的 RealtimeControl 帧广播给**其余**网关节点。
 ///
 /// 发起节点自己的连接已经由本地直转覆盖，所以实现要跳过自己；单实例部署没有对等节点，是空操作。
 #[async_trait::async_trait]
 pub trait IRealtimeBroadcastPort: Send + Sync {
-    async fn broadcast(&self, conversation_id: &str, packet: Vec<u8>);
+    async fn broadcast(&self, tx: &Ctx, conversation_id: &str, packet: Vec<u8>);
 }
 
 /// 不广播：单节点部署，或还没接上服务发现时的行为——本地直转已经覆盖了全部在线订阅者。
@@ -32,7 +47,7 @@ pub struct NoRealtimeBroadcast;
 
 #[async_trait::async_trait]
 impl IRealtimeBroadcastPort for NoRealtimeBroadcast {
-    async fn broadcast(&self, _conversation_id: &str, _packet: Vec<u8>) {}
+    async fn broadcast(&self, _tx: &Ctx, _conversation_id: &str, _packet: Vec<u8>) {}
 }
 
 /// 会话在线订阅集合内的直转。
@@ -66,9 +81,15 @@ impl RealtimeControlRelay {
         if conversation_id.is_empty() {
             return 0;
         }
+        let Some(tenant_id) = tx.tenant_id().filter(|tenant| {
+            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+        }) else {
+            return 0;
+        };
         let targets: Vec<String> = self
             .conversation_subscriptions
-            .local_subscribers(conversation_id)
+            .local_subscribers(tenant_id, conversation_id)
             .into_iter()
             .filter(|connection_id| Some(connection_id.as_str()) != exclude_connection_id)
             .collect();

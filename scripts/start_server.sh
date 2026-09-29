@@ -135,7 +135,7 @@ generate_local_token_secret() {
 }
 
 ensure_local_gateway_token_secrets() {
-    # Optional FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS is inherited unchanged:
+    # Optional FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS is passed only to API Gateway:
     # app_id:tenant_id:secret (comma-separated). Do not reuse the signing secret.
     # Gateway config rejects the old app_id:secret format at startup.
     if [ -n "${FLARE_API_GATEWAY_TOKEN_SECRET:-}" ] && [ -n "${ACCESS_GATEWAY_TOKEN_SECRET:-}" ]; then
@@ -152,7 +152,92 @@ ensure_local_gateway_token_secrets() {
     secret="$(cat "$LOCAL_GATEWAY_TOKEN_SECRET_FILE")"
     export FLARE_API_GATEWAY_TOKEN_SECRET="${FLARE_API_GATEWAY_TOKEN_SECRET:-$secret}"
     export ACCESS_GATEWAY_TOKEN_SECRET="${ACCESS_GATEWAY_TOKEN_SECRET:-$secret}"
-    export FLARE_ADMIN_GATEWAY_TOKEN_SECRET="${FLARE_ADMIN_GATEWAY_TOKEN_SECRET:-$secret}"
+}
+
+# Keep the cell identity key outside the inherited process environment. Only
+# the two authenticated Core ingress processes may sign; Route/Ingest and
+# Capability receive the public key. Social's local launcher may supply an
+# existing key directory so both products use the same Cell identity.
+load_internal_context_keys() {
+    local key_dir="${FLARE_INTERNAL_CTX_KEY_DIR:-$LOGS_DIR/.dev-internal-context}"
+    local private_file="$key_dir/private.pem"
+    local public_file="$key_dir/public.pem"
+    local supplied_public="${FLARE_INTERNAL_CTX_PUBLIC_KEY:-}"
+    local use_key_dir=0
+    CORE_INTERNAL_PRIVATE_KEY="${FLARE_INTERNAL_CTX_PRIVATE_KEY:-}"
+    CORE_INTERNAL_PUBLIC_KEY="$supplied_public"
+
+    if [ -n "${FLARE_INTERNAL_CTX_KEY_DIR:-}" ]; then
+        use_key_dir=1
+        if [ -n "$CORE_INTERNAL_PRIVATE_KEY" ]; then
+            echo "内部上下文私钥不能同时通过环境变量和密钥目录指定" >&2
+            return 1
+        fi
+    elif [ -z "$CORE_INTERNAL_PRIVATE_KEY" ] && [ -z "$CORE_INTERNAL_PUBLIC_KEY" ]; then
+        use_key_dir=1
+        mkdir -p "$key_dir"
+        chmod 700 "$key_dir"
+        if [ ! -e "$private_file" ] && [ ! -e "$public_file" ]; then
+            (umask 077; openssl genpkey -algorithm Ed25519 -out "$private_file" >/dev/null 2>&1 &&
+                openssl pkey -in "$private_file" -pubout -out "$public_file" >/dev/null 2>&1) || {
+                echo "无法生成本地内部上下文密钥" >&2
+                return 1
+            }
+        fi
+    fi
+
+    if [ "$use_key_dir" -eq 1 ]; then
+        if [ -L "$key_dir" ] || [ ! -d "$key_dir" ] ||
+           [ -L "$private_file" ] || [ ! -f "$private_file" ] ||
+           [ -L "$public_file" ] || [ ! -f "$public_file" ]; then
+            echo "内部上下文密钥目录无效或密钥文件不完整" >&2
+            return 1
+        fi
+        if ! openssl pkey -in "$private_file" -pubout 2>/dev/null | cmp -s - "$public_file"; then
+            echo "内部上下文公私钥不匹配" >&2
+            return 1
+        fi
+        local file_public
+        file_public="$(openssl base64 -A -in "$public_file")"
+        if [ -n "$CORE_INTERNAL_PUBLIC_KEY" ] &&
+           [ "$CORE_INTERNAL_PUBLIC_KEY" != "$file_public" ] &&
+           [ "$CORE_INTERNAL_PUBLIC_KEY" != "$(cat "$public_file")" ]; then
+            echo "指定的内部上下文公钥与密钥目录不匹配" >&2
+            return 1
+        fi
+        CORE_INTERNAL_PRIVATE_KEY="$(openssl base64 -A -in "$private_file")"
+        CORE_INTERNAL_PUBLIC_KEY="$file_public"
+    fi
+    if [ -z "$CORE_INTERNAL_PRIVATE_KEY" ] || [ -z "$CORE_INTERNAL_PUBLIC_KEY" ]; then
+        echo "内部上下文签名私钥或公钥缺失" >&2
+        return 1
+    fi
+    # start_detached_process inherits this shell's exported environment. Never
+    # leave credential variables exported globally and assume env_args filters.
+    unset FLARE_INTERNAL_CTX_PRIVATE_KEY FLARE_INTERNAL_CTX_SIGNING_KEY
+    unset FLARE_INTERNAL_CTX_PUBLIC_KEY FLARE_INTERNAL_CTX_KEY_DIR
+    export -n CORE_INTERNAL_PRIVATE_KEY CORE_INTERNAL_PUBLIC_KEY
+}
+
+# The Control Plane owns the EdDSA private key. Core receives only its public
+# key, and only the two mixed gRPC servers that expose control methods need it.
+load_console_control_public_key() {
+    CORE_CONSOLE_PUBLIC_KEY="${FLARE_CONSOLE_PUBLIC_KEY:-}"
+    if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
+        if [[ "$CORE_CONSOLE_PUBLIC_KEY" == -----BEGIN* ]]; then
+            printf '%s' "$CORE_CONSOLE_PUBLIC_KEY" | openssl pkey -pubin -noout >/dev/null 2>&1 || {
+                echo "Control 公钥格式无效" >&2
+                return 1
+            }
+        else
+            printf '%s' "$CORE_CONSOLE_PUBLIC_KEY" | openssl base64 -d -A 2>/dev/null | openssl pkey -pubin -noout >/dev/null 2>&1 || {
+                echo "Control 公钥格式无效" >&2
+                return 1
+            }
+        fi
+    fi
+    unset FLARE_CONSOLE_PUBLIC_KEY FLARE_CONSOLE_SIGNING_KEY FLARE_ADMIN_GATEWAY_TOKEN_SECRET
+    export -n CORE_CONSOLE_PUBLIC_KEY
 }
 
 FLARE_BUILD_PROFILE="${FLARE_BUILD_PROFILE:-debug}"
@@ -213,6 +298,9 @@ REQUIRED_CORE_BINARIES=(
     flare-api-gateway
     flare-signaling-gateway
 )
+if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
+    REQUIRED_CORE_BINARIES+=(flare-admin-gateway)
+fi
 
 core_binaries_ready() {
     local bin
@@ -260,6 +348,16 @@ fi
 # 创建日志目录
 mkdir -p "$LOGS_DIR"
 ensure_local_gateway_token_secrets
+# Credentials are passed only to the process that signs or validates its token
+# type. `start_detached_process` inherits exported variables, so merely
+# filtering env_args below would otherwise leak both secrets to every service.
+CORE_API_TOKEN_SECRET="$FLARE_API_GATEWAY_TOKEN_SECRET"
+CORE_ACCESS_TOKEN_SECRET="$ACCESS_GATEWAY_TOKEN_SECRET"
+CORE_API_APP_CREDENTIALS="${FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS:-}"
+unset FLARE_API_GATEWAY_TOKEN_SECRET ACCESS_GATEWAY_TOKEN_SECRET FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS
+export -n CORE_API_TOKEN_SECRET CORE_ACCESS_TOKEN_SECRET CORE_API_APP_CREDENTIALS
+load_internal_context_keys
+load_console_control_public_key
 echo -e "${BLUE}🔐 本地网关 token secret 已准备: logs/.dev-token-secret（内容不会打印；本地客户端可将该文件内容作为 TOKEN_SECRET）${NC}"
 echo ""
 
@@ -373,9 +471,16 @@ CORE_SERVICES=(
     "media"
     "api-gateway"
 )
+# Always stop a previously launched Admin Gateway, including when the Console
+# public key was removed. Only start it when this Core process can verify
+# Control Plane credentials; the regular Core-only profile keeps it closed.
+CORE_STOP_SERVICES=("${CORE_SERVICES[@]}" "admin-gateway")
+if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
+    CORE_SERVICES+=("admin-gateway")
+fi
 
 # 停止所有核心服务
-for service in "${CORE_SERVICES[@]}"; do
+for service in "${CORE_STOP_SERVICES[@]}"; do
     pid_file="$LOGS_DIR/flare-$service.pid"
     if [ -f "$pid_file" ]; then
         pid=$(cat "$pid_file")
@@ -525,7 +630,8 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 # 8. 推送服务：push-server（推送服务）、push-worker（推送工作器）
 # 9. 媒资服务：media（媒资服务）
 # 10. API 网关：api-gateway（业务系统统一入口）
-# 11. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
+# 11. 管理网关：admin-gateway（仅在配置 Console 公钥时启动）
+# 12. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
 
 # 启动服务（后台运行）
 for service in "${CORE_SERVICES[@]}"; do
@@ -635,6 +741,11 @@ for service in "${CORE_SERVICES[@]}"; do
             export FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK="${FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK:-http://127.0.0.1:${MEDIA_PORT}}"
             ENV_VARS="set"
             ;;
+        "admin-gateway")
+            PACKAGE="flare-admin-gateway"
+            BIN_NAME="flare-admin-gateway"
+            ENV_VARS=""
+            ;;
         *)
             echo -e "${RED}   ✗ 未知服务: $service${NC}"
             continue
@@ -663,9 +774,6 @@ for service in "${CORE_SERVICES[@]}"; do
         "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
         "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
         "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
-        "FLARE_API_GATEWAY_TOKEN_SECRET=$FLARE_API_GATEWAY_TOKEN_SECRET"
-        "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
-        "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
     )
     [ -n "${SIGNALING_ONLINE_SERVICE_HOST:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_HOST=$SIGNALING_ONLINE_SERVICE_HOST")
     [ -n "${SIGNALING_ONLINE_SERVICE_PORT:-}" ] && env_args+=("SIGNALING_ONLINE_SERVICE_PORT=$SIGNALING_ONLINE_SERVICE_PORT")
@@ -680,6 +788,26 @@ for service in "${CORE_SERVICES[@]}"; do
     [ -n "${FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK=$FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK")
     [ -n "${FLARE_API_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_API_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK=$FLARE_API_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK")
     [ -n "${FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK:-}" ] && env_args+=("FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK=$FLARE_API_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK")
+    case "$service" in
+        api-gateway)
+            env_args+=("FLARE_API_GATEWAY_TOKEN_SECRET=$CORE_API_TOKEN_SECRET")
+            [ -n "$CORE_API_APP_CREDENTIALS" ] && env_args+=("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS=$CORE_API_APP_CREDENTIALS") ;;
+    esac
+    case "$service" in
+        signaling-online|signaling-route|message-ingest|capability|push-proxy)
+            env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
+        api-gateway)
+            env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+    esac
+    case "$service" in
+        signaling-online|capability)
+            [ -n "$CORE_CONSOLE_PUBLIC_KEY" ] && env_args+=("FLARE_CONSOLE_PUBLIC_KEY=$CORE_CONSOLE_PUBLIC_KEY") ;;
+        admin-gateway)
+            # This development launcher runs Control on the same host. Keep the
+            # management HTTP listener off LAN interfaces by default.
+            env_args+=("FLARE_ADMIN_GATEWAY_BIND_ADDRESS=${FLARE_ADMIN_GATEWAY_BIND_ADDRESS:-127.0.0.1:50051}")
+            env_args+=("FLARE_CONSOLE_PUBLIC_KEY=$CORE_CONSOLE_PUBLIC_KEY") ;;
+    esac
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）
     start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" "$CARGO_TARGET_BIN_DIR/$BIN_NAME" "${env_args[@]}"
@@ -838,11 +966,11 @@ if [ "$GATEWAY_MODE" == "single" ]; then
         "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
         "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
         "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
-        "FLARE_API_GATEWAY_TOKEN_SECRET=$FLARE_API_GATEWAY_TOKEN_SECRET"
-        "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
-        "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
+        "ACCESS_GATEWAY_TOKEN_SECRET=$CORE_ACCESS_TOKEN_SECRET"
         "PORT=$DEFAULT_WS_PORT"
         "GRPC_PORT=$DEFAULT_GRPC_PORT"
+        "FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY"
+        "FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY"
     )
     start_detached_process "flare-access-gateway-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
     gateway_pid="$DETACHED_PID"
@@ -916,14 +1044,14 @@ else
             "CONSUL_DISCOVERY_REFRESH_INTERVAL=$CONSUL_DISCOVERY_REFRESH_INTERVAL"
             "CONSUL_DISCOVER_CACHE_TTL_SECS=$CONSUL_DISCOVER_CACHE_TTL_SECS"
             "SERVICE_HEARTBEAT_INTERVAL=$SERVICE_HEARTBEAT_INTERVAL"
-            "FLARE_API_GATEWAY_TOKEN_SECRET=$FLARE_API_GATEWAY_TOKEN_SECRET"
-            "ACCESS_GATEWAY_TOKEN_SECRET=$ACCESS_GATEWAY_TOKEN_SECRET"
-            "FLARE_ADMIN_GATEWAY_TOKEN_SECRET=$FLARE_ADMIN_GATEWAY_TOKEN_SECRET"
+            "ACCESS_GATEWAY_TOKEN_SECRET=$CORE_ACCESS_TOKEN_SECRET"
             "GATEWAY_ID=$gateway_id"
             "GATEWAY_REGION=$region"
             "PORT=$ws_port"
             "GRPC_PORT=$grpc_port"
             "GATEWAY_${gateway_key_upper}_GRPC_PORT=$grpc_port"
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY"
+            "FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY"
         )
         start_detached_process "flare-access-gateway-$gateway_key-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
         gateway_pid="$DETACHED_PID"

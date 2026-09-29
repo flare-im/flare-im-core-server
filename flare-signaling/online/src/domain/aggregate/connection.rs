@@ -304,6 +304,10 @@ impl Connection {
         self.last_heartbeat_at
     }
 
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
     /// 计算质量评分（0-100）
     ///
     /// 业务规则：

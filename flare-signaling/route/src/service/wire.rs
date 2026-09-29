@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use flare_im_contracts::utils::normalize_tenant_id;
+use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::{AnyhowContext, Result};
 
 use crate::application::handlers::{
@@ -54,11 +55,28 @@ pub async fn initialize(
     let ack_routing_handler = Arc::new(AckRoutingHandler::new(ack_to_push_proxy));
     let data_routing_handler = Arc::new(DataRoutingHandler::new(message_forwarder));
 
+    let message_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(key) => Some(SignedContextVerifier::from_public_key(&key).map_err(|_| {
+            flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for signaling route",
+            )
+        })?),
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!("message routing disabled: internal context verifier missing");
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
+            ));
+        }
+    };
     let upstream_handler = RouterUpstreamHandler::new(
         message_routing_handler,
         event_routing_handler,
         ack_routing_handler,
         data_routing_handler,
+        message_verifier,
     );
 
     Ok(ApplicationContext { upstream_handler })

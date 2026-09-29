@@ -29,11 +29,12 @@ impl<R: crate::domain::repository::ConversationRepository + Send + Sync> OnlineQ
     #[instrument(skip(self), fields(user_count = query.request.user_ids.len()))]
     pub async fn get_online_status(
         &self,
+        tenant_id: &str,
         query: GetOnlineStatusQuery,
     ) -> Result<GetOnlineStatusResponse> {
         let statuses = self
             .repository
-            .fetch_statuses(&query.request.user_ids)
+            .fetch_statuses(tenant_id, &query.request.user_ids)
             .await?;
 
         let mut result = HashMap::new();

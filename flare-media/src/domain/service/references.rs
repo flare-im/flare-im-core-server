@@ -8,8 +8,9 @@ impl MediaService {
         scope: MediaReferenceScope,
         metadata: HashMap<String, String>,
     ) -> Result<MediaFileMetadata> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = require_tenant(ctx)?;
         let mut file_metadata = self.get_metadata(ctx, file_id).await?;
+        Self::authorize_file_write(ctx, &file_metadata)?;
 
         if let Some(reference_store) = &self.reference_store {
             if reference_store
@@ -67,8 +68,9 @@ impl MediaService {
         file_id: &str,
         reference_id: Option<&str>,
     ) -> Result<MediaFileMetadata> {
-        let _tenant_id = ctx.tenant_id().unwrap_or("0");
+        require_tenant(ctx)?;
         let mut file_metadata = self.get_metadata(ctx, file_id).await?;
+        Self::authorize_file_write(ctx, &file_metadata)?;
 
         if let Some(reference_store) = &self.reference_store {
             let removed = if let Some(reference_id) = reference_id {
@@ -100,6 +102,7 @@ impl MediaService {
         ctx: &Context,
         file_id: &str,
     ) -> Result<Vec<MediaReference>> {
+        self.get_metadata(ctx, file_id).await?;
         if let Some(reference_store) = &self.reference_store {
             reference_store.list_references(ctx, file_id).await
         } else {
@@ -111,16 +114,21 @@ impl MediaService {
         request_id = %ctx.request_id(),
         trace_id = %ctx.trace_id(),
     ))]
-    pub async fn cleanup_orphaned_assets(&self, ctx: &Context) -> Result<Vec<String>> {
+    pub async fn cleanup_orphaned_assets(&self, ctx: &Context, limit: u32) -> Result<Vec<String>> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
+        require_tenant(ctx)?;
+        let limit = if limit == 0 { 100 } else { limit.min(1000) };
 
         let Some(store) = &self.metadata_store else {
             return Ok(vec![]);
         };
 
-        let expired = store.list_orphaned_assets(Utc::now()).await.map_err(|e| {
-            map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets")
-        })?;
+        let expired = store
+            .list_orphaned_assets(ctx, Utc::now(), limit)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets")
+            })?;
 
         for asset in &expired {
             if !Self::is_message_managed_asset(asset) {
@@ -137,27 +145,20 @@ impl MediaService {
                 .or_else(|| asset.metadata.get(STORAGE_PATH_METADATA_KEY).cloned())
                 .unwrap_or_else(|| asset.file_id.clone());
 
-            // 从 metadata 中提取 tenant_id，如果没有则使用默认值
-            let _tenant_id = asset
-                .metadata
-                .get("tenant_id")
-                .map(|s| s.as_str())
-                .unwrap_or("0");
-
             if let Some(repo) = &self.object_repo {
-                let _ = repo.delete_object(&storage_path).await;
+                repo.delete_object(&storage_path).await?;
             }
             if let Some(local) = &self.local_store {
-                let _ = local.delete(&storage_path).await;
+                local.delete(&storage_path).await?;
             }
             if let Some(reference_store) = &self.reference_store {
-                let _ = reference_store
+                reference_store
                     .delete_all_references(ctx, &asset.file_id)
-                    .await;
+                    .await?;
             }
-            let _ = store.delete_metadata(ctx, &asset.file_id).await;
+            store.delete_metadata(ctx, &asset.file_id).await?;
             if let Some(cache) = &self.metadata_cache {
-                let _ = cache.invalidate(ctx, &asset.file_id).await;
+                cache.invalidate(ctx, &asset.file_id).await?;
             }
         }
 

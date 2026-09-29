@@ -17,6 +17,8 @@ use crate::infrastructure::persistence::redis::{
     RedisSubscriptionRepository,
 };
 use crate::interface::grpc::OnlineHandler;
+use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 单态化后的 gRPC Handler（Redis 实现 + 无事件发布）
@@ -77,10 +79,25 @@ pub async fn initialize(
 
     // 4. 构建领域服务
     let gateway_id = format!("gateway-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let online_domain_service = Arc::new(OnlineStatusService::<
-        RedisConversationRepository,
-        NoopConnectionEventPublisher,
-    >::new(conversation_repository.clone(), gateway_id));
+    let tenant_runtime = match online_config.tenant_runtime_postgres_url.as_deref() {
+        Some(url) => TenantRuntimeCache::connect(url, 2).await.map_err(|error| {
+            flare_server_core::error::FlareError::system(format!(
+                "Online tenant runtime connection failed: {error}"
+            ))
+        })?,
+        None => TenantRuntimeCache::disabled(),
+    };
+    let online_domain_service = Arc::new(
+        OnlineStatusService::<RedisConversationRepository, NoopConnectionEventPublisher>::new(
+            conversation_repository.clone(),
+            gateway_id,
+        )
+        .with_tenant_runtime(
+            tenant_runtime,
+            online_config.tenant_policy,
+            online_config.max_online_devices_per_user,
+        ),
+    );
 
     let subscription_domain_service = Arc::new(SubscriptionService::new(
         subscription_repository,
@@ -103,12 +120,39 @@ pub async fn initialize(
     let query_handler = Arc::new(OnlineQueryHandler::new(conversation_repository.clone()));
 
     // 6. 构建 OnlineService Handler（interface::grpc，仅编排 application handlers）
+    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
+        .map_err(|_| {
+        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
+    })?;
+    if control_verifier.is_none() {
+        tracing::warn!("Console control public key missing; Online kick RPCs fail closed");
+    }
+    let identity_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(key) => Some(SignedContextVerifier::from_public_key(&key).map_err(|_| {
+            flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for Online",
+            )
+        })?),
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "Online session and presence RPCs disabled: internal context verifier missing"
+            );
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
+            ));
+        }
+    };
     let online_handler = OnlineHandler::new(
         command_handler,
         query_handler,
         user_handler,
         presence_watcher_handler,
-    );
+    )
+    .with_control_verifier(control_verifier)
+    .with_identity_verifier(identity_verifier);
 
     Ok(ApplicationContext { online_handler })
 }
@@ -193,6 +237,13 @@ impl OnlineService for WiredOnlineHandler {
         request: Request<KickDeviceRequest>,
     ) -> std::result::Result<Response<KickDeviceResponse>, Status> {
         self.handle_kick_device(request).await
+    }
+
+    async fn self_kick_device(
+        &self,
+        request: Request<KickDeviceRequest>,
+    ) -> std::result::Result<Response<KickDeviceResponse>, Status> {
+        self.handle_self_kick_device(request).await
     }
 
     async fn kick_tenant(

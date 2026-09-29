@@ -1,4 +1,4 @@
-//! 撤销即断：订阅 redis kick 频道，收到 user_id 就关闭本节点该用户的全部长连接。
+//! 撤销即断：订阅 redis kick 频道，按已认证 `(tenant,user,device?)` 关闭本节点连接。
 //!
 //! 频道 = `{namespace}:kick`，与 api-gateway 的 `RedisTokenStore::kick_channel` 一致。
 //! api-gateway `/api/v1/auth/revoke` 撤销用户令牌后 publish user_id 到该频道；
@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flare_core::server::connection::ConnectionManagerTrait;
+use flare_im_contracts::domain::tenant::is_valid_tenant_id;
+use flare_server_core::auth::KickSignal;
 use futures::StreamExt;
 use tracing::{info, warn};
 
@@ -41,27 +43,140 @@ async fn run_subscriber(
     info!(channel = %channel, "subscribed to revoke/kick channel");
     let mut stream = pubsub.on_message();
     while let Some(msg) = stream.next().await {
-        let user_id: String = match msg.get_payload() {
+        let payload: String = match msg.get_payload() {
             Ok(v) => v,
             Err(err) => {
                 warn!(%err, "bad kick payload; ignoring");
                 continue;
             }
         };
-        let user_id = user_id.trim().to_string();
-        if user_id.is_empty() {
+        let signal: KickSignal = match serde_json::from_str(&payload) {
+            Ok(signal) => signal,
+            Err(_) => {
+                warn!("unscoped or malformed kick payload rejected");
+                continue;
+            }
+        };
+        if !is_valid_tenant_id(&signal.tenant_id) || signal.user_id.trim().is_empty() {
+            warn!("invalid tenant-scoped kick payload rejected");
             continue;
         }
-        let conn_ids = connection_manager.get_user_connections(&user_id).await;
+        let conn_ids = connection_manager
+            .get_user_connections(&signal.user_id)
+            .await;
         let mut closed = 0usize;
         for cid in &conn_ids {
+            let Some((_, info)) = connection_manager.get_connection(cid).await else {
+                continue;
+            };
+            if !kick_matches(
+                &signal,
+                cid,
+                info.authenticated,
+                info.user_id.as_deref(),
+                info.metadata.get("tenant_id").map(String::as_str),
+                info.device_info
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+            ) {
+                continue;
+            }
             if connection_manager.remove_connection(cid).await.is_ok() {
                 closed += 1;
             }
         }
         if closed > 0 {
-            info!(user_id = %user_id, closed, "revoked user: force-closed live connections on this node");
+            info!(tenant_id = %signal.tenant_id, user_id = %signal.user_id, closed, "revoked user: force-closed live connections on this node");
         }
     }
     Ok(())
+}
+
+fn kick_matches(
+    signal: &KickSignal,
+    connection_id: &str,
+    authenticated: bool,
+    user_id: Option<&str>,
+    tenant_id: Option<&str>,
+    device_id: Option<&str>,
+) -> bool {
+    authenticated
+        && signal
+            .connection_id
+            .as_deref()
+            .is_none_or(|target| target == connection_id)
+        && user_id == Some(signal.user_id.as_str())
+        && tenant_id == Some(signal.tenant_id.as_str())
+        && signal
+            .device_id
+            .as_deref()
+            .is_none_or(|target| device_id == Some(target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kick_never_crosses_tenant_or_device() {
+        let signal = KickSignal {
+            tenant_id: "a".into(),
+            user_id: "same".into(),
+            device_id: Some("d1".into()),
+            connection_id: None,
+        };
+        assert!(kick_matches(
+            &signal,
+            "old",
+            true,
+            Some("same"),
+            Some("a"),
+            Some("d1")
+        ));
+        assert!(!kick_matches(
+            &signal,
+            "old",
+            true,
+            Some("same"),
+            Some("b"),
+            Some("d1")
+        ));
+        assert!(!kick_matches(
+            &signal,
+            "old",
+            true,
+            Some("same"),
+            Some("a"),
+            Some("d2")
+        ));
+        assert!(!kick_matches(
+            &signal,
+            "old",
+            false,
+            Some("same"),
+            Some("a"),
+            Some("d1")
+        ));
+        assert!(serde_json::from_str::<KickSignal>("same").is_err());
+        let targeted = KickSignal {
+            connection_id: Some("old".into()),
+            ..signal
+        };
+        assert!(kick_matches(
+            &targeted,
+            "old",
+            true,
+            Some("same"),
+            Some("a"),
+            Some("d1")
+        ));
+        assert!(!kick_matches(
+            &targeted,
+            "new",
+            true,
+            Some("same"),
+            Some("a"),
+            Some("d1")
+        ));
+    }
 }

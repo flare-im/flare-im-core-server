@@ -25,6 +25,7 @@ fn default_user_upload_is_external_and_not_reference_managed() {
     let service = service();
     let payload = [];
     let context = UploadContext {
+        tenant_id: "tenant-a",
         file_id: "file-1",
         file_name: "avatar.png",
         mime_type: "image/png",
@@ -58,6 +59,7 @@ fn message_lifecycle_metadata_extracts_reference_scope() {
         MESSAGE_MEDIA_LIFECYCLE_SCOPE.to_string(),
     );
     let context = UploadContext {
+        tenant_id: "tenant-a",
         file_id: "file-1",
         file_name: "message.png",
         mime_type: "image/png",

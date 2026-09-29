@@ -232,6 +232,31 @@ let response = grpc_client.your_method(request).await?;
 - 健康检查需要服务提供 `/health` 端点
 - 配置中的 `ttl` 字段会被自动调整为 90 秒（心跳间隔的 3 倍）
 
+## 单 Cell 静态模式候选（DEP-08，未验收）
+
+`FLARE_REGISTRY_MODE=static` 显式关闭 Core 应用配置的注册和发现；未设置或设为
+`configured` 时沿用现有配置。空值、`dns`、`consul` 等其他值在配置加载时失败。
+静态模式不创建 DNS/SRV 记录、不调用注册中心，也不代表完整 Core 消息链可用。
+Core 内同容器 gRPC 调用须使用已配置的静态 URI；Gateway 默认回退使用
+`127.0.0.1` 上各服务端口。`release/supervise-core.toml` 对 Signaling Gateway 子进程
+固定传入 `PORT=60051` 和 `GRPC_PORT=60060`（不继承父进程同名变量），使
+WS=60051、QUIC=60052、内部 gRPC=60060，与 GatewayRouter 静态目标相符；
+只设置 `GRPC_PORT` 会移动 WS/QUIC。Gateway→Online 仅在显式 static 模式且服务名
+确为 `flare-signaling-online` 时回退同 Cell `127.0.0.1:50061`。
+
+跨容器 Social Hook 不能保留 `discovery://flare-social-hook`：Message Ingest 在显式
+static 模式下会在 Redis/MQ 初始化前拒绝启用的非 `http(s)://` gRPC Hook 配置。
+部署配置须显式指向 Social 私网 `http://social:50210` 并保留强制 PreSend 失败关闭。
+启动校验只确认显式 URI 形式，不验证 DNS 是否解析到私网或远端是否就绪；这些仍需部署与 E2E smoke 检查。
+动态插件路由也需要
+独立的静态地址或明确拒绝。Signaling Route 的 `svid.im` 已有仅针对 Message Ingest
+和 Message Orchestrator 两个固定服务的同容器配置端口回退候选，未知服务/缺端口拒绝；
+它尚未经过 Cargo 与真实消息链验收，不能据此勾选 DEP-08。Core
+supervisor 已在 `shared_env` 传入该开关，并且只在精确 `static` 模式下豁免
+Consul endpoint；正式模板仍须提供完整静态地址并跑真实消息 smoke。
+不要以现有 DNS backend 代替：它的 SRV 解析尚未实现，
+且注册 API 明确不支持 DNS。
+
 ## 相关文档
 
 - [flare-server-core 服务发现文档](https://github.com/flare152/flare-server-core/blob/main/flare-core-transport/src/discovery/README.md)

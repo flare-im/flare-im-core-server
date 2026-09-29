@@ -16,10 +16,12 @@ use tracing::{debug, instrument, warn};
 
 use crate::domain::service::ConnectionDomainService;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct OnlineSession {
     user_id: String,
+    tenant_id: String,
     conversation_id: String,
+    authenticated_ctx: Ctx,
 }
 
 /// 连接管理处理器：仅编排会话领域服务与指标，连接查询由 QueryHandler / PushDomainService 使用 ConnectionQuery 独立完成。
@@ -105,6 +107,13 @@ impl ConnectionHandler {
                 return;
             }
         };
+        let Some(tenant_id) = ctx.tenant_id().filter(|tenant| {
+            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+        }) else {
+            warn!(%user_id, %connection_id, "eager subscribe: canonical tenant missing");
+            return;
+        };
         let mut client = match conversation_read.ensure_client().await {
             Ok(client) => client,
             Err(error) => {
@@ -117,6 +126,7 @@ impl ConnectionHandler {
         // 不在这里显式订阅，这类通知就没有订阅者、被静默丢弃——表现为「对方发来好友申请，
         // 我这边毫无动静」，只能靠客户端下次主动拉列表才发现。
         conversation_subscriptions.join(
+            tenant_id,
             &flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id(&user_id),
             &connection_id,
         );
@@ -140,7 +150,11 @@ impl ConnectionHandler {
                 Ok(response) => {
                     let page = response.into_inner();
                     for summary in &page.conversations {
-                        conversation_subscriptions.join(&summary.conversation_id, &connection_id);
+                        conversation_subscriptions.join(
+                            tenant_id,
+                            &summary.conversation_id,
+                            &connection_id,
+                        );
                     }
                     total += page.conversations.len();
                     if page.conversations.is_empty()
@@ -209,12 +223,23 @@ impl ConnectionHandler {
             .connection_port
             .get_connection_info(connection_id)
             .await?;
+        let authenticated_ctx = self.connection_port.build_ctx(connection_id).await?;
+        if authenticated_ctx.user_id() != Some(connection_info.user_id.as_str())
+            || authenticated_ctx.tenant_id() != Some(connection_info.tenant_id.as_str())
+        {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::PermissionDenied,
+                "online connection identity mismatch",
+            )
+            .build_error());
+        }
         let user_id = connection_info.user_id.clone();
 
         // 注册会话到 Signaling Online(业务端会话管理)
         let conversation_id = self
             .session_domain_service
             .register_connection(
+                &authenticated_ctx,
                 &user_id,
                 &connection_info.device_id,
                 connection_info.platform.as_deref(),
@@ -226,7 +251,9 @@ impl ConnectionHandler {
             connection_id.to_string(),
             OnlineSession {
                 user_id: user_id.clone(),
+                tenant_id: connection_info.tenant_id.clone(),
                 conversation_id: conversation_id.clone(),
+                authenticated_ctx,
             },
         );
 
@@ -251,7 +278,10 @@ impl ConnectionHandler {
             .await;
 
         // 更新活跃连接数(从基础层获取)
-        let list = self.connection_port.list_user_connections(&user_id).await?;
+        let list = self
+            .connection_port
+            .list_user_connections(&connection_info.tenant_id, &user_id)
+            .await?;
         let active_count = list.len() as i64;
         self.metrics.connections_active.set(active_count);
 
@@ -291,12 +321,14 @@ impl ConnectionHandler {
                 .build_error()
             })?;
         let user_id = session.user_id;
+        let tenant_id = session.tenant_id;
         let conversation_id = session.conversation_id;
+        let authenticated_ctx = session.authenticated_ctx;
 
         // 底层连接可能已先被移除，断开清理必须以 Online 会话缓存为准。
         let user_connections = self
             .connection_port
-            .list_user_connections(&user_id)
+            .list_user_connections(&tenant_id, &user_id)
             .await
             .unwrap_or_default();
         let active_count_after_disconnect = user_connections
@@ -327,7 +359,7 @@ impl ConnectionHandler {
 
         if let Err(err) = self
             .session_domain_service
-            .unregister_connection(&user_id, &conversation_id)
+            .unregister_connection(&authenticated_ctx, &user_id, &conversation_id)
             .await
         {
             warn!(
@@ -385,10 +417,16 @@ impl ConnectionHandler {
         };
         let user_id = session.user_id;
         let conversation_id = session.conversation_id;
+        let authenticated_ctx = session.authenticated_ctx;
 
         // 刷新 Signaling Online 的心跳
         self.session_domain_service
-            .refresh_heartbeat(&user_id, &conversation_id, Some(connection_id))
+            .refresh_heartbeat(
+                &authenticated_ctx,
+                &user_id,
+                &conversation_id,
+                Some(connection_id),
+            )
             .await
             .map_err(|e| {
                 flare_server_core::error::ErrorBuilder::new(

@@ -56,7 +56,7 @@ where
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to login"))?;
 
-        self.publish_login_presence(request, &response).await;
+        self.publish_login_presence(ctx, request, &response).await;
         Ok(response)
     }
 
@@ -101,10 +101,11 @@ where
     #[instrument(skip(self), fields(user_id = %user_id))]
     pub async fn handle_subscribe_user_presence(
         &self,
+        tenant_id: &str,
         user_id: String,
     ) -> Result<Vec<flare_grpc_proto::signaling::online::UserPresenceEvent>> {
         self.subscription_domain_service
-            .subscribe_user_presence(user_id)
+            .subscribe_user_presence(tenant_id, user_id)
             .await
     }
 
@@ -112,17 +113,26 @@ where
     #[instrument(skip(self))]
     pub async fn handle_watch_presence(
         &self,
+        tenant_id: &str,
         request: WatchPresenceRequest,
     ) -> Result<Vec<flare_grpc_proto::signaling::online::PresenceEvent>> {
         self.subscription_domain_service
-            .watch_presence(request)
+            .watch_presence(tenant_id, request)
             .await
     }
 
-    async fn publish_login_presence(&self, request: LoginRequest, response: &LoginResponse) {
+    async fn publish_login_presence(
+        &self,
+        ctx: &Context,
+        request: LoginRequest,
+        response: &LoginResponse,
+    ) {
         if !response.success || request.user_id.trim().is_empty() {
             return;
         }
+        let Some(tenant_id) = ctx.tenant_id() else {
+            return;
+        };
         let now = chrono::Utc::now();
         let ts = Timestamp {
             seconds: now.timestamp(),
@@ -150,7 +160,7 @@ where
         };
         if let Err(err) = self
             .subscription_domain_service
-            .publish_presence_event(presence)
+            .publish_presence_event(tenant_id, presence)
             .await
         {
             warn!(%err, user_id = %request.user_id, "publish login presence event failed");
@@ -163,7 +173,7 @@ where
         };
         if let Err(err) = self
             .subscription_domain_service
-            .publish_user_presence_event(user_presence)
+            .publish_user_presence_event(tenant_id, user_presence)
             .await
         {
             warn!(%err, user_id = %request.user_id, "publish login user presence event failed");
@@ -171,6 +181,9 @@ where
     }
 
     async fn publish_presence_snapshot(&self, ctx: &Context, user_id: &str, reason: &str) {
+        let Some(tenant_id) = ctx.tenant_id() else {
+            return;
+        };
         let user_id = user_id.trim();
         if user_id.is_empty() {
             return;
@@ -209,7 +222,7 @@ where
         };
         if let Err(err) = self
             .subscription_domain_service
-            .publish_presence_event(presence)
+            .publish_presence_event(tenant_id, presence)
             .await
         {
             warn!(%err, user_id = %user_id, "publish presence snapshot event failed");
@@ -222,7 +235,7 @@ where
         };
         if let Err(err) = self
             .subscription_domain_service
-            .publish_user_presence_event(user_presence)
+            .publish_user_presence_event(tenant_id, user_presence)
             .await
         {
             warn!(%err, user_id = %user_id, "publish user presence snapshot event failed");

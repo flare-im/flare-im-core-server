@@ -25,8 +25,8 @@ impl RedisPresenceWatcher {
         }
     }
 
-    fn presence_channel(&self, user_id: &str) -> String {
-        format!("{}:{}", PRESENCE_CHANNEL_PREFIX, user_id)
+    fn presence_channel(tenant_id: &str, user_id: &str) -> String {
+        format!("{}:{}:{}", PRESENCE_CHANNEL_PREFIX, tenant_id, user_id)
     }
 
     fn parse_presence_event(user_id: &str, payload: &str) -> Result<PresenceChangeEvent> {
@@ -109,15 +109,17 @@ impl RedisPresenceWatcher {
 impl PresenceWatcher for RedisPresenceWatcher {
     async fn watch_presence(
         &self,
+        tenant_id: &str,
         user_ids: &[String],
     ) -> Result<mpsc::Receiver<Result<PresenceChangeEvent>>> {
         let (tx, rx) = mpsc::channel(100);
         let client = self.client.clone();
+        let channel_prefix = format!("{PRESENCE_CHANNEL_PREFIX}:{tenant_id}:");
         let channels: Vec<String> = user_ids
             .iter()
             .map(|id| id.trim())
             .filter(|id| !id.is_empty())
-            .map(|id| self.presence_channel(id))
+            .map(|id| Self::presence_channel(tenant_id, id))
             .collect();
 
         tokio::spawn(async move {
@@ -149,8 +151,7 @@ impl PresenceWatcher for RedisPresenceWatcher {
             let mut messages = pubsub.on_message();
             while let Some(msg) = messages.next().await {
                 let channel = msg.get_channel_name().to_string();
-                let Some(user_id) = channel.strip_prefix(&format!("{PRESENCE_CHANNEL_PREFIX}:"))
-                else {
+                let Some(user_id) = channel.strip_prefix(&channel_prefix) else {
                     continue;
                 };
                 let payload = match msg.get_payload::<String>() {

@@ -45,10 +45,18 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let capability_runtime = capability_grpc.runtime_config();
 
     // 租户投影只在有库时可用：没有库就没有 `tenants` 表可写，控制面推送会得到 Unimplemented 的路由缺席错误。
+    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
+        .map_err(|_| {
+        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
+    })?;
+    if control_verifier.is_none() {
+        tracing::warn!("Console control public key missing; tenant projection RPCs fail closed");
+    }
     let tenant_projection = db_pool.as_ref().map(|pool| {
-        TenantProjectionGrpcServer::new(Arc::new(PostgresTenantProjectionRepository::new(
-            Arc::clone(pool),
-        )))
+        TenantProjectionGrpcServer::new(
+            Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))),
+            control_verifier.clone(),
+        )
     });
 
     let extension_router = capability_registry.extension_router().await;

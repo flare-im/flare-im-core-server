@@ -1,5 +1,8 @@
 use super::*;
 
+/// `(bucket, region, storage_class, versioning_enabled, metadata)` returned by `describe_bucket`.
+pub type BucketDescription = (String, String, String, bool, HashMap<String, String>);
+
 impl MediaService {
     #[instrument(skip(self, ctx, context), fields(
         request_id = %ctx.request_id(),
@@ -15,6 +18,19 @@ impl MediaService {
         mut context: UploadContext<'_>,
     ) -> Result<MediaFileMetadata> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
+        let tenant_id = require_tenant(ctx)?;
+        let owner_id = tenant::require_owner(ctx)?;
+        if context.tenant_id != tenant_id || context.user_id != owner_id {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "upload identity does not match authenticated context"
+            ));
+        }
+        context
+            .metadata
+            .insert("tenant_id".to_string(), tenant_id.to_string());
+        context.metadata.remove(STORAGE_BUCKET_METADATA_KEY);
+        context.metadata.remove(STORAGE_PATH_METADATA_KEY);
 
         tracing::trace!(
             file_id = context.file_id,
@@ -56,7 +72,9 @@ impl MediaService {
                     .metadata
                     .entry(FILE_CATEGORY_METADATA_KEY.to_string())
                     .or_insert_with(|| category.clone());
-                if Self::can_reuse_hash_match(&existing, message_managed) {
+                if Self::can_reuse_hash_match(&existing, message_managed)
+                    && existing.owner_id.as_deref() == Some(owner_id)
+                {
                     if let Some(scope) = scope.as_ref() {
                         tracing::trace!(file_id = context.file_id, "为已存在的文件创建引用");
                         self.ensure_reference(ctx, &mut existing, &context, scope)
@@ -244,6 +262,7 @@ impl MediaService {
         );
 
         let mut metadata = MediaFileMetadata {
+            owner_id: Some(owner_id.to_string()),
             file_id: context.file_id.to_string(),
             file_name: context.file_name.to_string(),
             mime_type: context.mime_type.to_string(),
@@ -284,6 +303,7 @@ impl MediaService {
     #[instrument(skip(self, ctx))]
     pub async fn delete_media_file(&self, ctx: &Context, file_id: &str) -> Result<()> {
         let mut metadata = self.get_metadata(ctx, file_id).await?;
+        Self::authorize_file_write(ctx, &metadata)?;
 
         if metadata.reference_count > 1 {
             if let Some(reference_store) = &self.reference_store {
@@ -341,15 +361,18 @@ impl MediaService {
     }
 
     pub async fn get_metadata(&self, ctx: &Context, file_id: &str) -> Result<MediaFileMetadata> {
+        require_tenant(ctx)?;
         if let Some(cache) = &self.metadata_cache
             && let Some(metadata) = cache.get_cached_metadata(ctx, file_id).await?
         {
+            Self::authorize_file_read(ctx, &metadata)?;
             return Ok(metadata);
         }
 
         if let Some(store) = &self.metadata_store
             && let Some(metadata) = store.load_metadata(ctx, file_id).await?
         {
+            Self::authorize_file_read(ctx, &metadata)?;
             if let Some(cache) = &self.metadata_cache {
                 cache.cache_metadata(ctx, &metadata).await.ok();
             }
@@ -398,7 +421,7 @@ impl MediaService {
     ) -> Result<PresignedUrl> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
-        let _tenant_id = ctx.tenant_id().unwrap_or("0");
+        require_tenant(ctx)?;
         let metadata = self.get_metadata(ctx, file_id).await?;
         let expires_in = if expires_in > 0 {
             expires_in
@@ -562,31 +585,42 @@ impl MediaService {
 
     pub async fn list_objects(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         _bucket: &str,
         _prefix: &str,
     ) -> Result<Vec<MediaFileMetadata>> {
-        Ok(Vec::new())
+        require_tenant(ctx)?;
+        Err(flare_server_core::flare_err!(
+            ErrorCode::OperationNotSupported,
+            "tenant object inventory is not implemented"
+        ))
     }
 
-    pub async fn set_object_acl(&self, ctx: &Context, file_id: &str) -> Result<()> {
-        let _ = self.get_metadata(ctx, file_id).await?;
-        Ok(())
+    pub async fn set_object_acl(&self, ctx: &Context, _file_id: &str) -> Result<()> {
+        require_tenant(ctx)?;
+        Err(flare_server_core::flare_err!(
+            ErrorCode::OperationNotSupported,
+            "media ACL mutation is not implemented"
+        ))
     }
 
     pub fn describe_bucket(
         &self,
+        ctx: &Context,
         bucket: Option<&str>,
-    ) -> (String, String, String, bool, HashMap<String, String>) {
-        let resolved_bucket = bucket
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().to_string())
-            .or_else(|| {
-                self.object_repo
-                    .as_ref()
-                    .and_then(|repo| repo.bucket_name())
-            })
+    ) -> Result<BucketDescription> {
+        let tenant_id = require_tenant(ctx)?;
+        let resolved_bucket = self
+            .object_repo
+            .as_ref()
+            .and_then(|repo| repo.bucket_name())
             .unwrap_or_else(|| "media".to_string());
+        if bucket.is_some_and(|requested| !requested.is_empty() && requested != resolved_bucket) {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "bucket is outside this media service"
+            ));
+        }
         let storage_class = self
             .object_repo
             .as_ref()
@@ -600,6 +634,13 @@ impl MediaService {
             });
         let mut metadata = HashMap::new();
         metadata.insert("provider".to_string(), storage_class.clone());
+        metadata.insert(
+            "tenant_prefix".to_string(),
+            format!(
+                "{}/",
+                crate::domain::model::tenant_storage_segment(tenant_id)
+            ),
+        );
         if let Some(base_url) = self.object_repo.as_ref().and_then(|repo| repo.base_url()) {
             metadata.insert("base_url".to_string(), base_url);
         } else if let Some(base_url) = self.local_store.as_ref().and_then(|store| store.base_url())
@@ -607,12 +648,12 @@ impl MediaService {
             metadata.insert("base_url".to_string(), base_url);
         }
 
-        (
+        Ok((
             resolved_bucket,
             "us-east-1".to_string(),
             storage_class,
             false,
             metadata,
-        )
+        ))
     }
 }

@@ -129,12 +129,12 @@ impl MediaQueryHandler {
 
     pub async fn handle_describe_bucket(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         request: DescribeBucketRequest,
     ) -> Result<DescribeBucketResponse> {
         let (bucket, region, storage_class, versioning_enabled, metadata) = self
             .domain_service
-            .describe_bucket(Some(request.bucket.as_str()));
+            .describe_bucket(ctx, Some(request.bucket.as_str()))?;
         Ok(DescribeBucketResponse {
             bucket,
             region,

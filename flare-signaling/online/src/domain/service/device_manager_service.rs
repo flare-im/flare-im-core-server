@@ -26,7 +26,11 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     }
 
     /// 获取用户的所有在线设备会话
-    pub async fn get_user_devices(&self, user_id: &str) -> Result<Vec<ConnectionRecord>> {
+    pub async fn get_user_devices(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<ConnectionRecord>> {
         let uid = UserId::new(user_id.to_string()).map_err(|e| {
             flare_err!(
                 ErrorCode::InvalidParameter,
@@ -35,7 +39,7 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
         })?;
         let sessions = self
             .repository
-            .get_user_connections(&uid)
+            .get_user_connections(tenant_id, &uid)
             .await
             .map_err(|e| {
                 map_infra_error(
@@ -74,12 +78,16 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     /// 返回：需要踢出的会话 ID 列表
     pub async fn check_token_version(
         &self,
+        tenant_id: &str,
         user_id: &str,
         new_token_version: i64,
     ) -> Result<Vec<String>> {
         let uid = UserId::new(user_id.to_string())
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
-        let sessions = self.repository.get_user_connections(&uid).await?;
+        let sessions = self
+            .repository
+            .get_user_connections(tenant_id, &uid)
+            .await?;
 
         let mut to_kick = Vec::new();
         for session in sessions {
@@ -125,12 +133,16 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     /// 选择策略：
     /// 1. 优先选择 Critical 或 High 优先级
     /// 2. 同优先级选择链接质量最好的（RTT 最低）
-    pub async fn select_best_device(&self, user_id: &str) -> Result<Option<ConnectionRecord>> {
+    pub async fn select_best_device(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ConnectionRecord>> {
         let uid = UserId::new(user_id.to_string())
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let mut sessions: Vec<ConnectionRecord> = self
             .repository
-            .get_user_connections(&uid)
+            .get_user_connections(tenant_id, &uid)
             .await?
             .into_iter()
             .map(|s| ConnectionRecord {
@@ -172,12 +184,16 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     /// - Unspecified(0)：视为 Normal
     pub async fn get_push_target_devices(
         &self,
+        tenant_id: &str,
         user_id: &str,
         include_low_priority: bool,
     ) -> Result<Vec<ConnectionRecord>> {
         let uid = UserId::new(user_id.to_string())
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
-        let sessions = self.repository.get_user_connections(&uid).await?;
+        let sessions = self
+            .repository
+            .get_user_connections(tenant_id, &uid)
+            .await?;
 
         let result: Vec<ConnectionRecord> = sessions
             .into_iter()
@@ -212,7 +228,10 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
             .collect();
 
         if result.is_empty() && include_low_priority {
-            let sessions_all = self.repository.get_user_connections(&uid).await?;
+            let sessions_all = self
+                .repository
+                .get_user_connections(tenant_id, &uid)
+                .await?;
             let records_all: Vec<ConnectionRecord> = sessions_all
                 .into_iter()
                 .map(|s| ConnectionRecord {
@@ -244,6 +263,7 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
     /// 强制踢出指定设备
     pub async fn kick_device(
         &self,
+        tenant_id: &str,
         user_id: &str,
         conversation_id: &str,
         reason: &str,
@@ -258,19 +278,23 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
             reason = %reason,
             "Kicking device"
         );
-        self.repository.remove_connection(&sid, &uid).await?;
+        self.repository
+            .remove_connection(tenant_id, &sid, &uid)
+            .await?;
         Ok(())
     }
 
     /// 批量踢出设备（用于 Token 版本升级）
     pub async fn batch_kick_devices(
         &self,
+        tenant_id: &str,
         user_id: &str,
         conversation_ids: &[String],
         reason: &str,
     ) -> Result<()> {
         for conversation_id in conversation_ids {
-            self.kick_device(user_id, conversation_id, reason).await?;
+            self.kick_device(tenant_id, user_id, conversation_id, reason)
+                .await?;
         }
         Ok(())
     }

@@ -94,9 +94,11 @@ pub fn build_long_connection_handler(
     tenant_runtime: TenantRuntimeCache,
     realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
     realtime_broadcast: Arc<dyn crate::domain::service::IRealtimeBroadcastPort>,
+    message_signer: Option<flare_server_core::SignedContextSigner>,
 ) -> Arc<LongConnectionHandler> {
-    let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> =
-        Arc::new(RouterMessageCommandPort::new(route_pool.clone()));
+    let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> = Arc::new(
+        RouterMessageCommandPort::new(route_pool.clone(), message_signer),
+    );
     let event_port: Arc<dyn crate::domain::ports::IEventCommandPort> =
         Arc::new(RouterEventCommandPort::new(route_pool.clone()));
     let storage_sync = Arc::new(StorageSyncPort::new(storage_sync_pool));

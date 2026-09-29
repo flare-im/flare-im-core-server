@@ -93,7 +93,9 @@ retries = 8
 retry_backoff_ms = 25
 stream_name = "FLARE_PUSH"
 subjects = ["flare.im.push.*"]
-options = { retention = "limits", storage = "file", max_age_seconds = "86400", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
+# Stream retention/storage are fixed to limits/file by the NATS adapter; ack_wait/max_deliver
+# are consumer settings (currently the adapter defaults to 30s/16), not stream options.
+options = { max_age_seconds = "86400", duplicate_window_seconds = "600", max_bytes = "1073741824", num_replicas = "1" }
 
 [jetstream.message]
 url = "${FLARE_NATS_URL:-nats://127.0.0.1:24222}"
@@ -103,7 +105,20 @@ retries = 8
 retry_backoff_ms = 25
 stream_name = "FLARE_MESSAGE"
 subjects = ["flare.im.message.*", "flare.im.conversation.*"]
-options = { retention = "limits", storage = "file", max_age_seconds = "604800", duplicate_window_seconds = "600", ack_wait_seconds = "30", max_deliver = "16" }
+options = { max_age_seconds = "604800", duplicate_window_seconds = "600", max_bytes = "1073741824", num_replicas = "1" }
+
+# Framework dead-letter subjects are not part of FLARE_PUSH. Because the
+# configured topology replaces the fallback topology, this stream must be
+# listed explicitly or framework DLQ publication has no owned stream.
+[jetstream.dlq]
+url = "${FLARE_NATS_URL:-nats://127.0.0.1:24222}"
+client_id = "flare-im-dlq"
+timeout_ms = 5000
+retries = 8
+retry_backoff_ms = 25
+stream_name = "FLARE_DLQ"
+subjects = ["flare.im.dlq.>"]
+options = { max_age_seconds = "604800", duplicate_window_seconds = "600", max_bytes = "1073741824", num_replicas = "1" }
 
 # Kafka 生产级推荐参数：仅在 mq.default_backend = "kafka" 时作为主 MQ 后端使用。
 [kafka.message]

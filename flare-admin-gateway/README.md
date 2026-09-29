@@ -64,6 +64,7 @@ x-request-id: request-1
 ```
 
 You may also use `idempotency-key` instead of `x-request-id` for idempotency and audit correlation.
+The two bounded read-only POSTs, `/messages/query` and `/messages/write-ledger/query`, require the signed employee token and concrete tenant but not write-operation audit headers. `/messages/export` remains a protected write-class operation.
 
 ## Message write-path ledger query
 

@@ -17,7 +17,14 @@ impl PushTaskStatusQuery {
         Self { store }
     }
 
-    pub async fn get_task_status(&self, _ctx: &Ctx, task_id: &str) -> Result<Option<String>> {
-        self.store.get_task_status(task_id).await
+    pub async fn get_task_status(&self, ctx: &Ctx, task_id: &str) -> Result<Option<String>> {
+        let tenant_id = ctx.tenant_id().ok_or_else(|| {
+            flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::PermissionDenied,
+                "verified tenant required for push task status",
+            )
+            .build_error()
+        })?;
+        self.store.get_task_status(tenant_id, task_id).await
     }
 }

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::{
     context::Context,
     error::{ErrorCode, Result, map_infra_error},
@@ -12,11 +11,15 @@ use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::domain::model::{FileAccessType, MediaAssetStatus, MediaFileMetadata};
+use crate::domain::model::{
+    FileAccessType, MediaAssetStatus, MediaFileMetadata, tenant_storage_segment,
+};
 use crate::domain::repository::MediaMetadataCache;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedMetadata {
+    #[serde(default)]
+    owner_id: Option<String>,
     file_id: String,
     file_name: String,
     mime_type: String,
@@ -55,19 +58,25 @@ impl RedisMetadataCache {
         })
     }
 
-    fn key(&self, ctx: &Context, file_id: &str) -> String {
-        let tenant_id = normalize_tenant_id(ctx.tenant_id().unwrap_or("0"));
-        format!(
-            "{}:media:metadata:{}:{}",
-            self.namespace, tenant_id, file_id
-        )
+    fn key(&self, ctx: &Context, file_id: &str) -> Result<String> {
+        metadata_cache_key(&self.namespace, ctx, file_id)
     }
+}
+
+fn metadata_cache_key(namespace: &str, ctx: &Context, file_id: &str) -> Result<String> {
+    let tenant_id = crate::domain::service::require_tenant(ctx)?;
+    Ok(format!(
+        "{namespace}:media:metadata:v2:{}:{}",
+        tenant_storage_segment(tenant_id),
+        tenant_storage_segment(file_id)
+    ))
 }
 
 #[async_trait::async_trait]
 impl MediaMetadataCache for RedisMetadataCache {
     async fn cache_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
         let cached = CachedMetadata {
+            owner_id: metadata.owner_id.clone(),
             file_id: metadata.file_id.clone(),
             file_name: metadata.file_name.clone(),
             mime_type: metadata.mime_type.clone(),
@@ -98,7 +107,7 @@ impl MediaMetadataCache for RedisMetadataCache {
         })?;
         let mut conn = self.connection.lock().await;
         let _: () = conn
-            .set(self.key(ctx, &metadata.file_id), payload)
+            .set(self.key(ctx, &metadata.file_id)?, payload)
             .await
             .map_err(|e| {
                 map_infra_error(
@@ -116,7 +125,7 @@ impl MediaMetadataCache for RedisMetadataCache {
         file_id: &str,
     ) -> Result<Option<MediaFileMetadata>> {
         let mut conn = self.connection.lock().await;
-        let value: Option<String> = conn.get(self.key(ctx, file_id)).await.map_err(|e| {
+        let value: Option<String> = conn.get(self.key(ctx, file_id)?).await.map_err(|e| {
             map_infra_error(e, ErrorCode::NetworkError, "redis get cached metadata")
         })?;
         if let Some(value) = value {
@@ -142,6 +151,7 @@ impl MediaMetadataCache for RedisMetadataCache {
             };
 
             Ok(Some(MediaFileMetadata {
+                owner_id: cached.owner_id,
                 file_id: cached.file_id,
                 file_name: cached.file_name,
                 mime_type: cached.mime_type,
@@ -170,9 +180,27 @@ impl MediaMetadataCache for RedisMetadataCache {
     async fn invalidate(&self, ctx: &Context, file_id: &str) -> Result<()> {
         let mut conn = self.connection.lock().await;
         let _: () = conn
-            .del(self.key(ctx, file_id))
+            .del(self.key(ctx, file_id)?)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "redis delete cache key"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn media_cache_keys_do_not_alias_tenants_or_delimiters() {
+        let key = |tenant, file| {
+            metadata_cache_key("fixture", &Context::root().with_tenant_id(tenant), file).unwrap()
+        };
+        assert_ne!(key("a:b", "file"), key("a", "b:file"));
+        assert_ne!(key("a%3Ab", "file"), key("a:b", "file"));
+        assert_ne!(key("default", "file"), key("0", "file"));
+        assert!(metadata_cache_key("fixture", &Context::root(), "file").is_err());
+        assert!(
+            metadata_cache_key("fixture", &Context::root().with_tenant_id("*"), "file").is_err()
+        );
     }
 }

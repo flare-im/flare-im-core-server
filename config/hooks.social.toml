@@ -13,7 +13,7 @@ name = "social-policy-pre-send"
 description = "发信前 Social 权限校验：单聊好友/黑名单/陌生人策略，群聊成员/解散/禁言策略"
 enabled = true
 priority = 110
-timeout_ms = 2000
+timeout_ms = 300
 require_success = true
 
 [pre_send.selector]

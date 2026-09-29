@@ -127,6 +127,28 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
             admin_endpoint("/api/v1/admin/gateway/upstreams"),
             admin_endpoint("/api/v1/admin/gateway/routes"),
             admin_endpoint("/api/v1/admin/gateway/config"),
+            admin_endpoint("/api/v1/admin/medias/bucket"),
+            AdminEndpointDescriptor {
+                method: "POST".to_string(),
+                path: "/api/v1/admin/medias/cleanup-orphaned-assets".to_string(),
+                scope: "admin_gateway:admin".to_string(),
+                write: true,
+                status: "available".to_string(),
+            },
+            AdminEndpointDescriptor {
+                method: "GET".to_string(),
+                path: "/api/v1/admin/medias/objects".to_string(),
+                scope: "admin_gateway:admin".to_string(),
+                write: false,
+                status: "not_implemented".to_string(),
+            },
+            AdminEndpointDescriptor {
+                method: "POST".to_string(),
+                path: "/api/v1/admin/medias/object-acl".to_string(),
+                scope: "admin_gateway:admin".to_string(),
+                write: true,
+                status: "not_implemented".to_string(),
+            },
             AdminEndpointDescriptor {
                 method: "POST".to_string(),
                 path: "/api/v1/admin/messages/query".to_string(),

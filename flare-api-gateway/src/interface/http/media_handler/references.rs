@@ -31,7 +31,7 @@ pub async fn create_reference(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Creating media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.create_reference(req).await?;
+    let grpc_res = media_client.create_reference(&ctx, req).await?;
     Ok(Json(ApiResponse::success(
         CreateReferenceHttpResponse::from(grpc_res),
     )))
@@ -53,7 +53,7 @@ pub async fn delete_reference(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.delete_reference(req).await?;
+    let grpc_res = media_client.delete_reference(&ctx, req).await?;
     Ok(Json(ApiResponse::success(
         DeleteReferenceHttpResponse::from(grpc_res),
     )))
@@ -84,28 +84,8 @@ pub async fn list_references(
         sort: Vec::new(),
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.list_references(grpc_req).await?;
+    let grpc_res = media_client.list_references(&ctx, grpc_req).await?;
     Ok(Json(ApiResponse::success(
         ListReferencesHttpResponse::from(grpc_res),
     )))
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/medias/cleanup-orphaned-assets",
-    tag = "Media",
-    responses((status = 200, description = "成功")),
-)]
-#[instrument(skip(headers, clients))]
-pub async fn cleanup_orphaned_assets(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Json(req): Json<CleanupOrphanedAssetsRequest>,
-) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
-    debug!(trace_id = %ctx.trace_id(), limit = req.limit, "Cleaning up orphaned media assets");
-
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.cleanup_orphaned_assets(req).await?;
-    Ok(Json(ApiResponse::success(grpc_res)))
 }

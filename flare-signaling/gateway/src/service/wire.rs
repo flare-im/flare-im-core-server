@@ -103,10 +103,38 @@ pub async fn initialize(
         access_config.default_tenant_id.clone(),
     ));
 
-    let connection_port: Arc<dyn IConnectionPort> = Arc::new(ConnectionRepository::new(
-        connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
-        access_config.default_tenant_id.clone(),
-    ));
+    // Only this token-authenticated ingress may sign User context for Online
+    // login, heartbeat and logout. The same key serves the already-bound
+    // message ingress path; callers must prove connection provenance.
+    let message_signer = match std::env::var("FLARE_INTERNAL_CTX_PRIVATE_KEY") {
+        Ok(key) => Some(
+            flare_server_core::SignedContextSigner::from_private_key(&key).map_err(|_| {
+                flare_server_core::error::FlareError::system(
+                    "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY for signaling gateway",
+                )
+            })?,
+        ),
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "signaling message and Online RPCs disabled: internal context signer missing"
+            );
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY encoding",
+            ));
+        }
+    };
+
+    let connection_port: Arc<dyn IConnectionPort> = Arc::new(
+        ConnectionRepository::new(
+            connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
+            access_config.default_tenant_id.clone(),
+        )
+        .with_static_registry_mode(app_config.uses_static_registry())
+        .with_signer(message_signer.clone()),
+    );
 
     // 6. 连接领域服务
     let quality_service = Arc::new(ConnectionQualityService::new());
@@ -165,6 +193,7 @@ pub async fn initialize(
             Ok(router) => Arc::new(crate::infrastructure::ports::GatewayRealtimeBroadcast::new(
                 router,
                 gateway_id.clone(),
+                message_signer.clone(),
             )),
             Err(err) => {
                 // 有损信号不值得让网关起不来：退回单节点行为并说清楚，而不是静默。
@@ -207,6 +236,7 @@ pub async fn initialize(
         tenant_runtime.clone(),
         realtime_relay.clone(),
         realtime_broadcast,
+        message_signer,
     );
 
     // 10. 推送领域服务
@@ -248,11 +278,32 @@ pub async fn initialize(
 
     // 14. gRPC 处理器
     debug!("Building gRPC handlers");
-    let access_gateway_grpc_handler = Arc::new(AccessGatewayHandler::new(
-        Arc::new(PushHandler::new(push_domain_service.clone())),
-        Arc::new(ConnectionQueryHandler::new(connection_port.clone())),
-        realtime_relay,
-    ));
+    let gateway_identity_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(key) => Some(
+            flare_server_core::SignedContextVerifier::from_public_key(&key).map_err(|_| {
+                flare_server_core::error::FlareError::system(
+                    "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for Gateway",
+                )
+            })?,
+        ),
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!("Gateway GetUserConnections disabled: identity verifier missing");
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
+            ));
+        }
+    };
+    let access_gateway_grpc_handler = Arc::new(
+        AccessGatewayHandler::new(
+            Arc::new(PushHandler::new(push_domain_service.clone())),
+            Arc::new(ConnectionQueryHandler::new(connection_port.clone())),
+            realtime_relay,
+        )
+        .with_identity_verifier(gateway_identity_verifier),
+    );
     debug!("gRPC handlers built successfully");
 
     // 15. gRPC 地址

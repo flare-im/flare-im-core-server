@@ -23,6 +23,7 @@ use crate::domain::repository::{
     UploadSessionStoreRef,
 };
 use flare_server_core::error::{ErrorCode, Result, map_context_error, map_infra_error};
+pub(crate) use tenant::{require_owner, require_tenant, validate_tenant};
 
 const DIRECT_SINGLE_PUT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
 const DIRECT_MULTIPART_MIN_PART_SIZE_BYTES: i64 = 8 * 1024 * 1024;
@@ -78,8 +79,11 @@ impl MediaService {
 
 mod direct;
 mod helpers;
+#[cfg(test)]
+mod isolation_tests;
 mod multipart;
 mod references;
 mod storage;
+mod tenant;
 #[cfg(test)]
 mod tests;

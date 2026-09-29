@@ -14,6 +14,8 @@ use flare_grpc_proto::{
 };
 use flare_proto::common::Message as ProtoStorageMessage;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::grpc::client::set_signed_context_token;
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use prost::Message;
 use prost_types::Timestamp;
 use tonic::transport::Channel;
@@ -30,21 +32,45 @@ pub struct GrpcHookFactory;
 
 async fn hook_plugin_call<Mres: Message + Default>(
     client: &mut HookPluginClient<Channel>,
+    ctx: &Ctx,
     operation: &'static str,
     request_type_url: &str,
     inner: &impl Message,
     static_metadata: &HashMap<String, String>,
 ) -> std::result::Result<Mres, tonic::Status> {
+    let verified = ctx
+        .get_data::<VerifiedContext>()
+        .ok_or_else(|| tonic::Status::unauthenticated("verified hook identity required"))?;
+    let claims = verified
+        .claims()
+        .ok_or_else(|| tonic::Status::unauthenticated("signed hook identity required"))?;
+    let token = verified
+        .token()
+        .ok_or_else(|| tonic::Status::unauthenticated("signed hook token required"))?;
+    if ctx.request_id() != claims.request_id || ctx.tenant_id() != Some(claims.tenant_id.as_str()) {
+        return Err(tonic::Status::permission_denied(
+            "hook identity context mismatch",
+        ));
+    }
+    if operation == "flare.hook.v1.pre_send"
+        && (claims.actor_type != flare_server_core::auth::SignedActorType::User
+            || ctx.user_id() != Some(claims.actor_id.as_str()))
+    {
+        return Err(tonic::Status::permission_denied(
+            "pre-send hook requires signed user",
+        ));
+    }
     let any = prost_types::Any {
         type_url: request_type_url.to_string(),
         value: inner.encode_to_vec(),
     };
-    let req = tonic::Request::new(GenericRequest {
+    let mut req = tonic::Request::new(GenericRequest {
         operation: operation.to_string(),
         metadata: static_metadata.clone(),
         payload: Some(any),
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: claims.request_id.clone(),
     });
+    set_signed_context_token(&mut req, token)?;
     let envelope = client.call(req).await?.into_inner();
     if !envelope.ok {
         return Err(tonic::Status::internal(format!(
@@ -147,6 +173,7 @@ impl PreSendHook for GrpcPreSendHook {
 
         let response = hook_plugin_call::<ProtoPreSendHookResponse>(
             &mut client,
+            ctx,
             "flare.hook.v1.pre_send",
             "type.googleapis.com/flare.capability.v1.PreSendHookRequest",
             &request,
@@ -199,6 +226,7 @@ impl PostSendHook for GrpcPostSendHook {
 
         match hook_plugin_call::<ProtoPostSendHookResponse>(
             &mut client,
+            ctx,
             "flare.hook.v1.post_send",
             "type.googleapis.com/flare.capability.v1.PostSendHookRequest",
             &request,
@@ -250,6 +278,7 @@ impl DeliveryHook for GrpcDeliveryHook {
 
         match hook_plugin_call::<ProtoDeliveryHookResponse>(
             &mut client,
+            ctx,
             "flare.hook.v1.delivery",
             "type.googleapis.com/flare.capability.v1.DeliveryHookRequest",
             &request,
@@ -301,6 +330,7 @@ impl RecallHook for GrpcRecallHook {
 
         match hook_plugin_call::<ProtoRecallHookResponse>(
             &mut client,
+            ctx,
             "flare.hook.v1.recall",
             "type.googleapis.com/flare.capability.v1.RecallHookRequest",
             &request,

@@ -13,6 +13,12 @@
 token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
 
+# 与 Access Gateway 共用 Core tenants 投影；已知 suspended/deleting 租户拒签发、
+# 拒刷新、拒普通 API。生产配置 strict；Core-only 联调可用 lenient。
+# 可用 FLARE_API_GATEWAY_TENANT_RUNTIME_POSTGRES_URL / FLARE_API_GATEWAY_TENANT_POLICY 覆盖。
+postgres = "tenant_runtime"
+tenant_policy = "lenient"
+
 # 联调默认业务登录 token 与 API Gateway issuer/secret 一致，无需额外 trusted issuer。
 # 若生产使用独立业务 JWT，可取消注释：
 # [[services.api_gateway.trusted_token_issuers]]

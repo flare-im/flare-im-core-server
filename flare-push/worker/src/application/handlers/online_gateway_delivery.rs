@@ -70,12 +70,21 @@ impl GatewayPushExecutor {
         core: &flare_server_core::context::Context,
         target_user_id: &str,
     ) -> Result<Vec<DeviceInfo>> {
+        let tenant_id = core
+            .tenant_id()
+            .ok_or_else(|| FlareError::system("push device lookup requires tenant"))?;
+        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+            || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+        {
+            return Err(FlareError::system("invalid push device lookup tenant"));
+        }
+        let cache_key = format!("{tenant_id}:{target_user_id}");
         let now = Instant::now();
         let cache_ttl = device_route_cache_ttl();
         if cache_ttl.is_zero() {
             return self.list_user_devices(core, target_user_id).await;
         }
-        if let Some(cached) = self.device_cache.lock().await.get(target_user_id).cloned()
+        if let Some(cached) = self.device_cache.lock().await.get(&cache_key).cloned()
             && cached.expires_at > now
         {
             return Ok(cached.devices);
@@ -93,7 +102,7 @@ impl GatewayPushExecutor {
             }
         }
         cache.insert(
-            target_user_id.to_string(),
+            cache_key,
             CachedDevices {
                 devices: devices.clone(),
                 expires_at: now + cache_ttl,

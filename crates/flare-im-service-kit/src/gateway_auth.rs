@@ -20,7 +20,46 @@ use flare_server_core::{
 };
 use tracing::{debug, warn};
 
+use crate::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
+
 pub const APP_ID_HEADER: &str = "x-app-id";
+
+/// Tenant gate shared by API authentication and token issuance. A configured
+/// projection always rejects suspended/deleting tenants; strict mode also
+/// rejects missing or unavailable projections.
+#[derive(Clone)]
+pub struct TenantRuntimeGuard {
+    cache: TenantRuntimeCache,
+    policy: TenantAccessPolicy,
+}
+
+impl TenantRuntimeGuard {
+    pub fn new(cache: TenantRuntimeCache, policy: TenantAccessPolicy) -> Self {
+        Self { cache, policy }
+    }
+
+    pub async fn admit(&self, tenant_id: Option<&str>) -> Result<(), AuthError> {
+        let tenant_id = tenant_id.map(str::trim).filter(|value| !value.is_empty());
+        if tenant_id == Some("*")
+            || (tenant_id.is_none() && self.policy == TenantAccessPolicy::Strict)
+        {
+            return Err(AuthError::Forbidden("tenant binding required".into()));
+        }
+        let tenant_id = tenant_id.unwrap_or("0");
+        let lookup = self.cache.lookup(tenant_id).await;
+        if lookup.admits_connection(self.policy) {
+            return Ok(());
+        }
+        match lookup {
+            TenantLookup::Unavailable => Err(AuthError::ProviderUnavailable(
+                "tenant runtime projection unavailable".into(),
+            )),
+            TenantLookup::Known(_) | TenantLookup::Unknown => {
+                Err(AuthError::Forbidden("TENANT_UNAVAILABLE".into()))
+            }
+        }
+    }
+}
 
 pub async fn authenticate_http_request(
     validator: &Arc<dyn TokenValidator>,
@@ -89,6 +128,16 @@ pub fn inject_principal(
     request: &mut Request,
     principal: &AuthenticatedPrincipal,
 ) -> Result<(), AuthError> {
+    // Incoming identity headers are untrusted, including when a legacy token
+    // has no tenant/device binding. Remove them before inserting verified data.
+    for name in [
+        keys::USER_ID,
+        keys::DEVICE_ID,
+        keys::TENANT_ID,
+        APP_ID_HEADER,
+    ] {
+        request.headers_mut().remove(name);
+    }
     insert_required_header(request.headers_mut(), keys::USER_ID, &principal.user_id)?;
     if let Some(device_id) = principal.device_id.as_deref() {
         insert_optional_header(request.headers_mut(), keys::DEVICE_ID, device_id)?;
@@ -166,7 +215,36 @@ fn insert_optional_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
     use axum::body::Body;
+    use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
+    use std::collections::HashMap;
+
+    struct TenantRows(HashMap<String, TenantStatus>);
+
+    #[async_trait::async_trait]
+    impl TenantRuntimeSource for TenantRows {
+        async fn load(&self, tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok(self.0.get(tenant_id).map(|status| TenantRuntimeSnapshot {
+                tenant_id: tenant_id.to_string(),
+                status: *status,
+                quota: TenantQuota::default(),
+                version: 1,
+            }))
+        }
+    }
+
+    fn tenant_guard(policy: TenantAccessPolicy) -> TenantRuntimeGuard {
+        let cache = TenantRuntimeCache::with_source(
+            Arc::new(TenantRows(HashMap::from([
+                ("active".into(), TenantStatus::Active),
+                ("suspended".into(), TenantStatus::Suspended),
+                ("deleting".into(), TenantStatus::Deleting),
+            ]))),
+            TenantRuntimeCacheOptions::default(),
+        );
+        TenantRuntimeGuard::new(cache, policy)
+    }
 
     #[test]
     fn extracts_bearer_token_case_insensitively() {
@@ -213,6 +291,75 @@ mod tests {
         assert_eq!(
             request.headers().get(APP_ID_HEADER).unwrap(),
             "business-console"
+        );
+    }
+
+    #[test]
+    fn unbound_principal_cannot_keep_spoofed_identity_headers() {
+        let mut request = Request::builder()
+            .header(keys::TENANT_ID, "victim")
+            .header(keys::DEVICE_ID, "forged-device")
+            .header(APP_ID_HEADER, "forged-app")
+            .body(Body::empty())
+            .unwrap();
+        let principal = AuthenticatedPrincipal {
+            user_id: "user-a".into(),
+            tenant_id: None,
+            device_id: None,
+            app_id: None,
+            expires_at: None,
+            scopes: Vec::new(),
+            metadata: Default::default(),
+        };
+        inject_principal(&mut request, &principal).unwrap();
+        assert!(request.headers().get(keys::TENANT_ID).is_none());
+        assert!(request.headers().get(keys::DEVICE_ID).is_none());
+        assert!(request.headers().get(APP_ID_HEADER).is_none());
+        assert_eq!(request.headers().get(keys::USER_ID).unwrap(), "user-a");
+    }
+
+    #[tokio::test]
+    async fn tenant_guard_rejects_disabled_tenants_under_both_policies() {
+        for policy in [TenantAccessPolicy::Lenient, TenantAccessPolicy::Strict] {
+            let guard = tenant_guard(policy);
+            assert!(guard.admit(Some("active")).await.is_ok());
+            assert!(matches!(
+                guard.admit(Some("suspended")).await,
+                Err(AuthError::Forbidden(_))
+            ));
+            assert!(matches!(
+                guard.admit(Some("deleting")).await,
+                Err(AuthError::Forbidden(_))
+            ));
+            assert!(guard.admit(Some("*")).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_guard_fail_closed_policy_applies_to_missing_projection() {
+        assert!(
+            tenant_guard(TenantAccessPolicy::Lenient)
+                .admit(Some("unknown"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tenant_guard(TenantAccessPolicy::Lenient)
+                .admit(None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            tenant_guard(TenantAccessPolicy::Strict)
+                .admit(Some("unknown"))
+                .await
+                .is_err()
+        );
+        assert!(
+            tenant_guard(TenantAccessPolicy::Strict)
+                .admit(None)
+                .await
+                .is_err()
         );
     }
 }

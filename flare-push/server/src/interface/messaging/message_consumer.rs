@@ -20,6 +20,7 @@ use tracing::instrument;
 
 use flare_server_core::error::FlareError;
 
+use super::acknowledge_after_dlq;
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 
@@ -121,18 +122,15 @@ impl MessageHandler for PushMessageHandler {
                 "Unexpected payload_kind, expected MESSAGE, sending to DLQ"
             );
             let ctx = &message.context.ctx;
-            if let Err(e) = self
-                .publisher
-                .publish_dlq(
-                    ctx,
-                    Some(&envelope.conversation_id),
-                    message.payload.clone(),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "Failed to send message to DLQ");
-            }
-            return Ok(MessageResult::Ack);
+            return acknowledge_after_dlq(
+                self.publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await,
+            );
         }
 
         // 3. 从 payload oneof 提取 Message
@@ -144,18 +142,15 @@ impl MessageHandler for PushMessageHandler {
                     "Message payload missing or wrong variant, sending to DLQ"
                 );
                 let ctx = &message.context.ctx;
-                if let Err(e) = self
-                    .publisher
-                    .publish_dlq(
-                        ctx,
-                        Some(&envelope.conversation_id),
-                        message.payload.clone(),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %e, "Failed to send message to DLQ");
-                }
-                return Ok(MessageResult::Ack);
+                return acknowledge_after_dlq(
+                    self.publisher
+                        .publish_dlq(
+                            ctx,
+                            Some(&envelope.conversation_id),
+                            message.payload.clone(),
+                        )
+                        .await,
+                );
             }
         };
 
@@ -200,18 +195,15 @@ impl MessageHandler for PushMessageHandler {
                     offset = message.context.offset,
                     "Failed to process MqEnvelope, sending to DLQ"
                 );
-                if let Err(dlq_err) = self
-                    .publisher
-                    .publish_dlq(
-                        ctx,
-                        Some(&envelope.conversation_id),
-                        message.payload.clone(),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
-                }
-                Ok(MessageResult::Ack)
+                acknowledge_after_dlq(
+                    self.publisher
+                        .publish_dlq(
+                            ctx,
+                            Some(&envelope.conversation_id),
+                            message.payload.clone(),
+                        )
+                        .await,
+                )
             }
         }
     }

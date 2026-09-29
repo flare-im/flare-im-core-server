@@ -15,7 +15,7 @@ use super::types::{
 };
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HookConfig {
     pub pre_send: Vec<HookDefinition>,
     pub post_send: Vec<HookDefinition>,
@@ -24,7 +24,7 @@ pub struct HookConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HookSelectorConfig {
     pub tenants: Vec<String>,
     pub conversation_types: Vec<String>,
@@ -32,7 +32,7 @@ pub struct HookSelectorConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookTransportConfig {
     Grpc {
         endpoint: String,
@@ -52,7 +52,7 @@ pub enum HookTransportConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HookDefinition {
     pub name: String,
     pub version: Option<String>,
@@ -232,7 +232,12 @@ impl HookConfigLoader {
         })?;
         toml::from_str(&content).map_err(|err| {
             ErrorBuilder::new(ErrorCode::ConfigurationError, "invalid hook config format")
-                .details(format!("path={}, err={err}", path.display()))
+                // TOML errors include source lines, potentially containing secrets.
+                .details(format!(
+                    "path={}, byte_range={:?}",
+                    path.display(),
+                    err.span()
+                ))
                 .build_error()
         })
     }
@@ -259,6 +264,7 @@ impl HookConfigLoader {
             })?;
         entries.sort_by_key(|entry| entry.path());
 
+        let mut profile_count = 0;
         for entry in entries {
             if entry
                 .path()
@@ -268,7 +274,17 @@ impl HookConfigLoader {
             {
                 let cfg = self.load_from_file(&entry.path())?;
                 merged.merge(cfg);
+                profile_count += 1;
             }
+        }
+
+        if profile_count == 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "explicit hook config directory contains no TOML profiles",
+            )
+            .details(format!("path={}", dir.display()))
+            .build_error());
         }
 
         Ok(merged)

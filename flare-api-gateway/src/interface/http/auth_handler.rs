@@ -15,9 +15,13 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 
 use flare_im_service_kit::gateway::GatewaySettings;
-use flare_im_service_kit::gateway_auth::{auth_error_response, extract_bearer_token};
+use flare_im_service_kit::gateway_auth::{
+    TenantRuntimeGuard, auth_error_response, extract_bearer_token,
+};
 use flare_server_core::TokenService;
-use flare_server_core::auth::{AuthError, IssuedToken, TokenIssueRequest, TokenIssuer};
+use flare_server_core::auth::{
+    AuthError, AuthProviderMode, IssuedToken, KickSignal, TokenIssueRequest, TokenIssuer,
+};
 use flare_server_core::http::ApiResponse;
 
 const GATEWAY_NAME: &str = "api-gateway";
@@ -92,6 +96,7 @@ impl From<IssuedToken> for IssuedTokenHttp {
 pub async fn issue_token(
     Extension(settings): Extension<GatewaySettings>,
     Extension(issuer): Extension<TokenIssuerHandle>,
+    Extension(tenant_guard): Extension<TenantRuntimeGuard>,
     headers: HeaderMap,
     Json(request): Json<IssueTokenHttpRequest>,
 ) -> Response {
@@ -124,6 +129,9 @@ pub async fn issue_token(
             GATEWAY_NAME,
         );
     }
+    if let Err(err) = tenant_guard.admit(tenant_id.as_deref()).await {
+        return auth_error_response(err, GATEWAY_NAME);
+    }
     match issuer
         .issue(TokenIssueRequest {
             user_id: request.user_id,
@@ -134,6 +142,9 @@ pub async fn issue_token(
         .await
     {
         Ok(issued) => {
+            if let Err(err) = tenant_guard.admit(issued.tenant_id.as_deref()).await {
+                return auth_error_response(err, GATEWAY_NAME);
+            }
             info!(user_id = %issued.user_id, tenant_id = ?issued.tenant_id, "access token issued");
             Json(ApiResponse::success(IssuedTokenHttp::from(issued))).into_response()
         }
@@ -154,7 +165,10 @@ pub async fn issue_token(
 )]
 #[instrument(skip_all)]
 pub async fn refresh_token(
+    Extension(settings): Extension<GatewaySettings>,
     Extension(issuer): Extension<TokenIssuerHandle>,
+    Extension(token_service): Extension<Arc<TokenService>>,
+    Extension(tenant_guard): Extension<TenantRuntimeGuard>,
     headers: HeaderMap,
 ) -> Response {
     let Some(issuer) = issuer.0 else {
@@ -164,8 +178,25 @@ pub async fn refresh_token(
         Ok(token) => token,
         Err(err) => return auth_error_response(err, GATEWAY_NAME),
     };
+    // Check the signed tenant before issuer.refresh rotates a long-lived token.
+    // The external http_hook issuer owns its own token format; validate its
+    // returned tenant as well, before exposing the refreshed token to callers.
+    if settings.auth.mode == AuthProviderMode::CoreJwt {
+        let claims = match token_service.decode_claims_allow_expired(&current) {
+            Ok(claims) => claims,
+            Err(err) => {
+                return auth_error_response(AuthError::InvalidToken(err.to_string()), GATEWAY_NAME);
+            }
+        };
+        if let Err(err) = tenant_guard.admit(claims.tenant_id.as_deref()).await {
+            return auth_error_response(err, GATEWAY_NAME);
+        }
+    }
     match issuer.refresh(&current).await {
         Ok(issued) => {
+            if let Err(err) = tenant_guard.admit(issued.tenant_id.as_deref()).await {
+                return auth_error_response(err, GATEWAY_NAME);
+            }
             info!(user_id = %issued.user_id, "access token refreshed");
             Json(ApiResponse::success(IssuedTokenHttp::from(issued))).into_response()
         }
@@ -203,9 +234,10 @@ pub async fn revoke_user(
     Json(request): Json<RevokeUserHttpRequest>,
 ) -> Response {
     // 特权操作：只认 app 凭据，不接受 dev-issue 联调开关。
-    if let Err(err) = authorize_admin(&settings, &headers) {
-        return auth_error_response(err, GATEWAY_NAME);
-    }
+    let tenant_id = match authorize_admin(&settings, &headers) {
+        Ok(tenant_id) => tenant_id,
+        Err(err) => return auth_error_response(err, GATEWAY_NAME),
+    };
     let user_id = request.user_id.trim();
     if user_id.is_empty() {
         return auth_error_response(
@@ -227,7 +259,7 @@ pub async fn revoke_user(
     }
     // 撤销窗口覆盖到刷新令牌有效期，确保被撤销的令牌在其可能存活的全程都被拒。
     let ttl = token_service.refresh_ttl();
-    if let Err(err) = token_service.revoke_user(user_id, ttl) {
+    if let Err(err) = token_service.revoke_user(&tenant_id, user_id, ttl) {
         warn!(%err, "revoke_user failed");
         return auth_error_response(
             AuthError::ProviderUnavailable(err.to_string()),
@@ -235,10 +267,15 @@ pub async fn revoke_user(
         );
     }
     // 广播踢人信号（best-effort：失败不影响撤销本身，只是活连接要等自然超时/重连被拒）。
-    if let Err(err) = token_service.publish_kick(user_id) {
+    if let Err(err) = token_service.publish_kick(&KickSignal {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.to_owned(),
+        device_id: None,
+        connection_id: None,
+    }) {
         warn!(%err, "publish_kick failed; revocation still applied");
     }
-    info!(user_id, "user revoked and kick signal broadcast");
+    info!(user_id, tenant_id, "user revoked and kick signal broadcast");
     Json(ApiResponse::success(serde_json::json!({
         "revoked": true,
         "userId": user_id,
@@ -284,17 +321,26 @@ pub(crate) fn authorize_issue(
 pub(crate) fn authorize_admin(
     settings: &GatewaySettings,
     headers: &HeaderMap,
-) -> Result<(), AuthError> {
+) -> Result<String, AuthError> {
     let app_id = header_str(headers, APP_ID_HEADER);
     let app_secret = header_str(headers, APP_SECRET_HEADER);
     match (app_id, app_secret) {
         (Some(app_id), Some(app_secret)) => {
-            let matched = settings.auth.app_credentials.iter().any(|cred| {
+            let matched = settings.auth.app_credentials.iter().find(|cred| {
                 cred.app_id == app_id
                     && constant_time_eq(cred.secret.as_bytes(), app_secret.as_bytes())
             });
-            if matched {
-                Ok(())
+            if let Some(credential) = matched {
+                let tenant_id = credential.tenant_id.trim();
+                if tenant_id.is_empty()
+                    || !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                    || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+                {
+                    return Err(AuthError::Forbidden(
+                        "app credential tenant is invalid".into(),
+                    ));
+                }
+                Ok(tenant_id.to_owned())
             } else {
                 warn!(app_id = %app_id, "admin op rejected: unknown app credential");
                 Err(AuthError::Forbidden("unknown app credential".into()))
@@ -340,7 +386,11 @@ fn delegated_response() -> Response {
 mod tests {
     use super::*;
     use axum::{Router, body::Body, http::Request, routing::post};
+    use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
     use flare_im_service_kit::gateway::GatewayEnvScope;
+    use flare_im_service_kit::tenant_runtime::{
+        TenantAccessPolicy, TenantRuntimeCache, TenantRuntimeCacheOptions, TenantRuntimeSource,
+    };
     use flare_server_core::auth::{CoreJwtTokenIssuer, TokenService};
     use std::collections::HashMap;
     use tower::ServiceExt;
@@ -365,11 +415,49 @@ mod tests {
     }
 
     fn app(settings: GatewaySettings, issuer: Option<Arc<dyn TokenIssuer>>) -> Router {
+        app_with_guard(
+            settings,
+            issuer,
+            TenantRuntimeGuard::new(TenantRuntimeCache::disabled(), TenantAccessPolicy::Lenient),
+        )
+    }
+
+    fn app_with_guard(
+        settings: GatewaySettings,
+        issuer: Option<Arc<dyn TokenIssuer>>,
+        tenant_guard: TenantRuntimeGuard,
+    ) -> Router {
         Router::new()
             .route("/tokens", post(issue_token))
             .route("/tokens/refresh", post(refresh_token))
             .layer(Extension(settings))
             .layer(Extension(TokenIssuerHandle(issuer)))
+            .layer(Extension(service()))
+            .layer(Extension(tenant_guard))
+    }
+
+    struct SuspendedTenant;
+
+    #[async_trait::async_trait]
+    impl TenantRuntimeSource for SuspendedTenant {
+        async fn load(&self, tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok((tenant_id == "0").then(|| TenantRuntimeSnapshot {
+                tenant_id: tenant_id.to_string(),
+                status: TenantStatus::Suspended,
+                quota: TenantQuota::default(),
+                version: 1,
+            }))
+        }
+    }
+
+    fn suspended_guard() -> TenantRuntimeGuard {
+        TenantRuntimeGuard::new(
+            TenantRuntimeCache::with_source(
+                Arc::new(SuspendedTenant),
+                TenantRuntimeCacheOptions::default(),
+            ),
+            TenantAccessPolicy::Strict,
+        )
     }
 
     fn core_issuer() -> Option<Arc<dyn TokenIssuer>> {
@@ -504,6 +592,29 @@ mod tests {
                 assert_eq!(claims.tenant_id.as_deref(), Some("0"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn suspended_tenant_cannot_issue_or_refresh_access_tokens() {
+        let guard = suspended_guard();
+        let (status, _) = call(
+            app_with_guard(settings(&[]), core_issuer(), guard.clone()),
+            issue_req(&[(APP_ID_HEADER, "console"), (APP_SECRET_HEADER, APP_SECRET)]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let refresh = service()
+            .generate_refresh_token("user-a", Some("device-a"), Some("0"))
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/tokens/refresh")
+            .header("authorization", format!("Bearer {refresh}"))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = call(app_with_guard(settings(&[]), core_issuer(), guard), request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

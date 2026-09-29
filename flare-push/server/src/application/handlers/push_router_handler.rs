@@ -35,7 +35,7 @@ pub trait OnlineStatusReader: Send + Sync {
         ctx: &flare_server_core::context::Ctx,
         user_ids: &[String],
     ) -> Result<HashMap<String, bool>>;
-
+    /// Retained for existing adapters; never used as a routing tenant fallback.
     fn default_tenant_id(&self) -> &str;
 }
 
@@ -48,7 +48,6 @@ impl OnlineStatusReader for OnlineStatusService {
     ) -> Result<HashMap<String, bool>> {
         OnlineStatusService::online_statuses(self, ctx, user_ids).await
     }
-
     fn default_tenant_id(&self) -> &str {
         OnlineStatusService::default_tenant_id(self)
     }
@@ -1003,7 +1002,7 @@ impl PushRouterHandler {
         push_req.user_ids = user_ids.to_vec();
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.request_tenant_id(ctx).to_string();
+        let tenant_id = self.request_tenant_id(ctx)?.to_string();
         // 真实在线状态必须查：把所有收件人当成在线会让 `publish_targeted_tasks`
         // 一个离线任务都建不出来——群消息走的正是这条内联事件路径，于是离线群成员
         // 收不到任何推送通知，只能等下次自己打开 app 拉。
@@ -1058,7 +1057,7 @@ impl PushRouterHandler {
         push_req.user_ids = user_ids.to_vec();
         let push_payload = push_req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.request_tenant_id(ctx).to_string();
+        let tenant_id = self.request_tenant_id(ctx)?.to_string();
         let online_statuses = user_ids
             .iter()
             .map(|user_id| (user_id.clone(), true))
@@ -1098,7 +1097,7 @@ impl PushRouterHandler {
             .map(|o| o.expire_at_ms)
             .filter(|expire_at| *expire_at > 0);
         let message_id = Self::event_message_id(&req);
-        let tenant_id = self.request_tenant_id(ctx).to_string();
+        let tenant_id = self.request_tenant_id(ctx)?.to_string();
 
         // user_ids 在读扩散下不再使用（网关按会话订阅投递）；保持为空避免误导下游。
         let push_payload = req.encode_to_vec();
@@ -1152,6 +1151,13 @@ impl PushRouterHandler {
         conversation_id: &str,
         template: OfflineFanoutTemplate<'_>,
     ) {
+        let tenant_id = match self.request_tenant_id(ctx) {
+            Ok(tenant_id) => tenant_id.to_string(),
+            Err(error) => {
+                tracing::warn!(error = %error, "Skipping offline fanout: tenant required");
+                return;
+            }
+        };
         let Some(policy) = self.notify_policy.as_ref() else {
             return;
         };
@@ -1210,7 +1216,6 @@ impl PushRouterHandler {
             .iter()
             .map(|user_id| (user_id.clone(), false))
             .collect();
-        let tenant_id = self.request_tenant_id(ctx).to_string();
         let headers = HashMap::new();
         if let Err(error) = self
             .publish_targeted_tasks_inner(
@@ -1291,7 +1296,7 @@ impl PushRouterHandler {
                 .await;
         };
 
-        let tenant_id = self.request_tenant_id(ctx).to_string();
+        let tenant_id = self.request_tenant_id(ctx)?.to_string();
         let key = ConversationPingCoalesceKey::new(tenant_id, conversation_id.clone());
         let pending =
             pending_conversation_ping_request(&req, &conversation_id, max_conversation_seq);
@@ -1355,11 +1360,21 @@ impl PushRouterHandler {
         });
     }
 
-    // An explicitly scoped request must never be published under the deployment's
-    // default tenant. Worker delivery and gateway subscriptions use this field.
-    fn request_tenant_id<'a>(&'a self, ctx: &'a flare_server_core::context::Ctx) -> &'a str {
+    // A broker header is not authenticated, but a missing or noncanonical tenant
+    // must never silently become the deployment default before provenance exists.
+    fn request_tenant_id<'a>(&self, ctx: &'a flare_server_core::context::Ctx) -> Result<&'a str> {
         ctx.tenant_id()
-            .unwrap_or_else(|| self.online_status.default_tenant_id())
+            .filter(|tenant_id| {
+                flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                    && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+            })
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::PermissionDenied,
+                    "canonical tenant is required for push task routing",
+                )
+                .build_error()
+            })
     }
 
     pub async fn handle_message(
@@ -1379,7 +1394,7 @@ impl PushRouterHandler {
 
         let push_payload = req.encode_to_vec();
         let metadata = HashMap::new();
-        let tenant_id = self.request_tenant_id(ctx).to_string();
+        let tenant_id = self.request_tenant_id(ctx)?.to_string();
         let online_statuses = self.load_online_statuses(ctx, &req.user_ids).await?;
         self.publish_targeted_tasks(
             ctx,
@@ -1451,6 +1466,14 @@ impl PushRouterHandler {
         ctx: &flare_server_core::context::Ctx,
         envelope: PushEnvelope,
     ) -> Result<()> {
+        let tenant_id = self.request_tenant_id(ctx)?;
+        if envelope.tenant_id != tenant_id {
+            return Err(ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "push envelope tenant does not match routing context",
+            )
+            .build_error());
+        }
         // 提取推送选项
         let priority = envelope.options.as_ref().map(|o| o.priority).unwrap_or(5);
         let expire_at = envelope.options.as_ref().and_then(|o| o.expire_at);
@@ -1481,7 +1504,7 @@ impl PushRouterHandler {
             PushTaskTemplate {
                 message_id: &message_id,
                 conversation_id: &conversation_id,
-                tenant_id: &envelope.tenant_id,
+                tenant_id,
                 priority,
                 expire_at,
                 push_payload: &push_payload,
@@ -1638,6 +1661,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn missing_or_noncanonical_tenant_cannot_be_replaced_by_deployment_default() {
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::new(),
+                tenant_id: "0".into(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(MockPushTaskPublisher::default()),
+        );
+        for tenant in [None, Some("default"), Some(" t1"), Some("t1:other")] {
+            let mut ctx = Context::root();
+            if let Some(tenant) = tenant {
+                ctx = ctx.with_tenant_id(tenant);
+            }
+            let ctx = Arc::new(ctx);
+            assert_eq!(
+                handler.request_tenant_id(&ctx).unwrap_err().code(),
+                Some(ErrorCode::PermissionDenied)
+            );
+        }
+        let scoped = Arc::new(Context::root().with_tenant_id("t1"));
+        assert_eq!(handler.request_tenant_id(&scoped).unwrap(), "t1");
+    }
+
+    #[tokio::test]
+    async fn push_envelope_tenant_must_equal_routing_context() {
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::new(),
+                tenant_id: "0".into(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(MockPushTaskPublisher::default()),
+        );
+        let ctx = Arc::new(Context::root().with_tenant_id("t1"));
+        let envelope = PushEnvelope {
+            tenant_id: "t2".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            handler
+                .handle_push_envelope(&ctx, envelope)
+                .await
+                .unwrap_err()
+                .code(),
+            Some(ErrorCode::PermissionDenied)
+        );
+    }
+
     #[derive(Default)]
     struct MockPushTaskPublisher {
         online: Mutex<Vec<(Option<String>, PushTaskEnvelope)>>,
@@ -1775,7 +1854,7 @@ mod tests {
                 calls: calls.clone(),
             }));
 
-        let ctx = Arc::new(Context::root());
+        let ctx = Arc::new(Context::root().with_tenant_id("tenant-a"));
         let user_ids = vec!["user-online".to_string(), "user-offline".to_string()];
         let statuses = HashMap::from([
             ("user-online".to_string(), true),
@@ -1860,7 +1939,7 @@ mod tests {
             options: None,
         };
 
-        let ctx = Arc::new(Context::root());
+        let ctx = Arc::new(Context::root().with_tenant_id("tenant-a"));
         handler.handle_event(&ctx, req).await.expect("handle_event");
         let offline = publisher
             .offline
@@ -2036,7 +2115,7 @@ mod tests {
             options: None,
         };
 
-        let ctx = Arc::new(Context::root());
+        let ctx = Arc::new(Context::root().with_tenant_id("tenant-a"));
         handler.handle_event(&ctx, req).await.expect("handle_event");
         publisher
             .offline
@@ -2074,7 +2153,7 @@ mod tests {
             calls: calls.clone(),
         }));
 
-        let ctx = Arc::new(Context::root());
+        let ctx = Arc::new(Context::root().with_tenant_id("tenant-a"));
         let headers = HashMap::new();
         handler
             .publish_targeted_tasks(
@@ -2165,7 +2244,7 @@ mod tests {
             publisher.clone(),
         );
 
-        let ctx = Arc::new(Context::root());
+        let ctx = Arc::new(Context::root().with_tenant_id("tenant-a"));
         let req = access_gateway::PushEventRequest {
             user_ids: vec!["user-online".to_string(), "user-offline".to_string()],
             events: vec![flare_proto::common::Event {

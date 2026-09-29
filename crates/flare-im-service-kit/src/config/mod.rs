@@ -85,6 +85,40 @@ pub struct JetStreamClusterConfig {
 pub struct JetStreamTopologySpec {
     pub stream_name: String,
     pub subjects: Vec<String>,
+    pub max_age: Duration,
+    pub duplicate_window: Duration,
+    pub num_replicas: usize,
+    pub max_bytes: i64,
+}
+
+// Keep these fallback values in sync with flare-server-core's NatsStreamSpec::new.
+// The checked-in base.toml states all four limits explicitly, so production does not
+// depend on these compatibility defaults.
+const DEFAULT_STREAM_MAX_AGE_SECONDS: u64 = 7 * 24 * 3600;
+const DEFAULT_STREAM_DUPLICATE_WINDOW_SECONDS: u64 = 10 * 60;
+const DEFAULT_STREAM_MAX_BYTES: i64 = 1024 * 1024 * 1024;
+const DEFAULT_STREAM_NUM_REPLICAS: usize = 1;
+
+fn positive_stream_option(
+    profile_name: &str,
+    options: &HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> Result<u64> {
+    let Some(raw) = options.get(key) else {
+        return Ok(default);
+    };
+    let value = raw.parse::<u64>().map_err(|_| {
+        flare_server_core::error::FlareError::system(format!(
+            "jetstream.{profile_name}.options.{key} must be a positive integer"
+        ))
+    })?;
+    if value == 0 {
+        return Err(flare_server_core::error::FlareError::system(format!(
+            "jetstream.{profile_name}.options.{key} must be a positive integer"
+        )));
+    }
+    Ok(value)
 }
 
 /// MQ 后端选择（`[mq]`）。
@@ -370,6 +404,12 @@ pub struct ApiGatewayServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
+    /// 租户运行时投影库 profile（`tenants` 表）。
+    #[serde(default)]
+    pub postgres: Option<String>,
+    /// 未知/不可用投影的接入策略：lenient 或 strict。
+    #[serde(default)]
+    pub tenant_policy: Option<String>,
     /// 信令服务名（通过服务发现获取地址）
     #[serde(default)]
     pub signaling_service: Option<String>,
@@ -424,18 +464,6 @@ pub struct AdminGatewayServiceConfig {
     /// 运行时配置
     #[serde(flatten)]
     pub runtime: ServiceRuntimeConfig,
-    /// JWT Token 密钥。未配置时可由启动入口回退到 api_gateway 配置。
-    #[serde(default)]
-    pub token_secret: Option<String>,
-    /// JWT Token 发行方。未配置时可由启动入口回退到 api_gateway 配置。
-    #[serde(default)]
-    pub token_issuer: Option<String>,
-    /// JWT Token 过期时间（秒）
-    #[serde(default)]
-    pub token_ttl_seconds: Option<u64>,
-    /// 额外信任的 JWT 发行方（如业务管理后台 token）
-    #[serde(default)]
-    pub trusted_token_issuers: Vec<TrustedTokenIssuerConfig>,
 }
 
 /// 媒体服务配置
@@ -997,6 +1025,9 @@ pub struct FlareAppConfig {
     /// 核心配置
     #[serde(flatten)]
     pub core: Config,
+    /// Process-local deployment override; never inferred from DNS or TOML.
+    #[serde(skip)]
+    static_registry_mode: bool,
     /// 日志配置
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -1024,6 +1055,12 @@ pub struct FlareAppConfig {
 }
 
 impl FlareAppConfig {
+    /// True only when the process explicitly selected `FLARE_REGISTRY_MODE=static`.
+    /// An absent registry in ordinary configuration is not an opt-in to static routing.
+    pub fn uses_static_registry(&self) -> bool {
+        self.static_registry_mode
+    }
+
     /// 返回当前 MQ 后端标识（`nats` \| `kafka`）。
     pub fn mq_default_backend(&self) -> &str {
         self.mq.default_backend.as_str()
@@ -1059,29 +1096,103 @@ impl FlareAppConfig {
         self.jetstream.get(name)
     }
 
-    /// 获取 NATS JetStream 拓扑配置。stream/subject 由用户在 `[jetstream.*]` 中指定。
+    /// 获取 NATS JetStream 拓扑配置。错误的 stream 选项不能静默退回默认保留期。
     pub fn jetstream_topology(&self) -> Vec<JetStreamTopologySpec> {
-        let mut specs = self
-            .jetstream
-            .values()
-            .filter_map(|profile| {
-                let stream_name = profile
-                    .stream_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())?;
-                if profile.subjects.is_empty() {
-                    return None;
+        self.try_jetstream_topology()
+            .expect("invalid JetStream topology configuration")
+    }
+
+    fn try_jetstream_topology(&self) -> Result<Vec<JetStreamTopologySpec>> {
+        let mut specs = Vec::new();
+        for (profile_name, profile) in &self.jetstream {
+            for key in profile.options.keys() {
+                if !matches!(
+                    key.as_str(),
+                    "max_age_seconds" | "duplicate_window_seconds" | "max_bytes" | "num_replicas"
+                ) {
+                    return Err(flare_server_core::error::FlareError::system(format!(
+                        "jetstream.{profile_name}.options.{key} is unsupported; stream retention/storage are fixed to limits/file, and consumer ack settings belong to service consumer configuration"
+                    )));
                 }
-                Some(JetStreamTopologySpec {
-                    stream_name: stream_name.to_string(),
-                    subjects: profile.subjects.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
+            }
+            let stream_name = profile
+                .stream_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            if stream_name.is_none() && profile.subjects.is_empty() && profile.options.is_empty() {
+                // A connection-only profile does not own a stream.
+                continue;
+            }
+            let stream_name = stream_name.ok_or_else(|| {
+                flare_server_core::error::FlareError::system(format!(
+                    "jetstream.{profile_name}.stream_name is required for stream topology"
+                ))
+            })?;
+            if profile.subjects.is_empty()
+                || profile
+                    .subjects
+                    .iter()
+                    .any(|subject| subject.trim().is_empty())
+            {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "jetstream.{profile_name}.subjects must contain non-empty subjects"
+                )));
+            }
+
+            let max_age_seconds = positive_stream_option(
+                profile_name,
+                &profile.options,
+                "max_age_seconds",
+                DEFAULT_STREAM_MAX_AGE_SECONDS,
+            )?;
+            let duplicate_window_seconds = positive_stream_option(
+                profile_name,
+                &profile.options,
+                "duplicate_window_seconds",
+                DEFAULT_STREAM_DUPLICATE_WINDOW_SECONDS,
+            )?;
+            let max_bytes = positive_stream_option(
+                profile_name,
+                &profile.options,
+                "max_bytes",
+                DEFAULT_STREAM_MAX_BYTES as u64,
+            )?;
+            let max_bytes = i64::try_from(max_bytes).map_err(|_| {
+                flare_server_core::error::FlareError::system(format!(
+                    "jetstream.{profile_name}.options.max_bytes exceeds i64::MAX"
+                ))
+            })?;
+            let num_replicas = positive_stream_option(
+                profile_name,
+                &profile.options,
+                "num_replicas",
+                DEFAULT_STREAM_NUM_REPLICAS as u64,
+            )?;
+            if !(1..=5).contains(&num_replicas) {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "jetstream.{profile_name}.options.num_replicas must be between 1 and 5"
+                )));
+            }
+            specs.push(JetStreamTopologySpec {
+                stream_name: stream_name.to_string(),
+                subjects: profile.subjects.clone(),
+                max_age: Duration::from_secs(max_age_seconds),
+                duplicate_window: Duration::from_secs(duplicate_window_seconds),
+                num_replicas: num_replicas as usize,
+                max_bytes,
+            });
+        }
         specs.sort_by(|a, b| a.stream_name.cmp(&b.stream_name));
-        specs.dedup_by(|a, b| a.stream_name == b.stream_name);
-        specs
+        for duplicate in specs.windows(2) {
+            if duplicate[0].stream_name == duplicate[1].stream_name {
+                return Err(flare_server_core::error::FlareError::system(format!(
+                    "JetStream stream {} is declared by multiple profiles",
+                    duplicate[0].stream_name
+                )));
+            }
+        }
+        Ok(specs)
     }
 
     /// 获取 Kafka 配置
@@ -1205,7 +1316,11 @@ impl FlareAppConfig {
             }
         }
 
-        if let Some(registry) = runtime.registry.as_ref() {
+        if self.static_registry_mode {
+            // A service-level registry section must not silently re-enable
+            // registration in a single-Cell static deployment.
+            cfg.registry = None;
+        } else if let Some(registry) = runtime.registry.as_ref() {
             cfg.registry = Some(registry.clone());
         }
 
@@ -1233,6 +1348,7 @@ impl FlareAppConfig {
     /// # 返回
     /// 如果所有引用都有效，返回 Ok(())，否则返回错误信息
     pub fn validate_references(&self) -> Result<()> {
+        self.try_jetstream_topology()?;
         match self.mq.default_backend.as_str() {
             "nats" => {}
             "kafka" => {
@@ -1490,6 +1606,27 @@ fn apply_mq_env_overrides(cfg: &mut FlareAppConfig) {
     }
 }
 
+/// Select the existing configured registry or the explicit single-Cell static
+/// mode. Static mode disables registration/discovery; it does not implement
+/// DNS/SRV or synthesize service records.
+fn apply_registry_mode_override(
+    cfg: &mut FlareAppConfig,
+    mode: Option<&str>,
+) -> std::result::Result<(), &'static str> {
+    match mode {
+        None | Some("configured") => {
+            cfg.static_registry_mode = false;
+            Ok(())
+        }
+        Some("static") => {
+            cfg.static_registry_mode = true;
+            cfg.core.registry = None;
+            Ok(())
+        }
+        Some(_) => Err("FLARE_REGISTRY_MODE must be 'configured' or 'static'"),
+    }
+}
+
 /// 加载配置
 ///
 /// # 参数
@@ -1563,6 +1700,24 @@ pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
         }
         apply_mq_env_overrides(&mut cfg);
         cfg.ensure_defaults();
+        match env::var("FLARE_REGISTRY_MODE") {
+            Ok(mode) => apply_registry_mode_override(&mut cfg, Some(&mode))
+                .expect("invalid FLARE_REGISTRY_MODE"),
+            Err(env::VarError::NotPresent) => apply_registry_mode_override(&mut cfg, None)
+                .expect("default registry mode must be valid"),
+            Err(env::VarError::NotUnicode(_)) => {
+                panic!("FLARE_REGISTRY_MODE must be valid UTF-8")
+            }
+        }
+        if cfg.static_registry_mode {
+            tracing::info!(
+                "Core service registration and discovery disabled in explicit static mode"
+            );
+        }
+        // Stream limits affect message retention and cannot use the optional
+        // reference-validation fallback below.
+        cfg.try_jetstream_topology()
+            .expect("invalid JetStream topology configuration");
         // 验证配置引用（可选，生产环境建议启用）
         if let Err(e) = cfg.validate_references() {
             warn!("configuration reference validation failed: {}", e);
@@ -1906,6 +2061,7 @@ fn default_config() -> FlareAppConfig {
             mesh: None,
             storage: None,
         },
+        static_registry_mode: false,
         logging: LoggingConfig::default(),
         redis: HashMap::new(),
         jetstream: HashMap::new(),
@@ -1973,6 +2129,158 @@ pub struct ServicesConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_mode_defaults_to_existing_config_and_rejects_unknown_values() {
+        let mut config = default_config();
+        apply_registry_mode_override(&mut config, None).unwrap();
+        assert!(config.core.registry.is_some());
+        assert!(!config.uses_static_registry());
+
+        apply_registry_mode_override(&mut config, Some("configured")).unwrap();
+        assert!(config.core.registry.is_some());
+        for invalid in ["", "dns", "consul", "STATIC", "disabled"] {
+            assert!(
+                apply_registry_mode_override(&mut config, Some(invalid)).is_err(),
+                "unknown mode {invalid:?} must fail before service startup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn static_registry_mode_skips_registration_discovery_and_service_override() {
+        let mut config = default_config();
+        let service_registry = config.core.registry.clone().unwrap();
+        apply_registry_mode_override(&mut config, Some("static")).unwrap();
+        assert!(config.core.registry.is_none());
+        assert!(config.uses_static_registry());
+
+        let runtime = ServiceRuntimeConfig {
+            registry: Some(service_registry),
+            ..Default::default()
+        };
+        assert!(
+            config
+                .compose_service_config(&runtime, "test-service")
+                .registry
+                .is_none(),
+            "service-specific registry must not override the process static mode"
+        );
+
+        let address = "127.0.0.1:50061".parse().unwrap();
+        assert!(
+            crate::discovery::init_from_config(&config, "test-service", address, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::discovery::register_service_from_config(&config, "test-service", address, None,)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::discovery::create_discover_from_config(&config, "test-service")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn jetstream_test_profile(options: HashMap<String, String>) -> JetStreamClusterConfig {
+        JetStreamClusterConfig {
+            url: "nats://localhost:4222".to_string(),
+            stream_name: Some("FLARE_PUSH".to_string()),
+            subjects: vec!["flare.im.push.*".to_string()],
+            options,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn real_base_push_stream_retains_configured_one_day_limit() {
+        let base_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/base.toml");
+        let raw = fs::read_to_string(&base_path).expect("read real base config");
+        let mut value: Value = toml::from_str(&raw).expect("parse real base config");
+        expand_env_placeholders_in_value_with(&mut value, &base_path, |_| None)
+            .expect("resolve defaults without process environment");
+        let config: FlareAppConfig = value.try_into().expect("deserialize real base config");
+        let push = config
+            .jetstream_topology()
+            .into_iter()
+            .find(|spec| spec.stream_name == "FLARE_PUSH")
+            .expect("push stream topology");
+        assert_eq!(push.max_age, Duration::from_secs(86_400));
+        assert_eq!(push.duplicate_window, Duration::from_secs(600));
+        assert_eq!(push.max_bytes, 1_073_741_824);
+        assert_eq!(push.num_replicas, 1);
+        let dlq = config
+            .jetstream_topology()
+            .into_iter()
+            .find(|spec| spec.stream_name == "FLARE_DLQ")
+            .expect("framework dead-letter stream topology");
+        assert_eq!(dlq.subjects, vec!["flare.im.dlq.>"]);
+        assert_eq!(dlq.max_age, Duration::from_secs(7 * 86_400));
+    }
+
+    #[test]
+    fn jetstream_stream_limits_and_replicas_reach_runtime_spec() {
+        let mut config = default_config();
+        config.jetstream.insert(
+            "push".to_string(),
+            jetstream_test_profile(HashMap::from([
+                ("max_age_seconds".to_string(), "172800".to_string()),
+                ("duplicate_window_seconds".to_string(), "120".to_string()),
+                ("max_bytes".to_string(), "2147483648".to_string()),
+                ("num_replicas".to_string(), "3".to_string()),
+            ])),
+        );
+        let spec = config.jetstream_topology().remove(0);
+        assert_eq!(spec.max_age, Duration::from_secs(172_800));
+        assert_eq!(spec.duplicate_window, Duration::from_secs(120));
+        assert_eq!(spec.max_bytes, 2_147_483_648);
+        assert_eq!(spec.num_replicas, 3);
+    }
+
+    #[test]
+    fn invalid_jetstream_options_fail_validation_instead_of_using_defaults() {
+        for (key, value) in [
+            ("max_age_seconds", "0"),
+            ("duplicate_window_seconds", "nope"),
+            ("max_bytes", "9223372036854775808"),
+            ("num_replicas", "6"),
+            ("retention", "limits"),
+        ] {
+            let mut config = default_config();
+            config.jetstream.insert(
+                "push".to_string(),
+                jetstream_test_profile(HashMap::from([(key.to_string(), value.to_string())])),
+            );
+            let error = config
+                .validate_references()
+                .expect_err("invalid stream option");
+            assert!(error.to_string().contains(key), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn incomplete_or_duplicate_jetstream_stream_profiles_fail_validation() {
+        let mut config = default_config();
+        let mut incomplete = jetstream_test_profile(HashMap::new());
+        incomplete.subjects.clear();
+        config.jetstream.insert("push".to_string(), incomplete);
+        assert!(config.validate_references().is_err());
+
+        config
+            .jetstream
+            .insert("push".to_string(), jetstream_test_profile(HashMap::new()));
+        config.jetstream.insert(
+            "duplicate".to_string(),
+            jetstream_test_profile(HashMap::new()),
+        );
+        assert!(config.validate_references().is_err());
+    }
 
     #[test]
     fn env_placeholders_expand_in_nested_toml_values() {

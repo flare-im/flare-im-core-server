@@ -46,6 +46,17 @@ impl MessageSendServiceClientWrapper {
         Ok(response.into_inner())
     }
 
+    /// Forward a gateway-authenticated identity to protected MessageIngest.
+    pub async fn send_message_with_signed_context(
+        &mut self,
+        request: SendMessageRequest,
+        token: &str,
+    ) -> Result<SendMessageResponse> {
+        let mut request = tonic::Request::new(request);
+        flare_server_core::grpc::client::set_signed_context_token(&mut request, token)?;
+        Ok(self.client.send_message(request).await?.into_inner())
+    }
+
     /// 批量发送消息
     pub async fn batch_send_message(
         &mut self,

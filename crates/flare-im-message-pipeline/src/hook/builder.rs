@@ -8,6 +8,7 @@ use flare_im_hooks::hooks::hook_context_data::{HookContextData, set_hook_context
 use flare_im_hooks::hooks::{MessageDraft, MessageRecord};
 use flare_proto::common::{Message, MessageContent};
 use flare_server_core::context::{Context, Ctx};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use flare_server_core::mq::nats::consumer::context_from_nats_headers;
 use prost::Message as _;
 use serde_json::json;
@@ -66,7 +67,8 @@ fn conversation_type_int_to_label(ty: i32) -> String {
 pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
     use flare_im_hooks::hooks::hook_context_data::{get_hook_context_data, set_hook_context_data};
     let mut hook_ctx = (**ctx).clone();
-    if hook_ctx.request_id().is_empty()
+    if ctx.get_data::<VerifiedContext>().is_none()
+        && hook_ctx.request_id().is_empty()
         && let Some(request_id) = request
             .attributes
             .get("x-request-id")
@@ -97,10 +99,11 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
     {
         hook_ctx = hook_ctx.with_trace_id(trace_id.clone());
     }
-    if let Some(user_id) = request
-        .attributes
-        .get("x-user-id")
-        .filter(|s| !s.is_empty())
+    if ctx.get_data::<VerifiedContext>().is_none()
+        && let Some(user_id) = request
+            .attributes
+            .get("x-user-id")
+            .filter(|s| !s.is_empty())
     {
         hook_ctx = hook_ctx.with_user_id(user_id.clone());
     }
@@ -468,9 +471,19 @@ pub fn merge_context(original: &Ctx, updated: Ctx) -> Ctx {
         .unwrap_or_default();
 
     // 合并 trace_id（如果 updated 没有）
-    let mut merged_ctx = (*updated).clone();
-    if merged_ctx.trace_id().is_empty() && !original.trace_id().is_empty() {
-        merged_ctx = merged_ctx.with_trace_id(original.trace_id());
+    let mut merged_ctx = if original.get_data::<VerifiedContext>().is_some() {
+        // Never replace a verified identity or lose its private marker with a
+        // Context reconstructed from untrusted message attributes.
+        (**original).clone()
+    } else {
+        (*updated).clone()
+    };
+    if merged_ctx.trace_id().is_empty() {
+        if !updated.trace_id().is_empty() {
+            merged_ctx = merged_ctx.with_trace_id(updated.trace_id());
+        } else if !original.trace_id().is_empty() {
+            merged_ctx = merged_ctx.with_trace_id(original.trace_id());
+        }
     }
 
     // 合并 tenant_id（如果 updated 没有）

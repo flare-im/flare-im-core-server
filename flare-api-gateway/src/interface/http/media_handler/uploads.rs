@@ -48,7 +48,7 @@ pub async fn generate_upload_url(
     debug!(trace_id = %ctx.trace_id(), user_id = %user_id, "Generating upload URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.generate_upload_url(req).await?;
+    let grpc_res = media_client.generate_upload_url(&ctx, req).await?;
     Ok(Json(ApiResponse::success(grpc_res)))
 }
 
@@ -91,7 +91,7 @@ pub async fn upload_file(
     }
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.upload_file(chunks).await?;
+    let grpc_res = media_client.upload_file(&ctx, chunks).await?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
     ))))
@@ -119,7 +119,7 @@ pub async fn initiate_multipart_upload(
     };
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .initiate_multipart_upload(grpc_req)
+        .initiate_multipart_upload(&ctx, grpc_req)
         .await
         .map_err(|err| {
             tracing::error!(
@@ -162,7 +162,7 @@ pub async fn upload_multipart_chunk(
         payload: req.payload,
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.upload_multipart_chunk(grpc_req).await?;
+    let grpc_res = media_client.upload_multipart_chunk(&ctx, grpc_req).await?;
     Ok(Json(ApiResponse::success(
         UploadMultipartChunkHttpResponse::from(grpc_res),
     )))
@@ -186,9 +186,12 @@ pub async fn complete_multipart_upload(
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .complete_multipart_upload(CompleteMultipartUploadRequest {
-            upload_id: req.upload_id,
-        })
+        .complete_multipart_upload(
+            &ctx,
+            CompleteMultipartUploadRequest {
+                upload_id: req.upload_id,
+            },
+        )
         .await?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
@@ -213,9 +216,12 @@ pub async fn abort_multipart_upload(
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .abort_multipart_upload(AbortMultipartUploadRequest {
-            upload_id: req.upload_id,
-        })
+        .abort_multipart_upload(
+            &ctx,
+            AbortMultipartUploadRequest {
+                upload_id: req.upload_id,
+            },
+        )
         .await?;
     Ok(Json(ApiResponse::success(
         AbortMultipartUploadHttpResponse::from(grpc_res),
@@ -244,7 +250,7 @@ pub async fn initiate_direct_upload(
         full_sha256: req.full_sha256,
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.initiate_direct_upload(grpc_req).await.map_err(|err| {
+    let grpc_res = media_client.initiate_direct_upload(&ctx, grpc_req).await.map_err(|err| {
         tracing::error!(trace_id = %ctx.trace_id(), error = %err, "initiate direct upload grpc call failed");
         GatewayError::internal("MEDIA_DIRECT_UPLOAD_INITIATE_FAILED", err.to_string())
     })?;
@@ -269,7 +275,7 @@ pub async fn get_direct_upload_status(
     let ctx = Ctx::from_headers(&headers);
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .get_direct_upload_status(GetDirectUploadStatusRequest {
+        .get_direct_upload_status(&ctx, GetDirectUploadStatusRequest {
             upload_id: req.upload_id,
         })
         .await
@@ -298,7 +304,7 @@ pub async fn presign_direct_upload_parts(
     let ctx = Ctx::from_headers(&headers);
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .presign_direct_upload_parts(PresignDirectUploadPartsRequest {
+        .presign_direct_upload_parts(&ctx, PresignDirectUploadPartsRequest {
             upload_id: req.upload_id,
             part_numbers: req.part_numbers,
             expires_in: req.expires_in,
@@ -339,7 +345,7 @@ pub async fn commit_direct_upload_parts(
         .collect();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .commit_direct_upload_parts(CommitDirectUploadPartsRequest {
+        .commit_direct_upload_parts(&ctx, CommitDirectUploadPartsRequest {
             upload_id: req.upload_id,
             parts: grpc_parts,
         })
@@ -369,7 +375,7 @@ pub async fn complete_direct_upload(
     let ctx = Ctx::from_headers(&headers);
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .complete_direct_upload(CompleteDirectUploadRequest {
+        .complete_direct_upload(&ctx, CompleteDirectUploadRequest {
             upload_id: req.upload_id,
         })
         .await
@@ -398,7 +404,7 @@ pub async fn abort_direct_upload(
     let ctx = Ctx::from_headers(&headers);
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .abort_direct_upload(AbortDirectUploadRequest {
+        .abort_direct_upload(&ctx, AbortDirectUploadRequest {
             upload_id: req.upload_id,
         })
         .await

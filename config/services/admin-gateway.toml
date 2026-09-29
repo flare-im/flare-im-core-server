@@ -5,15 +5,12 @@
 # Admin Gateway 是独立管理面入口，不提供管理后台页面。
 # 生产建议部署在内网、VPN、mTLS 或 service mesh policy 后面。
 
-# JWT Token 配置。未配置时启动入口会回退到 api_gateway 的 token_* 配置。
-# token_secret 不应写入仓库。生产/联调用 FLARE_ADMIN_GATEWAY_TOKEN_SECRET 注入，长度至少 32 字节。
-token_issuer = "flare-im-core"
-token_ttl_seconds = 3600
-
-# 若生产使用独立业务管理后台 JWT，可取消注释：
-# [[services.admin_gateway.trusted_token_issuers]]
-# issuer = "business-admin"
-# secret = "set-via-secret-manager"
+# 管理请求只接受 Control Plane EdDSA 短期令牌。
+# 启动时必须通过 FLARE_CONSOLE_PUBLIC_KEY 注入 Ed25519 公钥；无 HMAC 或
+# api-gateway 用户令牌回退。私钥只在 Control 后端，不能注入本服务。
+# 本地 scripts/start_server.sh 在配置公钥时才启动该服务，并通过
+# FLARE_ADMIN_GATEWAY_BIND_ADDRESS=127.0.0.1:50051 默认仅监听环回地址；
+# Compose 按私有服务网络使用下方地址，不向公网发布端口。
 
 [services.admin_gateway.server]
 address = "0.0.0.0"

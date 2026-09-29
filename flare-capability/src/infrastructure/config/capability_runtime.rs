@@ -40,17 +40,13 @@ pub fn service_name_from_discovery_route(authority: &str) -> Option<&str> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// 能力 gRPC 的运行时护栏：负载、超时、管理面鉴权、滥用防护。
+/// 能力 gRPC 的运行时护栏：负载、超时、滥用防护。
 #[derive(Debug, Clone)]
 pub struct CapabilityRuntimeConfig {
     /// `Dispatch.payload_json` 最大字节数（UTF-8）。
     pub max_payload_json_bytes: usize,
     /// 单次 `Dispatch` 端到端超时（含 RTC/媒体控制后端）。
     pub dispatch_timeout: Duration,
-    /// 非空时：`Grant` / `Revoke` / `SetTenantCapabilitySwitch` 须在 metadata 携带同值 `x-capability-admin-secret`。
-    pub admin_secret: Option<String>,
-    /// 为 true 且未配置 `admin_secret` 时，上述变更类 RPC 直接拒绝（强制生产闭环）。
-    pub deny_policy_mutations_without_secret: bool,
     /// 每 `(tenant_id, user_id)` 每分钟最多 `Dispatch` 次数；`None` 表示不限制。
     pub dispatch_max_per_minute: Option<u32>,
     /// 启动时自动发现并注册的远程插件 endpoint 列表（JSON）。
@@ -68,8 +64,6 @@ impl CapabilityRuntimeConfig {
 
         let mut max_payload_json_bytes = 1_048_576usize;
         let mut dispatch_timeout_ms = 25_000u64;
-        let mut admin_secret: Option<String> = None;
-        let mut deny_policy_mutations_without_secret = false;
         let mut dispatch_max_per_minute: Option<u32> = None;
         let mut plugin_discovery_endpoints: Vec<PluginDiscoveryEndpoint> = vec![];
         let mut plugin_health_check_interval_secs = 15u64;
@@ -93,20 +87,6 @@ impl CapabilityRuntimeConfig {
             .filter(|&n: &u64| (1_000..=120_000).contains(&n))
         {
             dispatch_timeout_ms = v;
-        }
-
-        if let Some(v) = layered.resolve_nonempty_string(
-            "FLARE_CAPABILITY_ADMIN_SECRET",
-            "capability_runtime.admin_secret",
-        ) {
-            admin_secret = Some(v);
-        }
-
-        if let Some(v) = layered.resolve_bool(
-            "FLARE_CAPABILITY_DENY_POLICY_MUTATIONS_WITHOUT_SECRET",
-            "capability_runtime.deny_policy_mutations_without_secret",
-        ) {
-            deny_policy_mutations_without_secret = v;
         }
 
         if let Some(v) = layered
@@ -149,23 +129,11 @@ impl CapabilityRuntimeConfig {
         let cfg = Self {
             max_payload_json_bytes,
             dispatch_timeout: Duration::from_millis(dispatch_timeout_ms),
-            admin_secret,
-            deny_policy_mutations_without_secret,
             dispatch_max_per_minute,
             plugin_discovery_endpoints,
             plugin_health_check_interval: Duration::from_secs(plugin_health_check_interval_secs),
             plugin_call_timeout: Duration::from_millis(plugin_call_timeout_ms),
         };
-
-        if cfg.deny_policy_mutations_without_secret && cfg.admin_secret.is_none() {
-            tracing::error!(
-                "FLARE_CAPABILITY_DENY_POLICY_MUTATIONS_WITHOUT_SECRET=1 but FLARE_CAPABILITY_ADMIN_SECRET is unset; policy mutations will be rejected"
-            );
-        } else if cfg.admin_secret.is_none() {
-            tracing::warn!(
-                "FLARE_CAPABILITY_ADMIN_SECRET not set: Grant/Revoke/SetTenantCapabilitySwitch are not cryptographically protected; set secret in production"
-            );
-        }
 
         tracing::info!(
             max_payload_bytes = cfg.max_payload_json_bytes,
@@ -174,8 +142,6 @@ impl CapabilityRuntimeConfig {
             discovered_plugin_count = cfg.plugin_discovery_endpoints.len(),
             plugin_health_interval_secs = plugin_health_check_interval_secs,
             plugin_call_timeout_ms = plugin_call_timeout_ms,
-            admin_secret_configured = cfg.admin_secret.is_some(),
-            deny_mutations_without_secret = cfg.deny_policy_mutations_without_secret,
             "CapabilityRuntimeConfig loaded"
         );
 
@@ -208,13 +174,5 @@ impl CapabilityRuntimeConfig {
     /// 首选媒体控制面发现项：用于 `RtcCapability` 主链路装配。
     pub fn primary_media_control_endpoint(&self) -> Option<&PluginDiscoveryEndpoint> {
         self.media_control_endpoints().into_iter().next()
-    }
-
-    /// 是否允许执行策略变更 RPC（未配置密钥时的策略）。
-    pub fn policy_mutations_allowed(&self) -> bool {
-        if self.admin_secret.is_some() {
-            return true;
-        }
-        !self.deny_policy_mutations_without_secret
     }
 }

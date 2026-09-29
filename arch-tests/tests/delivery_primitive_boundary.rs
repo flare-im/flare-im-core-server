@@ -142,9 +142,14 @@ fn push_server_can_read_online_status_from_redis_without_grpc_roundtrip() {
     assert!(
         online_status.contains("OnlineStatusBackend")
             && online_status.contains("Redis(ConnectionManager)")
-            && online_status.contains("session:{user_id}")
+            && online_status.contains("session:{tenant_id}:{user_id}")
             && online_status.contains("grpc_online_statuses"),
         "push server online filtering must retain redis direct-read backend and grpc fallback"
+    );
+    // SEC-07: the same user id in two tenants must never share a session key.
+    assert!(
+        !online_status.contains("\"session:{user_id}\""),
+        "push server must not read the tenant-less legacy session key"
     );
 }
 

@@ -67,28 +67,37 @@ impl AckModule {
     /// 获取ACK状态
     pub async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<AckStatusInfo>, Box<dyn std::error::Error>> {
-        self.service.get_ack_status(message_id, user_id).await
+        self.service
+            .get_ack_status(tenant_id, message_id, user_id)
+            .await
     }
 
     /// 检查ACK是否存在
     pub async fn exists_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.service.exists_ack(message_id, user_id).await
+        self.service
+            .exists_ack(tenant_id, message_id, user_id)
+            .await
     }
 
     /// 删除ACK状态
     pub async fn delete_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.service.delete_ack(message_id, user_id).await
+        self.service
+            .delete_ack(tenant_id, message_id, user_id)
+            .await
     }
 
     /// 获取模块统计信息
@@ -107,33 +116,43 @@ impl AckManager for AckModule {
 
     async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<crate::ack::redis_manager::AckStatusInfo>, Box<dyn std::error::Error>> {
-        self.service.get_ack_status(message_id, user_id).await
+        self.service
+            .get_ack_status(tenant_id, message_id, user_id)
+            .await
     }
 
     async fn batch_get_ack_status(
         &self,
+        tenant_id: &str,
         acks: Vec<(String, String)>,
     ) -> Result<Vec<crate::ack::redis_manager::AckStatusInfo>, Box<dyn std::error::Error>> {
-        self.service.batch_get_ack_status(acks).await
+        self.service.batch_get_ack_status(tenant_id, acks).await
     }
 
     async fn exists_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.service.exists_ack(message_id, user_id).await
+        self.service
+            .exists_ack(tenant_id, message_id, user_id)
+            .await
     }
 
     async fn delete_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.service.delete_ack(message_id, user_id).await
+        self.service
+            .delete_ack(tenant_id, message_id, user_id)
+            .await
     }
 }
 
@@ -157,6 +176,7 @@ mod tests {
         let module = AckModule::new(ack_config).await?;
 
         let ack_info = crate::ack::redis_manager::AckStatusInfo {
+            tenant_id: "tenant-a".to_string(),
             message_id: "test_msg_1".to_string(),
             user_id: "user_1".to_string(),
             ack_type: Some(crate::ack::redis_manager::AckType::TransportAck),
@@ -169,14 +189,18 @@ mod tests {
         module.record_ack_status(ack_info.clone()).await?;
 
         // 获取ACK状态
-        let retrieved = module.get_ack_status("test_msg_1", "user_1").await?;
+        let retrieved = module
+            .get_ack_status("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.message_id, "test_msg_1");
         assert_eq!(retrieved.user_id, "user_1");
 
         // 检查ACK是否存在
-        let exists = module.exists_ack("test_msg_1", "user_1").await?;
+        let exists = module
+            .exists_ack("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(exists);
 
         Ok(())

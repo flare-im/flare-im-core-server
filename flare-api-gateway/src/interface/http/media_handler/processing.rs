@@ -65,7 +65,7 @@ pub async fn process_image(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_image(grpc_req).await?;
+    let grpc_res = media_client.process_image(&ctx, grpc_req).await?;
     Ok(Json(ApiResponse::success(ProcessImageHttpResponse::from(
         grpc_res,
     ))))
@@ -131,7 +131,7 @@ pub async fn process_video(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_video(grpc_req).await?;
+    let grpc_res = media_client.process_video(&ctx, grpc_req).await?;
     Ok(Json(ApiResponse::success(ProcessVideoHttpResponse::from(
         grpc_res,
     ))))

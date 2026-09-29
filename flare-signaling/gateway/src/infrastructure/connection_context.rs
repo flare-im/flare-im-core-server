@@ -7,6 +7,36 @@ use flare_server_core::context::{ActorContext, ActorType, Context};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Provenance recorded only after the connection manager reports a completed
+/// token-authenticated connection. It is never decoded from client metadata.
+pub(crate) struct AuthenticatedConnectionOrigin {
+    connection_id: String,
+    user_id: String,
+    tenant_id: String,
+}
+
+impl AuthenticatedConnectionOrigin {
+    pub(crate) fn new(connection_id: String, user_id: String, tenant_id: String) -> Self {
+        Self {
+            connection_id,
+            user_id,
+            tenant_id,
+        }
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    pub(crate) fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+}
+
 /// 连接上下文键（用于存储在 ConnectionInfo.metadata 中）
 pub const METADATA_KEY_TENANT_ID: &str = "tenant_id";
 pub const METADATA_KEY_USER_ID: &str = "user_id";

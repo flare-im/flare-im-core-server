@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// ACK状态信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckStatusInfo {
+    pub tenant_id: String,
     /// 消息ID
     pub message_id: String,
     /// 用户ID
@@ -79,7 +80,7 @@ impl RedisAckManager {
     /// 存储ACK状态
     pub async fn store_ack_status(&self, ack_info: &AckStatusInfo) -> RedisResult<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let key = self.format_key(&ack_info.message_id, &ack_info.user_id);
+        let key = self.format_key(&ack_info.tenant_id, &ack_info.message_id, &ack_info.user_id)?;
         let value = serde_json::to_string(ack_info).map_err(|e| {
             RedisError::from((
                 redis::ErrorKind::TypeError,
@@ -102,11 +103,12 @@ impl RedisAckManager {
     /// 获取ACK状态
     pub async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> RedisResult<Option<AckStatusInfo>> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let key = self.format_key(message_id, user_id);
+        let key = self.format_key(tenant_id, message_id, user_id)?;
         let value: Option<String> = conn.get(&key).await?;
 
         match value {
@@ -118,6 +120,12 @@ impl RedisAckManager {
                         e.to_string(),
                     ))
                 })?;
+                if ack_info.tenant_id != tenant_id {
+                    return Err(RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "ACK tenant mismatch",
+                    )));
+                }
                 Ok(Some(ack_info))
             }
             None => Ok(None),
@@ -130,7 +138,8 @@ impl RedisAckManager {
         let mut pipe = redis::pipe();
 
         for ack_info in ack_infos {
-            let key = self.format_key(&ack_info.message_id, &ack_info.user_id);
+            let key =
+                self.format_key(&ack_info.tenant_id, &ack_info.message_id, &ack_info.user_id)?;
             let value = serde_json::to_string(ack_info).map_err(|e| {
                 RedisError::from((
                     redis::ErrorKind::TypeError,
@@ -154,29 +163,56 @@ impl RedisAckManager {
     }
 
     /// 删除ACK状态
-    pub async fn delete_ack_status(&self, message_id: &str, user_id: &str) -> RedisResult<()> {
+    pub async fn delete_ack_status(
+        &self,
+        tenant_id: &str,
+        message_id: &str,
+        user_id: &str,
+    ) -> RedisResult<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let key = self.format_key(message_id, user_id);
+        let key = self.format_key(tenant_id, message_id, user_id)?;
         let _: () = conn.del(&key).await?;
         Ok(())
     }
 
     /// 检查ACK是否存在
-    pub async fn exists_ack(&self, message_id: &str, user_id: &str) -> RedisResult<bool> {
+    pub async fn exists_ack(
+        &self,
+        tenant_id: &str,
+        message_id: &str,
+        user_id: &str,
+    ) -> RedisResult<bool> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let key = self.format_key(message_id, user_id);
+        let key = self.format_key(tenant_id, message_id, user_id)?;
         let exists: bool = conn.exists(&key).await?;
         Ok(exists)
     }
 
     /// 格式化Redis键
-    fn format_key(&self, message_id: &str, user_id: &str) -> String {
-        format!("ack:{}:{}", message_id, user_id)
+    pub(crate) fn validate_tenant(tenant_id: &str) -> RedisResult<()> {
+        if flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+            && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == tenant_id
+        {
+            Ok(())
+        } else {
+            Err(RedisError::from((
+                redis::ErrorKind::TypeError,
+                "canonical ACK tenant required",
+            )))
+        }
+    }
+
+    fn format_key(&self, tenant_id: &str, message_id: &str, user_id: &str) -> RedisResult<String> {
+        Self::validate_tenant(tenant_id)?;
+        Ok(format!(
+            "ack:v2:{tenant_id}:{}:{message_id}:{user_id}",
+            message_id.len()
+        ))
     }
 
     /// 扫描所有 ACK keys（使用 SCAN 命令，避免阻塞）
     ///
-    /// 返回所有匹配 `ack:*:*` 模式的 keys
+    /// 返回所有匹配 `ack:v2:*` 模式的 keys（旧键不双读）
     ///
     /// # 参数
     /// - `max_keys`: 最大扫描 keys 数量（0 表示不限制）
@@ -189,7 +225,7 @@ impl RedisAckManager {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let mut keys = Vec::new();
         let mut cursor: u64 = 0;
-        let pattern = "ack:*:*";
+        let pattern = "ack:v2:*";
         let count = scan_batch_size;
         let max_keys = max_keys.unwrap_or(0);
 
@@ -312,6 +348,34 @@ mod tests {
     use super::*;
     use tokio;
 
+    #[test]
+    fn ack_keys_require_canonical_tenant_and_do_not_collide() {
+        let manager = RedisAckManager::new("redis://127.0.0.1:6379/0", 60).unwrap();
+        let tenant_a = manager
+            .format_key("tenant-a", "same-message", "same-user")
+            .unwrap();
+        let tenant_b = manager
+            .format_key("tenant-b", "same-message", "same-user")
+            .unwrap();
+        assert_eq!(tenant_a, "ack:v2:tenant-a:12:same-message:same-user");
+        assert_ne!(tenant_a, tenant_b);
+        assert_ne!(
+            manager.format_key("tenant-a", "a:b", "c").unwrap(),
+            manager.format_key("tenant-a", "a", "b:c").unwrap(),
+        );
+        assert!(manager.format_key("", "same-message", "same-user").is_err());
+        assert!(
+            manager
+                .format_key("default", "same-message", "same-user")
+                .is_err()
+        );
+        assert!(
+            manager
+                .format_key("*", "same-message", "same-user")
+                .is_err()
+        );
+    }
+
     fn redis_test_url() -> Option<String> {
         std::env::var("FLARE_REDIS_TEST_URL")
             .ok()
@@ -327,6 +391,7 @@ mod tests {
         let manager = RedisAckManager::new(&redis_url, 3600)?;
 
         let ack_info = AckStatusInfo {
+            tenant_id: "tenant-a".to_string(),
             message_id: "test_msg_1".to_string(),
             user_id: "user_1".to_string(),
             ack_type: Some(AckType::TransportAck),
@@ -339,7 +404,9 @@ mod tests {
         manager.store_ack_status(&ack_info).await?;
 
         // 获取ACK状态
-        let retrieved = manager.get_ack_status("test_msg_1", "user_1").await?;
+        let retrieved = manager
+            .get_ack_status("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.message_id, "test_msg_1");
@@ -347,14 +414,20 @@ mod tests {
         assert_eq!(retrieved.status, AckStatus::Received);
 
         // 检查ACK是否存在
-        let exists = manager.exists_ack("test_msg_1", "user_1").await?;
+        let exists = manager
+            .exists_ack("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(exists);
 
         // 删除ACK状态
-        manager.delete_ack_status("test_msg_1", "user_1").await?;
+        manager
+            .delete_ack_status("tenant-a", "test_msg_1", "user_1")
+            .await?;
 
         // 确认已删除
-        let exists = manager.exists_ack("test_msg_1", "user_1").await?;
+        let exists = manager
+            .exists_ack("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(!exists);
 
         Ok(())

@@ -24,6 +24,8 @@ metrics_port = 19180
 metrics_path = "/metrics"
 # 租户投影库（base.toml [postgres.tenant_runtime]）：tenant 维度阈值先取投影 quota.core.send_qps
 # （0 = 回落下面的全局值）；可用 MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL 覆盖，不配置则只用全局值。
+# 已知 suspended/deleting 租户无论策略均拒绝发送；生产设 MESSAGE_INGEST_TENANT_POLICY=strict，
+# 未投影/回源失败亦拒绝。Core-only 联调默认 lenient。
 postgres = "tenant_runtime"
 send_rate_limit_enabled = true
 send_rate_limit_tenant_per_second = 50000

@@ -1,4 +1,4 @@
-//! `flare.capability.v1.CapabilityService` gRPC 实现（生产护栏：超时、限流、管理密钥、审计）。
+//! `flare.capability.v1.CapabilityService` gRPC 实现（生产护栏：超时、限流、控制令牌、审计）。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,11 +18,13 @@ use flare_grpc_proto::capability::{
     UserCapabilityGrant as ProtoGrant,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::control_auth::{ConsoleControlVerifier, ControlActorKind};
+use flare_server_core::SignedContextVerifier;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use super::administer::dispatch_hook_administer;
-use crate::application::handler::dispatch_capability_command;
+use crate::application::handler::{VerifiedDispatchOrigin, dispatch_capability_command};
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::PluginHealthProbe;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
@@ -37,8 +39,7 @@ use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
 use crate::interface::grpc::hooks::HookServiceServer;
 use crate::interface::grpc::shared::helpers::{
-    actor_id_from_request, capability_error_to_status, ctx_allow_missing,
-    require_capability_policy_admin, trace_id_from_request,
+    capability_error_to_status, require_capability_policy_admin, trace_id_from_request,
 };
 
 /// 可观测计数（后续可对接 Prometheus / OTel）。
@@ -90,6 +91,9 @@ pub struct CapabilityGrpcServer {
     hook_governance: Option<Arc<HookServiceServer>>,
     /// 扩展插件 endpoint 登记（开发期进程内簿；可换持久化）。
     plugin_routes: Arc<PluginRouteBook>,
+    /// Dispatch alone requires cell-signed identity; other RPCs keep their own auth contract.
+    dispatch_verifier: Option<SignedContextVerifier>,
+    control_verifier: Option<ConsoleControlVerifier>,
 }
 
 impl CapabilityGrpcServer {
@@ -103,6 +107,8 @@ impl CapabilityGrpcServer {
         metrics: Arc<CapabilityInvocationMetrics>,
         hook_governance: Option<Arc<HookServiceServer>>,
         plugin_routes: Arc<PluginRouteBook>,
+        dispatch_verifier: Option<SignedContextVerifier>,
+        control_verifier: Option<ConsoleControlVerifier>,
     ) -> Self {
         let server = Self {
             registry,
@@ -113,6 +119,8 @@ impl CapabilityGrpcServer {
             metrics,
             hook_governance,
             plugin_routes,
+            dispatch_verifier,
+            control_verifier,
         };
         server.register_discovered_plugin_endpoints();
         server.spawn_plugin_health_checker();
@@ -237,6 +245,14 @@ fn ts_from_chrono(dt: chrono::DateTime<Utc>) -> Timestamp {
     }
 }
 
+fn require_canonical_dispatch_tenant_id(tenant_id: &str) -> Result<String, Status> {
+    let normalized = normalize_tenant_id(tenant_id);
+    if normalized != tenant_id {
+        return Err(Status::invalid_argument("tenant_id must be canonical"));
+    }
+    Ok(normalized)
+}
+
 /// 按插件**声明**的健康协议做检查。
 ///
 /// 这里曾经内嵌着某个具体协议的客户端与一段 `if capability_id == ...`。
@@ -296,8 +312,9 @@ async fn check_plugin_health(
 impl CapabilityService for CapabilityGrpcServer {
     async fn list_capabilities(
         &self,
-        _request: Request<ListCapabilitiesRequest>,
+        request: Request<ListCapabilitiesRequest>,
     ) -> Result<Response<ListCapabilitiesResponse>, Status> {
+        let _actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let capabilities = list_registered_capabilities()
             .into_iter()
             .map(domain_descriptor_to_proto)
@@ -309,7 +326,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListUserCapabilitiesRequest>,
     ) -> Result<Response<ListUserCapabilitiesResponse>, Status> {
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id and user_id required"));
         }
@@ -337,17 +356,22 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<DispatchCapabilityRequest>,
     ) -> Result<Response<DispatchCapabilityResponse>, Status> {
-        let ctx = ctx_allow_missing(&request);
+        let verifier = self.dispatch_verifier.as_ref().ok_or_else(|| {
+            Status::unauthenticated("signed dispatch context verifier not configured")
+        })?;
+        let origin = VerifiedDispatchOrigin::verify(request.metadata(), verifier)?;
         let r = request.into_inner();
+
+        // Bind the body before policy lookup or plugin routing; normalization or
+        // defaults must not turn a caller-supplied tenant/user into signed identity.
+        origin.require_user_binding(&r.tenant_id, &r.user_id, &r.request_id)?;
+        let normalized_tenant_id = require_canonical_dispatch_tenant_id(&r.tenant_id)?;
+        let ctx = origin.into_context();
 
         if r.capability_id.is_empty() {
             return Err(Status::invalid_argument("capability_id required"));
         }
-        let tenant_id = if r.tenant_id.trim().is_empty() {
-            None
-        } else {
-            Some(normalize_tenant_id(&r.tenant_id))
-        };
+        let tenant_id = Some(normalized_tenant_id);
         let tenant_for_log = tenant_id.as_deref().unwrap_or("0");
         tracing::trace!(
             capability_id = %r.capability_id,
@@ -452,10 +476,10 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<GrantUserCapabilityRequest>,
     ) -> Result<Response<GrantUserCapabilityResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let trace = trace_id_from_request(&request);
-        let actor = actor_id_from_request(&request);
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, user_id, capability_id required",
@@ -500,7 +524,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "grant",
                 &r.tenant_id,
-                actor.as_deref(),
+                Some(actor.subject.as_str()),
                 Some(r.user_id.as_str()),
                 Some(r.capability_id.as_str()),
                 detail,
@@ -518,10 +542,10 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<RevokeUserCapabilityRequest>,
     ) -> Result<Response<RevokeUserCapabilityResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let trace = trace_id_from_request(&request);
-        let actor = actor_id_from_request(&request);
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, user_id, capability_id required",
@@ -537,7 +561,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "revoke",
                 &r.tenant_id,
-                actor.as_deref(),
+                Some(actor.subject.as_str()),
                 Some(r.user_id.as_str()),
                 Some(r.capability_id.as_str()),
                 serde_json::json!({}),
@@ -555,10 +579,10 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<SetTenantCapabilitySwitchRequest>,
     ) -> Result<Response<SetTenantCapabilitySwitchResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let trace = trace_id_from_request(&request);
-        let actor = actor_id_from_request(&request);
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, capability_id required",
@@ -576,7 +600,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "tenant_switch",
                 &r.tenant_id,
-                actor.as_deref(),
+                Some(actor.subject.as_str()),
                 None,
                 Some(r.capability_id.as_str()),
                 serde_json::json!({ "enabled": r.enabled }),
@@ -594,8 +618,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<RegisterPluginEndpointRequest>,
     ) -> Result<Response<RegisterPluginEndpointResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, plugin_id, capability_id required",
@@ -654,8 +679,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<DeregisterPluginEndpointRequest>,
     ) -> Result<Response<DeregisterPluginEndpointResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id, plugin_id required"));
         }
@@ -671,7 +697,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListRegisteredPluginsRequest>,
     ) -> Result<Response<ListRegisteredPluginsResponse>, Status> {
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
         let r = request.into_inner();
+        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id required"));
         }
@@ -685,12 +713,30 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<GenericRequest>,
     ) -> Result<Response<GenericResponse>, Status> {
-        require_capability_policy_admin(&request, self.runtime.as_ref())?;
+        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::Employee)?;
         let Some(ref gov) = self.hook_governance else {
             return Err(Status::failed_precondition(
                 "hook governance disabled: configure database_url for HookService",
             ));
         };
-        dispatch_hook_administer(gov.as_ref(), request.into_inner()).await
+        dispatch_hook_administer(gov.as_ref(), request.into_inner(), &actor).await
+    }
+}
+
+#[cfg(test)]
+mod dispatch_identity_tests {
+    use super::require_canonical_dispatch_tenant_id;
+
+    #[test]
+    fn dispatch_rejects_tenant_aliases_that_would_change_signed_identity() {
+        assert_eq!(require_canonical_dispatch_tenant_id("0").unwrap(), "0");
+        assert_eq!(
+            require_canonical_dispatch_tenant_id("tenant-a").unwrap(),
+            "tenant-a"
+        );
+        for alias in ["", "default", " tenant-a", "tenant-a "] {
+            assert!(require_canonical_dispatch_tenant_id(alias).is_err());
+        }
     }
 }

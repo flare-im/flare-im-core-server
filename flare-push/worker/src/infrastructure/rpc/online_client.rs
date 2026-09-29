@@ -8,6 +8,7 @@ use flare_grpc_proto::signaling::online::{
 };
 use flare_server_core::context::{Context, ContextExt};
 use flare_server_core::error::{FlareError, Result};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use tonic::transport::Channel;
 use tracing::instrument;
 
@@ -51,9 +52,26 @@ impl OnlineServiceClient {
         ctx.ensure_not_cancelled().map_err(|e| {
             flare_server_core::error::FlareError::system(format!("Request cancelled: {}", e))
         })?;
-        let request = tonic::Request::new(ListUserDevicesRequest {
+        let tenant_id = ctx
+            .tenant_id()
+            .ok_or_else(|| FlareError::system("push device query requires tenant"))?;
+        let marker = ctx
+            .get_data::<VerifiedContext>()
+            .ok_or_else(|| FlareError::system("verified push device query identity required"))?;
+        let claims = marker
+            .claims()
+            .ok_or_else(|| FlareError::system("signed push device query identity required"))?;
+        if claims.tenant_id != tenant_id {
+            return Err(FlareError::system("push device query tenant mismatch"));
+        }
+        let token = marker
+            .token()
+            .ok_or_else(|| FlareError::system("signed push device query token required"))?;
+        let mut request = tonic::Request::new(ListUserDevicesRequest {
             user_id: user_id.to_string(),
         });
+        flare_server_core::set_signed_context_token(&mut request, token)
+            .map_err(|_| FlareError::system("invalid push device query token"))?;
         let response = self.client.clone().list_user_devices(request).await?;
         Ok(response.into_inner())
     }

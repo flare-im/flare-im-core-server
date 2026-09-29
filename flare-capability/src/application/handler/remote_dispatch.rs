@@ -9,14 +9,86 @@ use flare_core_base::context::Ctx;
 use flare_grpc_proto::capability::GenericRequest;
 use flare_grpc_proto::capability::RegisteredPluginInstance;
 use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
+use flare_server_core::context::{ActorContext, ActorType, Context};
+use flare_server_core::{
+    SignedActorType, SignedContextClaims, SignedContextVerifier, set_signed_context_token,
+};
 use serde_json::Value;
-use tonic::Request;
+use tonic::metadata::MetadataMap;
+use tonic::{Request, Status};
 
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityError, Result,
 };
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
+
+/// Only the verifier can construct this marker; an untrusted request body or
+/// legacy Context metadata cannot create a dispatch identity.
+pub(crate) struct VerifiedDispatchOrigin {
+    claims: SignedContextClaims,
+    token: String,
+}
+
+impl VerifiedDispatchOrigin {
+    pub(crate) fn verify(
+        metadata: &MetadataMap,
+        verifier: &SignedContextVerifier,
+    ) -> std::result::Result<Self, Status> {
+        let mut headers = metadata.get_all("x-flare-ctx").iter();
+        let token = headers
+            .next()
+            .ok_or_else(|| Status::unauthenticated("signed dispatch context required"))?
+            .to_str()
+            .map_err(|_| Status::unauthenticated("invalid signed dispatch context"))?;
+        if headers.next().is_some() || token.len() > 8192 {
+            return Err(Status::unauthenticated("invalid signed dispatch context"));
+        }
+        let claims = verifier
+            .verify(token)
+            .map_err(|_| Status::unauthenticated("invalid signed dispatch context"))?;
+        Ok(Self {
+            claims,
+            token: token.to_owned(),
+        })
+    }
+
+    pub(crate) fn require_user_binding(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        request_id: &str,
+    ) -> std::result::Result<(), Status> {
+        if self.claims.actor_type != SignedActorType::User
+            || tenant_id != self.claims.tenant_id
+            || user_id != self.claims.actor_id
+            || request_id != self.claims.request_id
+        {
+            return Err(Status::permission_denied(
+                "dispatch identity does not match signed context",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_context(self) -> Ctx {
+        let mut actor = ActorContext::new(&self.claims.actor_id).with_type(ActorType::User);
+        for role in &self.claims.roles {
+            actor = actor.with_role(role);
+        }
+        Arc::new(
+            Context::with_request_id(&self.claims.request_id)
+                .with_tenant_id(&self.claims.tenant_id)
+                .with_user_id(&self.claims.actor_id)
+                .with_actor(actor)
+                .insert_data(self),
+        )
+    }
+
+    fn token(&self) -> &str {
+        &self.token
+    }
+}
 
 fn build_request_payload(
     req: &CapabilityDispatchCommand,
@@ -49,12 +121,6 @@ async fn invoke_once(
     endpoint: &RegisteredPluginInstance,
     timeout: Duration,
 ) -> Result<CapabilityDispatchResult> {
-    let payload = build_request_payload(req).map_err(|e| CapabilityError::System(e.to_string()))?;
-    let channel = resolve_plugin_channel(endpoint.grpc_authority.as_str())
-        .await
-        .map_err(CapabilityError::System)?;
-    let mut client = ExtensionPluginClient::new(channel);
-
     let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());
     let user_id = req.user_id.clone().unwrap_or_default();
     let request_id = req
@@ -62,6 +128,19 @@ async fn invoke_once(
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let origin = ctx
+        .get_data::<VerifiedDispatchOrigin>()
+        .ok_or_else(|| CapabilityError::PolicyDenied("verified dispatch origin required".into()))?;
+    origin
+        .require_user_binding(&tenant_id, &user_id, &request_id)
+        .map_err(|_| CapabilityError::PolicyDenied("dispatch identity mismatch".into()))?;
+
+    let payload = build_request_payload(req).map_err(|e| CapabilityError::System(e.to_string()))?;
+    let channel = resolve_plugin_channel(endpoint.grpc_authority.as_str())
+        .await
+        .map_err(CapabilityError::System)?;
+    let mut client = ExtensionPluginClient::new(channel);
+
     let mut metadata = std::collections::HashMap::new();
     metadata.insert("tenant_id".to_string(), tenant_id);
     if !user_id.is_empty() {
@@ -71,13 +150,14 @@ async fn invoke_once(
     if !trace_id.is_empty() {
         metadata.insert("trace_id".to_string(), trace_id.to_string());
     }
-
-    let grpc_req = Request::new(GenericRequest {
+    let mut grpc_req = Request::new(GenericRequest {
         operation: req.capability_id.clone(),
         metadata,
         payload: Some(payload),
         request_id: request_id.clone(),
     });
+    set_signed_context_token(&mut grpc_req, origin.token())
+        .map_err(|_| CapabilityError::PolicyDenied("invalid dispatch credential".into()))?;
 
     let response = tokio::time::timeout(timeout, client.call(grpc_req))
         .await
@@ -185,13 +265,81 @@ mod declaration_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_core_base::context::Ctx;
     use flare_grpc_proto::capability::RegisteredPluginInstance;
-    use flare_server_core::Context;
+    use flare_server_core::{
+        Context, SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
+    };
+    use tonic::metadata::MetadataMap;
 
-    use super::dispatch_remote_with_candidates;
+    use super::{VerifiedDispatchOrigin, dispatch_remote_with_candidates};
     use crate::domain::capability::{CapabilityDispatchCommand, CapabilityError};
     use crate::infrastructure::capability::PluginRouteBook;
+
+    fn verified_origin(actor_type: SignedActorType) -> (VerifiedDispatchOrigin, String) {
+        let key = SigningKey::from_bytes(&[54; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let signer = SignedContextSigner::from_private_key(&private).unwrap();
+        let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
+        let token = signer
+            .sign(&SignedContextIdentity::new(actor_type, "u1", "0", "r1"))
+            .unwrap();
+        let mut metadata = MetadataMap::new();
+        metadata.insert("x-flare-ctx", token.parse().unwrap());
+        (
+            VerifiedDispatchOrigin::verify(&metadata, &verifier).unwrap(),
+            token,
+        )
+    }
+
+    #[test]
+    fn dispatch_origin_requires_signed_user_and_exact_body_identity() {
+        let (origin, token) = verified_origin(SignedActorType::User);
+        origin.require_user_binding("0", "u1", "r1").unwrap();
+        for (tenant, user, request) in [
+            ("other", "u1", "r1"),
+            ("0", "other", "r1"),
+            ("0", "u1", "other"),
+            ("", "u1", "r1"),
+        ] {
+            assert!(origin.require_user_binding(tenant, user, request).is_err());
+        }
+        let ctx = origin.into_context();
+        assert_eq!(ctx.tenant_id(), Some("0"));
+        assert_eq!(ctx.user_id(), Some("u1"));
+        assert_eq!(
+            ctx.get_data::<VerifiedDispatchOrigin>().unwrap().token(),
+            token
+        );
+
+        let (service, _) = verified_origin(SignedActorType::Service);
+        assert!(service.require_user_binding("0", "u1", "r1").is_err());
+    }
+
+    #[test]
+    fn dispatch_origin_rejects_missing_invalid_and_duplicate_credentials() {
+        let key = SigningKey::from_bytes(&[54; 32]);
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
+        assert!(VerifiedDispatchOrigin::verify(&MetadataMap::new(), &verifier).is_err());
+        let mut invalid = MetadataMap::new();
+        invalid.insert("x-flare-ctx", "forged".parse().unwrap());
+        assert!(VerifiedDispatchOrigin::verify(&invalid, &verifier).is_err());
+        let (_, token) = verified_origin(SignedActorType::User);
+        let mut duplicate = MetadataMap::new();
+        duplicate.append("x-flare-ctx", token.parse().unwrap());
+        duplicate.append("x-flare-ctx", token.parse().unwrap());
+        assert!(VerifiedDispatchOrigin::verify(&duplicate, &verifier).is_err());
+    }
 
     /// 构造一个已注册实例。`declared` 为空且 `unverified=true` 表示旧插件。
     fn instance(
@@ -217,7 +365,7 @@ mod declaration_tests {
     }
 
     async fn dispatch(book: PluginRouteBook, capability_id: &str) -> Result<(), CapabilityError> {
-        let ctx: Ctx = Arc::new(Context::default());
+        let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
         let req = CapabilityDispatchCommand {
             capability_id: capability_id.into(),
             tenant_id: Some("0".into()),
@@ -239,6 +387,33 @@ mod declaration_tests {
         )
         .await
         .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn bare_context_cannot_dispatch_to_plugin() {
+        let book = PluginRouteBook::new();
+        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.do"]));
+        let book = Arc::new(book);
+        let req = CapabilityDispatchCommand {
+            capability_id: "vendorx.do".into(),
+            tenant_id: Some("0".into()),
+            user_id: Some("u1".into()),
+            conversation_id: None,
+            payload: None,
+            request_id: Some("r1".into()),
+        };
+        let ctx: Ctx = Arc::new(Context::default());
+        let err = dispatch_remote_with_candidates(
+            &ctx,
+            &req,
+            &book,
+            book.list_filtered("0", "vendorx.do"),
+            Duration::from_millis(30),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CapabilityError::PolicyDenied(_)));
     }
 
     /// 声明之外的调用被拒，且拒绝原因是「声明」而不是「没注册」。

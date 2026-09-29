@@ -16,9 +16,16 @@ use flare_proto::common::{
     MessageStatus, event, message_content,
 };
 use flare_server_core::{
+    AuthenticatedPrincipal,
+    auth::{SignedActorType, SignedContextIdentity, SignedContextSigner},
     context::Ctx,
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
+
+/// Present only to the API gateway ingress process; no downstream Core worker
+/// receives this private signing capability.
+#[derive(Clone)]
+pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
 
 /// 发送消息
 #[utoipa::path(
@@ -31,10 +38,12 @@ use flare_server_core::{
         (status = 400, description = "参数错误"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn send_message(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<SendMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<SendMessageHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -45,10 +54,39 @@ pub async fn send_message(
         "Sending message"
     );
 
-    let sender_id = ctx
-        .require_user_id()
-        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
-        .to_string();
+    let sender_id = principal.user_id.trim().to_string();
+    let tenant_id = principal
+        .tenant_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
+        })?;
+    if sender_id.is_empty() || principal.has_gateway_admin_scope() {
+        return Err(GatewayError::bad_request(
+            "USER_REQUIRED",
+            "authenticated user required",
+        ));
+    }
+    let signer = signer.0.as_ref().ok_or_else(|| {
+        GatewayError::internal(
+            "MESSAGE_SIGNER_UNAVAILABLE",
+            "internal identity signer not configured",
+        )
+    })?;
+    let signed_identity = SignedContextIdentity::new(
+        SignedActorType::User,
+        &sender_id,
+        if tenant_id == "default" {
+            "0"
+        } else {
+            tenant_id
+        },
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let signed_token = signer.sign(&signed_identity).map_err(|_| {
+        GatewayError::internal("MESSAGE_SIGNING_FAILED", "internal identity signing failed")
+    })?;
     let content = serde_json::to_vec(&req.content)?;
     let client_msg_id = if req.client_msg_id.trim().is_empty() {
         format!("http_{}", uuid::Uuid::new_v4())
@@ -95,7 +133,7 @@ pub async fn send_message(
 
     let mut message_client = clients.message_ingest_send.lock().await;
     let grpc_res = message_client
-        .send_message_with_ctx(&ctx, grpc_req)
+        .send_message_with_signed_context(grpc_req, &signed_token)
         .await
         .map_err(|err| GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string()))?;
     let response = SendMessageHttpResponse {

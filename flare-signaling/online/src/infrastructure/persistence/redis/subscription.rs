@@ -20,12 +20,12 @@ impl RedisSubscriptionRepository {
         Self { client, config }
     }
 
-    fn subscription_key(&self, user_id: &str) -> String {
-        format!("{}:{}", SUBSCRIPTION_KEY_PREFIX, user_id)
+    fn subscription_key(tenant_id: &str, user_id: &str) -> String {
+        format!("{}:{}:{}", SUBSCRIPTION_KEY_PREFIX, tenant_id, user_id)
     }
 
-    fn topic_subscribers_key(&self, topic: &str) -> String {
-        format!("{}:{}", TOPIC_SUBSCRIBERS_KEY_PREFIX, topic)
+    fn topic_subscribers_key(tenant_id: &str, topic: &str) -> String {
+        format!("{}:{}:{}", TOPIC_SUBSCRIBERS_KEY_PREFIX, tenant_id, topic)
     }
 
     async fn connection(&self) -> Result<ConnectionManager> {
@@ -41,10 +41,15 @@ impl RedisSubscriptionRepository {
 }
 
 impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepository {
-    async fn add_subscription(&self, user_id: String, topic: String) -> Result<()> {
+    async fn add_subscription(
+        &self,
+        tenant_id: &str,
+        user_id: String,
+        topic: String,
+    ) -> Result<()> {
         let mut conn = self.connection().await?;
-        let user_key = self.subscription_key(&user_id);
-        let topic_key = self.topic_subscribers_key(&topic);
+        let user_key = Self::subscription_key(tenant_id, &user_id);
+        let topic_key = Self::topic_subscribers_key(tenant_id, &topic);
 
         // 保存用户的订阅
         let _: () = conn.hset(&user_key, &topic, "1").await.map_err(|e| {
@@ -80,8 +85,11 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
                 "user_id is required in context".to_string(),
             )
         })?;
+        let tenant_id = ctx.tenant_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system("tenant_id required for subscription")
+        })?;
         let mut conn = self.connection().await?;
-        let user_key = self.subscription_key(user_id);
+        let user_key = Self::subscription_key(tenant_id, user_id);
 
         for topic in topics {
             // 从用户的订阅中移除
@@ -93,7 +101,7 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
             })?;
 
             // 从主题的订阅者列表中移除
-            let topic_key = self.topic_subscribers_key(topic);
+            let topic_key = Self::topic_subscribers_key(tenant_id, topic);
             let _: i64 = conn.srem(&topic_key, user_id).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
                     "failed to remove subscriber: {}",
@@ -114,8 +122,11 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
                 "user_id is required in context".to_string(),
             )
         })?;
+        let tenant_id = ctx.tenant_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system("tenant_id required for subscription")
+        })?;
         let mut conn = self.connection().await?;
-        let user_key = self.subscription_key(user_id);
+        let user_key = Self::subscription_key(tenant_id, user_id);
         let subscriptions: HashMap<String, String> =
             conn.hgetall(&user_key).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
@@ -144,9 +155,9 @@ impl crate::domain::repository::SubscriptionRepository for RedisSubscriptionRepo
         Ok(result)
     }
 
-    async fn get_topic_subscribers(&self, topic: &str) -> Result<Vec<String>> {
+    async fn get_topic_subscribers(&self, tenant_id: &str, topic: &str) -> Result<Vec<String>> {
         let mut conn = self.connection().await?;
-        let topic_key = self.topic_subscribers_key(topic);
+        let topic_key = Self::topic_subscribers_key(tenant_id, topic);
         let subscribers: Vec<String> = conn.smembers(&topic_key).await.map_err(|e| {
             flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
         })?;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use flare_grpc_proto::message::message_event_service_client::MessageEventServiceClient;
 use flare_grpc_proto::message::message_send_service_client::MessageSendServiceClient;
 use flare_grpc_proto::message::{ExecuteEventRequest, SendMessageRequest, SendMessageResponse};
-use flare_proto::common::{CustomData, Event as ProtoEvent, Message};
+use flare_proto::common::{CustomData, Event as ProtoEvent, Message, MessageSource};
 use prost::Message as ProstMessage;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -19,14 +19,35 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, map_infra_error};
 use tracing::{debug, info};
 
 use crate::domain::repository::{DefaultRouteRepository, RouteRepository};
+use flare_im_contracts::service_names::{MESSAGE_INGEST, MESSAGE_ORCHESTRATOR};
 use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_service_kit::ServiceClient;
+use flare_im_service_kit::config::ServicesConfig;
 use flare_server_core::error::Result;
+use flare_server_core::{SignedActorType, VerifiedContext, set_signed_context_token};
 
 /// SVID 常量定义
 pub mod svid {
     /// IM 业务系统 SVID（默认）
     pub const IM: &str = "svid.im";
+}
+
+/// Resolve only the two built-in IM routes in a single Core cell without a registry.
+/// The target host is never read from a route or request, and an absent configured
+/// gRPC port is not replaced with a process-wide or service default port.
+fn static_im_endpoint(services: &ServicesConfig, service_name: &str) -> Option<String> {
+    let server = match service_name {
+        MESSAGE_INGEST => services.message_ingest.as_ref()?.runtime.server.as_ref()?,
+        MESSAGE_ORCHESTRATOR => services
+            .message_orchestrator
+            .as_ref()?
+            .runtime
+            .server
+            .as_ref()?,
+        _ => return None,
+    };
+    let port = server.port.filter(|port| *port != 0)?;
+    Some(format!("http://127.0.0.1:{port}"))
 }
 
 /// 同一业务端点上的消息与事件 gRPC 客户端。
@@ -290,14 +311,35 @@ impl MessageForwarder {
                     )
                 })?
             } else {
-                return Err(map_infra_error(
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "Service discovery not configured",
-                    ),
-                    ErrorCode::NetworkError,
-                    format!("Service discovery not configured for {}", im_service),
-                ));
+                let static_endpoint = static_im_endpoint(&app_config.services, &im_service)
+                    .ok_or_else(|| {
+                        map_infra_error(
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "Static IM service endpoint unavailable",
+                            ),
+                            ErrorCode::NetworkError,
+                            format!(
+                                "Static IM service endpoint unavailable or unsupported for {}",
+                                im_service
+                            ),
+                        )
+                    })?;
+                let channel = tonic::transport::Endpoint::from_shared(static_endpoint)
+                    .map_err(|e| {
+                        map_infra_error(e, ErrorCode::NetworkError, "Invalid static IM endpoint")
+                    })?
+                    .connect_timeout(Duration::from_secs(3))
+                    .connect()
+                    .await
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::NetworkError,
+                            format!("Failed to connect to static IM service {}", im_service),
+                        )
+                    })?;
+                return Ok(BusinessGrpcClients::from_channel(channel));
             };
 
             let mut service_client = ServiceClient::new(discover);
@@ -461,6 +503,30 @@ impl MessageForwarder {
         message: Message,
         route_repository: Arc<DefaultRouteRepository>,
     ) -> Result<(String, Vec<u8>)> {
+        let origin = ctx.get_data::<VerifiedContext>().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "verified message origin required",
+            )
+            .build_error()
+        })?;
+        let claims = origin.claims().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "signed message origin required",
+            )
+            .build_error()
+        })?;
+        if claims.actor_type != SignedActorType::User
+            || ctx.tenant_id() != Some(claims.tenant_id.as_str())
+            || message.sender_id != claims.actor_id
+            || message.source != MessageSource::User as i32
+        {
+            return Err(
+                ErrorBuilder::new(ErrorCode::PermissionDenied, "message sender mismatch")
+                    .build_error(),
+            );
+        }
         // 提取或使用默认 SVID
         let resolved_svid = if svid.is_empty() { svid::IM } else { svid };
         debug!(svid = %resolved_svid, "Forwarding message to business system");
@@ -531,18 +597,21 @@ impl MessageForwarder {
             svid: resolved_svid.to_string(),
         };
 
-        let forwarding_ctx = ctx.with_tenant_id(
-            ctx.tenant_id()
-                .filter(|tenant_id| !tenant_id.trim().is_empty())
-                .map(normalize_tenant_id)
-                .unwrap_or_else(|| normalize_tenant_id(&self.default_tenant_id)),
-        );
-
         let mut grpc_request = tonic::Request::new(request);
-        flare_server_core::grpc::utils::encode_context_to_metadata(
-            grpc_request.metadata_mut(),
-            &forwarding_ctx,
-        );
+        let token = origin.token().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "signed message origin required",
+            )
+            .build_error()
+        })?;
+        set_signed_context_token(&mut grpc_request, token).map_err(|_| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "invalid signed message context",
+            )
+            .build_error()
+        })?;
 
         let response = match business_clients.send.send_message(grpc_request).await {
             Ok(resp) => resp,
@@ -702,5 +771,70 @@ impl MessageForwarder {
             resolved_svid, endpoint
         );
         Ok((endpoint, Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod static_im_endpoint_tests {
+    use super::*;
+    use flare_im_service_kit::config::{
+        MessageIngestServiceConfig, MessageOrchestratorServiceConfig, ServiceEndpointConfig,
+    };
+
+    #[test]
+    fn fixed_im_service_names_use_only_their_configured_local_grpc_ports() {
+        let mut services = ServicesConfig::default();
+        let mut ingest = MessageIngestServiceConfig::default();
+        ingest.runtime.server = Some(ServiceEndpointConfig {
+            address: Some("untrusted.example".to_string()),
+            port: Some(50182),
+        });
+        services.message_ingest = Some(ingest);
+
+        let mut orchestrator = MessageOrchestratorServiceConfig::default();
+        orchestrator.runtime.server = Some(ServiceEndpointConfig {
+            address: Some("0.0.0.0".to_string()),
+            port: Some(50181),
+        });
+        services.message_orchestrator = Some(orchestrator);
+
+        assert_eq!(
+            static_im_endpoint(&services, MESSAGE_INGEST).as_deref(),
+            Some("http://127.0.0.1:50182")
+        );
+        assert_eq!(
+            static_im_endpoint(&services, MESSAGE_ORCHESTRATOR).as_deref(),
+            Some("http://127.0.0.1:50181")
+        );
+        assert_eq!(
+            static_im_endpoint(&services, "http://evil.example:1234"),
+            None
+        );
+        assert_eq!(static_im_endpoint(&services, "flare-admin-gateway"), None);
+    }
+
+    #[test]
+    fn missing_or_zero_configured_port_fails_closed() {
+        let mut services = ServicesConfig::default();
+        assert_eq!(static_im_endpoint(&services, MESSAGE_INGEST), None);
+
+        let mut ingest = MessageIngestServiceConfig::default();
+        ingest.runtime.server = Some(ServiceEndpointConfig {
+            address: Some("127.0.0.1".to_string()),
+            port: None,
+        });
+        services.message_ingest = Some(ingest);
+        assert_eq!(static_im_endpoint(&services, MESSAGE_INGEST), None);
+
+        services
+            .message_ingest
+            .as_mut()
+            .unwrap()
+            .runtime
+            .server
+            .as_mut()
+            .unwrap()
+            .port = Some(0);
+        assert_eq!(static_im_endpoint(&services, MESSAGE_INGEST), None);
     }
 }

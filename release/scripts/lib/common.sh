@@ -81,9 +81,11 @@ flare_load_env_file() {
 flare_ensure_token_secrets() {
     local app_home="$1"
     mkdir -p "$app_home/data" "$app_home/logs" "$app_home/run"
+    # Admin management no longer accepts the end-user HMAC secret. Do not
+    # propagate a legacy dotenv value to every Core process.
+    unset FLARE_ADMIN_GATEWAY_TOKEN_SECRET
 
     if [ -n "${FLARE_API_GATEWAY_TOKEN_SECRET:-}" ] && [ -n "${ACCESS_GATEWAY_TOKEN_SECRET:-}" ]; then
-        export FLARE_ADMIN_GATEWAY_TOKEN_SECRET="${FLARE_ADMIN_GATEWAY_TOKEN_SECRET:-$FLARE_API_GATEWAY_TOKEN_SECRET}"
         return 0
     fi
 
@@ -103,7 +105,6 @@ flare_ensure_token_secrets() {
     secret="$(cat "$secret_file")"
     export FLARE_API_GATEWAY_TOKEN_SECRET="${FLARE_API_GATEWAY_TOKEN_SECRET:-$secret}"
     export ACCESS_GATEWAY_TOKEN_SECRET="${ACCESS_GATEWAY_TOKEN_SECRET:-$secret}"
-    export FLARE_ADMIN_GATEWAY_TOKEN_SECRET="${FLARE_ADMIN_GATEWAY_TOKEN_SECRET:-$secret}"
 }
 
 flare_release_service_specs() {

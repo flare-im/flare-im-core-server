@@ -15,14 +15,19 @@ use std::collections::HashMap;
 
 #[async_trait]
 pub trait IConnectionPort: Send + Sync {
-    async fn login(&self, request: LoginRequest) -> Result<LoginResponse>;
-    async fn logout(&self, request: LogoutRequest) -> Result<LogoutResponse>;
-    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<HeartbeatResponse>;
+    async fn login(&self, ctx: &Ctx, request: LoginRequest) -> Result<LoginResponse>;
+    async fn logout(&self, ctx: &Ctx, request: LogoutRequest) -> Result<LogoutResponse>;
+    async fn heartbeat(&self, ctx: &Ctx, request: HeartbeatRequest) -> Result<HeartbeatResponse>;
     async fn get_online_status(
         &self,
+        ctx: &Ctx,
         request: GetOnlineStatusRequest,
     ) -> Result<GetOnlineStatusResponse>;
-    async fn list_user_connections(&self, user_id: &str) -> Result<Vec<ConnectionInfo>>;
+    async fn list_user_connections(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<ConnectionInfo>>;
     async fn get_connection_info(&self, connection_id: &str) -> Result<ConnectionInfo>;
     async fn get_connection_metadata(&self, connection_id: &str)
     -> Result<HashMap<String, String>>;

@@ -9,6 +9,7 @@ pub use crate::ack::redis_manager::{AckStatus, AckType, ImportanceLevel};
 /// ACK 事件
 #[derive(Debug, Clone)]
 pub struct AckEvent {
+    pub tenant_id: String,
     pub message_id: String,
     pub user_id: String,
     pub ack_type: AckType,
@@ -21,6 +22,7 @@ pub struct AckEvent {
 /// ACK 超时事件
 #[derive(Debug, Clone)]
 pub struct AckTimeoutEvent {
+    pub tenant_id: String,
     pub message_id: String,
     pub user_id: String,
     pub ack_type: AckType,
@@ -37,6 +39,7 @@ pub trait AckManager: Send + Sync {
     /// 查询 ACK 状态
     async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<AckStatusInfo>, Box<dyn std::error::Error>>;
@@ -44,12 +47,14 @@ pub trait AckManager: Send + Sync {
     /// 批量查询 ACK 状态
     async fn batch_get_ack_status(
         &self,
+        tenant_id: &str,
         acks: Vec<(String, String)>,
     ) -> Result<Vec<AckStatusInfo>, Box<dyn std::error::Error>>;
 
     /// 检查 ACK 是否存在
     async fn exists_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<bool, Box<dyn std::error::Error>>;
@@ -57,6 +62,7 @@ pub trait AckManager: Send + Sync {
     /// 删除 ACK 状态
     async fn delete_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>>;

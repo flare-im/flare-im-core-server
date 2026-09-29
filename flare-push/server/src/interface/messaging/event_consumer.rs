@@ -23,6 +23,7 @@ use tracing::instrument;
 
 use flare_server_core::error::FlareError;
 
+use super::acknowledge_after_dlq;
 use crate::application::PushRouterHandler;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 
@@ -126,18 +127,15 @@ impl MessageHandler for PushEventHandler {
             );
             // 发送到 DLQ
             let ctx = &message.context.ctx;
-            if let Err(e) = self
-                .publisher
-                .publish_dlq(
-                    ctx,
-                    Some(&envelope.conversation_id),
-                    message.payload.clone(),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "Failed to send message to DLQ");
-            }
-            return Ok(MessageResult::Ack);
+            return acknowledge_after_dlq(
+                self.publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await,
+            );
         }
 
         // 3. 从 payload oneof 提取 Event
@@ -149,18 +147,15 @@ impl MessageHandler for PushEventHandler {
                     "Event payload missing or wrong variant, sending to DLQ"
                 );
                 let ctx = &message.context.ctx;
-                if let Err(e) = self
-                    .publisher
-                    .publish_dlq(
-                        ctx,
-                        Some(&envelope.conversation_id),
-                        message.payload.clone(),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %e, "Failed to send message to DLQ");
-                }
-                return Ok(MessageResult::Ack);
+                return acknowledge_after_dlq(
+                    self.publisher
+                        .publish_dlq(
+                            ctx,
+                            Some(&envelope.conversation_id),
+                            message.payload.clone(),
+                        )
+                        .await,
+                );
             }
         };
 
@@ -183,18 +178,15 @@ impl MessageHandler for PushEventHandler {
                 recipient_count = envelope.recipient_user_ids.len(),
                 "Large conversation push event envelope must not carry materialized recipients"
             );
-            if let Err(e) = self
-                .publisher
-                .publish_dlq(
-                    ctx,
-                    Some(&envelope.conversation_id),
-                    message.payload.clone(),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "Failed to send message to DLQ");
-            }
-            return Ok(MessageResult::Ack);
+            return acknowledge_after_dlq(
+                self.publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await,
+            );
         }
         if is_ping && envelope.recipient_user_ids.is_empty() && !envelope.large_conversation {
             tracing::error!(
@@ -202,18 +194,15 @@ impl MessageHandler for PushEventHandler {
                 conversation_id = %envelope.conversation_id,
                 "Recipient-less ping requires large_conversation=true"
             );
-            if let Err(e) = self
-                .publisher
-                .publish_dlq(
-                    ctx,
-                    Some(&envelope.conversation_id),
-                    message.payload.clone(),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "Failed to send message to DLQ");
-            }
-            return Ok(MessageResult::Ack);
+            return acknowledge_after_dlq(
+                self.publisher
+                    .publish_dlq(
+                        ctx,
+                        Some(&envelope.conversation_id),
+                        message.payload.clone(),
+                    )
+                    .await,
+            );
         }
         let req = if is_ping {
             PushEventRequest {
@@ -269,18 +258,15 @@ impl MessageHandler for PushEventHandler {
                     "Failed to process MqEnvelope, sending to DLQ"
                 );
                 // 发送到 DLQ
-                if let Err(dlq_err) = self
-                    .publisher
-                    .publish_dlq(
-                        ctx,
-                        Some(&envelope.conversation_id),
-                        message.payload.clone(),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %dlq_err, "Failed to send message to DLQ");
-                }
-                Ok(MessageResult::Ack)
+                acknowledge_after_dlq(
+                    self.publisher
+                        .publish_dlq(
+                            ctx,
+                            Some(&envelope.conversation_id),
+                            message.payload.clone(),
+                        )
+                        .await,
+                )
             }
         }
     }

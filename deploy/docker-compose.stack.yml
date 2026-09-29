@@ -31,13 +31,8 @@ x-flare-service: &flare-service
     # 曾写成 FLARE_CONFIG_DIR —— 没有任何代码读那个名字，服务会回退到相对 CWD 的
     # config/，容器里不存在，于是集体「postgres config is required」启动失败。
     FLARE_CONFIG_PATH: /etc/flare/config
-    # All three gateways must validate against the same secret the client signs with.
-    # No default on purpose: a shipped default secret is a shipped vulnerability —
-    # anyone holding it can forge any user's identity against any deployment that
-    # forgot to change it. Compose fails loudly if FLARE_TOKEN_SECRET is unset.
-    FLARE_API_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
-    ACCESS_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
-    FLARE_ADMIN_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
+    # End-user JWT secrets are injected only into the two actual gateways below.
+    # Admin control tokens use an unrelated EdDSA public key.
     # Inside the compose network services reach each other by service name on the
     # container-internal port, not through the host-side mapping.
     CONSUL_HTTP_ADDR: http://consul:8500
@@ -83,8 +78,11 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: api-gateway
+      FLARE_API_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
       FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS: ${FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS:-}
       FLARE_API_GATEWAY_AUTH_DEV_ISSUE: "false"
+      FLARE_API_GATEWAY_TENANT_POLICY: strict
+      FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
     command: ["flare-api-gateway"]
     ports: ["50050:50050"]
 
@@ -95,6 +93,10 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: signaling-gateway
+      ACCESS_GATEWAY_TOKEN_SECRET: ${FLARE_TOKEN_SECRET:?set FLARE_TOKEN_SECRET to a strong secret of 32+ bytes}
+      ACCESS_GATEWAY_TENANT_POLICY: strict
+      FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-signaling-gateway"]
     # The long-connection port clients actually dial
     ports: ["60051:60051"]
@@ -106,6 +108,7 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: admin-gateway
+      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
     command: ["flare-admin-gateway"]
 
   # ── Signaling ──────────────────────────────────────────────────────────────
@@ -116,6 +119,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: signaling-online
+      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set FLARE_INTERNAL_CTX_PUBLIC_KEY to the Cell Ed25519 public key}
     command: ["flare-signaling-online"]
 
   signaling-route:
@@ -125,6 +130,7 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: signaling-route
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-signaling-route"]
 
   # ── Messaging ──────────────────────────────────────────────────────────────
@@ -135,7 +141,9 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: message-ingest
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
       MESSAGE_INGEST_HOOKS_CONFIG: /etc/flare/config/hooks.toml
+      MESSAGE_INGEST_TENANT_POLICY: strict
     command: ["flare-message-ingest"]
 
   orchestrator:
@@ -192,6 +200,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: push-server
+      # MessagePipeline/PushProxy events have no verified broker provenance yet.
+      PUSH_SERVER_EVENT_PROVENANCE_MODE: ${PUSH_SERVER_EVENT_PROVENANCE_MODE:-paused}
     command: ["flare-push-server"]
 
   push-proxy:
@@ -199,6 +209,9 @@ services:
     environment:
       <<: *flare-env
       SERVICE_ADVERTISE_HOST: push-proxy
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
+      # Do not acknowledge new tasks while downstream signed MQ consumers are paused.
+      PUSH_PROXY_EVENT_PROVENANCE_MODE: ${PUSH_PROXY_EVENT_PROVENANCE_MODE:-paused}
     command: ["flare-push-proxy"]
 
   push-worker:
@@ -208,6 +221,9 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: push-worker
+      # Until every broker event has verified provenance, fail before consuming
+      # rather than ACK/DLQ normal tasks with an unauthenticated tenant.
+      PUSH_WORKER_EVENT_PROVENANCE_MODE: ${PUSH_WORKER_EVENT_PROVENANCE_MODE:-paused}
       FLARE_ENV: ${FLARE_ENV:-development}
       PUSH_WORKER_OFFLINE_DELIVERY_BACKEND: ${PUSH_WORKER_OFFLINE_DELIVERY_BACKEND:-outbox}
       PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON: ${PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON:-}
@@ -225,6 +241,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: capability
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
+      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
     command: ["flare-capability"]
 
   media:

@@ -64,6 +64,7 @@ x-request-id: request-1
 ```
 
 也可以用 `idempotency-key` 替代 `x-request-id` 做幂等和审计关联。
+两个受限的只读 POST：`/messages/query` 与 `/messages/write-ledger/query`，仍要求已签名的员工令牌和明确租户，但不要求写操作审计头；`/messages/export` 仍按受保护的写类操作处理。
 
 ## 消息写链路账本查询
 

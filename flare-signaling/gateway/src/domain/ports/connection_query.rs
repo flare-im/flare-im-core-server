@@ -13,8 +13,8 @@ pub trait ConnectionQuery: Send + Sync {
     /// 查询用户当前在本网关上的连接（含设备/平台等读模型字段）
     async fn query_user_connections(&self, tx: &Ctx, user_id: &str) -> Result<Vec<ConnectionInfo>>;
 
-    /// 与 [`Self::query_user_connections`] 等价读路径；部分调用方无 `Ctx` 时使用。
-    async fn list_user_connections(&self, user_id: &str) -> Result<Vec<ConnectionInfo>>;
+    /// 与 [`Self::query_user_connections`] 等价读路径；租户必须来自可信请求上下文。
+    async fn list_user_connections(&self, tx: &Ctx, user_id: &str) -> Result<Vec<ConnectionInfo>>;
 
     /// 只取连接 id，**不组装读模型**。
     ///
@@ -27,9 +27,9 @@ pub trait ConnectionQuery: Send + Sync {
     ///
     /// 默认实现回落到完整路径并丢掉多余字段，保证既有实现方不受影响；
     /// 真实实现应当覆写它，直接读连接表。
-    async fn list_user_connection_ids(&self, user_id: &str) -> Result<Vec<String>> {
+    async fn list_user_connection_ids(&self, tx: &Ctx, user_id: &str) -> Result<Vec<String>> {
         Ok(self
-            .list_user_connections(user_id)
+            .list_user_connections(tx, user_id)
             .await?
             .into_iter()
             .map(|info| info.connection_id)

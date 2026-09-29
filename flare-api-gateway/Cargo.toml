@@ -18,6 +18,7 @@ flare-server-core = { workspace = true, features = ["http", "proto"] }
 flare-core-runtime = { workspace = true }
 flare-core-base = { workspace = true }
 flare-im-service-kit = { workspace = true }
+flare-im-contracts = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 

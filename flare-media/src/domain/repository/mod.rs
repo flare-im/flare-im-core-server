@@ -87,11 +87,16 @@ pub trait MediaObjectRepository: Send + Sync {
     }
     fn build_object_key_for(
         &self,
+        tenant_id: &str,
         file_id: &str,
         _file_name: &str,
         _file_category: &str,
     ) -> String {
-        file_id.to_string()
+        format!(
+            "{}/{}",
+            crate::domain::model::tenant_storage_segment(tenant_id),
+            file_id
+        )
     }
     fn base_url(&self) -> Option<String>;
     fn cdn_base_url(&self) -> Option<String>;
@@ -109,7 +114,7 @@ pub trait MediaObjectRepository: Send + Sync {
 /// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaMetadataStore: Send + Sync {
-    async fn save_metadata(&self, metadata: &MediaFileMetadata) -> Result<()>;
+    async fn save_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()>;
     async fn load_metadata(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -125,7 +130,12 @@ pub trait MediaMetadataStore: Send + Sync {
         ctx: &flare_server_core::context::Context,
         file_id: &str,
     ) -> Result<()>;
-    async fn list_orphaned_assets(&self, before: DateTime<Utc>) -> Result<Vec<MediaFileMetadata>>;
+    async fn list_orphaned_assets(
+        &self,
+        ctx: &Context,
+        before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<MediaFileMetadata>>;
     async fn update_status(
         &self,
         ctx: &flare_server_core::context::Context,

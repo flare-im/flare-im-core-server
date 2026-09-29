@@ -92,6 +92,8 @@ pub enum FileAccessType {
 
 #[derive(Debug, Clone)]
 pub struct MediaFileMetadata {
+    /// Established by authenticated upload context; absent for unaudited legacy data.
+    pub owner_id: Option<String>,
     pub file_id: String,
     pub file_name: String,
     pub mime_type: String,
@@ -114,6 +116,7 @@ pub struct MediaFileMetadata {
 impl Default for MediaFileMetadata {
     fn default() -> Self {
         Self {
+            owner_id: None,
             file_id: String::new(),
             file_name: String::new(),
             mime_type: String::new(),
@@ -207,6 +210,8 @@ pub struct PresignedUploadPartUrl {
 
 #[derive(Debug, Clone)]
 pub struct UploadContext<'a> {
+    /// Trusted request tenant, never copied from caller-supplied upload metadata.
+    pub tenant_id: &'a str,
     pub file_id: &'a str,
     pub file_name: &'a str,
     pub mime_type: &'a str,
@@ -218,6 +223,20 @@ pub struct UploadContext<'a> {
     pub namespace: Option<&'a str>,
     pub business_tag: Option<&'a str>,
     pub metadata: HashMap<String, String>,
+}
+
+/// Injective path-segment encoding: tenant IDs may not alter the object hierarchy.
+pub(crate) fn tenant_storage_segment(tenant_id: &str) -> String {
+    let mut encoded = String::new();
+    for byte in tenant_id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to String");
+        }
+    }
+    encoded
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +272,9 @@ pub enum UploadSessionStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UploadSession {
     pub upload_id: String,
+    /// Empty only when decoding a pre-isolation session; such sessions are refused.
+    #[serde(default)]
+    pub tenant_id: String,
     #[serde(default)]
     pub file_id: Option<String>,
     pub file_name: String,

@@ -10,9 +10,13 @@ use flare_grpc_proto::signaling::router::{
     RouteEventResponse, RouteMessageRequest, RouteMessageResponse,
     router_upstream_service_server::RouterUpstreamService,
 };
+use flare_proto::common::MessageSource;
+use flare_server_core::VerifiedContext;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::flare_err;
+use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::utils::require_ctx_from_request;
+use flare_server_core::{SignedActorType, SignedContextVerifier};
 
 use crate::application::handlers::{
     AckRoutingHandler, DataRoutingHandler, EventRoutingHandler, MessageRoutingHandler,
@@ -24,6 +28,7 @@ pub struct RouterUpstreamHandler {
     event_handler: Arc<EventRoutingHandler>,
     ack_handler: Arc<AckRoutingHandler>,
     data_handler: Arc<DataRoutingHandler>,
+    message_verifier: Option<SignedContextVerifier>,
 }
 
 impl RouterUpstreamHandler {
@@ -33,12 +38,14 @@ impl RouterUpstreamHandler {
         event_handler: Arc<EventRoutingHandler>,
         ack_handler: Arc<AckRoutingHandler>,
         data_handler: Arc<DataRoutingHandler>,
+        message_verifier: Option<SignedContextVerifier>,
     ) -> Self {
         Self {
             message_handler,
             event_handler,
             ack_handler,
             data_handler,
+            message_verifier,
         }
     }
 }
@@ -50,10 +57,17 @@ impl RouterUpstreamService for RouterUpstreamHandler {
         &self,
         request: Request<RouteMessageRequest>,
     ) -> Result<Response<RouteMessageResponse>, Status> {
-        // 1. 提取上下文
-        let ctx = require_ctx_from_request(&request)?;
+        let verifier = self
+            .message_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("signed message context unavailable"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .ok_or_else(|| Status::unauthenticated("verified message context required"))?;
 
-        // 2. 解析请求
+        // Never use the legacy ContextLayer metadata as message identity.
         let req = request.into_inner();
         let svid = req.svid;
         let message = req.message.ok_or_else(|| {
@@ -62,6 +76,14 @@ impl RouterUpstreamService for RouterUpstreamHandler {
                 "Message is required"
             )
         })?;
+        if claims.actor_type != SignedActorType::User
+            || message.sender_id != claims.actor_id
+            || message.source != MessageSource::User as i32
+        {
+            return Err(Status::permission_denied(
+                "message sender does not match signed context",
+            ));
+        }
         let options = req.options.unwrap_or_default();
 
         let result = self

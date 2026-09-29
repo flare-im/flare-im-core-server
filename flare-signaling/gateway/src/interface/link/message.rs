@@ -1,7 +1,5 @@
 //! 消息/ACK/事件/DATA 处理：实现 ServerEventHandler，按 PayloadCommand 类型解码 flare-proto 并委托应用层。
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
 use flare_core::common::protocol::{Frame, NotificationCommand, PayloadCommand};
@@ -160,24 +158,6 @@ impl ServerEventHandler for LongConnectionHandler {
 }
 
 impl LongConnectionHandler {
-    /// 从 metadata 或 Message payload 解析 conversation_id
-    fn conversation_id_from_metadata_or_message(
-        &self,
-        metadata: &HashMap<String, Vec<u8>>,
-        payload: &[u8],
-    ) -> Option<String> {
-        if let Some(v) = metadata.get("conversation_id")
-            && let Ok(s) = String::from_utf8(v.clone())
-            && !s.is_empty()
-        {
-            return Some(s);
-        }
-        decode_message_payload(payload)
-            .ok()
-            .filter(|m| !m.conversation_id.is_empty())
-            .map(|m| m.conversation_id)
-    }
-
     /// 消息发送处理
     async fn handle_message_send(
         &self,
@@ -185,15 +165,6 @@ impl LongConnectionHandler {
         connection_id: &str,
     ) -> CoreResult<Option<Frame>> {
         self.spawn_refresh_session(connection_id);
-        let conversation_id =
-            self.conversation_id_from_metadata_or_message(&command.metadata, &command.payload);
-        // 统一读扩散地基（惰性订阅）：连接对某会话有交互即订阅，后续该会话的会话级 publish
-        // 由本节点扇给此连接（O(在线/节点)，与群人数无关）。幂等。
-        if let Some(conversation_id) = conversation_id.as_deref() {
-            self.connection_handler
-                .conversation_subscriptions()
-                .join(conversation_id, connection_id);
-        }
         let message = match decode_message_payload(&command.payload) {
             Ok(m) => m,
             Err(e) => {
@@ -201,6 +172,8 @@ impl LongConnectionHandler {
                 return Ok(Some(frame));
             }
         };
+        let conversation_id =
+            (!message.conversation_id.is_empty()).then(|| message.conversation_id.clone());
         let client_msg_id = message.client_msg_id.clone();
         let send_command = SendMessageCommand::new(connection_id.to_string(), message, command.seq);
         let result = self
@@ -208,6 +181,25 @@ impl LongConnectionHandler {
             .handle_send_message(&send_command)
             .await
             .map_err(send_ack_failure_from_error);
+        // 仅发送成功后惰性订阅；未授权客户端不得靠裸帧 metadata 的 conversation_id
+        // 将自己的连接塞进任意会话的读扩散订阅表。
+        if result.is_ok()
+            && let Some(conversation_id) = conversation_id.as_deref()
+            && let Ok(ctx) = self
+                .connection_handler
+                .build_request_ctx(connection_id)
+                .await
+            && let Some(tenant_id) = ctx.tenant_id().filter(|tenant| {
+                flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                    && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+            })
+        {
+            self.connection_handler.conversation_subscriptions().join(
+                tenant_id,
+                conversation_id,
+                connection_id,
+            );
+        }
         build_message_ack_frame(
             &command.message_id,
             &client_msg_id,

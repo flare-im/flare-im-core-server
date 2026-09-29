@@ -1,4 +1,5 @@
 use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_service_kit::tenant_runtime::TenantAccessPolicy;
 use flare_server_core::error::Result;
 use std::env;
 
@@ -11,6 +12,11 @@ pub struct OnlineConfig {
     pub kick_redis_url: String,
     /// kick 频道名：`{token_store namespace}:kick`，与 signaling-gateway `revoke_subscriber` 一致。
     pub kick_channel: String,
+    pub tenant_runtime_postgres_url: Option<String>,
+    pub tenant_policy: TenantAccessPolicy,
+    /// Local fallback when a tenant has no projected device quota; zero means
+    /// unlimited. A projected nonzero quota always takes precedence.
+    pub max_online_devices_per_user: u32,
 }
 
 impl OnlineConfig {
@@ -59,12 +65,41 @@ impl OnlineConfig {
                 format!("{namespace}:kick")
             });
 
+        let tenant_runtime_postgres_url = env::var("SIGNALING_ONLINE_TENANT_RUNTIME_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                app.postgres_profile("tenant_runtime")
+                    .map(|profile| profile.url.clone())
+            });
+        let tenant_policy = TenantAccessPolicy::from_env("SIGNALING_ONLINE_TENANT_POLICY")
+            .map_err(flare_server_core::error::FlareError::system)?
+            .unwrap_or_default();
+        if tenant_policy == TenantAccessPolicy::Strict && tenant_runtime_postgres_url.is_none() {
+            return Err(flare_server_core::error::FlareError::system(
+                "SIGNALING_ONLINE_TENANT_POLICY=strict requires tenant_runtime Postgres",
+            ));
+        }
+        let max_online_devices_per_user = env::var("SIGNALING_ONLINE_MAX_DEVICES_PER_USER")
+            .ok()
+            .map(|value| value.parse::<u32>())
+            .transpose()
+            .map_err(|_| {
+                flare_server_core::error::FlareError::system(
+                    "SIGNALING_ONLINE_MAX_DEVICES_PER_USER must be an unsigned integer",
+                )
+            })?
+            .unwrap_or(0);
+
         Ok(Self {
             redis_url,
             redis_ttl_seconds,
             presence_prefix,
             kick_redis_url,
             kick_channel,
+            tenant_runtime_postgres_url,
+            tenant_policy,
+            max_online_devices_per_user,
         })
     }
 }

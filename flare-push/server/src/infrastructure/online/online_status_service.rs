@@ -4,7 +4,9 @@ use std::sync::Arc;
 use flare_grpc_proto::signaling::online::GetOnlineStatusRequest;
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_im_contracts::Ctx;
+use flare_server_core::SignedActorType;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use redis::aio::ConnectionManager;
 use tonic::transport::Channel;
 
@@ -13,6 +15,49 @@ use crate::config::PushServerConfig;
 enum OnlineStatusBackend {
     Grpc(OnlineServiceClient<Channel>),
     Redis(ConnectionManager),
+}
+
+fn require_tenant(ctx: &Ctx) -> Result<&str> {
+    let tenant_id = ctx.tenant_id().ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "push online query requires tenant",
+        )
+        .build_error()
+    })?;
+    if !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+        || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+    {
+        return Err(
+            ErrorBuilder::new(ErrorCode::PermissionDenied, "non-canonical push tenant")
+                .build_error(),
+        );
+    }
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(|marker| marker.claims())
+        .ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "verified Push online identity required",
+            )
+            .build_error()
+        })?;
+    if claims.tenant_id != tenant_id
+        || !(claims.actor_type == SignedActorType::User
+            || (claims.actor_type == SignedActorType::Service
+                && matches!(
+                    claims.actor_id.as_str(),
+                    "flare-push-server" | "flare-push-worker"
+                )))
+    {
+        return Err(ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "Push online actor or tenant mismatch",
+        )
+        .build_error());
+    }
+    Ok(tenant_id)
 }
 
 pub struct OnlineStatusService {
@@ -73,13 +118,15 @@ impl OnlineStatusService {
         if user_ids.is_empty() {
             return Ok(HashMap::new());
         }
+        let tenant_id = require_tenant(ctx)?;
 
         match &self.backend {
             OnlineStatusBackend::Grpc(client) => {
                 self.grpc_online_statuses(ctx, client, user_ids).await
             }
             OnlineStatusBackend::Redis(manager) => {
-                self.redis_online_statuses(manager, user_ids).await
+                self.redis_online_statuses(manager, tenant_id, user_ids)
+                    .await
             }
         }
     }
@@ -113,10 +160,19 @@ impl OnlineStatusService {
         let mut req = tonic::Request::new(GetOnlineStatusRequest {
             user_ids: user_ids.to_vec(),
         });
-        flare_server_core::grpc::client::encode_context_to_metadata(
-            req.metadata_mut(),
-            ctx.as_ref(),
-        );
+        // MQ context headers are not a signing authority. Forward only a token
+        // that an upstream gRPC boundary actually verified; otherwise fail closed.
+        let token = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.token())
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::PermissionDenied,
+                    "verified Online query identity required",
+                )
+                .build_error()
+            })?;
+        flare_server_core::set_signed_context_token(&mut req, token)?;
         let resp = client.get_online_status(req).await?.into_inner();
         Ok(resp
             .statuses
@@ -128,12 +184,13 @@ impl OnlineStatusService {
     async fn redis_online_statuses(
         &self,
         manager: &ConnectionManager,
+        tenant_id: &str,
         user_ids: &[String],
     ) -> Result<HashMap<String, bool>> {
         let mut conn = manager.clone();
         let mut pipe = redis::pipe();
         for user_id in user_ids {
-            pipe.hlen(format!("session:{user_id}"));
+            pipe.hlen(format!("session:{tenant_id}:{user_id}"));
         }
         let counts: Vec<usize> = pipe
             .query_async(&mut conn)
@@ -160,7 +217,7 @@ impl OnlineStatusService {
         ctx: &Ctx,
         conversation_id: &str,
     ) -> Result<Vec<String>> {
-        let tenant_id = ctx.tenant_id().unwrap_or_else(|| self.default_tenant_id());
+        let tenant_id = require_tenant(ctx)?;
         let key = format!("conv:online:{tenant_id}:{conversation_id}");
         let mut conn = manager.clone();
 

@@ -3,12 +3,14 @@ use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
     clients::GrpcClients,
     gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
+    gateway_auth::TenantRuntimeGuard,
     service_names::API_GATEWAY,
+    tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::{
     TokenService,
-    auth::{RedisTokenStore, build_token_issuer, build_token_validator},
+    auth::{RedisTokenStore, SignedContextSigner, build_token_issuer, build_token_validator},
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
+use crate::interface::http::MessageContextSigner;
 use crate::interface::http::create_public_router;
 
 pub struct ApplicationBootstrap;
@@ -109,6 +112,46 @@ impl ApplicationBootstrap {
         )
         .context("failed to initialize gateway auth validator")?;
         info!(auth_mode = ?settings.auth.mode, "Gateway auth validator initialized");
+        let tenant_policy = std::env::var("FLARE_API_GATEWAY_TENANT_POLICY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| gateway_config.tenant_policy.clone())
+            .map(|value| {
+                TenantAccessPolicy::parse(&value).ok_or_else(|| {
+                    flare_server_core::error::FlareError::system(
+                        "FLARE_API_GATEWAY_TENANT_POLICY must be lenient or strict",
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let tenant_url = std::env::var("FLARE_API_GATEWAY_TENANT_RUNTIME_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                gateway_config
+                    .postgres
+                    .as_deref()
+                    .and_then(|name| app_config.postgres_profile(name))
+                    .map(|profile| profile.url.clone())
+            });
+        let tenant_runtime = match tenant_url.as_deref() {
+            Some(url) => TenantRuntimeCache::connect(url, 2)
+                .await
+                .map_err(flare_server_core::error::FlareError::system)?,
+            None if tenant_policy == TenantAccessPolicy::Strict => {
+                return Err(flare_server_core::error::FlareError::system(
+                    "strict API tenant policy requires a tenant runtime projection database",
+                ));
+            }
+            None => TenantRuntimeCache::disabled(),
+        };
+        info!(
+            policy = tenant_policy.as_str(),
+            enabled = tenant_runtime.is_enabled(),
+            "API tenant admission initialized"
+        );
+        let tenant_guard = TenantRuntimeGuard::new(tenant_runtime, tenant_policy);
         let token_issuer = crate::interface::http::auth_handler::TokenIssuerHandle(
             build_token_issuer(&settings.auth, token_service.clone())
                 .context("failed to initialize gateway token issuer")?,
@@ -126,12 +169,28 @@ impl ApplicationBootstrap {
             "Gateway token issuer initialized"
         );
 
+        let message_signer = match std::env::var("FLARE_INTERNAL_CTX_PRIVATE_KEY") {
+            Ok(material) => Some(SignedContextSigner::from_private_key(&material).map_err(
+                |e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "invalid internal context private key: {e}"
+                    ))
+                },
+            )?),
+            Err(_) => {
+                warn!("FLARE_INTERNAL_CTX_PRIVATE_KEY missing; HTTP message send fails closed");
+                None
+            }
+        };
+
         let app = create_public_router(clients)
             .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
             .layer(axum::Extension(settings.clone()))
+            .layer(axum::Extension(tenant_guard))
             .layer(axum::Extension(auth_validator))
             .layer(axum::Extension(token_issuer))
             .layer(axum::Extension(token_service))
+            .layer(axum::Extension(MessageContextSigner(message_signer)))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())

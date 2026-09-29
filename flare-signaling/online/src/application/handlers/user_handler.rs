@@ -9,7 +9,6 @@ use flare_grpc_proto::signaling::online::{
     GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest, KickDeviceResponse,
     KickTenantRequest, KickTenantResponse, ListUserDevicesRequest, ListUserDevicesResponse,
 };
-use flare_server_core::context::Context;
 
 use crate::domain::repository::ConversationRepository;
 use crate::domain::service::UserService;
@@ -27,28 +26,34 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
 
     pub async fn get_user_presence(
         &self,
+        tenant_id: &str,
         request: GetUserPresenceRequest,
     ) -> Result<GetUserPresenceResponse> {
-        self.inner.get_user_presence(request).await
+        self.inner.get_user_presence(tenant_id, request).await
     }
 
     pub async fn batch_get_user_presence(
         &self,
+        tenant_id: &str,
         request: BatchGetUserPresenceRequest,
     ) -> Result<BatchGetUserPresenceResponse> {
-        self.inner.batch_get_user_presence(request).await
+        self.inner.batch_get_user_presence(tenant_id, request).await
     }
 
     pub async fn list_user_devices(
         &self,
-        ctx: &Context,
+        tenant_id: &str,
         request: ListUserDevicesRequest,
     ) -> Result<ListUserDevicesResponse> {
-        self.inner.list_user_devices(ctx, request).await
+        self.inner.list_user_devices(tenant_id, request).await
     }
 
-    pub async fn kick_device(&self, request: KickDeviceRequest) -> Result<KickDeviceResponse> {
-        self.inner.kick_device(request).await
+    pub async fn kick_device(
+        &self,
+        request: KickDeviceRequest,
+        expected_tenant_id: &str,
+    ) -> Result<KickDeviceResponse> {
+        self.inner.kick_device(request, expected_tenant_id).await
     }
 
     pub async fn kick_tenant(&self, request: KickTenantRequest) -> Result<KickTenantResponse> {
@@ -57,9 +62,9 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
 
     pub async fn get_device(
         &self,
-        ctx: &Context,
+        tenant_id: &str,
         request: GetDeviceRequest,
     ) -> Result<GetDeviceResponse> {
-        self.inner.get_device(ctx, request).await
+        self.inner.get_device(tenant_id, request).await
     }
 }

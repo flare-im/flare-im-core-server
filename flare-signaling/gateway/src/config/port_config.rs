@@ -58,9 +58,14 @@ impl PortConfig {
     /// 3. PORT 环境变量（PORT + 2 作为 gRPC 端口）
     /// 4. 配置中的端口 + 2（作为 gRPC 端口）
     pub fn from_env_or_config(config_port: u16) -> Self {
+        let port = std::env::var("PORT").ok();
+        let grpc_port = std::env::var("GRPC_PORT").ok();
+        Self::from_values(config_port, port.as_deref(), grpc_port.as_deref())
+    }
+
+    fn from_values(config_port: u16, env_port: Option<&str>, env_grpc_port: Option<&str>) -> Self {
         // 检查是否同时指定了 PORT 和 GRPC_PORT（多网关部署场景）
-        if let (Ok(env_port), Ok(env_grpc_port)) =
-            (std::env::var("PORT"), std::env::var("GRPC_PORT"))
+        if let (Some(env_port), Some(env_grpc_port)) = (env_port, env_grpc_port)
             && let (Ok(ws_port), Ok(grpc_port)) =
                 (env_port.parse::<u16>(), env_grpc_port.parse::<u16>())
         {
@@ -69,7 +74,7 @@ impl PortConfig {
         }
 
         // 只指定了 GRPC_PORT
-        if let Ok(env_grpc_port) = std::env::var("GRPC_PORT")
+        if let Some(env_grpc_port) = env_grpc_port
             && let Ok(port) = env_grpc_port.parse::<u16>()
         {
             info!("使用环境变量 GRPC_PORT={} 作为 gRPC 端口", port);
@@ -77,7 +82,7 @@ impl PortConfig {
         }
 
         // 只指定了 PORT
-        if let Ok(env_port) = std::env::var("PORT")
+        if let Some(env_port) = env_port
             && let Ok(port) = env_port.parse::<u16>()
         {
             let grpc_port = port + 2;
@@ -120,5 +125,28 @@ mod tests {
         assert_eq!(config.grpc_port, 1);
         assert_eq!(config.ws_port, 0); // 防止溢出
         assert_eq!(config.quic_port, 0);
+    }
+
+    #[test]
+    fn supervised_core_ports_match_edge_health_and_gateway_router() {
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../../../../release/supervise-core.toml")).unwrap();
+        let gateway = manifest["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|service| service["name"].as_str() == Some("signaling-gateway"))
+            .unwrap();
+        let port = gateway["environment"]["PORT"].as_str().unwrap();
+        let grpc_port = gateway["environment"]["GRPC_PORT"].as_str().unwrap();
+        let actual = PortConfig::from_values(60051, Some(port), Some(grpc_port));
+        assert_eq!(actual.ws_port, 60051);
+        assert_eq!(actual.quic_port, 60052);
+        assert_eq!(actual.grpc_port, 60060);
+        assert_eq!(gateway["tcp_health"].as_str(), Some("127.0.0.1:60051"));
+        assert_eq!(
+            flare_im_service_kit::discovery::STATIC_ACCESS_GATEWAY_GRPC_URI,
+            format!("http://127.0.0.1:{}", actual.grpc_port)
+        );
     }
 }

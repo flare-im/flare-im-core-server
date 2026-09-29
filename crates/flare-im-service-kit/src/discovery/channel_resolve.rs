@@ -20,7 +20,10 @@ use crate::service_names::service_names::{
 /// 注册中心路由前缀，与 capability `PluginRouteBook` 一致。
 pub const DISCOVERY_ROUTE_PREFIX: &str = "discovery://";
 
-/// 本地开发默认静态 gRPC 地址（与 `config/services/*.toml` 默认端口对齐）。
+/// Same-Cell Access Gateway gRPC listener, not its public WS/QUIC edge port.
+pub const STATIC_ACCESS_GATEWAY_GRPC_URI: &str = "http://127.0.0.1:60060";
+
+/// 单 Cell 默认静态 gRPC 地址；Access Gateway 必须指向内部 gRPC 而非 WS 端口。
 pub fn default_static_grpc_fallback(service_name: &str) -> &'static str {
     match service_name {
         CONVERSATION => "http://127.0.0.1:50090",
@@ -31,7 +34,7 @@ pub fn default_static_grpc_fallback(service_name: &str) -> &'static str {
         STORAGE_READER => "http://127.0.0.1:60083",
         SYNC_ORCHESTRATOR => "http://127.0.0.1:60084",
         MEDIA => "http://127.0.0.1:60081",
-        ACCESS_GATEWAY => "http://127.0.0.1:60051",
+        ACCESS_GATEWAY => STATIC_ACCESS_GATEWAY_GRPC_URI,
         API_GATEWAY => "http://127.0.0.1:50050",
         ADMIN_GATEWAY => "http://127.0.0.1:50051",
         _ => "http://127.0.0.1:65535",
@@ -180,4 +183,18 @@ pub async fn connect_grpc_channel_with_fallback(
             )
         })?
         .map_err(|e| format!("static fallback {static_fallback_uri}: {e}"))
+}
+
+#[cfg(test)]
+mod static_route_tests {
+    use super::*;
+
+    #[test]
+    fn access_gateway_fallback_is_its_grpc_listener_not_public_edge() {
+        assert_eq!(
+            default_static_grpc_fallback(ACCESS_GATEWAY),
+            STATIC_ACCESS_GATEWAY_GRPC_URI
+        );
+        assert_eq!(STATIC_ACCESS_GATEWAY_GRPC_URI, "http://127.0.0.1:60060");
+    }
 }

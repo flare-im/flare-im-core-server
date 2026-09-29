@@ -365,6 +365,7 @@ impl GatewayRouter {
         &self,
         request: RelayRealtimeControlRequest,
         skip_gateway_id: Option<&str>,
+        signed_token: &str,
     ) {
         let gateway_ids: Vec<String> = match self.service_discover {
             Some(ref sd) => peer_gateway_ids(
@@ -383,10 +384,17 @@ impl GatewayRouter {
         for gateway_id in gateway_ids {
             match self.get_or_create_client(&gateway_id).await {
                 Ok(mut client) => {
-                    if let Err(e) = client
-                        .relay_realtime_control(tonic::Request::new(request.clone()))
-                        .await
+                    let mut signed_request = tonic::Request::new(request.clone());
+                    if flare_server_core::set_signed_context_token(
+                        &mut signed_request,
+                        signed_token,
+                    )
+                    .is_err()
                     {
+                        tracing::warn!("realtime relay not sent: invalid signed context header");
+                        return;
+                    }
+                    if let Err(e) = client.relay_realtime_control(signed_request).await {
                         tracing::trace!(
                             gateway_id = %gateway_id,
                             error = %e,
@@ -727,25 +735,22 @@ fn users_offline_error(user_ids: Vec<String>) -> FlareError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn conversation_delivery_preserves_tenant_and_request_context() {
+    fn conversation_delivery_rejects_unsigned_tenant_metadata() {
         use super::*;
         use flare_server_core::context::Context;
         for tenant in ["tenant-a", "tenant-b"] {
             let ctx = Arc::new(Context::with_request_id("delivery-request").with_tenant_id(tenant));
-            let req = conversation_delivery_request(
-                &ctx,
-                DeliverToConversationRequest {
-                    conversation_id: "same-conversation".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            assert_eq!(req.metadata().get("x-tenant-id").unwrap(), tenant);
-            assert_eq!(
-                req.metadata().get("x-request-id").unwrap(),
-                "delivery-request"
+            assert!(
+                conversation_delivery_request(
+                    &ctx,
+                    DeliverToConversationRequest {
+                        conversation_id: "same-conversation".into(),
+                        ..Default::default()
+                    },
+                )
+                .is_err(),
+                "raw tenant metadata must not become a gateway push identity"
             );
-            assert_eq!(req.get_ref().conversation_id, "same-conversation");
         }
         assert!(
             conversation_delivery_request(&Arc::new(Context::root()), Default::default()).is_err()
@@ -792,19 +797,47 @@ fn conversation_delivery_request(
     ctx: &flare_server_core::context::Ctx,
     request: DeliverToConversationRequest,
 ) -> Result<tonic::Request<DeliverToConversationRequest>> {
-    if ctx
-        .tenant_id()
-        .is_none_or(|tenant| tenant.trim().is_empty())
+    use flare_server_core::auth::SignedActorType;
+    use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
+
+    let verified = ctx.get_data::<VerifiedContext>().ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "verified push producer context required",
+        )
+        .build_error()
+    })?;
+    let claims = verified.claims().ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "signed push producer context required",
+        )
+        .build_error()
+    })?;
+    if claims.actor_type != SignedActorType::Service
+        || claims.actor_id != "flare-push-worker"
+        || ctx.tenant_id() != Some(claims.tenant_id.as_str())
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
     {
         return Err(ErrorBuilder::new(
-            ErrorCode::InvalidParameter,
-            "conversation delivery requires tenant context",
+            ErrorCode::PermissionDenied,
+            "conversation delivery producer identity mismatch",
         )
         .build_error());
     }
-    Ok(flare_server_core::client::request_with_context(
-        request, ctx,
-    ))
+    let token = verified.token().ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "signed push producer token required",
+        )
+        .build_error()
+    })?;
+    let mut outbound = tonic::Request::new(request);
+    flare_server_core::set_signed_context_token(&mut outbound, token).map_err(|_| {
+        ErrorBuilder::new(ErrorCode::PermissionDenied, "invalid push producer token").build_error()
+    })?;
+    Ok(outbound)
 }
 
 /// 广播目标：服务发现给出的实例去掉自己。

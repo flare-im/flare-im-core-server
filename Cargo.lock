@@ -1601,6 +1601,7 @@ version = "1.0.3"
 dependencies = [
  "anyhow",
  "axum 0.8.6",
+ "ed25519-dalek",
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
@@ -1609,6 +1610,7 @@ dependencies = [
  "flare-server-core",
  "serde",
  "tokio",
+ "tonic",
  "tower 0.5.2",
  "tower-http",
  "tracing",
@@ -1628,6 +1630,7 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
+ "flare-im-contracts",
  "flare-im-service-kit",
  "flare-proto",
  "flare-server-core",
@@ -1670,6 +1673,7 @@ dependencies = [
  "base64",
  "chrono",
  "dashmap",
+ "ed25519-dalek",
  "etcd-client",
  "flare-core-base",
  "flare-core-runtime",
@@ -1692,7 +1696,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
@@ -1939,6 +1942,7 @@ name = "flare-im-ack"
 version = "1.0.3"
 dependencies = [
  "dashmap",
+ "flare-im-contracts",
  "prometheus",
  "redis 0.32.7",
  "serde",
@@ -2081,6 +2085,7 @@ dependencies = [
  "base64",
  "dashmap",
  "dotenvy",
+ "ed25519-dalek",
  "etcd-client",
  "flare-core",
  "flare-core-base",
@@ -2358,6 +2363,7 @@ dependencies = [
  "redis 0.32.7",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2489,6 +2495,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "flare-supervise"
+version = "1.0.3"
+dependencies = [
+ "flare-server-core",
+ "serde",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

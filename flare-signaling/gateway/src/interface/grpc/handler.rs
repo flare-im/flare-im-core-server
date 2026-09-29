@@ -18,7 +18,15 @@ use flare_grpc_proto::access_gateway::{
     PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
     PushResponse, PushResult, RelayRealtimeControlRequest,
 };
-use flare_im_contracts::require_context;
+use flare_im_contracts::Ctx;
+use flare_proto::common::DataPacket;
+use flare_proto::common::data_packet::Payload as DataPayload;
+use flare_proto::common::realtime_control_packet::Payload as RealtimePayload;
+use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
+use flare_server_core::grpc::middleware::signed_context::{
+    VerifiedContext, verify_signed_context_metadata,
+};
+use prost::Message as ProstMessage;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -33,6 +41,7 @@ pub struct AccessGatewayHandler {
     connection_query_handler: Arc<ConnectionQueryHandler>,
     /// 轻量信令直转：与上行路径用的是同一个实例，所以两条入口的语义逐字相同。
     realtime_relay: Arc<crate::domain::service::RealtimeControlRelay>,
+    identity_verifier: Option<SignedContextVerifier>,
 }
 
 impl AccessGatewayHandler {
@@ -45,8 +54,129 @@ impl AccessGatewayHandler {
             push_handler,
             connection_query_handler,
             realtime_relay,
+            identity_verifier: None,
         }
     }
+
+    pub fn with_identity_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
+        self.identity_verifier = verifier;
+        self
+    }
+
+    /// Push RPCs originate from a broker consumer, never an end-user token or
+    /// an arbitrary tenant header. The worker may forward a verified event
+    /// context, but cannot manufacture one from an unsigned MQ envelope.
+    fn require_push_producer<T>(&self, request: &Request<T>) -> Result<Ctx, Status> {
+        let verifier = self
+            .identity_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("gateway push identity verifier not configured"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.claims())
+            .ok_or_else(|| Status::unauthenticated("signed push identity required"))?;
+        validate_push_producer_claims(claims)?;
+        Ok(ctx)
+    }
+}
+
+fn validate_push_producer_claims(claims: &SignedContextClaims) -> Result<(), Status> {
+    if claims.actor_type != SignedActorType::Service
+        || claims.actor_id != "flare-push-worker"
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+    {
+        return Err(Status::permission_denied(
+            "gateway push producer not permitted",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_delivery_body(body: &DeliverToConversationRequest) -> Result<(), Status> {
+    use flare_grpc_proto::access_gateway::deliver_to_conversation_request::Payload;
+    if body.conversation_id.is_empty() || body.conversation_id.trim() != body.conversation_id {
+        return Err(Status::invalid_argument(
+            "canonical conversation id required",
+        ));
+    }
+    match body.payload.as_ref() {
+        Some(Payload::Messages(delivery)) if !delivery.messages.is_empty() => {
+            if delivery
+                .messages
+                .iter()
+                .any(|message| message.conversation_id != body.conversation_id)
+            {
+                return Err(Status::permission_denied("message conversation mismatch"));
+            }
+        }
+        Some(Payload::Events(delivery)) if !delivery.events.is_empty() => {
+            if delivery
+                .events
+                .iter()
+                .any(|event| event.conversation_id != body.conversation_id)
+            {
+                return Err(Status::permission_denied("event conversation mismatch"));
+            }
+        }
+        Some(Payload::Ping(ping)) if ping.max_conversation_seq > 0 => {}
+        _ => {
+            return Err(Status::invalid_argument(
+                "invalid conversation delivery payload",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_realtime_relay_body(
+    claims: &SignedContextClaims,
+    body: &RelayRealtimeControlRequest,
+) -> Result<(), Status> {
+    if claims.actor_type != SignedActorType::User
+        || claims.credential_id.as_deref() != Some("signaling-gateway")
+        || claims.actor_id.is_empty()
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+    {
+        return Err(Status::permission_denied(
+            "gateway relay identity not permitted",
+        ));
+    }
+    if body.conversation_id.is_empty() || body.conversation_id.trim() != body.conversation_id {
+        return Err(Status::invalid_argument(
+            "canonical conversation id required",
+        ));
+    }
+    if claims.request_id
+        != crate::domain::service::realtime_relay::relay_body_request_id(
+            &body.conversation_id,
+            &body.packet,
+        )
+    {
+        return Err(Status::permission_denied(
+            "realtime relay token/body mismatch",
+        ));
+    }
+    let packet = DataPacket::decode(body.packet.as_slice())
+        .map_err(|_| Status::invalid_argument("realtime relay packet invalid"))?;
+    let Some(DataPayload::RealtimeControl(rc)) = packet.payload else {
+        return Err(Status::invalid_argument("realtime control packet required"));
+    };
+    if rc.conversation_id.as_deref() != Some(body.conversation_id.as_str()) {
+        return Err(Status::permission_denied(
+            "realtime relay conversation mismatch",
+        ));
+    }
+    if let Some(RealtimePayload::TypingAggregate(aggregate)) = rc.payload.as_ref()
+        && aggregate.conversation_id != body.conversation_id
+    {
+        return Err(Status::permission_denied(
+            "typing aggregate conversation mismatch",
+        ));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -55,7 +185,15 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<PushMessageRequest>,
     ) -> Result<Response<PushResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
+        if request
+            .get_ref()
+            .messages
+            .iter()
+            .any(|message| message.conversation_id.trim().is_empty())
+        {
+            return Err(Status::invalid_argument("message conversation id required"));
+        }
         let req = request.into_inner();
         debug!("PushMessage request: {} users", req.user_ids.len());
         let response = self
@@ -76,7 +214,8 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<DeliverToConversationRequest>,
     ) -> Result<Response<PushResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
+        validate_delivery_body(request.get_ref())?;
         let req = request.into_inner();
         {
             use flare_grpc_proto::access_gateway::deliver_to_conversation_request::Payload;
@@ -112,7 +251,16 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<RelayRealtimeControlRequest>,
     ) -> Result<Response<PushResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let verifier = self
+            .identity_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("gateway relay identity verifier not configured"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.claims())
+            .ok_or_else(|| Status::unauthenticated("signed gateway relay identity required"))?;
+        validate_realtime_relay_body(claims, request.get_ref())?;
         let req = request.into_inner();
         let delivered = self
             .realtime_relay
@@ -134,7 +282,24 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<PushEventRequest>,
     ) -> Result<Response<PushResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
+        if request
+            .get_ref()
+            .events
+            .iter()
+            .any(|event| event.conversation_id.trim().is_empty())
+        {
+            return Err(Status::invalid_argument("event conversation id required"));
+        }
+        if !request.get_ref().conversation_id.is_empty()
+            && request
+                .get_ref()
+                .events
+                .iter()
+                .any(|event| event.conversation_id != request.get_ref().conversation_id)
+        {
+            return Err(Status::permission_denied("event conversation mismatch"));
+        }
         let req = request.into_inner();
         debug!("PushEvent request: {} users", req.user_ids.len());
         let response = self
@@ -163,7 +328,7 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<PushNotificationRequest>,
     ) -> Result<Response<PushNotificationResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
         let req = request.into_inner();
         debug!("PushNotification request: {} users", req.user_ids.len());
         let notification = req
@@ -187,7 +352,7 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<PushAckRequest>,
     ) -> Result<Response<PushAckResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
         let req = request.into_inner();
         debug!("PushAck request: {} users", req.user_ids.len());
         let ack = req
@@ -208,7 +373,7 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<PushCustomRequest>,
     ) -> Result<Response<PushResponse>, Status> {
-        let ctx = require_context(&request)?;
+        let ctx = self.require_push_producer(&request)?;
         let req = request.into_inner();
         debug!("PushCustom request: {} users", req.user_ids.len());
         let custom_data = req
@@ -232,15 +397,35 @@ impl AccessGateway for AccessGatewayHandler {
         &self,
         request: Request<GetUserConnectionsRequest>,
     ) -> Result<Response<GetUserConnectionsResponse>, Status> {
+        let verifier = self.identity_verifier.as_ref().ok_or_else(|| {
+            Status::unavailable("gateway online identity verifier not configured")
+        })?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.claims())
+            .ok_or_else(|| Status::unauthenticated("signed gateway identity required"))?;
+        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+            || claims.tenant_id != flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+            || (claims.actor_type == SignedActorType::User
+                && claims.actor_id != request.get_ref().user_id)
+            || (claims.actor_type != SignedActorType::User
+                && !(claims.actor_type == SignedActorType::Service
+                    && claims.actor_id == "flare-push-worker"))
+        {
+            return Err(Status::permission_denied(
+                "gateway user connection query not permitted",
+            ));
+        }
+        let tenant_id = claims.tenant_id.clone();
         let req = request.into_inner();
         debug!("GetUserConnections request: user_id={}", req.user_id);
         let rows = self
             .connection_query_handler
-            .query_user_connections(UserConnectionsQuery::new(
-                req.user_id,
-                req.platforms,
-                req.limit,
-            ))
+            .query_user_connections(
+                &tenant_id,
+                UserConnectionsQuery::new(req.user_id, req.platforms, req.limit),
+            )
             .await
             .map_err(|e: flare_server_core::error::FlareError| {
                 tracing::error!(?e, "Failed to get user connections");
@@ -266,5 +451,149 @@ impl AccessGateway for AccessGatewayHandler {
             connections,
             total_online,
         }))
+    }
+}
+
+#[cfg(test)]
+mod realtime_relay_tests {
+    use super::*;
+    use flare_proto::common::RealtimeControlPacket;
+
+    fn claims() -> SignedContextClaims {
+        SignedContextClaims {
+            sub: "alice".into(),
+            iss: "flare-cell".into(),
+            aud: "flare-cell-internal".into(),
+            token_use: "internal_context".into(),
+            iat: 1,
+            exp: 2,
+            jti: "test".into(),
+            actor_type: SignedActorType::User,
+            actor_id: "alice".into(),
+            tenant_id: "t1".into(),
+            roles: Vec::new(),
+            credential_id: Some("signaling-gateway".into()),
+            request_id: crate::domain::service::realtime_relay::relay_body_request_id(
+                "same",
+                &body("same").packet,
+            ),
+        }
+    }
+
+    fn body(conversation_id: &str) -> RelayRealtimeControlRequest {
+        RelayRealtimeControlRequest {
+            conversation_id: conversation_id.into(),
+            packet: DataPacket {
+                payload: Some(DataPayload::RealtimeControl(RealtimeControlPacket {
+                    control_type: "presence".into(),
+                    conversation_id: Some(conversation_id.into()),
+                    correlation_id: None,
+                    attributes: Default::default(),
+                    payload: None,
+                })),
+            }
+            .encode_to_vec(),
+        }
+    }
+
+    #[test]
+    fn relay_rejects_non_gateway_or_non_user_claims() {
+        let mut identity = claims();
+        assert!(validate_realtime_relay_body(&identity, &body("same")).is_ok());
+        identity.actor_type = SignedActorType::Service;
+        assert_eq!(
+            validate_realtime_relay_body(&identity, &body("same"))
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        identity.actor_type = SignedActorType::User;
+        identity.credential_id = None;
+        assert_eq!(
+            validate_realtime_relay_body(&identity, &body("same"))
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        identity.credential_id = Some("signaling-gateway".into());
+        identity.tenant_id = "default".into();
+        assert_eq!(
+            validate_realtime_relay_body(&identity, &body("same"))
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn relay_rejects_body_conversation_spoofing() {
+        let mut forged = body("other");
+        forged.conversation_id = "same".into();
+        assert_eq!(
+            validate_realtime_relay_body(&claims(), &forged)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            validate_realtime_relay_body(&claims(), &body(""))
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut tampered = body("same");
+        tampered.packet.push(0);
+        assert_eq!(
+            validate_realtime_relay_body(&claims(), &tampered)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn push_producer_claims_reject_user_wrong_service_and_noncanonical_tenant() {
+        let mut identity = claims();
+        assert_eq!(
+            validate_push_producer_claims(&identity).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        identity.actor_type = SignedActorType::Service;
+        identity.actor_id = "flare-push-worker".into();
+        identity.tenant_id = "t1".into();
+        assert!(validate_push_producer_claims(&identity).is_ok());
+        identity.actor_id = "untrusted-worker".into();
+        assert_eq!(
+            validate_push_producer_claims(&identity).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        identity.actor_id = "flare-push-worker".into();
+        identity.tenant_id = "default".into();
+        assert_eq!(
+            validate_push_producer_claims(&identity).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn conversation_delivery_rejects_body_target_mismatch() {
+        use flare_grpc_proto::access_gateway::{
+            ConversationMessagesDelivery, deliver_to_conversation_request::Payload,
+        };
+        let message = flare_proto::common::Message {
+            conversation_id: "other".into(),
+            ..Default::default()
+        };
+        let request = DeliverToConversationRequest {
+            conversation_id: "same".into(),
+            options: None,
+            payload: Some(Payload::Messages(ConversationMessagesDelivery {
+                messages: vec![message],
+            })),
+        };
+        assert_eq!(
+            validate_delivery_body(&request).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
     }
 }

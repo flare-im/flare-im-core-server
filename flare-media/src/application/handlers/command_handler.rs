@@ -78,13 +78,14 @@ impl MediaCommandHandler {
 
         // 构建 UploadContext（在命令处理器作用域中，确保生命周期正确）
         let upload_context = UploadContext {
+            tenant_id: crate::domain::service::require_tenant(ctx)?,
             file_id: &file_id,
             file_name: metadata.file_name.as_str(),
             mime_type: metadata.mime_type.as_str(),
             payload: &payload,
             file_size: metadata.file_size,
             file_category,
-            user_id: metadata.user_id.as_str(),
+            user_id: crate::domain::service::require_owner(ctx)?,
             trace_id,
             namespace,
             business_tag,
@@ -272,8 +273,14 @@ impl MediaCommandHandler {
             .await
     }
 
-    pub async fn handle_cleanup_orphaned_assets(&self, ctx: &Context) -> Result<Vec<String>> {
-        self.domain_service.cleanup_orphaned_assets(ctx).await
+    pub async fn handle_cleanup_orphaned_assets(
+        &self,
+        ctx: &Context,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        self.domain_service
+            .cleanup_orphaned_assets(ctx, limit)
+            .await
     }
 
     pub async fn handle_set_object_acl(

@@ -14,7 +14,7 @@ use crate::ServiceClient;
 use crate::config::FlareAppConfig;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 
-use super::channel_resolve::DISCOVERY_CHANNEL_TIMEOUT;
+use super::channel_resolve::{DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI};
 use super::init::create_discover_from_config;
 
 fn connect_static_lazy(
@@ -102,7 +102,7 @@ pub async fn build_gateway_router_from_app_config(
             ))
         }
         None => {
-            let ep = static_fallback.unwrap_or_else(|| "http://127.0.0.1:60060".to_string());
+            let ep = static_fallback.unwrap_or_else(|| STATIC_ACCESS_GATEWAY_GRPC_URI.to_string());
             tracing::info!(
                 endpoint = %ep,
                 "No registry configured; GatewayRouter using static Access Gateway endpoint"

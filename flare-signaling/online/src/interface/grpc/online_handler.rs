@@ -10,9 +10,16 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+use flare_im_service_kit::control_auth::{
+    ConsoleControlVerifier, ControlActorKind, require_grpc_control,
+};
+use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
+use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::flare_err;
-use flare_server_core::middleware::extract_context;
+use flare_server_core::grpc::middleware::signed_context::{
+    VerifiedContext, verify_signed_context_metadata,
+};
 
 use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
 use crate::application::queries::GetOnlineStatusQuery;
@@ -35,6 +42,8 @@ where
     query_handler: Arc<OnlineQueryHandler<CR>>,
     user_handler: Arc<OnlineUserHandler<CR>>,
     presence_watcher_handler: Arc<OnlinePresenceWatcherHandler<PW>>,
+    control_verifier: Option<ConsoleControlVerifier>,
+    identity_verifier: Option<SignedContextVerifier>,
 }
 
 impl<CR, SR, PP, PW> Clone for OnlineHandler<CR, SR, PP, PW>
@@ -50,6 +59,8 @@ where
             query_handler: self.query_handler.clone(),
             user_handler: self.user_handler.clone(),
             presence_watcher_handler: self.presence_watcher_handler.clone(),
+            control_verifier: self.control_verifier.clone(),
+            identity_verifier: self.identity_verifier.clone(),
         }
     }
 }
@@ -72,17 +83,97 @@ where
             query_handler,
             user_handler,
             presence_watcher_handler,
+            control_verifier: None,
+            identity_verifier: None,
         }
+    }
+
+    pub fn with_control_verifier(mut self, verifier: Option<ConsoleControlVerifier>) -> Self {
+        self.control_verifier = verifier;
+        self
+    }
+
+    pub fn with_identity_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
+        self.identity_verifier = verifier;
+        self
+    }
+
+    fn verified_identity<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<(Ctx, SignedContextClaims), Status> {
+        let verifier = self
+            .identity_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("online identity verifier not configured"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.claims())
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("online identity required"))?;
+        if claims.tenant_id != flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) {
+            return Err(Status::permission_denied("non-canonical online tenant"));
+        }
+        Ok((ctx, claims))
+    }
+
+    fn require_user(claims: &SignedContextClaims, user_id: &str) -> Result<(), Status> {
+        if claims.actor_type != SignedActorType::User || claims.actor_id != user_id {
+            return Err(Status::permission_denied("online user identity mismatch"));
+        }
+        Ok(())
+    }
+
+    fn require_query_actor(claims: &SignedContextClaims) -> Result<(), Status> {
+        if claims.actor_type == SignedActorType::User
+            || (claims.actor_type == SignedActorType::Service
+                && matches!(
+                    claims.actor_id.as_str(),
+                    "flare-push-server" | "flare-push-worker"
+                ))
+        {
+            return Ok(());
+        }
+        Err(Status::permission_denied(
+            "online query actor not permitted",
+        ))
     }
 
     pub async fn handle_login(
         &self,
         request: Request<LoginRequest>,
     ) -> Result<Response<LoginResponse>, Status> {
-        let ctx = extract_context(&request)?;
+        let (ctx, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
+        if claims.credential_id.as_deref() != Some("signaling-gateway")
+            || request
+                .get_ref()
+                .metadata
+                .get("connection_id")
+                .map(String::as_str)
+                != Some(claims.request_id.as_str())
+        {
+            return Err(Status::permission_denied(
+                "authenticated signaling connection required for Online login",
+            ));
+        }
+        if request
+            .get_ref()
+            .metadata
+            .get("tenant_id")
+            .is_some_and(|tenant| tenant != &claims.tenant_id)
+            || request
+                .get_ref()
+                .metadata
+                .get("x-tenant-id")
+                .is_some_and(|tenant| tenant != &claims.tenant_id)
+        {
+            return Err(Status::permission_denied("online login tenant mismatch"));
+        }
         let command = LoginCommand {
             request: request.into_inner(),
-            ctx: ctx.clone(),
+            ctx: ctx.as_ref().clone(),
         };
         let response = self
             .command_handler
@@ -96,10 +187,11 @@ where
         &self,
         request: Request<LogoutRequest>,
     ) -> Result<Response<LogoutResponse>, Status> {
-        let ctx = extract_context(&request)?;
+        let (ctx, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
         let command = LogoutCommand {
             request: request.into_inner(),
-            ctx: ctx.clone(),
+            ctx: ctx.as_ref().clone(),
         };
         let response = self
             .command_handler
@@ -113,10 +205,11 @@ where
         &self,
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
-        let ctx = extract_context(&request)?;
+        let (ctx, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
         let command = HeartbeatCommand {
             request: request.into_inner(),
-            ctx: ctx.clone(),
+            ctx: ctx.as_ref().clone(),
         };
         let response = self
             .command_handler
@@ -130,12 +223,14 @@ where
         &self,
         request: Request<GetOnlineStatusRequest>,
     ) -> Result<Response<GetOnlineStatusResponse>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_query_actor(&claims)?;
         let query = GetOnlineStatusQuery {
             request: request.into_inner(),
         };
         let response = self
             .query_handler
-            .get_online_status(query)
+            .get_online_status(&claims.tenant_id, query)
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -145,6 +240,8 @@ where
         &self,
         request: Request<WatchPresenceRequest>,
     ) -> Result<Response<ReceiverStream<Result<PresenceEvent, Status>>>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_query_actor(&claims)?;
         let req = request.into_inner();
         let user_ids = req.user_ids;
 
@@ -158,7 +255,7 @@ where
 
         let mut receiver = self
             .presence_watcher_handler
-            .watch_presence(&user_ids)
+            .watch_presence(&claims.tenant_id, &user_ids)
             .await
             .into_grpc()?;
 
@@ -214,9 +311,11 @@ where
         &self,
         request: Request<GetUserPresenceRequest>,
     ) -> Result<Response<GetUserPresenceResponse>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_query_actor(&claims)?;
         let response = self
             .user_handler
-            .get_user_presence(request.into_inner())
+            .get_user_presence(&claims.tenant_id, request.into_inner())
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -226,9 +325,11 @@ where
         &self,
         request: Request<BatchGetUserPresenceRequest>,
     ) -> Result<Response<BatchGetUserPresenceResponse>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_query_actor(&claims)?;
         let response = self
             .user_handler
-            .batch_get_user_presence(request.into_inner())
+            .batch_get_user_presence(&claims.tenant_id, request.into_inner())
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -238,6 +339,8 @@ where
         &self,
         request: Request<SubscribeUserPresenceRequest>,
     ) -> Result<Response<ReceiverStream<Result<UserPresenceEvent, Status>>>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_query_actor(&claims)?;
         let req = request.into_inner();
         let user_ids = req.user_ids;
 
@@ -251,7 +354,7 @@ where
 
         let mut receiver = self
             .presence_watcher_handler
-            .watch_presence(&user_ids)
+            .watch_presence(&claims.tenant_id, &user_ids)
             .await
             .into_grpc()?;
 
@@ -295,10 +398,17 @@ where
         &self,
         request: Request<ListUserDevicesRequest>,
     ) -> Result<Response<ListUserDevicesResponse>, Status> {
-        let ctx = extract_context(&request)?;
+        let (_, claims) = self.verified_identity(&request)?;
+        if claims.actor_type == SignedActorType::User {
+            Self::require_user(&claims, &request.get_ref().user_id)?;
+        } else if claims.actor_type != SignedActorType::Service
+            || claims.actor_id != "flare-push-worker"
+        {
+            return Err(Status::permission_denied("device list actor not permitted"));
+        }
         let response = self
             .user_handler
-            .list_user_devices(&ctx, request.into_inner())
+            .list_user_devices(&claims.tenant_id, request.into_inner())
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -308,9 +418,27 @@ where
         &self,
         request: Request<KickDeviceRequest>,
     ) -> Result<Response<KickDeviceResponse>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::Employee)?;
+        actor.require_tenant(&actor.tenant_id)?;
+        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "control kick_device authorized");
         let response = self
             .user_handler
-            .kick_device(request.into_inner())
+            .kick_device(request.into_inner(), &actor.tenant_id)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
+    }
+
+    pub async fn handle_self_kick_device(
+        &self,
+        request: Request<KickDeviceRequest>,
+    ) -> Result<Response<KickDeviceResponse>, Status> {
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
+        let response = self
+            .user_handler
+            .kick_device(request.into_inner(), &claims.tenant_id)
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -320,6 +448,14 @@ where
         &self,
         request: Request<KickTenantRequest>,
     ) -> Result<Response<KickTenantResponse>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        if actor.kind != ControlActorKind::Employee && actor.kind != ControlActorKind::Scheduler {
+            return Err(Status::permission_denied(
+                "control actor not permitted to kick tenant",
+            ));
+        }
+        actor.require_tenant(&request.get_ref().tenant_id)?;
+        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "control kick_tenant authorized");
         let response = self
             .user_handler
             .kick_tenant(request.into_inner())
@@ -332,10 +468,11 @@ where
         &self,
         request: Request<GetDeviceRequest>,
     ) -> Result<Response<GetDeviceResponse>, Status> {
-        let ctx = extract_context(&request)?;
+        let (_, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
         let response = self
             .user_handler
-            .get_device(&ctx, request.into_inner())
+            .get_device(&claims.tenant_id, request.into_inner())
             .await
             .into_grpc()?;
         Ok(Response::new(response))

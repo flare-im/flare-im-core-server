@@ -16,6 +16,7 @@ use flare_im_hooks::hooks::{
 use flare_im_message_pipeline::{ConversationClient, MqPushRepository, RecipientRepositoryImpl};
 use flare_im_seq::SequenceAllocator;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_server_core::auth::SignedContextVerifier;
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::mq::kafka::KafkaProducer;
 use flare_server_core::mq::nats::NatsProducer;
@@ -48,6 +49,17 @@ pub async fn initialize(
     app_config: &flare_im_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(MessageIngestConfig::from_app_config(app_config));
+    initialize_with_config(app_config, config).await
+}
+
+async fn initialize_with_config(
+    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    config: Arc<MessageIngestConfig>,
+) -> Result<ApplicationContext> {
+    // Validate and install the policy before Redis/MQ I/O or any background work.
+    // A broken explicit policy path must fail startup even when infrastructure is down.
+    let hook_dispatcher =
+        build_hook_dispatcher(config.as_ref(), app_config.uses_static_registry()).await?;
 
     let redis_client = build_redis_client(&config).await?;
     let mq_producer = build_mq_producer(&config).await?;
@@ -130,7 +142,7 @@ pub async fn initialize(
     ));
 
     let hook_execution_service = Arc::new(HookExecutionService::new(
-        build_hook_dispatcher(app_config, config.as_ref()).await?,
+        hook_dispatcher,
         config.default_tenant_id.clone(),
     ));
 
@@ -199,7 +211,26 @@ pub async fn initialize(
             flare_im_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
         }
     };
-    message_ingest_handler = message_ingest_handler.with_tenant_runtime(tenant_runtime.clone());
+    let tenant_policy = flare_im_service_kit::tenant_runtime::TenantAccessPolicy::from_env(
+        "MESSAGE_INGEST_TENANT_POLICY",
+    )
+    .map_err(flare_server_core::error::FlareError::system)?
+    .unwrap_or_default();
+    if tenant_policy == flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Strict
+        && !tenant_runtime.is_enabled()
+    {
+        return Err(flare_server_core::error::FlareError::system(
+            "strict message-ingest tenant policy requires tenant runtime projection database",
+        ));
+    }
+    tracing::info!(
+        policy = tenant_policy.as_str(),
+        enabled = tenant_runtime.is_enabled(),
+        "message-ingest tenant admission initialized"
+    );
+    message_ingest_handler = message_ingest_handler
+        .with_tenant_runtime(tenant_runtime.clone())
+        .with_tenant_policy(tenant_policy);
 
     let send_rate_limit_config = SendRateLimitConfig {
         enabled: config.send_rate_limit_enabled,
@@ -223,7 +254,23 @@ pub async fn initialize(
     }
     let message_ingest_handler = Arc::new(message_ingest_handler);
 
-    let message_send_grpc = MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics);
+    let message_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(material) => Some(
+            SignedContextVerifier::from_public_key(&material).map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "invalid internal context public key: {e}"
+                ))
+            })?,
+        ),
+        Err(_) => {
+            tracing::warn!(
+                "FLARE_INTERNAL_CTX_PUBLIC_KEY is missing; message send RPCs fail closed"
+            );
+            None
+        }
+    };
+    let message_send_grpc =
+        MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics, message_verifier);
 
     tracing::info!(
         service = MESSAGE_INGEST,
@@ -303,9 +350,37 @@ fn inject_flare_capability_hook_plugin_targets(cfg: &mut HookConfig, endpoint: S
     });
 }
 
+fn validate_static_hook_routes(hook_cfg: &HookConfig, static_registry_mode: bool) -> Result<()> {
+    if !static_registry_mode {
+        return Ok(());
+    }
+    for (kind, hooks) in [
+        ("pre_send", &hook_cfg.pre_send),
+        ("post_send", &hook_cfg.post_send),
+        ("delivery", &hook_cfg.delivery),
+        ("recall", &hook_cfg.recall),
+    ] {
+        for hook in hooks.iter().filter(|hook| hook.enabled) {
+            if let HookTransportConfig::Grpc { endpoint, .. } = &hook.transport {
+                let explicit_http =
+                    endpoint.starts_with("http://") || endpoint.starts_with("https://");
+                if !explicit_http
+                    || tonic::transport::Endpoint::from_shared(endpoint.clone()).is_err()
+                {
+                    return Err(flare_server_core::error::FlareError::system(format!(
+                        "{kind} hook {} requires an explicit private http(s) gRPC URI in FLARE_REGISTRY_MODE=static; discovery:// routes cannot resolve",
+                        hook.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn build_hook_dispatcher(
-    _app_config: &flare_im_service_kit::config::FlareAppConfig,
     ingest_cfg: &MessageIngestConfig,
+    static_registry_mode: bool,
 ) -> Result<Arc<HookDispatcher>> {
     let registry = HookRegistry::new();
     let mut loader = HookConfigLoader::new();
@@ -319,6 +394,10 @@ async fn build_hook_dispatcher(
     let mut hook_cfg = loader.load().map_err(|e| {
         flare_server_core::error::FlareError::system(format!("load hook config: {e}"))
     })?;
+
+    // Validate the declared policy before capability auto-dedup can remove a
+    // discovery:// Social hook and conceal a broken static deployment profile.
+    validate_static_hook_routes(&hook_cfg, static_registry_mode)?;
 
     if ingest_cfg.capability_hooks_auto {
         let ep = ingest_cfg.resolve_capability_grpc_uri();
@@ -340,14 +419,23 @@ async fn build_hook_dispatcher(
         }
     }
 
+    // Also inspect generated capability targets before Redis/MQ initialization.
+    validate_static_hook_routes(&hook_cfg, static_registry_mode)?;
+
     let factory = DefaultHookFactory::new().map_err(|e| {
         flare_server_core::error::FlareError::system(format!("hook DefaultHookFactory: {e}"))
     })?;
 
-    let pre_n = hook_cfg.pre_send.len();
-    let post_n = hook_cfg.post_send.len();
-    let delivery_n = hook_cfg.delivery.len();
-    let recall_n = hook_cfg.recall.len();
+    // DefaultHookFactory installs each enabled definition or returns an error.
+    // Disabled definitions must not masquerade as active policy gates in logs.
+    let pre_n = hook_cfg.pre_send.iter().filter(|hook| hook.enabled).count();
+    let post_n = hook_cfg
+        .post_send
+        .iter()
+        .filter(|hook| hook.enabled)
+        .count();
+    let delivery_n = hook_cfg.delivery.iter().filter(|hook| hook.enabled).count();
+    let recall_n = hook_cfg.recall.iter().filter(|hook| hook.enabled).count();
 
     hook_cfg
         .install(registry.clone(), &factory)
@@ -364,4 +452,137 @@ async fn build_hook_dispatcher(
     );
 
     Ok(Arc::new(HookDispatcher::new(registry)))
+}
+
+#[cfg(test)]
+mod hook_startup_tests {
+    use super::*;
+
+    #[test]
+    fn static_mode_rejects_discovery_hooks_but_accepts_explicit_uri() {
+        let mut config = HookConfig::default();
+        config.pre_send.push(HookDefinition {
+            name: "social-policy-pre-send".into(),
+            transport: HookTransportConfig::Grpc {
+                endpoint: "discovery://flare-social-hook".into(),
+                metadata: HashMap::new(),
+            },
+            ..Default::default()
+        });
+        assert!(validate_static_hook_routes(&config, false).is_ok());
+        let error = validate_static_hook_routes(&config, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("explicit private http(s) gRPC URI"),
+            "{error}"
+        );
+        config.pre_send[0].transport = HookTransportConfig::Grpc {
+            endpoint: "http://social-hook.internal:50210".into(),
+            metadata: HashMap::new(),
+        };
+        assert!(validate_static_hook_routes(&config, true).is_ok());
+        config.pre_send[0].transport = HookTransportConfig::Grpc {
+            endpoint: "http://".into(),
+            metadata: HashMap::new(),
+        };
+        assert!(validate_static_hook_routes(&config, true).is_err());
+    }
+
+    #[test]
+    fn static_mode_checks_all_enabled_hook_phases_only() {
+        let discovery_hook = HookDefinition {
+            name: "phase-hook".into(),
+            transport: HookTransportConfig::Grpc {
+                endpoint: "discovery://flare-social-hook".into(),
+                metadata: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let mut config = HookConfig::default();
+        config.pre_send.push(HookDefinition {
+            enabled: false,
+            ..discovery_hook.clone()
+        });
+        assert!(validate_static_hook_routes(&config, true).is_ok());
+        for kind in 0..3 {
+            config.post_send.clear();
+            config.delivery.clear();
+            config.recall.clear();
+            match kind {
+                0 => config.post_send.push(discovery_hook.clone()),
+                1 => config.delivery.push(discovery_hook.clone()),
+                _ => config.recall.push(discovery_hook.clone()),
+            }
+            assert!(validate_static_hook_routes(&config, true).is_err());
+        }
+    }
+
+    #[test]
+    fn shipped_social_profile_requires_static_endpoint_override() {
+        let profile = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/hooks.social.toml");
+        let config = HookConfigLoader::new()
+            .add_candidate(profile)
+            .load()
+            .unwrap();
+        assert!(validate_static_hook_routes(&config, false).is_ok());
+        assert!(validate_static_hook_routes(&config, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn capability_auto_cannot_hide_discovery_social_hook_in_static_mode() {
+        let app_config = toml::from_str(
+            r#"
+            [service]
+            name = "hook-static-test"
+            version = "0.0.0"
+            [server]
+            address = "127.0.0.1"
+            port = 0
+            "#,
+        )
+        .unwrap();
+        let mut config = MessageIngestConfig::from_app_config(&app_config);
+        config.hook_config =
+            Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/hooks.social.toml").into());
+        config.capability_hooks_auto = true;
+        let error = match build_hook_dispatcher(&config, true).await {
+            Ok(_) => panic!("discovery Social hook must fail before capability auto-dedup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("social-policy-pre-send"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_explicit_policy_fails_before_unconfigured_infrastructure() {
+        let app_config = toml::from_str(
+            r#"
+            [service]
+            name = "hook-startup-test"
+            version = "0.0.0"
+            [server]
+            address = "127.0.0.1"
+            port = 0
+            "#,
+        )
+        .unwrap();
+        let mut config = MessageIngestConfig::from_app_config(&app_config);
+        config.hook_config = Some(
+            std::env::temp_dir()
+                .join(format!("missing-hook-{}", uuid::Uuid::new_v4()))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        config.hook_config_dir = None;
+        config.redis_url = None;
+        config.mq_backend = "must-not-be-initialized".into();
+        let error = match initialize_with_config(&app_config, Arc::new(config)).await {
+            Ok(_) => panic!("missing explicit policy must prevent startup"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("load hook config"), "{error}");
+    }
 }

@@ -465,11 +465,11 @@ impl MediaService for MediaGrpcHandler {
         request: Request<CleanupOrphanedAssetsRequest>,
     ) -> Result<Response<CleanupOrphanedAssetsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
         let cleaned = self
             .command_handler
-            .handle_cleanup_orphaned_assets(&ctx)
+            .handle_cleanup_orphaned_assets(&ctx, req.limit)
             .await
             .into_grpc()?;
 

@@ -98,9 +98,10 @@ cargo run --example chatroom_client -- user2
 | 脚本 | 说明 | 用途 |
 |------|------|------|
 | `check_services.sh` | 检查服务状态 | 验证服务是否正常运行 |
-| `check_schema_parity.sh` | 校验全新部署与运行库 schema 一致 | **加表/加列后必跑**；只写 migration 忘了 init.sql 时，老库正常而新部署直接建不起来 |
+| `check_schema_parity.sh` | 只读校验迁移账本与完整逻辑结构 | 显式 DATABASE_URL/PG*；缺账本、pending、断连、checksum/结构漂移均失败；不混入 Social SQL |
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
-| `migrate_db.sh` | 数据库迁移 | 初始化数据库表结构 |
+| `migrate_db.sh` | Core 原子迁移账本 | migrations/*.sql；非破坏性升级，不执行 init.sql |
+| `dev_reset_db.sh` | 显式开发重置 | 删除 Core 数据；仅 make dev-reset + FLARE_ALLOW_DEV_RESET=1 |
 | `smoke_message_flow.sh` | 消息流烟测 | 发送一条消息，检查落库、ledger，并通过读侧读回 |
 | `check_memory_budget.sh` | 校验容器内存预算现状 | 每容器都设 `mem_limit`、上限之和不超过物理内存 |
 | `plan_mem_budget.py` | 计算最优内存预算 | 按物理内存/核数推算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`/`effective_cache_size` 等），经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值 |
@@ -286,7 +287,7 @@ lsof -i :50181  # message-orchestrator
 lsof -i :60083  # storage-reader
 lsof -i :60084  # sync-orchestrator
 lsof -i :60081  # media
-lsof -i :50091  # push-server
+lsof -i :50091  # push-proxy（push-server 是队列消费者）
 lsof -i :60051  # access-gateway
 lsof -i :50050  # api-gateway
 
@@ -319,22 +320,16 @@ SMOKE_POSTGRES_URL=postgres://flare:flare123@localhost:25432/flare2 \
 
 ## 数据库迁移
 
-### 初始化数据库表结构
+### 账本迁移（空库或严格匹配的旧基线）
 
 ```bash
-./scripts/migrate_db.sh
+# 先通过安全环境设置 DATABASE_URL，或设置 PGHOST/PGPORT/PGUSER/PGDATABASE。
+bash scripts/migrate_db.sh
+bash scripts/check_schema_parity.sh
 ```
 
-**功能**：
-- 运行数据库迁移脚本
-- 创建必要的表结构
-- 初始化默认数据
-
-**手动迁移**：
-```bash
-# 使用 sqlx-cli
-sqlx migrate run --database-url "postgresql://flare:flare123@localhost:25432/flare2"
-```
+维护窗口内运行；DDL 与 SHA-256 账本一起提交。旧库只在完整结构与历史数据安全门禁通过后登记 baseline；不能凭表存在或版本标签跳过。
+详见 [迁移工具](../tools/flare-migrate/README.md)。不要用 SQLx CLI 创建另一套账本，也不要把 deploy/init.sql 当升级脚本。
 
 ---
 
@@ -430,12 +425,12 @@ export DATABASE_URL="postgresql://flare:flare123@localhost:25432/flare2"
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| signaling-online | 50051 | 在线状态服务 gRPC |
+| signaling-online | 50061 | 在线状态服务 gRPC |
 | signaling-route | 50062 | 路由目录服务 gRPC |
 | capability（flare-capability） | 见 `config` | Hook 扩展与能力插件 gRPC |
 | conversation | 50090 | 会话管理服务 gRPC |
 | message-orchestrator | 50181 | 消息编排服务 gRPC |
-| push-server | 50091 | 消息推送服务 gRPC |
+| push-proxy | 50091 | 推送代理 gRPC；push-server 是队列消费者 |
 | access-gateway | 60051 | 客户端接入网关（WebSocket/QUIC） |
 | access-gateway-grpc | 60053 | 客户端接入网关 gRPC（port + 2） |
 | api-gateway | 50050 | 业务系统统一入口 gRPC |

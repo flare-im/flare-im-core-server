@@ -17,6 +17,8 @@ impl MediaService {
         full_sha256: Option<String>,
     ) -> Result<DirectUploadSessionState> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
+        let tenant_id = require_tenant(ctx)?;
+        let owner_id = tenant::require_owner(ctx)?;
 
         let Some(store) = &self.upload_conversation_store else {
             return Err(flare_server_core::flare_err!(
@@ -40,8 +42,12 @@ impl MediaService {
         let bucket = object_repo
             .bucket_name()
             .unwrap_or_else(|| "media".to_string());
-        let object_key =
-            object_repo.build_object_key_for(&file_id, &metadata.file_name, &file_category);
+        let object_key = object_repo.build_object_key_for(
+            tenant_id,
+            &file_id,
+            &metadata.file_name,
+            &file_category,
+        );
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.chunk_ttl_seconds.max(300));
@@ -88,12 +94,14 @@ impl MediaService {
         };
 
         let mut metadata_map = metadata.metadata.clone();
+        metadata_map.insert("tenant_id".to_string(), tenant_id.to_string());
         metadata_map
             .entry(FILE_CATEGORY_METADATA_KEY.to_string())
             .or_insert_with(|| file_category.clone());
 
         let session = UploadSession {
             upload_id: Uuid::new_v4().to_string(),
+            tenant_id: tenant_id.to_string(),
             file_id: Some(file_id.clone()),
             file_name: metadata.file_name.clone(),
             mime_type: metadata.mime_type.clone(),
@@ -112,7 +120,7 @@ impl MediaService {
             head_tail_sha256,
             full_sha256,
             total_parts: Some(total_parts),
-            user_id: metadata.user_id.clone(),
+            user_id: owner_id.to_string(),
             namespace: if metadata.namespace.is_empty() {
                 None
             } else {
@@ -163,6 +171,7 @@ impl MediaService {
                 format!("upload_id={upload_id}")
             )
         })?;
+        Self::authorize_upload_session(ctx, &session)?;
         self.ensure_direct_session(&session)?;
         Ok(self.direct_state_from_session(&session))
     }
@@ -199,6 +208,7 @@ impl MediaService {
                 format!("upload_id={upload_id}")
             )
         })?;
+        Self::authorize_upload_session(ctx, &session)?;
         self.ensure_direct_session(&session)?;
         if session.transport_kind != Some(DirectUploadTransportKind::MultipartPut) {
             return Err(flare_server_core::flare_err!(
@@ -275,6 +285,7 @@ impl MediaService {
                 format!("upload_id={upload_id}")
             )
         })?;
+        Self::authorize_upload_session(ctx, &session)?;
         self.ensure_direct_session(&session)?;
         let total_parts = session.total_parts.unwrap_or_default();
         for part in parts {
@@ -332,6 +343,7 @@ impl MediaService {
                 format!("upload_id={upload_id}")
             )
         })?;
+        Self::authorize_upload_session(ctx, &session)?;
         self.ensure_direct_session(&session)?;
 
         let object_key = session.object_key.clone().ok_or_else(|| {
@@ -421,6 +433,8 @@ impl MediaService {
         };
 
         if let Some(mut session) = store.get_session(upload_id).await? {
+            Self::authorize_upload_session(ctx, &session)?;
+            self.ensure_direct_session(&session)?;
             if let (Some(object_repo), Some(object_key), Some(storage_upload_id), Some(kind)) = (
                 self.object_repo.as_ref(),
                 session.object_key.as_deref(),

@@ -1,13 +1,12 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
-    ApiGatewayServiceConfig,
     clients::GrpcClients,
-    gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
+    control_auth::ConsoleControlVerifier,
+    gateway::{GatewayEnvScope, GatewaySettings},
     service_names::ADMIN_GATEWAY,
 };
 use flare_server_core::error::{AnyhowContext, Result};
-use flare_server_core::{TokenService, auth::build_token_validator};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -26,15 +25,26 @@ impl ApplicationBootstrap {
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Admin)?;
         let admin_config = app_config.admin_gateway_service();
-        let api_config = app_config.api_gateway_service();
-        let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
-            app_config,
-            &admin_config.runtime,
-            ADMIN_GATEWAY,
-        )
-        .context(
-            "invalid admin-gateway listen address (check config/services/admin-gateway.toml)",
-        )?;
+        let configured_address: SocketAddr =
+            flare_im_service_kit::ServiceHelper::parse_server_addr(
+                app_config,
+                &admin_config.runtime,
+                ADMIN_GATEWAY,
+            )
+            .context(
+                "invalid admin-gateway listen address (check config/services/admin-gateway.toml)",
+            )?;
+        let address = match std::env::var("FLARE_ADMIN_GATEWAY_BIND_ADDRESS") {
+            Ok(value) => value
+                .parse::<SocketAddr>()
+                .context("invalid FLARE_ADMIN_GATEWAY_BIND_ADDRESS")?,
+            Err(std::env::VarError::NotPresent) => configured_address,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(flare_server_core::error::FlareError::system(
+                    "FLARE_ADMIN_GATEWAY_BIND_ADDRESS has invalid encoding",
+                ));
+            }
+        };
         info!(address = %address, "Admin Gateway HTTP listen address resolved");
 
         info!("Connecting Admin Gateway to downstream gRPC services...");
@@ -50,40 +60,17 @@ impl ApplicationBootstrap {
             Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
         info!("Admin Gateway gRPC clients initialized");
 
-        let token_service = Arc::new(TokenService::new(
-            require_secure_token_secret(
-                "FLARE_ADMIN_GATEWAY_TOKEN_SECRET",
-                admin_config
-                    .token_secret
-                    .as_deref()
-                    .or(api_config.token_secret.as_deref()),
-                "services.admin_gateway.token_secret",
-            )?,
-            admin_config
-                .token_issuer
-                .clone()
-                .or_else(|| api_config.token_issuer.clone())
-                .unwrap_or_else(|| "flare-im-core".to_string()),
-            admin_config
-                .token_ttl_seconds
-                .or(api_config.token_ttl_seconds)
-                .unwrap_or(3600),
-        ));
-        let trusted_issuers = trusted_admin_issuers(&admin_config, &api_config);
-        let auth_validator =
-            build_token_validator(&settings.auth, token_service.clone(), &trusted_issuers)
-                .context("failed to initialize admin-gateway auth validator")?;
-        info!(
-            auth_mode = ?settings.auth.mode,
-            trusted_issuer_count = trusted_issuers.len(),
-            "Admin Gateway auth validator initialized"
+        let control_verifier = Arc::new(
+            ConsoleControlVerifier::from_env()
+                .context("invalid FLARE_CONSOLE_PUBLIC_KEY")?
+                .context("FLARE_CONSOLE_PUBLIC_KEY required for admin gateway")?,
         );
+        info!("Admin Gateway Console public-key verifier initialized");
 
         let app = create_admin_router(clients)
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
-            .layer(axum::Extension(auth_validator))
-            .layer(axum::Extension(token_service))
+            .layer(axum::Extension(control_verifier))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
@@ -122,16 +109,5 @@ impl ApplicationBootstrap {
                 })
             })
             .await?)
-    }
-}
-
-fn trusted_admin_issuers(
-    admin_config: &flare_im_service_kit::AdminGatewayServiceConfig,
-    api_config: &ApiGatewayServiceConfig,
-) -> Vec<flare_im_service_kit::config::TrustedTokenIssuerConfig> {
-    if admin_config.trusted_token_issuers.is_empty() {
-        api_config.trusted_token_issuers.clone()
-    } else {
-        admin_config.trusted_token_issuers.clone()
     }
 }

@@ -371,3 +371,22 @@ Flare Core 进程监听本机服务端口：
 - `60084`: sync-orchestrator
 
 生产公网暴露请只开放必要 gateway/API 端口，并用安全组限制来源。
+
+### DEP-08 单容器静态发现候选（尚未验收）
+
+`release/supervise-core.toml` 只在进程显式设置 `FLARE_REGISTRY_MODE=static`
+时免除 Consul；它不会实现 DNS/SRV 发现。该清单固定 Access Gateway 的
+WebSocket `60051`、QUIC `60052` 和 gRPC `60060`，以匹配 Core 内部的
+GatewayRouter 静态目标。Signaling Gateway 的 Online 调用在这一模式下仅
+回退同一 Core 容器的 `50061`。
+
+启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
+`discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在
+连接 Redis/MQ 前拒绝启动。部署方必须提供已审核、指向 Social 私网
+`flare-social-hook` 的独立 Hook 配置文件，并把路径传给
+`MESSAGE_INGEST_HOOKS_CONFIG`。`flare-deploy/templates/compose/single/hooks.social.static.toml`
+是保持原有 fail-closed 策略、仅将传输端点改为私网 `social:50210` 的候选；
+需只读挂载并显式设置 `MESSAGE_INGEST_CAPABILITY_HOOKS_AUTO=0`。不要通过禁用
+Hook 来让健康检查变绿。
+这只是 fail-fast/端口候选，尚无跨 Core/Social 的 Hook、Presence/Kick、
+消息与 QUIC 端到端验收，也不能据此替换现有生产启动流程。

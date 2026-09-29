@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use flare_im_service_kit::control_auth::ConsoleControlVerifier;
+use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::Result;
 use sqlx::PgPool;
 
@@ -100,6 +102,32 @@ pub async fn init_capability_extension_stack(
 
     register_discovered_media_plugins(&registry, &plugin_routes, runtime.as_ref()).await?;
 
+    let dispatch_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(key) => Some(SignedContextVerifier::from_public_key(&key).map_err(|_| {
+            flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for Capability Dispatch",
+            )
+        })?),
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!("Capability Dispatch disabled: FLARE_INTERNAL_CTX_PUBLIC_KEY missing");
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
+            ));
+        }
+    };
+
+    let control_verifier = ConsoleControlVerifier::from_env().map_err(|_| {
+        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
+    })?;
+    if control_verifier.is_none() {
+        tracing::warn!(
+            "Console control public key missing; Capability management RPCs fail closed"
+        );
+    }
+
     let capability_grpc = CapabilityGrpcServer::new(
         registry.clone(),
         Arc::clone(&capability_policy),
@@ -109,6 +137,8 @@ pub async fn init_capability_extension_stack(
         capability_metrics,
         hook_governance,
         Arc::clone(&plugin_routes),
+        dispatch_verifier,
+        control_verifier,
     );
 
     tracing::info!("capability extension stack initialized (media plugins via service discovery)");

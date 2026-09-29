@@ -1,6 +1,7 @@
 //! 应用启动：gRPC PushService 监听
 
-use flare_server_core::error::Result;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::{SignedContextLayer, SignedContextVerifier};
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
@@ -12,6 +13,7 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
+        let verifier = push_proxy_identity_verifier()?;
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let service_config = app_config.push_proxy_service();
         let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
@@ -24,12 +26,13 @@ impl ApplicationBootstrap {
         info!(address = %runtime_plan.address, "Push Proxy listen address");
 
         let context = wire::initialize(app_config).await?;
-        Self::run_with_context(context, runtime_plan).await
+        Self::run_with_context(context, runtime_plan, verifier).await
     }
 
     async fn run_with_context(
         context: ApplicationContext,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        verifier: SignedContextVerifier,
     ) -> Result<()> {
         use flare_grpc_proto::push::push_service_server::PushServiceServer;
         use tonic::transport::Server;
@@ -42,11 +45,7 @@ impl ApplicationBootstrap {
         let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
             "push-proxy-grpc",
             move |shutdown_rx| async move {
-                use flare_server_core::middleware::ContextLayer;
-
-                let svc = ContextLayer::new()
-                    .allow_missing()
-                    .layer(PushServiceServer::new(handler));
+                let svc = SignedContextLayer::new(verifier).layer(PushServiceServer::new(handler));
 
                 Server::builder()
                     .add_service(svc)
@@ -71,5 +70,39 @@ impl ApplicationBootstrap {
             })
             .await
             .map_err(flare_server_core::error::FlareError::from)
+    }
+}
+
+fn push_proxy_identity_verifier() -> Result<SignedContextVerifier> {
+    let key = std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY").ok();
+    verifier_from_public_key(key.as_deref())
+}
+
+fn verifier_from_public_key(key: Option<&str>) -> Result<SignedContextVerifier> {
+    let key = key.ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "FLARE_INTERNAL_CTX_PUBLIC_KEY is required for Push Proxy",
+        )
+        .build_error()
+    })?;
+    SignedContextVerifier::from_public_key(key).map_err(|_| {
+        ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "FLARE_INTERNAL_CTX_PUBLIC_KEY is invalid for Push Proxy",
+        )
+        .build_error()
+    })
+}
+
+#[cfg(test)]
+mod identity_startup_tests {
+    use super::*;
+
+    #[test]
+    fn missing_or_invalid_public_key_prevents_push_proxy_start() {
+        assert!(verifier_from_public_key(None).is_err());
+        assert!(verifier_from_public_key(Some("")).is_err());
+        assert!(verifier_from_public_key(Some("not a public key")).is_err());
     }
 }

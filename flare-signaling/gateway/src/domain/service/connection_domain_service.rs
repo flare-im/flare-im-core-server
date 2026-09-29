@@ -5,6 +5,7 @@
 use flare_grpc_proto::signaling::{
     DeviceConflictStrategy, HeartbeatRequest, LoginRequest, LogoutRequest,
 };
+use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
@@ -44,6 +45,7 @@ impl ConnectionDomainService {
     #[instrument(skip(self), fields(user_id, device_id))]
     pub async fn register_connection(
         &self,
+        ctx: &Ctx,
         user_id: &str,
         device_id: &str,
         device_platform: Option<&str>,
@@ -51,6 +53,16 @@ impl ConnectionDomainService {
         connection_metadata: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<String> {
         let user_id = user_id.trim();
+        let tenant_id = match ctx.tenant_id() {
+            Some(tenant_id) if ctx.user_id() == Some(user_id) => tenant_id,
+            _ => {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::PermissionDenied,
+                    "verified online identity mismatch",
+                )
+                .build_error());
+            }
+        };
         if user_id.is_empty() {
             return Err(
                 ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id is required").build_error(),
@@ -76,6 +88,7 @@ impl ConnectionDomainService {
         // 构建 metadata，包含 gateway_id
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("gateway_id".to_string(), self.config.gateway_id.clone());
+        metadata.insert("tenant_id".to_string(), tenant_id.to_string());
         if let Some(connection_id) = connection_id {
             metadata.insert("connection_id".to_string(), connection_id.to_string());
         }
@@ -84,8 +97,6 @@ impl ConnectionDomainService {
             .unwrap_or(DeviceConflictStrategy::PlatformExclusive as i32);
         if let Some(connection_metadata) = connection_metadata {
             for key in [
-                "tenant_id",
-                "x-tenant-id",
                 "app_version",
                 "system_version",
                 "model",
@@ -118,7 +129,7 @@ impl ConnectionDomainService {
         // 通过连接仓储调用登录，添加超时保护
         let login_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.connection_port.login(login_request),
+            self.connection_port.login(ctx, login_request),
         )
         .await;
 
@@ -173,13 +184,18 @@ impl ConnectionDomainService {
     ///
     /// 通知 Signaling Online 服务注销用户连接
     #[instrument(skip(self), fields(user_id))]
-    pub async fn unregister_connection(&self, user_id: &str, conversation_id: &str) -> Result<()> {
+    pub async fn unregister_connection(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<()> {
         let logout_request = LogoutRequest {
             user_id: user_id.to_string(),
             conversation_id: conversation_id.to_string(),
         };
 
-        if let Err(e) = self.connection_port.logout(logout_request).await {
+        if let Err(e) = self.connection_port.logout(ctx, logout_request).await {
             warn!(
                 ?e,
                 user_id = %user_id,
@@ -206,6 +222,7 @@ impl ConnectionDomainService {
     #[instrument(skip(self), fields(user_id))]
     pub async fn refresh_heartbeat(
         &self,
+        ctx: &Ctx,
         user_id: &str,
         conversation_id: &str,
         connection_id: Option<&str>,
@@ -243,7 +260,7 @@ impl ConnectionDomainService {
         // 添加超时保护
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            self.connection_port.heartbeat(heartbeat_request),
+            self.connection_port.heartbeat(ctx, heartbeat_request),
         )
         .await
         {
@@ -321,7 +338,7 @@ mod tests {
 
     #[async_trait]
     impl IConnectionPort for CapturingConnectionPort {
-        async fn login(&self, request: LoginRequest) -> Result<LoginResponse> {
+        async fn login(&self, _ctx: &Ctx, request: LoginRequest) -> Result<LoginResponse> {
             *self.last_login.lock().await = Some(request.clone());
             Ok(LoginResponse {
                 success: true,
@@ -332,22 +349,31 @@ mod tests {
             })
         }
 
-        async fn logout(&self, _request: LogoutRequest) -> Result<LogoutResponse> {
+        async fn logout(&self, _ctx: &Ctx, _request: LogoutRequest) -> Result<LogoutResponse> {
             Ok(LogoutResponse::default())
         }
 
-        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<HeartbeatResponse> {
+        async fn heartbeat(
+            &self,
+            _ctx: &Ctx,
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
             Ok(HeartbeatResponse::default())
         }
 
         async fn get_online_status(
             &self,
+            _ctx: &Ctx,
             _request: GetOnlineStatusRequest,
         ) -> Result<GetOnlineStatusResponse> {
             Ok(GetOnlineStatusResponse::default())
         }
 
-        async fn list_user_connections(&self, _user_id: &str) -> Result<Vec<ConnectionInfo>> {
+        async fn list_user_connections(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
             Ok(Vec::new())
         }
 
@@ -416,9 +442,22 @@ mod tests {
             "desired_conflict_strategy".to_string(),
             "platform_exclusive".to_string(),
         );
+        metadata.insert("tenant_id".to_string(), "forged".to_string());
+        let ctx = std::sync::Arc::new(
+            flare_server_core::Context::root()
+                .with_tenant_id("acme")
+                .with_user_id("u1"),
+        );
 
         service
-            .register_connection("u1", "d1", Some("web"), Some("conn-1"), Some(&metadata))
+            .register_connection(
+                &ctx,
+                "u1",
+                "d1",
+                Some("web"),
+                Some("conn-1"),
+                Some(&metadata),
+            )
             .await
             .expect("register connection should succeed");
 
@@ -436,5 +475,6 @@ mod tests {
             request.metadata.get("desired_conflict_strategy"),
             Some(&"platform_exclusive".to_string())
         );
+        assert_eq!(request.metadata.get("tenant_id"), Some(&"acme".to_string()));
     }
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::error::Result;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use std::convert::TryInto;
@@ -22,18 +24,24 @@ impl RedisIdempotencyRepository {
         }
     }
 
-    fn message_key(message_id: &str) -> String {
-        format!("storage:idempotency:{}", message_id)
+    fn message_key(ctx: &Ctx, message_id: &str) -> Result<String> {
+        let tenant_id = ctx.tenant_id().ok_or_else(|| {
+            flare_server_core::error::FlareError::system("tenant required for idempotency key")
+        })?;
+        if !is_valid_tenant_id(tenant_id) || normalize_tenant_id(tenant_id) != tenant_id {
+            return Err(flare_server_core::error::FlareError::system(
+                "canonical tenant required for idempotency key",
+            ));
+        }
+        Ok(format!("storage:idempotency:{tenant_id}:{message_id}"))
     }
 }
 
 impl MessageIdempotencyRepository for RedisIdempotencyRepository {
     #[instrument(skip(self), fields(message_id))]
     async fn is_new(&self, ctx: &Ctx, message_id: &str) -> Result<bool> {
-        let _ = ctx; // 上下文用于日志追踪
+        let key = Self::message_key(ctx, message_id)?;
         let mut conn = ConnectionManager::new(self.client.as_ref().clone()).await?;
-
-        let key = Self::message_key(message_id);
         let is_new: bool = conn.set_nx(&key, 1).await?;
         if is_new && self.ttl_seconds > 0 {
             let ttl: i64 = self.ttl_seconds.try_into()?;
@@ -45,19 +53,18 @@ impl MessageIdempotencyRepository for RedisIdempotencyRepository {
 
     #[instrument(skip(self), fields(message_id))]
     async fn release(&self, ctx: &Ctx, message_id: &str) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
         if message_id.is_empty() {
             return Ok(());
         }
+        let key = Self::message_key(ctx, message_id)?;
         let mut conn = ConnectionManager::new(self.client.as_ref().clone()).await?;
-        let key = Self::message_key(message_id);
         let _: () = conn.del(key).await?;
         Ok(())
     }
 
     // is_new_by_client_msg_id / release_by_client_msg_id 走 trait 默认实现：
-    // 唯一作用域规则在 domain::scoped_client_idempotency_key，最终 key 与旧覆盖逐字一致
-    // （"storage:idempotency:" 前缀由 message_key 统一追加）。此处不再 fork 键空间。
+    // 客户端 ID 仍由 domain::scoped_client_idempotency_key 生成，Redis 前缀再加
+    // 可信 tenant 一层；旧键不双读，避免旧的裸 server-id 键跨租户碰撞。
 }
 
 #[cfg(test)]
@@ -71,18 +78,23 @@ mod tests {
 
     #[test]
     fn client_message_key_is_scoped_by_tenant_sender_and_conversation() {
-        // 共享作用域规则 + message_key 前缀 = 与历史 Redis key 逐字一致（键空间不迁移）。
+        // 同一 client ID 在两个租户的 Redis key 必须不同；旧键不双读。
         let scoped = scoped_client_idempotency_key(
             &ctx_with_tenant("tenant-a"),
             "client-1",
             Some("sender-1"),
             Some("conv-a"),
         );
-        let key = RedisIdempotencyRepository::message_key(&scoped);
+        let key =
+            RedisIdempotencyRepository::message_key(&ctx_with_tenant("tenant-a"), &scoped).unwrap();
 
         assert_eq!(
             key,
-            "storage:idempotency:client:tenant-a:sender-1:conv-a:client-1"
+            "storage:idempotency:tenant-a:client:tenant-a:sender-1:conv-a:client-1"
+        );
+        assert_ne!(
+            RedisIdempotencyRepository::message_key(&ctx_with_tenant("tenant-a"), "same").unwrap(),
+            RedisIdempotencyRepository::message_key(&ctx_with_tenant("tenant-b"), "same").unwrap(),
         );
         assert_ne!(
             scoped,
@@ -93,6 +105,11 @@ mod tests {
                 Some("conv-b"),
             )
         );
+        assert_ne!(
+            key,
+            RedisIdempotencyRepository::message_key(&ctx_with_tenant("tenant-b"), &scoped).unwrap()
+        );
+        assert!(RedisIdempotencyRepository::message_key(&Ctx::default(), "same").is_err());
         assert_ne!(
             scoped,
             scoped_client_idempotency_key(

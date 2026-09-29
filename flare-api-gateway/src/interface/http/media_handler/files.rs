@@ -38,7 +38,7 @@ pub async fn get_file_url(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.get_file_url(req.into()).await?;
+    let grpc_res = media_client.get_file_url(&ctx, req.into()).await?;
     Ok(Json(ApiResponse::success(GetFileUrlHttpResponse::from(
         grpc_res,
     ))))
@@ -66,7 +66,7 @@ pub async fn get_file_info(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file info");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.get_file_info(req).await?;
+    let grpc_res = media_client.get_file_info(&ctx, req).await?;
     let info = grpc_res
         .info
         .ok_or_else(|| GatewayError::not_found("File info not found"))?;
@@ -83,7 +83,7 @@ pub async fn serve_file(
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .get_file_info_with_ctx(
+        .get_file_info(
             &ctx,
             GetFileInfoRequest {
                 file_id: file_id.clone(),
@@ -96,7 +96,7 @@ pub async fn serve_file(
 
     if !info.bucket.trim().is_empty() {
         let url_res = media_client
-            .get_file_url_with_ctx(
+            .get_file_url(
                 &ctx,
                 GetFileUrlRequest {
                     file_id,
@@ -122,7 +122,7 @@ pub async fn serve_file(
     }
 
     let stream = media_client
-        .download_file_with_ctx(
+        .download_file(
             &ctx,
             DownloadFileRequest {
                 file_id: file_id.clone(),
@@ -177,6 +177,6 @@ pub async fn delete_file(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting file");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.delete_file(req).await?;
+    let grpc_res = media_client.delete_file(&ctx, req).await?;
     Ok(Json(ApiResponse::success(grpc_res)))
 }

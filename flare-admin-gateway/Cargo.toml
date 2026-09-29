@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 flare-core-runtime = { workspace = true }
 flare-im-service-kit = { workspace = true }
+tonic = { workspace = true }
 flare-core-base = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-proto = { workspace = true }
@@ -28,6 +29,9 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 utoipa = "4"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 
 [lints]
 workspace = true

@@ -52,7 +52,13 @@ fn stream_specs_from_app(app: Option<&FlareAppConfig>) -> Vec<NatsStreamSpec> {
         .map(|cfg| cfg.jetstream_topology())
         .unwrap_or_default()
         .into_iter()
-        .map(|spec| NatsStreamSpec::new(spec.stream_name, spec.subjects))
+        .map(|spec| {
+            NatsStreamSpec::new(spec.stream_name, spec.subjects)
+                .with_max_age(spec.max_age)
+                .with_duplicate_window(spec.duplicate_window)
+                .with_num_replicas(spec.num_replicas)
+                .with_max_bytes(spec.max_bytes)
+        })
         .collect::<Vec<_>>();
     if specs.is_empty() {
         default_stream_specs()

@@ -4,8 +4,7 @@
 //! - `GetVersions`：对账；核不消费功能开关投影，`features_version` 恒为 0。
 //! - `UpsertFeatureFlags`：核只有能力开关（`CapabilityService.SetTenantCapabilitySwitch`），返回 `Unimplemented`。
 //!
-//! 投影内容本身不做管理面鉴权：本服务只在内网监听，与控制面之间靠网络边界隔离（与
-//! `CapabilityService` 的 `Register/Deregister` 同一约定）。
+//! 所有投影 RPC 均验证 Console 公钥控制令牌并绑定租户；内网监听不构成授权。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +13,9 @@ use flare_grpc_proto::control::tenant_projection_server::TenantProjection;
 use flare_grpc_proto::control::{
     FeatureFlagsProjectionUpsert, GetVersionsRequest, ProjectionAck, ProjectionVersions,
     TenantProjectionUpsert, TenantVersions,
+};
+use flare_im_service_kit::control_auth::{
+    ConsoleControlVerifier, ControlActorKind, require_grpc_control,
 };
 use flare_server_core::error::grpc::IntoGrpc;
 use tonic::{Request, Response, Status};
@@ -25,11 +27,15 @@ use crate::domain::repository::TenantProjectionRepository;
 
 pub struct TenantProjectionGrpcServer<R: TenantProjectionRepository + 'static> {
     repository: Arc<R>,
+    control_verifier: Option<ConsoleControlVerifier>,
 }
 
 impl<R: TenantProjectionRepository + 'static> TenantProjectionGrpcServer<R> {
-    pub fn new(repository: Arc<R>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<R>, control_verifier: Option<ConsoleControlVerifier>) -> Self {
+        Self {
+            repository,
+            control_verifier,
+        }
     }
 }
 
@@ -37,6 +43,7 @@ impl<R: TenantProjectionRepository + 'static> Clone for TenantProjectionGrpcServ
     fn clone(&self) -> Self {
         Self {
             repository: Arc::clone(&self.repository),
+            control_verifier: self.control_verifier.clone(),
         }
     }
 }
@@ -47,6 +54,9 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<TenantProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        actor.require_tenant(&request.get_ref().im_tenant_id)?;
         let record = TenantProjectionRecord::from_proto(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let outcome = apply_tenant_projection(self.repository.as_ref(), &record)
@@ -60,8 +70,18 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
 
     async fn upsert_feature_flags(
         &self,
-        _request: Request<FeatureFlagsProjectionUpsert>,
+        request: Request<FeatureFlagsProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let tenant_id = &request.get_ref().im_tenant_id;
+        if tenant_id == "*" {
+            if actor.tenant_id != "*" {
+                return Err(Status::permission_denied("control tenant mismatch"));
+            }
+        } else {
+            actor.require_tenant(tenant_id)?;
+        }
         Err(Status::unimplemented(
             "flare-im-core does not consume feature flag projections; core capability switches go through CapabilityService.SetTenantCapabilitySwitch",
         ))
@@ -71,12 +91,22 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<GetVersionsRequest>,
     ) -> Result<Response<ProjectionVersions>, Status> {
-        let ids: Vec<String> = request
-            .into_inner()
-            .im_tenant_ids
-            .into_iter()
-            .map(flare_im_contracts::utils::normalize_tenant_id)
-            .collect();
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let ids = request.into_inner().im_tenant_ids;
+        if ids.len() == 1 {
+            actor.require_tenant(&ids[0])?;
+        } else if actor.tenant_id != "*" {
+            return Err(Status::permission_denied(
+                "multi-tenant projection read requires platform token",
+            ));
+        }
+        if ids.iter().any(|id| {
+            !flare_im_contracts::domain::tenant::is_valid_tenant_id(id)
+                || id != &flare_im_contracts::utils::normalize_tenant_id(id)
+        }) {
+            return Err(Status::invalid_argument("im_tenant_ids must be canonical"));
+        }
         let versions = tenant_projection_versions(self.repository.as_ref(), &ids)
             .await
             .into_grpc()?;
@@ -100,6 +130,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
 mod tests {
     use super::*;
     use crate::domain::model::TenantProjectionOutcome;
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_grpc_proto::control::TenantStatus as ProtoStatus;
     use flare_server_core::error::Result as FlareResult;
     use std::sync::Mutex;
@@ -155,7 +187,44 @@ mod tests {
 
     fn server() -> (Arc<MemoryRepo>, TenantProjectionGrpcServer<MemoryRepo>) {
         let repo = Arc::new(MemoryRepo::default());
-        (repo.clone(), TenantProjectionGrpcServer::new(repo))
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let verifier = ConsoleControlVerifier::from_public_key(&public).unwrap();
+        (
+            repo.clone(),
+            TenantProjectionGrpcServer::new(repo, Some(verifier)),
+        )
+    }
+
+    fn authed<T>(payload: T, tenant_id: &str) -> Request<T> {
+        signed_request(
+            payload,
+            tenant_id,
+            flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
+            flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
+        )
+    }
+
+    fn signed_request<T>(payload: T, tenant_id: &str, subject: &str, audience: &str) -> Request<T> {
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let signer = flare_server_core::TokenService::from_ed25519_private_key(
+            &private,
+            flare_im_service_kit::control_auth::CONSOLE_ISSUER,
+            60,
+        )
+        .unwrap();
+        let token = signer
+            .generate_with_ed25519(subject, Some(tenant_id), "control", audience)
+            .unwrap();
+        let mut request = Request::new(payload);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
     }
 
     #[tokio::test]
@@ -163,7 +232,7 @@ mod tests {
         let (repo, server) = server();
 
         let ack = server
-            .upsert_tenant(Request::new(upsert("acme", ProtoStatus::Active, 3)))
+            .upsert_tenant(authed(upsert("acme", ProtoStatus::Active, 3), "acme"))
             .await
             .unwrap()
             .into_inner();
@@ -172,7 +241,7 @@ mod tests {
 
         // 同版本重放：丢弃，报告本地版本。
         let ack = server
-            .upsert_tenant(Request::new(upsert("acme", ProtoStatus::Suspended, 3)))
+            .upsert_tenant(authed(upsert("acme", ProtoStatus::Suspended, 3), "acme"))
             .await
             .unwrap()
             .into_inner();
@@ -181,7 +250,7 @@ mod tests {
 
         // 旧版本乱序到达：丢弃。
         let ack = server
-            .upsert_tenant(Request::new(upsert("acme", ProtoStatus::Suspended, 2)))
+            .upsert_tenant(authed(upsert("acme", ProtoStatus::Suspended, 2), "acme"))
             .await
             .unwrap()
             .into_inner();
@@ -194,7 +263,7 @@ mod tests {
 
         // 更高版本：生效。
         let ack = server
-            .upsert_tenant(Request::new(upsert("acme", ProtoStatus::Suspended, 4)))
+            .upsert_tenant(authed(upsert("acme", ProtoStatus::Suspended, 4), "acme"))
             .await
             .unwrap()
             .into_inner();
@@ -210,34 +279,37 @@ mod tests {
     async fn invalid_projection_is_invalid_argument() {
         let (_, server) = server();
         let status = server
-            .upsert_tenant(Request::new(upsert("acme", ProtoStatus::Active, 0)))
+            .upsert_tenant(authed(upsert("acme", ProtoStatus::Active, 0), "acme"))
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
 
         let status = server
-            .upsert_tenant(Request::new(upsert("*", ProtoStatus::Active, 1)))
+            .upsert_tenant(authed(upsert("*", ProtoStatus::Active, 1), "*"))
             .await
             .unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 
     #[tokio::test]
     async fn get_versions_reports_tenant_version_and_zero_features_version() {
         let (_, server) = server();
         server
-            .upsert_tenant(Request::new(upsert("a", ProtoStatus::Active, 5)))
+            .upsert_tenant(authed(upsert("a", ProtoStatus::Active, 5), "a"))
             .await
             .unwrap();
         server
-            .upsert_tenant(Request::new(upsert("b", ProtoStatus::Active, 8)))
+            .upsert_tenant(authed(upsert("b", ProtoStatus::Active, 8), "b"))
             .await
             .unwrap();
 
         let all = server
-            .get_versions(Request::new(GetVersionsRequest {
-                im_tenant_ids: vec![],
-            }))
+            .get_versions(authed(
+                GetVersionsRequest {
+                    im_tenant_ids: vec![],
+                },
+                "*",
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -247,9 +319,12 @@ mod tests {
         assert_eq!(all["a"].features_version, 0);
 
         let some = server
-            .get_versions(Request::new(GetVersionsRequest {
-                im_tenant_ids: vec!["b".to_string(), "missing".to_string()],
-            }))
+            .get_versions(authed(
+                GetVersionsRequest {
+                    im_tenant_ids: vec!["b".to_string(), "missing".to_string()],
+                },
+                "*",
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -262,9 +337,76 @@ mod tests {
     async fn feature_flags_are_unimplemented() {
         let (_, server) = server();
         let status = server
-            .upsert_feature_flags(Request::new(FeatureFlagsProjectionUpsert::default()))
+            .upsert_feature_flags(authed(
+                FeatureFlagsProjectionUpsert {
+                    im_tenant_id: "acme".into(),
+                    ..Default::default()
+                },
+                "acme",
+            ))
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn projection_rejects_untrusted_actor_audience_and_cross_tenant_body() {
+        let (_, server) = server();
+        let body = upsert("tenant-a", ProtoStatus::Active, 1);
+        assert_eq!(
+            server
+                .upsert_tenant(Request::new(body.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            server
+                .upsert_tenant(authed(body.clone(), "tenant-b"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            server
+                .upsert_tenant(signed_request(
+                    body.clone(),
+                    "tenant-a",
+                    "employee-1",
+                    flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            server
+                .upsert_tenant(signed_request(
+                    body,
+                    "tenant-a",
+                    flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
+                    flare_im_service_kit::control_auth::CORE_ADMIN_AUDIENCE
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            server
+                .get_versions(authed(
+                    GetVersionsRequest {
+                        im_tenant_ids: vec!["tenant-a".into(), "tenant-b".into()]
+                    },
+                    "tenant-a"
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
     }
 }

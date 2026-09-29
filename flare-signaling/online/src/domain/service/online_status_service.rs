@@ -8,7 +8,8 @@ use flare_grpc_proto::signaling::online::{
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
 };
 use flare_im_contracts::ConnectionEvent;
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
@@ -21,7 +22,7 @@ use crate::domain::connection_event_publisher::{
     ConnectionEventPublisher, NoopConnectionEventPublisher,
 };
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::repository::ConversationRepository;
+use crate::domain::repository::{ConversationRepository, EvictedConnection};
 use crate::domain::value_object::{
     ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
@@ -39,6 +40,9 @@ pub struct OnlineStatusService<CR, P = NoopConnectionEventPublisher> {
     sessions: Arc<RwLock<HashMap<String, InMemoryConnection>>>,
     gateway_id: String,
     connection_event_publisher: Option<Arc<P>>,
+    tenant_runtime: TenantRuntimeCache,
+    tenant_policy: TenantAccessPolicy,
+    max_online_devices_per_user: u32,
 }
 
 impl<CR, P> OnlineStatusService<CR, P>
@@ -52,6 +56,9 @@ where
             sessions: Arc::new(RwLock::new(HashMap::new())),
             gateway_id,
             connection_event_publisher: None,
+            tenant_runtime: TenantRuntimeCache::disabled(),
+            tenant_policy: TenantAccessPolicy::Lenient,
+            max_online_devices_per_user: 0,
         }
     }
 
@@ -60,22 +67,27 @@ where
         self
     }
 
-    async fn remove_memory_sessions_by_user(&self, user_id: &str, device_ids: Option<&[DeviceId]>) {
+    pub fn with_tenant_runtime(
+        mut self,
+        tenant_runtime: TenantRuntimeCache,
+        tenant_policy: TenantAccessPolicy,
+        max_online_devices_per_user: u32,
+    ) -> Self {
+        self.tenant_runtime = tenant_runtime;
+        self.tenant_policy = tenant_policy;
+        self.max_online_devices_per_user = max_online_devices_per_user;
+        self
+    }
+
+    async fn remove_memory_evicted(&self, evicted: &[EvictedConnection]) {
         let mut map = self.sessions.write().await;
-        map.retain(|_, conn| {
-            if conn.session.user_id().as_str() != user_id {
-                return true;
-            }
-            match device_ids {
-                Some(ids) => !ids
-                    .iter()
-                    .any(|device_id| device_id.as_str() == conn.session.device_id().as_str()),
-                None => false,
-            }
-        });
+        for item in evicted {
+            map.remove(&item.conversation_id);
+        }
     }
 
     pub async fn login(&self, ctx: &Context, request: LoginRequest) -> Result<LoginResponse> {
+        let tenant_id = required_tenant(ctx)?;
         tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %request.user_id,
@@ -114,77 +126,27 @@ where
         }
         let applied_strategy = desired_strategy;
 
-        // 检查现有会话
         let user_vo = UserId::new(user_id.clone()).map_err(|e| {
             flare_err!(
                 ErrorCode::InvalidParameter,
                 format!("invalid user_id: {}", e)
             )
         })?;
-        let existing_sessions = self
-            .repository
-            .get_user_connections(&user_vo)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "Failed to get user connections",
-                )
-            })?;
-
-        // 根据冲突策略处理现有会话
-        if !existing_sessions.is_empty() {
-            match applied_strategy {
-                DeviceConflictStrategy::Exclusive => {
-                    // 互斥：踢出所有旧设备
-                    info!(
-                        user_id = %user_id,
-                        device_id = %device_id,
-                        "Exclusive strategy: removing all existing sessions"
-                    );
-                    self.repository
-                        .remove_user_connections(&user_vo, None)
-                        .await?;
-                    self.remove_memory_sessions_by_user(user_id, None).await;
-                }
-                DeviceConflictStrategy::PlatformExclusive => {
-                    // 平台互斥：只踢出同平台的旧设备
-                    let same_platform_devices: Vec<DeviceId> = existing_sessions
-                        .iter()
-                        .filter(|s| s.device_platform() == device_platform)
-                        .map(|s| s.device_id().clone())
-                        .collect();
-                    if !same_platform_devices.is_empty() {
-                        info!(
-                            user_id = %user_id,
-                            device_id = %device_id,
-                            platform = %device_platform,
-                            "Platform exclusive strategy: removing same platform devices"
-                        );
-                        self.repository
-                            .remove_user_connections(&user_vo, Some(&same_platform_devices))
-                            .await?;
-                        self.remove_memory_sessions_by_user(user_id, Some(&same_platform_devices))
-                            .await;
-                    }
-                }
-                DeviceConflictStrategy::Coexist => {
-                    // 共存：允许多设备同时在线
-                    info!(
-                        user_id = %user_id,
-                        device_id = %device_id,
-                        "Coexist strategy: allowing multiple devices"
-                    );
-                }
-                DeviceConflictStrategy::Unspecified => {
-                    return Err(flare_err!(
-                        ErrorCode::InvalidParameter,
-                        "desired_conflict_strategy is required"
-                    ));
-                }
-            }
+        let lookup = self.tenant_runtime.lookup(tenant_id).await;
+        if !lookup.admits_connection(self.tenant_policy)
+            || (self.tenant_runtime.is_enabled() && matches!(&lookup, TenantLookup::Unavailable))
+        {
+            return Err(flare_err!(
+                ErrorCode::PermissionDenied,
+                "tenant runtime does not admit Online login"
+            ));
         }
+        let projected_cap = lookup.core_quota().max_online_devices_per_user;
+        let max_devices = if projected_cap > 0 {
+            projected_cap
+        } else {
+            self.max_online_devices_per_user
+        };
 
         // 从 metadata 中提取 gateway_id（用于跨地区路由）
         // 如果 metadata 中没有 gateway_id，使用配置的默认值
@@ -215,19 +177,10 @@ where
         })?;
         let priority_vo = DevicePriority::from_i32(device_priority);
         let token_vo = TokenVersion::from(token_version);
-        // 租户来自网关透传的 Login metadata（tenant_id / x-tenant-id），缺省归一到 "0"。
-        let tenant_id = normalize_tenant_id(
-            request
-                .metadata
-                .get("tenant_id")
-                .or_else(|| request.metadata.get("x-tenant-id"))
-                .map(String::as_str)
-                .unwrap_or_default(),
-        );
         let params = ConnectionCreateParams {
             user_id: user_vo.clone(),
             device_id: device_vo.clone(),
-            tenant_id: tenant_id.clone(),
+            tenant_id: tenant_id.to_owned(),
             device_platform: device_platform.to_string(),
             server_id: request.server_id.clone(),
             gateway_id: gateway_id.clone(),
@@ -238,6 +191,48 @@ where
         let session = Connection::create(params);
         let conversation_id = session.id().as_str().to_string();
 
+        let gateway_connection_id = request.metadata.get("connection_id").ok_or_else(|| {
+            flare_err!(
+                ErrorCode::PermissionDenied,
+                "authenticated gateway connection ID required"
+            )
+        })?;
+        let evicted = self
+            .repository
+            .admit_connection(
+                &session,
+                gateway_connection_id,
+                applied_strategy,
+                max_devices,
+            )
+            .await
+            .map_err(|error| {
+                map_infra_error(
+                    error,
+                    ErrorCode::DatabaseError,
+                    "Failed to atomically admit Online connection",
+                )
+            })?;
+        self.remove_memory_evicted(&evicted).await;
+        for old in &evicted {
+            if let Err(error) = self
+                .repository
+                .broadcast_user_kick(
+                    tenant_id,
+                    user_id,
+                    Some(&old.device_id),
+                    Some(&old.connection_id),
+                )
+                .await
+            {
+                // Redis admission is already committed. Returning a login error
+                // would leave the new physical socket registered with no
+                // conversation ID at the gateway. The old session is gone from
+                // authoritative storage and its next heartbeat will fail.
+                warn!(tenant_id, user_id, connection_id = %old.connection_id, %error, "old connection kick publish failed after admission");
+            }
+        }
+
         {
             let mut map = self.sessions.write().await;
             map.insert(
@@ -247,13 +242,6 @@ where
                 },
             );
         }
-
-        self.repository
-            .save_connection(&session)
-            .await
-            .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "Failed to save connection")
-            })?;
 
         if let (Some(publisher), Some(_connection_id)) = (
             &self.connection_event_publisher,
@@ -288,6 +276,7 @@ where
     }
 
     pub async fn logout(&self, ctx: &Context, request: LogoutRequest) -> Result<LogoutResponse> {
+        let tenant_id = required_tenant(ctx)?;
         tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %request.user_id,
@@ -325,10 +314,15 @@ where
         })?;
         {
             let mut map = self.sessions.write().await;
-            map.remove(conversation_id);
+            if map.get(conversation_id).is_some_and(|entry| {
+                entry.session.tenant_id() == tenant_id
+                    && entry.session.user_id().as_str() == user_id
+            }) {
+                map.remove(conversation_id);
+            }
         }
         self.repository
-            .remove_connection(&session_vo, &user_vo)
+            .remove_connection(tenant_id, &session_vo, &user_vo)
             .await
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to remove connection")
@@ -350,6 +344,7 @@ where
         user_id: &str,
         connection_quality: Option<&flare_proto::common::ConnectionQuality>,
     ) -> Result<HeartbeatResponse> {
+        let tenant_id = required_tenant(ctx)?;
         tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_id = %user_id,
@@ -359,7 +354,10 @@ where
 
         {
             let mut map = self.sessions.write().await;
-            if let Some(session) = map.get_mut(conversation_id) {
+            if let Some(session) = map.get_mut(conversation_id).filter(|entry| {
+                entry.session.tenant_id() == tenant_id
+                    && entry.session.user_id().as_str() == user_id
+            }) {
                 let quality_opt =
                     connection_quality.and_then(|q| ConnectionQuality::from_proto(q).ok());
                 session
@@ -382,7 +380,7 @@ where
             )
         })?;
         self.repository
-            .touch_connection(&session_vo, &user_vo)
+            .touch_connection(tenant_id, &session_vo, &user_vo)
             .await
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to touch connection")
@@ -396,6 +394,7 @@ where
         ctx: &Context,
         user_ids: &[String],
     ) -> Result<GetOnlineStatusResponse> {
+        let tenant_id = required_tenant(ctx)?;
         tracing::trace!(
             trace_id = %ctx.trace_id(),
             user_count = %user_ids.len(),
@@ -404,7 +403,7 @@ where
 
         let statuses = self
             .repository
-            .fetch_statuses(user_ids)
+            .fetch_statuses(tenant_id, user_ids)
             .await
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to fetch statuses")
@@ -445,6 +444,19 @@ where
     }
 }
 
+fn required_tenant(ctx: &Context) -> Result<&str> {
+    let tenant_id = ctx
+        .tenant_id()
+        .ok_or_else(|| flare_err!(ErrorCode::PermissionDenied, "verified tenant is required"))?;
+    if !is_valid_tenant_id(tenant_id) {
+        return Err(flare_err!(
+            ErrorCode::PermissionDenied,
+            "invalid tenant in context"
+        ));
+    }
+    Ok(tenant_id)
+}
+
 /// Noop ConversationRepository 实现
 pub struct NoopConversationRepository;
 
@@ -455,8 +467,18 @@ impl ConversationRepository for NoopConversationRepository {
     ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
+    async fn admit_connection(
+        &self,
+        _connection: &Connection,
+        _gateway_connection_id: &str,
+        _strategy: DeviceConflictStrategy,
+        _max_devices: u32,
+    ) -> flare_server_core::error::Result<Vec<EvictedConnection>> {
+        Ok(Vec::new())
+    }
     async fn remove_connection(
         &self,
+        _tenant_id: &str,
         _conversation_id: &ConnectionId,
         _user_id: &UserId,
     ) -> flare_server_core::error::Result<()> {
@@ -464,6 +486,7 @@ impl ConversationRepository for NoopConversationRepository {
     }
     async fn touch_connection(
         &self,
+        _tenant_id: &str,
         _conversation_id: &ConnectionId,
         _user_id: &UserId,
     ) -> flare_server_core::error::Result<()> {
@@ -471,18 +494,21 @@ impl ConversationRepository for NoopConversationRepository {
     }
     async fn fetch_statuses(
         &self,
+        _tenant_id: &str,
         _user_ids: &[String],
     ) -> flare_server_core::error::Result<HashMap<String, OnlineStatusRecord>> {
         Ok(HashMap::new())
     }
     async fn get_user_connections(
         &self,
+        _tenant_id: &str,
         _user_id: &UserId,
     ) -> flare_server_core::error::Result<Vec<Connection>> {
         Ok(vec![])
     }
     async fn remove_user_connections(
         &self,
+        _tenant_id: &str,
         _user_id: &UserId,
         _device_ids: Option<&[DeviceId]>,
     ) -> flare_server_core::error::Result<()> {
@@ -490,6 +516,7 @@ impl ConversationRepository for NoopConversationRepository {
     }
     async fn get_connection_by_device(
         &self,
+        _tenant_id: &str,
         _user_id: &UserId,
         _device_id: &DeviceId,
     ) -> flare_server_core::error::Result<Option<Connection>> {
@@ -516,7 +543,13 @@ impl ConversationRepository for NoopConversationRepository {
     ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
-    async fn broadcast_user_kick(&self, _user_id: &str) -> flare_server_core::error::Result<()> {
+    async fn broadcast_user_kick(
+        &self,
+        _tenant_id: &str,
+        _user_id: &str,
+        _device_id: Option<&str>,
+        _connection_id: Option<&str>,
+    ) -> flare_server_core::error::Result<()> {
         Ok(())
     }
 }

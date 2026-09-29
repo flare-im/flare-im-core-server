@@ -12,7 +12,7 @@ enabled = true
 priority = 100
 timeout_ms = 300
 require_success = true
-error_policy = "fail_fast"
+error_policy = "FailFast"
 
 [pre_send.selector]
 conversation_types = ["single", "single_chat", "direct", "group", "group_chat"]
@@ -33,7 +33,7 @@ enabled = true
 priority = 10
 timeout_ms = 800
 require_success = false
-error_policy = "ignore"
+error_policy = "Ignore"
 
 [post_send.selector]
 conversation_types = ["single", "group", "group_chat"]
@@ -53,7 +53,7 @@ enabled = true
 priority = 10
 timeout_ms = 300
 require_success = false
-error_policy = "ignore"
+error_policy = "Ignore"
 
 [delivery.selector]
 conversation_types = ["single", "group", "group_chat"]
@@ -73,7 +73,7 @@ enabled = true
 priority = 80
 timeout_ms = 500
 require_success = true
-error_policy = "fail_fast"
+error_policy = "FailFast"
 
 [recall.selector]
 conversation_types = ["single", "group", "group_chat"]

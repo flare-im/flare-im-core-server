@@ -58,7 +58,8 @@ Typed TOML owns stable service behavior: ports, profile references, subjects, WA
 
 Environment variables are reserved for secrets and per-process operational tuning:
 
-- `FLARE_API_GATEWAY_TOKEN_SECRET`, `FLARE_ADMIN_GATEWAY_TOKEN_SECRET`, `ACCESS_GATEWAY_TOKEN_SECRET`
+- `FLARE_API_GATEWAY_TOKEN_SECRET`, `ACCESS_GATEWAY_TOKEN_SECRET` for end-user access tokens; `FLARE_CONSOLE_PUBLIC_KEY` for Control/Admin EdDSA verification
+- `FLARE_API_GATEWAY_TENANT_POLICY`, `MESSAGE_INGEST_TENANT_POLICY` and the corresponding `*_TENANT_RUNTIME_POSTGRES_URL` overrides for data-plane tenant admission
 - `FLARE_API_GATEWAY_GRPC_*`, `FLARE_ADMIN_GATEWAY_GRPC_*` for downstream HTTP gateway routes and static fallbacks
 - `ACCESS_GATEWAY_*` for long-connection stability limits and auth-hook overrides
 - `PUSH_WORKER_OFFLINE_*` for offline outbox stream wiring

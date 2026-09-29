@@ -34,7 +34,8 @@ pub use flare_server_core::discovery::{
 };
 
 pub use channel_resolve::{
-    DISCOVERY_CHANNEL_TIMEOUT, DISCOVERY_ROUTE_PREFIX, connect_grpc_channel_with_fallback,
+    DISCOVERY_CHANNEL_TIMEOUT, DISCOVERY_ROUTE_PREFIX, STATIC_ACCESS_GATEWAY_GRPC_URI,
+    connect_grpc_channel_with_fallback,
     connect_grpc_channel_with_fallback as connect_grpc_channel_resilient,
     default_static_grpc_fallback, discovery_route_authority, get_discovered_channel_with_timeout,
     invalidate_discovered_service, is_discovery_route_authority,

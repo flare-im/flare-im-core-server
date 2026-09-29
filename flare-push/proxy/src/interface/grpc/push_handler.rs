@@ -1,5 +1,6 @@
 //! PushService gRPC：映射协议并调用 `application::handlers` / `queries`。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use flare_grpc_proto::push::push_service_server::PushService;
@@ -9,7 +10,10 @@ use flare_grpc_proto::push::{
     QueryPushStatusResponse, RegisterDevicePushTokenRequest, RegisterDevicePushTokenResponse,
     UnregisterDevicePushTokenRequest, UnregisterDevicePushTokenResponse,
 };
+use flare_im_contracts::Ctx;
 use flare_im_contracts::DevicePushToken;
+use flare_server_core::auth::{SignedActorType, SignedContextClaims};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
@@ -48,7 +52,13 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<PushMessageRequest>,
     ) -> Result<Response<PushMessageResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
+        let tenant_id = require_tenant_id(&ctx)?;
+        require_metadata_tenant(&request.get_ref().metadata, &tenant_id)?;
+        if let Some(options) = request.get_ref().options.as_ref() {
+            require_metadata_tenant(&options.metadata, &tenant_id)?;
+        }
+        require_delivery_provenance_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushMessageResponse {
@@ -65,7 +75,7 @@ impl PushService for PushServiceHandler {
             .map_err(|e| Status::internal(e.to_string()))?;
         let task_id = uuid::Uuid::new_v4().to_string();
         self.store
-            .save_task_status(&task_id, "pending")
+            .save_task_status(&tenant_id, &task_id, "pending")
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(PushMessageResponse {
@@ -82,7 +92,16 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<PushNotificationRequest>,
     ) -> Result<Response<PushNotificationResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
+        let tenant_id = require_tenant_id(&ctx)?;
+        require_metadata_tenant(&request.get_ref().metadata, &tenant_id)?;
+        if let Some(options) = request.get_ref().options.as_ref() {
+            require_metadata_tenant(&options.metadata, &tenant_id)?;
+        }
+        if let Some(notification) = request.get_ref().notification.as_ref() {
+            require_metadata_tenant(&notification.metadata, &tenant_id)?;
+        }
+        require_delivery_provenance_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushNotificationResponse {
@@ -98,7 +117,7 @@ impl PushService for PushServiceHandler {
             .map_err(|e| Status::internal(e.to_string()))?;
         let task_id = uuid::Uuid::new_v4().to_string();
         self.store
-            .save_task_status(&task_id, "pending")
+            .save_task_status(&tenant_id, &task_id, "pending")
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(PushNotificationResponse {
@@ -114,7 +133,16 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<PushCustomRequest>,
     ) -> Result<Response<PushCustomResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
+        let tenant_id = require_tenant_id(&ctx)?;
+        require_metadata_tenant(&request.get_ref().metadata, &tenant_id)?;
+        if let Some(options) = request.get_ref().options.as_ref() {
+            require_metadata_tenant(&options.metadata, &tenant_id)?;
+        }
+        if let Some(custom_data) = request.get_ref().custom_data.as_ref() {
+            require_metadata_tenant(&custom_data.attributes, &tenant_id)?;
+        }
+        require_delivery_provenance_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushCustomResponse {
@@ -131,7 +159,7 @@ impl PushService for PushServiceHandler {
             .map_err(|e| Status::internal(e.to_string()))?;
         let task_id = uuid::Uuid::new_v4().to_string();
         self.store
-            .save_task_status(&task_id, "pending")
+            .save_task_status(&tenant_id, &task_id, "pending")
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(PushCustomResponse {
@@ -147,7 +175,7 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<RegisterDevicePushTokenRequest>,
     ) -> Result<Response<RegisterDevicePushTokenResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::User)?;
         let req = request.into_inner();
         validate_registration_owner(&ctx, &req.user_id)?;
         let provider = provider_string(req.provider)?;
@@ -176,7 +204,7 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<UnregisterDevicePushTokenRequest>,
     ) -> Result<Response<UnregisterDevicePushTokenResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::User)?;
         let req = request.into_inner();
         validate_registration_owner(&ctx, &req.user_id)?;
         let provider = provider_string(req.provider)?;
@@ -195,7 +223,7 @@ impl PushService for PushServiceHandler {
         &self,
         request: Request<QueryPushStatusRequest>,
     ) -> Result<Response<QueryPushStatusResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
         let req = request.into_inner();
         let status = self
             .status_query
@@ -211,11 +239,74 @@ impl PushService for PushServiceHandler {
     }
 }
 
+/// The downstream Push Server/Worker consumers are intentionally paused until
+/// signed MQ ingress and both delivery stages have been verified. Do not
+/// acknowledge new tasks as "pending" when no consumer can deliver them.
+fn require_delivery_provenance_ready() -> Result<(), Status> {
+    let mode = std::env::var("PUSH_PROXY_EVENT_PROVENANCE_MODE").unwrap_or_default();
+    delivery_provenance_gate(&mode)
+}
+
+fn delivery_provenance_gate(mode: &str) -> Result<(), Status> {
+    match mode.trim() {
+        "" | "paused" => Err(Status::unavailable(
+            "Push enqueue paused until authenticated MQ provenance and replay are ready",
+        )),
+        "signed-v1" => Err(Status::unavailable(
+            "signed-v1 Push enqueue is reserved; end-to-end verification is not implemented",
+        )),
+        _ => Err(Status::unavailable("unsupported Push provenance mode")),
+    }
+}
+
 fn require_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String, Status> {
     ctx.tenant_id()
-        .map(|tenant_id| tenant_id.trim().to_string())
-        .filter(|tenant_id| !tenant_id.is_empty())
-        .ok_or_else(|| Status::invalid_argument("tenant_id is required"))
+        .filter(|tenant_id| {
+            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+        })
+        .map(ToString::to_string)
+        .ok_or_else(|| Status::permission_denied("canonical signed tenant_id is required"))
+}
+
+fn require_verified_actor<T>(
+    request: &Request<T>,
+    expected: SignedActorType,
+) -> Result<Ctx, Status> {
+    let ctx = require_ctx_from_request(request)?;
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(|marker| marker.claims())
+        .ok_or_else(|| Status::unauthenticated("signed Push Proxy identity required"))?;
+    validate_actor_claims(claims, expected)?;
+    Ok(ctx)
+}
+
+fn validate_actor_claims(
+    claims: &SignedContextClaims,
+    expected: SignedActorType,
+) -> Result<(), Status> {
+    if claims.actor_type != expected
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+    {
+        return Err(Status::permission_denied(
+            "Push Proxy actor or tenant not permitted",
+        ));
+    }
+    Ok(())
+}
+
+fn require_metadata_tenant(
+    metadata: &HashMap<String, String>,
+    tenant_id: &str,
+) -> Result<(), Status> {
+    for key in ["tenant_id", "x-tenant-id"] {
+        if metadata.get(key).is_some_and(|value| value != tenant_id) {
+            return Err(Status::permission_denied("push body tenant mismatch"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_registration_owner(
@@ -239,6 +330,104 @@ fn require_non_empty(value: &str, name: &'static str) -> Result<(), Status> {
         return Err(Status::invalid_argument(format!("{name} is required")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod identity_boundary_tests {
+    use super::*;
+
+    fn claims(actor_type: SignedActorType, tenant_id: &str) -> SignedContextClaims {
+        SignedContextClaims {
+            sub: "producer".into(),
+            iss: "flare-cell".into(),
+            aud: "flare-cell-internal".into(),
+            token_use: "internal_context".into(),
+            iat: 1,
+            exp: 2,
+            jti: "test".into(),
+            actor_type,
+            actor_id: "producer".into(),
+            tenant_id: tenant_id.into(),
+            roles: Vec::new(),
+            credential_id: None,
+            request_id: "req-1".into(),
+        }
+    }
+
+    #[test]
+    fn service_push_and_user_device_roles_are_separate() {
+        let service = claims(SignedActorType::Service, "t1");
+        let user = claims(SignedActorType::User, "t1");
+        assert!(validate_actor_claims(&service, SignedActorType::Service).is_ok());
+        assert!(validate_actor_claims(&user, SignedActorType::User).is_ok());
+        assert_eq!(
+            validate_actor_claims(&user, SignedActorType::Service)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            validate_actor_claims(&service, SignedActorType::User)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn canonical_tenant_and_body_metadata_must_match_signed_claims() {
+        for tenant in ["", "default", " t1", "t1:other", "*"] {
+            assert_eq!(
+                validate_actor_claims(
+                    &claims(SignedActorType::Service, tenant),
+                    SignedActorType::Service
+                )
+                .unwrap_err()
+                .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+        let forged = HashMap::from([("tenant_id".into(), "t2".into())]);
+        assert_eq!(
+            require_metadata_tenant(&forged, "t1").unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        let matching = HashMap::from([("x-tenant-id".into(), "t1".into())]);
+        assert!(require_metadata_tenant(&matching, "t1").is_ok());
+    }
+
+    #[test]
+    fn bare_legacy_metadata_cannot_authenticate_push_proxy() {
+        let mut request = Request::new(PushMessageRequest::default());
+        request
+            .metadata_mut()
+            .insert("x-tenant-id", "t1".parse().unwrap());
+        request
+            .metadata_mut()
+            .insert("x-actor-type", "2".parse().unwrap());
+        assert_eq!(
+            require_verified_actor(&request, SignedActorType::Service)
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivery_gate_tests {
+    use super::*;
+
+    #[test]
+    fn no_mode_can_acknowledge_unconsumable_push_tasks() {
+        for mode in ["", "paused", "signed-v1", "unknown"] {
+            assert_eq!(
+                delivery_provenance_gate(mode).unwrap_err().code(),
+                tonic::Code::Unavailable,
+                "mode={mode}"
+            );
+        }
+    }
 }
 
 fn provider_string(provider: i32) -> Result<String, Status> {

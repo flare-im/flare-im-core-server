@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
-use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
 use flare_proto::common::{
     ContentVisibility, MessageRetentionPolicy, RetentionMode, RetentionTrigger, SendAckDurability,
 };
@@ -34,7 +34,9 @@ use crate::domain::PersistenceMode;
 use crate::domain::service::{
     ConversationEnsureService, MessageIngestService, build_conversation_ensure_request_from_message,
 };
+use flare_server_core::auth::SignedActorType;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 
 const MAX_BATCH_SEND_CONCURRENCY: usize = 32;
 const MAX_BATCH_SEND_SIZE: usize = 1024;
@@ -58,6 +60,7 @@ pub struct MessageIngestHandler {
     send_rate_limiter: Option<Arc<SendRateLimiter>>,
     /// 租户投影：`quota.core.send_qps` 优先于全局 tenant 阈值（0 = 回落）。
     tenant_runtime: TenantRuntimeCache,
+    tenant_policy: TenantAccessPolicy,
     /// WAL 后 MQ publish 阶段超时。持久消息超时后返回 WalAccepted，交给 WAL replay 恢复。
     send_publish_timeout: Option<Duration>,
 }
@@ -78,6 +81,7 @@ impl MessageIngestHandler {
             idempotency: None,
             send_rate_limiter: None,
             tenant_runtime: TenantRuntimeCache::disabled(),
+            tenant_policy: TenantAccessPolicy::Lenient,
             send_publish_timeout: None,
         }
     }
@@ -93,6 +97,11 @@ impl MessageIngestHandler {
 
     pub fn with_tenant_runtime(mut self, tenant_runtime: TenantRuntimeCache) -> Self {
         self.tenant_runtime = tenant_runtime;
+        self
+    }
+
+    pub fn with_tenant_policy(mut self, tenant_policy: TenantAccessPolicy) -> Self {
+        self.tenant_policy = tenant_policy;
         self
     }
 
@@ -289,8 +298,27 @@ impl MessageIngestHandler {
             .build_error());
         }
 
-        // 摄入边界幂等：按 client_msg_id 去重重发，闭合"首发成功但 ACK 丢失 → SDK 重试"导致的重复 echo + seq 空洞。
+        // A revoked tenant must not bypass admission through idempotency replay.
+        // Run the tenant gate before limiter, WAL, hooks and every dedup path.
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let tenant_lookup = self.tenant_runtime.lookup(&tenant_id).await;
+        if !tenant_lookup.admits_connection(self.tenant_policy) {
+            let reason = match &tenant_lookup {
+                TenantLookup::Known(snapshot) => snapshot.status.as_str(),
+                TenantLookup::Unknown => "unknown",
+                TenantLookup::Unavailable => "unavailable",
+            };
+            tracing::warn!(
+                tenant_id,
+                reason,
+                policy = self.tenant_policy.as_str(),
+                "message rejected: tenant unavailable"
+            );
+            return Err(
+                ErrorBuilder::new(ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE").build_error(),
+            );
+        }
+        // 摄入边界幂等：按 client_msg_id 去重重发，闭合"首发成功但 ACK 丢失 → SDK 重试"导致的重复 echo + seq 空洞。
         let device_id = ctx.device_id().filter(|device_id| !device_id.is_empty());
         let idem_key = self
             .idempotency
@@ -337,7 +365,7 @@ impl MessageIngestHandler {
 
         if let Some(limiter) = self.send_rate_limiter.as_ref() {
             let rate_limit_start = Instant::now();
-            let tenant_send_qps = self.tenant_runtime.core_quota(&tenant_id).await.send_qps;
+            let tenant_send_qps = tenant_lookup.core_quota().send_qps;
             if let Err(error) = limiter.check(&tenant_id, tenant_send_qps, &cmd.message) {
                 self.metrics.observe_send_stage(
                     "rate_limit",
@@ -423,11 +451,22 @@ impl MessageIngestHandler {
         .await?;
 
         // 2. 执行 PreSend Hook（经统一扩展编排器）
+        // Social Bridge system/notification messages have a verified Service
+        // provenance. They do not represent a user pre-send action; the Social
+        // PreSend hook only accepts signed User callers. Never infer this
+        // bypass from message.source or attributes supplied by the client.
+        let execute_user_pre_send = !ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|verified| verified.claims())
+            .is_some_and(|claims| {
+                claims.actor_type == SignedActorType::Service
+                    && claims.actor_id == "flare-social-bridge"
+            });
         let hook_context = self
             .measure_stage(
                 "pre_send_hook",
                 self.extension_orchestrator
-                    .execute_pre_send(ctx, message, true),
+                    .execute_pre_send(ctx, message, execute_user_pre_send),
             )
             .await?;
 

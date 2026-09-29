@@ -60,7 +60,9 @@ impl PreSendPlan {
                 PreSendDecision::Continue => PreSendDecision::Continue,
                 PreSendDecision::Reject { error } => {
                     let error = annotate(error, &self.metadata);
-                    if should_fail_open_on_hook_unavailable(&error) {
+                    if !self.metadata.require_success
+                        && should_fail_open_on_hook_unavailable(&error)
+                    {
                         tracing::warn!(
                             hook = %self.metadata.name,
                             reason = %error,
@@ -76,13 +78,7 @@ impl PreSendPlan {
                 let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
                     .details(format!("hook={}", self.metadata.name))
                     .build_error();
-                if should_fail_open_on_hook_unavailable(&err) {
-                    tracing::warn!(
-                        hook = %self.metadata.name,
-                        "hook pre-send timeout, degrade to no-hook path"
-                    );
-                    PreSendDecision::Continue
-                } else if self.metadata.require_success {
+                if self.metadata.require_success {
                     PreSendDecision::Reject { error: err }
                 } else {
                     tracing::warn!(hook = %self.metadata.name, "pre-send hook timeout ignored");
@@ -587,17 +583,18 @@ mod tests {
     #[async_trait]
     impl PreSendHook for SlowPreSendHook {
         async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            PreSendDecision::Continue
+            std::future::pending().await
         }
     }
 
     #[tokio::test]
-    async fn pre_send_unavailable_hook_degrades_to_continue() {
+    async fn optional_pre_send_unavailable_hook_degrades_to_continue() {
         let registry = HookRegistry::new();
         registry
             .register_pre_send(
-                HookMetadata::default().with_name("pre-send-unavailable"),
+                HookMetadata::default()
+                    .with_name("pre-send-unavailable")
+                    .with_require_success(false),
                 HookSelector::default(),
                 Arc::new(RejectServiceUnavailablePreSend),
             )
@@ -627,12 +624,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_send_timeout_degrades_to_continue() {
+    async fn optional_pre_send_timeout_degrades_to_continue() {
         let registry = HookRegistry::new();
         registry
             .register_pre_send(
                 HookMetadata::default()
                     .with_name("pre-send-timeout")
+                    .with_require_success(false)
                     .with_timeout(Duration::from_millis(1)),
                 HookSelector::default(),
                 Arc::new(SlowPreSendHook),
@@ -643,6 +641,103 @@ mod tests {
         let ctx: Ctx = Arc::new(Context::with_request_id("req-pre-send-timeout"));
         let result = registry.execute_pre_send(&ctx, &mut draft).await;
         assert!(result.is_ok(), "hook timeout should degrade");
+    }
+
+    #[tokio::test]
+    async fn required_pre_send_unavailable_hook_rejects() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_require_success(true),
+                HookSelector::default(),
+                Arc::new(RejectServiceUnavailablePreSend),
+            )
+            .await;
+        let ctx: Ctx = Arc::new(Context::with_request_id("required-unavailable"));
+        let result = registry
+            .execute_pre_send(&ctx, &mut MessageDraft::new(vec![]))
+            .await;
+        assert_eq!(
+            result.unwrap_err().code(),
+            Some(ErrorCode::ServiceUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_send_connection_errors_obey_required_policy() {
+        struct RejectConnection(ErrorCode);
+        #[async_trait]
+        impl PreSendHook for RejectConnection {
+            async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+                PreSendDecision::Reject {
+                    error: ErrorBuilder::new(self.0, "connection unavailable").build_error(),
+                }
+            }
+        }
+        for code in [
+            ErrorCode::ConnectionRefused,
+            ErrorCode::ConnectionClosed,
+            ErrorCode::ConnectionTimeout,
+        ] {
+            for required in [true, false] {
+                let registry = HookRegistry::new();
+                registry
+                    .register_pre_send(
+                        HookMetadata::default().with_require_success(required),
+                        HookSelector::default(),
+                        Arc::new(RejectConnection(code)),
+                    )
+                    .await;
+                let ctx: Ctx = Arc::new(Context::with_request_id("connection-error"));
+                let result = registry
+                    .execute_pre_send(&ctx, &mut MessageDraft::new(vec![]))
+                    .await;
+                if required {
+                    assert_eq!(result.unwrap_err().code(), Some(code));
+                } else {
+                    assert!(result.is_ok());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn required_pre_send_timeout_rejects() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default()
+                    .with_require_success(true)
+                    .with_timeout(Duration::from_millis(1)),
+                HookSelector::default(),
+                Arc::new(SlowPreSendHook),
+            )
+            .await;
+        let ctx: Ctx = Arc::new(Context::with_request_id("required-timeout"));
+        let result = registry
+            .execute_pre_send(&ctx, &mut MessageDraft::new(vec![]))
+            .await;
+        assert_eq!(
+            result.unwrap_err().code(),
+            Some(ErrorCode::OperationTimeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_pre_send_business_reject_still_blocks() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_require_success(false),
+                HookSelector::default(),
+                Arc::new(RejectBusinessPreSend),
+            )
+            .await;
+        let ctx: Ctx = Arc::new(Context::with_request_id("optional-business-reject"));
+        let result = registry
+            .execute_pre_send(&ctx, &mut MessageDraft::new(vec![]))
+            .await;
+        assert_eq!(result.unwrap_err().code(), Some(ErrorCode::OperationFailed));
     }
 
     #[tokio::test]

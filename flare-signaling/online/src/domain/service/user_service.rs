@@ -40,6 +40,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
     /// 查询用户在线状态
     pub async fn get_user_presence(
         &self,
+        tenant_id: &str,
         request: GetUserPresenceRequest,
     ) -> Result<GetUserPresenceResponse> {
         let user_id = &request.user_id;
@@ -53,7 +54,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         })?;
         let sessions = self
             .conversation_repository
-            .get_user_connections(&user_id_vo)
+            .get_user_connections(tenant_id, &user_id_vo)
             .await
             .map_err(|e| {
                 map_infra_error(
@@ -116,6 +117,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
     /// 批量查询在线状态
     pub async fn batch_get_user_presence(
         &self,
+        tenant_id: &str,
         request: BatchGetUserPresenceRequest,
     ) -> Result<BatchGetUserPresenceResponse> {
         let user_ids = &request.user_ids;
@@ -137,9 +139,12 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         for user_id in user_ids {
             match self
-                .get_user_presence(GetUserPresenceRequest {
-                    user_id: user_id.clone(),
-                })
+                .get_user_presence(
+                    tenant_id,
+                    GetUserPresenceRequest {
+                        user_id: user_id.clone(),
+                    },
+                )
                 .await
             {
                 Ok(response) => {
@@ -158,27 +163,16 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
     pub async fn list_user_devices(
         &self,
-        ctx: &flare_server_core::context::Context,
+        tenant_id: &str,
         request: ListUserDevicesRequest,
     ) -> Result<ListUserDevicesResponse> {
-        // Router / push-worker 等服务间调用会在 proto 中携带目标 user_id；上下文里的 user_id 常为调用方而非被查询用户。
-        let user_id = if !request.user_id.is_empty() {
-            request.user_id
-        } else {
-            ctx.user_id()
-                .ok_or_else(|| {
-                    flare_server_core::error::FlareError::system(
-                        "user_id is required in ListUserDevicesRequest or context".to_string(),
-                    )
-                })?
-                .to_string()
-        };
+        let user_id = request.user_id;
 
         let user_id_vo = crate::domain::value_object::UserId::new(user_id)
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let sessions = self
             .conversation_repository
-            .get_user_connections(&user_id_vo)
+            .get_user_connections(tenant_id, &user_id_vo)
             .await?;
         let now = Utc::now();
         let sessions = sessions
@@ -214,7 +208,11 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
     }
 
     /// 踢出设备
-    pub async fn kick_device(&self, request: KickDeviceRequest) -> Result<KickDeviceResponse> {
+    pub async fn kick_device(
+        &self,
+        request: KickDeviceRequest,
+        expected_tenant_id: &str,
+    ) -> Result<KickDeviceResponse> {
         let user_id = &request.user_id;
         let device_id = &request.device_id;
 
@@ -225,13 +223,22 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let session = self
             .conversation_repository
-            .get_connection_by_device(&user_vo, &device_vo)
+            .get_connection_by_device(expected_tenant_id, &user_vo, &device_vo)
             .await?;
 
         if let Some(session) = session {
+            if session.tenant_id() != expected_tenant_id {
+                return Err(flare_err!(
+                    ErrorCode::PermissionDenied,
+                    "device tenant does not match control identity"
+                ));
+            }
             // 删除会话
             self.conversation_repository
-                .remove_connection(session.id(), &user_vo)
+                .remove_connection(expected_tenant_id, session.id(), &user_vo)
+                .await?;
+            self.conversation_repository
+                .broadcast_user_kick(expected_tenant_id, user_id, Some(device_id), None)
                 .await?;
 
             info!(
@@ -281,11 +288,14 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     continue;
                 };
                 match self
-                    .kick_device(KickDeviceRequest {
-                        user_id: user_id.to_string(),
-                        device_id: device_id.to_string(),
-                        reason: reason.to_string(),
-                    })
+                    .kick_device(
+                        KickDeviceRequest {
+                            user_id: user_id.to_string(),
+                            device_id: device_id.to_string(),
+                            reason: reason.to_string(),
+                        },
+                        &tenant_id,
+                    )
                     .await
                 {
                     Ok(_) => {
@@ -314,7 +324,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         for user_id in &kicked_users {
             if let Err(error) = self
                 .conversation_repository
-                .broadcast_user_kick(user_id)
+                .broadcast_user_kick(&tenant_id, user_id, None, None)
                 .await
             {
                 warn!(tenant_id = %tenant_id, user_id = %user_id, %error, "kick broadcast failed");
@@ -335,14 +345,10 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
     pub async fn get_device(
         &self,
-        ctx: &flare_server_core::context::Context,
+        tenant_id: &str,
         request: GetDeviceRequest,
     ) -> Result<GetDeviceResponse> {
-        let user_id = ctx.user_id().ok_or_else(|| {
-            flare_server_core::error::FlareError::system(
-                "user_id is required in context".to_string(),
-            )
-        })?;
+        let user_id = request.user_id.as_str();
         let device_id = &request.device_id;
 
         let user_id_vo = crate::domain::value_object::UserId::new(user_id.to_string())
@@ -351,7 +357,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))?;
         let session = self
             .conversation_repository
-            .get_connection_by_device(&user_id_vo, &device_vo)
+            .get_connection_by_device(tenant_id, &user_id_vo, &device_vo)
             .await?;
 
         if let Some(session) = session {
@@ -396,7 +402,7 @@ mod tests {
         index: Mutex<HashMap<String, BTreeSet<String>>>,
         /// 成员插入顺序日志：SSCAN 的游标不随删除位移，这里用它模拟。
         index_log: Mutex<HashMap<String, Vec<String>>>,
-        kicks: Mutex<Vec<String>>,
+        kicks: Mutex<Vec<(String, String, Option<String>)>>,
         page_size_seen: Mutex<Vec<usize>>,
     }
 
@@ -438,7 +444,11 @@ mod tests {
             self.sessions
                 .lock()
                 .unwrap()
-                .entry(connection.user_id().as_str().to_string())
+                .entry(format!(
+                    "{}:{}",
+                    connection.tenant_id(),
+                    connection.user_id().as_str()
+                ))
                 .or_default()
                 .push(connection.clone());
             self.index_add(
@@ -451,14 +461,28 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_connection(
+            &self,
+            connection: &Connection,
+            _gateway_connection_id: &str,
+            _strategy: flare_grpc_proto::signaling::online::DeviceConflictStrategy,
+            _max_devices: u32,
+        ) -> Result<Vec<crate::domain::repository::EvictedConnection>> {
+            self.save_connection(connection).await?;
+            Ok(Vec::new())
+        }
+
         async fn remove_connection(
             &self,
+            tenant_id: &str,
             conversation_id: &ConnectionId,
             user_id: &UserId,
         ) -> Result<()> {
             let removed = {
                 let mut sessions = self.sessions.lock().unwrap();
-                let list = sessions.entry(user_id.as_str().to_string()).or_default();
+                let list = sessions
+                    .entry(format!("{}:{}", tenant_id, user_id.as_str()))
+                    .or_default();
                 let pos = list.iter().position(|c| c.id() == conversation_id);
                 pos.map(|i| list.remove(i))
             };
@@ -476,29 +500,35 @@ mod tests {
             Ok(())
         }
 
-        async fn touch_connection(&self, _: &ConnectionId, _: &UserId) -> Result<()> {
+        async fn touch_connection(&self, _: &str, _: &ConnectionId, _: &UserId) -> Result<()> {
             Ok(())
         }
 
         async fn fetch_statuses(
             &self,
+            _tenant_id: &str,
             _user_ids: &[String],
         ) -> Result<HashMap<String, OnlineStatusRecord>> {
             Ok(HashMap::new())
         }
 
-        async fn get_user_connections(&self, user_id: &UserId) -> Result<Vec<Connection>> {
+        async fn get_user_connections(
+            &self,
+            tenant_id: &str,
+            user_id: &UserId,
+        ) -> Result<Vec<Connection>> {
             Ok(self
                 .sessions
                 .lock()
                 .unwrap()
-                .get(user_id.as_str())
+                .get(&format!("{}:{}", tenant_id, user_id.as_str()))
                 .cloned()
                 .unwrap_or_default())
         }
 
         async fn remove_user_connections(
             &self,
+            _tenant_id: &str,
             _user_id: &UserId,
             _device_ids: Option<&[DeviceId]>,
         ) -> Result<()> {
@@ -507,11 +537,12 @@ mod tests {
 
         async fn get_connection_by_device(
             &self,
+            tenant_id: &str,
             user_id: &UserId,
             device_id: &DeviceId,
         ) -> Result<Option<Connection>> {
             Ok(self
-                .get_user_connections(user_id)
+                .get_user_connections(tenant_id, user_id)
                 .await?
                 .into_iter()
                 .find(|c| c.device_id() == device_id))
@@ -567,8 +598,18 @@ mod tests {
             Ok(())
         }
 
-        async fn broadcast_user_kick(&self, user_id: &str) -> Result<()> {
-            self.kicks.lock().unwrap().push(user_id.to_string());
+        async fn broadcast_user_kick(
+            &self,
+            tenant_id: &str,
+            user_id: &str,
+            device_id: Option<&str>,
+            _connection_id: Option<&str>,
+        ) -> Result<()> {
+            self.kicks.lock().unwrap().push((
+                tenant_id.to_owned(),
+                user_id.to_owned(),
+                device_id.map(str::to_owned),
+            ));
             Ok(())
         }
     }
@@ -602,6 +643,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kick_device_cannot_remove_another_tenants_session() {
+        let (repo, service) = seeded().await;
+        let result = service
+            .kick_device(
+                KickDeviceRequest {
+                    user_id: "u9".into(),
+                    device_id: "d1".into(),
+                    reason: "test".into(),
+                },
+                "acme",
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code(), Some(ErrorCode::UserNotFound));
+        assert_eq!(
+            repo.members("other"),
+            vec![tenant_session_member("u9", "d1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_user_and_device_are_isolated_between_tenants() {
+        let repo = Arc::new(MemoryRepo::default());
+        repo.save_connection(&connection("acme", "same", "d1"))
+            .await
+            .unwrap();
+        repo.save_connection(&connection("other", "same", "d1"))
+            .await
+            .unwrap();
+        let service = UserService::new(repo.clone());
+        service
+            .kick_device(
+                KickDeviceRequest {
+                    user_id: "same".into(),
+                    device_id: "d1".into(),
+                    reason: "self".into(),
+                },
+                "acme",
+            )
+            .await
+            .unwrap();
+        assert!(
+            repo.get_user_connections("acme", &UserId::new("same".into()).unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            repo.get_user_connections("other", &UserId::new("same".into()).unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            repo.kicks
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(tenant, _, _)| tenant == "acme")
+        );
+    }
+
+    #[tokio::test]
     async fn kick_tenant_removes_every_session_of_that_tenant_only() {
         let (repo, service) = seeded().await;
 
@@ -616,24 +720,29 @@ mod tests {
         assert_eq!(response.kicked, 3);
         assert!(repo.members("acme").is_empty(), "index emptied");
         assert!(
-            repo.get_user_connections(&UserId::new("u1".into()).unwrap())
+            repo.get_user_connections("acme", &UserId::new("u1".into()).unwrap())
                 .await
                 .unwrap()
                 .is_empty()
         );
         // 其他租户不受影响。
-        assert_eq!(repo.members("other"), vec!["u9:d1".to_string()]);
         assert_eq!(
-            repo.get_user_connections(&UserId::new("u9".into()).unwrap())
+            repo.members("other"),
+            vec![tenant_session_member("u9", "d1")]
+        );
+        assert_eq!(
+            repo.get_user_connections("other", &UserId::new("u9".into()).unwrap())
                 .await
                 .unwrap()
                 .len(),
             1
         );
-        // 网关 kick 通知按用户去重。
+        // 每个设备按租户精确通知，随后按用户发送租户范围兜底通知。
         let mut kicks = repo.kicks.lock().unwrap().clone();
         kicks.sort();
-        assert_eq!(kicks, vec!["u1".to_string(), "u2".to_string()]);
+        assert!(kicks.iter().all(|(tenant, _, _)| tenant == "acme"));
+        assert!(kicks.contains(&("acme".into(), "u1".into(), None)));
+        assert!(kicks.contains(&("acme".into(), "u2".into(), None)));
     }
 
     #[tokio::test]
@@ -652,7 +761,14 @@ mod tests {
 
         assert_eq!(response.kicked, 3);
         assert!(repo.members("acme").is_empty());
-        assert!(!repo.kicks.lock().unwrap().contains(&"ghost".to_string()));
+        assert!(
+            !repo
+                .kicks
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, user, _)| user == "ghost")
+        );
     }
 
     #[tokio::test]

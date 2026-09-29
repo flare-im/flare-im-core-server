@@ -2,12 +2,14 @@
 
 pub mod clients;
 pub mod config;
+pub mod control_auth;
 pub mod discovery;
 pub mod env_registry;
 pub mod gateway;
 pub mod gateway_auth;
 pub mod health;
 pub mod metrics;
+pub mod push_provenance;
 pub mod runtime;
 pub mod service_helper;
 pub mod tenant_runtime;

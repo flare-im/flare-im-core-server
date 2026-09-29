@@ -29,7 +29,11 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
     }
 
     /// 订阅用户在线状态变化
-    pub async fn subscribe_user_presence(&self, user_id: String) -> Result<Vec<UserPresenceEvent>> {
+    pub async fn subscribe_user_presence(
+        &self,
+        tenant_id: &str,
+        user_id: String,
+    ) -> Result<Vec<UserPresenceEvent>> {
         // 检查用户是否存在
         if user_id.is_empty() {
             return Err(
@@ -40,7 +44,7 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
 
         // 记录订阅
         self.subscription_repo
-            .add_subscription(user_id.clone(), "presence".to_string())
+            .add_subscription(tenant_id, user_id.clone(), "presence".to_string())
             .await?;
 
         info!(user_id = %user_id, "Subscribed to user presence events");
@@ -52,6 +56,7 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
     /// 订阅在线状态流
     pub async fn watch_presence(
         &self,
+        tenant_id: &str,
         request: WatchPresenceRequest,
     ) -> Result<Vec<PresenceEvent>> {
         let user_ids = &request.user_ids;
@@ -66,7 +71,7 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
         // 为每个用户添加订阅
         for user_id in user_ids {
             self.subscription_repo
-                .add_subscription(user_id.clone(), "presence".to_string())
+                .add_subscription(tenant_id, user_id.clone(), "presence".to_string())
                 .await?;
         }
 
@@ -77,17 +82,25 @@ impl<SR: SubscriptionRepository + Send + Sync, PP: PresencePublisher + Send + Sy
     }
 
     /// 发布在线状态事件
-    pub async fn publish_presence_event(&self, event: PresenceEvent) -> Result<()> {
+    pub async fn publish_presence_event(
+        &self,
+        tenant_id: &str,
+        event: PresenceEvent,
+    ) -> Result<()> {
         self.presence_publisher
-            .publish_presence_event(event)
+            .publish_presence_event(tenant_id, event)
             .await?;
         Ok(())
     }
 
     /// 发布用户状态事件
-    pub async fn publish_user_presence_event(&self, event: UserPresenceEvent) -> Result<()> {
+    pub async fn publish_user_presence_event(
+        &self,
+        tenant_id: &str,
+        event: UserPresenceEvent,
+    ) -> Result<()> {
         self.presence_publisher
-            .publish_user_presence_event(event)
+            .publish_user_presence_event(tenant_id, event)
             .await?;
         Ok(())
     }

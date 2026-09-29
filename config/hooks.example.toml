@@ -5,7 +5,6 @@
 
 [[pre_send]]
 name = "compliance-text-check"
-type = "pre_send"
 priority = 10
 timeout_ms = 200
 require_success = true
@@ -61,26 +60,5 @@ tenants = ["0"]
 type = "grpc"
 endpoint = "https://hooks.internal.svc:7443"
 
-# -----------------------------------------------------------------------------
-# Capability Runtime（扩展插件发现 / 健康检查 / 动态调用）
-# -----------------------------------------------------------------------------
-[capability_runtime]
-# 可选：覆盖 dispatch 限制（与环境变量同名能力）
-# max_payload_json_bytes = 1048576
-# dispatch_timeout_ms = 25000
-# dispatch_max_per_minute = 3000
-
-# 扩展插件健康检查配置
-plugin_health_check_interval_secs = 15
-plugin_call_timeout_ms = 5000
-
-[[capability_runtime.plugin_discovery_endpoints]]
-tenant_id = "0"
-plugin_id = "flare-strom-sfu"
-capability_id = "rtc.media.control"
-service_name = "flare-strom-sfu"
-[capability_runtime.plugin_discovery_endpoints.labels]
-module = "rtc"
-backend = "strom-sfu"
-# flare-capability 启动时会读取该条目并自动装配 remote RTC backend。
-
+# Capability Runtime is a service configuration, not a HookConfig field.
+# Configure plugin discovery/health checks in config/services/capability.toml.

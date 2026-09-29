@@ -21,10 +21,11 @@ impl<PW: PresenceWatcher + Send + Sync> OnlinePresenceWatcherHandler<PW> {
 
     pub async fn watch_presence(
         &self,
+        tenant_id: &str,
         user_ids: &[String],
     ) -> Result<mpsc::Receiver<flare_server_core::error::Result<PresenceChangeEvent>>> {
         self.inner
-            .watch_presence(user_ids)
+            .watch_presence(tenant_id, user_ids)
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to watch presence"))
     }

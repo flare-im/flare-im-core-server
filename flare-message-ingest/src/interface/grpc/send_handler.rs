@@ -11,8 +11,12 @@ use flare_grpc_proto::message::{
     SendAckResponse, SendCustomDataRequest, SendCustomDataResponse, SendMessageRequest,
     SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
 };
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_proto::common::{Message, MessageSource, MessageType};
+use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use flare_server_core::error::grpc::IntoGrpc;
+use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::utils::require_ctx_from_request;
 use prost_types;
 use tonic::{Request, Response, Status};
@@ -23,18 +27,130 @@ use tracing::instrument;
 pub struct MessageSendGrpcHandler {
     message_ingest_handler: Arc<MessageIngestHandler>,
     metrics: Arc<MessageOrchestratorMetrics>,
+    message_verifier: Option<SignedContextVerifier>,
 }
 
 impl MessageSendGrpcHandler {
     pub fn new(
         message_ingest_handler: Arc<MessageIngestHandler>,
         metrics: Arc<MessageOrchestratorMetrics>,
+        message_verifier: Option<SignedContextVerifier>,
     ) -> Self {
         Self {
             message_ingest_handler,
             metrics,
+            message_verifier,
         }
     }
+
+    fn verified_send_ctx<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<flare_server_core::context::Ctx, Status> {
+        let verifier = self
+            .message_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("message identity verifier not configured"))?;
+        verify_signed_context_metadata(request.metadata(), verifier)
+    }
+}
+
+/// The message envelope is untrusted data. Only a signed, source-bound actor
+/// may send it; legacy message attributes never confer internal privileges.
+fn authorize_message(
+    ctx: &flare_server_core::context::Ctx,
+    message: &Message,
+    system_only: bool,
+) -> Result<(), Status> {
+    use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(|verified| verified.claims())
+        .ok_or_else(|| Status::unauthenticated("signed message identity required"))?;
+    authorize_message_claims(claims, message, system_only)
+}
+
+fn authorize_message_claims(
+    claims: &SignedContextClaims,
+    message: &Message,
+    system_only: bool,
+) -> Result<(), Status> {
+    if claims.tenant_id != normalize_tenant_id(&claims.tenant_id) {
+        return Err(Status::permission_denied("non-canonical tenant identity"));
+    }
+    if message
+        .attributes
+        .contains_key("x-social-internal-send-token")
+    {
+        return Err(Status::permission_denied(
+            "legacy internal send credential forbidden",
+        ));
+    }
+    for (key, expected) in [
+        ("x-tenant-id", claims.tenant_id.as_str()),
+        ("x-request-id", claims.request_id.as_str()),
+    ] {
+        if message
+            .attributes
+            .get(key)
+            .is_some_and(|actual| actual != expected)
+        {
+            return Err(Status::permission_denied(
+                "message identity attribute mismatch",
+            ));
+        }
+    }
+    match claims.actor_type {
+        SignedActorType::User if !system_only => {
+            if message.sender_id != claims.actor_id
+                || message.source != MessageSource::User as i32
+                || matches!(
+                    MessageType::try_from(message.message_type),
+                    Ok(MessageType::System | MessageType::Notification)
+                )
+                || matches!(
+                    message.attributes.get("message_type").map(String::as_str),
+                    Some("system" | "notification")
+                )
+                || message
+                    .attributes
+                    .get("x-user-id")
+                    .is_some_and(|actual| actual != &claims.actor_id)
+            {
+                return Err(Status::permission_denied(
+                    "message sender does not match signed user",
+                ));
+            }
+        }
+        SignedActorType::Service if claims.actor_id == "flare-social-bridge" => {
+            let expected_type = if system_only {
+                MessageType::System
+            } else {
+                match MessageType::try_from(message.message_type) {
+                    Ok(MessageType::System) => MessageType::System,
+                    Ok(MessageType::Notification) => MessageType::Notification,
+                    _ => {
+                        return Err(Status::permission_denied(
+                            "service may only send internal messages",
+                        ));
+                    }
+                }
+            };
+            if message.source != MessageSource::System as i32
+                || message.message_type != expected_type as i32
+                || message.sender_id.trim().is_empty()
+                || message.attributes.contains_key("x-user-id")
+            {
+                return Err(Status::permission_denied("invalid signed bridge message"));
+            }
+        }
+        _ => {
+            return Err(Status::permission_denied(
+                "actor not permitted to send message",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -45,7 +161,7 @@ impl MessageSendService for MessageSendGrpcHandler {
         request: Request<SendMessageRequest>,
     ) -> Result<Response<SendMessageResponse>, Status> {
         let decode_start = Instant::now();
-        let ctx = match require_ctx_from_request(&request) {
+        let ctx = match self.verified_send_ctx(&request) {
             Ok(ctx) => ctx,
             Err(status) => {
                 self.metrics.observe_send_stage(
@@ -63,6 +179,7 @@ impl MessageSendService for MessageSendGrpcHandler {
                 .observe_send_stage("grpc_request_decode", "error", decode_start.elapsed());
             Status::invalid_argument("message required")
         })?;
+        authorize_message(&ctx, &message, false)?;
         self.metrics
             .observe_send_stage("grpc_request_decode", "success", decode_start.elapsed());
 
@@ -102,7 +219,7 @@ impl MessageSendService for MessageSendGrpcHandler {
         request: Request<BatchSendMessageRequest>,
     ) -> Result<Response<BatchSendMessageResponse>, Status> {
         let decode_start = Instant::now();
-        let ctx = match require_ctx_from_request(&request) {
+        let ctx = match self.verified_send_ctx(&request) {
             Ok(ctx) => ctx,
             Err(status) => {
                 self.metrics.observe_send_stage(
@@ -130,13 +247,16 @@ impl MessageSendService for MessageSendGrpcHandler {
         let mut failures = Vec::new();
         for m in req.messages {
             match m.message {
-                Some(msg) => messages.push(crate::application::commands::SendMessageCommand {
-                    burn_enabled: false,
-                    burn_after_read_seconds: None,
-                    message: msg,
-                    conversation_id: m.conversation_id,
-                    sync: m.sync,
-                }),
+                Some(msg) => {
+                    authorize_message(&ctx, &msg, false)?;
+                    messages.push(crate::application::commands::SendMessageCommand {
+                        burn_enabled: false,
+                        burn_after_read_seconds: None,
+                        message: msg,
+                        conversation_id: m.conversation_id,
+                        sync: m.sync,
+                    })
+                }
                 None => failures.push(FailedMessage {
                     message_id: String::new(),
                     code: 400,
@@ -195,12 +315,14 @@ impl MessageSendService for MessageSendGrpcHandler {
         &self,
         request: Request<SendSystemMessageRequest>,
     ) -> Result<Response<SendSystemMessageResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = self.verified_send_ctx(&request)?;
         let req = request.into_inner();
+        let message = req.message.unwrap_or_default();
+        authorize_message(&ctx, &message, true)?;
 
         let cmd = crate::application::commands::SendSystemMessageCommand {
             conversation_id: req.conversation_id,
-            message: req.message.unwrap_or_default(),
+            message,
             system_message_type: req.system_message_type,
         };
 
@@ -295,6 +417,153 @@ fn send_response_from_outcome(outcome: SendMessageOutcome) -> SendMessageRespons
 mod tests {
     use super::*;
     use flare_proto::common::SendAckDurability;
+
+    fn claims(actor_type: SignedActorType, actor_id: &str) -> SignedContextClaims {
+        SignedContextClaims {
+            sub: actor_id.into(),
+            iss: "flare".into(),
+            aud: "internal".into(),
+            token_use: "internal_context".into(),
+            iat: 1,
+            exp: 2,
+            jti: "test".into(),
+            actor_type,
+            actor_id: actor_id.into(),
+            tenant_id: "tenant-a".into(),
+            roles: Vec::new(),
+            credential_id: None,
+            request_id: "req-1".into(),
+        }
+    }
+
+    fn message(sender: &str, source: MessageSource, kind: MessageType) -> Message {
+        Message {
+            sender_id: sender.into(),
+            source: source as i32,
+            message_type: kind as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn user_sender_and_internal_source_cannot_be_spoofed() {
+        let user = claims(SignedActorType::User, "alice");
+        assert!(
+            authorize_message_claims(
+                &user,
+                &message("alice", MessageSource::User, MessageType::Text),
+                false
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            authorize_message_claims(
+                &user,
+                &message("bob", MessageSource::User, MessageType::Text),
+                false
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            authorize_message_claims(
+                &user,
+                &message("alice", MessageSource::System, MessageType::Notification),
+                false
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert!(
+            authorize_message_claims(
+                &user,
+                &message("alice", MessageSource::User, MessageType::Notification),
+                false,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            authorize_message_claims(
+                &user,
+                &message("alice", MessageSource::User, MessageType::Text),
+                true
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn only_exact_bridge_identity_can_send_internal_message() {
+        let bridge = claims(SignedActorType::Service, "flare-social-bridge");
+        assert!(
+            authorize_message_claims(
+                &bridge,
+                &message("alice", MessageSource::System, MessageType::Notification),
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize_message_claims(
+                &bridge,
+                &message("alice", MessageSource::System, MessageType::System),
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize_message_claims(
+                &claims(SignedActorType::Service, "other"),
+                &message("alice", MessageSource::System, MessageType::System),
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_message_claims(
+                &bridge,
+                &message("alice", MessageSource::System, MessageType::Text),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_message_claims(
+                &bridge,
+                &message("alice", MessageSource::User, MessageType::System),
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_message_claims(
+                &bridge,
+                &message("alice", MessageSource::System, MessageType::Notification),
+                true
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_secret_and_cross_tenant_attributes_are_not_authority() {
+        let user = claims(SignedActorType::User, "alice");
+        let mut msg = message("alice", MessageSource::User, MessageType::Text);
+        msg.attributes
+            .insert("x-tenant-id".into(), "tenant-b".into());
+        assert!(authorize_message_claims(&user, &msg, false).is_err());
+        msg.attributes.clear();
+        msg.attributes
+            .insert("x-social-internal-send-token".into(), "secret".into());
+        assert!(authorize_message_claims(&user, &msg, false).is_err());
+        msg.attributes.clear();
+        msg.attributes.insert("x-user-id".into(), "bob".into());
+        assert!(authorize_message_claims(&user, &msg, false).is_err());
+    }
 
     #[test]
     fn send_response_preserves_ack_durability() {

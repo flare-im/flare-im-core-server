@@ -11,7 +11,7 @@ use flare_im_contracts::Ctx;
 use flare_im_contracts::event::types::types;
 use flare_proto::common::{
     CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind, PushTargetType,
-    PushTaskEnvelope, push_envelope,
+    push_envelope,
 };
 use flare_server_core::context::keys;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 use crate::config::PushProxyConfig;
 
-const DEFAULT_TENANT_ID: &str = "0";
 const MAX_PUSH_ENVELOPE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Push Proxy 使用的 MQ 发布器。
@@ -77,6 +76,7 @@ impl PushProxyMqPublisher {
     /// 将 PushMessageRequest 写入 push-request topic（设计文档：PushProxy 只负责入队缓冲）
     #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
     pub async fn publish_push_message(&self, ctx: &Ctx, req: &PushMessageRequest) -> Result<()> {
+        required_push_tenant(ctx)?;
         let key = req.user_ids.first().map(String::as_str);
         let envelope = EventEnvelope::new(
             types::MESSAGE,
@@ -109,31 +109,6 @@ impl PushProxyMqPublisher {
     pub async fn publish_push_custom(&self, ctx: &Ctx, req: &PushCustomRequest) -> Result<()> {
         let envelope = Self::custom_envelope_from_request(ctx, req)?;
         self.publish_push_envelope(ctx, &envelope).await
-    }
-
-    /// 发布 PushTaskEnvelope 到在线/离线推送 topic
-    #[instrument(skip(self, ctx, task))]
-    pub async fn publish_push_task(
-        &self,
-        ctx: &Ctx,
-        task: &PushTaskEnvelope,
-        is_online: bool,
-    ) -> Result<()> {
-        let topic = if is_online {
-            &self.config.push_online_topic
-        } else {
-            &self.config.push_offline_topic
-        };
-
-        let envelope = EventEnvelope::new(types::SYSTEM, &task.user_id, 0, task.encode_to_vec())
-            .with_source("flare-push-proxy");
-
-        self.event_publisher
-            .publish(ctx, topic, &envelope)
-            .await
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
-            })
     }
 
     async fn publish_push_envelope(&self, ctx: &Ctx, envelope: &PushEnvelope) -> Result<()> {
@@ -192,7 +167,7 @@ impl PushProxyMqPublisher {
             created_at,
         };
 
-        Ok(base_envelope(
+        base_envelope(
             ctx,
             envelope_id,
             created_at,
@@ -200,7 +175,7 @@ impl PushProxyMqPublisher {
             PushPayloadKind::Notification,
             req.options.as_ref(),
             Some(push_envelope::Payload::Notification(payload)),
-        ))
+        )
     }
 
     fn custom_envelope_from_request(ctx: &Ctx, req: &PushCustomRequest) -> Result<PushEnvelope> {
@@ -218,7 +193,7 @@ impl PushProxyMqPublisher {
             created_at,
         };
 
-        Ok(base_envelope(
+        base_envelope(
             ctx,
             envelope_id,
             created_at,
@@ -226,7 +201,7 @@ impl PushProxyMqPublisher {
             PushPayloadKind::Custom,
             req.options.as_ref(),
             Some(push_envelope::Payload::Custom(payload)),
-        ))
+        )
     }
 }
 
@@ -238,12 +213,8 @@ fn base_envelope(
     payload_kind: PushPayloadKind,
     options: Option<&GrpcPushOptions>,
     payload: Option<push_envelope::Payload>,
-) -> PushEnvelope {
-    let tenant_id = ctx
-        .tenant_id()
-        .filter(|tenant_id| !tenant_id.trim().is_empty())
-        .unwrap_or(DEFAULT_TENANT_ID)
-        .to_string();
+) -> Result<PushEnvelope> {
+    let tenant_id = required_push_tenant(ctx)?;
     let trace_id = if ctx.trace_id().trim().is_empty() {
         ctx.request_id().to_string()
     } else {
@@ -251,7 +222,7 @@ fn base_envelope(
     };
     let headers = envelope_headers(ctx, &tenant_id, &envelope_id, created_at);
 
-    PushEnvelope {
+    Ok(PushEnvelope {
         envelope_id,
         tenant_id,
         trace_id,
@@ -263,7 +234,23 @@ fn base_envelope(
         options: push_options(options),
         payload,
         headers,
-    }
+    })
+}
+
+fn required_push_tenant(ctx: &Ctx) -> Result<String> {
+    ctx.tenant_id()
+        .filter(|tenant_id| {
+            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+        })
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "canonical tenant_id required for Push publication",
+            )
+            .build_error()
+        })
 }
 
 fn push_options(options: Option<&GrpcPushOptions>) -> Option<PushOptions> {
@@ -448,5 +435,29 @@ mod tests {
         };
 
         assert!(PushProxyMqPublisher::notification_envelope_from_request(&ctx, &req).is_err());
+    }
+
+    #[test]
+    fn push_publication_never_invents_a_default_tenant() {
+        let missing = Arc::new(Context::with_request_id("req-missing"));
+        let noncanonical =
+            Arc::new(Context::with_request_id("req-alias").with_tenant_id(" default "));
+        for ctx in [&missing, &noncanonical] {
+            assert!(required_push_tenant(ctx).is_err());
+            assert!(
+                base_envelope(
+                    ctx,
+                    "envelope-1".to_string(),
+                    1,
+                    vec!["user-1".to_string()],
+                    PushPayloadKind::Notification,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+        }
+        let explicit = Arc::new(Context::with_request_id("req-explicit").with_tenant_id("0"));
+        assert_eq!(required_push_tenant(&explicit).unwrap(), "0");
     }
 }

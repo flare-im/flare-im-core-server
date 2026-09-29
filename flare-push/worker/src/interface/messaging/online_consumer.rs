@@ -45,6 +45,7 @@ struct BatchEntry {
 
 #[derive(Hash, Eq, PartialEq)]
 struct MessageBatchKey {
+    tenant_id: String,
     user_ids: Vec<String>,
     options: Vec<u8>,
 }
@@ -97,6 +98,13 @@ impl OnlinePushHandler {
             if Self::payload_kind(&entry.envelope) != PushTaskPayloadKind::Message {
                 continue;
             }
+            // The first entry's context is used for the whole group at dispatch.
+            // Never combine same-user tasks from different tenants, even when
+            // their request options and target IDs are otherwise identical.
+            let tenant_id = entry.envelope.tenant_id.as_str();
+            if tenant_id.is_empty() || tenant_id.trim() != tenant_id {
+                continue;
+            }
             let Ok(mut request) = Self::decode_push_message_request(&entry.envelope) else {
                 continue;
             };
@@ -117,7 +125,11 @@ impl OnlinePushHandler {
             let messages = std::mem::take(&mut request.messages);
             request.user_ids = user_ids.clone();
             request.messages = messages;
-            let key = MessageBatchKey { user_ids, options };
+            let key = MessageBatchKey {
+                tenant_id: tenant_id.to_string(),
+                user_ids,
+                options,
+            };
 
             match groups.entry(key) {
                 Entry::Occupied(mut occupied) => {
@@ -588,6 +600,39 @@ mod tests {
         for group in groups.values() {
             assert_eq!(group.request.messages.len(), 1);
         }
+    }
+
+    #[test]
+    fn build_message_groups_never_merges_same_user_across_tenants() {
+        let tenant_a = batch_entry(0, "same-user", "tenant-a-message");
+        let mut tenant_b = batch_entry(1, "same-user", "tenant-b-message");
+        tenant_b.envelope.tenant_id = "tenant-2".to_string();
+        let (groups, grouped_indices) =
+            OnlinePushHandler::build_message_groups(&[tenant_a, tenant_b]);
+
+        assert_eq!(grouped_indices.len(), 2);
+        assert_eq!(groups.len(), 2);
+        let mut grouped_messages = groups
+            .into_iter()
+            .map(|(key, group)| (key.tenant_id, group.request.messages[0].server_id.clone()))
+            .collect::<Vec<_>>();
+        grouped_messages.sort();
+        assert_eq!(
+            grouped_messages,
+            vec![
+                ("tenant-1".to_string(), "tenant-a-message".to_string()),
+                ("tenant-2".to_string(), "tenant-b-message".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_message_groups_does_not_group_missing_tenant() {
+        let mut missing = batch_entry(0, "same-user", "message");
+        missing.envelope.tenant_id.clear();
+        let (groups, grouped_indices) = OnlinePushHandler::build_message_groups(&[missing]);
+        assert!(groups.is_empty());
+        assert!(grouped_indices.is_empty());
     }
 
     #[test]

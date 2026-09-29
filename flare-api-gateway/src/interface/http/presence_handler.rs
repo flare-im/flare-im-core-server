@@ -8,16 +8,60 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
+use super::MessageContextSigner;
 use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, DeviceInfo, GetDeviceRequest, GetUserPresenceRequest,
     KickDeviceRequest, ListUserDevicesRequest, LogoutRequest, UserPresence,
 };
 use flare_im_service_kit::clients::GrpcClients;
 use flare_proto::ConnectionQuality;
+use flare_server_core::{AuthenticatedPrincipal, SignedActorType, SignedContextIdentity};
 use flare_server_core::{
     context::Ctx,
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
+
+fn signed_online_user(
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+) -> Result<String> {
+    let user_id = principal.user_id.trim();
+    let tenant_id = principal
+        .tenant_id
+        .as_deref()
+        .map(flare_im_contracts::utils::normalize_tenant_id)
+        .ok_or_else(|| {
+            GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
+        })?;
+    if user_id.is_empty()
+        || principal.has_gateway_admin_scope()
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
+    {
+        return Err(GatewayError::bad_request(
+            "USER_REQUIRED",
+            "authenticated user and tenant required",
+        ));
+    }
+    let signer = signer.0.as_ref().ok_or_else(|| {
+        GatewayError::internal(
+            "ONLINE_SIGNER_UNAVAILABLE",
+            "internal identity signer not configured",
+        )
+    })?;
+    signer
+        .sign(
+            &SignedContextIdentity::new(
+                SignedActorType::User,
+                user_id,
+                tenant_id,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .with_credential_id("api-gateway"),
+        )
+        .map_err(|_| {
+            GatewayError::internal("ONLINE_SIGNING_FAILED", "internal identity signing failed")
+        })
+}
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -151,13 +195,16 @@ fn user_presence_to_http(p: UserPresence) -> UserPresenceHttp {
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn get_user_presence(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<UserPresenceHttp>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let uid = user_id.trim();
     if uid.is_empty() {
         return Err(GatewayError::bad_request(
@@ -172,7 +219,7 @@ pub async fn get_user_presence(
     };
     let mut client = clients.online.lock().await;
     let resp = client
-        .get_user_presence_with_ctx(&ctx, grpc_req)
+        .get_user_presence_with_ctx(&ctx, &token, grpc_req)
         .await
         .map_err(|e| GatewayError::internal("GET_USER_PRESENCE_FAILED", e.to_string()))?;
     let presence = resp
@@ -192,13 +239,16 @@ pub async fn get_user_presence(
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn list_user_devices(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<ListUserDevicesHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let uid = user_id.trim();
     if uid.is_empty() {
         return Err(GatewayError::bad_request(
@@ -212,6 +262,7 @@ pub async fn list_user_devices(
     let resp = client
         .list_user_devices_with_ctx(
             &ctx,
+            &token,
             ListUserDevicesRequest {
                 user_id: uid.to_string(),
             },
@@ -233,13 +284,16 @@ pub async fn list_user_devices(
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn get_device(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Path(device_id): Path<String>,
 ) -> Result<Json<ApiResponse<DevicePresenceHttp>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let user_id = ctx
         .require_user_id()
         .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
@@ -257,6 +311,7 @@ pub async fn get_device(
     let resp = client
         .get_device_with_ctx(
             &ctx,
+            &token,
             GetDeviceRequest {
                 user_id,
                 device_id: did.to_string(),
@@ -282,13 +337,16 @@ pub async fn get_device(
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients, req))]
+#[instrument(skip(headers, clients, principal, signer, req))]
 pub async fn batch_get_user_presence(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<BatchGetUserPresenceHttpRequest>,
 ) -> Result<Json<ApiResponse<BatchGetUserPresenceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let ids: Vec<String> = req
         .user_ids
         .into_iter()
@@ -307,7 +365,7 @@ pub async fn batch_get_user_presence(
     let grpc_req = BatchGetUserPresenceRequest { user_ids: ids };
     let mut client = clients.online.lock().await;
     let resp = client
-        .batch_get_user_presence_with_ctx(&ctx, grpc_req)
+        .batch_get_user_presence_with_ctx(&ctx, &token, grpc_req)
         .await
         .map_err(|e| GatewayError::internal("BATCH_GET_USER_PRESENCE_FAILED", e.to_string()))?;
     let presences = resp
@@ -331,13 +389,16 @@ pub async fn batch_get_user_presence(
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients, req))]
+#[instrument(skip(headers, clients, principal, signer, req))]
 pub async fn logout_presence(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<LogoutPresenceHttpRequest>,
 ) -> Result<Json<ApiResponse<LogoutPresenceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let user_id = ctx
         .require_user_id()
         .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
@@ -362,7 +423,7 @@ pub async fn logout_presence(
     };
     let mut client = clients.online.lock().await;
     let resp = client
-        .logout_with_ctx(&ctx, grpc_req)
+        .logout_with_ctx(&ctx, &token, grpc_req)
         .await
         .map_err(|e| GatewayError::internal("LOGOUT_PRESENCE_FAILED", e.to_string()))?;
     Ok(Json(ApiResponse::success(LogoutPresenceHttpResponse {
@@ -381,14 +442,17 @@ pub async fn logout_presence(
         (status = 400, description = "参数错误"),
     )
 )]
-#[instrument(skip(headers, clients, req))]
+#[instrument(skip(headers, clients, principal, signer, req))]
 pub async fn kick_device(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Path(device_id): Path<String>,
     Json(req): Json<KickDeviceHttpRequest>,
 ) -> Result<Json<ApiResponse<KickDeviceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
+    let token = signed_online_user(&principal, &signer)?;
     let user_id = ctx
         .require_user_id()
         .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
@@ -411,8 +475,9 @@ pub async fn kick_device(
 
     let mut client = clients.online.lock().await;
     let resp = client
-        .kick_device_with_ctx(
+        .self_kick_device_with_ctx(
             &ctx,
+            &token,
             KickDeviceRequest {
                 user_id,
                 device_id: did.to_string(),

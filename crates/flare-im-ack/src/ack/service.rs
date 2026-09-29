@@ -194,6 +194,7 @@ impl AckService {
         &self,
         ack_info: AckStatusInfo,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        RedisAckManager::validate_tenant(&ack_info.tenant_id)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -217,7 +218,8 @@ impl AckService {
         }
 
         // 将ACK信息缓存到内存中
-        let cache_key = self.format_cache_key(&ack_info.message_id, &ack_info.user_id);
+        let cache_key =
+            self.format_cache_key(&ack_info.tenant_id, &ack_info.message_id, &ack_info.user_id);
         self.cache.insert(
             cache_key,
             CachedAckInfo {
@@ -240,10 +242,12 @@ impl AckService {
     /// 获取ACK状态
     pub async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<AckStatusInfo>, Box<dyn std::error::Error>> {
-        let cache_key = self.format_cache_key(message_id, user_id);
+        RedisAckManager::validate_tenant(tenant_id)?;
+        let cache_key = self.format_cache_key(tenant_id, message_id, user_id);
 
         // 首先检查内存缓存
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -253,7 +257,7 @@ impl AckService {
         // 如果内存缓存中没有，从Redis获取
         if let Some(ack_info) = self
             .redis_manager
-            .get_ack_status(message_id, user_id)
+            .get_ack_status(tenant_id, message_id, user_id)
             .await?
         {
             // 将从Redis获取的ACK信息缓存到内存中
@@ -280,10 +284,12 @@ impl AckService {
     /// 检查ACK是否存在
     pub async fn exists_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let cache_key = self.format_cache_key(message_id, user_id);
+        RedisAckManager::validate_tenant(tenant_id)?;
+        let cache_key = self.format_cache_key(tenant_id, message_id, user_id);
 
         // 首先检查内存缓存中是否存在
         if self.cache.contains_key(&cache_key) {
@@ -291,41 +297,51 @@ impl AckService {
         }
 
         // 如果内存缓存中不存在，检查Redis中是否存在
-        Ok(self.redis_manager.exists_ack(message_id, user_id).await?)
+        Ok(self
+            .redis_manager
+            .exists_ack(tenant_id, message_id, user_id)
+            .await?)
     }
 
     /// 删除ACK状态
     pub async fn delete_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let cache_key = self.format_cache_key(message_id, user_id);
+        RedisAckManager::validate_tenant(tenant_id)?;
+        let cache_key = self.format_cache_key(tenant_id, message_id, user_id);
 
         // 从内存缓存中删除
         self.cache.remove(&cache_key);
         // 从Redis中删除
         self.redis_manager
-            .delete_ack_status(message_id, user_id)
+            .delete_ack_status(tenant_id, message_id, user_id)
             .await?;
 
         Ok(())
     }
 
     /// 格式化缓存键
-    fn format_cache_key(&self, message_id: &str, user_id: &str) -> String {
-        format!("{}:{}", message_id, user_id)
+    fn format_cache_key(&self, tenant_id: &str, message_id: &str, user_id: &str) -> String {
+        format!("{tenant_id}:{}:{message_id}:{user_id}", message_id.len())
     }
 
     /// 批量查询 ACK 状态
     pub async fn batch_get_ack_status_internal(
         &self,
+        tenant_id: &str,
         acks: Vec<(String, String)>,
     ) -> Result<Vec<AckStatusInfo>, Box<dyn std::error::Error>> {
+        RedisAckManager::validate_tenant(tenant_id)?;
         let mut results = Vec::new();
 
         for (message_id, user_id) in acks {
-            if let Some(ack_info) = self.get_ack_status(&message_id, &user_id).await? {
+            if let Some(ack_info) = self
+                .get_ack_status(tenant_id, &message_id, &user_id)
+                .await?
+            {
                 results.push(ack_info);
             }
         }
@@ -360,6 +376,7 @@ impl AckService {
 impl AckManager for AckService {
     async fn record_ack(&self, event: AckEvent) -> Result<(), Box<dyn std::error::Error>> {
         let ack_info = AckStatusInfo {
+            tenant_id: event.tenant_id,
             message_id: event.message_id,
             user_id: event.user_id,
             ack_type: Some(event.ack_type),
@@ -373,33 +390,37 @@ impl AckManager for AckService {
 
     async fn get_ack_status(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<AckStatusInfo>, Box<dyn std::error::Error>> {
-        AckService::get_ack_status(self, message_id, user_id).await
+        AckService::get_ack_status(self, tenant_id, message_id, user_id).await
     }
 
     async fn batch_get_ack_status(
         &self,
+        tenant_id: &str,
         acks: Vec<(String, String)>,
     ) -> Result<Vec<AckStatusInfo>, Box<dyn std::error::Error>> {
-        self.batch_get_ack_status_internal(acks).await
+        self.batch_get_ack_status_internal(tenant_id, acks).await
     }
 
     async fn exists_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.exists_ack(message_id, user_id).await
+        self.exists_ack(tenant_id, message_id, user_id).await
     }
 
     async fn delete_ack(
         &self,
+        tenant_id: &str,
         message_id: &str,
         user_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.delete_ack(message_id, user_id).await
+        self.delete_ack(tenant_id, message_id, user_id).await
     }
 }
 
@@ -431,6 +452,7 @@ mod tests {
         let service = AckService::new(config, metrics).await?;
 
         let ack_info = AckStatusInfo {
+            tenant_id: "tenant-a".to_string(),
             message_id: "test_msg_1".to_string(),
             user_id: "user_1".to_string(),
             ack_type: Some(crate::ack::redis_manager::AckType::TransportAck),
@@ -441,13 +463,41 @@ mod tests {
 
         service.record_ack(ack_info).await?;
 
-        let retrieved = service.get_ack_status("test_msg_1", "user_1").await?;
+        service
+            .record_ack(AckStatusInfo {
+                tenant_id: "tenant-b".to_string(),
+                message_id: "test_msg_1".to_string(),
+                user_id: "user_1".to_string(),
+                ack_type: Some(crate::ack::redis_manager::AckType::TransportAck),
+                status: crate::ack::redis_manager::AckStatus::Processed,
+                timestamp: 1234567891,
+                importance: ImportanceLevel::Low,
+            })
+            .await?;
+
+        let retrieved = service
+            .get_ack_status("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.message_id, "test_msg_1");
         assert_eq!(retrieved.user_id, "user_1");
+        assert_eq!(
+            retrieved.status,
+            crate::ack::redis_manager::AckStatus::Received
+        );
+        assert_eq!(
+            service
+                .get_ack_status("tenant-b", "test_msg_1", "user_1")
+                .await?
+                .unwrap()
+                .status,
+            crate::ack::redis_manager::AckStatus::Processed
+        );
 
-        let exists = service.exists_ack("test_msg_1", "user_1").await?;
+        let exists = service
+            .exists_ack("tenant-a", "test_msg_1", "user_1")
+            .await?;
         assert!(exists);
 
         Ok(())

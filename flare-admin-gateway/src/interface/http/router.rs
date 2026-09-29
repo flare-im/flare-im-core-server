@@ -8,6 +8,7 @@ use utoipa::OpenApi;
 
 use super::admin_auth_middleware::admin_auth_middleware;
 use super::admin_handler;
+use super::media_handler;
 use flare_im_service_kit::clients::GrpcClients;
 
 #[allow(dead_code)]
@@ -25,9 +26,16 @@ use flare_im_service_kit::clients::GrpcClients;
         admin_handler::admin_query_message_events,
         admin_handler::admin_query_message_write_ledger,
         admin_handler::admin_export_messages,
+        media_handler::cleanup_orphaned_assets,
+        media_handler::set_object_acl,
+        media_handler::list_objects,
+        media_handler::describe_bucket,
     ),
     components(
         schemas(
+            media_handler::ListObjectsQuery,
+            media_handler::AdminMediaObjects,
+            media_handler::AdminMediaObject,
             super::admin_contract::AdminCapabilitiesResponse,
             super::admin_contract::AdminRequiredHeaders,
             super::admin_contract::AdminEndpointDescriptor,
@@ -102,6 +110,13 @@ async fn swagger_ui_html() -> Html<&'static str> {
 
 pub fn create_admin_router(clients: Arc<GrpcClients>) -> Router {
     let admin_router = Router::new()
+        .route(
+            "/medias/cleanup-orphaned-assets",
+            post(media_handler::cleanup_orphaned_assets),
+        )
+        .route("/medias/object-acl", post(media_handler::set_object_acl))
+        .route("/medias/objects", get(media_handler::list_objects))
+        .route("/medias/bucket", get(media_handler::describe_bucket))
         .route("/auth/check", get(admin_handler::admin_auth_check))
         .route("/capabilities", get(admin_handler::admin_capabilities))
         .route("/gateway/health", get(admin_handler::admin_gateway_health))

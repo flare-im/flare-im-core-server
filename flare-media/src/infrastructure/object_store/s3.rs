@@ -214,7 +214,10 @@ impl S3ObjectStore {
     }
 
     fn build_object_key(&self, context: &UploadContext<'_>) -> String {
-        let mut segments: Vec<String> = Vec::with_capacity(6);
+        let mut segments: Vec<String> = Vec::with_capacity(9);
+        segments.push(crate::domain::model::tenant_storage_segment(
+            context.tenant_id,
+        ));
 
         if let Some(prefix) = &self.bucket_root_prefix {
             segments.push(prefix.clone());
@@ -288,18 +291,20 @@ impl S3ObjectStore {
             })?;
 
         let url = presigned.uri().to_string();
-        tracing::trace!(key = &key, presigned_url = &url, "已生成预签名GET URL");
+        tracing::trace!(key = &key, "已生成预签名GET URL");
         Ok(url)
     }
 
     fn build_object_key_from_parts(
         &self,
+        tenant_id: &str,
         file_id: &str,
         file_name: &str,
         file_category: &str,
     ) -> String {
         let empty = [];
         let context = UploadContext {
+            tenant_id,
             file_id,
             file_name,
             mime_type: "",
@@ -648,8 +653,14 @@ impl MediaObjectRepository for S3ObjectStore {
         })
     }
 
-    fn build_object_key_for(&self, file_id: &str, file_name: &str, file_category: &str) -> String {
-        self.build_object_key_from_parts(file_id, file_name, file_category)
+    fn build_object_key_for(
+        &self,
+        tenant_id: &str,
+        file_id: &str,
+        file_name: &str,
+        file_category: &str,
+    ) -> String {
+        self.build_object_key_from_parts(tenant_id, file_id, file_name, file_category)
     }
 
     fn base_url(&self) -> Option<String> {
@@ -770,6 +781,76 @@ mod public_endpoint_tests {
         assert_eq!(
             normalize_optional_url(&s(" https://cdn.example.com/flare-media ")),
             s("https://cdn.example.com/flare-media")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tenant_key_tests {
+    use super::*;
+
+    fn store() -> S3ObjectStore {
+        let client = S3Client::from_conf(
+            S3ConfigBuilder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("us-east-1"))
+                .endpoint_url("https://objects.example.test")
+                .force_path_style(true)
+                .credentials_provider(Credentials::new("test", "test", None, None, "unit-test"))
+                .build(),
+        );
+        S3ObjectStore {
+            presign_client: client.clone(),
+            client,
+            bucket: "media".to_string(),
+            base_url: None,
+            cdn_base_url: None,
+            upload_prefix: Some("uploads".to_string()),
+            bucket_root_prefix: Some("root".to_string()),
+            force_path_style: true,
+            presign_url_ttl_seconds: 60,
+            use_presign: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_and_direct_keys_start_with_an_injective_tenant_prefix() {
+        let store = store();
+        let context = UploadContext {
+            tenant_id: "tenant-a",
+            file_id: "file-id",
+            file_name: "photo.png",
+            mime_type: "image/png",
+            file_size: 0,
+            payload: &[],
+            file_category: "image".to_string(),
+            user_id: "owner",
+            trace_id: None,
+            namespace: None,
+            business_tag: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let stream_key = store.build_object_key(&context);
+        let direct_key = store.build_object_key_for("tenant-a", "file-id", "photo.png", "image");
+        for key in [stream_key, direct_key] {
+            assert!(key.starts_with("tenant-a/root/uploads/image/"));
+            assert!(key.ends_with("/file-id.png"));
+        }
+        let other = store.build_object_key_for("../tenant-b", "file-id", "photo.png", "image");
+        assert!(other.starts_with("%2E%2E%2Ftenant-b/"));
+        assert!(!other.contains("../"));
+    }
+
+    #[tokio::test]
+    async fn legacy_presigned_download_uses_the_recorded_key_without_rewriting_it() {
+        // Signing is offline; no S3 service is contacted by this regression.
+        let url = store()
+            .presign_get_url("old-layout/2025/file.png", Some(60))
+            .await
+            .unwrap();
+        assert_eq!(
+            url::Url::parse(&url).unwrap().path(),
+            "/media/old-layout/2025/file.png"
         );
     }
 }

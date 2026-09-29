@@ -15,6 +15,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 dashmap = "6.0"
 dotenvy = "0.15"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 etcd-client = { workspace = true }
 flare-core = { workspace = true }
 flare-core-base = { workspace = true }

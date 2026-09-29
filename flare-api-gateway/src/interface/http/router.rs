@@ -37,12 +37,8 @@ use flare_im_service_kit::clients::GrpcClients;
         media_handler::references::create_reference,
         media_handler::references::delete_reference,
         media_handler::references::list_references,
-        media_handler::references::cleanup_orphaned_assets,
         media_handler::processing::process_image,
         media_handler::processing::process_video,
-        media_handler::objects::set_object_acl,
-        media_handler::objects::list_objects,
-        media_handler::objects::describe_bucket,
         message_handler::send_message,
         message_handler::execute_custom_event,
         message_handler::recall_message,
@@ -61,7 +57,6 @@ use flare_im_service_kit::clients::GrpcClients;
     ),
     components(
         schemas(
-            super::media_handler::ListObjectsHttpRequest,
             crate::application::dto::UploadFileMetadataHttp,
             crate::application::dto::UploadFileHttpRequest,
             crate::application::dto::UploadFileHttpResponse,
@@ -175,12 +170,9 @@ pub fn create_router(clients: Arc<GrpcClients>) -> Router {
 
 /// 创建 public API Gateway 路由。
 pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
-    let media_public_router = Router::new()
-        .route("/files/{file_id}", get(media_handler::serve_file))
-        .layer(axum::Extension(clients.clone()));
-
     // Media API 路由
     let media_router = Router::new()
+        .route("/files/{file_id}", get(media_handler::serve_file))
         .route("/upload-url", post(media_handler::generate_upload_url))
         .route("/upload-file", post(media_handler::upload_file))
         .route(
@@ -226,16 +218,10 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .route("/references", post(media_handler::create_reference))
         .route("/references", delete(media_handler::delete_reference))
         .route("/references", get(media_handler::list_references))
-        .route(
-            "/cleanup-orphaned-assets",
-            post(media_handler::cleanup_orphaned_assets),
-        )
         .route("/process-image", post(media_handler::process_image))
         .route("/process-video", post(media_handler::process_video))
-        .route("/object-acl", post(media_handler::set_object_acl))
-        .route("/objects", get(media_handler::list_objects))
-        .route("/bucket", get(media_handler::describe_bucket))
         .layer(axum::Extension(clients.clone()))
+        .route_layer(middleware::from_fn(media_handler::require_media_identity))
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
     // Message API 路由
@@ -293,7 +279,7 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
 
     Router::new()
         .nest("/api/v1/auth", auth_router)
-        .nest("/api/v1/medias", media_public_router.merge(media_router))
+        .nest("/api/v1/medias", media_router)
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)
         .nest("/api/v1/presence", presence_router)
@@ -303,3 +289,7 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         // 健康检查
         .route("/health", get(|| async { "OK" }))
 }
+
+#[cfg(test)]
+#[path = "router_media_tests.rs"]
+mod media_tests;

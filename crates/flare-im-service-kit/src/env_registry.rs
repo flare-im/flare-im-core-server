@@ -19,6 +19,7 @@ pub enum EnvOwner {
     Capability,
     Conversation,
     MessageIngest,
+    Media,
     Orchestrator,
     PushProxy,
     PushServer,
@@ -362,8 +363,18 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::TenantDefaults,
     ),
     env(
-        "FLARE_ADMIN_GATEWAY_TOKEN_SECRET",
-        EnvOwner::AdminGateway,
+        "FLARE_CONSOLE_PUBLIC_KEY",
+        EnvOwner::Shared,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+        EnvOwner::Shared,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+        EnvOwner::Shared,
         EnvPurpose::Auth,
     ),
     env(
@@ -462,15 +473,40 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_ADMIN_GATEWAY_BIND_ADDRESS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_API_GATEWAY_TENANT_POLICY",
+        EnvOwner::ApiGateway,
+        EnvPurpose::TenantDefaults,
+    ),
+    env(
+        "FLARE_API_GATEWAY_TENANT_RUNTIME_POSTGRES_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::Database,
+    ),
+    env(
         "FLARE_CONFIG_PATH",
         EnvOwner::Runtime,
         EnvPurpose::ConfigPath,
     ),
     env("FLARE_ENV", EnvOwner::Runtime, EnvPurpose::ConfigPath),
     env(
+        "FLARE_REGISTRY_MODE",
+        EnvOwner::Runtime,
+        EnvPurpose::Discovery,
+    ),
+    env(
         "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT",
         EnvOwner::Capability,
         EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_MEDIA_TEST_DATABASE_URL",
+        EnvOwner::Media,
+        EnvPurpose::TestOnly,
     ),
     env("FLARE_MQ_DEFAULT_BACKEND", EnvOwner::Shared, EnvPurpose::Mq),
     env(
@@ -633,6 +669,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL",
         EnvOwner::MessageIngest,
         EnvPurpose::Database,
+    ),
+    env(
+        "MESSAGE_INGEST_TENANT_POLICY",
+        EnvOwner::MessageIngest,
+        EnvPurpose::TenantDefaults,
     ),
     env(
         "FLARE_TENANT_TEST_DATABASE_URL",
@@ -1432,6 +1473,41 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "FLARE_USER_SYNC_INDEX_CHUNK",
         EnvOwner::Orchestrator,
         EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "FLARE_SUPERVISE_MANIFEST",
+        EnvOwner::Runtime,
+        EnvPurpose::ConfigPath,
+    ),
+    env(
+        "FLARE_SUPERVISE_HEALTH_SOCKET",
+        EnvOwner::Runtime,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "SIGNALING_ONLINE_MAX_DEVICES_PER_USER",
+        EnvOwner::SignalingOnline,
+        EnvPurpose::TenantDefaults,
+    ),
+    env(
+        "SIGNALING_ONLINE_TENANT_RUNTIME_POSTGRES_URL",
+        EnvOwner::SignalingOnline,
+        EnvPurpose::Database,
+    ),
+    env(
+        "PUSH_PROXY_EVENT_PROVENANCE_MODE",
+        EnvOwner::PushProxy,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_SERVER_EVENT_PROVENANCE_MODE",
+        EnvOwner::PushServer,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_EVENT_PROVENANCE_MODE",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
     ),
 ];
 

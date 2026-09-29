@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- 查询ACK状态 ---");
     for ack_info in &ack_infos {
         let status = ack_module
-            .get_ack_status(&ack_info.message_id, &ack_info.user_id)
+            .get_ack_status(&ack_info.tenant_id, &ack_info.message_id, &ack_info.user_id)
             .await?;
         if let Some(status) = status {
             println!(
@@ -86,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- 检查ACK存在性 ---");
     for ack_info in &ack_infos {
         let exists = ack_module
-            .exists_ack(&ack_info.message_id, &ack_info.user_id)
+            .exists_ack(&ack_info.tenant_id, &ack_info.message_id, &ack_info.user_id)
             .await?;
         println!("消息 '{}' 的ACK是否存在: {}", ack_info.message_id, exists);
     }
@@ -143,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Helper to create AckStatusInfo
 fn create_test_ack(msg_id: &str, user_id: &str, importance: ImportanceLevel) -> AckStatusInfo {
     AckStatusInfo {
+        tenant_id: "tenant-a".to_string(),
         message_id: msg_id.to_string(),
         user_id: user_id.to_string(),
         ack_type: Some(AckType::TransportAck),

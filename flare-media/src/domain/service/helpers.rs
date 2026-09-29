@@ -7,12 +7,19 @@ impl MediaService {
         format!("{:x}", hasher.finalize())
     }
 
-    pub(super) fn session_dir(&self, upload_id: &str) -> PathBuf {
-        self.config.chunk_root_dir.join(upload_id)
+    pub(super) fn session_dir(&self, upload_id: &str) -> Result<PathBuf> {
+        let valid = Uuid::parse_str(upload_id).is_ok_and(|id| id.to_string() == upload_id);
+        if !valid {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "invalid upload session id"
+            ));
+        }
+        Ok(self.config.chunk_root_dir.join(upload_id))
     }
 
     pub(super) async fn ensure_session_dir(&self, upload_id: &str) -> Result<PathBuf> {
-        let dir = self.session_dir(upload_id);
+        let dir = self.session_dir(upload_id)?;
         fs::create_dir_all(&dir).await.map_err(|e| {
             map_infra_error(
                 e,
@@ -28,7 +35,7 @@ impl MediaService {
         upload_id: &str,
         chunks: &[u32],
     ) -> Result<Vec<u8>> {
-        let dir = self.session_dir(upload_id);
+        let dir = self.session_dir(upload_id)?;
         let mut payload = Vec::new();
 
         for index in chunks {
@@ -55,7 +62,7 @@ impl MediaService {
     }
 
     pub(super) async fn cleanup_chunks(&self, upload_id: &str) -> Result<()> {
-        let dir = self.session_dir(upload_id);
+        let dir = self.session_dir(upload_id)?;
         if fs::metadata(&dir).await.is_ok() {
             fs::remove_dir_all(&dir).await.map_err(|e| {
                 map_infra_error(
@@ -138,6 +145,7 @@ impl MediaService {
                 infer_file_category(Some(session.file_type.as_str()), &session.mime_type)
             });
         let mut scope_context = UploadContext {
+            tenant_id: require_tenant(ctx)?,
             file_id,
             file_name: &session.file_name,
             mime_type: &session.mime_type,
@@ -174,6 +182,7 @@ impl MediaService {
         );
 
         let mut metadata = MediaFileMetadata {
+            owner_id: Some(tenant::require_owner(ctx)?.to_string()),
             file_id: file_id.to_string(),
             file_name: session.file_name.clone(),
             mime_type: session.mime_type.clone(),
@@ -466,9 +475,9 @@ impl MediaService {
         };
 
         let reference = MediaReference {
-            tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+            tenant_id: require_tenant(ctx)?.to_string(),
             reference_id: Self::deterministic_reference_id(
-                ctx.tenant_id().unwrap_or("0"),
+                require_tenant(ctx)?,
                 &metadata.file_id,
                 scope,
             ),
@@ -501,7 +510,7 @@ impl MediaService {
     ) -> Result<()> {
         if let Some(store) = &self.metadata_store {
             store
-                .save_metadata(metadata)
+                .save_metadata(ctx, metadata)
                 .await
                 .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "persist metadata"))?;
         }

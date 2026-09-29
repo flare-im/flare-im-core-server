@@ -38,7 +38,7 @@ struct ConversationTypingState {
 struct TypingAggregator {
     emit_window: Duration,
     ttl: Duration,
-    state: Mutex<HashMap<String, ConversationTypingState>>,
+    state: Mutex<HashMap<(String, String), ConversationTypingState>>,
 }
 
 impl TypingAggregator {
@@ -62,20 +62,22 @@ impl TypingAggregator {
     /// 返回 `Some(aggregate)` 表示应向会话订阅者下发该聚合；`None` 表示窗口内折叠（仅更新集合）。
     fn observe(
         &self,
+        tenant_id: &str,
         conversation_id: &str,
         user_id: &str,
         typing: bool,
     ) -> Option<TypingAggregatePacket> {
         let now = Instant::now();
         let mut guard = self.state.lock().ok()?;
+        let key = (tenant_id.to_string(), conversation_id.to_string());
 
-        if guard.len() >= TYPING_AGG_MAX_CONVERSATIONS && !guard.contains_key(conversation_id) {
+        if guard.len() >= TYPING_AGG_MAX_CONVERSATIONS && !guard.contains_key(&key) {
             let ttl = self.ttl;
             guard.retain(|_, st| st.users.values().any(|ts| now.duration_since(*ts) < ttl));
         }
 
         let ttl = self.ttl;
-        let entry = guard.entry(conversation_id.to_string()).or_default();
+        let entry = guard.entry(key.clone()).or_default();
         if typing {
             if !user_id.is_empty() {
                 entry.users.insert(user_id.to_string(), now);
@@ -108,7 +110,7 @@ impl TypingAggregator {
         let typing_count = entry.users.len() as u32;
         let is_empty = entry.users.is_empty();
         if is_empty {
-            guard.remove(conversation_id);
+            guard.remove(&key);
         }
         Some(TypingAggregatePacket {
             conversation_id: conversation_id.to_string(),
@@ -223,11 +225,38 @@ impl SendDataDomainService {
         if conversation_id.is_empty() {
             return;
         }
+        let Some(origin) = tx
+            .get_data::<crate::infrastructure::connection_context::AuthenticatedConnectionOrigin>(
+        ) else {
+            return;
+        };
+        let Some(tenant_id) = tx.tenant_id().filter(|tenant| {
+            !tenant.is_empty() && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+        }) else {
+            return;
+        };
+        if origin.connection_id() != sender_connection_id
+            || origin.tenant_id() != tenant_id
+            || tx.user_id() != Some(origin.user_id())
+        {
+            return;
+        }
+        // 聚合包只能由网关生成，客户端不能伪造其他用户的 typing 列表。
+        if matches!(
+            rc.payload.as_ref(),
+            Some(RealtimePayload::TypingAggregate(_))
+        ) {
+            return;
+        }
 
         let (relay_payload, include_sender) = match rc.payload.as_ref() {
             Some(RealtimePayload::Typing(typing)) => {
+                if typing.user_id != origin.user_id() {
+                    return;
+                }
                 // 超大群"N 人正在输入"聚合 + 风暴防护：逐键与人数两维都压成 ≤1 条/窗口/会话。
                 let Some(aggregate) = self.typing_aggregator.observe(
+                    tenant_id,
                     &conversation_id,
                     &typing.user_id,
                     typing.typing,
@@ -263,7 +292,7 @@ impl SendDataDomainService {
         // 本节点没有订阅者不代表别处没有：广播与本地投递数无关，否则「两个人各在一台网关上」
         // 这个最常见的情形恰好一条都收不到。
         self.broadcast
-            .broadcast(&conversation_id, relay_payload)
+            .broadcast(tx, &conversation_id, relay_payload)
             .await;
     }
 
@@ -427,7 +456,7 @@ mod tests {
 
     #[async_trait]
     impl IRealtimeBroadcastPort for CapturingBroadcast {
-        async fn broadcast(&self, conversation_id: &str, packet: Vec<u8>) {
+        async fn broadcast(&self, _tx: &Ctx, conversation_id: &str, packet: Vec<u8>) {
             self.calls
                 .lock()
                 .expect("broadcast mutex poisoned")
@@ -496,12 +525,27 @@ mod tests {
         }
     }
 
+    fn authenticated_ctx(connection_id: &str, user_id: &str, tenant_id: &str) -> Ctx {
+        Arc::new(
+            flare_server_core::Context::root()
+                .with_tenant_id(tenant_id)
+                .with_user_id(user_id)
+                .insert_data(
+                    crate::infrastructure::connection_context::AuthenticatedConnectionOrigin::new(
+                        connection_id.to_string(),
+                        user_id.to_string(),
+                        tenant_id.to_string(),
+                    ),
+                ),
+        )
+    }
+
     #[tokio::test]
     async fn typing_emits_aggregate_to_all_subscribers() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("conv-1", "conn-sender");
-        registry.join("conv-1", "conn-b");
-        registry.join("conv-1", "conn-c");
+        registry.join("t1", "conv-1", "conn-sender");
+        registry.join("t1", "conv-1", "conn-b");
+        registry.join("t1", "conv-1", "conn-c");
 
         let (service, push, broadcast) = service_with(registry);
 
@@ -510,7 +554,7 @@ mod tests {
             typing_packet("conv-1", "u-sender", true),
             0,
         );
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx = authenticated_ctx("conn-sender", "u-sender", "t1");
 
         let reply = service.execute(&ctx, &cmd).await.expect("relay ok");
         assert!(
@@ -558,11 +602,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_conversation_id_in_another_tenant_never_receives_realtime_frames() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "same", "conn-alice");
+        registry.join("t2", "same", "conn-bob");
+        let (service, push, _) = service_with(registry);
+        let ctx = authenticated_ctx("conn-alice", "alice", "t1");
+        let cmd = SendDataCommand::new(
+            "conn-alice".to_string(),
+            typing_packet("same", "alice", true),
+            0,
+        );
+        service.execute(&ctx, &cmd).await.expect("relay");
+        let calls = push.calls.lock().expect("calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ["conn-alice"]);
+    }
+
+    #[tokio::test]
+    async fn forged_realtime_identity_without_authenticated_origin_is_not_relayed() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "same", "conn-bob");
+        let (service, push, broadcast) = service_with(registry);
+        let forged: Ctx = Arc::new(
+            flare_server_core::Context::root()
+                .with_tenant_id("t1")
+                .with_user_id("alice"),
+        );
+        let cmd = SendDataCommand::new(
+            "conn-alice".to_string(),
+            typing_packet("same", "alice", true),
+            0,
+        );
+        service
+            .execute(&forged, &cmd)
+            .await
+            .expect("ephemeral drop");
+        assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
+        assert!(
+            broadcast
+                .calls
+                .lock()
+                .expect("calls mutex poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn typing_is_broadcast_even_when_this_node_has_nobody_to_tell() {
         // 这正是本轮要修的那个场景：Alice 在 A 节点、Bob 在 B 节点。A 节点除了 Alice 自己没有别人，
         // 从前就到此为止——于是 Bob 永远看不到 Alice 在打字。
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("conv-1", "conn-sender");
+        registry.join("t1", "conv-1", "conn-sender");
         let (service, _push, broadcast) = service_with(registry);
 
         let cmd = SendDataCommand::new(
@@ -570,7 +661,7 @@ mod tests {
             typing_packet("conv-1", "u-sender", true),
             0,
         );
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx = authenticated_ctx("conn-sender", "u-sender", "t1");
         service.execute(&ctx, &cmd).await.expect("relay ok");
 
         let broadcasts = broadcast.calls.lock().expect("broadcast mutex poisoned");
@@ -586,10 +677,10 @@ mod tests {
     async fn a_folded_typing_keystroke_is_neither_relayed_nor_broadcast() {
         // 聚合窗口内折叠的那些不发：广播频率由窗口决定（默认 1 条/秒/会话），不由按键决定。
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("conv-1", "conn-sender");
-        registry.join("conv-1", "conn-b");
+        registry.join("t1", "conv-1", "conn-sender");
+        registry.join("t1", "conv-1", "conn-b");
         let (service, push, broadcast) = service_with(registry);
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx = authenticated_ctx("conn-sender", "u-sender", "t1");
 
         for _ in 0..5 {
             let cmd = SendDataCommand::new(
@@ -619,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn a_signal_without_a_conversation_goes_nowhere() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("conv-1", "conn-b");
+        registry.join("t1", "conv-1", "conn-b");
         let (service, push, broadcast) = service_with(registry);
 
         let cmd = SendDataCommand::new(
@@ -627,7 +718,7 @@ mod tests {
             typing_packet("", "u-sender", true),
             0,
         );
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx = authenticated_ctx("conn-sender", "u-sender", "t1");
         service.execute(&ctx, &cmd).await.expect("relay ok");
 
         assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
@@ -649,20 +740,25 @@ mod tests {
             state: Mutex::new(HashMap::new()),
         };
         // 首条 typing → 发射，集合 {u1}
-        let first = aggregator.observe("c", "u1", true).expect("first emits");
+        let first = aggregator
+            .observe("t1", "c", "u1", true)
+            .expect("first emits");
         assert_eq!(first.typing_count, 1);
         assert_eq!(first.typing_user_ids, vec!["u1".to_string()]);
         // 窗口内第二个用户 typing → 折叠（不发），但集合更新为 {u1,u2}
         assert!(
-            aggregator.observe("c", "u2", true).is_none(),
+            aggregator.observe("t1", "c", "u2", true).is_none(),
             "second typing within window is folded"
         );
         // stop 立即发射，反映当前集合（u2 移除后 = {u1}）
-        let stop = aggregator.observe("c", "u2", false).expect("stop emits");
+        let stop = aggregator
+            .observe("t1", "c", "u2", false)
+            .expect("stop emits");
         assert_eq!(stop.typing_count, 1);
         assert_eq!(stop.typing_user_ids, vec!["u1".to_string()]);
         // 不同会话独立、立即发射
-        assert!(aggregator.observe("c2", "u1", true).is_some());
+        assert!(aggregator.observe("t1", "c2", "u1", true).is_some());
+        assert!(aggregator.observe("t2", "c", "u2", true).is_some());
     }
 
     #[test]
@@ -672,9 +768,9 @@ mod tests {
             ttl: Duration::from_millis(6000),
             state: Mutex::new(HashMap::new()),
         };
-        assert!(aggregator.observe("c", "u1", true).is_some());
+        assert!(aggregator.observe("t1", "c", "u1", true).is_some());
         assert!(
-            aggregator.observe("c", "u2", true).is_some(),
+            aggregator.observe("t1", "c", "u2", true).is_some(),
             "window=0 emits on every event"
         );
     }
@@ -684,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn a_signal_with_no_local_audience_still_reaches_the_peers() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("conv-1", "conn-sender");
+        registry.join("t1", "conv-1", "conn-sender");
         let (service, push, broadcast) = service_with(registry);
         let packet = DataPacket {
             payload: Some(DataPayload::RealtimeControl(RealtimeControlPacket {
@@ -696,7 +792,7 @@ mod tests {
             })),
         };
         let cmd = SendDataCommand::new("conn-sender".to_string(), packet, 0);
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx = authenticated_ctx("conn-sender", "u-sender", "t1");
         service.execute(&ctx, &cmd).await.expect("noop ok");
         assert!(
             push.calls.lock().expect("calls mutex poisoned").is_empty(),
