@@ -1,0 +1,171 @@
+# Flare IM Core single-container process manifest. This is NOT the current
+# one-process-per-container Compose mode. DEP-08 supplies the matching Cell env.
+version = 1
+shared_env = [
+  "PATH", "HOME", "TZ", "RUST_LOG", "RUST_BACKTRACE", "SSL_CERT_FILE", "AWS_CA_BUNDLE",
+  "NO_PROXY", "no_proxy", "FLARE_CONFIG_PATH", "FLARE_ENV", "FLARE_REGISTRY_MODE",
+  "FLARE_MQ_DEFAULT_BACKEND", "FLARE_POSTGRES_URL", "FLARE_REDIS_URL_BASE",
+  "FLARE_NATS_URL", "FLARE_KAFKA_BROKERS", "FLARE_CONSUL_ENDPOINT",
+  "CONSUL_HTTP_ADDR", "CONSUL_DISCOVERY_REFRESH_INTERVAL", "CONSUL_DISCOVER_CACHE_TTL_SECS",
+  "DISCOVERY_CHANNEL_TIMEOUT", "DISCOVERY_CLIENT_CACHE",
+  "SERVICE_ADVERTISE_HOST", "SERVICE_HEARTBEAT_INTERVAL",
+  "DATABASE_URL", "REDIS_URL", "NATS_URL", "GRPC_CONNECT_TIMEOUT_SECS",
+  "GRPC_REQUEST_TIMEOUT_SECS", "FLARE_EVENT_SLOW_LOG_MS", "FLARE_SYNC_SLOW_LOG_MS",
+]
+shared_env_prefixes = ["TRACING_"]
+# Do not silently fall back to the config's localhost/dev infrastructure values.
+required_env = [
+  "FLARE_CONFIG_PATH", "FLARE_MQ_DEFAULT_BACKEND", "FLARE_POSTGRES_URL",
+  "FLARE_REDIS_URL_BASE", "FLARE_NATS_URL", "FLARE_CONSUL_ENDPOINT",
+  "SERVICE_ADVERTISE_HOST",
+]
+# Only explicit static mode may omit Consul. Unset, configured, or invalid
+# FLARE_REGISTRY_MODE values must not bypass the required endpoint.
+required_env_unless = [
+  { name = "FLARE_CONSUL_ENDPOINT", when_env = "FLARE_REGISTRY_MODE", equals = "static" },
+]
+forbidden_env = [
+  "FLARE_CONSOLE_SIGNING_KEY", "FLARE_CONSOLE_PRIVATE_KEY",
+  "FLARE_CONTROL_DATABASE_URL", "FLARE_PLATFORM_CONTROL_DATABASE_URL",
+  "FLARE_ADMIN_GATEWAY_TOKEN_SECRET", "FLARE_ADMIN_GATEWAY_AUTH_APP_CREDENTIALS",
+]
+
+[restart]
+min_delay_ms = 500
+max_delay_ms = 30000
+reset_after_secs = 60
+stop_grace_secs = 20
+
+[[services]]
+name = "signaling-online"
+command = "/usr/local/bin/flare-signaling-online"
+inherit_env_prefixes = ["SIGNALING_ONLINE_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CONSOLE_PUBLIC_KEY"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:50061"
+
+[[services]]
+name = "signaling-route"
+command = "/usr/local/bin/flare-signaling-route"
+inherit_env_prefixes = ["SIGNALING_ROUTE_", "ROUTER_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "ORCHESTRATOR_SERVICE"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:50062"
+
+[[services]]
+name = "capability"
+command = "/usr/local/bin/flare-capability"
+inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CONSOLE_PUBLIC_KEY", "CONFIG_CENTER_ENDPOINT", "TENANT_ID"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:50110"
+
+[[services]]
+name = "conversation"
+command = "/usr/local/bin/flare-conversation"
+inherit_env_prefixes = ["CONVERSATION_"]
+tcp_health = "127.0.0.1:50090"
+
+[[services]]
+name = "message-ingest"
+command = "/usr/local/bin/flare-message-ingest"
+inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CAPABILITY_GRPC_URI"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "MESSAGE_INGEST_HOOKS_CONFIG"]
+tcp_health = "127.0.0.1:50182"
+[services.environment]
+MESSAGE_INGEST_TENANT_POLICY = "strict"
+
+[[services]]
+name = "orchestrator"
+command = "/usr/local/bin/flare-orchestrator"
+inherit_env_prefixes = ["MESSAGE_ORCHESTRATOR_", "ORCHESTRATOR_"]
+inherit_env = ["FLARE_USER_SYNC_INDEX_CHUNK"]
+tcp_health = "127.0.0.1:50181"
+
+[[services]]
+name = "storage-writer"
+command = "/usr/local/bin/flare-storage-writer"
+inherit_env_prefixes = ["STORAGE_"]
+inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
+
+[[services]]
+name = "storage-reader"
+command = "/usr/local/bin/flare-storage-reader"
+inherit_env_prefixes = ["STORAGE_"]
+inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
+tcp_health = "127.0.0.1:60083"
+
+[[services]]
+name = "sync-orchestrator"
+command = "/usr/local/bin/flare-sync-orchestrator"
+inherit_env_prefixes = ["SYNC_ORCHESTRATOR_", "SNAPSHOT_", "BOOTSTRAP_", "MULTI_SYNC_"]
+tcp_health = "127.0.0.1:60084"
+
+[[services]]
+name = "push-server"
+command = "/usr/local/bin/flare-push-server"
+# Signed MQ provenance is not implemented yet. Do not crash-loop the default
+# all-service supervisor on the intentionally paused Push consumer.
+enabled_if_env = "PUSH_SERVER_SIGNED_PROVENANCE_READY"
+inherit_env_prefixes = ["PUSH_SERVER_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+
+[[services]]
+name = "push-proxy"
+command = "/usr/local/bin/flare-push-proxy"
+inherit_env_prefixes = ["PUSH_PROXY_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:50091"
+
+[[services]]
+name = "push-worker"
+command = "/usr/local/bin/flare-push-worker"
+enabled_if_env = "PUSH_WORKER_SIGNED_PROVENANCE_READY"
+inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_GETUI_"]
+inherit_env = ["ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+
+[[services]]
+name = "media"
+command = "/usr/local/bin/flare-media"
+inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_"]
+inherit_env = ["FLARE_OBJECT_STORE_PROFILE"]
+required_env = ["FLARE_S3_ENDPOINT", "FLARE_S3_ACCESS_KEY", "FLARE_S3_SECRET_KEY"]
+tcp_health = "127.0.0.1:60081"
+
+[[services]]
+name = "api-gateway"
+command = "/usr/local/bin/flare-api-gateway"
+inherit_env_prefixes = ["FLARE_API_GATEWAY_", "GRPC_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT"]
+required_env = ["FLARE_API_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+tcp_health = "127.0.0.1:50050"
+[services.environment]
+FLARE_API_GATEWAY_AUTH_DEV_ISSUE = "false"
+FLARE_API_GATEWAY_TENANT_POLICY = "strict"
+
+[[services]]
+name = "signaling-gateway"
+command = "/usr/local/bin/flare-signaling-gateway"
+inherit_env_prefixes = ["ACCESS_GATEWAY_", "GATEWAY_"]
+inherit_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+required_env = ["ACCESS_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:60051"
+[services.environment]
+ACCESS_GATEWAY_TENANT_POLICY = "strict"
+# PortConfig must see both variables: WS 60051, QUIC 60052, gRPC 60060.
+# Fixed child values override any parent PORT/GRPC_PORT and match GatewayRouter.
+PORT = "60051"
+GRPC_PORT = "60060"
+
+[[services]]
+name = "admin-gateway"
+command = "/usr/local/bin/flare-admin-gateway"
+enabled_if_env = "FLARE_CONSOLE_PUBLIC_KEY"
+inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
+inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
+required_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
+tcp_health = "127.0.0.1:50051"
+[services.environment]
+FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE = "false"

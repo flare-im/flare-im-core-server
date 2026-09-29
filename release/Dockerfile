@@ -93,7 +93,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/flare-im-core/target \
-    cargo build --release \
+    cargo build --locked --release \
         -p flare-api-gateway \
         -p flare-admin-gateway \
         -p flare-signaling-gateway \
@@ -110,6 +110,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p flare-push-worker \
         -p flare-capability \
         -p flare-media \
+        -p flare-supervise \
     # The cache mount disappears with the layer, so copy the binaries out while it's
     # still mounted. Forgetting this yields an image with an empty /out and a build
     # that "succeeded".
@@ -137,6 +138,12 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
 
 COPY --from=builder /out/ /usr/local/bin/
 COPY flare-im-core/config /etc/flare/config
+COPY flare-im-core/release/supervise-core.toml /etc/flare/supervise-core.toml
+
+# The reusable binary is flare-supervise; Core's documented CLI is
+# `flare-core supervise --services=all|a,b`. Existing Compose services keep
+# their explicit command and therefore do not enter the supervisor mode.
+RUN ln -s flare-supervise /usr/local/bin/flare-core
 
 USER flare
 WORKDIR /home/flare
@@ -149,5 +156,7 @@ ENV FLARE_CONFIG_PATH=/etc/flare/config \
     MESSAGE_INGEST_HOOKS_CONFIG=/etc/flare/config/hooks.toml \
     RUST_LOG=info
 
-# No default CMD: this image carries every service and the compose file names the one to
-# run. A default would silently start the wrong process when someone forgets `command:`.
+# The existing one-process-per-container Compose declares an explicit command
+# for every service. A container started without one uses the opt-in Core Cell
+# supervisor and its manifest. DEP-08 supplies a supervisor-specific healthcheck.
+CMD ["flare-core", "supervise", "--services=all"]

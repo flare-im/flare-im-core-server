@@ -46,6 +46,7 @@ members = [
 
     # 运维工具
     "tools/flare-dlq-replay",
+    "tools/flare-supervise",
 ]
 
 resolver = "2"
