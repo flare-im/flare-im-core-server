@@ -1,0 +1,29 @@
+# DEP-08 one-shot Core ledger migrator. The caller must supply an immutable,
+# reviewed Python/Debian base image reference; this Dockerfile has no default.
+# Build from the flare-im-core repository root, not the parent source workspace.
+ARG MIGRATOR_BASE_IMAGE
+FROM ${MIGRATOR_BASE_IMAGE}
+ARG MIGRATOR_BASE_IMAGE
+
+# FROM resolves before RUN, so the caller must still use an approved registry;
+# this gate prevents a mutable tag or unsupported Python from producing an image.
+RUN printf '%s\n' "$MIGRATOR_BASE_IMAGE" \
+      | grep -Eq '^[^[:space:]@]+@sha256:[a-f0-9]{64}$' \
+    && python3 -c 'import sys; assert sys.version_info >= (3, 10)'
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 flare \
+    && useradd --system --uid 10001 --gid 10001 --create-home flare
+
+WORKDIR /opt/flare-im-core
+COPY --chown=10001:10001 migrations/ ./migrations/
+COPY --chown=10001:10001 tools/flare-migrate/ ./tools/flare-migrate/
+
+USER 10001:10001
+# DATABASE_URL or PG* variables are injected only into the one-shot job.
+# Existing schemas require a separately reviewed --baseline-admission file;
+# this image never copies dev init.sql or silently adopts an existing schema.
+ENTRYPOINT ["python3", "/opt/flare-im-core/tools/flare-migrate/flare_migrate.py"]
+CMD ["run"]

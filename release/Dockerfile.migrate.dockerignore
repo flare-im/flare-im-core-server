@@ -1,0 +1,11 @@
+*
+!migrations/
+!migrations/**
+!tools/
+!tools/flare-migrate/
+!tools/flare-migrate/flare_migrate.py
+!tools/flare-migrate/catalog.sql
+!tools/flare-migrate/ledger_catalog.sql
+!tools/flare-migrate/ledger-schema.json
+!tools/flare-migrate/schema/
+!tools/flare-migrate/schema/*.json

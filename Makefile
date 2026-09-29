@@ -50,6 +50,19 @@ check:
 test:
 	$(CARGO) test --all
 
+.PHONY: db-migrate check-schema dev-reset test-migrations
+db-migrate:
+	bash scripts/migrate_db.sh
+
+check-schema:
+	bash scripts/check_schema_parity.sh
+
+dev-reset:
+	bash scripts/dev_reset_db.sh
+
+test-migrations:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/flare-migrate -p 'test_unit.py' -v
+
 clean:
 	$(CARGO) clean
 

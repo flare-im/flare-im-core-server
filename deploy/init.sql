@@ -1,5 +1,5 @@
 -- ============================================================================
--- Flare IM Core 数据库初始化（唯一入口）
+-- Flare IM Core 开发重置快照（仅 make dev-reset；生产使用 migrations/ 账本）
 -- ============================================================================
 -- 设计依据:
 --   - common/message.proto   (Message, MessageStatus, MessageSource, MessageType, MessageTimeline, MessageReadRecord)
@@ -10,7 +10,7 @@
 --   - storage.proto         (StoreMessage, VisibilityStatus)
 --   - flare-capability: hook_configs / hook_executions（Hook 引擎）；capability_*（CapabilityService 策略）
 -- 数据库: PostgreSQL + TimescaleDB
--- 维护约定: 与本仓 IM 相关的 DDL 变更请在本文件增改，勿另建零散 .sql，便于单源对齐与评审。
+-- 维护约定: 生产 DDL 只追加 migrations/*.sql；本文件同步最新开发快照，不用于升级已有数据库。
 -- 开发阶段: 可随时删库或清空数据卷后对目标 PostgreSQL 执行本文件全量初始化
 --   例: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/init.sql
 -- 表结构: 凡 CREATE TABLE 前须有对应 DROP TABLE IF EXISTS ... CASCADE。
@@ -18,6 +18,9 @@
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+-- dev-reset invalidates the old ledger together with Core data.
+DROP TABLE IF EXISTS flare_schema_migrations;
 
 -- ============================================================================
 -- 1. 租户与支撑层
@@ -671,6 +674,7 @@ DROP TABLE IF EXISTS media_assets CASCADE;
 
 CREATE TABLE media_assets (
     tenant_id TEXT NOT NULL,
+    owner_id TEXT,
     file_id TEXT NOT NULL,
     file_name TEXT NOT NULL,
     mime_type TEXT NOT NULL,
@@ -689,6 +693,7 @@ CREATE TABLE media_assets (
 );
 COMMENT ON TABLE media_assets IS '媒体资产元数据';
 COMMENT ON COLUMN media_assets.tenant_id IS '租户 ID';
+COMMENT ON COLUMN media_assets.owner_id IS 'Authenticated uploader; NULL legacy private assets require ownership review';
 COMMENT ON COLUMN media_assets.file_id IS '文件唯一标识（租户内唯一）';
 COMMENT ON COLUMN media_assets.file_name IS '文件名';
 COMMENT ON COLUMN media_assets.mime_type IS 'MIME 类型';
@@ -704,6 +709,9 @@ COMMENT ON COLUMN media_assets.status IS '状态（active 等）';
 COMMENT ON COLUMN media_assets.grace_expires_at IS '宽限过期时间';
 COMMENT ON COLUMN media_assets.access_type IS '访问类型（private/public）';
 CREATE INDEX IF NOT EXISTS idx_media_assets_tenant_uploaded ON media_assets(tenant_id, uploaded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_tenant_orphan_due
+    ON media_assets(tenant_id, grace_expires_at, file_id)
+    WHERE reference_count = 0 AND status = 'pending' AND grace_expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_media_assets_sha256_active
     ON media_assets(sha256, uploaded_at DESC)
     WHERE sha256 IS NOT NULL

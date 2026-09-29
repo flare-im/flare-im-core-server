@@ -1,0 +1,85 @@
+{
+  "kind": "r",
+  "rules": 0,
+  "columns": [
+    {
+      "name": "admission_sha256",
+      "type": "text",
+      "default": null,
+      "identity": "",
+      "not_null": false,
+      "generated": ""
+    },
+    {
+      "name": "applied_at",
+      "type": "timestamp with time zone",
+      "default": "CURRENT_TIMESTAMP",
+      "identity": "",
+      "not_null": true,
+      "generated": ""
+    },
+    {
+      "name": "baseline_admission",
+      "type": "jsonb",
+      "default": null,
+      "identity": "",
+      "not_null": false,
+      "generated": ""
+    },
+    {
+      "name": "checksum",
+      "type": "text",
+      "default": null,
+      "identity": "",
+      "not_null": true,
+      "generated": ""
+    },
+    {
+      "name": "version",
+      "type": "bigint",
+      "default": null,
+      "identity": "",
+      "not_null": true,
+      "generated": ""
+    }
+  ],
+  "indexes": [
+    {
+      "ready": true,
+      "valid": true,
+      "unique": true,
+      "primary": true,
+      "definition": "CREATE UNIQUE INDEX flare_schema_migrations_pkey ON public.flare_schema_migrations USING btree (version)"
+    }
+  ],
+  "triggers": 0,
+  "constraints": [
+    {
+      "name": "flare_schema_migrations_admission_check",
+      "type": "c",
+      "deferred": false,
+      "validated": true,
+      "deferrable": false,
+      "definition": "CHECK ((((baseline_admission IS NULL) AND (admission_sha256 IS NULL)) OR ((version = 1) AND (baseline_admission IS NOT NULL) AND (admission_sha256 IS NOT NULL) AND (jsonb_typeof(baseline_admission) = 'object'::text) AND (admission_sha256 ~ '^[0-9a-f]{64}$'::text))))"
+    },
+    {
+      "name": "flare_schema_migrations_checksum_check",
+      "type": "c",
+      "deferred": false,
+      "validated": true,
+      "deferrable": false,
+      "definition": "CHECK ((checksum ~ '^[0-9a-f]{64}$'::text))"
+    },
+    {
+      "name": "flare_schema_migrations_pkey",
+      "type": "p",
+      "deferred": false,
+      "validated": true,
+      "deferrable": false,
+      "definition": "PRIMARY KEY (version)"
+    }
+  ],
+  "persistence": "p",
+  "row_security": false,
+  "force_row_security": false
+}
