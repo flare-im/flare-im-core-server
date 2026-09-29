@@ -20,7 +20,7 @@ impl ApplicationBootstrap {
             app_config,
             &service_config.runtime,
             STORAGE_WRITER,
-        );
+        )?;
 
         // 使用 Wire 风格的依赖注入构建应用上下文
         let context = self::wire::initialize(app_config).await?;

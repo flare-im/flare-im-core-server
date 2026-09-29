@@ -2,7 +2,11 @@
 //!
 //! 为各个服务模块提供统一的 Prometheus 指标收集与导出能力。
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use axum::{
     Router,
@@ -10,15 +14,44 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use flare_core_runtime::ServiceRuntime;
+use flare_server_core::error::{FlareError, Result};
 use once_cell::sync::Lazy;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
-    Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use tokio::{net::TcpListener, sync::oneshot};
 
+use crate::config::ServiceMetricsSection;
+
 /// 全局指标注册表
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
+
+/// 关闭租户标签时 `tenant_id` 标签的统一取值。
+pub const AGGREGATED_TENANT_LABEL: &str = "_all";
+
+static TENANT_LABELS: AtomicBool = AtomicBool::new(true);
+
+/// 设置 `[metrics] tenant_labels`。配置加载时调用一次；关闭后按租户的数据改走用量流与
+/// trace/log，指标只保留聚合序列，避免云上租户数把时序基数放大（设计 §13.2）。
+pub fn set_tenant_labels(enabled: bool) {
+    TENANT_LABELS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn tenant_labels_enabled() -> bool {
+    TENANT_LABELS.load(Ordering::Relaxed)
+}
+
+/// 指标 `tenant_id` 标签取值：开关打开时是真实租户，关闭时统一为 [`AGGREGATED_TENANT_LABEL`]。
+/// 所有带 `tenant_id` 标签的写入都必须经过这里。
+pub fn tenant_label(tenant_id: &str) -> &str {
+    if tenant_labels_enabled() {
+        tenant_id
+    } else {
+        AGGREGATED_TENANT_LABEL
+    }
+}
 
 /// Prometheus 指标 HTTP 出口配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +86,43 @@ impl MetricsEndpointConfig {
         }
     }
 
-    pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+    pub fn socket_addr(&self) -> std::result::Result<SocketAddr, std::net::AddrParseError> {
         format!("{}:{}", self.address, self.port).parse()
+    }
+
+    /// 由 `[services.<name>.metrics]` 段解析。段缺失或 `enabled = false` 时关闭；
+    /// 启用却没给端口、或地址非法，属于显式配置错误，拒绝启动。
+    pub fn from_section(
+        service_name: &str,
+        section: Option<&ServiceMetricsSection>,
+    ) -> Result<Self> {
+        let Some(section) = section else {
+            return Ok(Self::disabled());
+        };
+        if section.enabled == Some(false) {
+            return Ok(Self::disabled());
+        }
+        let port = section.port.filter(|port| *port != 0).ok_or_else(|| {
+            FlareError::system(format!(
+                "[services.{service_name}.metrics] is enabled but has no port"
+            ))
+        })?;
+        let address = section
+            .address
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("0.0.0.0");
+        let mut config = Self::new(address, port);
+        if let Some(path) = section.path.as_deref() {
+            config = config.with_path(path);
+        }
+        config.socket_addr().map_err(|error| {
+            FlareError::system(format!(
+                "[services.{service_name}.metrics] invalid address {address}:{port}: {error}"
+            ))
+        })?;
+        Ok(config)
     }
 }
 
@@ -76,7 +144,7 @@ fn normalize_metrics_path(path: String) -> String {
 }
 
 /// 将全局注册表编码为 Prometheus text format。
-pub fn encode_prometheus_text() -> Result<String, prometheus::Error> {
+pub fn encode_prometheus_text() -> std::result::Result<String, prometheus::Error> {
     let encoder = TextEncoder::new();
     let metric_families = REGISTRY.gather();
     let mut buffer = Vec::new();
@@ -104,7 +172,7 @@ async fn metrics_handler() -> Response {
 pub async fn serve_prometheus_metrics(
     config: MetricsEndpointConfig,
     shutdown_rx: oneshot::Receiver<()>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !config.enabled {
         let _ = shutdown_rx.await;
         return Ok(());
@@ -128,6 +196,68 @@ pub async fn serve_prometheus_metrics(
         .await?;
 
     Ok(())
+}
+
+/// 进程身份指标：每个挂了 `/metrics` 的进程至少导出这两条，
+/// 抓取目标即使没有业务指标也能区分服务、版本与重启。
+struct ServiceIdentityMetrics {
+    info: IntGaugeVec,
+    start_time_seconds: Gauge,
+}
+
+static SERVICE_IDENTITY: Lazy<ServiceIdentityMetrics> = Lazy::new(|| {
+    let info = IntGaugeVec::new(
+        Opts::new(
+            "flare_service_info",
+            "Flare service identity; value is always 1",
+        ),
+        &["service", "version"],
+    )
+    .expect("flare_service_info metric definition is static");
+    let start_time_seconds = Gauge::new(
+        "flare_service_start_time_seconds",
+        "Unix time the service process started serving metrics",
+    )
+    .expect("flare_service_start_time_seconds metric definition is static");
+    let _ = REGISTRY.register(Box::new(info.clone()));
+    let _ = REGISTRY.register(Box::new(start_time_seconds.clone()));
+    ServiceIdentityMetrics {
+        info,
+        start_time_seconds,
+    }
+});
+
+fn record_service_identity(service_name: &str) {
+    let identity = &*SERVICE_IDENTITY;
+    identity
+        .info
+        .with_label_values(&[service_name, env!("CARGO_PKG_VERSION")])
+        .set(1);
+    if identity.start_time_seconds.get() == 0.0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs_f64())
+            .unwrap_or_default();
+        identity.start_time_seconds.set(now);
+    }
+}
+
+/// 给运行时挂上 `/metrics` 出口（关闭时原样返回）。
+///
+/// 共享运行时（`build_service_runtime_plan` / `build_background_service_runtime`）与
+/// 自带 HTTP 装配的网关都经这里，保证监听、优雅停机与身份指标一致。
+pub fn attach_metrics_endpoint(
+    runtime: ServiceRuntime,
+    service_name: &str,
+    config: MetricsEndpointConfig,
+) -> ServiceRuntime {
+    if !config.enabled {
+        return runtime;
+    }
+    record_service_identity(service_name);
+    runtime.add_spawn_with_shutdown(format!("{service_name}-metrics"), move |shutdown_rx| {
+        serve_prometheus_metrics(config, shutdown_rx)
+    })
 }
 
 /// 存储写入服务指标
@@ -600,17 +730,18 @@ impl AccessGatewayMetrics {
     /// 于是 /metrics 里永远是 0。运维在故障时看到 push_success_total 0
     /// 会直接断定「推送全挂」，而实际推送好好的——比没有这个指标更糟。
     pub fn record_push_result(&self, tenant_id: &str, ok: i32, fail: i32) {
+        let tenant = tenant_label(tenant_id);
         if ok > 0 {
             self.push_success_total
-                .with_label_values(&[tenant_id])
+                .with_label_values(&[tenant])
                 .inc_by(ok as u64);
             self.messages_pushed_total
-                .with_label_values(&[tenant_id])
+                .with_label_values(&[tenant])
                 .inc_by(ok as u64);
         }
         if fail > 0 {
             self.push_failure_total
-                .with_label_values(&["delivery_failed", tenant_id])
+                .with_label_values(&["delivery_failed", tenant])
                 .inc_by(fail as u64);
         }
     }
@@ -621,7 +752,7 @@ impl AccessGatewayMetrics {
             return;
         }
         self.push_latency_seconds
-            .with_label_values(&[tenant_id])
+            .with_label_values(&[tenant_label(tenant_id)])
             .observe(seconds);
     }
 
@@ -637,7 +768,7 @@ impl AccessGatewayMetrics {
     /// 记录收到的客户端 ACK。
     pub fn record_client_ack(&self, tenant_id: &str) {
         self.client_ack_received_total
-            .with_label_values(&[tenant_id])
+            .with_label_values(&[tenant_label(tenant_id)])
             .inc();
     }
 }
@@ -680,6 +811,103 @@ mod tests {
                 .parse::<SocketAddr>()
                 .expect("valid literal")
         );
+    }
+
+    #[test]
+    fn metrics_section_absent_or_disabled_means_no_endpoint() {
+        assert!(
+            !MetricsEndpointConfig::from_section("svc", None)
+                .unwrap()
+                .enabled
+        );
+        let disabled = ServiceMetricsSection {
+            enabled: Some(false),
+            port: Some(19190),
+            ..ServiceMetricsSection::default()
+        };
+        assert!(
+            !MetricsEndpointConfig::from_section("svc", Some(&disabled))
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn metrics_section_resolves_address_port_and_path() {
+        let section = ServiceMetricsSection {
+            port: Some(19190),
+            path: Some("prom".to_string()),
+            ..ServiceMetricsSection::default()
+        };
+        let config = MetricsEndpointConfig::from_section("conversation", Some(&section)).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.address, "0.0.0.0");
+        assert_eq!(config.port, 19190);
+        assert_eq!(config.path, "/prom");
+    }
+
+    #[test]
+    fn enabled_metrics_section_without_port_or_with_bad_address_fails() {
+        let no_port = ServiceMetricsSection::default();
+        let error = MetricsEndpointConfig::from_section("media", Some(&no_port))
+            .expect_err("port is required");
+        assert!(error.to_string().contains("services.media.metrics"));
+
+        let bad_address = ServiceMetricsSection {
+            address: Some("not an ip".to_string()),
+            port: Some(19191),
+            ..ServiceMetricsSection::default()
+        };
+        assert!(MetricsEndpointConfig::from_section("media", Some(&bad_address)).is_err());
+    }
+
+    #[test]
+    fn tenant_label_switch_aggregates_tenants() {
+        set_tenant_labels(false);
+        assert_eq!(tenant_label("tenant-a"), AGGREGATED_TENANT_LABEL);
+        set_tenant_labels(true);
+        assert_eq!(tenant_label("tenant-a"), "tenant-a");
+    }
+
+    #[tokio::test]
+    async fn attached_endpoint_serves_identity_metrics_and_stops_on_shutdown() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = listener.local_addr().expect("probe addr").port();
+        drop(listener);
+
+        let config = MetricsEndpointConfig::new("127.0.0.1", port);
+        record_service_identity("identity-probe");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(serve_prometheus_metrics(config, shutdown_rx));
+
+        let mut body = String::new();
+        for _ in 0..50 {
+            if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                stream
+                    .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("write request");
+                stream
+                    .read_to_string(&mut body)
+                    .await
+                    .expect("read response");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            body.starts_with("HTTP/1.1 200"),
+            "unexpected response: {body}"
+        );
+        assert!(body.contains("flare_service_info{service=\"identity-probe\""));
+        assert!(body.contains("flare_service_start_time_seconds"));
+
+        shutdown_tx.send(()).expect("server still running");
+        server
+            .await
+            .expect("server task joins")
+            .expect("server exits cleanly");
     }
 
     #[test]

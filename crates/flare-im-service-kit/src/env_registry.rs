@@ -1485,6 +1485,21 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Observability,
     ),
     env(
+        "FLARE_LOG_FORMAT",
+        EnvOwner::Runtime,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        EnvOwner::Runtime,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "OTEL_SERVICE_NAME",
+        EnvOwner::Runtime,
+        EnvPurpose::Observability,
+    ),
+    env(
         "SIGNALING_ONLINE_MAX_DEVICES_PER_USER",
         EnvOwner::SignalingOnline,
         EnvPurpose::TenantDefaults,

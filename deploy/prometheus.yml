@@ -14,9 +14,9 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # Flare IM Core 已实际启动 /metrics 的服务。目标名使用
-  # docker-compose.stack.yml 的服务名；端口与 config/services/*.toml 一致。
-  # 其他服务接入 serve_prometheus_metrics 后再增加抓取目标。
+  # Flare IM Core 全部 16 个服务的 /metrics。目标名使用 docker-compose.stack.yml 的服务名；
+  # 端口与 config/services/*.toml 一致：19180–19183、19186 为服务专属 metrics_* 字段，
+  # 19187–19197 为共享运行时的 [services.<name>.metrics] 段。
   - job_name: 'message-ingest'
     static_configs:
       - targets: ['message-ingest:19180']
@@ -62,6 +62,94 @@ scrape_configs:
   # 中间件服务 —— 只抓取有 /metrics HTTP 端点的服务
   # jetstream/redis/postgres 使用自有协议，不能直接 scrape，
   # 需要单独的 exporter（如 jetstream_exporter、redis_exporter、postgres_exporter）
+
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:19187']
+        labels:
+          service: 'api-gateway'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'admin-gateway'
+    static_configs:
+      - targets: ['admin-gateway:19188']
+        labels:
+          service: 'admin-gateway'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'capability'
+    static_configs:
+      - targets: ['capability:19189']
+        labels:
+          service: 'capability'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'conversation'
+    static_configs:
+      - targets: ['conversation:19190']
+        labels:
+          service: 'conversation'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'media'
+    static_configs:
+      - targets: ['media:19191']
+        labels:
+          service: 'media'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'push-proxy'
+    static_configs:
+      - targets: ['push-proxy:19192']
+        labels:
+          service: 'push-proxy'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'push-server'
+    static_configs:
+      - targets: ['push-server:19193']
+        labels:
+          service: 'push-server'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'signaling-online'
+    static_configs:
+      - targets: ['signaling-online:19194']
+        labels:
+          service: 'signaling-online'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'signaling-route'
+    static_configs:
+      - targets: ['signaling-route:19195']
+        labels:
+          service: 'signaling-route'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'storage-reader'
+    static_configs:
+      - targets: ['storage-reader:19196']
+        labels:
+          service: 'storage-reader'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'sync-orchestrator'
+    static_configs:
+      - targets: ['sync-orchestrator:19197']
+        labels:
+          service: 'sync-orchestrator'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
 
   - job_name: 'loki'
     static_configs:

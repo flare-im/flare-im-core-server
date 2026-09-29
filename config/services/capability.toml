@@ -21,3 +21,8 @@ service_name = "flare-strom-sfu"
 
 # 本地静态 SFU（无 Consul）时可改用：
 # FLARE_MEDIA_CONTROL_GRPC_ENDPOINT=http://127.0.0.1:50060
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.capability.metrics]
+address = "0.0.0.0"
+port = 19189

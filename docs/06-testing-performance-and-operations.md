@@ -254,8 +254,28 @@ GROUP BY write_state;
 
 低基数要求：
 
-- metrics label 不要使用 tenant_id、conversation_id、message_id。
+- metrics label 不要使用 user_id、device_id、conversation_id、message_id。
+- `tenant_id` 标签受 `config/base.toml` 的 `[metrics] tenant_labels` 控制：私有化默认开；云部署关闭，
+  关闭后该标签统一为 `_all`，按租户的数据走用量流与 trace/log。
 - trace/log 可以带 request_id、trace_id、message_id。
+
+### 指标出口、日志与 trace
+
+全部 16 个服务都暴露 `/metrics`，端口表以 `config/services/*.toml` 为准，`deploy/prometheus.yml` 与之一一对应
+（`scripts/check_metrics_endpoint_served.sh` 校验端口唯一且都有抓取目标）：
+
+| 端口 | 服务 | 配置位置 |
+|------|------|----------|
+| 19180 / 19181 / 19182 / 19186 | message-ingest / orchestrator / storage-writer / push-worker | 服务专属 `metrics_*` 字段 |
+| 19183 | signaling-gateway | `ACCESS_GATEWAY_METRICS_*`，默认 19183 |
+| 19187–19197 | api-gateway、admin-gateway、capability、conversation、media、push-proxy、push-server、signaling-online、signaling-route、storage-reader、sync-orchestrator | `[services.<name>.metrics]`，由共享运行时挂载 |
+
+每个出口至少导出 `flare_service_info{service,version}` 与 `flare_service_start_time_seconds`。
+
+- 日志格式：`FLARE_LOG_FORMAT=json`（或 `[logging] format = "json"`）输出一行一个 JSON 事件，字段平铺并带当前 span，
+  不含 ANSI 转义；默认 `text`。写错格式名拒绝启动。
+- Trace：设置 `OTEL_EXPORTER_OTLP_ENDPOINT`（gRPC，如 `http://otel-collector:4317`）即启用 OTLP exporter，
+  服务名取 `OTEL_SERVICE_NAME`，未设时为可执行文件名。与 JSON 日志可同时开启。
 
 ## Dashboard 面板
 

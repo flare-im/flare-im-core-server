@@ -35,6 +35,14 @@ with_thread_ids = true
 with_file = true
 # 是否显示行号
 with_line_number = true
+# stdout 格式：text（默认）或 json（一行一个事件，供采集器解析）。FLARE_LOG_FORMAT 优先。
+# 设置 OTEL_EXPORTER_OTLP_ENDPOINT（可选 OTEL_SERVICE_NAME）即启用 OTLP trace，与 json 可同时开。
+# format = "json"
+
+[metrics]
+# 是否把真实租户写进指标的 tenant_id 标签。私有化默认开（租户少，便于排障）；
+# 云部署应关闭，标签统一为 "_all"，按租户的数据走用量流与 trace/log。
+tenant_labels = true
 
 [mesh]
 enabled = false

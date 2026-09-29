@@ -27,7 +27,7 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
         let app_config = flare_im_service_kit::load_config(Some("config"));
-        flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()));
+        flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Api)?;
         let gateway_config = app_config.api_gateway_service();
@@ -216,6 +216,12 @@ impl ApplicationBootstrap {
                 }),
             API_GATEWAY,
         );
+        let metrics = flare_im_service_kit::metrics::MetricsEndpointConfig::from_section(
+            API_GATEWAY,
+            gateway_config.runtime.metrics.as_ref(),
+        )?;
+        let runtime =
+            flare_im_service_kit::metrics::attach_metrics_endpoint(runtime, API_GATEWAY, metrics);
 
         Ok(runtime
             .run_with_registration(|addr| {

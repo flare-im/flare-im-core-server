@@ -19,7 +19,7 @@ impl ApplicationBootstrap {
             app_config,
             &service_config.runtime,
             PUSH_SERVER,
-        );
+        )?;
         let ctx = wire::initialize(app_config).await?;
         Self::run_with_runtime(ctx, runtime).await
     }

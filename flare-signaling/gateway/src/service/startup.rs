@@ -62,10 +62,13 @@ pub async fn start_services(
     // 配置 Runtime
     let config = RuntimeConfig::default().with_shutdown_timeout(std::time::Duration::from_secs(10));
 
-    // 创建 ServiceRuntime（使用简化模式 + 服务注册）
+    // 创建 ServiceRuntime（使用简化模式 + 服务注册）。指标端点随共享运行时挂载：
+    // 网关此前只在 wire.rs 打了一句 "Prometheus metrics initialized"，却从没真正起
+    // serve_prometheus_metrics，连接数、推送成功/失败/耗时注册了却无处可读。
     let runtime = flare_im_service_kit::ImServiceRuntimePlan {
         service_name: ACCESS_GATEWAY.to_string(),
         address: grpc_addr,
+        metrics: metrics_config,
     }
     .service_runtime()
     .with_config(config)
@@ -125,20 +128,6 @@ pub async fn start_services(
             Ok(())
         }
     });
-
-    // 指标端点。网关此前只在 wire.rs 打了一句 "Prometheus metrics initialized"，
-    // 却从没像其它服务那样真正起 serve_prometheus_metrics —— 指标注册进了全局
-    // REGISTRY 但没有任何出口，整个网关侧观测面（连接数、推送成功/失败/耗时）
-    // 无处可读。
-    let mut runtime = runtime;
-    if metrics_config.enabled {
-        runtime = runtime.add_spawn_with_shutdown("access-gateway-metrics", move |shutdown_rx| {
-            let cfg = metrics_config.clone();
-            async move {
-                flare_im_service_kit::metrics::serve_prometheus_metrics(cfg, shutdown_rx).await
-            }
-        });
-    }
 
     // 运行服务（带服务注册）
     let gateway_id_for_reg = gateway_id.clone();

@@ -5,3 +5,8 @@
 [services.push_proxy.server]
 address = "0.0.0.0"
 port = 50091
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.push_proxy.metrics]
+address = "0.0.0.0"
+port = 19192

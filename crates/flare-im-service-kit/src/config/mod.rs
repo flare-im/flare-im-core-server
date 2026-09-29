@@ -309,6 +309,35 @@ pub struct ServiceRuntimeConfig {
     /// 注册中心配置
     #[serde(default)]
     pub registry: Option<RegistryConfig>,
+    /// Prometheus `/metrics` 出口：`[services.<name>.metrics]`。
+    ///
+    /// 由共享运行时统一挂载；已有专属 `metrics_*` 字段的服务（ingest、orchestrator、
+    /// storage-writer、push-worker、signaling-gateway）不使用此段，避免同一进程重复监听。
+    #[serde(default)]
+    pub metrics: Option<ServiceMetricsSection>,
+}
+
+/// 服务级 Prometheus 出口配置段。
+///
+/// 段存在即默认启用；启用时必须给出端口，不能靠默认值与其他服务撞端口。
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct ServiceMetricsSection {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// 进程级指标策略：`[metrics]`。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MetricsPolicyConfig {
+    /// 是否把真实租户写进 `tenant_id` 标签（设计 §13.2）：私有化默认开，云部署关闭。
+    #[serde(default)]
+    pub tenant_labels: Option<bool>,
 }
 
 /// 接入网关服务配置
@@ -1005,6 +1034,10 @@ pub struct LoggingConfig {
     /// 是否使用 ANSI 颜色。默认 None 表示自动检测（输出到 TTY 时开启，重定向到文件时关闭，便于阅读日志文件）
     #[serde(default)]
     pub with_ansi: Option<bool>,
+    /// stdout 日志格式：`text`（默认）或 `json`（一行一个事件，供采集器解析）。
+    /// 环境变量 `FLARE_LOG_FORMAT` 优先；写错名称时拒绝启动。
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -1031,6 +1064,9 @@ pub struct FlareAppConfig {
     /// 日志配置
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// 进程级指标策略
+    #[serde(default)]
+    pub metrics: MetricsPolicyConfig,
     /// Redis 配置映射
     #[serde(default)]
     pub redis: HashMap<String, RedisPoolConfig>,
@@ -1700,6 +1736,7 @@ pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
         }
         apply_mq_env_overrides(&mut cfg);
         cfg.ensure_defaults();
+        crate::metrics::set_tenant_labels(cfg.metrics.tenant_labels.unwrap_or(true));
         match env::var("FLARE_REGISTRY_MODE") {
             Ok(mode) => apply_registry_mode_override(&mut cfg, Some(&mode))
                 .expect("invalid FLARE_REGISTRY_MODE"),
@@ -2063,6 +2100,7 @@ fn default_config() -> FlareAppConfig {
         },
         static_registry_mode: false,
         logging: LoggingConfig::default(),
+        metrics: MetricsPolicyConfig::default(),
         redis: HashMap::new(),
         jetstream: HashMap::new(),
         mq: MqBackendConfig::default(),

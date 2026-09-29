@@ -23,3 +23,8 @@ online_ttl_seconds = 3600
 default_tenant_id = "0"
 hook_config = "config/hooks.toml"
 # hook_config_dir = "config/hooks.d"
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.push_server.metrics]
+address = "0.0.0.0"
+port = 19193

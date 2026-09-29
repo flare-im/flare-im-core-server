@@ -117,7 +117,9 @@ where
                 .observe(total_duration.as_secs_f64());
             self.metrics
                 .messages_persisted_total
-                .with_label_values(&[tenant_id.as_str()])
+                .with_label_values(&[flare_im_service_kit::metrics::tenant_label(
+                    tenant_id.as_str(),
+                )])
                 .inc();
             self.metrics.record_storage_persist("message", "success");
 

@@ -43,3 +43,8 @@ allow_history_sync = true  # 是否允许历史同步
 [services.conversation.server]
 address = "0.0.0.0"
 port = 50090
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.conversation.metrics]
+address = "0.0.0.0"
+port = 19190

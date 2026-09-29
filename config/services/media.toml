@@ -23,3 +23,8 @@ local_base_url = "http://127.0.0.1:50050/api/v1/medias/files"
 [services.media.server]
 address = "0.0.0.0"
 port = 60081
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.media.metrics]
+address = "0.0.0.0"
+port = 19191

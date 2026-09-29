@@ -21,3 +21,8 @@ presence_prefix = "presence:user"
 address = "0.0.0.0"
 port = 50061
 
+
+# Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
+[services.signaling_online.metrics]
+address = "0.0.0.0"
+port = 19194

@@ -27,11 +27,11 @@ pub use config::{
     AccessGatewayServiceConfig, AdminGatewayServiceConfig, ApiGatewayServiceConfig,
     CapabilityServiceConfig, ConfigManager, ConversationServiceConfig, FlareAppConfig,
     JetStreamClusterConfig, KafkaClusterConfig, MediaServiceConfig, MessageIngestServiceConfig,
-    MessageOrchestratorServiceConfig, MqBackendConfig, ObjectStoreConfig, PostgresInstanceConfig,
-    PushProxyServiceConfig, RedisPoolConfig, ServiceEndpointConfig, ServiceRuntimeConfig,
-    SessionPolicyConfig, SignalingOnlineServiceConfig, SignalingRouteServiceConfig,
-    StorageReaderServiceConfig, StorageWriterServiceConfig, SyncOrchestratorServiceConfig,
-    app_config, load_config, load_config_with_validation,
+    MessageOrchestratorServiceConfig, MetricsPolicyConfig, MqBackendConfig, ObjectStoreConfig,
+    PostgresInstanceConfig, PushProxyServiceConfig, RedisPoolConfig, ServiceEndpointConfig,
+    ServiceMetricsSection, ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
+    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig,
+    SyncOrchestratorServiceConfig, app_config, load_config, load_config_with_validation,
 };
 pub use discovery::{
     BackendType, ChannelService, Discover, DiscoveryBackend, DiscoveryConfig, DiscoveryFactory,

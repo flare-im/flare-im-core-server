@@ -11,23 +11,27 @@ use flare_core_runtime::{HealthFailureAction, ServiceRuntime};
 use flare_server_core::error::{AnyhowContext, Result};
 
 use crate::config::{FlareAppConfig, ServiceEndpointConfig, ServiceRuntimeConfig};
+use crate::metrics::{MetricsEndpointConfig, attach_metrics_endpoint};
 
 /// Resolved runtime startup contract for one service process.
 #[derive(Debug, Clone)]
 pub struct ImServiceRuntimePlan {
     pub service_name: String,
     pub address: SocketAddr,
+    /// `[services.<name>.metrics]`; disabled when the section is absent.
+    pub metrics: MetricsEndpointConfig,
 }
 
 impl ImServiceRuntimePlan {
     /// Build a `ServiceRuntime` with Flare IM's default operational behavior.
     pub fn service_runtime(&self) -> ServiceRuntime {
-        crate::health::attach_runtime_health_checks(
+        let runtime = crate::health::attach_runtime_health_checks(
             ServiceRuntime::new(&self.service_name)
                 .with_address(self.address)
                 .with_health_failure_action(HealthFailureAction::GracefulShutdown),
             &self.service_name,
-        )
+        );
+        attach_metrics_endpoint(runtime, &self.service_name, self.metrics.clone())
     }
 }
 
@@ -44,14 +48,21 @@ pub fn background_service_runtime(service_name: impl Into<String>) -> ServiceRun
     )
 }
 
-/// Build a background runtime from typed service config.
+/// Build a background runtime from typed service config, including its
+/// optional `[services.<name>.metrics]` endpoint.
 pub fn build_background_service_runtime(
     app_config: &FlareAppConfig,
     runtime: &ServiceRuntimeConfig,
     fallback_service_name: &str,
-) -> ServiceRuntime {
+) -> Result<ServiceRuntime> {
     let service_config = app_config.compose_service_config(runtime, fallback_service_name);
-    background_service_runtime(service_config.service.name)
+    let service_name = service_config.service.name;
+    let metrics = MetricsEndpointConfig::from_section(&service_name, runtime.metrics.as_ref())?;
+    Ok(attach_metrics_endpoint(
+        background_service_runtime(service_name.clone()),
+        &service_name,
+        metrics,
+    ))
 }
 
 /// Resolve the app config directory used by service binaries.
@@ -93,9 +104,13 @@ pub fn build_service_runtime_plan(
         |key| env::var(key).ok(),
     )?;
 
+    let service_name = service_config.service.name;
+    let metrics = MetricsEndpointConfig::from_section(&service_name, runtime.metrics.as_ref())?;
+
     Ok(ImServiceRuntimePlan {
-        service_name: service_config.service.name,
+        service_name,
         address,
+        metrics,
     })
 }
 
