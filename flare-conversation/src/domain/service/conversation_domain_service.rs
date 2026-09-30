@@ -695,6 +695,35 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         Ok(())
     }
 
+    /// 清除会话早于某服务端时刻的历史（业务逻辑）
+    ///
+    /// 边界是调用方给的服务端时间（Unix 毫秒），必须为正：0 或负值在旧协议里表示「没给」，
+    /// 若当成「删到 1970 年」会静默成为空操作，调用方会误以为已经清过。
+    pub async fn purge_history_before(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        before_ms: i64,
+    ) -> Result<crate::domain::model::ConversationHistoryPurge> {
+        if before_ms <= 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "before_ms must be a positive server timestamp in milliseconds",
+            )
+            .build_error());
+        }
+        let before = chrono::Utc
+            .timestamp_millis_opt(before_ms)
+            .single()
+            .ok_or_else(|| {
+                ErrorBuilder::new(ErrorCode::InvalidParameter, "before_ms is out of range")
+                    .build_error()
+            })?;
+        self.conversation_repo
+            .purge_history_before(ctx, conversation_id, before)
+            .await
+    }
+
     /// 管理参与者（业务逻辑）
     pub async fn manage_participants(
         &self,

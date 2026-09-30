@@ -24,6 +24,14 @@ pub struct DeleteConversationCommand {
     pub hard_delete: bool,
 }
 
+/// 清除会话早于某服务端时刻的历史命令
+#[derive(Debug, Clone)]
+pub struct PurgeConversationHistoryCommand {
+    pub conversation_id: String,
+    /// 服务端时间（Unix 毫秒）：只删除时间严格早于它的消息与事件
+    pub before_ms: i64,
+}
+
 /// 强制会话同步命令
 #[derive(Debug, Clone)]
 pub struct ForceConversationSyncCommand {

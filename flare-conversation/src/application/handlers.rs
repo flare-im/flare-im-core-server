@@ -7,8 +7,9 @@ use tracing::debug;
 
 use crate::application::commands::{
     CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
-    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand,
-    UpdateConversationUserSettingsCommand, UpdateCursorCommand, UpdatePresenceCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, PurgeConversationHistoryCommand,
+    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
+    UpdatePresenceCommand,
 };
 use crate::application::queries::{
     ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
@@ -79,6 +80,22 @@ impl ConversationCommandHandler {
 
         debug!(conversation_id = %command.conversation_id, "Conversation deleted");
         Ok(())
+    }
+
+    /// 处理按时间边界清除会话历史命令
+    pub async fn handle_purge_conversation_history(
+        &self,
+        ctx: &Context,
+        command: PurgeConversationHistoryCommand,
+    ) -> Result<crate::domain::model::ConversationHistoryPurge> {
+        debug!(
+            conversation_id = %command.conversation_id,
+            before_ms = command.before_ms,
+            "Handling purge conversation history command"
+        );
+        self.domain_service
+            .purge_history_before(ctx, &command.conversation_id, command.before_ms)
+            .await
     }
 
     /// 处理强制会话同步命令

@@ -4,7 +4,8 @@ use flare_grpc_proto::conversation::conversation_manage_service_server::Conversa
 use flare_grpc_proto::conversation::{
     CreateConversationRequest, CreateConversationResponse, DeleteConversationRequest,
     ForceConversationSyncRequest, ManageParticipantsRequest, ManageParticipantsResponse,
-    MarkConversationAsReadRequest, SearchConversationsRequest, SearchConversationsResponse,
+    MarkConversationAsReadRequest, PurgeConversationHistoryRequest,
+    PurgeConversationHistoryResponse, SearchConversationsRequest, SearchConversationsResponse,
     UpdateConversationRequest, UpdateConversationResponse, UpdateConversationUserSettingsRequest,
     UpdateConversationUserSettingsResponse, UpdateCursorRequest, UpdatePresenceRequest,
 };
@@ -15,8 +16,9 @@ use tonic::{Request, Response, Status};
 
 use crate::application::commands::{
     CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
-    ManageParticipantsCommand, MarkConversationAsReadCommand, UpdateConversationCommand,
-    UpdateConversationUserSettingsCommand, UpdateCursorCommand, UpdatePresenceCommand,
+    ManageParticipantsCommand, MarkConversationAsReadCommand, PurgeConversationHistoryCommand,
+    UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
+    UpdatePresenceCommand,
 };
 use crate::application::queries::SearchConversationsQuery;
 use crate::domain::model::{
@@ -127,6 +129,29 @@ impl ConversationManageService for ConversationGrpcHandler {
             .await
             .into_grpc()?;
         Ok(Response::new(()))
+    }
+
+    async fn purge_conversation_history(
+        &self,
+        request: Request<PurgeConversationHistoryRequest>,
+    ) -> Result<Response<PurgeConversationHistoryResponse>, Status> {
+        let ctx = require_ctx_from_request(&request)?;
+        let req = request.into_inner();
+        let purged = self
+            .command_handler
+            .handle_purge_conversation_history(
+                &ctx,
+                PurgeConversationHistoryCommand {
+                    conversation_id: req.conversation_id,
+                    before_ms: req.before_ms,
+                },
+            )
+            .await
+            .into_grpc()?;
+        Ok(Response::new(PurgeConversationHistoryResponse {
+            purged_messages: purged.purged_messages,
+            max_purged_seq: purged.max_purged_seq,
+        }))
     }
 
     async fn manage_participants(

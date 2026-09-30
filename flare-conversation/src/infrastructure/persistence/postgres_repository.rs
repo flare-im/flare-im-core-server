@@ -12,8 +12,9 @@ use tracing::debug;
 
 use crate::config::ConversationConfig;
 use crate::domain::model::{
-    Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
-    ConversationParticipantsPage, ConversationSort, ConversationSummary, ConversationType,
+    Conversation, ConversationBootstrapResult, ConversationFilter, ConversationHistoryPurge,
+    ConversationParticipant, ConversationParticipantsPage, ConversationSort, ConversationSummary,
+    ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
 
@@ -1018,6 +1019,105 @@ impl ConversationRepository for PostgresConversationRepository {
 
         debug!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
         Ok(())
+    }
+
+    async fn purge_history_before(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        before: DateTime<Utc>,
+    ) -> Result<ConversationHistoryPurge> {
+        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        if conversation_id.trim().is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
+        // 与整会话硬删同一组表，只是按时间截断：messages.created_at 与 events.created_at
+        // 都是 ingest 盖的服务端时间，边界之后写入的消息与事件一条都不碰。
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "begin conversation history purge",
+            )
+        })?;
+        let purged: Vec<(String, i64)> = sqlx::query_as(
+            "DELETE FROM messages WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3 \
+             RETURNING server_id, seq",
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(before)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to purge conversation messages before boundary",
+            )
+        })?;
+        let purged_ids: Vec<String> = purged.iter().map(|(id, _)| id.clone()).collect();
+        if !purged_ids.is_empty() {
+            for stmt in [
+                "DELETE FROM pinned_messages WHERE tenant_id = $1 AND conversation_id = $2 AND message_id = ANY($3)",
+                "DELETE FROM marked_messages WHERE tenant_id = $1 AND conversation_id = $2 AND message_id = ANY($3)",
+            ] {
+                sqlx::query(stmt)
+                    .bind(tenant_id)
+                    .bind(conversation_id)
+                    .bind(&purged_ids)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::DatabaseError,
+                            "Failed to purge pins/marks of purged messages",
+                        )
+                    })?;
+            }
+        }
+        sqlx::query(
+            "DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3",
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(before)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to purge conversation events before boundary",
+            )
+        })?;
+        tx.commit().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "commit conversation history purge",
+            )
+        })?;
+        let outcome = ConversationHistoryPurge {
+            purged_messages: purged.len() as u64,
+            max_purged_seq: purged
+                .iter()
+                .map(|(_, seq)| (*seq).max(0) as u64)
+                .max()
+                .unwrap_or(0),
+        };
+        debug!(
+            conversation_id = %conversation_id,
+            purged_messages = outcome.purged_messages,
+            max_purged_seq = outcome.max_purged_seq,
+            "Conversation history purged before boundary"
+        );
+        Ok(outcome)
     }
 
     async fn manage_participants(

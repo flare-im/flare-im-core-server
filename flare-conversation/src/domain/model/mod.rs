@@ -483,6 +483,17 @@ pub enum ThreadSortOrder {
     ReplyCountDesc, // 按回复数降序
 }
 
+/// 按时间边界清除会话历史的结果。
+///
+/// 会话本身、成员和边界之后的消息都保留，只报告删掉了什么。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConversationHistoryPurge {
+    /// 删除的消息条数
+    pub purged_messages: u64,
+    /// 被删消息里最大的会话 seq；没删任何消息时为 0
+    pub max_purged_seq: u64,
+}
+
 /// 会话领域配置值对象（只包含领域相关的配置）
 #[derive(Clone, Debug)]
 pub struct ConversationDomainConfig {

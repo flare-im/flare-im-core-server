@@ -63,6 +63,14 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &str,
         hard_delete: bool,
     ) -> Result<()>;
+    /// 物理删除会话里服务端时间严格早于 `before` 的历史（消息、事件、置顶、标记），
+    /// 会话行、成员与 `before` 及之后的消息原样保留。重复调用幂等。
+    async fn purge_history_before(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::domain::model::ConversationHistoryPurge>;
     async fn manage_participants(
         &self,
         ctx: &flare_server_core::context::Context,
