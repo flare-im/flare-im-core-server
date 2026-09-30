@@ -295,7 +295,7 @@ Core 需要业务系统提供：
 
 文件/图片/视频建议流程：
 
-1. 调用 `/api/v1/medias/upload-url` 或 direct upload API 获取上传凭证。
+1. 调用 direct upload API（`/api/v1/medias/uploads/*`）获取上传凭证。`/api/v1/medias/upload-url` 只返回调用方租户下的对象位置，不签名、不登记元数据，不能用于上传。
 2. 客户端或业务服务上传对象。
 3. 调用 create reference 建立业务引用。
 4. 发送 `IMAGE`、`VIDEO`、`FILE` 或 `CUSTOM` 消息，引用 media file id。

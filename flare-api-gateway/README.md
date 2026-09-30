@@ -254,13 +254,15 @@ POST /api/v1/medias/upload-url
 Content-Type: application/json
 
 {
-  "bucket": "media-bucket",
-  "object_key": "uploads/test.jpg",
+  "bucket": "",
+  "object_key": "",
   "mime_type": "image/jpeg",
   "expected_size": 102400,
   "expires_in": 3600
 }
 ```
+
+The server chooses `object_key`; its first segment is the caller's tenant. A non-empty `object_key` is rejected with 400, and a `bucket` other than the configured one with 403. `upload_url` is only the object's location, not a signed credential, and the route records no metadata. Upload through the direct-upload routes (`/api/v1/medias/uploads/*`) instead.
 
 #### Get file URL
 ```http

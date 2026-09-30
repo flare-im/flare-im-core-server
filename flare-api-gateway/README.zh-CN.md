@@ -254,13 +254,15 @@ POST /api/v1/medias/upload-url
 Content-Type: application/json
 
 {
-  "bucket": "media-bucket",
-  "object_key": "uploads/test.jpg",
+  "bucket": "",
+  "object_key": "",
   "mime_type": "image/jpeg",
   "expected_size": 102400,
   "expires_in": 3600
 }
 ```
+
+`object_key` 由服务端生成，首段是调用方租户。传入非空 `object_key` 返回 400，`bucket` 与配置的桶不同返回 403。`upload_url` 只是对象位置，不是签名凭证；该接口也不登记元数据。上传请改用直传接口 `/api/v1/medias/uploads/*`。
 
 #### 获取文件 URL
 ```http

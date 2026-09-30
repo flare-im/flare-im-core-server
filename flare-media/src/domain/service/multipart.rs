@@ -121,8 +121,10 @@ impl MediaService {
             ));
         }
         if chunk_len > self.config.max_chunk_size_bytes {
+            // InvalidParameter 经 gRPC 往返后仍可识别为调用方错误（网关回 400）；
+            // MessageTooLarge 没有对应的 gRPC 码，会变成 Unknown，被当成服务端故障。
             return Err(flare_server_core::flare_err_details!(
-                ErrorCode::MessageTooLarge,
+                ErrorCode::InvalidParameter,
                 "chunk size exceeds limit",
                 format!(
                     "chunk_size={} max={}",

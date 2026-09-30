@@ -28,7 +28,12 @@ impl TokenValidator for Validator {
         request: TokenValidationRequest,
     ) -> Result<AuthenticatedPrincipal, AuthError> {
         Ok(AuthenticatedPrincipal {
-            user_id: "user".to_string(),
+            // Same tenant, different end user: owns upload sessions the default caller must not see.
+            user_id: if request.token == "other-user" {
+                "other".to_string()
+            } else {
+                "user".to_string()
+            },
             tenant_id: if request.token == "unbound" {
                 None
             } else {
@@ -277,9 +282,16 @@ enum MediaVerdict {
     CrossTenant,
     /// Same tenant, different owner.
     CrossOwner,
+    /// Upload session of another caller (or none at all): Media says not found, naming the id.
+    ForeignUploadSession,
+    /// Media rejected the arguments (part out of range, oversized chunk, caller-chosen key).
+    InvalidArgument,
+    /// Storage or Media-internal failure whose text carries an object key.
+    StorageFailure,
 }
 
 const FILE_ID: &str = "4a8f0c2e-5d1b-4f7e-9c3a-7b6d5e4f3a21";
+const UPLOAD_ID: &str = "9d2c7e41-3b8a-4c6f-a1e5-0f4b2d8c6a93";
 const LEGACY_CDN_KEY: &str = "tenant-a/media/documents/2026/09/30/note.txt";
 const SIGNED_URL: &str = "https://edge.test:18443/flare-media/tenant-a/media/documents/2026/09/30/note.txt?X-Amz-Signature=unit-test";
 
@@ -332,6 +344,30 @@ impl tower::Service<axum::http::Request<tonic::body::Body>> for ScriptedMedia {
                 "media access is not authorized"
             ))
             .into_http(),
+            MediaVerdict::ForeignUploadSession => {
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::MessageNotFound,
+                    "upload session not found",
+                    format!("upload_id={UPLOAD_ID}")
+                ))
+                .into_http()
+            }
+            MediaVerdict::InvalidArgument => {
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::InvalidParameter,
+                    "part number out of range",
+                    format!("part_number=9 total_parts=2 upload_id={UPLOAD_ID} file_id={FILE_ID}")
+                ))
+                .into_http()
+            }
+            MediaVerdict::StorageFailure => {
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::NetworkError,
+                    "failed to presign s3 put url",
+                    format!("key={LEGACY_CDN_KEY}")
+                ))
+                .into_http()
+            }
             MediaVerdict::OwnerWithLegacyCdnKey => match method {
                 "GetFileInfo" => grpc_ok(GetFileInfoResponse {
                     info: Some(FileInfo {
@@ -404,10 +440,20 @@ async fn call(
     uri: &str,
     body: Option<String>,
 ) -> axum::response::Response {
+    call_as(router, "ordinary-user", method, uri, body).await
+}
+
+async fn call_as(
+    router: &Router,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+) -> axum::response::Response {
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
-        .header("authorization", "Bearer ordinary-user");
+        .header("authorization", format!("Bearer {token}"));
     if body.is_some() {
         request = request.header("content-type", "application/json");
     }
@@ -475,6 +521,629 @@ async fn cross_tenant_and_cross_owner_denials_are_typed_and_do_not_echo_media_te
                 !String::from_utf8_lossy(&bytes).contains(leaked),
                 "{method} {uri}: {envelope}"
             );
+        }
+    }
+}
+
+/// Every upload-class route that reaches Media, as `(method, uri, json body)`. The bodies are
+/// valid for their extractors, so a typed envelope proves the answer came from Media's verdict.
+fn upload_routes() -> Vec<(&'static str, String, Option<String>)> {
+    let metadata = r#"{"file_name":"a.txt","mime_type":"text/plain","file_size":1,"file_type":0,"upload_id":""}"#;
+    let session = format!(r#"{{"upload_id":"{UPLOAD_ID}"}}"#);
+    vec![
+        (
+            "POST",
+            "/api/v1/medias/upload-url".to_string(),
+            Some(
+                r#"{"bucket":"","object_key":"","mime_type":"text/plain","expected_size":1,"expires_in":60}"#
+                    .to_string(),
+            ),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/upload-file".to_string(),
+            Some(format!(r#"{{"metadata":{metadata},"payload":"YQ=="}}"#)),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/multipart/initiate".to_string(),
+            Some(format!(
+                r#"{{"metadata":{metadata},"desired_chunk_size":1048576}}"#
+            )),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/multipart/chunk".to_string(),
+            Some(format!(
+                r#"{{"upload_id":"{UPLOAD_ID}","chunk_index":0,"payload":"YQ=="}}"#
+            )),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/multipart/complete".to_string(),
+            Some(session.clone()),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/multipart/abort".to_string(),
+            Some(session.clone()),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/uploads/initiate".to_string(),
+            Some(format!(r#"{{"metadata":{metadata}}}"#)),
+        ),
+        (
+            "GET",
+            format!("/api/v1/medias/uploads/status?upload_id={UPLOAD_ID}"),
+            None,
+        ),
+        (
+            "POST",
+            "/api/v1/medias/uploads/presign-parts".to_string(),
+            Some(format!(
+                r#"{{"upload_id":"{UPLOAD_ID}","part_numbers":[1]}}"#
+            )),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/uploads/commit-parts".to_string(),
+            Some(format!(
+                r#"{{"upload_id":"{UPLOAD_ID}","parts":[{{"part_number":1,"etag":"e","size":1}}]}}"#
+            )),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/uploads/complete".to_string(),
+            Some(session.clone()),
+        ),
+        ("POST", "/api/v1/medias/uploads/abort".to_string(), Some(session)),
+        (
+            "POST",
+            "/api/v1/medias/process-image".to_string(),
+            Some(format!(r#"{{"file_id":"{FILE_ID}"}}"#)),
+        ),
+        (
+            "POST",
+            "/api/v1/medias/process-video".to_string(),
+            Some(format!(r#"{{"file_id":"{FILE_ID}"}}"#)),
+        ),
+    ]
+}
+
+/// Media text that must never reach an HTTP body: identifiers and internal rule wording.
+const NEVER_ECHOED: [&str; 7] = [
+    FILE_ID,
+    UPLOAD_ID,
+    LEGACY_CDN_KEY,
+    "not authorized",
+    "upload session",
+    "out of range",
+    "presign",
+];
+
+async fn assert_typed_rejection(
+    response: axum::response::Response,
+    status: StatusCode,
+    reason: &str,
+    context: &str,
+) {
+    assert_eq!(response.status(), status, "{context}");
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| panic!("{context}: not a JSON envelope"));
+    assert_eq!(envelope["code"], status.as_u16(), "{context}");
+    assert_eq!(envelope["reason"], reason, "{context}");
+    assert!(envelope.get("data").is_none(), "{context}");
+    let text = String::from_utf8_lossy(&bytes);
+    for leaked in NEVER_ECHOED {
+        assert!(!text.contains(leaked), "{context}: {envelope}");
+    }
+}
+
+/// Upload, multipart, direct-upload and processing routes used to turn Media rejections into
+/// 500 and echo Media's text (upload ids, object keys). They share the /files mapping now.
+#[tokio::test]
+async fn upload_class_routes_map_media_rejections_to_typed_statuses_without_echo() {
+    let routes = upload_routes();
+    assert_eq!(routes.len(), 14);
+    for (verdict, status, reason) in [
+        (
+            MediaVerdict::ForeignUploadSession,
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+        ),
+        (
+            MediaVerdict::CrossTenant,
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+        ),
+        (MediaVerdict::CrossOwner, StatusCode::FORBIDDEN, "FORBIDDEN"),
+        (
+            MediaVerdict::InvalidArgument,
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+        ),
+        (
+            MediaVerdict::StorageFailure,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "MEDIA_REQUEST_FAILED",
+        ),
+    ] {
+        let router = scripted_router(verdict).await;
+        for (method, uri, body) in &routes {
+            let response = call(&router, method, uri, body.clone()).await;
+            assert_typed_rejection(response, status, reason, &format!("{method} {uri}")).await;
+        }
+    }
+}
+
+/// Contract against the real Media service (in-memory ports, production gRPC composition with
+/// the signed-context layer) read through the public HTTP routes.
+mod real_media {
+    use super::*;
+    use flare_media::application::handlers::{MediaCommandHandler, MediaQueryHandler};
+    use flare_media::domain::{
+        FileAccessType, MediaAssetStatus, MediaDomainConfig, MediaFileMetadata, MediaMetadataStore,
+        MediaObjectRepository, MediaService, OrphanAssetClaim, STORAGE_BUCKET_METADATA_KEY,
+        STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession, UploadSessionStore,
+    };
+    use flare_media::interface::grpc::{MediaGrpcHandler, authenticated_media_service};
+    use flare_server_core::context::Context;
+    use flare_server_core::error::{ErrorCode, Result as FlareResult};
+    use std::collections::HashMap;
+
+    const EDGE_MEDIA: &str = "https://edge.test:18443/flare-media";
+    const BUCKET: &str = "flare-media";
+    const LEGACY_FILE: &str = "legacy-bare-key-file";
+    const LEGACY_KEY: &str = "tenant-a/media/documents/2026/09/30/legacy-bare-key-file.txt";
+    const CDN_FILE: &str = "absolute-cdn-file";
+    const CDN_KEY: &str = "tenant-a/media/documents/2026/09/30/absolute-cdn-file.txt";
+    const CDN_URL: &str =
+        "https://cdn.example.com/tenant-a/media/documents/2026/09/30/absolute-cdn-file.txt";
+
+    fn signed(key: &str) -> String {
+        format!("{EDGE_MEDIA}/{key}?X-Amz-Signature=unit-test")
+    }
+
+    /// Private bucket behind the Edge: reads and single PUTs are signed, nothing is stored.
+    struct SigningBucket;
+
+    #[async_trait::async_trait]
+    impl MediaObjectRepository for SigningBucket {
+        async fn put_object(&self, _context: &UploadContext<'_>) -> FlareResult<String> {
+            Err(flare_server_core::flare_err!(
+                ErrorCode::InternalError,
+                "this contract never streams bytes"
+            ))
+        }
+        async fn delete_object(&self, _object_path: &str) -> FlareResult<()> {
+            Ok(())
+        }
+        async fn presign_object(&self, object_path: &str, _expires_in: i64) -> FlareResult<String> {
+            Ok(signed(object_path))
+        }
+        async fn presign_put_object(
+            &self,
+            object_path: &str,
+            _content_type: &str,
+            _expires_in: i64,
+        ) -> FlareResult<String> {
+            Ok(signed(object_path))
+        }
+        fn base_url(&self) -> Option<String> {
+            Some(EDGE_MEDIA.to_string())
+        }
+        fn cdn_base_url(&self) -> Option<String> {
+            None
+        }
+        fn use_presigned_urls(&self) -> bool {
+            true
+        }
+        fn bucket_name(&self) -> Option<String> {
+            Some(BUCKET.to_string())
+        }
+    }
+
+    /// `media_assets` stand-in keyed like the real table: (tenant, file_id).
+    #[derive(Default)]
+    struct Rows(StdMutex<HashMap<(String, String), MediaFileMetadata>>);
+
+    fn tenant_of(ctx: &Context) -> String {
+        ctx.tenant_id().unwrap_or_default().to_string()
+    }
+
+    #[async_trait::async_trait]
+    impl MediaMetadataStore for Rows {
+        async fn save_metadata(
+            &self,
+            ctx: &Context,
+            metadata: &MediaFileMetadata,
+        ) -> FlareResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert((tenant_of(ctx), metadata.file_id.clone()), metadata.clone());
+            Ok(())
+        }
+        async fn load_metadata(
+            &self,
+            ctx: &Context,
+            file_id: &str,
+        ) -> FlareResult<Option<MediaFileMetadata>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(&(tenant_of(ctx), file_id.to_string()))
+                .cloned())
+        }
+        async fn load_by_hash(
+            &self,
+            _ctx: &Context,
+            _sha256: &str,
+        ) -> FlareResult<Option<MediaFileMetadata>> {
+            Ok(None)
+        }
+        async fn delete_metadata(&self, ctx: &Context, file_id: &str) -> FlareResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(&(tenant_of(ctx), file_id.to_string()));
+            Ok(())
+        }
+        async fn list_orphaned_assets(
+            &self,
+            _ctx: &Context,
+            _before: chrono::DateTime<chrono::Utc>,
+            _limit: u32,
+        ) -> FlareResult<Vec<MediaFileMetadata>> {
+            Ok(Vec::new())
+        }
+        async fn claim_orphaned_asset(
+            &self,
+            _ctx: &Context,
+            _file_id: &str,
+            _before: chrono::DateTime<chrono::Utc>,
+        ) -> FlareResult<Option<Box<dyn OrphanAssetClaim>>> {
+            Ok(None)
+        }
+        async fn update_status(
+            &self,
+            _ctx: &Context,
+            _file_id: &str,
+            _status: MediaAssetStatus,
+            _grace_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> FlareResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Sessions(StdMutex<HashMap<String, UploadSession>>);
+
+    #[async_trait::async_trait]
+    impl UploadSessionStore for Sessions {
+        async fn create_session(&self, session: &UploadSession) -> FlareResult<()> {
+            self.upsert_session(session).await
+        }
+        async fn get_session(&self, upload_id: &str) -> FlareResult<Option<UploadSession>> {
+            Ok(self.0.lock().unwrap().get(upload_id).cloned())
+        }
+        async fn upsert_session(&self, session: &UploadSession) -> FlareResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(session.upload_id.clone(), session.clone());
+            Ok(())
+        }
+        async fn delete_session(&self, upload_id: &str) -> FlareResult<()> {
+            self.0.lock().unwrap().remove(upload_id);
+            Ok(())
+        }
+    }
+
+    struct Harness {
+        router: Router,
+        rows: Arc<Rows>,
+        chunks: std::path::PathBuf,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.chunks);
+        }
+    }
+
+    async fn serve() -> Harness {
+        let (signer, verifier) = cell_keys();
+        let rows = Arc::new(Rows::default());
+        let chunks = std::env::temp_dir().join(format!(
+            "flare-gateway-media-contract-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let service = Arc::new(MediaService::new(
+            Some(Arc::new(SigningBucket)),
+            Some(rows.clone()),
+            None,
+            None,
+            Some(Arc::new(Sessions::default())),
+            None,
+            MediaDomainConfig::new(3600, None, 60, chunks.clone(), 3600, 8 * 1024 * 1024),
+        ));
+        let handler = MediaGrpcHandler::new(
+            Arc::new(MediaCommandHandler::new(service.clone())),
+            Arc::new(MediaQueryHandler::new(service)),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(authenticated_media_service(handler, verifier))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+        );
+        let channel = Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect_lazy();
+        Harness {
+            router: router_with(channel, Some(signer)),
+            rows,
+            chunks,
+        }
+    }
+
+    /// A `media_assets` row as the PostgreSQL mapping yields it: bucket and key live in the
+    /// metadata JSON, `cdn_url`/`url` are whatever the writer stored at the time.
+    fn stored_row(file_id: &str, key: &str, stored_cdn_url: &str) -> MediaFileMetadata {
+        let metadata = HashMap::from([
+            ("tenant_id".to_string(), "tenant-a".to_string()),
+            (STORAGE_BUCKET_METADATA_KEY.to_string(), BUCKET.to_string()),
+            (STORAGE_PATH_METADATA_KEY.to_string(), key.to_string()),
+        ]);
+        MediaFileMetadata {
+            owner_id: Some("user".to_string()),
+            file_id: file_id.to_string(),
+            file_name: "note.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            file_size: 61,
+            url: stored_cdn_url.to_string(),
+            cdn_url: stored_cdn_url.to_string(),
+            metadata,
+            status: MediaAssetStatus::Active,
+            reference_count: 1,
+            access_type: FileAccessType::Private,
+            storage_bucket: Some(BUCKET.to_string()),
+            storage_path: Some(key.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn seed(h: &Harness, row: MediaFileMetadata) {
+        h.rows
+            .0
+            .lock()
+            .unwrap()
+            .insert(("tenant-a".to_string(), row.file_id.clone()), row);
+    }
+
+    async fn json_data(response: axum::response::Response) -> serde_json::Value {
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        envelope["data"].clone()
+    }
+
+    fn location(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .unwrap()
+    }
+
+    /// Rows written before the cdn_url fix carry the bare object key as `cdn_url` (19 such
+    /// rows on p0e2e). Read through HTTP they must fall back to the signed URL, never to a
+    /// relative Location or a bare key presented as a URL.
+    #[tokio::test]
+    async fn legacy_bare_key_row_reads_back_as_the_signed_url_over_http() {
+        let h = serve().await;
+        seed(&h, stored_row(LEGACY_FILE, LEGACY_KEY, LEGACY_KEY));
+        seed(&h, stored_row(CDN_FILE, CDN_KEY, CDN_URL));
+
+        let response = call(
+            &h.router,
+            "GET",
+            &format!("/api/v1/medias/files/{LEGACY_FILE}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location(&response), signed(LEGACY_KEY));
+
+        let info = json_data(
+            call(
+                &h.router,
+                "GET",
+                &format!("/api/v1/medias/file-info?file_id={LEGACY_FILE}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(info["file_id"], LEGACY_FILE);
+        assert!(info.get("cdn_url").is_none(), "{info}");
+
+        let url = json_data(
+            call(
+                &h.router,
+                "POST",
+                "/api/v1/medias/file-url",
+                Some(format!(r#"{{"file_id":"{LEGACY_FILE}"}}"#)),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(url["url"], signed(LEGACY_KEY));
+        assert!(url.get("cdn_url").is_none(), "{url}");
+
+        // Control: a row with a real absolute CDN URL still redirects there, so the fallback
+        // above is the legacy filter at work rather than the CDN path being ignored.
+        let response = call(
+            &h.router,
+            "GET",
+            &format!("/api/v1/medias/files/{CDN_FILE}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location(&response), CDN_URL);
+    }
+
+    /// `upload-url` hands out a server-generated key whose first segment is the caller's
+    /// tenant; caller-chosen keys and foreign buckets are typed rejections without echo.
+    #[tokio::test]
+    async fn upload_url_key_is_tenant_scoped_through_the_real_media_service() {
+        let h = serve().await;
+        let body = |bucket: &str, key: &str| {
+            Some(format!(
+                r#"{{"bucket":"{bucket}","object_key":"{key}","mime_type":"text/plain","expected_size":1,"expires_in":60}}"#
+            ))
+        };
+        let data =
+            json_data(call(&h.router, "POST", "/api/v1/medias/upload-url", body("", "")).await)
+                .await;
+        let key = data["object_key"].as_str().unwrap();
+        assert_eq!(key.split('/').next(), Some("tenant-a"), "{data}");
+        assert_eq!(data["upload_url"], format!("{EDGE_MEDIA}/{key}"));
+
+        for (bucket, key, status, reason) in [
+            (
+                "",
+                "tenant-b/media/documents/x.txt",
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+            ),
+            (
+                "",
+                "uploads/test.jpg",
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+            ),
+            ("media-bucket", "", StatusCode::FORBIDDEN, "FORBIDDEN"),
+        ] {
+            let response = call(
+                &h.router,
+                "POST",
+                "/api/v1/medias/upload-url",
+                body(bucket, key),
+            )
+            .await;
+            let context = format!("bucket={bucket:?} key={key:?}");
+            assert_eq!(response.status(), status, "{context}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["reason"], reason, "{context}");
+            let text = String::from_utf8_lossy(&bytes);
+            for leaked in ["tenant-b", "media-bucket", "assigned", "outside"] {
+                assert!(!text.contains(leaked), "{context}: {envelope}");
+            }
+        }
+    }
+
+    /// A direct-upload session belongs to its creator: another end user of the same tenant
+    /// gets 404 on every session route, and the upload id never comes back in the body.
+    #[tokio::test]
+    async fn foreign_upload_session_is_not_found_on_every_session_route() {
+        let h = serve().await;
+        let initiated = json_data(
+            call_as(
+                &h.router,
+                "other-user",
+                "POST",
+                "/api/v1/medias/uploads/initiate",
+                Some(
+                    r#"{"metadata":{"file_name":"a.txt","mime_type":"text/plain","file_size":1,"file_type":0,"upload_id":""}}"#
+                        .to_string(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        let upload_id = initiated["upload_id"].as_str().unwrap().to_string();
+        let object_key = initiated["object_key"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!upload_id.is_empty(), "{initiated}");
+
+        // The creator can read its own session: the routes below are live, not mis-wired.
+        let own = json_data(
+            call_as(
+                &h.router,
+                "other-user",
+                "GET",
+                &format!("/api/v1/medias/uploads/status?upload_id={upload_id}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(own["upload_id"], upload_id.as_str());
+
+        let session = format!(r#"{{"upload_id":"{upload_id}"}}"#);
+        for (method, uri, body) in [
+            (
+                "GET",
+                format!("/api/v1/medias/uploads/status?upload_id={upload_id}"),
+                None,
+            ),
+            (
+                "POST",
+                "/api/v1/medias/uploads/presign-parts".to_string(),
+                Some(format!(
+                    r#"{{"upload_id":"{upload_id}","part_numbers":[1]}}"#
+                )),
+            ),
+            (
+                "POST",
+                "/api/v1/medias/uploads/commit-parts".to_string(),
+                Some(format!(
+                    r#"{{"upload_id":"{upload_id}","parts":[{{"part_number":1,"etag":"e","size":1}}]}}"#
+                )),
+            ),
+            (
+                "POST",
+                "/api/v1/medias/uploads/complete".to_string(),
+                Some(session.clone()),
+            ),
+            (
+                "POST",
+                "/api/v1/medias/uploads/abort".to_string(),
+                Some(session.clone()),
+            ),
+        ] {
+            let response = call(&h.router, method, &uri, body).await;
+            let context = format!("{method} {uri}");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{context}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["reason"], "NOT_FOUND", "{context}");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains(&upload_id), "{context}: {envelope}");
+            assert!(
+                object_key.is_empty() || !text.contains(&object_key),
+                "{context}"
+            );
+            assert!(!text.contains("upload session"), "{context}: {envelope}");
         }
     }
 }

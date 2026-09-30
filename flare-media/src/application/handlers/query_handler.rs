@@ -96,13 +96,14 @@ impl MediaQueryHandler {
 
     pub async fn handle_generate_upload_url(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         request: GenerateUploadUrlRequest,
     ) -> Result<GenerateUploadUrlResponse> {
         let (upload_url, object_key) = self.domain_service.generate_upload_url(
+            ctx,
             Some(request.bucket.as_str()),
             Some(request.object_key.as_str()),
-        );
+        )?;
         Ok(GenerateUploadUrlResponse {
             upload_url,
             object_key,

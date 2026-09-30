@@ -10,6 +10,7 @@ use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
 use flare_server_core::http::{ApiResponse, Result};
 
+use super::errors::media_rpc_error;
 use super::identity::MediaIdentity;
 
 #[utoipa::path(
@@ -61,7 +62,10 @@ pub async fn process_image(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_image(&caller, grpc_req).await?;
+    let grpc_res = media_client
+        .process_image(&caller, grpc_req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(ProcessImageHttpResponse::from(
         grpc_res,
     ))))
@@ -127,7 +131,10 @@ pub async fn process_video(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_video(&caller, grpc_req).await?;
+    let grpc_res = media_client
+        .process_video(&caller, grpc_req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(ProcessVideoHttpResponse::from(
         grpc_res,
     ))))

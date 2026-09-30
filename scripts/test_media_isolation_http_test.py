@@ -120,6 +120,20 @@ class HttpGateSafetyTests(unittest.TestCase):
             gate.denied((401, {}, b'{"code":401,"message":"no token for 1200000000000000333"}'), anonymous=True,
                         identifiers=identifiers)
 
+    def test_rejected_arguments_can_require_a_typed_400(self):
+        gate.denied((400, {}, b'{"code":400,"reason":"BAD_REQUEST","message":""}'), anonymous=False, expected={400})
+        for status in [403, 404, 500, 200]:
+            with self.subTest(status=status), self.assertRaises(gate.GateFailure):
+                gate.denied((status, {}, b'{"code":%d,"reason":"X"}' % status), anonymous=False, expected={400})
+
+    def test_tenant_segment_matches_media_key_encoding(self):
+        # flare-media tenant_storage_segment: ASCII alphanumerics, '-' and '_' kept, other bytes %XX.
+        cases = {"1200000000000000333": "1200000000000000333", "tenant-a_1": "tenant-a_1",
+                 "../tenant-b": "%2E%2E%2Ftenant-b", "a b": "a%20b", "\u00e9": "%C3%A9", "t.x": "t%2Ex"}
+        for tenant, segment in cases.items():
+            with self.subTest(tenant=tenant):
+                self.assertEqual(gate.tenant_segment(tenant), segment)
+
     def test_identifier_echo_matches_whole_tokens_only(self):
         self.assertTrue(gate.echoes("x/1200000000000000333/media", "1200000000000000333"))
         self.assertTrue(gate.echoes("tenant 0 is gone", "0"))
@@ -263,6 +277,16 @@ class FakeMediaService:
         # key itself (from file-info) can reveal an echo of it.
         return "t-enc/media/documents/obj-7f3a9c.txt"
 
+    def upload_url(self, body):
+        """Fixed Media: a fresh key under the caller's tenant; a caller-chosen key is a typed 400."""
+        requested = body.get("object_key") or ""
+        if requested and not self.faults.get("upload_url_accepts_key"):
+            echo = requested if self.faults.get("upload_url_echo") else ""
+            return self.envelope(400, code=400, reason="BAD_REQUEST", message=echo)
+        tenant = self.env["FLARE_MEDIA_E2E_TENANT_A"]
+        key = requested or self.faults.get("upload_url_key", f"{tenant}/uploads/2026/10/01/4d1f0a6e")
+        return self.envelope(200, {"upload_url": self.STORAGE + key, "object_key": key})
+
     def refuse(self, token, file_id):
         """Typed refusals of the fixed gateway: 404 across tenants or when gone, 403 across owners."""
         if token == self.env["FLARE_MEDIA_E2E_USER_B"] or file_id not in self.files:
@@ -296,6 +320,8 @@ class FakeMediaService:
             status = self.faults.get("anonymous_status", 401)
             return self.envelope(status, code=status, reason="UNAUTHORIZED")
         owner = token == self.env["FLARE_MEDIA_E2E_USER_A"] or token == self.faults.get("leak_to")
+        if path == "/upload-url":
+            return self.upload_url(body or {})
         if path == "/file" and method == "DELETE" and set(body or {}) != {"file_id", "hard_delete"}:
             # axum Json<DeleteFileRequest>: plain-serde proto, every field required.
             return 422, {}, b"Failed to deserialize the JSON body into the target type"
@@ -350,6 +376,11 @@ class GateFlowTests(unittest.TestCase):
         service, out = self.run_gate(self.EDGE_ARGV)
         self.assertIn("admin: not evaluated", out)
         self.assertIn("public: 4 management routes return 404", out)
+        self.assertIn("upload-url: key starts with the caller's tenant", out)
+        issued = [c for c in service.calls if c.url.endswith("/upload-url")]
+        self.assertEqual([c.token for c in issued], ["bearer-user-a", "bearer-user-a"])
+        self.assertEqual(issued[0].body["object_key"], "")
+        self.assertTrue(issued[1].body["object_key"].startswith("1200000000000000349/"))
         self.assertIn("isolation: 12 requests denied without data or internal identifiers", out)
         self.assertIn("presigned: owner file-url under the storage prefix returns identical bytes", out)
         self.assertIn("download: owner bytes identical", out)
@@ -393,6 +424,14 @@ class GateFlowTests(unittest.TestCase):
             "denial echoes the file id": {"echo": "file_id"},
             "denial echoes the object key": {"echo": "object_key"},
             "denial echoes the tenant id": {"echo": "tenant"},
+            # Seen on p0e2e before the fix: object_key "uploads/<uuid>" with no tenant segment.
+            "upload-url key without a tenant segment (pre-fix)": {"upload_url_key": "uploads/4d1f0a6e"},
+            "upload-url key under the other tenant": {"upload_url_key": "1200000000000000349/uploads/4d1f0a6e"},
+            "upload-url key whose first segment only starts with the tenant": {
+                "upload_url_key": "12000000000000003330/uploads/4d1f0a6e"},
+            "upload-url key that is the bare tenant": {"upload_url_key": "1200000000000000333"},
+            "upload-url honors a caller-chosen key (pre-fix)": {"upload_url_accepts_key": True},
+            "upload-url refusal echoes the caller-chosen key": {"upload_url_echo": True},
         }
         for name, fault in faults.items():
             with self.subTest(name), self.assertRaises(gate.GateFailure):

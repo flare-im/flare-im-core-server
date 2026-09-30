@@ -1633,6 +1633,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-media",
  "flare-proto",
  "flare-server-core",
  "futures",

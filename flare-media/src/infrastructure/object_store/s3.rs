@@ -830,6 +830,39 @@ mod tenant_key_tests {
         assert!(!other.contains("../"));
     }
 
+    /// `upload-url` 用的也是这套布局：租户在最前，部署配置的根前缀与上传前缀在其后。
+    #[test]
+    fn upload_url_keys_use_the_tenant_first_layout() {
+        let temporary = std::env::temp_dir().join(format!(
+            "flare-media-s3-upload-url-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let service = crate::domain::MediaService::new(
+            Some(Arc::new(store())),
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::domain::MediaDomainConfig::new(
+                3600,
+                None,
+                60,
+                temporary.clone(),
+                3600,
+                8 * 1024 * 1024,
+            ),
+        );
+        let ctx = flare_server_core::context::Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("owner");
+        let generated = service.generate_upload_url(&ctx, None, None);
+        std::fs::remove_dir_all(&temporary).expect("remove this test's temporary chunks");
+        let (url, key) = generated.unwrap();
+        assert!(key.starts_with("tenant-a/root/uploads/uploads/"), "{key}");
+        assert_eq!(url, format!("/media/{key}"));
+    }
+
     #[tokio::test]
     async fn legacy_presigned_download_uses_the_recorded_key_without_rewriting_it() {
         // Signing is offline; no S3 service is contacted by this regression.

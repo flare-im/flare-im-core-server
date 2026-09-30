@@ -89,3 +89,7 @@ mod storage;
 mod tenant;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upload_rejection_tests;
+#[cfg(test)]
+mod upload_url_tests;

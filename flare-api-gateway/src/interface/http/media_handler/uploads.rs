@@ -15,8 +15,9 @@ use crate::application::dto::{
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
-use flare_server_core::http::{ApiResponse, HttpApiError as GatewayError, Result};
+use flare_server_core::http::{ApiResponse, Result};
 
+use super::errors::media_rpc_error;
 use super::identity::MediaIdentity;
 
 #[utoipa::path(
@@ -24,8 +25,9 @@ use super::identity::MediaIdentity;
     path = "/api/v1/medias/upload-url",
     tag = "Media",
     responses(
-        (status = 200, description = "成功"),
-        (status = 400, description = "参数错误"),
+        (status = 200, description = "成功：object_key 首段为调用方租户"),
+        (status = 400, description = "参数错误（含调用方指定 object_key）"),
+        (status = 403, description = "bucket 不属于本服务"),
         (status = 500, description = "内部错误"),
     ),
 )]
@@ -39,7 +41,10 @@ pub async fn generate_upload_url(
     debug!(trace_id = %ctx.trace_id(), user_id = %caller.actor_id(), "Generating upload URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.generate_upload_url(&caller, req).await?;
+    let grpc_res = media_client
+        .generate_upload_url(&caller, req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(grpc_res)))
 }
 
@@ -82,7 +87,10 @@ pub async fn upload_file(
     }
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.upload_file(&caller, chunks).await?;
+    let grpc_res = media_client
+        .upload_file(&caller, chunks)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
     ))))
@@ -112,14 +120,7 @@ pub async fn initiate_multipart_upload(
     let grpc_res = media_client
         .initiate_multipart_upload(&caller, grpc_req)
         .await
-        .map_err(|err| {
-            tracing::error!(
-                trace_id = %ctx.trace_id(),
-                error = %err,
-                "initiate multipart upload grpc call failed"
-            );
-            GatewayError::internal("MEDIA_MULTIPART_INITIATE_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         InitiateMultipartUploadHttpResponse::from(grpc_res),
     )))
@@ -155,7 +156,8 @@ pub async fn upload_multipart_chunk(
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
         .upload_multipart_chunk(&caller, grpc_req)
-        .await?;
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         UploadMultipartChunkHttpResponse::from(grpc_res),
     )))
@@ -185,7 +187,8 @@ pub async fn complete_multipart_upload(
                 upload_id: req.upload_id,
             },
         )
-        .await?;
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
     ))))
@@ -215,7 +218,8 @@ pub async fn abort_multipart_upload(
                 upload_id: req.upload_id,
             },
         )
-        .await?;
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         AbortMultipartUploadHttpResponse::from(grpc_res),
     )))
@@ -235,6 +239,7 @@ pub async fn initiate_direct_upload(
     Json(req): Json<InitiateDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<InitiateDirectUploadHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), file_name = %req.metadata.file_name, "Initiating direct upload");
     let grpc_req = InitiateDirectUploadRequest {
         metadata: Some(UploadFileMetadata::from(req.metadata)),
         desired_part_size: req.desired_part_size,
@@ -243,10 +248,10 @@ pub async fn initiate_direct_upload(
         full_sha256: req.full_sha256,
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.initiate_direct_upload(&caller, grpc_req).await.map_err(|err| {
-        tracing::error!(trace_id = %ctx.trace_id(), error = %err, "initiate direct upload grpc call failed");
-        GatewayError::internal("MEDIA_DIRECT_UPLOAD_INITIATE_FAILED", err.to_string())
-    })?;
+    let grpc_res = media_client
+        .initiate_direct_upload(&caller, grpc_req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         InitiateDirectUploadHttpResponse::from(grpc_res),
     )))
@@ -266,16 +271,17 @@ pub async fn get_direct_upload_status(
     axum::extract::Query(req): axum::extract::Query<GetDirectUploadStatusHttpRequest>,
 ) -> Result<Json<ApiResponse<GetDirectUploadStatusHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Getting direct upload status");
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .get_direct_upload_status(&caller, GetDirectUploadStatusRequest {
-            upload_id: req.upload_id,
-        })
+        .get_direct_upload_status(
+            &caller,
+            GetDirectUploadStatusRequest {
+                upload_id: req.upload_id,
+            },
+        )
         .await
-        .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "get direct upload status grpc call failed");
-            GatewayError::internal("MEDIA_DIRECT_UPLOAD_STATUS_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         GetDirectUploadStatusHttpResponse::from(grpc_res),
     )))
@@ -295,18 +301,19 @@ pub async fn presign_direct_upload_parts(
     Json(req): Json<PresignDirectUploadPartsHttpRequest>,
 ) -> Result<Json<ApiResponse<PresignDirectUploadPartsHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Presigning direct upload parts");
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .presign_direct_upload_parts(&caller, PresignDirectUploadPartsRequest {
-            upload_id: req.upload_id,
-            part_numbers: req.part_numbers,
-            expires_in: req.expires_in,
-        })
+        .presign_direct_upload_parts(
+            &caller,
+            PresignDirectUploadPartsRequest {
+                upload_id: req.upload_id,
+                part_numbers: req.part_numbers,
+                expires_in: req.expires_in,
+            },
+        )
         .await
-        .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "presign direct upload parts grpc call failed");
-            GatewayError::internal("MEDIA_DIRECT_UPLOAD_PRESIGN_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         PresignDirectUploadPartsHttpResponse::from(grpc_res),
     )))
@@ -326,6 +333,7 @@ pub async fn commit_direct_upload_parts(
     Json(req): Json<CommitDirectUploadPartsHttpRequest>,
 ) -> Result<Json<ApiResponse<CommitDirectUploadPartsHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Committing direct upload parts");
     let grpc_parts = req
         .parts
         .into_iter()
@@ -338,15 +346,15 @@ pub async fn commit_direct_upload_parts(
         .collect();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .commit_direct_upload_parts(&caller, CommitDirectUploadPartsRequest {
-            upload_id: req.upload_id,
-            parts: grpc_parts,
-        })
+        .commit_direct_upload_parts(
+            &caller,
+            CommitDirectUploadPartsRequest {
+                upload_id: req.upload_id,
+                parts: grpc_parts,
+            },
+        )
         .await
-        .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "commit direct upload parts grpc call failed");
-            GatewayError::internal("MEDIA_DIRECT_UPLOAD_COMMIT_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         CommitDirectUploadPartsHttpResponse::from(grpc_res),
     )))
@@ -366,16 +374,17 @@ pub async fn complete_direct_upload(
     Json(req): Json<CompleteDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing direct upload");
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .complete_direct_upload(&caller, CompleteDirectUploadRequest {
-            upload_id: req.upload_id,
-        })
+        .complete_direct_upload(
+            &caller,
+            CompleteDirectUploadRequest {
+                upload_id: req.upload_id,
+            },
+        )
         .await
-        .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "complete direct upload grpc call failed");
-            GatewayError::internal("MEDIA_DIRECT_UPLOAD_COMPLETE_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
     ))))
@@ -395,16 +404,17 @@ pub async fn abort_direct_upload(
     Json(req): Json<AbortDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<AbortMultipartUploadHttpResponse>>> {
     let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting direct upload");
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .abort_direct_upload(&caller, AbortDirectUploadRequest {
-            upload_id: req.upload_id,
-        })
+        .abort_direct_upload(
+            &caller,
+            AbortDirectUploadRequest {
+                upload_id: req.upload_id,
+            },
+        )
         .await
-        .map_err(|err| {
-            tracing::error!(trace_id = %ctx.trace_id(), error = %err, "abort direct upload grpc call failed");
-            GatewayError::internal("MEDIA_DIRECT_UPLOAD_ABORT_FAILED", err.to_string())
-        })?;
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         AbortMultipartUploadHttpResponse::from(grpc_res),
     )))

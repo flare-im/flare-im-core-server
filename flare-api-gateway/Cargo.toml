@@ -67,6 +67,8 @@ utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+# 契约测试：真实 Media gRPC 服务（内存端口）经公共 HTTP 路由读回，只在测试中使用。
+flare-media = { path = "../flare-media" }
 
 [lints]
 workspace = true

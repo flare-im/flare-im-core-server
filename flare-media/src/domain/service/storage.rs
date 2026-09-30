@@ -3,6 +3,9 @@ use super::*;
 /// `(bucket, region, storage_class, versioning_enabled, metadata)` returned by `describe_bucket`.
 pub type BucketDescription = (String, String, String, bool, HashMap<String, String>);
 
+/// `generate_upload_url` 生成的 key 在租户段之后使用的分类段，与正式上传的媒资分类分开。
+const UPLOAD_URL_KEY_CATEGORY: &str = "uploads";
+
 impl MediaService {
     #[instrument(skip(self, ctx, context), fields(
         request_id = %ctx.request_id(),
@@ -550,25 +553,50 @@ impl MediaService {
         })
     }
 
+    /// `POST /api/v1/medias/upload-url`：给出调用方租户下的一个对象位置。
+    ///
+    /// 这个接口不建上传会话、不落元数据，按它写入的对象永远拿不到 file_id；SDK 与客户端的
+    /// 真实上传都走 direct upload（`/uploads/*`，带会话、签名与完成校验）。所以这里只保证
+    /// 位置属于调用方租户：key 由服务端生成且首段是租户，调用方指定的 key 或别的桶一律拒绝。
+    /// 地址刻意不签名：签了就多出一个不登记、不计量、没人回收的写入口。
     pub fn generate_upload_url(
         &self,
+        ctx: &Context,
         bucket: Option<&str>,
         object_key: Option<&str>,
-    ) -> (String, String) {
-        let resolved_key = object_key
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().trim_start_matches('/').to_string())
-            .unwrap_or_else(|| format!("uploads/{}", Uuid::new_v4()));
-
-        let resolved_bucket = bucket
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().to_string())
-            .or_else(|| {
-                self.object_repo
-                    .as_ref()
-                    .and_then(|repo| repo.bucket_name())
-            })
+    ) -> Result<(String, String)> {
+        let tenant_id = require_tenant(ctx)?;
+        if object_key.is_some_and(|key| !key.trim().is_empty()) {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "object_key is assigned by the media service"
+            ));
+        }
+        let resolved_bucket = self
+            .object_repo
+            .as_ref()
+            .and_then(|repo| repo.bucket_name())
             .unwrap_or_else(|| "media".to_string());
+        if bucket.is_some_and(|requested| {
+            let requested = requested.trim();
+            !requested.is_empty() && requested != resolved_bucket
+        }) {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "bucket is outside this media service"
+            ));
+        }
+
+        let object_name = Uuid::new_v4().to_string();
+        let resolved_key = match self.object_repo.as_ref() {
+            Some(repo) => {
+                repo.build_object_key_for(tenant_id, &object_name, "", UPLOAD_URL_KEY_CATEGORY)
+            }
+            None => format!(
+                "{}/{UPLOAD_URL_KEY_CATEGORY}/{object_name}",
+                crate::domain::model::tenant_storage_segment(tenant_id)
+            ),
+        };
 
         let upload_url = if let Some(base) =
             self.object_repo.as_ref().and_then(|repo| repo.base_url())
@@ -580,7 +608,7 @@ impl MediaService {
             format!("/{}/{}", resolved_bucket, resolved_key)
         };
 
-        (upload_url, resolved_key)
+        Ok((upload_url, resolved_key))
     }
 
     pub async fn list_objects(

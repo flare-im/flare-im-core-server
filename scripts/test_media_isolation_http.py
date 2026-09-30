@@ -15,6 +15,9 @@ presigned file-url and the /files 307 target; both are fetched without the
 application bearer and must return the uploaded bytes. Foreign callers must be
 refused with a typed status (401 without a bearer, 403/404 with one) whose body
 carries neither data nor the fixture's file id, object key or a tenant id.
+upload-url must hand out a server-chosen object key whose first segment is the
+caller's tenant, and refuse a caller-chosen key with a typed 400 that does not
+echo it.
 """
 import argparse
 import base64
@@ -202,15 +205,16 @@ def echoes(text, value):
     return bool(value) and re.search(rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", text) is not None
 
 
-def denied(response, *, anonymous, identifiers=()):
+def denied(response, *, anonymous, identifiers=(), expected=None):
     """A typed refusal: 401 without a bearer, 403/404 for a foreign bearer.
 
     Media's own text is the caller's file id (cross-tenant not-found) or the
     authorization rule (cross-owner), so a denial must not carry the fixture's
-    file id, object key or either tenant id anywhere in its body.
+    file id, object key or either tenant id anywhere in its body. `expected`
+    overrides the accepted statuses (e.g. {400} for a rejected argument).
     """
     status, headers, payload = response
-    expected = {401} if anonymous else {403, 404}
+    expected = expected or ({401} if anonymous else {403, 404})
     if status not in expected or headers.get("Location"):
         allowed = "/".join(str(value) for value in sorted(expected))
         raise GateFailure(f"expected a {allowed} denial without redirect, received {status}")
@@ -260,6 +264,27 @@ def fixture_env(environ, with_admin):
     if not all(env.values()) or env["TENANT_A"] == env["TENANT_B"]:
         raise GateFailure("requires distinct tenant fixtures and all documented token variables")
     return env
+
+
+def tenant_segment(tenant):
+    """Media's reversible object-key segment for a tenant id (flare-media tenant_storage_segment)."""
+    return "".join(chr(byte) if chr(byte).isascii() and (chr(byte).isalnum() or chr(byte) in "-_")
+                   else f"%{byte:02X}" for byte in tenant.encode("utf-8"))
+
+
+def check_upload_url(transport, api, env, out):
+    """upload-url: the key is server-chosen under the caller's tenant; a caller-chosen key is refused."""
+    body = {"bucket": "", "object_key": "", "mime_type": "text/plain", "expected_size": 1, "expires_in": 60}
+    issued = successful_data(transport.request(api + "/upload-url", "POST", token=env["USER_A"], body=body))
+    key = issued.get("object_key")
+    segments = key.split("/") if isinstance(key, str) else []
+    if len(segments) < 2 or segments[0] != tenant_segment(env["TENANT_A"]) or not all(segments[1:]):
+        raise GateFailure("upload-url object key does not start with the caller's tenant")
+    foreign = f"{tenant_segment(env['TENANT_B'])}/media/documents/sec05-{uuid.uuid4().hex}.txt"
+    denied(transport.request(api + "/upload-url", "POST", token=env["USER_A"], body=dict(body, object_key=foreign)),
+           anonymous=False, identifiers=[foreign, env["TENANT_B"]], expected={400})
+    print("upload-url: key starts with the caller's tenant; a caller-chosen key under another tenant is "
+          "refused with a typed 400", file=out)
 
 
 def check_admin(transport, admin, env, bucket, out):
@@ -340,6 +365,7 @@ def run(args, environ, transport, out=None):
         if status != 404:
             raise GateFailure("ordinary gateway still exposes a management route")
     print(f"public: {len(MANAGEMENT_ROUTES)} management routes return 404 for a user token", file=out)
+    check_upload_url(transport, api, env, out)
     if admin_base:
         check_admin(transport, admin_base + "/api/v1/admin/medias", env, args.bucket, out)
     else:
@@ -367,7 +393,8 @@ def run(args, environ, transport, out=None):
         raise
     delete_fixture()
     scope = "management boundary" if admin_base else "public management boundary (admin not evaluated)"
-    print(f"PASS: {scope}, tenant/owner denials, authenticated upload/download; owned fixture deleted", file=out)
+    print(f"PASS: {scope}, tenant-scoped upload-url, tenant/owner denials, authenticated upload/download; "
+          "owned fixture deleted", file=out)
 
 
 def main(argv=None, environ=None):
