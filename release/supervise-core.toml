@@ -105,9 +105,10 @@ tcp_health = "127.0.0.1:60084"
 [[services]]
 name = "push-server"
 command = "/usr/local/bin/flare-push-server"
-# Signed MQ provenance is not implemented yet. Do not crash-loop the default
-# all-service supervisor on the intentionally paused Push consumer.
-enabled_if_env = "PUSH_SERVER_SIGNED_PROVENANCE_READY"
+# Started only when the deployment enforces broker provenance (see
+# flare_im_service_kit::push_delivery) and says so with this switch; otherwise the
+# default all-service supervisor would crash-loop on the paused Push consumer.
+enabled_if_env = "PUSH_SERVER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_SERVER_"]
 inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 
@@ -122,7 +123,7 @@ tcp_health = "127.0.0.1:50091"
 [[services]]
 name = "push-worker"
 command = "/usr/local/bin/flare-push-worker"
-enabled_if_env = "PUSH_WORKER_SIGNED_PROVENANCE_READY"
+enabled_if_env = "PUSH_WORKER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_GETUI_"]
 inherit_env = ["ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 

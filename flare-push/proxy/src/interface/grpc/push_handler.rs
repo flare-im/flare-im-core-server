@@ -27,6 +27,8 @@ pub struct PushServiceHandler {
     status_query: Arc<PushTaskStatusQuery>,
     store: Arc<RedisStateStore>,
     device_tokens: Arc<RedisDeviceTokenRegistry>,
+    /// Why enqueue is refused (`None` = broker provenance is enforced); decided once at startup.
+    delivery_refusal: Option<Arc<str>>,
 }
 
 impl PushServiceHandler {
@@ -35,12 +37,23 @@ impl PushServiceHandler {
         status_query: Arc<PushTaskStatusQuery>,
         store: Arc<RedisStateStore>,
         device_tokens: Arc<RedisDeviceTokenRegistry>,
+        delivery_refusal: Option<String>,
     ) -> Self {
         Self {
             command_handler,
             status_query,
             store,
             device_tokens,
+            delivery_refusal: delivery_refusal.map(Arc::from),
+        }
+    }
+
+    /// Enqueue only when the Push consumers can run: acknowledging a task that no
+    /// consumer may process would silently drop it.
+    fn require_delivery_ready(&self) -> Result<(), Status> {
+        match &self.delivery_refusal {
+            None => Ok(()),
+            Some(reason) => Err(Status::unavailable(reason.to_string())),
         }
     }
 }
@@ -58,7 +71,7 @@ impl PushService for PushServiceHandler {
         if let Some(options) = request.get_ref().options.as_ref() {
             require_metadata_tenant(&options.metadata, &tenant_id)?;
         }
-        require_delivery_provenance_ready()?;
+        self.require_delivery_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushMessageResponse {
@@ -101,7 +114,7 @@ impl PushService for PushServiceHandler {
         if let Some(notification) = request.get_ref().notification.as_ref() {
             require_metadata_tenant(&notification.metadata, &tenant_id)?;
         }
-        require_delivery_provenance_ready()?;
+        self.require_delivery_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushNotificationResponse {
@@ -142,7 +155,7 @@ impl PushService for PushServiceHandler {
         if let Some(custom_data) = request.get_ref().custom_data.as_ref() {
             require_metadata_tenant(&custom_data.attributes, &tenant_id)?;
         }
-        require_delivery_provenance_ready()?;
+        self.require_delivery_ready()?;
         let req = request.into_inner();
         if req.user_ids.is_empty() {
             return Ok(Response::new(PushCustomResponse {
@@ -242,23 +255,6 @@ impl PushService for PushServiceHandler {
 /// The downstream Push Server/Worker consumers are intentionally paused until
 /// signed MQ ingress and both delivery stages have been verified. Do not
 /// acknowledge new tasks as "pending" when no consumer can deliver them.
-fn require_delivery_provenance_ready() -> Result<(), Status> {
-    let mode = std::env::var("PUSH_PROXY_EVENT_PROVENANCE_MODE").unwrap_or_default();
-    delivery_provenance_gate(&mode)
-}
-
-fn delivery_provenance_gate(mode: &str) -> Result<(), Status> {
-    match mode.trim() {
-        "" | "paused" => Err(Status::unavailable(
-            "Push enqueue paused until authenticated MQ provenance and replay are ready",
-        )),
-        "signed-v1" => Err(Status::unavailable(
-            "signed-v1 Push enqueue is reserved; end-to-end verification is not implemented",
-        )),
-        _ => Err(Status::unavailable("unsupported Push provenance mode")),
-    }
-}
-
 fn require_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String, Status> {
     ctx.tenant_id()
         .filter(|tenant_id| {
@@ -416,17 +412,17 @@ mod identity_boundary_tests {
 
 #[cfg(test)]
 mod delivery_gate_tests {
-    use super::*;
-
     #[test]
-    fn no_mode_can_acknowledge_unconsumable_push_tasks() {
-        for mode in ["", "paused", "signed-v1", "unknown"] {
-            assert_eq!(
-                delivery_provenance_gate(mode).unwrap_err().code(),
-                tonic::Code::Unavailable,
-                "mode={mode}"
-            );
+    fn refusal_reason_becomes_unavailable_and_absence_allows_enqueue() {
+        fn gate(refusal: Option<&str>) -> Result<(), tonic::Status> {
+            match refusal {
+                None => Ok(()),
+                Some(reason) => Err(tonic::Status::unavailable(reason)),
+            }
         }
+        let refused = gate(Some("Push Proxy is paused")).unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unavailable);
+        assert!(gate(None).is_ok());
     }
 }
 

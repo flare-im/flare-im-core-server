@@ -1,6 +1,14 @@
 # SEC-07 Push 事件来源门禁与接线顺序
 
-状态：**阻断 / 候选设计**。本文件是对当前代码的信任边界审计与实施验收清单，**不是 Push 已可启用的声明**。截至本文检查时，`SignedPushRecordV1` 和 `flare-im-service-kit::push_provenance` 只是可复用的签名/验证原语；没有生产者、消费者、Broker ACL、持久去重或旧队列切换接线。`PUSH_PROXY_EVENT_PROVENANCE_MODE`、`PUSH_SERVER_EVENT_PROVENANCE_MODE`、`PUSH_WORKER_EVENT_PROVENANCE_MODE` 的 `signed-v1` 必须继续拒绝启动/入队。
+状态：单机 P0 以 `broker-isolated` 放行（见第 0 节）；`signed-v1` 仍为**阻断 / 候选设计**。本文件是对当前代码的信任边界审计与实施验收清单，**不是 Push 已可启用的声明**。截至本文检查时，`SignedPushRecordV1` 和 `flare-im-service-kit::push_provenance` 只是可复用的签名/验证原语；没有生产者、消费者、Broker ACL、持久去重或旧队列切换接线。`PUSH_PROXY_EVENT_PROVENANCE_MODE`、`PUSH_SERVER_EVENT_PROVENANCE_MODE`、`PUSH_WORKER_EVENT_PROVENANCE_MODE` 的 `signed-v1` 必须继续拒绝启动/入队。
+
+## 0. P0 单机决策：`broker-isolated`（2026-09-30）
+
+单机九容器拓扑中，Core 的所有 Push 生产者与消费者（Ingest、Orchestrator、Push Proxy/Server/Worker）同在一个 Core 容器内，Social 不使用 broker。此时伪造 broker 记录需要先取得 Core 的 broker 凭据——而这等同攻破 Core 本身，届时签名私钥同样失守。因此 P0 单机采用 `broker-isolated` 模式，由部署层保证、由代码核验可观察的一半：
+
+- `PUSH_{PROXY,SERVER,WORKER}_EVENT_PROVENANCE_MODE=broker-isolated`：仅当配置的 broker 为 NATS 且 URL 携带凭据时放行（`flare_im_service_kit::push_delivery`）；否则 Proxy 拒绝入队、Server/Worker 拒绝启动。默认仍为 `paused`；`signed-v1` 继续保留、拒绝。
+- 部署层（`flare-deploy` 单机模板 + `flarectl`）负责另一半：NATS 开启认证、凭据只注入 Core；broker 网络只挂 Core 与 NATS。监管清单的 `PUSH_SERVER_DELIVERY_READY`/`PUSH_WORKER_DELIVERY_READY` 仅用于选择进程，不能绕过上述门禁。
+- 多主机/多 Cell 拓扑（Core 拆分到多个容器或主机、第三方生产者接入 broker）不满足这一前提，必须实现下文的 `signed-v1` 方案。下文各节的信任断点分析与验收清单对 `signed-v1` 依然有效。
 
 ## 1. 当前数据流和不能跨越的信任断点
 

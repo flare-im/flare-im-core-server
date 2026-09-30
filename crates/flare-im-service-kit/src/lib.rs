@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod gateway_auth;
 pub mod health;
 pub mod metrics;
+pub mod push_delivery;
 pub mod push_provenance;
 pub mod runtime;
 pub mod service_helper;

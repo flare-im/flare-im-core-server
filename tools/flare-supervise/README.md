@@ -102,15 +102,16 @@ the S3 endpoint and credentials. Message Ingest requires
 its Hook configuration path. Admin Gateway joins `all` only when
 `FLARE_CONSOLE_PUBLIC_KEY` is provided.
 
-Push Server and Push Worker are also excluded from default `all` while their
-MQ event provenance gate is deliberately paused. The manifest's
-`PUSH_SERVER_SIGNED_PROVENANCE_READY` and
-`PUSH_WORKER_SIGNED_PROVENANCE_READY` conditions only select the processes;
-setting them **does not** bypass each binary's separate fail-closed startup
-gate. Do not set them for a release until authenticated ingress, signed event
-verification, replay, broker ACL, and retention capacity have passed their
-own acceptance tests. `flare-core health` can be green without Push and must
-not be interpreted as successful online/offline delivery.
+Push Server and Push Worker are also excluded from default `all` until the
+deployment enforces broker provenance. The manifest's
+`PUSH_SERVER_DELIVERY_READY` and `PUSH_WORKER_DELIVERY_READY` conditions only
+select the processes; setting them **does not** bypass each binary's separate
+fail-closed startup gate (`<ROLE>_EVENT_PROVENANCE_MODE`, see
+`flare_im_service_kit::push_delivery`). The single-host installer sets
+`broker-isolated`, which the gate accepts only with an authenticated NATS URL;
+`signed-v1` stays reserved for multi-host topologies. `flare-core health` can
+be green without Push and must not be interpreted as successful online/offline
+delivery.
 
 The supervisor does not generate or distribute keys, migrate schemas, or
 provision infrastructure. DEP-08 must provide an explicit Cell environment and

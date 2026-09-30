@@ -703,11 +703,11 @@ required_env_unless = [
             .unwrap();
         assert_eq!(
             push_server.enabled_if_env.as_deref(),
-            Some("PUSH_SERVER_SIGNED_PROVENANCE_READY")
+            Some("PUSH_SERVER_DELIVERY_READY")
         );
         assert_eq!(
             push_worker.enabled_if_env.as_deref(),
-            Some("PUSH_WORKER_SIGNED_PROVENANCE_READY")
+            Some("PUSH_WORKER_DELIVERY_READY")
         );
         assert!(manifest.env_allowed(push_worker, "PUSH_WORKER_APNS_PRIVATE_KEY"));
         assert!(
