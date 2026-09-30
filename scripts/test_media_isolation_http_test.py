@@ -85,14 +85,47 @@ class HttpGateSafetyTests(unittest.TestCase):
             transport.request("http://localhost:9000/object")
 
     def test_denials_must_not_contain_success_data_or_redirect(self):
-        gate.denied((403, {}, b'{"code":403,"data":null}'))
-        gate.denied((500, {}, b'{"code":500,"reason":"NOT_FOUND"}'))
+        gate.denied((403, {}, b'{"code":403,"data":null}'), anonymous=False)
+        gate.denied((404, {}, b'{"code":404,"reason":"NOT_FOUND"}'), anonymous=False)
+        gate.denied((401, {}, b'{"code":401,"reason":"UNAUTHORIZED"}'), anonymous=True)
         for response in [(200, {}, b'{}'), (403, {"Location": "https://private.test"}, b'{}'),
-                         (500, {}, b'{"code":500,"data":{"url":"private"}}'), (403, {}, b'{"code":0}'),
+                         (404, {}, b'{"code":404,"data":{"url":"private"}}'), (403, {}, b'{"code":0}'),
                          (403, {}, b'{"code":200}'), (403, {}, b'{"data":null}'), (403, {}, b'not-json'),
                          (307, {}, b'{"code":307}')]:
             with self.subTest(response=response), self.assertRaises(gate.GateFailure):
-                gate.denied(response)
+                gate.denied(response, anonymous=False)
+
+    def test_denials_are_typed_by_caller(self):
+        # The pre-fix gateway mapped every Media refusal to 500; a foreign bearer
+        # must now get 403/404 and an anonymous caller 401.
+        for status in [500, 401, 400, 502]:
+            with self.subTest(status=status), self.assertRaises(gate.GateFailure):
+                gate.denied((status, {}, b'{"code":%d,"reason":"X"}' % status), anonymous=False)
+        for status in [403, 404, 500]:
+            with self.subTest(status=status), self.assertRaises(gate.GateFailure):
+                gate.denied((status, {}, b'{"code":%d,"reason":"X"}' % status), anonymous=True)
+
+    def test_denials_must_not_echo_internal_identifiers(self):
+        identifiers = ["8dffe6e2-336e-4ab9-a668-cba3806937a8", "1200000000000000333/media/documents/x.txt",
+                       "1200000000000000333", "1200000000000000349"]
+        clean = b'{"code":404,"reason":"NOT_FOUND","message":"Resource not found","data":null,"ts":1759262164000}'
+        gate.denied((404, {}, clean), anonymous=False, identifiers=identifiers)
+        for body in [b'{"code":404,"reason":"8dffe6e2-336e-4ab9-a668-cba3806937a8"}',
+                     b'{"code":403,"reason":"FORBIDDEN","message":"key 1200000000000000333/media/documents/x.txt"}',
+                     b'{"code":404,"reason":"NOT_FOUND","message":"tenant=1200000000000000349"}',
+                     b'{"code":404,"reason":"NOT_FOUND","error":{"params":{"file":"8dffe6e2-336e-4ab9-a668-cba3806937a8"}}}']:
+            with self.subTest(body=body), self.assertRaisesRegex(gate.GateFailure, "echoes an internal identifier"):
+                gate.denied((int(json.loads(body)["code"]), {}, body), anonymous=False, identifiers=identifiers)
+        with self.assertRaisesRegex(gate.GateFailure, "echoes"):
+            gate.denied((401, {}, b'{"code":401,"message":"no token for 1200000000000000333"}'), anonymous=True,
+                        identifiers=identifiers)
+
+    def test_identifier_echo_matches_whole_tokens_only(self):
+        self.assertTrue(gate.echoes("x/1200000000000000333/media", "1200000000000000333"))
+        self.assertTrue(gate.echoes("tenant 0 is gone", "0"))
+        self.assertFalse(gate.echoes('{"code":404,"ts":1759262164000}', "0"))
+        self.assertFalse(gate.echoes("11200000000000000333", "1200000000000000333"))
+        self.assertFalse(gate.echoes("anything", ""))
 
     def test_success_requires_the_core_envelope(self):
         # flare-server-core ApiResponse::success serializes code 0.
@@ -221,9 +254,25 @@ class FakeMediaService:
         self.calls = []
         self.files = {}
 
-    def envelope(self, status, data=None, code=None, headers=None):
-        body = {"code": 0, "data": data} if code is None else {"code": code, "reason": "DENIED", "message": ""}
+    def envelope(self, status, data=None, code=None, headers=None, reason="DENIED", message=""):
+        body = {"code": 0, "data": data} if code is None else {"code": code, "reason": reason, "message": message}
         return status, headers or {}, json.dumps(body).encode()
+
+    def object_key(self, file_id):
+        # Shares no token with the file id or a tenant id, so only the object
+        # key itself (from file-info) can reveal an echo of it.
+        return "t-enc/media/documents/obj-7f3a9c.txt"
+
+    def refuse(self, token, file_id):
+        """Typed refusals of the fixed gateway: 404 across tenants or when gone, 403 across owners."""
+        if token == self.env["FLARE_MEDIA_E2E_USER_B"] or file_id not in self.files:
+            status, reason = 404, "NOT_FOUND"
+        else:
+            status, reason = 403, "FORBIDDEN"
+        status = self.faults.get("denial_status", status)
+        echo = {"file_id": file_id, "object_key": self.object_key(file_id),
+                "tenant": self.env["FLARE_MEDIA_E2E_TENANT_A"]}.get(self.faults.get("echo"), "")
+        return self.envelope(status, code=status, reason=reason, message=echo)
 
     def request(self, url, method="GET", *, token=None, tenant=None, body=None):
         self.calls.append(SimpleNamespace(url=url, method=method, token=token, tenant=tenant, body=body))
@@ -244,7 +293,8 @@ class FakeMediaService:
         if path in {"/cleanup-orphaned-assets", "/object-acl", "/objects", "/bucket"}:
             return (200, {}, b"{}") if path == self.faults.get("exposed") else (404, {}, b"")
         if not token:
-            return self.envelope(401, code=401)
+            status = self.faults.get("anonymous_status", 401)
+            return self.envelope(status, code=status, reason="UNAUTHORIZED")
         owner = token == self.env["FLARE_MEDIA_E2E_USER_A"] or token == self.faults.get("leak_to")
         if path == "/file" and method == "DELETE" and set(body or {}) != {"file_id", "hard_delete"}:
             # axum Json<DeleteFileRequest>: plain-serde proto, every field required.
@@ -255,9 +305,10 @@ class FakeMediaService:
             return self.envelope(200, {"file_id": file_id, "success": True, "url": "https://signed.invalid/?sig=x"})
         file_id = query.get("file_id") or (body or {}).get("file_id") or path.rsplit("/", 1)[-1]
         if file_id not in self.files or not owner:
-            return self.envelope(500, code=500)
+            return self.refuse(token, file_id)
         if path == "/file-info":
-            return self.envelope(200, {"file_id": file_id, "size": len(self.files[file_id])})
+            return self.envelope(200, {"file_id": file_id, "size": len(self.files[file_id]),
+                                       "object_key": self.object_key(file_id)})
         if path == "/file-url":
             target = self.faults.get("presigned", f"{self.STORAGE}1200000000000000349/media/{file_id}?X-Amz-Signature=secret")
             return self.envelope(200, {"url": target, "cdn_url": "1200000000000000349/media/" + file_id})
@@ -299,7 +350,7 @@ class GateFlowTests(unittest.TestCase):
         service, out = self.run_gate(self.EDGE_ARGV)
         self.assertIn("admin: not evaluated", out)
         self.assertIn("public: 4 management routes return 404", out)
-        self.assertIn("isolation: 12 requests denied", out)
+        self.assertIn("isolation: 12 requests denied without data or internal identifiers", out)
         self.assertIn("presigned: owner file-url under the storage prefix returns identical bytes", out)
         self.assertIn("download: owner bytes identical", out)
         self.assertIn("PASS: public management boundary (admin not evaluated)", out)
@@ -337,6 +388,11 @@ class GateFlowTests(unittest.TestCase):
             "redirect to another host": {"redirect": "https://evil.test:18443/flare-media/t/f-1"},
             "relative redirect (bare object key)": {"redirect": "1200000000000000349/media/f-1"},
             "presigned url outside storage prefix": {"presigned": "https://edge.test:18443/api/x?sig=1"},
+            "untyped 500 denial (pre-fix mapping)": {"denial_status": 500},
+            "anonymous not refused by authentication": {"anonymous_status": 404},
+            "denial echoes the file id": {"echo": "file_id"},
+            "denial echoes the object key": {"echo": "object_key"},
+            "denial echoes the tenant id": {"echo": "tenant"},
         }
         for name, fault in faults.items():
             with self.subTest(name), self.assertRaises(gate.GateFailure):

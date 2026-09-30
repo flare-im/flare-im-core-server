@@ -12,7 +12,9 @@ Host header keep the name. Without --admin-url the administrative half is
 skipped and reported as "admin: not evaluated". --storage-origin (origin plus
 optional path prefix such as Edge's /flare-media/) authorizes the owner's
 presigned file-url and the /files 307 target; both are fetched without the
-application bearer and must return the uploaded bytes.
+application bearer and must return the uploaded bytes. Foreign callers must be
+refused with a typed status (401 without a bearer, 403/404 with one) whose body
+carries neither data nor the fixture's file id, object key or a tenant id.
 """
 import argparse
 import base64
@@ -195,12 +197,23 @@ def successful_data(response):
     return envelope["data"]
 
 
-def denied(response):
+def echoes(text, value):
+    """True when `value` appears in `text` as a whole token (not inside a longer word or number)."""
+    return bool(value) and re.search(rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", text) is not None
+
+
+def denied(response, *, anonymous, identifiers=()):
+    """A typed refusal: 401 without a bearer, 403/404 for a foreign bearer.
+
+    Media's own text is the caller's file id (cross-tenant not-found) or the
+    authorization rule (cross-owner), so a denial must not carry the fixture's
+    file id, object key or either tenant id anywhere in its body.
+    """
     status, headers, payload = response
-    # Domain RPC errors currently lose their specific HTTP code. This asserts
-    # fail-closed data behavior, not that the legacy error mapping is correct.
-    if status not in {401, 403, 404, 500} or headers.get("Location"):
-        raise GateFailure(f"expected denial without redirect, received {status}")
+    expected = {401} if anonymous else {403, 404}
+    if status not in expected or headers.get("Location"):
+        allowed = "/".join(str(value) for value in sorted(expected))
+        raise GateFailure(f"expected a {allowed} denial without redirect, received {status}")
     try:
         envelope = json.loads(payload)
     except ValueError as error:
@@ -209,6 +222,9 @@ def denied(response):
     # A denial carries a positive error code; 0 (and the legacy 200) mean success.
     if not isinstance(code, int) or isinstance(code, bool) or code <= 0 or code == 200 or envelope.get("data") is not None:
         raise GateFailure("denied request exposed data")
+    text = payload.decode("utf-8", errors="replace")
+    if any(echoes(text, value) for value in identifiers):
+        raise GateFailure("denial echoes an internal identifier (file id, object key or tenant id)")
 
 
 def parse_args(argv=None):
@@ -268,16 +284,20 @@ def verify_fixture(transport, api, env, file_id, content, allowance, out):
     info = successful_data(transport.request(api + info_path, token=env["USER_A"]))
     if info.get("size") != len(content):
         raise GateFailure("owner file info does not describe the uploaded fixture")
+    identifiers = [value for value in (file_id, info.get("object_key"), env["TENANT_A"], env["TENANT_B"])
+                   if isinstance(value, str) and value]
     denials = 0
     for name in DENIED_PRINCIPALS:
         token = env[name] if name else None
-        denied(transport.request(api + info_path, token=token))
-        denied(transport.request(api + download_path, token=token))
-        denied(transport.request(api + "/file-url", "POST", token=token, body={"file_id": file_id, "expires_in": 60}))
-        denied(transport.request(api + "/file", "DELETE", token=token, body=delete_body(file_id)))
+        check = {"anonymous": token is None, "identifiers": identifiers}
+        denied(transport.request(api + info_path, token=token), **check)
+        denied(transport.request(api + download_path, token=token), **check)
+        denied(transport.request(api + "/file-url", "POST", token=token, body={"file_id": file_id, "expires_in": 60}),
+               **check)
+        denied(transport.request(api + "/file", "DELETE", token=token, body=delete_body(file_id)), **check)
         denials += 4
-    print(f"isolation: {denials} requests denied without data "
-          "(tenant B user, other tenant A user, anonymous x info/download/url/delete)", file=out)
+    print(f"isolation: {denials} requests denied without data or internal identifiers "
+          "(tenant B user, other tenant A user: 403/404; anonymous: 401; x info/download/url/delete)", file=out)
     if allowance is None:
         print("presigned: not evaluated (no --storage-origin)", file=out)
     else:
