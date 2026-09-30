@@ -216,6 +216,11 @@ valid:
 - `suspended` / `deleting` → the connection is rejected with `TENANT_UNAVAILABLE`, whatever
   the policy: before closing, the gateway sends an `ERROR` system frame (pre-negotiation
   JSON, like `CONNECT_ACK`) whose message is `TENANT_UNAVAILABLE`.
+- Right after a suspension the gateway's cached status can still be `active` while the
+  Online service already refuses to register the session. The client then gets
+  `CONNECT_ACK` followed by a `KICKED` system frame (negotiated encoding) whose message and
+  metadata `reason` are `TENANT_UNAVAILABLE`, and the connection is closed. Treat it like
+  the pre-ACK rejection: do not reconnect in a loop.
 - No projection for the tenant (or the projection database is unreachable) →
   `ACCESS_GATEWAY_TENANT_POLICY` (or `services.access_gateway.tenant_policy`) decides:
   `lenient` (default) admits, `strict` rejects. Use `strict` in production and `lenient`
