@@ -37,6 +37,7 @@ impl ApplicationBootstrap {
         context: ApplicationContext,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
+        use flare_grpc_proto::signaling::online::online_admin_service_server::OnlineAdminServiceServer;
         use flare_grpc_proto::signaling::online::online_service_server::OnlineServiceServer;
         use tonic::transport::Server;
 
@@ -59,6 +60,9 @@ impl ApplicationBootstrap {
                 // 使用 ContextLayer 包裹 Service
                 use flare_server_core::middleware::ContextLayer;
 
+                let online_admin_service = ContextLayer::new()
+                    .allow_missing()
+                    .layer(OnlineAdminServiceServer::new(online_handler.clone()));
                 let online_service = ContextLayer::new()
                     .allow_missing()
                     .layer(OnlineServiceServer::new(online_handler));
@@ -66,6 +70,7 @@ impl ApplicationBootstrap {
                 Server::builder()
                     .layer(grpc_metrics)
                     .add_service(online_service)
+                    .add_service(online_admin_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;
                     })

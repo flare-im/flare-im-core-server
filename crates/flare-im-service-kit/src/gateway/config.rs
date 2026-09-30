@@ -3,10 +3,11 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use serde::Deserialize;
 use std::str::FromStr;
 
+use crate::clients::CapabilityDownstreamConfig;
 pub use crate::clients::DownstreamGrpcConfig as GatewayGrpcConfig;
 use crate::discovery::{discovery_route_authority, is_discovery_route_authority};
 use crate::service_names::{
-    CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE, STORAGE_READER,
+    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE, STORAGE_READER,
 };
 
 /// 网关环境配置作用域。
@@ -349,6 +350,63 @@ impl GatewaySettings {
     }
 }
 
+/// Admin Gateway 专用的可选下游 Capability（租户能力开关、租户运行时只读）。
+///
+/// 只有 [`GatewayEnvScope::Admin`] 才读取
+/// `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL` 与 `..._STATIC_FALLBACK`；
+/// api-gateway 恒为 `None`，启动时不会去连 Capability。把 URL 显式设为空串即关闭该下游。
+pub fn capability_downstream_from_env(
+    scope: GatewayEnvScope,
+) -> Result<Option<CapabilityDownstreamConfig>> {
+    dotenvy::dotenv().ok();
+    capability_downstream_from_env_source(scope, |key| std::env::var(key).ok())
+}
+
+pub fn capability_downstream_from_env_source<F>(
+    scope: GatewayEnvScope,
+    mut source: F,
+) -> Result<Option<CapabilityDownstreamConfig>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if scope != GatewayEnvScope::Admin {
+        return Ok(None);
+    }
+    let service_url = env_or(
+        &mut source,
+        scope,
+        "GRPC_CAPABILITY_SERVICE_URL",
+        &discovery_route_authority(CAPABILITY),
+    );
+    let service_url = service_url.trim();
+    if service_url.is_empty() {
+        return Ok(None);
+    }
+    if !is_valid_grpc_route(service_url) {
+        return Err(config_error(
+            "gRPC route for capability must be discovery://, http://, or https://",
+        ));
+    }
+    let static_fallback = env_or(
+        &mut source,
+        scope,
+        "GRPC_CAPABILITY_STATIC_FALLBACK",
+        "http://127.0.0.1:50110",
+    );
+    let static_fallback = static_fallback.trim();
+    if !static_fallback.is_empty()
+        && !(static_fallback.starts_with("http://") || static_fallback.starts_with("https://"))
+    {
+        return Err(config_error(
+            "capability static fallback must be http:// or https://",
+        ));
+    }
+    Ok(Some(CapabilityDownstreamConfig {
+        service_url: service_url.to_string(),
+        static_fallback: static_fallback.to_string(),
+    }))
+}
+
 fn config_error(reason: impl Into<String>) -> FlareError {
     ErrorBuilder::new(ErrorCode::ConfigurationError, reason).build_error()
 }
@@ -464,6 +522,72 @@ mod tests {
             assert!(
                 alias.parse::<AuthProviderMode>().is_err(),
                 "{alias} must not be accepted as an auth mode"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_downstream_is_admin_only_and_optional() {
+        // api-gateway 不读取、也不连接 Capability，哪怕环境里配了 admin 的变量。
+        let mut api_reads = Vec::new();
+        let api = capability_downstream_from_env_source(GatewayEnvScope::Api, |key| {
+            api_reads.push(key.to_string());
+            Some("http://127.0.0.1:1".to_string())
+        })
+        .unwrap();
+        assert_eq!(api, None);
+        assert!(api_reads.is_empty(), "{api_reads:?}");
+
+        let defaults =
+            capability_downstream_from_env_source(GatewayEnvScope::Admin, |_| None).unwrap();
+        assert_eq!(
+            defaults,
+            Some(CapabilityDownstreamConfig {
+                service_url: "discovery://flare-capability".to_string(),
+                static_fallback: "http://127.0.0.1:50110".to_string(),
+            })
+        );
+
+        let env = HashMap::from([
+            (
+                "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL".to_string(),
+                "http://capability:50110".to_string(),
+            ),
+            (
+                "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_STATIC_FALLBACK".to_string(),
+                String::new(),
+            ),
+        ]);
+        let overridden = capability_downstream_from_env_source(GatewayEnvScope::Admin, |key| {
+            env.get(key).cloned()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(overridden.service_url, "http://capability:50110");
+        assert_eq!(overridden.static_fallback, "");
+
+        let disabled = capability_downstream_from_env_source(GatewayEnvScope::Admin, |key| {
+            (key == "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL").then(String::new)
+        })
+        .unwrap();
+        assert_eq!(disabled, None);
+
+        for (key, value) in [
+            (
+                "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL",
+                "capability:50110",
+            ),
+            (
+                "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_STATIC_FALLBACK",
+                "capability:50110",
+            ),
+        ] {
+            assert!(
+                capability_downstream_from_env_source(GatewayEnvScope::Admin, |k| {
+                    (k == key).then(|| value.to_string())
+                })
+                .is_err(),
+                "{key}"
             );
         }
     }

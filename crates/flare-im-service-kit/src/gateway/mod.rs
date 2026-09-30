@@ -8,6 +8,7 @@ pub mod router;
 
 pub use config::{
     GatewayEnvScope, GatewayGrpcConfig, GatewaySettings, RateLimitConfig, ServerConfig,
-    TracingConfig, require_secure_token_secret,
+    TracingConfig, capability_downstream_from_env, capability_downstream_from_env_source,
+    require_secure_token_secret,
 };
 pub use router::{GatewayRouter, GatewayRouterConfig, GatewayRouterTrait};

@@ -5,11 +5,12 @@
 
 use std::sync::Arc;
 
+use flare_im_contracts::domain::tenant::{TenantQuota, TenantStatus};
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use sqlx::{PgPool, Row};
 
-use crate::domain::model::{TenantProjectionOutcome, TenantProjectionRecord};
-use crate::domain::repository::TenantProjectionRepository;
+use crate::domain::model::{TenantProjectionOutcome, TenantProjectionRecord, TenantRuntimeView};
+use crate::domain::repository::{TenantProjectionRepository, TenantRuntimeReader};
 
 pub struct PostgresTenantProjectionRepository {
     pool: Arc<PgPool>,
@@ -97,5 +98,53 @@ impl TenantProjectionRepository for PostgresTenantProjectionRepository {
                 (row.get("tenant_id"), u64::try_from(version).unwrap_or(0))
             })
             .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl TenantRuntimeReader for PostgresTenantProjectionRepository {
+    async fn tenant_runtime(&self, tenant_id: &str) -> Result<Option<TenantRuntimeView>> {
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, name, status,
+                   COALESCE(config, '{}'::jsonb)::text AS settings_json,
+                   COALESCE(quota, '{}'::jsonb)::text AS quota_json,
+                   version, projected_at, updated_at
+            FROM tenants
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "Failed to read tenant runtime")
+        })?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let status: String = row.get("status");
+        let status = TenantStatus::parse(&status).ok_or_else(|| {
+            flare_server_core::error::FlareError::system(format!(
+                "tenant {tenant_id} has unknown status `{status}`"
+            ))
+        })?;
+        let quota_json: String = row.get("quota_json");
+        let quota = serde_json::from_str::<TenantQuota>(&quota_json).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "tenant {tenant_id} has malformed quota: {e}"
+            ))
+        })?;
+        let version: i64 = row.get("version");
+        Ok(Some(TenantRuntimeView {
+            tenant_id: row.get("tenant_id"),
+            name: row.get("name"),
+            status,
+            quota,
+            settings_json: row.get("settings_json"),
+            version: u64::try_from(version).unwrap_or(0),
+            projected_at: row.get("projected_at"),
+            updated_at: row.get("updated_at"),
+        }))
     }
 }

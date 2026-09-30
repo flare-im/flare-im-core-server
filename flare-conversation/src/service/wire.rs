@@ -8,6 +8,7 @@ use std::time::Duration;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use sqlx::postgres::PgPoolOptions;
 
+use crate::application::ConversationAdminQueryHandler;
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
 use crate::domain::model::ConversationDomainConfig;
@@ -15,14 +16,17 @@ use crate::domain::service::{ConversationDomainService, DefaultConversationDomai
 use crate::infrastructure::event_consumer::{
     ConversationEnsureEventConsumer, ReadReceiptEventConsumer,
 };
+use crate::infrastructure::persistence::PostgresConversationAdminRepository;
 use crate::infrastructure::persistence::message_cache::RedisMessageCacheInvalidator;
 use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
 use crate::infrastructure::rpc::StorageReaderClient;
-use crate::interface::grpc::ConversationGrpcHandler;
+use crate::interface::grpc::{ConversationAdminGrpcHandler, ConversationGrpcHandler};
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub handler: ConversationGrpcHandler,
+    /// 管理员只读（`ConversationAdminService`）：只认 admin-gateway 转发的 admin 令牌。
+    pub admin_handler: ConversationAdminGrpcHandler<PostgresConversationAdminRepository>,
     /// 配置了 JetStream 且初始化成功时存在，由 bootstrap 后台 `run`（`ctx` 在 MQ 侧重建）
     pub read_receipt_consumer: Option<ReadReceiptEventConsumer>,
     pub conversation_ensure_consumer: Option<ConversationEnsureEventConsumer>,
@@ -92,6 +96,11 @@ pub async fn initialize(
         )
         .build_error());
     };
+
+    // 管理员只读仓储与会话仓储共用连接池，不另开连接。
+    let admin_repository = Arc::new(PostgresConversationAdminRepository::new(Arc::clone(
+        &postgres_pool,
+    )));
 
     // 4. 创建会话仓储（硬切到 Postgres，会话元数据必须来自持久化读模型）
     let mut conversation_repo =
@@ -177,6 +186,22 @@ pub async fn initialize(
 
     // 10. 构建 gRPC 处理器
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler);
+    // 管理员只读只认 Console 公钥验签的 admin 令牌；没配公钥时 fail closed（UNAUTHENTICATED）。
+    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
+        .map_err(|_| {
+        ErrorBuilder::new(
+            ErrorCode::ConfigurationError,
+            "invalid FLARE_CONSOLE_PUBLIC_KEY for conversation",
+        )
+        .build_error()
+    })?;
+    if control_verifier.is_none() {
+        tracing::warn!("Console control public key missing; conversation admin RPCs fail closed");
+    }
+    let admin_handler = ConversationAdminGrpcHandler::new(
+        Arc::new(ConversationAdminQueryHandler::new(admin_repository)),
+        control_verifier,
+    );
 
     let mq_consumers_enabled =
         conversation_config.mq_backend == "kafka" || conversation_config.jetstream_url.is_some();
@@ -213,6 +238,7 @@ pub async fn initialize(
 
     Ok(ApplicationContext {
         handler: grpc_handler,
+        admin_handler,
         read_receipt_consumer,
         conversation_ensure_consumer,
     })

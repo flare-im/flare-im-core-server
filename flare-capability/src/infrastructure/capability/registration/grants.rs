@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use flare_im_contracts::utils::normalize_tenant_id;
 
 use crate::domain::capability::{
-    CapabilityError, CapabilityPolicyBackend, Result, UserCapabilityGrant,
+    CapabilityError, CapabilityPolicyBackend, Result, TenantCapabilitySwitch, UserCapabilityGrant,
 };
 
 /// 与旧 `InMemoryCapabilityPolicyChecker` 等价的最小子集
@@ -252,6 +252,23 @@ impl CapabilityPolicyBackend for InMemoryCapabilityGrants {
     ) -> Result<()> {
         InMemoryCapabilityGrants::set_tenant_capability(self, tenant_id, capability_id, enabled);
         Ok(())
+    }
+
+    async fn list_tenant_switches(&self, tenant_id: &str) -> Result<Vec<TenantCapabilitySwitch>> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        let mut switches: Vec<TenantCapabilitySwitch> = self
+            .tenant_capability_switches
+            .iter()
+            .filter(|entry| entry.key().0 == tenant_id)
+            .map(|entry| TenantCapabilitySwitch {
+                tenant_id: tenant_id.clone(),
+                capability_id: entry.key().1.clone(),
+                enabled: *entry.value(),
+                updated_at: None,
+            })
+            .collect();
+        switches.sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
+        Ok(switches)
     }
 }
 

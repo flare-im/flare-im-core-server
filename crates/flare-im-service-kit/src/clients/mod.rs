@@ -1,3 +1,4 @@
+mod capability_client;
 mod conversation_client;
 mod media_client;
 mod message_client;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 use crate::config::FlareAppConfig;
 
+pub use capability_client::{CapabilityAdminClientWrapper, CapabilityDownstreamConfig};
 pub use conversation_client::{
     ConversationManageServiceClientWrapper, ConversationReadServiceClientWrapper,
 };
@@ -123,10 +125,61 @@ impl GrpcClients {
     }
 }
 
+/// 管理员调用：把 admin-gateway 已验签的 admin 令牌原样放进 `authorization`。
+///
+/// 网关不持有任何签名私钥，也不附带未签名的身份元数据；下游按 admin 受众重新验签，
+/// 只认令牌里的员工主体与租户（见 `docs/SEC02-console-control-auth.md`）。
+pub(crate) fn admin_bearer_request<T>(payload: T, admin_token: &str) -> Result<tonic::Request<T>> {
+    let rejected = || {
+        flare_server_core::error::ErrorBuilder::new(
+            flare_server_core::error::ErrorCode::AuthenticationRequired,
+            "admin token required for downstream admin call",
+        )
+        .build_error()
+    };
+    // JWT 只含可见 ASCII；HTTP 头允许的 obs-text（0x80–0xFF）在这里同样拒绝。
+    if admin_token.is_empty() || !admin_token.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(rejected());
+    }
+    let value = tonic::metadata::MetadataValue::try_from(format!("Bearer {admin_token}"))
+        .map_err(|_| rejected())?;
+    let mut request = tonic::Request::new(payload);
+    request.metadata_mut().insert("authorization", value);
+    Ok(request)
+}
+
 fn optional_static_fallback(uri: &str) -> Option<String> {
     if uri.trim().is_empty() {
         None
     } else {
         Some(uri.to_string())
+    }
+}
+
+#[cfg(test)]
+mod admin_request_tests {
+    use super::admin_bearer_request;
+
+    #[test]
+    fn forwards_the_admin_token_as_the_only_identity() {
+        let request = admin_bearer_request((), "a.b.c").unwrap();
+        let values: Vec<_> = request
+            .metadata()
+            .get_all("authorization")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["Bearer a.b.c".to_string()]);
+        // 不附带任何未签名的身份元数据。
+        for key in ["x-tenant-id", "x-user-id", "x-actor-id", "x-flare-ctx"] {
+            assert!(request.metadata().get(key).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn rejects_empty_or_ambiguous_tokens() {
+        for token in ["", "a.b c", "a.b.c\n", "a.b.\u{7f}c", "令牌"] {
+            assert!(admin_bearer_request((), token).is_err(), "{token:?}");
+        }
     }
 }

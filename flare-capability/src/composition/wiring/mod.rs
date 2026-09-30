@@ -12,7 +12,7 @@ use flare_server_core::error::Result;
 
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
-use crate::interface::grpc::TenantProjectionGrpcServer;
+use crate::interface::grpc::{CapabilityAdminGrpcServer, TenantProjectionGrpcServer};
 
 use crate::composition::process_config::CapabilityServiceConfig;
 use crate::composition::runtime_context::ApplicationContext;
@@ -52,12 +52,18 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     if control_verifier.is_none() {
         tracing::warn!("Console control public key missing; tenant projection RPCs fail closed");
     }
-    let tenant_projection = db_pool.as_ref().map(|pool| {
-        TenantProjectionGrpcServer::new(
-            Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))),
-            control_verifier.clone(),
-        )
+    let tenant_projection_repository = db_pool
+        .as_ref()
+        .map(|pool| Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))));
+    let tenant_projection = tenant_projection_repository.as_ref().map(|repository| {
+        TenantProjectionGrpcServer::new(Arc::clone(repository), control_verifier.clone())
     });
+    // 管理员只读与投影接收端读同一张 `tenants` 表；开关读同一个策略后端。
+    let capability_admin = CapabilityAdminGrpcServer::new(
+        Arc::clone(&capability_policy),
+        tenant_projection_repository,
+        control_verifier.clone(),
+    );
 
     let extension_router = capability_registry.extension_router().await;
     let im_hook_plugin = ImHookPluginServer::new(
@@ -77,5 +83,6 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         capability_grpc,
         capability_runtime,
         tenant_projection,
+        capability_admin,
     })
 }

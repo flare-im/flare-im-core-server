@@ -157,6 +157,7 @@ pub async fn initialize(
     Ok(ApplicationContext { online_handler })
 }
 
+use flare_grpc_proto::signaling::online::online_admin_service_server::OnlineAdminService;
 use flare_grpc_proto::signaling::online::online_service_server::OnlineService;
 use flare_grpc_proto::signaling::online::*;
 use tokio_stream::wrappers::ReceiverStream;
@@ -258,5 +259,23 @@ impl OnlineService for WiredOnlineHandler {
         request: Request<GetDeviceRequest>,
     ) -> std::result::Result<Response<GetDeviceResponse>, Status> {
         self.handle_get_device(request).await
+    }
+}
+
+/// 管理员只读入口：只认 admin-gateway 转发的 admin 令牌（见 `OnlineHandler::handle_admin_*`）。
+#[tonic::async_trait]
+impl OnlineAdminService for WiredOnlineHandler {
+    async fn admin_list_user_devices(
+        &self,
+        request: Request<AdminListUserDevicesRequest>,
+    ) -> std::result::Result<Response<ListUserDevicesResponse>, Status> {
+        self.handle_admin_list_user_devices(request).await
+    }
+
+    async fn admin_get_user_presence(
+        &self,
+        request: Request<AdminGetUserPresenceRequest>,
+    ) -> std::result::Result<Response<GetUserPresenceResponse>, Status> {
+        self.handle_admin_get_user_presence(request).await
     }
 }

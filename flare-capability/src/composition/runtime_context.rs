@@ -9,8 +9,8 @@ use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRoute
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
 use crate::interface::grpc::{
-    CapabilityGrpcServer, ExtensionPluginRouter, HookServiceServer, ImHookPluginServer,
-    TenantProjectionGrpcServer,
+    CapabilityAdminGrpcServer, CapabilityGrpcServer, ExtensionPluginRouter, HookServiceServer,
+    ImHookPluginServer, TenantProjectionGrpcServer,
 };
 
 /// 应用上下文：接口层 gRPC 依赖 + 能力注册表 + 策略后端。
@@ -33,4 +33,6 @@ pub struct ApplicationContext {
     pub capability_runtime: Arc<CapabilityRuntimeConfig>,
     /// 控制面租户投影接收端（`flare.control.v1.TenantProjection`）；仅当配置了 PostgreSQL。
     pub tenant_projection: Option<TenantProjectionGrpcServer<PostgresTenantProjectionRepository>>,
+    /// 管理员只读（`CapabilityAdminService`）：租户开关与本地租户投影，只认 admin 令牌。
+    pub capability_admin: CapabilityAdminGrpcServer<PostgresTenantProjectionRepository>,
 }

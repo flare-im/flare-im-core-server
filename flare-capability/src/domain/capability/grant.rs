@@ -1,3 +1,3 @@
 //! Domain facade for user capability grants.
 
-pub use flare_im_capability_core::UserCapabilityGrant;
+pub use flare_im_capability_core::{TenantCapabilitySwitch, UserCapabilityGrant};

@@ -2,6 +2,13 @@
 //!
 //! This verifier only holds the Console public key. It cannot mint credentials,
 //! and neither a user access JWT nor a cell-internal `x-flare-ctx` is accepted.
+//!
+//! Two assertions reach Core gRPC services: the control assertion Console sends
+//! directly (`token_use=control`, audience [`CORE_CONTROL_AUDIENCE`]) and the
+//! admin assertion that admin-gateway has already verified and forwards unchanged
+//! (`token_use=admin`, audience [`CORE_ADMIN_AUDIENCE`]). The admin branch is
+//! always employee-only and bound to one concrete tenant; admin-gateway never
+//! holds a signing key, so it cannot widen what the forwarded assertion says.
 
 use std::sync::Arc;
 
@@ -26,6 +33,16 @@ pub enum ControlActorKind {
     Employee,
     ProjectionWorker,
     Scheduler,
+}
+
+/// Which Console assertion authorized a gRPC call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlChannel {
+    /// Console → Core directly: `token_use=control`, audience [`CORE_CONTROL_AUDIENCE`].
+    Control,
+    /// Console → admin-gateway → Core, forwarded unchanged: `token_use=admin`,
+    /// audience [`CORE_ADMIN_AUDIENCE`], employee subject, concrete tenant.
+    Admin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,20 +139,56 @@ impl ConsoleControlVerifier {
     }
 
     pub fn verify_grpc<T>(&self, request: &Request<T>) -> Result<VerifiedControlActor, Status> {
-        let mut values = request.metadata().get_all("authorization").iter();
-        let value = values
-            .next()
-            .ok_or_else(|| Status::unauthenticated("control token required"))?;
-        if values.next().is_some() {
-            return Err(Status::unauthenticated("duplicate control authorization"));
-        }
-        let value = value
-            .to_str()
-            .map_err(|_| Status::unauthenticated("invalid control authorization"))?;
-        let token = bearer_token(value)
-            .ok_or_else(|| Status::unauthenticated("bearer control token required"))?;
-        self.verify_token(token, "control", CORE_CONTROL_AUDIENCE)
+        self.verify_token(grpc_bearer(request)?, "control", CORE_CONTROL_AUDIENCE)
     }
+
+    /// The admin assertion admin-gateway forwards unchanged. Only an employee
+    /// bound to one concrete tenant passes; `*` and the reserved service
+    /// subjects are rejected, so the caller may scope every read to
+    /// `actor.tenant_id` without looking at the request body.
+    pub fn verify_admin_token(&self, token: &str) -> Result<VerifiedControlActor, Status> {
+        let actor = self.verify_token(token, "admin", CORE_ADMIN_AUDIENCE)?;
+        actor.require_kind(ControlActorKind::Employee)?;
+        actor.require_tenant(&actor.tenant_id)?;
+        Ok(actor)
+    }
+
+    pub fn verify_grpc_admin<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<VerifiedControlActor, Status> {
+        self.verify_admin_token(grpc_bearer(request)?)
+    }
+
+    /// Operations Console may invoke either directly (control assertion) or
+    /// through admin-gateway (forwarded admin assertion). The control branch
+    /// keeps its existing per-method policy; the admin branch is already
+    /// narrowed to an employee with a concrete tenant.
+    pub fn verify_grpc_control_or_admin<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<(VerifiedControlActor, ControlChannel), Status> {
+        let token = grpc_bearer(request)?;
+        if let Ok(actor) = self.verify_token(token, "control", CORE_CONTROL_AUDIENCE) {
+            return Ok((actor, ControlChannel::Control));
+        }
+        Ok((self.verify_admin_token(token)?, ControlChannel::Admin))
+    }
+}
+
+/// Exactly one `authorization: Bearer <token>` entry; anything else is ambiguous.
+fn grpc_bearer<T>(request: &Request<T>) -> Result<&str, Status> {
+    let mut values = request.metadata().get_all("authorization").iter();
+    let value = values
+        .next()
+        .ok_or_else(|| Status::unauthenticated("control token required"))?;
+    if values.next().is_some() {
+        return Err(Status::unauthenticated("duplicate control authorization"));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| Status::unauthenticated("invalid control authorization"))?;
+    bearer_token(value).ok_or_else(|| Status::unauthenticated("bearer control token required"))
 }
 
 pub fn bearer_token(value: &str) -> Option<&str> {
@@ -153,6 +206,25 @@ pub fn require_grpc_control<T>(
     verifier
         .ok_or_else(|| Status::unauthenticated("Console control public key not configured"))?
         .verify_grpc(request)
+}
+
+/// Admin-only read RPCs: the forwarded admin assertion, nothing else.
+pub fn require_grpc_admin<T>(
+    request: &Request<T>,
+    verifier: Option<&ConsoleControlVerifier>,
+) -> Result<VerifiedControlActor, Status> {
+    verifier
+        .ok_or_else(|| Status::unauthenticated("Console control public key not configured"))?
+        .verify_grpc_admin(request)
+}
+
+pub fn require_grpc_control_or_admin<T>(
+    request: &Request<T>,
+    verifier: Option<&ConsoleControlVerifier>,
+) -> Result<(VerifiedControlActor, ControlChannel), Status> {
+    verifier
+        .ok_or_else(|| Status::unauthenticated("Console control public key not configured"))?
+        .verify_grpc_control_or_admin(request)
 }
 
 #[cfg(test)]
@@ -327,6 +399,147 @@ mod tests {
             verifier.verify_grpc(&request).unwrap_err().code(),
             tonic::Code::Unauthenticated
         );
+    }
+
+    fn bearer_request(token: &str) -> Request<()> {
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    }
+
+    #[test]
+    fn forwarded_admin_assertion_is_employee_with_a_concrete_tenant_only() {
+        let (signer, verifier) = token_pair(60);
+        let admin = |subject: &str, tenant: &str, token_use: &str, audience: &str| {
+            signer
+                .generate_with_ed25519(subject, Some(tenant), token_use, audience)
+                .unwrap()
+        };
+
+        let actor = require_grpc_admin(
+            &bearer_request(&admin(
+                "employee-1",
+                "tenant-a",
+                "admin",
+                CORE_ADMIN_AUDIENCE,
+            )),
+            Some(&verifier),
+        )
+        .unwrap();
+        assert_eq!(actor.subject, "employee-1");
+        assert_eq!(actor.tenant_id, "tenant-a");
+        assert_eq!(actor.kind, ControlActorKind::Employee);
+
+        // Missing token, or no public key configured.
+        assert_eq!(
+            require_grpc_admin(&Request::new(()), Some(&verifier))
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            require_grpc_admin(
+                &bearer_request(&admin(
+                    "employee-1",
+                    "tenant-a",
+                    "admin",
+                    CORE_ADMIN_AUDIENCE
+                )),
+                None
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::Unauthenticated
+        );
+        // Wrong audience / purpose: a direct control assertion is not an admin one.
+        for token in [
+            admin("employee-1", "tenant-a", "control", CORE_CONTROL_AUDIENCE),
+            admin("employee-1", "tenant-a", "admin", CORE_CONTROL_AUDIENCE),
+            admin("employee-1", "tenant-a", "control", CORE_ADMIN_AUDIENCE),
+        ] {
+            assert_eq!(
+                require_grpc_admin(&bearer_request(&token), Some(&verifier))
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+        }
+        // Platform-wide or service subjects never pass the admin branch.
+        for token in [
+            admin("employee-1", "*", "admin", CORE_ADMIN_AUDIENCE),
+            admin(
+                PROJECTION_WORKER_SUBJECT,
+                "tenant-a",
+                "admin",
+                CORE_ADMIN_AUDIENCE,
+            ),
+            admin(SCHEDULER_SUBJECT, "tenant-a", "admin", CORE_ADMIN_AUDIENCE),
+        ] {
+            assert_eq!(
+                require_grpc_admin(&bearer_request(&token), Some(&verifier))
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn control_or_admin_reports_the_channel_and_keeps_admin_narrowing() {
+        let (signer, verifier) = token_pair(60);
+        let token = |subject: &str, tenant: &str, token_use: &str, audience: &str| {
+            bearer_request(
+                &signer
+                    .generate_with_ed25519(subject, Some(tenant), token_use, audience)
+                    .unwrap(),
+            )
+        };
+
+        // Control branch is unchanged: its per-method policy still decides.
+        let (actor, channel) = require_grpc_control_or_admin(
+            &token(
+                SCHEDULER_SUBJECT,
+                "tenant-a",
+                "control",
+                CORE_CONTROL_AUDIENCE,
+            ),
+            Some(&verifier),
+        )
+        .unwrap();
+        assert_eq!(channel, ControlChannel::Control);
+        assert_eq!(actor.kind, ControlActorKind::Scheduler);
+
+        let (actor, channel) = require_grpc_control_or_admin(
+            &token("employee-1", "tenant-a", "admin", CORE_ADMIN_AUDIENCE),
+            Some(&verifier),
+        )
+        .unwrap();
+        assert_eq!(channel, ControlChannel::Admin);
+        assert_eq!(actor.tenant_id, "tenant-a");
+
+        assert_eq!(
+            require_grpc_control_or_admin(
+                &token(SCHEDULER_SUBJECT, "tenant-a", "admin", CORE_ADMIN_AUDIENCE),
+                Some(&verifier)
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        for request in [
+            Request::new(()),
+            token("employee-1", "tenant-a", "access", CORE_ADMIN_AUDIENCE),
+            token("employee-1", "tenant-a", "admin", "flare-social-control"),
+        ] {
+            assert_eq!(
+                require_grpc_control_or_admin(&request, Some(&verifier))
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+        }
     }
 
     #[tokio::test]

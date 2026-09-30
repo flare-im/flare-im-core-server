@@ -39,6 +39,7 @@ impl ApplicationBootstrap {
         context: ApplicationContext,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
     ) -> flare_server_core::error::Result<()> {
+        use flare_grpc_proto::conversation::conversation_admin_service_server::ConversationAdminServiceServer;
         use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageServiceServer;
         use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
         use tonic::transport::Server;
@@ -48,6 +49,7 @@ impl ApplicationBootstrap {
         let grpc_metrics =
             flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
+        let admin_handler = context.admin_handler.clone();
 
         info!(
             address = %address,
@@ -68,11 +70,16 @@ impl ApplicationBootstrap {
                 let manage_svc = ContextLayer::new()
                     .allow_missing()
                     .layer(ConversationManageServiceServer::new(handler));
+                // 管理员只读不读 ContextLayer 构造的上下文，只认 admin 令牌；包一层只为统一请求 ID。
+                let admin_svc = ContextLayer::new()
+                    .allow_missing()
+                    .layer(ConversationAdminServiceServer::new(admin_handler));
 
                 Server::builder()
                     .layer(grpc_metrics)
                     .add_service(read_svc)
                     .add_service(manage_svc)
+                    .add_service(admin_svc)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;
                     })

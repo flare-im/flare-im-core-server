@@ -17,9 +17,11 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 use tokio::time::timeout;
 
 pub mod tenant_projection;
+pub mod tenant_runtime;
 pub use tenant_projection::{
     TenantProjectionOutcome, TenantProjectionRecord, TenantProjectionValidationError,
 };
+pub use tenant_runtime::TenantRuntimeView;
 
 /// Hook执行模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

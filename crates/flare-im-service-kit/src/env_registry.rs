@@ -482,6 +482,17 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::AdminGateway,
         EnvPurpose::GatewayRuntime,
     ),
+    // Admin Gateway 专用的可选下游；api-gateway 不读取（gateway::capability_downstream_from_env）。
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
     env(
         "FLARE_API_GATEWAY_TENANT_POLICY",
         EnvOwner::ApiGateway,

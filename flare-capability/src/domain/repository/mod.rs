@@ -35,3 +35,13 @@ pub trait TenantProjectionRepository: Send + Sync {
         tenant_ids: &[String],
     ) -> flare_server_core::error::Result<Vec<(String, u64)>>;
 }
+
+/// 租户运行时只读（管理员查看本进程持有的投影）。与写路径分开，读侧不需要写权限。
+#[async_trait::async_trait]
+pub trait TenantRuntimeReader: Send + Sync {
+    /// 本地 `tenants` 表里的该租户；没有这一行返回 `None`。
+    async fn tenant_runtime(
+        &self,
+        tenant_id: &str,
+    ) -> flare_server_core::error::Result<Option<crate::domain::model::TenantRuntimeView>>;
+}

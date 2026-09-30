@@ -72,6 +72,7 @@ impl ApplicationBootstrap {
         let capability_grpc = context.capability_grpc;
         let extension_router = context.extension_router;
         let tenant_projection = context.tenant_projection;
+        let capability_admin = context.capability_admin;
 
         let runtime = runtime_plan
             .service_runtime()
@@ -102,6 +103,12 @@ impl ApplicationBootstrap {
                         ),
                     );
 
+                let capability_admin_service = ContextLayer::new().allow_missing().layer(
+                    flare_grpc_proto::capability::capability_admin_service_server::CapabilityAdminServiceServer::new(
+                        capability_admin,
+                    ),
+                );
+
                 let tenant_projection_service = tenant_projection.map(|server| {
                     ContextLayer::new().allow_missing().layer(
                         flare_grpc_proto::control::tenant_projection_server::TenantProjectionServer::new(
@@ -119,6 +126,7 @@ impl ApplicationBootstrap {
                     .add_service(hook_plugin_service)
                     .add_service(extension_plugin_service)
                     .add_service(capability_service)
+                    .add_service(capability_admin_service)
                     .add_optional_service(tenant_projection_service);
 
                 server

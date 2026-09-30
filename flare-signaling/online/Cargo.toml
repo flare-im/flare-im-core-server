@@ -38,3 +38,6 @@ futures-util = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }

@@ -268,3 +268,35 @@ pub trait ThreadRepository: Send + Sync {
         thread_id: &str,
     ) -> Result<Vec<String>>;
 }
+
+/// 管理员只读仓储：每个方法显式接收租户（来自已验证的 admin 令牌），不读调用上下文，
+/// 也不做成员资格校验。会话不属于该租户时与不存在同样处理（`None`）。
+///
+/// 用 `async_trait`：gRPC 处理器对实现泛型持有并跨线程执行，future 必须是 `Send`。
+#[async_trait::async_trait]
+pub trait ConversationAdminRepository: Send + Sync {
+    /// 按 `(updated_at, conversation_id)` 倒序分页；`cursor` 为上一页返回的不透明游标。
+    async fn admin_list_conversations(
+        &self,
+        tenant_id: &str,
+        cursor: Option<&str>,
+        limit: i64,
+        include_deleted: bool,
+    ) -> Result<crate::domain::model::AdminConversationPage>;
+
+    async fn admin_get_conversation(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<crate::domain::model::AdminConversation>>;
+
+    /// 会话不属于该租户时返回 `None`。
+    async fn admin_list_participants(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        cursor: Option<&str>,
+        limit: i32,
+        include_removed: bool,
+    ) -> Result<Option<ConversationParticipantsPage>>;
+}

@@ -9,7 +9,7 @@ use flare_server_core::error::AnyhowContext as _;
 use sqlx::{FromRow, PgPool};
 
 use crate::domain::capability::{
-    CapabilityError, CapabilityPolicyBackend, Result, UserCapabilityGrant,
+    CapabilityError, CapabilityPolicyBackend, Result, TenantCapabilitySwitch, UserCapabilityGrant,
 };
 
 #[derive(Debug, Clone, FromRow)]
@@ -358,5 +358,32 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         .await
         .map_err(|e| CapabilityError::System(format!("set_tenant_capability: {e}")))?;
         Ok(())
+    }
+
+    async fn list_tenant_switches(&self, tenant_id: &str) -> Result<Vec<TenantCapabilitySwitch>> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        let rows: Vec<(String, bool, DateTime<Utc>)> = sqlx::query_as(
+            r#"
+            SELECT capability_id, enabled, updated_at
+            FROM public.capability_tenant_switches
+            WHERE tenant_id = $1
+            ORDER BY capability_id
+            "#,
+        )
+        .bind(&tenant_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| CapabilityError::System(format!("list_tenant_switches: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(capability_id, enabled, updated_at)| TenantCapabilitySwitch {
+                    tenant_id: tenant_id.clone(),
+                    capability_id,
+                    enabled,
+                    updated_at: Some(updated_at),
+                },
+            )
+            .collect())
     }
 }

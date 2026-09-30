@@ -6,7 +6,7 @@ use flare_core_base::context::Ctx;
 
 use crate::context::{ConversationKind, PreSendEvaluateInput, ResolveTrigger};
 use crate::error::{CapabilityError, GuardDecision, Result as CapabilityResult};
-use crate::grant::UserCapabilityGrant;
+use crate::grant::{TenantCapabilitySwitch, UserCapabilityGrant};
 use crate::recipient::{RecipientResolveRequest, RecipientResolveResult};
 use crate::rtc::{
     AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
@@ -285,6 +285,18 @@ pub trait CapabilityPolicyBackend: Send + Sync {
         capability_id: &str,
         enabled: bool,
     ) -> CapabilityResult<()>;
+
+    /// 租户下已写入的全部能力开关，按 `capability_id` 升序；供管理员只读。
+    ///
+    /// 默认返回未支持：后端没实现就明确报错，而不是返回空列表冒充「一个都没装」。
+    async fn list_tenant_switches(
+        &self,
+        _tenant_id: &str,
+    ) -> CapabilityResult<Vec<TenantCapabilitySwitch>> {
+        Err(CapabilityError::NotSupported(
+            "this policy backend does not list tenant capability switches".into(),
+        ))
+    }
 }
 
 /// 能力分发路由：**把「哪些 capability_id 交给哪个后端」变成可注册的数据。**

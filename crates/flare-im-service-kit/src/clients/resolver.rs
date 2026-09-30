@@ -64,16 +64,19 @@ impl DownstreamGrpcResolver {
 
     pub async fn connect(&self, kind: DownstreamKind) -> Result<Channel> {
         let (route, fallback) = self.target_for(kind);
-        self.connect_with_route(kind, route, fallback).await
+        self.connect_route(kind.label(), kind.service_name(), route, fallback)
+            .await
     }
 
-    async fn connect_with_route(
+    /// 解析一条不在 [`DownstreamGrpcConfig`] 里的下游路由（例如只有 admin-gateway
+    /// 才连的 Capability）；发现与静态回退规则与 [`Self::connect`] 相同。
+    pub async fn connect_route(
         &self,
-        kind: DownstreamKind,
+        label: &str,
+        service_name: &str,
         route: &str,
         static_fallback: &str,
     ) -> Result<Channel> {
-        let label = kind.label();
         if is_discovery_route_authority(route) {
             info!(
                 service = label,
@@ -103,24 +106,18 @@ impl DownstreamGrpcResolver {
         } else {
             info!(
                 service = label,
-                service_name = kind.service_name(),
-                "resolving downstream gRPC via app registry (with static fallback)"
+                service_name, "resolving downstream gRPC via app registry (with static fallback)"
             );
-            connect_grpc_channel_from_app_config(
-                &self.app_config,
-                kind.service_name(),
-                static_fallback,
-            )
-            .await
-            .inspect(|_| {
-                info!(
-                    service = label,
-                    service_name = kind.service_name(),
-                    "downstream gRPC channel ready"
-                );
-            })
-            .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))
-            .with_context(|| format!("connect {label} ({})", kind.service_name()))
+            connect_grpc_channel_from_app_config(&self.app_config, service_name, static_fallback)
+                .await
+                .inspect(|_| {
+                    info!(
+                        service = label,
+                        service_name, "downstream gRPC channel ready"
+                    );
+                })
+                .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))
+                .with_context(|| format!("connect {label} ({service_name})"))
         }
     }
 

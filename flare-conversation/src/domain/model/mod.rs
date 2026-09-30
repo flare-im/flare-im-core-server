@@ -1,6 +1,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use std::collections::HashMap;
 
+mod admin;
+pub use admin::{AdminConversation, AdminConversationPage};
+
 use flare_proto::common::Message;
 use flare_proto::common::{
     ConflictResolution as ProtoConflictResolution,

@@ -1,9 +1,12 @@
 //! gRPC：`ConversationReadService`（只读原子）+ `ConversationManageService`（写与侧效应）。
 //! 不提供聚合型「Sync*」RPC；跨域同步编排由 `flare.sync.v1.SyncService` 完成。
 
+mod admin_service;
 mod manage_service;
 mod read_service;
 mod shared;
+
+pub use admin_service::ConversationAdminGrpcHandler;
 
 use std::sync::Arc;
 

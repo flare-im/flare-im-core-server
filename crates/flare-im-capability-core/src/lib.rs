@@ -20,7 +20,7 @@ pub use descriptor::CapabilityDescriptor;
 pub use dispatch::{CapabilityDispatchCommand, CapabilityDispatchResult};
 pub use error::{CapabilityError, GuardDecision, GuardRejection, Result};
 pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHandler};
-pub use grant::UserCapabilityGrant;
+pub use grant::{TenantCapabilitySwitch, UserCapabilityGrant};
 pub use ports::{
     CapabilityDispatchRoute, CapabilityPolicyBackend, PluginHealthProbe, PreSendGuard,
     PreSendGuardPipeline, RecipientResolver, RtcCapability, SeatModel,
