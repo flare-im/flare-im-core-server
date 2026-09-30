@@ -110,7 +110,9 @@ command = "/usr/local/bin/flare-push-server"
 # default all-service supervisor would crash-loop on the paused Push consumer.
 enabled_if_env = "PUSH_SERVER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_SERVER_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+# broker-isolated: each consumed record is attested as this service with the Cell key.
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 
 [[services]]
 name = "push-proxy"
@@ -125,7 +127,10 @@ name = "push-worker"
 command = "/usr/local/bin/flare-push-worker"
 enabled_if_env = "PUSH_WORKER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_GETUI_"]
-inherit_env = ["ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+inherit_env = [
+  "ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 
 [[services]]
 name = "media"

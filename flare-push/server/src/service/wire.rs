@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use flare_im_service_kit::push_delivery::{
+    AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
+};
 use flare_server_core::error::Result;
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::MessageHandler;
@@ -21,8 +24,14 @@ pub struct ApplicationContext {
 
 pub async fn initialize(
     app_config: &flare_im_service_kit::config::FlareAppConfig,
+    mode: PushDeliveryMode,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushServerConfig::from_app_config(app_config));
+    // Every consumed record is re-attested as this service for its tenant.
+    let identity = BrokerRecordIdentity::from_env(mode, "flare-push-server")?;
+    let attested = |handler: Arc<dyn MessageHandler>| -> Arc<dyn MessageHandler> {
+        Arc::new(AttestedRecordHandler::new(identity.clone(), handler))
+    };
 
     let publisher = Arc::new(PushServerMqPublisher::new(config.clone()).await?);
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
@@ -48,17 +57,17 @@ pub async fn initialize(
     register_handler(
         &mut dispatcher,
         config.push_message_topic.clone(),
-        Arc::new(message_handler),
+        attested(Arc::new(message_handler)),
     )?;
     register_handler(
         &mut dispatcher,
         config.push_event_topic.clone(),
-        Arc::new(event_handler),
+        attested(Arc::new(event_handler)),
     )?;
     register_handler(
         &mut dispatcher,
         config.push_envelope_topic.clone(),
-        Arc::new(push_handler),
+        attested(Arc::new(push_handler)),
     )?;
 
     Ok(ApplicationContext {

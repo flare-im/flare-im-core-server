@@ -10,7 +10,7 @@ impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         // Decide on the effective broker configuration before any consumer connects.
-        require_delivery_provenance(&crate::config::PushWorkerConfig::from_app_config(
+        let mode = require_delivery_provenance(&crate::config::PushWorkerConfig::from_app_config(
             app_config,
         )?)?;
         let service_config = app_config.push_worker_service();
@@ -19,7 +19,7 @@ impl ApplicationBootstrap {
             &service_config.runtime,
             PUSH_WORKER,
         )?;
-        let ctx = wire::initialize(app_config).await?;
+        let ctx = wire::initialize(app_config, mode).await?;
         Self::run_with_runtime(ctx, runtime).await
     }
 
@@ -103,7 +103,9 @@ const PROVENANCE_ENV: &str = "PUSH_WORKER_EVENT_PROVENANCE_MODE";
 /// Refuse to consume until the deployment states how forged broker records are
 /// excluded; see `flare_im_service_kit::push_delivery`. Runs before any consumer
 /// or DLQ publisher exists, so a refused start leaves the broker backlog intact.
-fn require_delivery_provenance(config: &crate::config::PushWorkerConfig) -> Result<()> {
+fn require_delivery_provenance(
+    config: &crate::config::PushWorkerConfig,
+) -> Result<flare_im_service_kit::push_delivery::PushDeliveryMode> {
     flare_im_service_kit::push_delivery::require_push_delivery(
         "Push Worker",
         PROVENANCE_ENV,
@@ -113,7 +115,6 @@ fn require_delivery_provenance(config: &crate::config::PushWorkerConfig) -> Resu
             nats_url: &config.jetstream_url,
         },
     )
-    .map(|_| ())
 }
 
 #[cfg(test)]

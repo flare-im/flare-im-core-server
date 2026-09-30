@@ -661,7 +661,16 @@ required_env_unless = [
             .filter(|service| manifest.env_allowed(service, "FLARE_INTERNAL_CTX_PRIVATE_KEY"))
             .map(|service| service.name.as_str())
             .collect();
-        assert_eq!(signer_users, ["api-gateway", "signaling-gateway"]);
+        // Push Server/Worker attest broker records (broker-isolated); Push Proxy only verifies.
+        assert_eq!(
+            signer_users,
+            [
+                "push-server",
+                "push-worker",
+                "api-gateway",
+                "signaling-gateway"
+            ]
+        );
         let push_proxy = manifest
             .services
             .iter()

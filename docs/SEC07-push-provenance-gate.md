@@ -8,6 +8,7 @@
 
 - `PUSH_{PROXY,SERVER,WORKER}_EVENT_PROVENANCE_MODE=broker-isolated`：仅当配置的 broker 为 NATS 且 URL 携带凭据时放行（`flare_im_service_kit::push_delivery`）；否则 Proxy 拒绝入队、Server/Worker 拒绝启动。默认仍为 `paused`；`signed-v1` 继续保留、拒绝。
 - 部署层（`flare-deploy` 单机模板 + `flarectl`）负责另一半：NATS 开启认证、凭据只注入 Core；broker 网络只挂 Core 与 NATS。监管清单的 `PUSH_SERVER_DELIVERY_READY`/`PUSH_WORKER_DELIVERY_READY` 仅用于选择进程，不能绕过上述门禁。
+- 消费侧身份：Push Server/Worker 的下游（Online 查询、Gateway 投递）只接受已验签的 `flare-push-server`/`flare-push-worker` 服务上下文。`broker-isolated` 下，`AttestedRecordHandler` 在处理器看到记录前，按记录头里的 canonical tenant 用 Cell 内部上下文私钥签发该服务身份、再经与入站 RPC 相同的验签路径得到 `VerifiedContext`（`BrokerRecordIdentity`）；租户缺失或不规范的记录直接进 DLQ。这是对"broker 只收 Core 写入"这一前提的显式落地，不是来源证明，`signed-v1` 仍需逐条签名。监管清单只给 Push Server/Worker 私钥，Push Proxy 仍只验签。
 - 多主机/多 Cell 拓扑（Core 拆分到多个容器或主机、第三方生产者接入 broker）不满足这一前提，必须实现下文的 `signed-v1` 方案。下文各节的信任断点分析与验收清单对 `signed-v1` 依然有效。
 
 ## 1. 当前数据流和不能跨越的信任断点

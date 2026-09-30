@@ -11,6 +11,9 @@ use flare_im_service_kit::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
 };
 use flare_im_service_kit::metrics::PushWorkerMetrics;
+use flare_im_service_kit::push_delivery::{
+    AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
+};
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
@@ -35,8 +38,11 @@ pub struct ApplicationContext {
 
 pub async fn initialize(
     app_config: &flare_im_service_kit::config::FlareAppConfig,
+    mode: PushDeliveryMode,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config)?);
+    // Every consumed record is re-attested as this service for its tenant.
+    let identity = BrokerRecordIdentity::from_env(mode, "flare-push-worker")?;
 
     // 1. 创建 DLQ 发布器
     let dlq = Arc::new(DlqPublisher::new(config.clone()).await?);
@@ -225,7 +231,7 @@ pub async fn initialize(
     Dispatcher::register(
         &mut dispatcher,
         config.push_online_topic.clone(),
-        online_handler,
+        Arc::new(AttestedRecordHandler::new(identity.clone(), online_handler)),
     )
     .map_err(|err| {
         flare_server_core::error::FlareError::system(format!(
@@ -237,7 +243,7 @@ pub async fn initialize(
     Dispatcher::register(
         &mut dispatcher,
         config.push_offline_topic.clone(),
-        offline_handler,
+        Arc::new(AttestedRecordHandler::new(identity, offline_handler)),
     )
     .map_err(|err| {
         flare_server_core::error::FlareError::system(format!(
