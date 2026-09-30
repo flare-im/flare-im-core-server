@@ -398,12 +398,16 @@ API Gateway 与 Admin Gateway 的下游 gRPC 路由缺省是 `discovery://`。st
 | conversation | `http://127.0.0.1:50090` | `<P>_GRPC_CONVERSATION_SERVICE_URL` |
 | signaling-online | `http://127.0.0.1:50061` | `<P>_GRPC_ONLINE_SERVICE_URL` |
 | storage-reader | `http://127.0.0.1:60083` | `<P>_GRPC_STORAGE_READER_SERVICE_URL` |
+| capability（仅 Admin Gateway，可选；URL 设为空串即关闭） | `http://127.0.0.1:50110` | `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL` |
 | push-proxy（仅 API Gateway，始终直连） | `http://127.0.0.1:50091` | `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` |
 
 `*_SERVICE_URL` 设为 `http://` 地址时网关直接连接（static URI override），不再
 先尝试服务发现，也就没有这些 WARN；下游不在同一容器时，改成对应的私网地址。
 `*_STATIC_FALLBACK` 只在 `discovery://` 解析失败时才用。supervisor 清单按前缀
 `FLARE_API_GATEWAY_` / `FLARE_ADMIN_GATEWAY_` 把这些变量传给对应子进程。
+flare-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gateway 的 7 个
+`FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL` 直接设成上表地址，preflight 核对它们，
+Admin Gateway 因此不打回退 WARN；API Gateway 仍走回退。
 
 启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
 `discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在

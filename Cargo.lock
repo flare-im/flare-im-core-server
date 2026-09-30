@@ -1609,6 +1609,7 @@ dependencies = [
  "flare-proto",
  "flare-server-core",
  "serde",
+ "serde_json",
  "tokio",
  "tonic",
  "tower 0.5.2",

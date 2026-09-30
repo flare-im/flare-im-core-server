@@ -18,13 +18,33 @@ use super::admin_contract::{AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER};
 
 const GATEWAY_NAME: &str = "admin-gateway";
 
+/// The admin assertion this middleware has just verified, kept verbatim for the
+/// downstream admin RPCs (Conversation, Online, Capability re-verify it themselves).
+///
+/// The gateway holds no signing key, so forwarding the unchanged assertion is the
+/// only way it can speak for the employee; `Debug` never prints the token.
+#[derive(Clone)]
+pub struct VerifiedAdminAssertion(Arc<str>);
+
+impl VerifiedAdminAssertion {
+    pub fn token(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for VerifiedAdminAssertion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedAdminAssertion(<redacted>)")
+    }
+}
+
 pub async fn admin_auth_middleware(
     axum::extract::Extension(verifier): axum::extract::Extension<Arc<ConsoleControlVerifier>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let actor = match verified_admin_actor(&verifier, request.headers()) {
-        Ok(actor) => actor,
+    let (actor, assertion) = match verified_admin_actor(&verifier, request.headers()) {
+        Ok(verified) => verified,
         Err(status) => return control_status_response(status),
     };
     if let Err(status) = authorize_admin_request(
@@ -74,6 +94,7 @@ pub async fn admin_auth_middleware(
         scopes: vec!["admin_gateway:admin".into()],
         metadata: Default::default(),
     });
+    request.extensions_mut().insert(assertion);
 
     next.run(request).await
 }
@@ -81,7 +102,7 @@ pub async fn admin_auth_middleware(
 fn verified_admin_actor(
     verifier: &ConsoleControlVerifier,
     headers: &HeaderMap,
-) -> Result<VerifiedControlActor, Status> {
+) -> Result<(VerifiedControlActor, VerifiedAdminAssertion), Status> {
     let mut auth_values = headers.get_all("authorization").iter();
     let value = auth_values
         .next()
@@ -98,7 +119,7 @@ fn verified_admin_actor(
     let actor = verifier.verify_token(token, "admin", CORE_ADMIN_AUDIENCE)?;
     actor.require_kind(ControlActorKind::Employee)?;
     actor.require_tenant(&actor.tenant_id)?;
-    Ok(actor)
+    Ok((actor, VerifiedAdminAssertion(Arc::from(token))))
 }
 
 fn control_status_response(status: Status) -> Response {
@@ -300,10 +321,12 @@ mod tests {
     fn admin_boundary_accepts_only_signed_employee_admin_audience() {
         let (verifier, headers) =
             signed_headers("employee-1", "tenant-a", "admin", CORE_ADMIN_AUDIENCE);
-        assert_eq!(
-            verified_admin_actor(&verifier, &headers).unwrap().subject,
-            "employee-1"
-        );
+        let (actor, assertion) = verified_admin_actor(&verifier, &headers).unwrap();
+        assert_eq!(actor.subject, "employee-1");
+        // The forwarded assertion is exactly the bearer token that was verified.
+        let bearer = headers.get("authorization").unwrap().to_str().unwrap();
+        assert_eq!(Some(assertion.token()), bearer.strip_prefix("Bearer "));
+        assert!(!format!("{assertion:?}").contains(assertion.token()));
         let (_, headers) = signed_headers("employee-1", "tenant-a", "control", CORE_ADMIN_AUDIENCE);
         assert_eq!(
             verified_admin_actor(&verifier, &headers)

@@ -11,6 +11,7 @@ use utoipa::OpenApi;
 use super::admin_auth_middleware::admin_auth_middleware;
 use super::admin_handler;
 use super::media_handler;
+use super::ops_handler::{self, AdminCapability, AdminCapabilityDownstream};
 use flare_im_service_kit::clients::GrpcClients;
 
 #[allow(dead_code)]
@@ -32,6 +33,17 @@ use flare_im_service_kit::clients::GrpcClients;
         media_handler::set_object_acl,
         media_handler::list_objects,
         media_handler::describe_bucket,
+        ops_handler::list_conversations,
+        ops_handler::get_conversation,
+        ops_handler::list_participants,
+        ops_handler::list_user_devices,
+        ops_handler::get_user_presence,
+        ops_handler::kick_user,
+        ops_handler::kick_device,
+        ops_handler::kick_tenant,
+        ops_handler::get_tenant_runtime,
+        ops_handler::list_tenant_capabilities,
+        ops_handler::list_plugins,
     ),
     components(
         schemas(
@@ -73,6 +85,23 @@ use flare_im_service_kit::clients::GrpcClients;
             crate::application::admin_messages::AdminMessageWriteLedgerHttpResponse,
             crate::application::admin_messages::AdminMessageWriteLedgerEntryHttp,
             crate::application::admin_messages::AdminMessageHttp,
+            crate::application::admin_ops::AdminConversationHttp,
+            crate::application::admin_ops::AdminConversationPageHttp,
+            crate::application::admin_ops::AdminConversationDetailHttp,
+            crate::application::admin_ops::AdminParticipantHttp,
+            crate::application::admin_ops::AdminParticipantPageHttp,
+            crate::application::admin_ops::AdminDeviceHttp,
+            crate::application::admin_ops::AdminUserDevicesHttp,
+            crate::application::admin_ops::AdminUserPresenceHttp,
+            crate::application::admin_ops::AdminUserKickHttp,
+            crate::application::admin_ops::AdminDeviceKickHttp,
+            crate::application::admin_ops::AdminTenantKickHttp,
+            crate::application::admin_ops::AdminTenantQuotaHttp,
+            crate::application::admin_ops::AdminTenantRuntimeHttp,
+            crate::application::admin_ops::AdminCapabilitySwitchHttp,
+            crate::application::admin_ops::AdminTenantCapabilitiesHttp,
+            crate::application::admin_ops::AdminPluginHttp,
+            crate::application::admin_ops::AdminPluginsHttp,
         )
     ),
     tags(
@@ -159,7 +188,11 @@ fn api_docs_router() -> Router {
         )
 }
 
-pub fn create_admin_router(clients: Arc<GrpcClients>) -> Router {
+/// `capability` 为 `None` 时（下游被显式关闭），租户运行时、能力开关、插件三条路由回 503。
+pub fn create_admin_router(
+    clients: Arc<GrpcClients>,
+    capability: Option<AdminCapabilityDownstream>,
+) -> Router {
     let admin_router = Router::new()
         .route(
             "/medias/cleanup-orphaned-assets",
@@ -194,7 +227,37 @@ pub fn create_admin_router(clients: Arc<GrpcClients>) -> Router {
             "/messages/{message_id}/events",
             get(admin_handler::admin_query_message_events),
         )
+        .route("/conversations", get(ops_handler::list_conversations))
+        .route(
+            "/conversations/{conversation_id}",
+            get(ops_handler::get_conversation),
+        )
+        .route(
+            "/conversations/{conversation_id}/participants",
+            get(ops_handler::list_participants),
+        )
+        .route(
+            "/users/{user_id}/devices",
+            get(ops_handler::list_user_devices),
+        )
+        .route(
+            "/users/{user_id}/presence",
+            get(ops_handler::get_user_presence),
+        )
+        .route("/users/{user_id}/kick", post(ops_handler::kick_user))
+        .route(
+            "/users/{user_id}/devices/{device_id}/kick",
+            post(ops_handler::kick_device),
+        )
+        .route("/tenant/kick-all", post(ops_handler::kick_tenant))
+        .route("/tenant/runtime", get(ops_handler::get_tenant_runtime))
+        .route(
+            "/capabilities/tenant",
+            get(ops_handler::list_tenant_capabilities),
+        )
+        .route("/plugins", get(ops_handler::list_plugins))
         .layer(axum::Extension(clients))
+        .layer(axum::Extension(AdminCapability::new(capability)))
         .route_layer(middleware::from_fn(admin_auth_middleware));
 
     compose_router(admin_router)

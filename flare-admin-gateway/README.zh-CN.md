@@ -28,7 +28,20 @@ GET  /api/v1/admin/messages/{message_id}
 GET  /api/v1/admin/messages/{message_id}/events
 POST /api/v1/admin/messages/write-ledger/query
 POST /api/v1/admin/messages/export
+GET  /api/v1/admin/conversations
+GET  /api/v1/admin/conversations/{conversation_id}
+GET  /api/v1/admin/conversations/{conversation_id}/participants
+GET  /api/v1/admin/users/{user_id}/devices
+GET  /api/v1/admin/users/{user_id}/presence
+POST /api/v1/admin/users/{user_id}/kick
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick
+POST /api/v1/admin/tenant/kick-all
+GET  /api/v1/admin/tenant/runtime
+GET  /api/v1/admin/capabilities/tenant
+GET  /api/v1/admin/plugins
 ```
+
+`medias/*` 路由见 OpenAPI 文档。会话、在线、踢线、租户运行时、能力开关与插件路由（ADM-01）的说明见 [docs/admin-api.md](../docs/admin-api.md)（英文）。
 
 本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin-gateway.toml`。
 

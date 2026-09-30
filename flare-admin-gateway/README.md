@@ -28,7 +28,20 @@ GET  /api/v1/admin/messages/{message_id}
 GET  /api/v1/admin/messages/{message_id}/events
 POST /api/v1/admin/messages/write-ledger/query
 POST /api/v1/admin/messages/export
+GET  /api/v1/admin/conversations
+GET  /api/v1/admin/conversations/{conversation_id}
+GET  /api/v1/admin/conversations/{conversation_id}/participants
+GET  /api/v1/admin/users/{user_id}/devices
+GET  /api/v1/admin/users/{user_id}/presence
+POST /api/v1/admin/users/{user_id}/kick
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick
+POST /api/v1/admin/tenant/kick-all
+GET  /api/v1/admin/tenant/runtime
+GET  /api/v1/admin/capabilities/tenant
+GET  /api/v1/admin/plugins
 ```
+
+The `medias/*` routes are listed in the OpenAPI document. The conversation, session, kick, tenant runtime, capability switch and plugin routes (ADM-01) are described in [docs/admin-api.md](../docs/admin-api.md).
 
 Locally it listens on `0.0.0.0:50051` by default, and its configuration file is `config/services/admin-gateway.toml`.
 

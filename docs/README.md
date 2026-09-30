@@ -10,6 +10,7 @@
 |------|------|------------|
 | 快速开始 | [QUICKSTART.md](QUICKSTART.md)（[中文](QUICKSTART.zh-CN.md)） | 五分钟起服务、手签 token、调通接口并自证，不需要自建用户体系。 |
 | 接入指南 | [INTEGRATION.md](INTEGRATION.md)（[中文](INTEGRATION.zh-CN.md)） | 把 Core 接进自己的业务：用户体系、客户端、部署、E2EE、Hook 扩展点。 |
+| 管理 API | [admin-api.md](admin-api.md) | Admin Gateway 的内网管理接口：admin 令牌与租户、写操作审计头、会话/在线/踢线/租户运行时/能力与插件路由、错误映射与契约测试。 |
 
 ## 阅读顺序
 

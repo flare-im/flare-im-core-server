@@ -285,7 +285,7 @@ mod tests {
         .unwrap()
         .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", CORE_ADMIN_AUDIENCE)
         .unwrap();
-        let router = super::super::create_admin_router(Arc::new(clients))
+        let router = super::super::create_admin_router(Arc::new(clients), None)
             .layer(Extension(Arc::new(
                 ConsoleControlVerifier::from_public_key(&control_public).unwrap(),
             )))

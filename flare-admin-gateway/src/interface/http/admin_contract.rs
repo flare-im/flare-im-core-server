@@ -172,6 +172,18 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
                 write: true,
                 status: "available".to_string(),
             },
+            // ADM-01：租户只取自 admin 令牌，下游（Conversation / Online / Capability）按令牌再验一次。
+            admin_endpoint("/api/v1/admin/conversations"),
+            admin_endpoint("/api/v1/admin/conversations/{conversation_id}"),
+            admin_endpoint("/api/v1/admin/conversations/{conversation_id}/participants"),
+            admin_endpoint("/api/v1/admin/users/{user_id}/devices"),
+            admin_endpoint("/api/v1/admin/users/{user_id}/presence"),
+            admin_write_endpoint("/api/v1/admin/users/{user_id}/kick"),
+            admin_write_endpoint("/api/v1/admin/users/{user_id}/devices/{device_id}/kick"),
+            admin_write_endpoint("/api/v1/admin/tenant/kick-all"),
+            admin_endpoint("/api/v1/admin/tenant/runtime"),
+            admin_endpoint("/api/v1/admin/capabilities/tenant"),
+            admin_endpoint("/api/v1/admin/plugins"),
         ],
         organization_policy: AdminOrganizationPolicyDescriptor {
             status: EnterprisePolicyStatus::ExternalPolicyRequired,
@@ -219,6 +231,18 @@ fn admin_endpoint(path: &str) -> AdminEndpointDescriptor {
         path: path.to_string(),
         scope: "admin_gateway:admin".to_string(),
         write: false,
+        status: "available".to_string(),
+    }
+}
+
+/// 写操作：中间件要求 `x-audit-reason`、与令牌主体一致的 `x-actor-id`，以及
+/// `idempotency-key` 或 `x-request-id` 之一。
+fn admin_write_endpoint(path: &str) -> AdminEndpointDescriptor {
+    AdminEndpointDescriptor {
+        method: "POST".to_string(),
+        path: path.to_string(),
+        scope: "admin_gateway:admin".to_string(),
+        write: true,
         status: "available".to_string(),
     }
 }

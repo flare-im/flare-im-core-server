@@ -13,6 +13,7 @@ use flare_server_core::{
 use serde::Serialize;
 
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
+use super::ops_handler::AdminCapability;
 use crate::application::admin_messages::{
     AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
     AdminMessageEventsQueryHttpRequest, AdminMessageExportHttpRequest,
@@ -24,7 +25,10 @@ use crate::application::admin_messages::{
     build_storage_message_export_request, build_storage_search_request,
     build_storage_write_ledger_request,
 };
-use flare_im_service_kit::{clients::GrpcClients, gateway::GatewaySettings};
+use flare_im_service_kit::{
+    clients::{CapabilityDownstreamConfig, GrpcClients},
+    gateway::GatewaySettings,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -114,6 +118,9 @@ pub struct AdminGrpcConfigSnapshot {
     pub conversation_static_fallback: Option<String>,
     pub online_static_fallback: Option<String>,
     pub storage_reader_static_fallback: Option<String>,
+    /// Admin Gateway 专用的可选下游；关闭时为 `null`。
+    pub capability_service_url: Option<String>,
+    pub capability_static_fallback: Option<String>,
     pub connect_timeout_secs: u64,
     pub request_timeout_secs: u64,
 }
@@ -193,8 +200,12 @@ pub async fn admin_capabilities() -> Json<ApiResponse<AdminCapabilitiesResponse>
         (status = 403, description = "Admin scope or admin context is missing"),
     ),
 )]
-pub async fn admin_gateway_health() -> Json<ApiResponse<AdminGatewayHealthResponse>> {
-    Json(ApiResponse::success(build_gateway_health()))
+pub async fn admin_gateway_health(
+    Extension(capability): Extension<AdminCapability>,
+) -> Json<ApiResponse<AdminGatewayHealthResponse>> {
+    Json(ApiResponse::success(build_gateway_health(
+        capability.config.as_ref(),
+    )))
 }
 
 #[utoipa::path(
@@ -209,8 +220,12 @@ pub async fn admin_gateway_health() -> Json<ApiResponse<AdminGatewayHealthRespon
 )]
 pub async fn admin_gateway_upstreams(
     Extension(settings): Extension<GatewaySettings>,
+    Extension(capability): Extension<AdminCapability>,
 ) -> Json<ApiResponse<AdminGatewayUpstreamsResponse>> {
-    Json(ApiResponse::success(build_gateway_upstreams(&settings)))
+    Json(ApiResponse::success(build_gateway_upstreams(
+        &settings,
+        capability.config.as_ref(),
+    )))
 }
 
 #[utoipa::path(
@@ -239,9 +254,11 @@ pub async fn admin_gateway_routes() -> Json<ApiResponse<AdminGatewayRoutesRespon
 )]
 pub async fn admin_gateway_config(
     Extension(settings): Extension<GatewaySettings>,
+    Extension(capability): Extension<AdminCapability>,
 ) -> Json<ApiResponse<AdminGatewayConfigSnapshot>> {
     Json(ApiResponse::success(build_gateway_config_snapshot(
         &settings,
+        capability.config.as_ref(),
     )))
 }
 
@@ -447,65 +464,79 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn build_gateway_health() -> AdminGatewayHealthResponse {
+/// 6 个固定下游，外加启用时的 Capability。
+fn build_gateway_health(
+    capability: Option<&CapabilityDownstreamConfig>,
+) -> AdminGatewayHealthResponse {
     AdminGatewayHealthResponse {
         service: "flare-admin-gateway".to_string(),
         status: "ok".to_string(),
         boundary: "internal_admin_api_only_no_admin_console".to_string(),
         admin_api_version: "v1".to_string(),
         route_count: build_gateway_routes().routes.len(),
-        upstream_count: 6,
+        upstream_count: 6 + usize::from(capability.is_some()),
     }
 }
 
-fn build_gateway_upstreams(settings: &GatewaySettings) -> AdminGatewayUpstreamsResponse {
+fn build_gateway_upstreams(
+    settings: &GatewaySettings,
+    capability: Option<&CapabilityDownstreamConfig>,
+) -> AdminGatewayUpstreamsResponse {
     let grpc = &settings.grpc;
-    AdminGatewayUpstreamsResponse {
-        upstreams: vec![
-            gateway_upstream(
-                "media",
-                &grpc.media_service_url,
-                &grpc.media_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-            gateway_upstream(
-                "message-ingest",
-                &grpc.message_ingest_service_url,
-                &grpc.message_ingest_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-            gateway_upstream(
-                "message-orchestrator",
-                &grpc.message_orchestrator_service_url,
-                &grpc.message_orchestrator_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-            gateway_upstream(
-                "conversation",
-                &grpc.conversation_service_url,
-                &grpc.conversation_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-            gateway_upstream(
-                "signaling-online",
-                &grpc.online_service_url,
-                &grpc.online_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-            gateway_upstream(
-                "storage-reader",
-                &grpc.storage_reader_service_url,
-                &grpc.storage_reader_static_fallback,
-                grpc.connect_timeout_secs,
-                grpc.request_timeout_secs,
-            ),
-        ],
+    let mut upstreams = vec![
+        gateway_upstream(
+            "media",
+            &grpc.media_service_url,
+            &grpc.media_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "message-ingest",
+            &grpc.message_ingest_service_url,
+            &grpc.message_ingest_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "message-orchestrator",
+            &grpc.message_orchestrator_service_url,
+            &grpc.message_orchestrator_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "conversation",
+            &grpc.conversation_service_url,
+            &grpc.conversation_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "signaling-online",
+            &grpc.online_service_url,
+            &grpc.online_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "storage-reader",
+            &grpc.storage_reader_service_url,
+            &grpc.storage_reader_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+    ];
+    if let Some(capability) = capability {
+        upstreams.push(gateway_upstream(
+            "capability",
+            &capability.service_url,
+            &capability.static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ));
     }
+    AdminGatewayUpstreamsResponse { upstreams }
 }
 
 fn gateway_upstream(
@@ -637,8 +668,128 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
                 "storage-reader",
                 "available",
             ),
+            route(
+                "GET",
+                "/api/v1/admin/medias/bucket",
+                "admin-media",
+                true,
+                true,
+                false,
+                "media",
+                "available",
+            ),
+            route(
+                "POST",
+                "/api/v1/admin/medias/cleanup-orphaned-assets",
+                "admin-media",
+                true,
+                true,
+                true,
+                "media",
+                "available",
+            ),
+            route(
+                "GET",
+                "/api/v1/admin/medias/objects",
+                "admin-media",
+                true,
+                true,
+                false,
+                "media",
+                "not_implemented",
+            ),
+            route(
+                "POST",
+                "/api/v1/admin/medias/object-acl",
+                "admin-media",
+                true,
+                true,
+                true,
+                "media",
+                "not_implemented",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/conversations",
+                "admin-conversation",
+                "conversation",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/conversations/{conversation_id}",
+                "admin-conversation",
+                "conversation",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/conversations/{conversation_id}/participants",
+                "admin-conversation",
+                "conversation",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/users/{user_id}/devices",
+                "admin-session",
+                "signaling-online",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/users/{user_id}/presence",
+                "admin-session",
+                "signaling-online",
+            ),
+            ops_route(
+                "POST",
+                "/api/v1/admin/users/{user_id}/kick",
+                "admin-session",
+                "signaling-online",
+            ),
+            ops_route(
+                "POST",
+                "/api/v1/admin/users/{user_id}/devices/{device_id}/kick",
+                "admin-session",
+                "signaling-online",
+            ),
+            ops_route(
+                "POST",
+                "/api/v1/admin/tenant/kick-all",
+                "admin-session",
+                "signaling-online",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/tenant/runtime",
+                "admin-tenant",
+                "capability",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/capabilities/tenant",
+                "admin-capability",
+                "capability",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/plugins",
+                "admin-capability",
+                "capability",
+            ),
         ],
     }
+}
+
+/// ADM-01 路由：POST 即写操作（踢线），其余只读。
+fn ops_route(method: &str, path: &str, category: &str, downstream: &str) -> AdminGatewayRoute {
+    route(
+        method,
+        path,
+        category,
+        true,
+        true,
+        method == "POST",
+        downstream,
+        "available",
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -664,7 +815,10 @@ fn route(
     }
 }
 
-fn build_gateway_config_snapshot(settings: &GatewaySettings) -> AdminGatewayConfigSnapshot {
+fn build_gateway_config_snapshot(
+    settings: &GatewaySettings,
+    capability: Option<&CapabilityDownstreamConfig>,
+) -> AdminGatewayConfigSnapshot {
     AdminGatewayConfigSnapshot {
         server: AdminServerConfigSnapshot {
             bind: settings.server.bind.clone(),
@@ -696,6 +850,9 @@ fn build_gateway_config_snapshot(settings: &GatewaySettings) -> AdminGatewayConf
             storage_reader_static_fallback: optional_string(
                 &settings.grpc.storage_reader_static_fallback,
             ),
+            capability_service_url: capability.map(|c| c.service_url.clone()),
+            capability_static_fallback: capability
+                .and_then(|c| optional_string(&c.static_fallback)),
             connect_timeout_secs: settings.grpc.connect_timeout_secs,
             request_timeout_secs: settings.grpc.request_timeout_secs,
         },
@@ -800,7 +957,7 @@ mod tests {
     fn admin_upstreams_are_built_from_gateway_grpc_config() {
         let settings = test_settings();
 
-        let response = build_gateway_upstreams(&settings);
+        let response = build_gateway_upstreams(&settings, None);
 
         assert_eq!(response.upstreams.len(), 6);
         assert!(
@@ -823,7 +980,7 @@ mod tests {
     fn admin_config_snapshot_redacts_auth_secret() {
         let settings = test_settings();
 
-        let snapshot = build_gateway_config_snapshot(&settings);
+        let snapshot = build_gateway_config_snapshot(&settings, None);
 
         assert_eq!(snapshot.auth.mode, "http_hook");
         assert_eq!(
@@ -835,6 +992,37 @@ mod tests {
                 .redacted_fields
                 .iter()
                 .any(|field| field == "auth.hook_secret")
+        );
+    }
+
+    #[test]
+    fn capability_upstream_is_listed_only_when_enabled() {
+        let settings = test_settings();
+        let capability = CapabilityDownstreamConfig {
+            service_url: "discovery://flare-capability".to_string(),
+            static_fallback: "http://127.0.0.1:50110".to_string(),
+        };
+
+        let response = build_gateway_upstreams(&settings, Some(&capability));
+        assert_eq!(response.upstreams.len(), 7);
+        let upstream = response.upstreams.last().unwrap();
+        assert_eq!(upstream.name, "capability");
+        assert_eq!(
+            upstream.static_fallback.as_deref(),
+            Some("http://127.0.0.1:50110")
+        );
+        assert_eq!(build_gateway_health(Some(&capability)).upstream_count, 7);
+        assert_eq!(build_gateway_health(None).upstream_count, 6);
+        let snapshot = build_gateway_config_snapshot(&settings, Some(&capability));
+        assert_eq!(
+            snapshot.grpc.capability_service_url.as_deref(),
+            Some("discovery://flare-capability")
+        );
+        assert_eq!(
+            build_gateway_config_snapshot(&settings, None)
+                .grpc
+                .capability_service_url,
+            None
         );
     }
 

@@ -1,9 +1,9 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
-    clients::GrpcClients,
+    clients::{CapabilityAdminClientWrapper, DownstreamGrpcResolver, GrpcClients},
     control_auth::ConsoleControlVerifier,
-    gateway::{GatewayEnvScope, GatewaySettings},
+    gateway::{GatewayEnvScope, GatewaySettings, capability_downstream_from_env},
     service_names::ADMIN_GATEWAY,
 };
 use flare_server_core::SignedContextSigner;
@@ -15,7 +15,7 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
-use crate::interface::http::{MediaContextSigner, create_admin_router};
+use crate::interface::http::{AdminCapabilityDownstream, MediaContextSigner, create_admin_router};
 
 pub struct ApplicationBootstrap;
 
@@ -62,6 +62,27 @@ impl ApplicationBootstrap {
             Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
         info!("Admin Gateway gRPC clients initialized");
 
+        // 租户运行时、能力开关与插件（ADM-01）只经这条可选下游；URL 设为空串即关闭，
+        // 对应三条路由回 503，其余管理接口不受影响。
+        let capability = match capability_downstream_from_env(GatewayEnvScope::Admin)? {
+            Some(config) => {
+                info!(
+                    capability_service_url = %config.service_url,
+                    "Using capability downstream for admin tenant runtime, switches and plugins"
+                );
+                let resolver = DownstreamGrpcResolver::new(
+                    Arc::new(app_config.clone()),
+                    settings.grpc.clone(),
+                );
+                let client = CapabilityAdminClientWrapper::connect(&resolver, &config).await?;
+                Some(AdminCapabilityDownstream { config, client })
+            }
+            None => {
+                warn!("capability downstream disabled; admin capability routes answer 503");
+                None
+            }
+        };
+
         let control_verifier = Arc::new(
             ConsoleControlVerifier::from_env()
                 .context("invalid FLARE_CONSOLE_PUBLIC_KEY")?
@@ -84,7 +105,7 @@ impl ApplicationBootstrap {
             }
         };
 
-        let app = create_admin_router(clients)
+        let app = create_admin_router(clients, capability)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 ADMIN_GATEWAY,
             ))
