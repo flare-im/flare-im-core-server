@@ -2,6 +2,7 @@
 
 Requires FLARE_MIGRATE_TEST_DISPOSABLE=1, PGHOST/PGPORT/PGUSER/PGDATABASE.
 Use a separate TimescaleDB instance. Missing infrastructure fails, never skips.
+PG_DUMP/PG_RESTORE (default: on PATH) must match the server's PostgreSQL major version.
 """
 from contextlib import contextmanager, redirect_stdout
 import dataclasses
@@ -9,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,44 @@ import uuid
 from unittest.mock import patch
 
 import flare_migrate as migrate
+
+# Legacy Social tables that shared Core's public schema before the Social database split.
+# Mirrors flare-social/deploy/db/social-tables.json; checked below when that sibling exists.
+SOCIAL_TABLE_LIST = migrate.ROOT.parent / "flare-social/deploy/db/social-tables.json"
+SOCIAL_TABLES = (
+    "flare_blocks", "flare_blocks_changes", "flare_blocks_sync", "flare_contact_meta",
+    "flare_contact_tags", "flare_contacts_removed", "flare_contacts_sync", "flare_control_idempotency",
+    "flare_feature_flags", "flare_feature_projection_versions", "flare_feature_user_overrides",
+    "flare_friend_requests", "flare_friendship_epochs", "flare_friendships",
+    "flare_group_announcement_reads", "flare_group_bans", "flare_group_directory_member_events",
+    "flare_group_directory_removed", "flare_group_directory_sync", "flare_group_invite_links",
+    "flare_group_join_requests", "flare_group_members", "flare_groups", "flare_invite_codes",
+    "flare_moment_comments", "flare_moment_feed", "flare_moment_likes", "flare_moments",
+    "flare_moments_audience", "flare_moments_settings", "flare_moments_visibility_rules",
+    "flare_my_group_settings", "flare_referral_stats", "flare_refresh_tokens", "flare_reports",
+    "flare_sensitive_hits", "flare_sensitive_words", "flare_social_outbox",
+    "flare_social_outbox_aggregate_seq", "flare_tenant_counters", "flare_tenants",
+    "flare_user_credentials", "flare_user_groups", "flare_user_login_keys", "flare_user_privacy",
+    "flare_user_profiles", "flare_user_qr_tokens", "flare_user_referrals", "flare_users",
+    "flare_verification_codes",
+)
+# The Social schema's only BIGSERIAL keys; their sequences are separate pg_dump objects.
+SOCIAL_SERIAL_KEYS = {"flare_group_directory_member_events": "id", "flare_social_outbox": "outbox_id"}
+
+
+def social_legacy_sql():
+    """Representative legacy Social shapes: plain tables, serial sequences, pg_trgm index, rows."""
+    parts = ["CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;"]
+    for table in SOCIAL_TABLES:
+        key = SOCIAL_SERIAL_KEYS.get(table)
+        if key:
+            parts.append(f"CREATE TABLE public.{table} ({key} BIGSERIAL PRIMARY KEY, tenant_id TEXT NOT NULL);")
+            parts.append(f"INSERT INTO public.{table}(tenant_id) VALUES ('0');")
+        else:
+            parts.append(f"CREATE TABLE public.{table} (tenant_id TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (tenant_id, id));")
+            parts.append(f"INSERT INTO public.{table}(tenant_id,id) VALUES ('0','social-row');")
+    parts.append("CREATE INDEX idx_fup_trgm_id ON public.flare_user_profiles USING gin (id gin_trgm_ops);")
+    return "\n".join(parts)
 
 
 class PostgresMigrationTests(unittest.TestCase):
@@ -67,6 +107,33 @@ class PostgresMigrationTests(unittest.TestCase):
         migrate.execute_migration(db, self.migrations[0].sql)
         db.query("COMMIT;")
 
+    def pg_tool(self, name, arguments, stdin=None, stdout=subprocess.PIPE):
+        # PG_DUMP / PG_RESTORE may select executables (e.g. wrappers running the
+        # server's own binaries); credentials stay in the environment/passfile.
+        result = subprocess.run([os.environ.get(name.upper(), name)] + arguments, cwd="/",
+                                stdin=stdin, stdout=stdout, stderr=subprocess.PIPE, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        return result.stdout
+
+    def restore_without(self, source, target, excluded):
+        """pg_dump the source minus `excluded` relations; restore as documented by TimescaleDB."""
+        with self.connect(source) as db:
+            server_major = db.query("SELECT current_setting('server_version_num')::int/10000;")
+            version = db.query("SELECT extversion FROM pg_extension WHERE extname='timescaledb';")
+        # A newer pg_restore emits settings (e.g. transaction_timeout) an older server rejects.
+        tool = re.search(r"\(PostgreSQL\) ([0-9]+)", self.pg_tool("pg_restore", ["--version"]).decode())
+        self.assertEqual(tool and tool[1], server_major, "PG_RESTORE must match the server's PostgreSQL major version")
+        with tempfile.TemporaryFile() as archive:
+            self.pg_tool("pg_dump", ["--format=custom", "--dbname=" + source]
+                         + ["--exclude-table=public." + name for name in excluded], stdout=archive)
+            archive.seek(0)
+            with self.connect(target) as db:
+                db.query(f"CREATE EXTENSION timescaledb WITH SCHEMA public VERSION '{version}';")
+                db.query("SELECT timescaledb_pre_restore();")
+            self.pg_tool("pg_restore", ["--exit-on-error", "--dbname=" + target], stdin=archive)
+            with self.connect(target) as db:
+                db.query("SELECT timescaledb_post_restore();")
+
     def test_empty_database_repeat_and_verified_schema(self):
         with self.fixture() as name, self.connect(name) as db:
             self.run_tool(db)
@@ -105,6 +172,54 @@ class PostgresMigrationTests(unittest.TestCase):
             with self.connect(name) as db:
                 self.assertEqual(db.query("SELECT to_regclass('public.flare_schema_migrations') IS NULL;"), "t")
                 self.assertEqual(db.query("SELECT version FROM schema_version;"), "48")
+
+    def test_mixed_social_tables_refuse_admission_until_core_only_dump(self):
+        if SOCIAL_TABLE_LIST.exists():
+            self.assertEqual(json.loads(SOCIAL_TABLE_LIST.read_text()), list(SOCIAL_TABLES))
+        absent = "SELECT to_regclass('public.flare_schema_migrations') IS NULL;"
+        with self.fixture() as mixed, self.fixture() as naive, self.fixture() as core_only:
+            with self.connect(mixed) as db:
+                self.baseline(db)
+                db.query("INSERT INTO tenants(tenant_id,name) VALUES ('retained','retained');")
+                db.query("INSERT INTO messages(tenant_id,server_id,conversation_id,sender_id,seq,status) VALUES ('retained','kept','fixture','user',1,1);")
+                source_review = self.approved_fixture(db)
+                db.query(social_legacy_sql())
+                # Neither fresh evidence nor an earlier Core-only review admits the mixed schema.
+                with self.assertRaisesRegex(migrate.MigrationError, "schema mismatch"):
+                    migrate.baseline_evidence(db, self.migrations)
+                with self.assertRaisesRegex(migrate.MigrationError, "schema mismatch"):
+                    self.run_tool(db, admission=source_review)
+            with self.connect(mixed) as db:
+                self.assertEqual(db.query(absent), "t")
+                self.assertEqual(db.query("SELECT count(*) FROM flare_social_outbox;"), "1")
+                listed = ",".join(f"'{name}'" for name in SOCIAL_TABLES)
+                owned = db.query(f"""SELECT s.relname FROM pg_depend d
+                  JOIN pg_class s ON s.oid=d.objid AND s.relkind='S'
+                  JOIN pg_class t ON t.oid=d.refobjid
+                  WHERE d.classid='pg_class'::regclass AND d.refclassid='pg_class'::regclass
+                    AND d.deptype IN ('a','i') AND t.relnamespace='public'::regnamespace
+                    AND t.relname IN ({listed}) ORDER BY 1;""").split()
+            self.assertEqual(owned, ["flare_group_directory_member_events_id_seq", "flare_social_outbox_outbox_id_seq"])
+            # Excluding only the listed tables still dumps their serial sequences: refused.
+            self.restore_without(mixed, naive, SOCIAL_TABLES)
+            with self.connect(naive) as db:
+                self.assertEqual(db.query("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='S' AND left(relname,6)='flare_';"), "2")
+                with self.assertRaisesRegex(migrate.MigrationError, "schema mismatch"):
+                    migrate.baseline_evidence(db, self.migrations)
+            self.restore_without(mixed, core_only, SOCIAL_TABLES + tuple(owned))
+            with self.connect(core_only) as db:
+                self.assertEqual(db.query("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND left(relname,6)='flare_';"), "0")
+                # The source review is bound to the source database identity, not the copy.
+                with self.assertRaisesRegex(migrate.MigrationError, "stale"):
+                    self.run_tool(db, admission=source_review)
+            with self.connect(core_only) as db:
+                self.assertEqual(db.query(absent), "t")
+                self.run_tool(db, admission=self.approved_fixture(db))
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 8)
+                self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"), "retained")
+                self.assertEqual(db.query("SELECT status FROM messages WHERE server_id='kept';"), "1")
+            with self.connect(mixed) as db:
+                self.assertEqual(db.query(absent), "t")
 
     def test_missing_constraint_is_not_accepted_as_a_baseline(self):
         with self.fixture() as name:
