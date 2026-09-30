@@ -155,7 +155,12 @@ FLARE_API_GATEWAY_TENANT_POLICY = "strict"
 name = "signaling-gateway"
 command = "/usr/local/bin/flare-signaling-gateway"
 inherit_env_prefixes = ["ACCESS_GATEWAY_", "GATEWAY_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+# FLARE_QUIC_TLS_*: the installation certificate for QUIC behind Edge's UDP
+# passthrough (optional; without it the listener generates a localhost one).
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+  "FLARE_QUIC_TLS_CERT", "FLARE_QUIC_TLS_KEY",
+]
 required_env = ["ACCESS_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60051"
 [services.environment]

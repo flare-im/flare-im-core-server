@@ -697,6 +697,13 @@ required_env_unless = [
             gateway.environment.get("GRPC_PORT").map(String::as_str),
             Some("60060")
         );
+        let quic_key_users: Vec<_> = manifest
+            .services
+            .iter()
+            .filter(|service| manifest.env_allowed(service, "FLARE_QUIC_TLS_KEY"))
+            .map(|service| service.name.as_str())
+            .collect();
+        assert_eq!(quic_key_users, ["signaling-gateway"]);
         assert!(!manifest.env_allowed(gateway, "PORT"));
         assert!(!manifest.env_allowed(gateway, "GRPC_PORT"));
         assert_eq!(gateway.tcp_health.as_deref(), Some("127.0.0.1:60051"));
