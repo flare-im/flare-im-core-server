@@ -18,7 +18,9 @@ use flare_grpc_proto::capability::{
     UserCapabilityGrant as ProtoGrant,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::control_auth::{ConsoleControlVerifier, ControlActorKind};
+use flare_im_service_kit::control_auth::{
+    ConsoleControlVerifier, ControlActorKind, VerifiedControlActor, require_grpc_control_or_admin,
+};
 use flare_server_core::SignedContextVerifier;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
@@ -697,7 +699,7 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListRegisteredPluginsRequest>,
     ) -> Result<Response<ListRegisteredPluginsResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        let actor = plugin_listing_actor(&request, self.control_verifier.as_ref())?;
         let r = request.into_inner();
         actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() {
@@ -724,6 +726,18 @@ impl CapabilityService for CapabilityGrpcServer {
     }
 }
 
+/// `ListRegisteredPlugins` 只读：Console 直连的 control 令牌，或 admin-gateway 原样转发的
+/// admin 令牌（ADM-01 `GET /api/v1/admin/plugins`）。两条分支都只允许员工，请求租户仍须
+/// 等于令牌租户；登记与注销插件（写）继续只认 control 令牌。
+fn plugin_listing_actor<T>(
+    request: &Request<T>,
+    verifier: Option<&ConsoleControlVerifier>,
+) -> Result<VerifiedControlActor, Status> {
+    let (actor, _channel) = require_grpc_control_or_admin(request, verifier)?;
+    actor.require_kind(ControlActorKind::Employee)?;
+    Ok(actor)
+}
+
 #[cfg(test)]
 mod dispatch_identity_tests {
     use super::require_canonical_dispatch_tenant_id;
@@ -737,6 +751,180 @@ mod dispatch_identity_tests {
         );
         for alias in ["", "default", " tenant-a", "tenant-a "] {
             assert!(require_canonical_dispatch_tenant_id(alias).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod plugin_listing_tests {
+    //! `ListRegisteredPlugins` 的两条令牌分支：缺令牌、错误受众、跨租户、非员工四类负向用例，
+    //! 外加 control 与 admin 两个正向对照；只返回请求租户（即令牌租户）下的实例。
+
+    use std::time::Duration;
+
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use flare_im_service_kit::control_auth::{
+        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, CORE_CONTROL_AUDIENCE, PROJECTION_WORKER_SUBJECT,
+    };
+    use tonic::Code;
+
+    use super::*;
+    use crate::infrastructure::capability::InMemoryCapabilityGrants;
+
+    fn signer() -> (flare_server_core::TokenService, ConsoleControlVerifier) {
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        (
+            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
+                .unwrap(),
+            ConsoleControlVerifier::from_public_key(&public).unwrap(),
+        )
+    }
+
+    fn plugin(plugin_id: &str) -> RegisteredPluginInstance {
+        RegisteredPluginInstance {
+            plugin_id: plugin_id.to_string(),
+            capability_id: "rtc.call".to_string(),
+            grpc_authority: "http://127.0.0.1:9".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn server(verifier: ConsoleControlVerifier) -> CapabilityGrpcServer {
+        let routes = Arc::new(PluginRouteBook::new());
+        routes.upsert("tenant-a", plugin("plugin-a"));
+        routes.upsert("tenant-b", plugin("plugin-b"));
+        CapabilityGrpcServer::new(
+            CapabilityExtensionRegistry::new(),
+            Arc::new(InMemoryCapabilityGrants::new()),
+            Arc::new(CapabilityRuntimeConfig {
+                max_payload_json_bytes: 1024,
+                dispatch_timeout: Duration::from_secs(1),
+                dispatch_max_per_minute: None,
+                plugin_discovery_endpoints: Vec::new(),
+                plugin_health_check_interval: Duration::from_secs(3600),
+                plugin_call_timeout: Duration::from_millis(50),
+            }),
+            None,
+            None,
+            Arc::new(CapabilityInvocationMetrics::default()),
+            None,
+            routes,
+            None,
+            Some(verifier),
+        )
+    }
+
+    fn request(token: Option<&str>, tenant_id: &str) -> Request<ListRegisteredPluginsRequest> {
+        let mut request = Request::new(ListRegisteredPluginsRequest {
+            tenant_id: tenant_id.to_string(),
+            capability_id: String::new(),
+        });
+        if let Some(token) = token {
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        }
+        request
+    }
+
+    async fn listed(
+        server: &CapabilityGrpcServer,
+        token: Option<&str>,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, Code> {
+        server
+            .list_registered_plugins(request(token, tenant_id))
+            .await
+            .map(|response| {
+                response
+                    .into_inner()
+                    .instances
+                    .into_iter()
+                    .map(|instance| instance.plugin_id)
+                    .collect()
+            })
+            .map_err(|status| status.code())
+    }
+
+    #[tokio::test]
+    async fn plugin_listing_accepts_control_and_forwarded_admin_within_the_token_tenant() {
+        let (tokens, verifier) = signer();
+        let server = server(verifier);
+        let admin = tokens
+            .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", CORE_ADMIN_AUDIENCE)
+            .unwrap();
+        let control = tokens
+            .generate_with_ed25519(
+                "employee-1",
+                Some("tenant-a"),
+                "control",
+                CORE_CONTROL_AUDIENCE,
+            )
+            .unwrap();
+
+        for token in [&admin, &control] {
+            assert_eq!(
+                listed(&server, Some(token), "tenant-a").await,
+                Ok(vec!["plugin-a".to_string()])
+            );
+            // 跨租户：请求租户不是令牌租户。
+            assert_eq!(
+                listed(&server, Some(token), "tenant-b").await,
+                Err(Code::PermissionDenied)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_listing_rejects_missing_wrong_audience_and_non_employee_tokens() {
+        let (tokens, verifier) = signer();
+        let server = server(verifier);
+        assert_eq!(
+            listed(&server, None, "tenant-a").await,
+            Err(Code::Unauthenticated)
+        );
+        // admin 令牌配 control 受众（或反过来）都不是任何一条分支的合法组合。
+        let crossed = tokens
+            .generate_with_ed25519(
+                "employee-1",
+                Some("tenant-a"),
+                "admin",
+                CORE_CONTROL_AUDIENCE,
+            )
+            .unwrap();
+        assert_eq!(
+            listed(&server, Some(&crossed), "tenant-a").await,
+            Err(Code::Unauthenticated)
+        );
+        // 通配租户的 admin 令牌不接受。
+        let wildcard = tokens
+            .generate_with_ed25519("employee-1", Some("*"), "admin", CORE_ADMIN_AUDIENCE)
+            .unwrap();
+        assert!(listed(&server, Some(&wildcard), "tenant-a").await.is_err());
+        // 投影 worker 不是员工：control 分支按员工拒绝，admin 分支直接拒绝。
+        for (token_use, audience) in [
+            ("control", CORE_CONTROL_AUDIENCE),
+            ("admin", CORE_ADMIN_AUDIENCE),
+        ] {
+            let worker = tokens
+                .generate_with_ed25519(
+                    PROJECTION_WORKER_SUBJECT,
+                    Some("tenant-a"),
+                    token_use,
+                    audience,
+                )
+                .unwrap();
+            assert_eq!(
+                listed(&server, Some(&worker), "tenant-a").await,
+                Err(Code::PermissionDenied),
+                "{token_use}"
+            );
         }
     }
 }

@@ -9,8 +9,10 @@ use tonic::transport::Channel;
 use crate::clients::{DownstreamGrpcResolver, admin_bearer_request};
 use crate::service_names::CAPABILITY;
 use flare_grpc_proto::capability::capability_admin_service_client::CapabilityAdminServiceClient;
+use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::capability::{
-    GetTenantRuntimeRequest, GetTenantRuntimeResponse, ListTenantCapabilitySwitchesRequest,
+    GetTenantRuntimeRequest, GetTenantRuntimeResponse, ListRegisteredPluginsRequest,
+    ListRegisteredPluginsResponse, ListTenantCapabilitySwitchesRequest,
     ListTenantCapabilitySwitchesResponse,
 };
 
@@ -24,15 +26,20 @@ pub struct CapabilityDownstreamConfig {
     pub static_fallback: String,
 }
 
+/// Capability 管理员客户端：`CapabilityAdminService` 的两个只读方法，外加同一通道上
+/// `CapabilityService.ListRegisteredPlugins`（该方法同时接受 Console 直连的 control 令牌
+/// 与这里转发的 admin 令牌）。
 #[derive(Clone)]
 pub struct CapabilityAdminClientWrapper {
     admin: CapabilityAdminServiceClient<Channel>,
+    service: CapabilityServiceClient<Channel>,
 }
 
 impl CapabilityAdminClientWrapper {
     pub fn from_channel(channel: Channel) -> Self {
         Self {
-            admin: CapabilityAdminServiceClient::new(channel),
+            admin: CapabilityAdminServiceClient::new(channel.clone()),
+            service: CapabilityServiceClient::new(channel),
         }
     }
 
@@ -76,6 +83,29 @@ impl CapabilityAdminClientWrapper {
             .admin
             .get_tenant_runtime(admin_bearer_request(
                 GetTenantRuntimeRequest {},
+                admin_token,
+            )?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 令牌租户下已登记的扩展插件实例；`capability_id` 为空表示不过滤。
+    ///
+    /// `tenant_id` 必须是已验签 admin 令牌里的租户：Capability 会再核对一次，不一致即
+    /// PERMISSION_DENIED。
+    pub async fn list_registered_plugins(
+        &mut self,
+        admin_token: &str,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> Result<ListRegisteredPluginsResponse> {
+        let response = self
+            .service
+            .list_registered_plugins(admin_bearer_request(
+                ListRegisteredPluginsRequest {
+                    tenant_id: tenant_id.to_string(),
+                    capability_id: capability_id.to_string(),
+                },
                 admin_token,
             )?)
             .await?;
