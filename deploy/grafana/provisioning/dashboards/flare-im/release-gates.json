@@ -1,131 +1,502 @@
 {
-  "dashboard": {
-    "title": "Release Gates",
-    "tags": ["flare-im", "release-gates", "slo"],
-    "timezone": "browser",
-    "schemaVersion": 16,
-    "version": 1,
-    "refresh": "30s",
-    "panels": [
-      {
-        "id": 1,
-        "title": "Core Service Availability",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
-        "targets": [
-          {
-            "expr": "up{job=~\"message-orchestrator|storage-writer|storage-reader|push-server|push-worker|access-gateway|signaling-online|signaling-route\"}",
-            "legendFormat": "{{job}}"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "mappings": [
-              {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+  "uid": "flare-im-release-gates",
+  "title": "Release Gates",
+  "description": "发布门禁：窗口与阈值和 alert_rules.yml 对应规则一致（推送失败率对应 PushSuccessRateLow，gRPC 错误率对应 GrpcServerErrorRateHigh）。",
+  "tags": [
+    "flare-im",
+    "release-gates",
+    "slo"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Core Service Availability",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{service=~\".+\"}",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Send ACK P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      {
-        "id": 2,
-        "title": "Send ACK P99",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"send_ack\"}[5m])) by (le))",
-            "legendFormat": "send_ack_p99"
-          }
-        ],
-        "yaxes": [
-          {"format": "s", "label": "seconds"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"total\"}[5m])))",
+          "legendFormat": "send_ack P99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Message Failure Rate",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
       },
-      {
-        "id": 3,
-        "title": "Message Failure Rate",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
-        "targets": [
-          {
-            "expr": "sum(rate(message_orchestrator_send_total{outcome=~\"error|failed\"}[5m])) / clamp_min(sum(rate(message_orchestrator_send_total[5m])), 1)",
-            "legendFormat": "failure_rate"
-          }
-        ],
-        "yaxes": [
-          {"format": "percentunit", "label": "ratio"},
-          {"format": "short"}
-        ]
-      },
-      {
-        "id": 4,
-        "title": "MQ Nack/Term Rate",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
-        "targets": [
-          {
-            "expr": "sum(rate(mq_process_ack_total{action=~\"nack|term\"}[5m])) by (action)",
-            "legendFormat": "{{action}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "ops", "label": "events/s"},
-          {"format": "short"}
-        ]
-      },
-      {
-        "id": 5,
-        "title": "DLQ Growth",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
-        "targets": [
-          {
-            "expr": "increase(dead_letter_queue_messages_total[10m])",
-            "legendFormat": "dlq_growth_10m"
-          }
-        ],
-        "yaxes": [
-          {"format": "short", "label": "messages"},
-          {"format": "short"}
-        ]
-      },
-      {
-        "id": 6,
-        "title": "Sync Page P99",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(flare_sync_page_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "sync_page_p99"
-          }
-        ],
-        "yaxes": [
-          {"format": "s", "label": "seconds"},
-          {"format": "short"}
-        ]
-      },
-      {
-        "id": 7,
-        "title": "Push Backlog",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
-        "targets": [
-          {
-            "expr": "sum(push_online_backlog) or vector(0)",
-            "legendFormat": "online_backlog"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
-          {
-            "expr": "sum(push_offline_backlog) or vector(0)",
-            "legendFormat": "offline_backlog"
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
           }
-        ],
-        "yaxes": [
-          {"format": "short", "label": "tasks"},
-          {"format": "short"}
-        ]
-      }
-    ]
-  }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(message_orchestrator_send_total{outcome=\"error\"}[5m])) or vector(0)) / sum(rate(message_orchestrator_send_total[5m]))",
+          "legendFormat": "failure_rate"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "MQ Nack/Term Rate",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(mq_process_ack_total{operation=~\"nack|term\"}[5m]))",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "DLQ Growth (10m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(mq_process_ack_total{operation=\"term\",outcome=\"success\"}[10m])) or vector(0)",
+          "legendFormat": "consumer_dead_lettered"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(push_worker_offline_redelivery_total{action=\"dlq_ack\"}[10m])) or vector(0)",
+          "legendFormat": "offline_push_dead_lettered"
+        }
+      ],
+      "description": "消费者先把消息投进死信流再 term，term 成功数即新增死信；离线推送 worker 另有 dlq_ack 处置。"
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sync RPC P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(grpc_server_handling_seconds_bucket{job=\"sync-orchestrator\",method=\"/flare.sync.v1.SyncService/ExecuteSync\"}[5m])))",
+          "legendFormat": "execute_sync P99"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Push Delivery Failure Rate",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(push_failure_total[5m])) or vector(0)) / ((sum(rate(push_success_total[5m])) or vector(0)) + (sum(rate(push_failure_total[5m])) or vector(0)))",
+          "legendFormat": "push_failure_rate"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "gRPC Server Error Rate",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job) (rate(grpc_server_handled_total{code=~\"Unknown|DeadlineExceeded|Internal|Unavailable|DataLoss|TransportError\"}[5m])) / sum by (job) (rate(grpc_server_handled_total[5m]))",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "description": "只算服务端错误码；InvalidArgument、NotFound、PermissionDenied 等调用方错误不计。"
+    }
+  ]
 }

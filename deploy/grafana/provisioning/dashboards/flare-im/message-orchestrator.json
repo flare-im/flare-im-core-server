@@ -1,135 +1,372 @@
 {
-  "dashboard": {
-    "title": "消息编排服务监控",
-    "tags": ["flare-im", "message-orchestrator"],
-    "timezone": "browser",
-    "schemaVersion": 16,
-    "version": 1,
-    "refresh": "30s",
-    "panels": [
-      {
-        "id": 1,
-        "title": "消息发送总数",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-        "targets": [
-          {
-            "expr": "sum(rate(messages_sent_total[5m])) by (message_type, tenant_id)",
-            "legendFormat": "{{message_type}} - {{tenant_id}}"
+  "uid": "flare-im-message-orchestrator",
+  "title": "消息编排服务监控",
+  "description": "发送链路：message-ingest 记录 send_total 与各发送阶段，message-orchestrator 记录 orch_* 扇出阶段与扇出耗时。",
+  "tags": [
+    "flare-im",
+    "message"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "发送结果速率",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "ops",
-            "decimals": 2
-          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      {
-        "id": 2,
-        "title": "消息发送延迟 (P99)",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P99 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P95 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.50, sum(rate(messages_sent_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P50 - {{tenant_id}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "s", "label": "延迟"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (durability, outcome) (rate(message_orchestrator_send_total[$__rate_interval]))",
+          "legendFormat": "{{durability}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "发送 ACK 耗时",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
       },
-      {
-        "id": 3,
-        "title": "WAL 写入延迟",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(wal_write_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P99"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(wal_write_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P95"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+        },
+        "overrides": []
       },
-      {
-        "id": 4,
-        "title": "JetStream 生产延迟",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(jetstream_produce_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P99"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(jetstream_produce_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P95"
-          }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      {
-        "id": 5,
-        "title": "PreSend Hook 执行时间",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(pre_send_hook_duration_seconds_bucket[5m])) by (le, hook_name))",
-            "legendFormat": "P99 - {{hook_name}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"total\"}[$__rate_interval])))",
+          "legendFormat": "P50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"total\"}[$__rate_interval])))",
+          "legendFormat": "P95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=\"total\"}[$__rate_interval])))",
+          "legendFormat": "P99"
+        }
+      ],
+      "description": "message-ingest 从收到发送请求到返回 ACK 的耗时（stage=total）。"
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "WAL 写入 / MQ 发布耗时 P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
       },
-      {
-        "id": 6,
-        "title": "错误统计",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-        "targets": [
-          {
-            "expr": "sum(rate(wal_write_failure_total[5m]))",
-            "legendFormat": "WAL 写入失败"
-          },
-          {
-            "expr": "sum(rate(jetstream_produce_failure_total[5m])) by (tenant_id)",
-            "legendFormat": "JetStream 生产失败 - {{tenant_id}}"
-          },
-          {
-            "expr": "sum(rate(pre_send_hook_failure_total[5m])) by (hook_name, tenant_id)",
-            "legendFormat": "Hook 失败 - {{hook_name}} - {{tenant_id}}"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "ops"},
-          {"format": "short"}
-        ]
-      }
-    ]
-  }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=~\"wal_write|mq_publish\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Hook 耗时 P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=~\"pre_send_hook|post_send_hook\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "编排扇出阶段耗时 P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage=~\"orch_persist_publish|orch_sync_index|orch_push_publish|orch_push_ping\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "扇出耗时 P99（摄入到投出）",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, mode, size_bucket) (rate(message_orchestrator_fanout_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{mode}} / {{size_bucket}}"
+        }
+      ],
+      "description": "两端都取服务端时钟，不受客户端时钟偏差影响。"
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "阶段失败与限流",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(message_orchestrator_send_stage_duration_seconds_count{outcome=~\"error|err\"}[$__rate_interval]))",
+          "legendFormat": "{{stage}} 失败"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(message_orchestrator_send_stage_duration_seconds_count{stage=\"rate_limit\",outcome=\"rejected\"}[$__rate_interval]))",
+          "legendFormat": "限流拒绝"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "gRPC 请求（摄入 / 编排）",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, code) (rate(grpc_server_handled_total{job=~\"message-ingest|message-orchestrator\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} {{code}}"
+        }
+      ]
+    }
+  ]
 }
-

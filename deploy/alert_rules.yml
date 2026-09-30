@@ -1,28 +1,39 @@
+# 只能引用源码里注册过的指标与标签：scripts/check_dashboard_metrics.sh 会逐条校验（make check）。
+# 引用不存在的指标不会报错，只会让告警永远不触发。
 groups:
   - name: flare_im_alerts
     interval: 30s
     rules:
-      # 推送成功率告警
+      # 推送成功率告警（接入网关在线投递）。按失败率计算：只有成功、从未失败的租户没有失败序列，
+      # 失败租户缺成功序列时用 `or ... * 0` 补 0，避免 100% 失败反而算不出比值。
       - alert: PushSuccessRateLow
         expr: |
           (
-            sum(rate(online_push_success_total[5m])) by (tenant_id)
+            sum by (tenant_id) (rate(push_failure_total[5m]))
             /
-            sum(rate(push_tasks_processed_total[5m])) by (tenant_id)
-          ) < 0.99
+            (
+              sum by (tenant_id) (rate(push_failure_total[5m]))
+              +
+              (
+                sum by (tenant_id) (rate(push_success_total[5m]))
+                or
+                sum by (tenant_id) (rate(push_failure_total[5m])) * 0
+              )
+            )
+          ) > 0.01
         for: 5m
         labels:
           severity: warning
           component: push
         annotations:
           summary: "推送成功率低于 99%"
-          description: "租户 {{ $labels.tenant_id }} 的推送成功率在过去 5 分钟内低于 99%，当前值: {{ $value | humanizePercentage }}"
+          description: "租户 {{ $labels.tenant_id }} 的在线推送失败率在过去 5 分钟内超过 1%，当前失败率: {{ $value | humanizePercentage }}"
 
       # 推送延迟告警
       - alert: PushLatencyHigh
         expr: |
-          histogram_quantile(0.99, 
-            sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id)
+          histogram_quantile(0.99,
+            sum by (le, tenant_id) (rate(access_gateway_push_latency_seconds_bucket[5m]))
           ) > 0.1
         for: 5m
         labels:
@@ -32,55 +43,27 @@ groups:
           summary: "推送延迟 P99 超过 100ms"
           description: "租户 {{ $labels.tenant_id }} 的推送延迟 P99 在过去 5 分钟内超过 100ms，当前值: {{ $value | humanizeDuration }}"
 
-      # 死信队列积压告警
-      - alert: DeadLetterQueueBacklog
-        expr: |
-          sum(rate(dead_letter_queue_messages_total[5m])) by (tenant_id) > 1000
-        for: 5m
-        labels:
-          severity: critical
-          component: push
-        annotations:
-          summary: "死信队列积压超过 1000 条"
-          description: "租户 {{ $labels.tenant_id }} 的死信队列积压超过 1000 条，当前值: {{ $value }}"
-
-      # ACK 确认率告警
-      - alert: AckConfirmationRateLow
-        expr: |
-          (
-            sum(rate(client_ack_received_total[5m])) by (tenant_id)
-            /
-            sum(rate(messages_sent_total[5m])) by (tenant_id)
-          ) < 0.95
-        for: 5m
-        labels:
-          severity: warning
-          component: message
-        annotations:
-          summary: "ACK 确认率低于 95%"
-          description: "租户 {{ $labels.tenant_id }} 的 ACK 确认率在过去 5 分钟内低于 95%，当前值: {{ $value | humanizePercentage }}"
-
-      # 消息发送失败率告警
+      # 消息发布到 MQ 的失败率（message-ingest 的 mq_publish 阶段）
       - alert: MessageSendFailureRateHigh
         expr: |
           (
-            sum(rate(jetstream_produce_failure_total[5m])) by (tenant_id)
+            sum(rate(message_orchestrator_send_stage_duration_seconds_count{stage="mq_publish",outcome="error"}[5m]))
             /
-            sum(rate(messages_sent_total[5m])) by (tenant_id)
+            sum(rate(message_orchestrator_send_stage_duration_seconds_count{stage="mq_publish"}[5m]))
           ) > 0.01
         for: 5m
         labels:
           severity: critical
           component: message
         annotations:
-          summary: "消息发送失败率超过 1%"
-          description: "租户 {{ $labels.tenant_id }} 的消息发送失败率在过去 5 分钟内超过 1%，当前值: {{ $value | humanizePercentage }}"
+          summary: "消息发布到 MQ 的失败率超过 1%"
+          description: "message-ingest 的 mq_publish 阶段失败率在过去 5 分钟内超过 1%，当前值: {{ $value | humanizePercentage }}"
 
-      # 消息持久化延迟告警
+      # 消息持久化延迟告警（直方图不带租户标签）
       - alert: MessagePersistenceLatencyHigh
         expr: |
           histogram_quantile(0.99,
-            sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id)
+            sum by (le) (rate(messages_persisted_duration_seconds_bucket[5m]))
           ) > 0.1
         for: 5m
         labels:
@@ -88,55 +71,60 @@ groups:
           component: storage
         annotations:
           summary: "消息持久化延迟 P99 超过 100ms"
-          description: "租户 {{ $labels.tenant_id }} 的消息持久化延迟 P99 在过去 5 分钟内超过 100ms，当前值: {{ $value | humanizeDuration }}"
+          description: "storage-writer 的消息持久化延迟 P99 在过去 5 分钟内超过 100ms，当前值: {{ $value | humanizeDuration }}"
 
-      # JetStream 消费延迟告警
-      - alert: JetStreamConsumerLagHigh
-        expr: |
-          jetstream_consumer_lag_sum > 10000
-        for: 5m
-        labels:
-          severity: warning
-          component: jetstream
-        annotations:
-          summary: "JetStream 消费延迟过高"
-          description: "JetStream 消费延迟超过 10000 条消息，当前值: {{ $value }}"
-
-      # 服务可用性告警
+      # 服务可用性告警：prometheus.yml 里每个 Core 抓取目标都带 service 标签
       - alert: ServiceDown
         expr: |
-          up{job=~"message-orchestrator|storage-writer|push-server|access-gateway"} == 0
+          up{service=~".+"} == 0
         for: 1m
         labels:
           severity: critical
           component: service
         annotations:
           summary: "服务 {{ $labels.job }} 不可用"
-          description: "服务 {{ $labels.job }} 在过去 1 分钟内不可用"
+          description: "服务 {{ $labels.job }}（{{ $labels.instance }}）在过去 1 分钟内无法抓取 /metrics"
 
-      # 高错误率告警
+      # HTTP 网关（API/Admin）5xx 比例
       - alert: HighErrorRate
         expr: |
           (
-            sum(rate(http_requests_total{status=~"5.."}[5m])) by (service)
+            sum by (job) (rate(http_server_requests_total{status=~"5.."}[5m]))
             /
-            sum(rate(http_requests_total[5m])) by (service)
+            sum by (job) (rate(http_server_requests_total[5m]))
           ) > 0.05
         for: 5m
         labels:
           severity: critical
           component: service
         annotations:
-          summary: "服务 {{ $labels.service }} 错误率超过 5%"
-          description: "服务 {{ $labels.service }} 的错误率在过去 5 分钟内超过 5%，当前值: {{ $value | humanizePercentage }}"
+          summary: "服务 {{ $labels.job }} 错误率超过 5%"
+          description: "服务 {{ $labels.job }} 的 HTTP 5xx 比例在过去 5 分钟内超过 5%，当前值: {{ $value | humanizePercentage }}"
+
+      # gRPC 服务端错误比例：只算服务端错误码，调用方错误（InvalidArgument、NotFound 等）不计
+      - alert: GrpcServerErrorRateHigh
+        expr: |
+          (
+            sum by (job) (rate(grpc_server_handled_total{code=~"Unknown|DeadlineExceeded|Internal|Unavailable|DataLoss|TransportError"}[5m]))
+            /
+            sum by (job) (rate(grpc_server_handled_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: service
+        annotations:
+          summary: "服务 {{ $labels.job }} gRPC 错误率超过 5%"
+          description: "服务 {{ $labels.job }} 的 gRPC 服务端错误比例在过去 5 分钟内超过 5%，当前值: {{ $value | humanizePercentage }}"
 
   - name: flare_im_release_gates
     interval: 30s
     rules:
+      # message-ingest 从收到发送请求到返回 ACK 的耗时（stage=total）
       - alert: FlareImSendAckP99High
         expr: |
           histogram_quantile(0.99,
-            sum(rate(message_orchestrator_send_stage_duration_seconds_bucket{stage="send_ack"}[5m])) by (le)
+            sum by (le) (rate(message_orchestrator_send_stage_duration_seconds_bucket{stage="total"}[5m]))
           ) > 2
         for: 10m
         labels:
@@ -149,9 +137,9 @@ groups:
       - alert: FlareImCommittedMessageFailureRateHigh
         expr: |
           (
-            sum(rate(message_orchestrator_send_total{outcome=~"error|failed"}[5m]))
+            sum(rate(message_orchestrator_send_total{outcome="error"}[5m]))
             /
-            clamp_min(sum(rate(message_orchestrator_send_total[5m])), 1)
+            sum(rate(message_orchestrator_send_total[5m]))
           ) > 0.001
         for: 10m
         labels:
@@ -163,7 +151,7 @@ groups:
 
       - alert: FlareImMqNackOrTermRateHigh
         expr: |
-          sum(rate(mq_process_ack_total{action=~"nack|term"}[5m])) > 5
+          sum(rate(mq_process_ack_total{operation=~"nack|term"}[5m])) > 5
         for: 5m
         labels:
           severity: warning
@@ -172,9 +160,15 @@ groups:
           summary: "MQ nack/term 速率过高"
           description: "MQ consumer nack/term 速率超过发布门禁，需要检查 poison message、retry 和 DLQ。"
 
+      # 消费者把重试耗尽/不可重试的消息投进死信流之后才 term，term 成功数即新增死信；
+      # 离线推送 worker 在推送后端未配置时另有 dlq_ack 处置。
       - alert: FlareImDlqGrowth
         expr: |
-          increase(dead_letter_queue_messages_total[10m]) > 0
+          (
+            (sum(increase(mq_process_ack_total{operation="term",outcome="success"}[10m])) or vector(0))
+            +
+            (sum(increase(push_worker_offline_redelivery_total{action="dlq_ack"}[10m])) or vector(0))
+          ) > 0
         for: 0m
         labels:
           severity: critical
@@ -186,12 +180,13 @@ groups:
       - alert: FlareImSyncLagP99High
         expr: |
           histogram_quantile(0.99,
-            sum(rate(flare_sync_page_duration_seconds_bucket[5m])) by (le)
+            sum by (le) (rate(grpc_server_handling_seconds_bucket{job="sync-orchestrator",method="/flare.sync.v1.SyncService/ExecuteSync"}[5m]))
           ) > 3
         for: 10m
         labels:
           severity: warning
           component: sync
         annotations:
-          summary: "Sync page P99 超过 3s"
-          description: "Sync page P99 超过发布门禁，可能影响 reconnect 和大群 pull 收敛体验。"
+          summary: "Sync P99 超过 3s"
+          description: "sync-orchestrator ExecuteSync P99 超过发布门禁，可能影响 reconnect 和大群 pull 收敛体验。"
+

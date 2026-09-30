@@ -1,127 +1,376 @@
 {
-  "dashboard": {
-    "title": "推送服务监控",
-    "tags": ["flare-im", "push-server"],
-    "timezone": "browser",
-    "schemaVersion": 16,
-    "version": 1,
-    "refresh": "30s",
-    "panels": [
-      {
-        "id": 1,
-        "title": "推送任务处理总数",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-        "targets": [
-          {
-            "expr": "sum(rate(push_tasks_processed_total[5m])) by (message_type, tenant_id)",
-            "legendFormat": "{{message_type}} - {{tenant_id}}"
+  "uid": "flare-im-push",
+  "title": "推送链路监控",
+  "description": "在线投递（接入网关）、在线状态、推送服务与离线推送 worker。",
+  "tags": [
+    "flare-im",
+    "push"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "在线推送投递速率",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "ops",
-            "decimals": 2
-          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      {
-        "id": 2,
-        "title": "推送成功率",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
-        "targets": [
-          {
-            "expr": "sum(rate(online_push_success_total[5m])) by (gateway_id, tenant_id) / sum(rate(push_tasks_processed_total[5m])) by (gateway_id, tenant_id)",
-            "legendFormat": "{{gateway_id}} - {{tenant_id}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "percentunit", "label": "成功率"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tenant_id) (rate(push_success_total[$__rate_interval]))",
+          "legendFormat": "成功 {{tenant_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (failure_reason, tenant_id) (rate(push_failure_total[$__rate_interval]))",
+          "legendFormat": "失败 {{failure_reason}} {{tenant_id}}"
+        }
+      ],
+      "description": "接入网关把消息投到在线连接的结果。"
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "在线推送成功率",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
       },
-      {
-        "id": 3,
-        "title": "推送延迟 (P99)",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P99 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P95 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.50, sum(rate(push_latency_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P50 - {{tenant_id}}"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "s", "label": "延迟"},
-          {"format": "short"}
-        ]
+        },
+        "overrides": []
       },
-      {
-        "id": 4,
-        "title": "在线状态查询延迟",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(online_status_query_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P99"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(online_status_query_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "P95"
-          }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      {
-        "id": 5,
-        "title": "在线/离线推送统计",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-        "targets": [
-          {
-            "expr": "sum(rate(online_push_success_total[5m])) by (gateway_id)",
-            "legendFormat": "在线推送成功 - {{gateway_id}}"
-          },
-          {
-            "expr": "sum(rate(offline_push_tasks_created_total[5m])) by (tenant_id)",
-            "legendFormat": "离线推送任务创建 - {{tenant_id}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "ops"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(push_success_total[$__rate_interval])) or vector(0)) / ((sum(rate(push_success_total[$__rate_interval])) or vector(0)) + (sum(rate(push_failure_total[$__rate_interval])) or vector(0)))",
+          "legendFormat": "成功率"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "推送投递耗时",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
       },
-      {
-        "id": 6,
-        "title": "推送失败统计",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-        "targets": [
-          {
-            "expr": "sum(rate(online_push_failure_total[5m])) by (gateway_id, error_type, tenant_id)",
-            "legendFormat": "{{gateway_id}} - {{error_type}} - {{tenant_id}}"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "ops"},
-          {"format": "short"}
-        ]
-      }
-    ]
-  }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(access_gateway_push_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(access_gateway_push_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(access_gateway_push_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "网关连接",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (connections_active)",
+          "legendFormat": "活跃 {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (instance) (rate(connection_disconnected_total[$__rate_interval]))",
+          "legendFormat": "断开/s {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "在线状态服务 gRPC 耗时 P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, method) (rate(grpc_server_handling_seconds_bucket{job=\"signaling-online\"}[$__rate_interval])))",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "推送服务 gRPC 请求",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, code) (rate(grpc_server_handled_total{job=~\"push-server|push-proxy\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} {{code}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "推送 MQ 消费确认",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, operation, outcome) (rate(mq_process_ack_total{job=~\"push-server|push-worker\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} {{operation}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "离线推送重投递处置",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason, action) (rate(push_worker_offline_redelivery_total[$__rate_interval]))",
+          "legendFormat": "{{reason}} / {{action}}"
+        }
+      ]
+    }
+  ]
 }
-

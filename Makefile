@@ -5,7 +5,7 @@ CARGO ?= cargo
 # 自动检测 protoc 路径
 PROTOC ?= $(shell which protoc || echo "/opt/homebrew/bin/protoc" || echo "/usr/local/bin/protoc" || echo "")
 
-.PHONY: help build fmt lint check test clean start-core start-social stop
+.PHONY: help build fmt lint check check-dashboard-metrics test clean start-core start-social stop
 
 help:
 	@echo "Flare IM Core Make targets"
@@ -13,7 +13,8 @@ help:
 	@echo "  build           cargo build --all"
 	@echo "  fmt             cargo fmt --all"
 	@echo "  lint            cargo clippy --all-targets --all-features"
-	@echo "  check           cargo check"
+	@echo "  check           Dashboard/alert metric gate, then cargo check"
+	@echo "  check-dashboard-metrics  Grafana panels and alert rules only use registered metrics"
 	@echo "  test            cargo test"
 	@echo "  clean           cargo clean"
 	@echo "  start-core      Start full stack, single gateway, no business hooks"
@@ -44,8 +45,13 @@ fmt:
 lint:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
-check:
+check: check-dashboard-metrics
 	$(CARGO) check
+
+# 面板与告警只能引用源码里注册过的指标与标签（依赖同级仓库 flare-server-core、flare-core）。
+check-dashboard-metrics:
+	bash scripts/check_dashboard_metrics.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_check_dashboard_metrics.py'
 
 test:
 	$(CARGO) test --all

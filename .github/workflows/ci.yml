@@ -75,6 +75,12 @@ jobs:
       - name: Hook 契约文档与适配器一致
         run: ./scripts/check_hook_contract.sh
 
+      # 面板与告警里的指标名只是字符串：引用从未注册的指标不会报任何错，
+      # 只会让面板恒为 No data、告警永不触发。本仓五个面板与 alert_rules.yml 曾整片如此。
+      # 注册名要从 server-core/flare-core 一起取，所以放在拉取同级仓库之后。
+      - name: 面板与告警只引用已注册指标
+        run: make check-dashboard-metrics
+
       # 格式先查：最快，失败得早，省掉后面的编译时间
       - name: rustfmt
         run: cargo fmt --all -- --check

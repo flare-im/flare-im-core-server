@@ -275,6 +275,15 @@ GROUP BY write_state;
 API/Admin 两个 HTTP 网关挂 `HttpMetricsLayer`：`http_server_requests_total{service,route,method,status}`、
 `http_server_request_duration_seconds{service,route,method}`、`http_server_in_flight_requests{service}`。`route` 是路由模板
 （如 `/api/v1/media/files/{file_id}`），未匹配的请求统一为 `_unmatched`，非标准方法归为 `OTHER`。
+`/metrics` 同时合并 prometheus 默认注册表：server-core 的 `mq_process_ack_total{backend,operation,outcome}` 与
+`mq_process_ack_duration_seconds`（`operation` 为 ack/nack/term，`term` 成功即消息已投进死信流），以及 Linux 上的
+进程指标 `process_cpu_seconds_total`、`process_resident_memory_bytes`、`process_open_fds`/`process_max_fds`、
+`process_threads`、`process_start_time_seconds`。
+
+`deploy/grafana/provisioning/dashboards/flare-im/` 的五个面板与 `deploy/alert_rules.yml` 只引用上面这些源码中注册过的指标与标签，
+由 `scripts/check_dashboard_metrics.sh`（`make check` / `make check-dashboard-metrics`，CI 同跑）校验；面板文件必须是
+Grafana 文件 provisioning 格式（顶层即 dashboard，带唯一 `uid`）。Redis、PostgreSQL、NATS 的连接数与消费积压需要另接
+exporter，目前不在面板和告警里。
 
 - 日志格式：`FLARE_LOG_FORMAT=json`（或 `[logging] format = "json"`）输出一行一个 JSON 事件，字段平铺并带当前 span，
   不含 ANSI 转义；默认 `text`。写错格式名拒绝启动。

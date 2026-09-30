@@ -1,107 +1,385 @@
 {
-  "dashboard": {
-    "title": "存储写入服务监控",
-    "tags": ["flare-im", "storage-writer"],
-    "timezone": "browser",
-    "schemaVersion": 16,
-    "version": 1,
-    "refresh": "30s",
-    "panels": [
-      {
-        "id": 1,
-        "title": "消息持久化总数",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-        "targets": [
-          {
-            "expr": "sum(rate(messages_persisted_total[5m])) by (tenant_id)",
-            "legendFormat": "{{tenant_id}}"
+  "uid": "flare-im-storage-writer",
+  "title": "存储写入服务监控",
+  "description": "storage-writer 持久化、写入账本与 MQ 消费确认。",
+  "tags": [
+    "flare-im",
+    "storage"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "持久化结果速率",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "ops",
-            "decimals": 2
-          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      {
-        "id": 2,
-        "title": "消息持久化延迟 (P99)",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P99 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P95 - {{tenant_id}}"
-          },
-          {
-            "expr": "histogram_quantile(0.50, sum(rate(messages_persisted_duration_seconds_bucket[5m])) by (le, tenant_id))",
-            "legendFormat": "P50 - {{tenant_id}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "s", "label": "延迟"},
-          {"format": "short"}
-        ]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path, result) (rate(storage_writer_persist_total[$__rate_interval]))",
+          "legendFormat": "{{path}} / {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "消息落库速率（按租户）",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
       },
-      {
-        "id": 3,
-        "title": "批量处理统计",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-        "targets": [
-          {
-            "expr": "sum(rate(batch_processing_duration_seconds[5m]))",
-            "legendFormat": "批量处理耗时"
-          },
-          {
-            "expr": "avg(batch_size)",
-            "legendFormat": "平均批量大小"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+        },
+        "overrides": []
       },
-      {
-        "id": 4,
-        "title": "数据库操作延迟",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, sum(rate(db_operation_duration_seconds_bucket[5m])) by (le, operation_type))",
-            "legendFormat": "P99 - {{operation_type}}"
-          }
-        ],
-        "yaxes": [
-          {"format": "s"},
-          {"format": "short"}
-        ]
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      {
-        "id": 5,
-        "title": "错误统计",
-        "type": "graph",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-        "targets": [
-          {
-            "expr": "sum(rate(persistence_failure_total[5m])) by (error_type, tenant_id)",
-            "legendFormat": "{{error_type}} - {{tenant_id}}"
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tenant_id) (rate(messages_persisted_total[$__rate_interval]))",
+          "legendFormat": "{{tenant_id}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "持久化耗时",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
-        ],
-        "yaxes": [
-          {"format": "ops"},
-          {"format": "short"}
-        ]
-      }
-    ]
-  }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(messages_persisted_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(messages_persisted_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(messages_persisted_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "DB 写入 / Redis 更新耗时 P99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(db_write_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "DB 写入 P99"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(redis_update_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "Redis 更新 P99"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "批量大小",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(storage_writer_batch_size_bucket[$__rate_interval])))",
+          "legendFormat": "P50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(storage_writer_batch_size_bucket[$__rate_interval])))",
+          "legendFormat": "P95"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "写入账本状态迁移",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage, result) (rate(storage_writer_ledger_transition_total[$__rate_interval]))",
+          "legendFormat": "{{stage}} / {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "失败与重复",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path) (rate(storage_writer_persist_total{result=\"error\"}[$__rate_interval]))",
+          "legendFormat": "{{path}} 失败"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (stage) (rate(storage_writer_ledger_transition_total{result=\"error\"}[$__rate_interval]))",
+          "legendFormat": "账本 {{stage}} 失败"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(messages_duplicate_total[$__rate_interval]))",
+          "legendFormat": "重复消息"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "MQ 消费确认",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation, outcome) (rate(mq_process_ack_total{job=\"storage-writer\"}[$__rate_interval]))",
+          "legendFormat": "{{operation}} / {{outcome}}"
+        }
+      ]
+    }
+  ]
 }
-
