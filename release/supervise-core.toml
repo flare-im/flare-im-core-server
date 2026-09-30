@@ -66,6 +66,8 @@ tcp_health = "127.0.0.1:50110"
 name = "conversation"
 command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
+# Verifies the admin assertion Admin Gateway forwards; without it every admin read fails closed.
+inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50090"
 
 [[services]]

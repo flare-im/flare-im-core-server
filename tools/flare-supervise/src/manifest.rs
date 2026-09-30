@@ -634,6 +634,41 @@ required_env_unless = [
     }
 
     #[test]
+    fn core_manifest_hands_console_public_key_to_every_admin_verifier() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        // Children start from an empty environment and only receive what
+        // `env_allowed` admits. Online and Capability verify Control assertions;
+        // Online, Capability and Conversation also verify the admin assertion
+        // Admin Gateway forwards (SEC-02, ADM-01). A verifier started without
+        // the key answers every admin RPC with UNAUTHENTICATED.
+        let key_users: Vec<_> = manifest
+            .services
+            .iter()
+            .filter(|service| manifest.env_allowed(service, "FLARE_CONSOLE_PUBLIC_KEY"))
+            .map(|service| service.name.as_str())
+            .collect();
+        assert_eq!(
+            key_users,
+            [
+                "signaling-online",
+                "capability",
+                "conversation",
+                "admin-gateway"
+            ]
+        );
+        for private in ["FLARE_CONSOLE_SIGNING_KEY", "FLARE_CONSOLE_PRIVATE_KEY"] {
+            assert!(
+                !manifest
+                    .services
+                    .iter()
+                    .any(|service| manifest.env_allowed(service, private)),
+                "{private}"
+            );
+        }
+    }
+
+    #[test]
     fn core_manifest_covers_all_existing_binaries_and_scopes_private_keys() {
         let manifest: Manifest =
             toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
