@@ -80,10 +80,14 @@ impl HookExecutionService {
 
         // 执行 PreSend Hook
         if execute_pre_send {
-            self.hooks
-                .pre_send(&original_context, &mut draft)
-                .await
-                .with_context(|| "PreSend hook failed")?;
+            // Keep the hook's structured error. Its code, reason and details reach
+            // the sender's ACK, which is how a client tells a policy denial apart
+            // from an infrastructure failure; wrapping it would flatten it into a
+            // generic internal error.
+            if let Err(error) = self.hooks.pre_send(&original_context, &mut draft).await {
+                tracing::debug!(%error, "PreSend hook refused the message");
+                return Err(error);
+            }
 
             // 应用 Draft 到消息
             apply_draft_to_request(&mut message, &draft);
@@ -133,5 +137,63 @@ impl HookExecutionService {
                     &format!("PostSend hook failed: {}", e)
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use flare_im_hooks::hooks::{
+        HookMetadata, HookRegistry, HookSelector, MessageDraft, PreSendDecision, PreSendHook,
+    };
+    use flare_server_core::context::Context;
+    use flare_server_core::error::{ErrorBuilder, FlareError};
+
+    struct PolicyDenial;
+
+    #[async_trait]
+    impl PreSendHook for PolicyDenial {
+        async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+            PreSendDecision::Reject {
+                error: ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+                    .details("allow=false")
+                    .build_error(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_denial_reaches_the_caller_with_its_reason_and_details() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_name("policy"),
+                HookSelector::default(),
+                Arc::new(PolicyDenial),
+            )
+            .await;
+        let service = HookExecutionService::new(Arc::new(HookDispatcher::new(registry)), None);
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        let error = match service
+            .execute_pre_send(&ctx, Message::default(), true)
+            .await
+        {
+            Ok(_) => panic!("denied message was accepted"),
+            Err(error) => error,
+        };
+        match error {
+            FlareError::Localized {
+                code,
+                reason,
+                details,
+                ..
+            } => {
+                assert_eq!(code, ErrorCode::OperationFailed);
+                assert_eq!(reason, "pre-send hook rejected");
+                assert_eq!(details.as_deref(), Some("allow=false"));
+            }
+            other => panic!("hook denial was flattened: {other}"),
+        }
     }
 }
