@@ -155,6 +155,15 @@ impl ConnectionDomainService {
                     .build_error())
                 }
             }
+            // Online 明确拒绝（如租户不可用）：原样上抛，flare-core 据此把原因下发给客户端
+            Ok(Err(e)) if e.code() == Some(ErrorCode::PermissionDenied) => {
+                warn!(
+                    user_id = %user_id,
+                    reason = %e.reason(),
+                    "signaling login rejected"
+                );
+                Err(e)
+            }
             Ok(Err(e)) => {
                 warn!(
                     ?e,
@@ -334,12 +343,17 @@ mod tests {
     #[derive(Default)]
     struct CapturingConnectionPort {
         last_login: Mutex<Option<LoginRequest>>,
+        /// 设了就让 Online 登录按这个错误失败
+        login_error: Option<(ErrorCode, &'static str)>,
     }
 
     #[async_trait]
     impl IConnectionPort for CapturingConnectionPort {
         async fn login(&self, _ctx: &Ctx, request: LoginRequest) -> Result<LoginResponse> {
             *self.last_login.lock().await = Some(request.clone());
+            if let Some((code, reason)) = self.login_error {
+                return Err(ErrorBuilder::new(code, reason).build_error());
+            }
             Ok(LoginResponse {
                 success: true,
                 conversation_id: "presence-session-1".to_string(),
@@ -476,5 +490,56 @@ mod tests {
             Some(&"platform_exclusive".to_string())
         );
         assert_eq!(request.metadata.get("tenant_id"), Some(&"acme".to_string()));
+    }
+
+    fn acme_user() -> Ctx {
+        std::sync::Arc::new(
+            flare_server_core::Context::root()
+                .with_tenant_id("acme")
+                .with_user_id("u1"),
+        )
+    }
+
+    /// Online 拒绝登记会话（租户不可用）时原样上抛权限拒绝和原因，不再折叠成
+    /// `InternalError "Signaling login failed"`；换到 flare-core 的错误后原因仍在，
+    /// flare-core 据此在 CONNECT_ACK 之后下发 KICKED `TENANT_UNAVAILABLE`。
+    #[tokio::test]
+    async fn online_tenant_rejection_reaches_flare_core_with_its_reason() {
+        let port = std::sync::Arc::new(CapturingConnectionPort {
+            login_error: Some((ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE")),
+            ..Default::default()
+        });
+        let service = service_with_port(port);
+
+        let error = service
+            .register_connection(&acme_user(), "u1", "d1", Some("web"), Some("conn-1"), None)
+            .await
+            .expect_err("Online rejected the session");
+
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(error.reason(), "TENANT_UNAVAILABLE");
+        let core = crate::infrastructure::error::server_error_to_core(error);
+        assert_eq!(
+            core.code(),
+            Some(flare_core::common::error::ErrorCode::PermissionDenied)
+        );
+        assert_eq!(core.reason(), "TENANT_UNAVAILABLE");
+    }
+
+    /// Online 不可用仍是内部错误，底层错误文本不会成为下发给客户端的原因。
+    #[tokio::test]
+    async fn online_outage_is_still_an_internal_error() {
+        let port = std::sync::Arc::new(CapturingConnectionPort {
+            login_error: Some((ErrorCode::ServiceUnavailable, "signaling login failed")),
+            ..Default::default()
+        });
+        let service = service_with_port(port);
+
+        let error = service
+            .register_connection(&acme_user(), "u1", "d1", Some("web"), Some("conn-1"), None)
+            .await
+            .expect_err("Online unavailable");
+
+        assert_eq!(error.code(), Some(ErrorCode::InternalError));
     }
 }

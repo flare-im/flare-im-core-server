@@ -136,9 +136,11 @@ where
         if !lookup.admits_connection(self.tenant_policy)
             || (self.tenant_runtime.is_enabled() && matches!(&lookup, TenantLookup::Unavailable))
         {
+            // 类型化原因：网关据此在 CONNECT_ACK 之后给客户端下发 KICKED `TENANT_UNAVAILABLE`，
+            // 与建连拒绝、踢线、HTTP 拒绝是同一个错误码。
             return Err(flare_err!(
                 ErrorCode::PermissionDenied,
-                "tenant runtime does not admit Online login"
+                kick_reason::TENANT_UNAVAILABLE
             ));
         }
         let projected_cap = lookup.core_quota().max_online_devices_per_user;
@@ -559,3 +561,74 @@ impl ConversationRepository for NoopConversationRepository {
 /// 默认的在线状态服务类型
 pub type DefaultOnlineStatusService =
     OnlineStatusService<NoopConversationRepository, NoopConnectionEventPublisher>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
+    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
+
+    struct OneTenant(TenantStatus);
+
+    #[async_trait::async_trait]
+    impl TenantRuntimeSource for OneTenant {
+        async fn load(
+            &self,
+            tenant_id: &str,
+        ) -> std::result::Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok(Some(TenantRuntimeSnapshot {
+                tenant_id: tenant_id.to_string(),
+                status: self.0,
+                quota: Default::default(),
+                version: 1,
+            }))
+        }
+    }
+
+    /// 停用 / 删除中的租户登记会话被拒，原因是类型化的 `TENANT_UNAVAILABLE`：网关据此在 CONNECT_ACK
+    /// 之后给客户端下发同一个原因，而不是无原因关连接。
+    #[tokio::test]
+    async fn login_of_an_unavailable_tenant_is_rejected_with_a_typed_reason() {
+        for status in [TenantStatus::Suspended, TenantStatus::Deleting] {
+            let service = DefaultOnlineStatusService::new(
+                Arc::new(NoopConversationRepository),
+                "gateway-test".to_string(),
+            )
+            .with_tenant_runtime(
+                TenantRuntimeCache::with_source(
+                    Arc::new(OneTenant(status)),
+                    TenantRuntimeCacheOptions::default(),
+                ),
+                TenantAccessPolicy::Lenient,
+                0,
+            );
+            let ctx = Context::root()
+                .with_tenant_id("tenant-a")
+                .with_user_id("alice");
+            let error = service
+                .login(
+                    &ctx,
+                    LoginRequest {
+                        user_id: "alice".to_string(),
+                        device_id: "device-a".to_string(),
+                        device_platform: "web".to_string(),
+                        desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("unavailable tenant must not log in");
+
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::PermissionDenied),
+                "{status:?}"
+            );
+            assert_eq!(
+                error.reason(),
+                kick_reason::TENANT_UNAVAILABLE,
+                "{status:?}"
+            );
+        }
+    }
+}

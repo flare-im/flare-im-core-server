@@ -25,7 +25,7 @@ use tonic::transport::Channel;
 
 use flare_im_contracts::Ctx;
 
-use crate::constants::METADATA_KEY_TENANT_ID;
+use crate::constants::{AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, METADATA_KEY_TENANT_ID};
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;
 use crate::domain::ports::IConnectionPort;
 use crate::infrastructure::connection_context::AuthenticatedConnectionOrigin;
@@ -254,11 +254,7 @@ impl IConnectionPort for ConnectionRepository {
             .login(request)
             .await
             .map(|resp| resp.into_inner())
-            .map_err(|status| {
-                ErrorBuilder::new(ErrorCode::ServiceUnavailable, "signaling login failed")
-                    .details(status.to_string())
-                    .build_error()
-            })
+            .map_err(online_login_error)
     }
 
     async fn logout(&self, ctx: &Ctx, request: LogoutRequest) -> Result<LogoutResponse> {
@@ -474,9 +470,48 @@ pub(crate) fn core_info_to_domain(
     info.with_metadata(metadata)
 }
 
+/// Online 登录失败的网关侧错误。租户闸门的拒绝（PERMISSION_DENIED，`TENANT_UNAVAILABLE`）保留为
+/// 类型化的权限拒绝，一路交给 flare-core，由它在 CONNECT_ACK 之后给客户端下发同一个原因；其余失败
+/// 仍按「Online 不可用」处理，状态文本只进 details，不会下发给客户端。
+fn online_login_error(status: tonic::Status) -> flare_server_core::error::FlareError {
+    if status.code() == tonic::Code::PermissionDenied
+        && status.message() == AUTH_FAILURE_MSG_TENANT_UNAVAILABLE
+    {
+        return ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            AUTH_FAILURE_MSG_TENANT_UNAVAILABLE,
+        )
+        .build_error();
+    }
+    ErrorBuilder::new(ErrorCode::ServiceUnavailable, "signaling login failed")
+        .details(status.to_string())
+        .build_error()
+}
+
 #[cfg(test)]
 mod static_route_tests {
     use super::*;
+
+    /// Online 的租户拒绝保留为 PERMISSION_DENIED `TENANT_UNAVAILABLE`；别的权限拒绝和不可用
+    /// 仍是「Online 不可用」，原文只进 details。
+    #[test]
+    fn online_tenant_rejection_stays_typed() {
+        let tenant = online_login_error(tonic::Status::permission_denied(
+            AUTH_FAILURE_MSG_TENANT_UNAVAILABLE,
+        ));
+        assert_eq!(tenant.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(tenant.reason(), AUTH_FAILURE_MSG_TENANT_UNAVAILABLE);
+
+        for status in [
+            tonic::Status::permission_denied("online login tenant mismatch"),
+            tonic::Status::unavailable("connection refused"),
+            tonic::Status::internal(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE),
+        ] {
+            let error = online_login_error(status);
+            assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+            assert_eq!(error.reason(), "signaling login failed");
+        }
+    }
 
     #[test]
     fn static_online_route_requires_explicit_mode_and_exact_service_name() {

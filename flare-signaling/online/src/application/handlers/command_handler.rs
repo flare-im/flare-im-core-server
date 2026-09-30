@@ -12,7 +12,7 @@ use prost_types::Timestamp;
 use tracing::{instrument, warn};
 
 use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
-use crate::domain::repository::{PresencePublisher, SubscriptionRepository};
+use crate::domain::repository::{PresencePublisher, SubscriptionRepository, kick_reason};
 use crate::domain::service::{OnlineStatusService, SubscriptionService};
 
 /// 在线状态命令处理器（编排层）
@@ -59,7 +59,7 @@ where
             .online_domain_service
             .login(ctx, request.clone())
             .await
-            .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to login"))?;
+            .map_err(login_error)?;
 
         self.publish_login_presence(ctx, request, &response).await;
         Ok(response)
@@ -254,6 +254,19 @@ where
     }
 }
 
+/// 登录失败的对外错误。租户闸门的拒绝（`PermissionDenied` + `TENANT_UNAVAILABLE`）是确定的业务
+/// 结论，原样交给网关，网关据此告诉客户端租户不可用；其余错误仍按内部错误上报，明细放进 details。
+fn login_error(
+    error: flare_server_core::error::FlareError,
+) -> flare_server_core::error::FlareError {
+    if error.code() == Some(ErrorCode::PermissionDenied)
+        && error.reason() == kick_reason::TENANT_UNAVAILABLE
+    {
+        return error;
+    }
+    map_infra_error(error, ErrorCode::InternalError, "Failed to login")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -380,5 +393,32 @@ mod tests {
         assert!(!output.contains(SECRET_PART), "{output}");
         assert!(!output.contains("LoginRequest"), "{output}");
         assert!(!output.contains("ContextInner"), "{output}");
+    }
+
+    /// 租户闸门的拒绝原样交给网关（gRPC PERMISSION_DENIED，reason `TENANT_UNAVAILABLE`）；
+    /// 其余登录失败仍折叠成内部错误，不把领域错误码带出去。
+    #[test]
+    fn only_the_tenant_rejection_keeps_its_code_and_reason() {
+        let tenant = login_error(flare_server_core::flare_err!(
+            ErrorCode::PermissionDenied,
+            kick_reason::TENANT_UNAVAILABLE
+        ));
+        assert_eq!(tenant.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(tenant.reason(), kick_reason::TENANT_UNAVAILABLE);
+        let status = tonic::Status::from(tenant);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert_eq!(status.message(), kick_reason::TENANT_UNAVAILABLE);
+
+        for other in [
+            flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "verified tenant is required"
+            ),
+            flare_server_core::flare_err!(ErrorCode::InvalidParameter, "device_id is required"),
+        ] {
+            let mapped = login_error(other);
+            assert_eq!(mapped.code(), Some(ErrorCode::InternalError));
+            assert_eq!(mapped.reason(), "Failed to login");
+        }
     }
 }
