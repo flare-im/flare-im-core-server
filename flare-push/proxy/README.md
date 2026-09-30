@@ -6,7 +6,7 @@ Exposes the **PushService** gRPC API (`push_service.proto`), writing the push re
 
 ## Responsibilities
 
-- **PushMessage**: receives a `PushMessageRequest` and writes it to the message-push inbound topic (default `flare.im.push.messages`).
+- **PushMessage**: receives a `PushMessageRequest`, wraps its `Message` in a protobuf `MqEnvelope` (`payload_kind = MESSAGE`, `push_only = true`, keyed by conversation ID), and writes it to the message-push inbound topic (default `flare.im.push.messages`). This is the same wire format as the message pipeline's push-only records and is decoded by the Push Server's message consumer; `MqEnvelope` has no push-options field, so the request's `options` / `metadata` are not carried in the MQ record.
 - **PushNotification**: receives a `PushNotificationRequest`, constructs a bare `PushEnvelope`, and writes it to the unified envelope topic (default `flare.im.push.envelope`).
 - **PushCustom**: receives a `PushCustomRequest`, constructs a bare `PushEnvelope`, and writes it to the unified envelope topic (default `flare.im.push.envelope`).
 - RPCs such as template push, scheduled push, and status query currently return `Unimplemented` and can be extended as needed.

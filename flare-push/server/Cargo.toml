@@ -38,5 +38,9 @@ chrono = { workspace = true }
 futures = { workspace = true }
 ulid = { workspace = true }  # 添加ulid依赖
 
+[dev-dependencies]
+# Proxy → Server 线格式契约测试（tests/proxy_wire_golden.rs）
+flare-push-proxy = { path = "../proxy" }
+
 [lints]
 workspace = true

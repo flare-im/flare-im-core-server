@@ -2280,6 +2280,7 @@ dependencies = [
  "flare-im-contracts",
  "flare-im-service-kit",
  "flare-proto",
+ "flare-push-proxy",
  "flare-server-core",
  "futures",
  "prost",

@@ -6,7 +6,7 @@
 
 ## 职责
 
-- **PushMessage**：接收 `PushMessageRequest`，写入消息推送入站 topic（默认 `flare.im.push.messages`）。
+- **PushMessage**：接收 `PushMessageRequest`，把其中的 `Message` 封装为 protobuf `MqEnvelope`（`payload_kind = MESSAGE`、`push_only = true`，分区键为会话 ID），写入消息推送入站 topic（默认 `flare.im.push.messages`）。与 message pipeline 的 push-only 记录同一线格式，由 Push Server 的消息消费端解码；`MqEnvelope` 没有推送选项字段，请求的 `options` / `metadata` 不进入 MQ 记录。
 - **PushNotification**：接收 `PushNotificationRequest`，构造成裸 `PushEnvelope`，写入统一信封 topic（默认 `flare.im.push.envelope`）。
 - **PushCustom**：接收 `PushCustomRequest`，构造成裸 `PushEnvelope`，写入统一信封 topic（默认 `flare.im.push.envelope`）。
 - 模板、定时推送、查询状态等 RPC 当前返回 `Unimplemented`，可按需扩展。

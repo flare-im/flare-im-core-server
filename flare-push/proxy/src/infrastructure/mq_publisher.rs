@@ -8,16 +8,13 @@ use flare_grpc_proto::push::{
     PushCustomRequest, PushMessageRequest, PushNotificationRequest, PushOptions as GrpcPushOptions,
 };
 use flare_im_contracts::Ctx;
-use flare_im_contracts::event::types::types;
+use flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers;
 use flare_proto::common::{
     CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind, PushTargetType,
     push_envelope,
 };
 use flare_server_core::context::keys;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
-use flare_server_core::eventbus::EventEnvelope;
-use flare_server_core::eventbus::EventPublisher;
-use flare_server_core::eventbus::MqEventBus;
 use flare_server_core::mq::kafka::KafkaProducerBuilder;
 use flare_server_core::mq::nats::NatsProducerBuilder;
 use flare_server_core::mq::producer::Producer;
@@ -29,11 +26,17 @@ use crate::config::PushProxyConfig;
 
 const MAX_PUSH_ENVELOPE_SIZE: usize = 10 * 1024 * 1024;
 
+/// 一条待写入 `push_request_topic` 的 MQ 记录。
+struct PushMessageRecord {
+    key: String,
+    payload: Vec<u8>,
+    headers: HashMap<String, String>,
+}
+
 /// Push Proxy 使用的 MQ 发布器。
 pub struct PushProxyMqPublisher {
     config: Arc<PushProxyConfig>,
     producer: Arc<dyn Producer>,
-    event_publisher: Arc<MqEventBus>,
 }
 
 impl PushProxyMqPublisher {
@@ -64,33 +67,34 @@ impl PushProxyMqPublisher {
                 )));
             }
         };
-        let event_publisher = MqEventBus::new(Arc::clone(&producer));
-
-        Ok(Self {
-            config,
-            producer,
-            event_publisher,
-        })
+        Ok(Self::with_producer(config, producer))
     }
 
-    /// 将 PushMessageRequest 写入 push-request topic（设计文档：PushProxy 只负责入队缓冲）
+    /// 使用已构建的 Producer 创建发布器（Broker 选择由调用方决定）。
+    pub fn with_producer(config: Arc<PushProxyConfig>, producer: Arc<dyn Producer>) -> Self {
+        Self { config, producer }
+    }
+
+    /// 将 PushMessageRequest 写入 push-request topic（设计文档：PushProxy 只负责入队缓冲）。
+    ///
+    /// 线格式与 message pipeline 的 push-only 记录一致：protobuf `MqEnvelope`
+    /// （`payload_kind = MESSAGE`、`push_only = true`），Push Server 的消息消费端按此解码。
+    /// `MqEnvelope` 没有推送选项字段，请求中的 `options` / `metadata` 不进入 MQ 记录。
     #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
     pub async fn publish_push_message(&self, ctx: &Ctx, req: &PushMessageRequest) -> Result<()> {
-        required_push_tenant(ctx)?;
-        let key = req.user_ids.first().map(String::as_str);
-        let envelope = EventEnvelope::new(
-            types::MESSAGE,
-            key.unwrap_or_default(),
-            0,
-            req.encode_to_vec(),
-        );
-        self.event_publisher
-            .publish(ctx, &self.config.push_request_topic, &envelope)
+        let record = push_message_record(ctx, req)?;
+        self.producer
+            .send(
+                ctx,
+                &self.config.push_request_topic,
+                Some(record.key.as_str()),
+                record.payload,
+                Some(record.headers),
+            )
             .await
             .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!("event publish failed: {}", e))
-            })?;
-        Ok(())
+                flare_server_core::error::FlareError::system(format!("mq publish failed: {}", e))
+            })
     }
 
     /// 将 PushNotificationRequest 转为统一 PushEnvelope，写入 push-envelope topic。
@@ -113,14 +117,7 @@ impl PushProxyMqPublisher {
 
     async fn publish_push_envelope(&self, ctx: &Ctx, envelope: &PushEnvelope) -> Result<()> {
         let payload = envelope.encode_to_vec();
-        if payload.len() > MAX_PUSH_ENVELOPE_SIZE {
-            return Err(
-                ErrorBuilder::new(ErrorCode::InvalidParameter, "push envelope too large")
-                    .param("size", payload.len().to_string())
-                    .param("max_size", MAX_PUSH_ENVELOPE_SIZE.to_string())
-                    .build_error(),
-            );
-        }
+        ensure_payload_size(payload.len(), "push envelope too large")?;
 
         self.producer
             .send(
@@ -203,6 +200,67 @@ impl PushProxyMqPublisher {
             Some(push_envelope::Payload::Custom(payload)),
         )
     }
+}
+
+/// 构造 `push_request_topic` 上的一条记录。
+///
+/// 分区键取会话 ID（与 pipeline 的 push-only 记录一致，同会话推送保持顺序）；记录头与信封头
+/// 相同，消费端据记录头重建租户与追踪上下文。
+fn push_message_record(ctx: &Ctx, req: &PushMessageRequest) -> Result<PushMessageRecord> {
+    let tenant_id = required_push_tenant(ctx)?;
+    let message = req.message.as_ref().ok_or_else(|| {
+        ErrorBuilder::new(ErrorCode::InvalidParameter, "push message payload missing").build_error()
+    })?;
+    let Some(first_user_id) = req.user_ids.first() else {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "push message recipients missing",
+        )
+        .build_error());
+    };
+
+    let mut headers = flare_server_core::utils::ctx_to_map(ctx);
+    headers.insert(keys::TENANT_ID.to_string(), tenant_id);
+    let mut envelope = mq_envelope_for_main_queue_message_with_headers(
+        message,
+        req.user_ids.clone(),
+        headers,
+        false,
+    );
+    envelope.push_only = true;
+    let record_headers = [
+        ("push-only", "true".to_string()),
+        ("x-envelope-id", envelope.envelope_id.clone()),
+        ("x-produced-at-ms", envelope.produced_at.to_string()),
+        ("x-conversation-id", envelope.conversation_id.clone()),
+        ("x-conversation-seq", envelope.seq.to_string()),
+    ];
+    for (name, value) in record_headers {
+        envelope.headers.insert(name.to_string(), value);
+    }
+
+    let payload = envelope.encode_to_vec();
+    ensure_payload_size(payload.len(), "push message too large")?;
+    let key = if envelope.conversation_id.trim().is_empty() {
+        first_user_id.clone()
+    } else {
+        envelope.conversation_id.clone()
+    };
+    Ok(PushMessageRecord {
+        key,
+        payload,
+        headers: envelope.headers,
+    })
+}
+
+fn ensure_payload_size(size: usize, reason: &str) -> Result<()> {
+    if size > MAX_PUSH_ENVELOPE_SIZE {
+        return Err(ErrorBuilder::new(ErrorCode::InvalidParameter, reason)
+            .param("size", size.to_string())
+            .param("max_size", MAX_PUSH_ENVELOPE_SIZE.to_string())
+            .build_error());
+    }
+    Ok(())
 }
 
 fn base_envelope(
@@ -323,7 +381,7 @@ fn current_time_ms() -> i64 {
 mod tests {
     use super::*;
     use flare_grpc_proto::push::{Notification, PushOptions as GrpcPushOptions};
-    use flare_proto::common::CustomData;
+    use flare_proto::common::{CustomData, Message, MqEnvelope, MqPayloadKind, mq_envelope};
     use flare_server_core::Context;
 
     #[test]
@@ -437,6 +495,77 @@ mod tests {
         assert!(PushProxyMqPublisher::notification_envelope_from_request(&ctx, &req).is_err());
     }
 
+    fn push_message_request(message: Option<Message>) -> PushMessageRequest {
+        PushMessageRequest {
+            user_ids: vec!["user-1".to_string(), "user-2".to_string()],
+            message,
+            options: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn push_message_record_is_push_only_mq_envelope() {
+        let ctx = Arc::new(
+            Context::with_request_id("req-4")
+                .with_trace_id("trace-4")
+                .with_tenant_id("tenant-4"),
+        );
+        let message = Message {
+            server_id: "srv-4".to_string(),
+            conversation_id: "conv-4".to_string(),
+            conversation_seq: 9,
+            ..Message::default()
+        };
+        let req = push_message_request(Some(message.clone()));
+
+        let record = push_message_record(&ctx, &req).unwrap();
+        let envelope = MqEnvelope::decode(record.payload.as_slice()).unwrap();
+
+        assert_eq!(record.key, "conv-4");
+        assert_eq!(envelope.payload_kind, MqPayloadKind::Message as i32);
+        assert_eq!(
+            envelope.payload,
+            Some(mq_envelope::Payload::Message(message))
+        );
+        assert_eq!(envelope.recipient_user_ids, req.user_ids);
+        assert_eq!(envelope.conversation_id, "conv-4");
+        assert_eq!(envelope.seq, 9);
+        assert!(envelope.push_only);
+        assert!(!envelope.large_conversation);
+        assert!(!envelope.envelope_id.is_empty());
+        assert_eq!(envelope.headers, record.headers);
+        for (name, value) in [
+            (keys::TENANT_ID, "tenant-4"),
+            (keys::TRACE_ID, "trace-4"),
+            (keys::REQUEST_ID, "req-4"),
+            ("push-only", "true"),
+            ("x-envelope-id", envelope.envelope_id.as_str()),
+            ("x-conversation-id", "conv-4"),
+            ("x-conversation-seq", "9"),
+        ] {
+            assert_eq!(record.headers.get(name).map(String::as_str), Some(value));
+        }
+    }
+
+    #[test]
+    fn push_message_record_without_conversation_keys_on_first_recipient() {
+        let ctx = Arc::new(Context::with_request_id("req-5").with_tenant_id("tenant-5"));
+        let req = push_message_request(Some(Message::default()));
+
+        assert_eq!(push_message_record(&ctx, &req).unwrap().key, "user-1");
+    }
+
+    #[test]
+    fn push_message_record_requires_message_and_recipients() {
+        let ctx = Arc::new(Context::with_request_id("req-6").with_tenant_id("tenant-6"));
+        assert!(push_message_record(&ctx, &push_message_request(None)).is_err());
+
+        let mut no_recipients = push_message_request(Some(Message::default()));
+        no_recipients.user_ids.clear();
+        assert!(push_message_record(&ctx, &no_recipients).is_err());
+    }
+
     #[test]
     fn push_publication_never_invents_a_default_tenant() {
         let missing = Arc::new(Context::with_request_id("req-missing"));
@@ -444,6 +573,9 @@ mod tests {
             Arc::new(Context::with_request_id("req-alias").with_tenant_id(" default "));
         for ctx in [&missing, &noncanonical] {
             assert!(required_push_tenant(ctx).is_err());
+            assert!(
+                push_message_record(ctx, &push_message_request(Some(Message::default()))).is_err()
+            );
             assert!(
                 base_envelope(
                     ctx,
