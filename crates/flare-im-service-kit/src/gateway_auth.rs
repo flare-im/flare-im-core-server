@@ -160,6 +160,10 @@ pub fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Gateway auth failure envelope. A `Forbidden` whose detail is a typed error
+/// code (upper-case identifier such as `TENANT_UNAVAILABLE`) keeps it as the
+/// reason, so the tenant gate answers with the same code as `/ws`, kicks and
+/// message ingest; free-text details stay out of the response.
 pub fn auth_error_response(error: AuthError, gateway_name: &'static str) -> Response {
     let (status, code, reason) = match &error {
         AuthError::MissingToken | AuthError::InvalidToken(_) => (
@@ -167,7 +171,15 @@ pub fn auth_error_response(error: AuthError, gateway_name: &'static str) -> Resp
             ErrorCode::HttpUnauthorized,
             "UNAUTHORIZED",
         ),
-        AuthError::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::HttpForbidden, "FORBIDDEN"),
+        AuthError::Forbidden(detail) => (
+            StatusCode::FORBIDDEN,
+            ErrorCode::HttpForbidden,
+            if is_typed_reason(detail) {
+                detail.as_str()
+            } else {
+                "FORBIDDEN"
+            },
+        ),
         AuthError::ProviderUnavailable(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::HttpServiceUnavailable,
@@ -185,6 +197,15 @@ pub fn auth_error_response(error: AuthError, gateway_name: &'static str) -> Resp
     let error = ErrorBuilder::new(code, reason).build_error();
     let body: ApiResponse<()> = ApiResponse::from(error);
     (status, Json(body)).into_response()
+}
+
+/// Upper-case letter first, then only upper-case letters, digits and `_`, at
+/// most 64 bytes: the shape of a client-facing error code.
+fn is_typed_reason(reason: &str) -> bool {
+    let mut chars = reason.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && reason.len() <= 64
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn insert_required_header(
@@ -333,6 +354,54 @@ mod tests {
             ));
             assert!(guard.admit(Some("*")).await.is_err());
         }
+    }
+
+    async fn response_reason(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (
+            status,
+            body["reason"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
+    /// The tenant gate answers 403 `TENANT_UNAVAILABLE` (the code `/ws`, kicks
+    /// and message ingest use), not a bare `FORBIDDEN`; free-text details never
+    /// become the reason.
+    #[tokio::test]
+    async fn tenant_rejection_keeps_its_typed_reason() {
+        for policy in [TenantAccessPolicy::Lenient, TenantAccessPolicy::Strict] {
+            for tenant in ["suspended", "deleting"] {
+                let error = tenant_guard(policy).admit(Some(tenant)).await.unwrap_err();
+                assert_eq!(
+                    response_reason(auth_error_response(error, "test")).await,
+                    (StatusCode::FORBIDDEN, "TENANT_UNAVAILABLE".to_string()),
+                    "{tenant}"
+                );
+            }
+        }
+        let unbound = tenant_guard(TenantAccessPolicy::Strict)
+            .admit(None)
+            .await
+            .unwrap_err();
+        for error in [
+            unbound,
+            AuthError::Forbidden("tenantId does not match app credential".into()),
+            AuthError::Forbidden("Tenant_x".into()),
+            AuthError::Forbidden(String::new()),
+        ] {
+            assert_eq!(
+                response_reason(auth_error_response(error, "test")).await,
+                (StatusCode::FORBIDDEN, "FORBIDDEN".to_string())
+            );
+        }
+        assert_eq!(
+            response_reason(auth_error_response(AuthError::MissingToken, "test")).await,
+            (StatusCode::UNAUTHORIZED, "UNAUTHORIZED".to_string())
+        );
     }
 
     #[tokio::test]

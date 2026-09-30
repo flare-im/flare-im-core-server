@@ -83,7 +83,7 @@ mod tests {
         }
     }
 
-    async fn call(status: TenantStatus) -> StatusCode {
+    async fn call(status: TenantStatus) -> (StatusCode, String) {
         let validator: Arc<dyn TokenValidator> = Arc::new(AcceptToken);
         let guard = TenantRuntimeGuard::new(
             TenantRuntimeCache::with_source(
@@ -97,22 +97,37 @@ mod tests {
             .route_layer(axum::middleware::from_fn(gateway_auth_middleware))
             .layer(Extension(validator))
             .layer(Extension(guard));
-        app.oneshot(
-            Request::builder()
-                .uri("/send")
-                .header("authorization", "Bearer token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .status()
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/send")
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reason = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body["reason"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        (status, reason)
     }
 
+    /// 停用 / 删除中租户的请求答 403 `TENANT_UNAVAILABLE`，与 `/ws` 拒绝、踢线、摄入侧拒绝同一个码。
     #[tokio::test]
     async fn validated_access_token_cannot_call_http_api_after_tenant_suspension() {
-        assert_eq!(call(TenantStatus::Active).await, StatusCode::OK);
-        assert_eq!(call(TenantStatus::Suspended).await, StatusCode::FORBIDDEN);
-        assert_eq!(call(TenantStatus::Deleting).await, StatusCode::FORBIDDEN);
+        assert_eq!(call(TenantStatus::Active).await.0, StatusCode::OK);
+        for status in [TenantStatus::Suspended, TenantStatus::Deleting] {
+            assert_eq!(
+                call(status).await,
+                (StatusCode::FORBIDDEN, "TENANT_UNAVAILABLE".to_string()),
+                "{status:?}"
+            );
+        }
     }
 }
