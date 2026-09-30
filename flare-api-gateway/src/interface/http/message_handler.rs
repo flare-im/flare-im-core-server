@@ -9,6 +9,7 @@ use crate::application::dto::{
     ExecuteCustomEventHttpRequest, ExecuteCustomEventHttpResponse, RecallMessageHttpRequest,
     RecallMessageHttpResponse, SendMessageHttpRequest, SendMessageHttpResponse,
 };
+use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_grpc_proto::message::{ExecuteEventRequest, RecallMessageRequest, SendMessageRequest};
 use flare_im_service_kit::clients::GrpcClients;
 use flare_proto::common::{
@@ -21,6 +22,8 @@ use flare_server_core::{
     context::Ctx,
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
+
+const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
 
 /// Present only to the API gateway ingress process; no downstream Core worker
 /// receives this private signing capability.
@@ -135,7 +138,7 @@ pub async fn send_message(
     let grpc_res = message_client
         .send_message_with_signed_context(grpc_req, &signed_token)
         .await
-        .map_err(|err| GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string()))?;
+        .map_err(send_failure)?;
     let response = SendMessageHttpResponse {
         server_msg_id: grpc_res.server_msg_id,
         seq: grpc_res.conversation_seq,
@@ -143,6 +146,22 @@ pub async fn send_message(
     };
 
     Ok(Json(ApiResponse::success(response)))
+}
+
+/// MessageIngest 拒绝映射为 HTTP。摄入侧有自己的租户闸门：租户刚停用时它的缓存可能比本网关先看到，
+/// 答 `PERMISSION_DENIED TENANT_UNAVAILABLE`。那和网关自己的拒绝是同一回事，要回确定的 403，不能当 500。
+fn send_failure(err: FlareError) -> GatewayError {
+    if err.code() != Some(ErrorCode::PermissionDenied) {
+        return GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string());
+    }
+    let error = if err.reason().contains(TENANT_UNAVAILABLE) {
+        ErrorBuilder::new(ErrorCode::HttpForbidden, TENANT_UNAVAILABLE).build_error()
+    } else {
+        ErrorBuilder::new(ErrorCode::HttpForbidden, "FORBIDDEN")
+            .details(err.reason())
+            .build_error()
+    };
+    GatewayError(error)
 }
 
 /// 执行业务自定义事件
@@ -351,6 +370,50 @@ mod tests {
             }
             other => panic!("unexpected payload: {other:?}"),
         }
+    }
+
+    /// 摄入侧租户闸门的拒绝经 gRPC 回到网关时的形态（Status → FlareError）。
+    fn ingest_rejection(code: tonic::Code, message: &str) -> FlareError {
+        FlareError::from(tonic::Status::new(code, message))
+    }
+
+    #[test]
+    fn ingest_tenant_rejection_is_a_typed_403_not_a_500() {
+        use axum::response::IntoResponse;
+        let ingest = FlareError::from(tonic::Status::from(
+            ErrorBuilder::new(ErrorCode::PermissionDenied, TENANT_UNAVAILABLE).build_error(),
+        ));
+        let err = send_failure(ingest);
+        let localized = err.0.as_localized().expect("localized error");
+        assert_eq!(localized.reason, TENANT_UNAVAILABLE);
+        assert_eq!(localized.details, None);
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn other_ingest_denials_are_403_and_failures_stay_500() {
+        use axum::response::IntoResponse;
+        let denied = send_failure(ingest_rejection(
+            tonic::Code::PermissionDenied,
+            "not a member",
+        ));
+        assert_eq!(denied.0.as_localized().unwrap().reason, "FORBIDDEN");
+        assert_eq!(
+            denied.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        let failed = send_failure(ingest_rejection(tonic::Code::Internal, "boom"));
+        assert_eq!(
+            failed.0.as_localized().unwrap().reason,
+            "MESSAGE_SEND_FAILED"
+        );
+        assert_eq!(
+            failed.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
