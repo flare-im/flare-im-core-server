@@ -428,6 +428,71 @@ mod tests {
         );
     }
 
+    /// 网关拨的 Push Proxy 地址必须落在它的真实监听端口上：single 拓扑靠代码缺省（同容器），
+    /// 多容器 stack compose 里网关与 Push Proxy 分属两个容器，必须显式指向 push-proxy 服务，
+    /// 否则缺省的 127.0.0.1 指回网关自己，接口全部 503。
+    #[test]
+    fn deployment_topologies_point_the_gateway_at_the_push_proxy_listener() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |path: &str| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        };
+        let mut section = "";
+        let port = read("config/services/push-proxy.toml")
+            .lines()
+            .map(str::trim)
+            .find_map(|line| {
+                if line.starts_with('[') {
+                    section = if line == "[services.push_proxy.server]" {
+                        "server"
+                    } else {
+                        ""
+                    };
+                    return None;
+                }
+                let value = line.strip_prefix("port")?.trim().strip_prefix('=')?;
+                (section == "server").then(|| value.trim().parse::<u16>().ok())?
+            })
+            .expect("push-proxy.toml declares [services.push_proxy.server] port");
+
+        // single：supervise-core.toml 的 push-proxy 健康探针地址就是网关的缺省拨号地址。
+        assert_eq!(DEFAULT_PUSH_PROXY_URL, format!("http://127.0.0.1:{port}"));
+        let supervise = read("release/supervise-core.toml");
+        let proxy_block = supervise
+            .split("[[services]]")
+            .find(|block| block.contains("name = \"push-proxy\""))
+            .expect("supervise-core.toml runs push-proxy");
+        assert!(
+            proxy_block.contains(&format!("tcp_health = \"127.0.0.1:{port}\"")),
+            "{proxy_block}"
+        );
+
+        // stack compose：api-gateway 服务块显式指向 push-proxy 服务。
+        let stack = read("deploy/docker-compose.stack.yml");
+        let service_block = |name: &str| {
+            let header = format!("  {name}:");
+            let mut lines = stack.lines().skip_while(|line| *line != header);
+            lines.next()?;
+            Some(
+                lines
+                    .take_while(|line| line.is_empty() || line.starts_with("    "))
+                    .map(str::trim)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(
+            service_block("push-proxy").is_some(),
+            "stack compose runs push-proxy in its own container"
+        );
+        let gateway = service_block("api-gateway").expect("stack compose runs api-gateway");
+        let expected = format!("FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL: http://push-proxy:{port}");
+        assert!(
+            gateway.contains(&expected.as_str()),
+            "api-gateway in deploy/docker-compose.stack.yml must set `{expected}`"
+        );
+    }
+
     #[test]
     fn invalid_static_address_is_a_startup_error() {
         let timeout = Duration::from_secs(1);

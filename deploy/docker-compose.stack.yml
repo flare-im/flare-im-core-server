@@ -89,6 +89,10 @@ services:
       FLARE_API_GATEWAY_AUTH_DEV_ISSUE: "false"
       FLARE_API_GATEWAY_TENANT_POLICY: strict
       FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
+      # 设备推送令牌登记（PUT/DELETE /api/v1/devices/{id}/push-token）直连 Push Proxy。
+      # 代码缺省 127.0.0.1:50091 只适用于 single 拓扑（同容器）；这里 push-proxy 在
+      # 自己的容器里，不设就连到网关自己，接口全部 503 UPSTREAM_UNAVAILABLE。
+      FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL: http://push-proxy:50091
     command: ["flare-api-gateway"]
     ports: ["50050:50050"]
 
