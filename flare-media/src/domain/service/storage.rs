@@ -180,9 +180,7 @@ impl MediaService {
                         primary_url = path.clone();
                     }
 
-                    let cdn_url = cdn
-                        .map(|base| Self::build_full_url(&base, &path))
-                        .unwrap_or_default();
+                    let cdn_url = Self::client_cdn_url(cdn, &path);
 
                     (primary_url, cdn_url, Some(path))
                 }
@@ -203,8 +201,7 @@ impl MediaService {
                         (
                             base.map(|base| Self::build_full_url(&base, &path))
                                 .unwrap_or_default(),
-                            cdn.map(|base| Self::build_full_url(&base, &path))
-                                .unwrap_or_default(),
+                            Self::client_cdn_url(cdn, &path),
                             Some(path),
                         )
                     } else {
@@ -225,8 +222,7 @@ impl MediaService {
             (
                 base.map(|base| Self::build_full_url(&base, &path))
                     .unwrap_or_default(),
-                cdn.map(|base| Self::build_full_url(&base, &path))
-                    .unwrap_or_default(),
+                Self::client_cdn_url(cdn, &path),
                 Some(path),
             )
         } else {
@@ -436,7 +432,8 @@ impl MediaService {
             .unwrap_or_else(|| metadata.file_id.clone());
 
         let mut url = metadata.url.clone();
-        let mut cdn_url = metadata.cdn_url.clone();
+        // 历史行里的 cdn_url 可能是空基址拼出的裸 key，只接受绝对 http(s) 地址。
+        let mut cdn_url = metadata.client_cdn_url().to_string();
 
         let stored_in_object_store = metadata.storage_bucket().is_some();
 
@@ -522,10 +519,6 @@ impl MediaService {
                 cdn_url = Self::build_full_url(&base, &object_path);
             }
         }
-        if cdn_url.is_empty() {
-            cdn_url = metadata.cdn_url.clone();
-        }
-
         let final_cdn_url = if cdn_url.is_empty() {
             if stored_in_object_store {
                 if let Some(base) = self.config.cdn_base_url.clone() {
@@ -541,6 +534,13 @@ impl MediaService {
             }
         } else {
             cdn_url
+        };
+        // CDN 地址是给客户端（以及 `/files/{id}` 的 307）直接用的，拼不出绝对地址就不给，
+        // 调用方回退到 `url`（私有对象即签名 URL）。
+        let final_cdn_url = if is_absolute_http_url(&final_cdn_url) {
+            final_cdn_url
+        } else {
+            String::new()
         };
 
         Ok(PresignedUrl {

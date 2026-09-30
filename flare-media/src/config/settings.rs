@@ -18,6 +18,30 @@ pub struct MediaConfig {
     pub max_chunk_size_bytes: i64,
 }
 
+/// 空串一律当成「没配」。
+///
+/// TOML 里 `${VAR:-}` 在环境变量缺省时会展开成空串而不是消失，直接当成有效值用会
+/// 拼出相对路径这种半可用的地址——比彻底没配更难查。
+pub(crate) fn normalize_optional_url(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// 服务级 `cdn_base_url` 优先，其次对象存储档案里的；两处的空白值都按没配处理。
+///
+/// base.toml 写的是 `cdn_base_url = "${FLARE_S3_CDN_BASE_URL:-}"`，环境变量不设时
+/// 展开成空串。此前这里原样拷成 `Some("")`，领域层 `build_full_url("", key)` 于是
+/// 返回裸对象 key 并落进 `cdn_url`，`/files/{id}` 的 307 就成了相对地址。
+fn resolve_cdn_base_url(
+    service: &Option<String>,
+    object_store: Option<&Option<String>>,
+) -> Option<String> {
+    normalize_optional_url(service).or_else(|| object_store.and_then(normalize_optional_url))
+}
+
 impl MediaConfig {
     pub fn from_app_config(app: &flare_im_service_kit::config::FlareAppConfig) -> Self {
         let service = app.media_service();
@@ -61,11 +85,10 @@ impl MediaConfig {
                 app.object_store_profile("default").cloned()
             });
 
-        let cdn_base_url = service.cdn_base_url.clone().or_else(|| {
-            object_store
-                .as_ref()
-                .and_then(|store| store.cdn_base_url.clone())
-        });
+        let cdn_base_url = resolve_cdn_base_url(
+            &service.cdn_base_url,
+            object_store.as_ref().map(|store| &store.cdn_base_url),
+        );
 
         let orphan_grace_seconds = service.orphan_grace_seconds.unwrap_or(86_400).max(0);
 
@@ -123,5 +146,62 @@ impl MediaConfig {
         self.upload_session_redis
             .as_ref()
             .map(|cfg| cfg.url.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_service_kit::config::FlareAppConfig;
+
+    /// 与 base.toml 同形：两处 `cdn_base_url` 都是 `${FLARE_S3_CDN_BASE_URL:-}` 展开后的值。
+    fn app_config(service_cdn: &str, store_cdn: &str) -> FlareAppConfig {
+        toml::from_str(&format!(
+            r#"
+            [service]
+            name = "flare-media"
+            version = "0.0.0"
+
+            [server]
+            address = "127.0.0.1"
+            port = 1
+
+            [object_storage.default]
+            profile_type = "s3"
+            cdn_base_url = "{store_cdn}"
+
+            [services.media]
+            object_store = "default"
+            cdn_base_url = "{service_cdn}"
+            "#
+        ))
+        .expect("minimal media config")
+    }
+
+    /// 环境变量没设时两处都展开成空串，不能变成 `Some("")` 传给领域层。
+    #[test]
+    fn blank_cdn_base_url_from_env_expansion_is_unset() {
+        for blank in ["", "   "] {
+            let config = MediaConfig::from_app_config(&app_config(blank, blank));
+            assert_eq!(config.cdn_base_url, None, "blank {blank:?}");
+        }
+    }
+
+    /// 服务级空白时回落到对象存储档案里真配的 CDN；两处都有时服务级优先，且去掉首尾空白。
+    #[test]
+    fn service_level_cdn_wins_and_blank_falls_back_to_the_store_profile() {
+        let config = MediaConfig::from_app_config(&app_config("", "https://cdn.example.com/m"));
+        assert_eq!(
+            config.cdn_base_url.as_deref(),
+            Some("https://cdn.example.com/m")
+        );
+        let config = MediaConfig::from_app_config(&app_config(
+            " https://svc.example.com ",
+            "https://cdn.example.com/m",
+        ));
+        assert_eq!(
+            config.cdn_base_url.as_deref(),
+            Some("https://svc.example.com")
+        );
     }
 }

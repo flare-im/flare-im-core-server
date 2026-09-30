@@ -13,8 +13,10 @@ use crate::application::dto::{
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::http::{ApiResponse, HttpApiError as GatewayError, Result};
 
+use super::errors::media_rpc_error;
 use super::identity::MediaIdentity;
 
 #[utoipa::path(
@@ -37,7 +39,10 @@ pub async fn get_file_url(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.get_file_url(&caller, req.into()).await?;
+    let grpc_res = media_client
+        .get_file_url(&caller, req.into())
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(GetFileUrlHttpResponse::from(
         grpc_res,
     ))))
@@ -65,7 +70,10 @@ pub async fn get_file_info(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file info");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.get_file_info(&caller, req).await?;
+    let grpc_res = media_client
+        .get_file_info(&caller, req)
+        .await
+        .map_err(media_rpc_error)?;
     let info = grpc_res
         .info
         .ok_or_else(|| GatewayError::not_found("File info not found"))?;
@@ -88,7 +96,8 @@ pub async fn serve_file(
                 file_id: file_id.clone(),
             },
         )
-        .await?;
+        .await
+        .map_err(media_rpc_error)?;
     let info = grpc_res
         .info
         .ok_or_else(|| GatewayError::not_found("File info not found"))?;
@@ -106,18 +115,23 @@ pub async fn serve_file(
                     content_visibility: flare_proto::common::ContentVisibility::Available as i32,
                 },
             )
-            .await?;
+            .await
+            .map_err(media_rpc_error)?;
         drop(media_client);
 
-        let redirect_to = if !url_res.cdn_url.trim().is_empty() {
-            url_res.cdn_url
-        } else {
-            url_res.url
+        let Some(redirect_to) = redirect_target(&url_res.cdn_url, &url_res.url) else {
+            // 只记形状：url 是签名地址，不能进日志。
+            tracing::warn!(
+                trace_id = %ctx.trace_id(),
+                cdn_url_present = !url_res.cdn_url.is_empty(),
+                url_present = !url_res.url.is_empty(),
+                "media returned no absolute download url"
+            );
+            return Err(GatewayError(
+                ErrorBuilder::new(ErrorCode::HttpBadGateway, "MEDIA_URL_UNAVAILABLE").build_error(),
+            ));
         };
-        if redirect_to.trim().is_empty() {
-            return Err(GatewayError::not_found("File url is empty"));
-        }
-        return Ok(Redirect::temporary(&redirect_to).into_response());
+        return Ok(Redirect::temporary(redirect_to).into_response());
     }
 
     let stream = media_client
@@ -127,7 +141,8 @@ pub async fn serve_file(
                 file_id: file_id.clone(),
             },
         )
-        .await?;
+        .await
+        .map_err(media_rpc_error)?;
     drop(media_client);
 
     let body_stream = stream.map(|item| {
@@ -176,6 +191,64 @@ pub async fn delete_file(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting file");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.delete_file(&caller, req).await?;
+    let grpc_res = media_client
+        .delete_file(&caller, req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(grpc_res)))
+}
+
+/// `/files/{id}` 的 307 目标：CDN 地址优先，其次 `url`（私有对象即签名 URL），只接受绝对 http(s)。
+///
+/// 空 `cdn_base_url` 曾让 Media 把裸对象 key 记成 cdn_url，作为 `Location` 会被按相对路径解析；
+/// 这类历史值直接跳过。
+fn redirect_target<'a>(cdn_url: &'a str, url: &'a str) -> Option<&'a str> {
+    [cdn_url, url]
+        .into_iter()
+        .find(|candidate| is_absolute_http_url(candidate))
+}
+
+fn is_absolute_http_url(value: &str) -> bool {
+    let prefix = value.get(..8).unwrap_or(value).to_ascii_lowercase();
+    (prefix.starts_with("http://") || prefix.starts_with("https://"))
+        && value.parse::<axum::http::Uri>().is_ok_and(|uri| {
+            uri.scheme_str().is_some_and(|scheme| {
+                scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+            }) && uri.host().is_some_and(|host| !host.is_empty())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIGNED: &str =
+        "https://edge.test:18443/flare-media/tenant-a/media/x.txt?X-Amz-Signature=unit-test";
+
+    #[test]
+    fn bare_key_cdn_url_falls_back_to_the_signed_url() {
+        for legacy in [
+            "tenant-a/media/documents/2026/09/30/x.txt",
+            "/tenant-a/media/x.txt",
+            "//tenant-a/media/x.txt",
+            "https:tenant-a/media/x.txt",
+            " https://cdn.example.com/x.txt",
+            "",
+        ] {
+            assert_eq!(redirect_target(legacy, SIGNED), Some(SIGNED), "{legacy:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_cdn_url_still_wins() {
+        let cdn = "https://cdn.example.com/tenant-a/media/x.txt";
+        assert_eq!(redirect_target(cdn, SIGNED), Some(cdn));
+    }
+
+    #[test]
+    fn no_absolute_candidate_means_no_redirect() {
+        assert_eq!(redirect_target("tenant-a/x.txt", "tenant-a/x.txt"), None);
+        assert_eq!(redirect_target("", ""), None);
+        assert_eq!(redirect_target("", "ftp://files.example.com/x"), None);
+    }
 }

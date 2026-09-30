@@ -16,7 +16,7 @@ use crate::domain::model::{
     MediaReference, MediaReferenceScope, MultipartChunkPayload, MultipartUploadInit,
     MultipartUploadSession, PresignedUploadPartUrl, PresignedUrl, STORAGE_BUCKET_METADATA_KEY,
     STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession, UploadSessionStatus,
-    UploadedPartRecord, infer_file_category,
+    UploadedPartRecord, infer_file_category, is_absolute_http_url,
 };
 use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
@@ -77,6 +77,8 @@ impl MediaService {
     }
 }
 
+#[cfg(test)]
+mod cdn_url_tests;
 mod direct;
 mod helpers;
 #[cfg(test)]

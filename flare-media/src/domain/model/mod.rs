@@ -153,6 +153,32 @@ impl MediaFileMetadata {
                 .map(|s| s.as_str())
         })
     }
+
+    /// 可以回给客户端的 CDN 地址：只有绝对 http(s) URL 才算，其余当作没有。
+    ///
+    /// 空 `cdn_base_url` 曾被拼成裸对象 key 落进 `cdn_url`，这类历史行在读取时丢弃，
+    /// 调用方回退到签名 URL。
+    pub fn client_cdn_url(&self) -> &str {
+        if is_absolute_http_url(&self.cdn_url) {
+            &self.cdn_url
+        } else {
+            ""
+        }
+    }
+}
+
+/// 是否为带主机的绝对 http(s) URL。
+///
+/// 要求字面上以 `http://` 或 `https://` 开头：`https:key` 这类写法 URL 解析器会补全，
+/// 但作为 `Location` 时浏览器按相对地址解析。含空白或控制字符的值同样不收。
+pub fn is_absolute_http_url(value: &str) -> bool {
+    let lower = value.get(..8).unwrap_or(value).to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+        && url::Url::parse(value).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some_and(|host| !host.is_empty())
+        })
 }
 
 #[derive(Debug, Clone)]

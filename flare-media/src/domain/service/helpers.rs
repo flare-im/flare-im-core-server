@@ -171,9 +171,7 @@ impl MediaService {
         let url = direct_base
             .map(|base| Self::build_full_url(&base, object_key))
             .unwrap_or_else(|| object_key.to_string());
-        let cdn_url = cdn_base
-            .map(|base| Self::build_full_url(&base, object_key))
-            .unwrap_or_default();
+        let cdn_url = Self::client_cdn_url(cdn_base, object_key);
 
         let (reference_count, status, grace_expires_at) = Self::initial_lifecycle_state(
             message_managed,
@@ -249,6 +247,14 @@ impl MediaService {
         } else {
             format!("{}/{}", trimmed_base, trimmed_path)
         }
+    }
+
+    /// 用 CDN 基址拼回给客户端的地址；拼出来不是绝对 http(s) URL（基址为空、缺 scheme）
+    /// 就当作没有 CDN，返回空串，调用方改用签名 URL。
+    pub(super) fn client_cdn_url(base: Option<String>, object_key: &str) -> String {
+        base.map(|base| Self::build_full_url(&base, object_key))
+            .filter(|url| is_absolute_http_url(url))
+            .unwrap_or_default()
     }
 
     pub(super) fn normalized_metadata_value<'a>(

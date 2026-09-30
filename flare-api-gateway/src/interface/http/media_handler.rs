@@ -1,3 +1,4 @@
+pub(crate) mod errors;
 pub(crate) mod files;
 pub(crate) mod identity;
 pub(crate) mod processing;

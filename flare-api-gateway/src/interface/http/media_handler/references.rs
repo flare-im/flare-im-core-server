@@ -9,6 +9,7 @@ use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
 use flare_server_core::http::{ApiResponse, Result};
 
+use super::errors::media_rpc_error;
 use super::identity::MediaIdentity;
 
 #[utoipa::path(
@@ -27,7 +28,10 @@ pub async fn create_reference(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Creating media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.create_reference(&caller, req).await?;
+    let grpc_res = media_client
+        .create_reference(&caller, req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         CreateReferenceHttpResponse::from(grpc_res),
     )))
@@ -49,7 +53,10 @@ pub async fn delete_reference(
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.delete_reference(&caller, req).await?;
+    let grpc_res = media_client
+        .delete_reference(&caller, req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         DeleteReferenceHttpResponse::from(grpc_res),
     )))
@@ -80,7 +87,10 @@ pub async fn list_references(
         sort: Vec::new(),
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.list_references(&caller, grpc_req).await?;
+    let grpc_res = media_client
+        .list_references(&caller, grpc_req)
+        .await
+        .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
         ListReferencesHttpResponse::from(grpc_res),
     )))

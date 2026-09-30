@@ -12,6 +12,7 @@ use aws_sdk_s3::types::{
 use chrono::{Datelike, Utc};
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
+use crate::config::settings::normalize_optional_url;
 use crate::domain::model::{ObjectStat, UploadContext, UploadedPartRecord};
 use crate::domain::repository::MediaObjectRepository;
 use flare_im_service_kit::config::ObjectStoreConfig;
@@ -682,18 +683,6 @@ impl MediaObjectRepository for S3ObjectStore {
     fn storage_provider(&self) -> Option<String> {
         Some("s3".to_string())
     }
-}
-
-/// 空串一律当成「没配」。
-///
-/// TOML 里 `${VAR:-}` 在环境变量缺省时会展开成空串而不是消失，直接当成有效值用会
-/// 拼出相对路径这种半可用的地址——比彻底没配更难查。
-fn normalize_optional_url(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
 }
 
 /// 回给客户端的端点：有对外端点就用它，否则回落到服务自用的端点。

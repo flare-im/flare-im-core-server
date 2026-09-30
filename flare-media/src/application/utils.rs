@@ -22,7 +22,8 @@ pub fn to_proto_file_info(metadata: &MediaFileMetadata) -> flare_grpc_proto::med
         mime_type: metadata.mime_type.clone(),
         size: metadata.file_size,
         url: metadata.url.clone(),
-        cdn_url: metadata.cdn_url.clone(),
+        // 历史行的 cdn_url 可能是裸对象 key，不是绝对 http(s) 地址就不对外给。
+        cdn_url: metadata.client_cdn_url().to_string(),
         metadata: metadata.metadata.clone(),
         created_at: Some(to_proto_timestamp(metadata.uploaded_at)),
         tenant: "".to_string(),
@@ -86,5 +87,22 @@ mod tests {
         let proto = to_proto_file_info(&metadata);
         assert_eq!(proto.bucket, "test-bucket");
         assert_eq!(proto.object_key, "images/2025/01/01/file-123.png");
+    }
+
+    /// 历史行的 cdn_url 是裸对象 key 时，FileInfo 不能把它当地址发出去；绝对地址照常带上。
+    #[test]
+    fn file_info_drops_a_bare_key_cdn_url_but_keeps_an_absolute_one() {
+        let mut metadata = MediaFileMetadata {
+            file_id: "file-123".to_string(),
+            cdn_url: "tenant-a/media/documents/file-123.txt".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(to_proto_file_info(&metadata).cdn_url, "");
+
+        metadata.cdn_url = "https://cdn.example.com/tenant-a/file-123.txt".to_string();
+        assert_eq!(
+            to_proto_file_info(&metadata).cdn_url,
+            "https://cdn.example.com/tenant-a/file-123.txt"
+        );
     }
 }

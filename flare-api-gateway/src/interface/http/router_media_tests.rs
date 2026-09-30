@@ -267,3 +267,214 @@ fn public_openapi_has_no_media_management_operations() {
         );
     }
 }
+
+/// What the scripted Media endpoint answers to every file RPC.
+#[derive(Clone, Copy)]
+enum MediaVerdict {
+    /// Owner of an object-store file whose persisted cdn_url is a bare object key.
+    OwnerWithLegacyCdnKey,
+    /// Media looked the file up under the caller's tenant and found nothing.
+    CrossTenant,
+    /// Same tenant, different owner.
+    CrossOwner,
+}
+
+const FILE_ID: &str = "4a8f0c2e-5d1b-4f7e-9c3a-7b6d5e4f3a21";
+const LEGACY_CDN_KEY: &str = "tenant-a/media/documents/2026/09/30/note.txt";
+const SIGNED_URL: &str = "https://edge.test:18443/flare-media/tenant-a/media/documents/2026/09/30/note.txt?X-Amz-Signature=unit-test";
+
+/// Stand-in Media endpoint that answers like the real service: domain errors are encoded
+/// exactly as `into_grpc()` does, successes as one length-prefixed protobuf frame.
+#[derive(Clone)]
+struct ScriptedMedia(MediaVerdict);
+
+impl tonic::server::NamedService for ScriptedMedia {
+    const NAME: &'static str = flare_grpc_proto::media::media_service_server::SERVICE_NAME;
+}
+
+fn grpc_ok(message: impl prost::Message) -> axum::http::Response<tonic::body::Body> {
+    let payload = message.encode_to_vec();
+    let mut frame = Vec::with_capacity(payload.len() + 5);
+    frame.push(0);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    axum::http::Response::builder()
+        .header("content-type", "application/grpc")
+        .header("grpc-status", "0")
+        .body(tonic::body::Body::new(Body::from(frame)))
+        .unwrap()
+}
+
+impl tower::Service<axum::http::Request<tonic::body::Body>> for ScriptedMedia {
+    type Response = axum::http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: axum::http::Request<tonic::body::Body>) -> Self::Future {
+        use flare_grpc_proto::media::*;
+        use flare_server_core::error::ErrorCode;
+        let method = request.uri().path().rsplit('/').next().unwrap_or_default();
+        let response = match self.0 {
+            MediaVerdict::CrossTenant => {
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::MessageNotFound,
+                    "metadata not found",
+                    FILE_ID
+                ))
+                .into_http()
+            }
+            MediaVerdict::CrossOwner => tonic::Status::from(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "media access is not authorized"
+            ))
+            .into_http(),
+            MediaVerdict::OwnerWithLegacyCdnKey => match method {
+                "GetFileInfo" => grpc_ok(GetFileInfoResponse {
+                    info: Some(FileInfo {
+                        file_id: FILE_ID.to_string(),
+                        bucket: "flare-media".to_string(),
+                        object_key: LEGACY_CDN_KEY.to_string(),
+                        cdn_url: LEGACY_CDN_KEY.to_string(),
+                        ..Default::default()
+                    }),
+                    success: true,
+                    ..Default::default()
+                }),
+                "GetFileUrl" => grpc_ok(GetFileUrlResponse {
+                    url: SIGNED_URL.to_string(),
+                    cdn_url: LEGACY_CDN_KEY.to_string(),
+                    success: true,
+                    ..Default::default()
+                }),
+                _ => tonic::Status::unimplemented("not scripted").into_http(),
+            },
+        };
+        std::future::ready(Ok(response))
+    }
+}
+
+async fn scripted_router(verdict: MediaVerdict) -> Router {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tonic::transport::Server::builder()
+        .add_service(ScriptedMedia(verdict))
+        .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener));
+    tokio::spawn(server);
+    let channel = Channel::from_shared(format!("http://{address}"))
+        .unwrap()
+        .connect_lazy();
+    let (signer, _) = cell_keys();
+    router_with(channel, Some(signer))
+}
+
+/// The file routes a W2-07 isolation probe hits, as `(method, uri, json body)`.
+fn file_routes() -> Vec<(&'static str, String, Option<String>)> {
+    vec![
+        ("GET", format!("/api/v1/medias/files/{FILE_ID}"), None),
+        (
+            "GET",
+            format!("/api/v1/medias/file-info?file_id={FILE_ID}"),
+            None,
+        ),
+        (
+            "POST",
+            "/api/v1/medias/file-url".to_string(),
+            Some(format!(r#"{{"file_id":"{FILE_ID}"}}"#)),
+        ),
+        (
+            "DELETE",
+            "/api/v1/medias/file".to_string(),
+            Some(format!(r#"{{"file_id":"{FILE_ID}","hard_delete":true}}"#)),
+        ),
+        (
+            "GET",
+            format!("/api/v1/medias/references?file_id={FILE_ID}"),
+            None,
+        ),
+    ]
+}
+
+async fn call(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", "Bearer ordinary-user");
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    router
+        .clone()
+        .oneshot(
+            request
+                .body(body.map(Body::from).unwrap_or_default())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn file_download_redirect_skips_a_bare_key_cdn_url_for_the_signed_url() {
+    let router = scripted_router(MediaVerdict::OwnerWithLegacyCdnKey).await;
+    let response = call(
+        &router,
+        "GET",
+        &format!("/api/v1/medias/files/{FILE_ID}"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        SIGNED_URL
+    );
+}
+
+#[tokio::test]
+async fn cross_tenant_and_cross_owner_denials_are_typed_and_do_not_echo_media_text() {
+    for (verdict, status, reason, leaked) in [
+        (
+            MediaVerdict::CrossTenant,
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            FILE_ID,
+        ),
+        (
+            MediaVerdict::CrossOwner,
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "not authorized",
+        ),
+    ] {
+        let router = scripted_router(verdict).await;
+        for (method, uri, body) in file_routes() {
+            let response = call(&router, method, &uri, body).await;
+            assert_eq!(response.status(), status, "{method} {uri}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["code"], status.as_u16(), "{method} {uri}");
+            assert_eq!(envelope["reason"], reason, "{method} {uri}");
+            assert!(envelope.get("data").is_none(), "{method} {uri}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(leaked),
+                "{method} {uri}: {envelope}"
+            );
+        }
+    }
+}
