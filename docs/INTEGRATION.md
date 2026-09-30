@@ -214,7 +214,8 @@ to push a projection.
 valid:
 
 - `suspended` / `deleting` → the connection is rejected with `TENANT_UNAVAILABLE`, whatever
-  the policy.
+  the policy: before closing, the gateway sends an `ERROR` system frame (pre-negotiation
+  JSON, like `CONNECT_ACK`) whose message is `TENANT_UNAVAILABLE`.
 - No projection for the tenant (or the projection database is unreachable) →
   `ACCESS_GATEWAY_TENANT_POLICY` (or `services.access_gateway.tenant_policy`) decides:
   `lenient` (default) admits, `strict` rejects. Use `strict` in production and `lenient`

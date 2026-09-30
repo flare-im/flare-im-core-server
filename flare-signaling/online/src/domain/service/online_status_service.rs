@@ -22,7 +22,7 @@ use crate::domain::connection_event_publisher::{
     ConnectionEventPublisher, NoopConnectionEventPublisher,
 };
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::repository::{ConversationRepository, EvictedConnection};
+use crate::domain::repository::{ConversationRepository, EvictedConnection, kick_reason};
 use crate::domain::value_object::{
     ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
 };
@@ -222,6 +222,7 @@ where
                     user_id,
                     Some(&old.device_id),
                     Some(&old.connection_id),
+                    kick_reason::SESSION_REPLACED,
                 )
                 .await
             {
@@ -549,6 +550,7 @@ impl ConversationRepository for NoopConversationRepository {
         _user_id: &str,
         _device_id: Option<&str>,
         _connection_id: Option<&str>,
+        _reason: &str,
     ) -> flare_server_core::error::Result<()> {
         Ok(())
     }

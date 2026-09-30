@@ -593,6 +593,7 @@ impl ConversationRepository for RedisConversationRepository {
         user_id: &str,
         device_id: Option<&str>,
         connection_id: Option<&str>,
+        reason: &str,
     ) -> Result<()> {
         let mut conn = ConnectionManager::new(self.kick_client.as_ref().clone())
             .await
@@ -604,6 +605,7 @@ impl ConversationRepository for RedisConversationRepository {
             user_id: user_id.to_owned(),
             device_id: device_id.map(str::to_owned),
             connection_id: connection_id.map(str::to_owned),
+            reason: Some(reason.to_owned()),
         };
         let payload = serde_json::to_string(&signal).map_err(|e| {
             flare_server_core::error::FlareError::system(format!("serialize kick signal: {e}"))

@@ -272,6 +272,7 @@ pub async fn revoke_user(
         user_id: user_id.to_owned(),
         device_id: None,
         connection_id: None,
+        reason: Some("TOKEN_REVOKED".to_owned()),
     }) {
         warn!(%err, "publish_kick failed; revocation still applied");
     }

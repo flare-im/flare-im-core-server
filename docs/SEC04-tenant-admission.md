@@ -4,13 +4,15 @@ Core 的 `tenants` 投影是数据面判定源，进程内按租户缓存，默�
 
 | 入口 | 判定位置 | 停用时结果 |
 | --- | --- | --- |
-| WS/QUIC 新连接 | Access Gateway 验证 token 后 | `TENANT_UNAVAILABLE` |
-| HTTP 消息/会话/媒资/在线 API | API Gateway Bearer 验证后、下游调用前 | 403 |
+| WS/QUIC 新连接 | Access Gateway 验证 token 后 | 关连接前下发 ERROR 帧（协商前 JSON），message 为 `TENANT_UNAVAILABLE`，metadata `code=AUTHENTICATION_FAILED` |
+| HTTP 消息/会话/媒资/在线 API | API Gateway Bearer 验证后、下游调用前 | 403；发送时若 MessageIngest 的缓存先看到停用，同样回 403 `TENANT_UNAVAILABLE` |
 | 本地 token 签发 | App 凭据或开发开关验证后、签发前 | 403 |
 | 本地 token 刷新 | 验证签名并从原 token 取租户后、轮换前 | 403 |
 | gRPC 消息摄入 | 已验证上下文之后、幂等重放/限流/WAL/Hook 前 | `PermissionDenied` |
 
 API Gateway 使用 `services.api_gateway.postgres` 指向 `[postgres.tenant_runtime]`，可用 `FLARE_API_GATEWAY_TENANT_RUNTIME_POSTGRES_URL` 覆盖；策略用 `FLARE_API_GATEWAY_TENANT_POLICY` 覆盖配置。MessageIngest 使用 `services.message_ingest.postgres` 或 `MESSAGE_INGEST_TENANT_RUNTIME_POSTGRES_URL`；策略由 `MESSAGE_INGEST_TENANT_POLICY` 指定。Access Gateway 使用原有 `ACCESS_GATEWAY_TENANT_*` 配置。投影改变后，单个进程最多再使用约 1 秒的旧状态；验收以 5 秒内全部拒绝为门槛。
+
+已接纳的长连接不会被重新检查，由 Control 踢掉：状态写入后 Control 立即投递该租户的投影，核确认非 active 的快照后调 Online `KickTenant`，当即一次、2 秒后再一次。第二次踢掉的是缓存过期前重连进来的连接。网关关连接前下发 KICKED 帧，message 与 metadata `reason` 都是类型化原因：租户踢线为 `TENANT_UNAVAILABLE`（请求里的原因只进 Online 日志），运维按设备踢为 `DEVICE_KICKED`，同设备新连接接替旧连接为 `SESSION_REPLACED`，令牌撤销为 `TOKEN_REVOKED`，不带原因的旧信号为 `KICKED`。
 
 Core 自签的普通 HTTP/WS 接入令牌只允许 `token_use` 缺省（历史 access）或显式 `access`。`refresh`/`control`/`admin` 令牌不能当普通接入令牌，也不能经旧 access 刷新宽限路径换新。
 

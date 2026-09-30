@@ -16,13 +16,15 @@ use flare_server_core::flare_err;
 use prost_types::Timestamp;
 use tracing::{info, warn};
 
-use crate::domain::repository::{ConversationRepository, parse_tenant_session_member};
+use crate::domain::repository::{ConversationRepository, kick_reason, parse_tenant_session_member};
 use crate::domain::value_object::UserId;
 
 const ONLINE_SESSION_FRESHNESS_SECONDS: i64 = 90;
 /// `KickTenant` 每页 SSCAN 的成员数。
 const KICK_TENANT_SCAN_PAGE: usize = 256;
-/// 踢出原因缺省值（原样下发给连接端）。
+/// 请求未带原因时日志里记的原因。连接端收到的始终是类型化的
+/// [`kick_reason::TENANT_UNAVAILABLE`]，与建连拒绝、HTTP 拒绝同一个错误码，客户端据此判断租户不可用；
+/// 请求里的原因是运维说明，只进日志。
 const KICK_TENANT_DEFAULT_REASON: &str = "TENANT_UNAVAILABLE";
 
 /// 用户领域服务 - 包含所有业务逻辑（泛型仓储，避免 `dyn` 异步 trait）
@@ -207,11 +209,21 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         })
     }
 
-    /// 踢出设备
+    /// 踢出设备（运维操作）：连接端收到 [`kick_reason::DEVICE_KICKED`]，请求里的原因只进日志。
     pub async fn kick_device(
         &self,
         request: KickDeviceRequest,
         expected_tenant_id: &str,
+    ) -> Result<KickDeviceResponse> {
+        self.kick_device_because(request, expected_tenant_id, kick_reason::DEVICE_KICKED)
+            .await
+    }
+
+    async fn kick_device_because(
+        &self,
+        request: KickDeviceRequest,
+        expected_tenant_id: &str,
+        wire_reason: &str,
     ) -> Result<KickDeviceResponse> {
         let user_id = &request.user_id;
         let device_id = &request.device_id;
@@ -238,13 +250,20 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 .remove_connection(expected_tenant_id, session.id(), &user_vo)
                 .await?;
             self.conversation_repository
-                .broadcast_user_kick(expected_tenant_id, user_id, Some(device_id), None)
+                .broadcast_user_kick(
+                    expected_tenant_id,
+                    user_id,
+                    Some(device_id),
+                    None,
+                    wire_reason,
+                )
                 .await?;
 
             info!(
                 user_id = %user_id,
                 device_id = %device_id,
                 conversation_id = %session.id().as_str(),
+                reason = %request.reason,
                 "device kicked"
             );
 
@@ -288,13 +307,14 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     continue;
                 };
                 match self
-                    .kick_device(
+                    .kick_device_because(
                         KickDeviceRequest {
                             user_id: user_id.to_string(),
                             device_id: device_id.to_string(),
                             reason: reason.to_string(),
                         },
                         &tenant_id,
+                        kick_reason::TENANT_UNAVAILABLE,
                     )
                     .await
                 {
@@ -324,7 +344,13 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         for user_id in &kicked_users {
             if let Err(error) = self
                 .conversation_repository
-                .broadcast_user_kick(&tenant_id, user_id, None, None)
+                .broadcast_user_kick(
+                    &tenant_id,
+                    user_id,
+                    None,
+                    None,
+                    kick_reason::TENANT_UNAVAILABLE,
+                )
                 .await
             {
                 warn!(tenant_id = %tenant_id, user_id = %user_id, %error, "kick broadcast failed");
@@ -403,6 +429,8 @@ mod tests {
         /// 成员插入顺序日志：SSCAN 的游标不随删除位移，这里用它模拟。
         index_log: Mutex<HashMap<String, Vec<String>>>,
         kicks: Mutex<Vec<(String, String, Option<String>)>>,
+        /// 每次 kick 广播带给连接端的原因。
+        kick_reasons: Mutex<Vec<String>>,
         page_size_seen: Mutex<Vec<usize>>,
     }
 
@@ -604,12 +632,14 @@ mod tests {
             user_id: &str,
             device_id: Option<&str>,
             _connection_id: Option<&str>,
+            reason: &str,
         ) -> Result<()> {
             self.kicks.lock().unwrap().push((
                 tenant_id.to_owned(),
                 user_id.to_owned(),
                 device_id.map(str::to_owned),
             ));
+            self.kick_reasons.lock().unwrap().push(reason.to_owned());
             Ok(())
         }
     }
@@ -640,6 +670,26 @@ mod tests {
         }
         let service = UserService::new(repo.clone());
         (repo, service)
+    }
+
+    #[tokio::test]
+    async fn operator_device_kick_tells_the_connection_a_typed_reason() {
+        let (repo, service) = seeded().await;
+        service
+            .kick_device(
+                KickDeviceRequest {
+                    user_id: "u1".into(),
+                    device_id: "d1".into(),
+                    reason: "lost phone".into(),
+                },
+                "acme",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *repo.kick_reasons.lock().unwrap(),
+            vec![kick_reason::DEVICE_KICKED.to_string()]
+        );
     }
 
     #[tokio::test]
@@ -736,6 +786,13 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        // 连接端收到的是类型化错误码，不是请求里的运维说明。
+        let reasons = repo.kick_reasons.lock().unwrap().clone();
+        assert!(!reasons.is_empty());
+        assert!(
+            reasons.iter().all(|r| r == kick_reason::TENANT_UNAVAILABLE),
+            "{reasons:?}"
         );
         // 每个设备按租户精确通知，随后按用户发送租户范围兜底通知。
         let mut kicks = repo.kicks.lock().unwrap().clone();

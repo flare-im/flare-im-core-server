@@ -79,13 +79,15 @@ pub trait ConversationRepository: Send + Sync {
     /// 从租户在线索引移除一个成员（会话已不存在的陈旧项）。
     async fn unindex_tenant_session(&self, tenant_id: &str, member: &str) -> Result<()>;
 
-    /// 通知各网关关闭该用户的全部长连接（撤销即断的 kick 频道）。
+    /// 通知各网关关闭该用户的全部长连接（撤销即断的 kick 频道）。`reason` 是网关关连接前
+    /// 下发给客户端的类型化原因（KICKED 帧），见 [`kick_reason`]。
     async fn broadcast_user_kick(
         &self,
         tenant_id: &str,
         user_id: &str,
         device_id: Option<&str>,
         connection_id: Option<&str>,
+        reason: &str,
     ) -> Result<()>;
 }
 
@@ -172,4 +174,14 @@ pub struct PresenceChangeEvent {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
     pub conflict_action: Option<i32>, // ConflictAction enum value
     pub reason: Option<String>,
+}
+
+/// 踢线时下发给客户端的类型化原因（KICKED 帧的 message）。
+pub mod kick_reason {
+    /// 租户停用 / 删除中：与建连拒绝、HTTP 拒绝用同一个错误码。
+    pub const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
+    /// 运维按设备踢下线。
+    pub const DEVICE_KICKED: &str = "DEVICE_KICKED";
+    /// 同设备的新连接接替了旧连接，或设备数超限挤掉了旧设备。
+    pub const SESSION_REPLACED: &str = "SESSION_REPLACED";
 }
