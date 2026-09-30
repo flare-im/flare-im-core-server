@@ -32,6 +32,7 @@ utoipa = "4"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

@@ -32,6 +32,10 @@ POST /api/v1/admin/messages/export
 
 本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin-gateway.toml`。
 
+## API 文档
+
+`GET /swagger-ui` 提供 `GET /api-doc/openapi.json` 的 Swagger UI 页面。Swagger UI 的样式与脚本内嵌在二进制中，经 `/swagger-ui/swagger-ui.css` 与 `/swagger-ui/swagger-ui-bundle.js` 提供，页面不加载任何外部资源，隔离网络中也能打开。这两个文件是未经修改的 Swagger UI 5.3.1 `dist/` 产物，许可为 Apache-2.0，许可证与 NOTICE 保存在 `assets/swagger-ui/`。
+
 ## 认证
 
 Admin Gateway 不签发、不刷新、不存储 token。它只通过 `FLARE_ADMIN_GATEWAY_AUTH_MODE=core_jwt` 或 `FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook` 恢复标准 principal。

@@ -32,6 +32,10 @@ POST /api/v1/admin/messages/export
 
 Locally it listens on `0.0.0.0:50051` by default, and its configuration file is `config/services/admin-gateway.toml`.
 
+## API docs
+
+`GET /swagger-ui` serves Swagger UI for `GET /api-doc/openapi.json`. The Swagger UI stylesheet and script are embedded in the binary and served from `/swagger-ui/swagger-ui.css` and `/swagger-ui/swagger-ui-bundle.js`, so the page loads no external resources and works on isolated networks. They are unmodified Swagger UI 5.3.1 `dist/` files under Apache-2.0; the license and NOTICE are kept in `assets/swagger-ui/`.
+
 ## Authentication
 
 The Admin Gateway does not issue, refresh, or store tokens. It only restores the standard principal via `FLARE_ADMIN_GATEWAY_AUTH_MODE=core_jwt` or `FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook`.
