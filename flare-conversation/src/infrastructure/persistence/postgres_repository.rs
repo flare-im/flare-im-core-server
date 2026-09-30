@@ -17,6 +17,7 @@ use crate::domain::model::{
     ConversationType,
 };
 use crate::domain::repository::ConversationRepository;
+use crate::infrastructure::persistence::message_cache::MessageCacheInvalidator;
 
 /// 会话摘要读时补全:解码最后一条消息的 content(BYTEA proto `MessageContent`)→
 /// (预览文本, content_type 标签)。文本类取正文,媒体/卡片等取占位标签;解码失败或空 → (None, None)。
@@ -78,12 +79,27 @@ struct ConversationRow {
 pub struct PostgresConversationRepository {
     pool: Arc<PgPool>,
     config: Arc<ConversationConfig>,
+    /// storage-reader 的消息热缓存；未配置表示 reader 不读缓存，清除历史无需失效。
+    message_cache: Option<Arc<dyn MessageCacheInvalidator>>,
 }
 
 impl PostgresConversationRepository {
     /// 创建PostgreSQL Conversation Repository
     pub fn new(pool: Arc<PgPool>, config: Arc<ConversationConfig>) -> Self {
-        Self { pool, config }
+        Self {
+            pool,
+            config,
+            message_cache: None,
+        }
+    }
+
+    /// 清除会话历史时一并失效 storage-reader 的消息热缓存。
+    pub fn with_message_cache_invalidator(
+        mut self,
+        invalidator: Arc<dyn MessageCacheInvalidator>,
+    ) -> Self {
+        self.message_cache = Some(invalidator);
+        self
     }
 
     /// 单聊库中 `channel_id` 为空：按当前用户从 participants 解析对端，仅写入内存摘要（不下发进 DB 列）。
@@ -1096,6 +1112,60 @@ impl ConversationRepository for PostgresConversationRepository {
                 "Failed to purge conversation events before boundary",
             )
         })?;
+        if !purged_ids.is_empty() {
+            // 物化的未读数只随新消息 +1、随已读 -N，从不因删消息而减少：不重算的话，
+            // 旧关系里没读的消息删掉之后红点还一直挂着。按与会话列表读时重算相同的口径
+            // （已读/可见下限之后、非本人发送、非 6/7/8 状态）数剩下的消息；删消息只会让
+            // 未读变少，所以取与原值的较小者，并以原值为 LIMIT 封顶，不对长会话整段计数。
+            sqlx::query(
+                r#"
+                UPDATE conversation_participants sp
+                SET unread_count = LEAST(
+                        GREATEST(COALESCE(sp.unread_count, 0), 0),
+                        (
+                            SELECT COUNT(1)::INT
+                            FROM (
+                                SELECT 1
+                                FROM messages m
+                                WHERE m.tenant_id = sp.tenant_id
+                                  AND m.conversation_id = sp.conversation_id
+                                  AND m.seq > GREATEST(
+                                      COALESCE(sp.last_read_seq, 0),
+                                      COALESCE(sp.visible_from_seq, 0)
+                                  )
+                                  AND m.sender_id <> sp.user_id
+                                  AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                                LIMIT GREATEST(COALESCE(sp.unread_count, 0), 0)
+                            ) remaining
+                        )
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE sp.tenant_id = $1
+                  AND sp.conversation_id = $2
+                  AND NOT COALESCE(sp.is_deleted, false)
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "Failed to recompute unread counts after history purge",
+                )
+            })?;
+        }
+        // 热缓存失效放在提交之前：失败就回滚，调用方重试时这批消息还在库里，
+        // RETURNING 能再次拿到同一组 ID；若先提交再失效，失败后重试已无从得知删了哪些。
+        if let Some(cache) = &self.message_cache
+            && !purged_ids.is_empty()
+        {
+            cache
+                .invalidate_messages(tenant_id, conversation_id, &purged_ids)
+                .await?;
+        }
         tx.commit().await.map_err(|e| {
             map_infra_error(
                 e,
@@ -1103,6 +1173,21 @@ impl ConversationRepository for PostgresConversationRepository {
                 "commit conversation history purge",
             )
         })?;
+        // 提交前到提交这段时间里，reader 仍可能从库里读到这些行并回填缓存；提交后再失效一次。
+        // 这一次失败不影响已提交的清除，只记日志。
+        if let Some(cache) = &self.message_cache
+            && !purged_ids.is_empty()
+            && let Err(error) = cache
+                .invalidate_messages(tenant_id, conversation_id, &purged_ids)
+                .await
+        {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                purged_messages = purged_ids.len(),
+                error = %error,
+                "post-commit storage cache invalidation failed after history purge"
+            );
+        }
         let outcome = ConversationHistoryPurge {
             purged_messages: purged.len() as u64,
             max_purged_seq: purged

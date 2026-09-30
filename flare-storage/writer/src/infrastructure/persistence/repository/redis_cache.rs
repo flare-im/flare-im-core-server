@@ -44,11 +44,11 @@ impl RedisHotCacheRepository {
     }
 
     fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
-        format!("cache:msg:{tenant_id}:{conversation_id}:{message_id}")
+        flare_im_contracts::message_cache_key(tenant_id, conversation_id, message_id)
     }
 
     fn tail_key(tenant_id: &str, conversation_id: &str) -> String {
-        format!("cache:tail:{tenant_id}:{conversation_id}")
+        flare_im_contracts::message_tail_key(tenant_id, conversation_id)
     }
 }
 

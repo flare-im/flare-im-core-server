@@ -6,6 +6,7 @@ pub mod domain;
 pub mod event;
 pub mod instrumentation;
 pub mod message;
+pub mod message_cache;
 pub mod service_names;
 pub mod utils;
 pub mod wal;
@@ -29,6 +30,7 @@ pub use message::{
     Attachment, Message as MessageDomain, RetentionTransitionError, message_from_proto,
     message_into_proto, message_to_proto,
 };
+pub use message_cache::{message_cache_key, message_tail_key};
 pub use service_names::{get_service_name, service_name_env_var, validate_service_name};
 pub use utils::{
     context_from_mq_metadata, context_to_mq_metadata, extract_context_opt,

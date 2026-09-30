@@ -65,6 +65,7 @@ pub trait ConversationRepository: Send + Sync {
     ) -> Result<()>;
     /// 物理删除会话里服务端时间严格早于 `before` 的历史（消息、事件、置顶、标记），
     /// 会话行、成员与 `before` 及之后的消息原样保留。重复调用幂等。
+    /// 删掉消息时同事务按剩余消息重算成员未读数，并失效这些消息的读侧热缓存。
     async fn purge_history_before(
         &self,
         ctx: &flare_server_core::context::Context,

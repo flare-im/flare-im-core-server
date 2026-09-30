@@ -15,6 +15,7 @@ use crate::domain::service::{ConversationDomainService, DefaultConversationDomai
 use crate::infrastructure::event_consumer::{
     ConversationEnsureEventConsumer, ReadReceiptEventConsumer,
 };
+use crate::infrastructure::persistence::message_cache::RedisMessageCacheInvalidator;
 use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
 use crate::infrastructure::rpc::StorageReaderClient;
 use crate::interface::grpc::ConversationGrpcHandler;
@@ -93,12 +94,26 @@ pub async fn initialize(
     };
 
     // 4. 创建会话仓储（硬切到 Postgres，会话元数据必须来自持久化读模型）
-    let conversation_repo = Arc::new(
+    let mut conversation_repo =
         crate::infrastructure::persistence::PostgresConversationRepository::new(
             postgres_pool,
             conversation_config.clone(),
-        ),
-    );
+        );
+    // storage-reader 读消息热缓存时，清除历史要在同一个 Redis 上失效被删的消息。
+    if let Some(cache_url) = RedisMessageCacheInvalidator::storage_reader_redis_url(app_config) {
+        let cache_client = redis::Client::open(cache_url).map_err(|e| {
+            ErrorBuilder::new(
+                ErrorCode::NetworkError,
+                "Failed to create storage cache Redis client",
+            )
+            .details(e.to_string())
+            .build_error()
+        })?;
+        conversation_repo = conversation_repo.with_message_cache_invalidator(Arc::new(
+            RedisMessageCacheInvalidator::new(Arc::new(cache_client)),
+        ));
+    }
+    let conversation_repo = Arc::new(conversation_repo);
 
     // 5. 创建在线状态仓储
     let presence_repo: Arc<RedisPresenceRepository> = Arc::new(RedisPresenceRepository::new(
