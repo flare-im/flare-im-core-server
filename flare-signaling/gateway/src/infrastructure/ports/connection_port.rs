@@ -506,6 +506,8 @@ mod static_route_tests {
             tonic::Status::permission_denied("online login tenant mismatch"),
             tonic::Status::unavailable("connection refused"),
             tonic::Status::internal(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE),
+            // Online 读不到租户投影时的登录失败：暂时故障，客户端应当重连
+            tonic::Status::internal("Failed to login"),
         ] {
             let error = online_login_error(status);
             assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));

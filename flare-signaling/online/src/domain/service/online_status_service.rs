@@ -133,15 +133,27 @@ where
             )
         })?;
         let lookup = self.tenant_runtime.lookup(tenant_id).await;
-        if !lookup.admits_connection(self.tenant_policy)
-            || (self.tenant_runtime.is_enabled() && matches!(&lookup, TenantLookup::Unavailable))
-        {
-            // 类型化原因：网关据此在 CONNECT_ACK 之后给客户端下发 KICKED `TENANT_UNAVAILABLE`，
-            // 与建连拒绝、踢线、HTTP 拒绝是同一个错误码。
-            return Err(flare_err!(
-                ErrorCode::PermissionDenied,
-                kick_reason::TENANT_UNAVAILABLE
-            ));
+        match &lookup {
+            // 投影读不到（数据库抖动等）：不论策略都拒绝登记（fail-closed），但这是暂时故障，
+            // 不是租户结论。不能用 `TENANT_UNAVAILABLE`：客户端收到它会终止会话、不再重连；
+            // 这里按服务不可用上报，网关照常按内部错误关连接，客户端随后重连。与 HTTP 租户门
+            // 回 503 而不是 403 一致。
+            TenantLookup::Unavailable => {
+                return Err(flare_err!(
+                    ErrorCode::ServiceUnavailable,
+                    "tenant runtime projection unavailable"
+                ));
+            }
+            // 已知的停用 / 删除中租户，或严格策略下没有投影的租户：类型化原因，网关据此在
+            // CONNECT_ACK 之后给客户端下发 KICKED `TENANT_UNAVAILABLE`，与建连拒绝、踢线、
+            // HTTP 拒绝是同一个错误码。
+            _ if !lookup.admits_connection(self.tenant_policy) => {
+                return Err(flare_err!(
+                    ErrorCode::PermissionDenied,
+                    kick_reason::TENANT_UNAVAILABLE
+                ));
+            }
+            _ => {}
         }
         let projected_cap = lookup.core_quota().max_online_devices_per_user;
         let max_devices = if projected_cap > 0 {
@@ -585,37 +597,74 @@ mod tests {
         }
     }
 
+    /// 控制面从没投影过这个租户。
+    struct NoProjection;
+
+    #[async_trait::async_trait]
+    impl TenantRuntimeSource for NoProjection {
+        async fn load(
+            &self,
+            _tenant_id: &str,
+        ) -> std::result::Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok(None)
+        }
+    }
+
+    /// 投影库读不到（如 PG 抖动）。
+    struct UnreachableProjection;
+
+    #[async_trait::async_trait]
+    impl TenantRuntimeSource for UnreachableProjection {
+        async fn load(
+            &self,
+            _tenant_id: &str,
+        ) -> std::result::Result<Option<TenantRuntimeSnapshot>, String> {
+            Err("connection refused".to_string())
+        }
+    }
+
+    fn service_with(
+        source: impl TenantRuntimeSource,
+        policy: TenantAccessPolicy,
+    ) -> DefaultOnlineStatusService {
+        DefaultOnlineStatusService::new(
+            Arc::new(NoopConversationRepository),
+            "gateway-test".to_string(),
+        )
+        .with_tenant_runtime(
+            TenantRuntimeCache::with_source(Arc::new(source), TenantRuntimeCacheOptions::default()),
+            policy,
+            0,
+        )
+    }
+
+    async fn login_alice(service: &DefaultOnlineStatusService) -> Result<LoginResponse> {
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+        service
+            .login(
+                &ctx,
+                LoginRequest {
+                    user_id: "alice".to_string(),
+                    device_id: "device-a".to_string(),
+                    device_platform: "web".to_string(),
+                    desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+                    metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
     /// 停用 / 删除中的租户登记会话被拒，原因是类型化的 `TENANT_UNAVAILABLE`：网关据此在 CONNECT_ACK
     /// 之后给客户端下发同一个原因，而不是无原因关连接。
     #[tokio::test]
     async fn login_of_an_unavailable_tenant_is_rejected_with_a_typed_reason() {
         for status in [TenantStatus::Suspended, TenantStatus::Deleting] {
-            let service = DefaultOnlineStatusService::new(
-                Arc::new(NoopConversationRepository),
-                "gateway-test".to_string(),
-            )
-            .with_tenant_runtime(
-                TenantRuntimeCache::with_source(
-                    Arc::new(OneTenant(status)),
-                    TenantRuntimeCacheOptions::default(),
-                ),
-                TenantAccessPolicy::Lenient,
-                0,
-            );
-            let ctx = Context::root()
-                .with_tenant_id("tenant-a")
-                .with_user_id("alice");
-            let error = service
-                .login(
-                    &ctx,
-                    LoginRequest {
-                        user_id: "alice".to_string(),
-                        device_id: "device-a".to_string(),
-                        device_platform: "web".to_string(),
-                        desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
-                        ..Default::default()
-                    },
-                )
+            let service = service_with(OneTenant(status), TenantAccessPolicy::Lenient);
+
+            let error = login_alice(&service)
                 .await
                 .expect_err("unavailable tenant must not log in");
 
@@ -628,6 +677,46 @@ mod tests {
                 error.reason(),
                 kick_reason::TENANT_UNAVAILABLE,
                 "{status:?}"
+            );
+        }
+    }
+
+    /// 没有投影的租户：严格策略按租户不可用拒绝（类型化原因），宽松策略放行。
+    #[tokio::test]
+    async fn an_unprojected_tenant_follows_the_policy() {
+        let strict = service_with(NoProjection, TenantAccessPolicy::Strict);
+        let error = login_alice(&strict)
+            .await
+            .expect_err("strict policy rejects an unprojected tenant");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(error.reason(), kick_reason::TENANT_UNAVAILABLE);
+
+        let lenient = service_with(NoProjection, TenantAccessPolicy::Lenient);
+        login_alice(&lenient)
+            .await
+            .expect("lenient policy admits an unprojected tenant");
+    }
+
+    /// 投影库读不到时仍然拒绝登记（两种策略都是），但报的是暂时故障，不是 `TENANT_UNAVAILABLE`：
+    /// 后者会让客户端终止会话、不再重连，一次数据库抖动就会把这段时间里连进来的客户端全部挂在离线。
+    #[tokio::test]
+    async fn a_projection_outage_fails_the_login_transiently() {
+        for policy in [TenantAccessPolicy::Lenient, TenantAccessPolicy::Strict] {
+            let service = service_with(UnreachableProjection, policy);
+
+            let error = login_alice(&service)
+                .await
+                .expect_err("login must fail closed while the projection is unreachable");
+
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::ServiceUnavailable),
+                "{policy:?}"
+            );
+            assert_ne!(
+                error.reason(),
+                kick_reason::TENANT_UNAVAILABLE,
+                "{policy:?}"
             );
         }
     }

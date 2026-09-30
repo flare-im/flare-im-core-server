@@ -421,4 +421,78 @@ mod tests {
             assert_eq!(mapped.reason(), "Failed to login");
         }
     }
+
+    /// 投影库读不到（如 PG 抖动）时登记失败，但交给网关的不是租户拒绝：gRPC 状态既不是
+    /// PERMISSION_DENIED 也不带 `TENANT_UNAVAILABLE`，网关按「Online 不可用」处理，客户端照常重连，
+    /// 而不是收到终止会话的 KICKED `TENANT_UNAVAILABLE`。
+    #[tokio::test]
+    async fn a_projection_outage_reaches_the_gateway_as_a_transient_failure() {
+        use flare_im_contracts::domain::tenant::TenantRuntimeSnapshot;
+        use flare_im_service_kit::tenant_runtime::{
+            TenantAccessPolicy, TenantRuntimeCache, TenantRuntimeCacheOptions, TenantRuntimeSource,
+        };
+
+        struct UnreachableProjection;
+
+        #[async_trait::async_trait]
+        impl TenantRuntimeSource for UnreachableProjection {
+            async fn load(
+                &self,
+                _tenant_id: &str,
+            ) -> std::result::Result<Option<TenantRuntimeSnapshot>, String> {
+                Err("connection refused".to_string())
+            }
+        }
+
+        let handler = OnlineCommandHandler::new(
+            Arc::new(
+                OnlineStatusService::<_>::new(
+                    Arc::new(NoopConversationRepository),
+                    "gateway-test".to_string(),
+                )
+                .with_tenant_runtime(
+                    TenantRuntimeCache::with_source(
+                        Arc::new(UnreachableProjection),
+                        TenantRuntimeCacheOptions::default(),
+                    ),
+                    TenantAccessPolicy::Lenient,
+                    0,
+                ),
+            ),
+            Arc::new(SubscriptionService::new(
+                Arc::new(NoopSubscriptions),
+                Arc::new(NoopPresence),
+            )),
+        );
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+        let request = LoginRequest {
+            user_id: "alice".to_string(),
+            device_id: "device-a".to_string(),
+            device_platform: "web".to_string(),
+            desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+            metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
+            ..Default::default()
+        };
+
+        let error = handler
+            .handle_login(
+                &ctx,
+                LoginCommand {
+                    request,
+                    ctx: ctx.clone(),
+                },
+            )
+            .await
+            .expect_err("login must fail closed while the projection is unreachable");
+
+        let status = tonic::Status::from(error);
+        assert_ne!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+        assert_ne!(
+            status.message(),
+            kick_reason::TENANT_UNAVAILABLE,
+            "{status:?}"
+        );
+    }
 }

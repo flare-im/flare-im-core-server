@@ -226,6 +226,11 @@ valid:
   `lenient` (default) admits, `strict` rejects. Use `strict` in production and `lenient`
   for single-tenant / development setups. `strict` refuses to start without a projection
   database.
+- If the Online service cannot read the projection while registering the session (for
+  example during a brief database outage), it refuses the session under either policy, but
+  as a transient failure: the `KICKED` frame after `CONNECT_ACK` carries a server error code
+  such as `INTERNAL_ERROR`, never `TENANT_UNAVAILABLE`. Reconnect with backoff as after any
+  other disconnect.
 - The projection database is `services.access_gateway.postgres` (profile
   `[postgres.tenant_runtime]` in `config/base.toml`) or
   `ACCESS_GATEWAY_TENANT_RUNTIME_POSTGRES_URL`. Without it the gateway does not enforce
