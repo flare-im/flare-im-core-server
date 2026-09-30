@@ -24,6 +24,13 @@ port = 50051
 # FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL
 # 以及各自 FLARE_ADMIN_GATEWAY_*_STATIC_FALLBACK。
+# 显式 static 注册模式（FLARE_REGISTRY_MODE=static，单容器 Core）不做服务发现：启动时
+# 每个下游打印一条回退 WARN，然后使用 *_STATIC_FALLBACK 的缺省值，即同一 Core 容器内的固定地址：
+#   MEDIA http://127.0.0.1:60081            MESSAGE_INGEST http://127.0.0.1:50182
+#   MESSAGE_ORCHESTRATOR http://127.0.0.1:50181   CONVERSATION http://127.0.0.1:50090
+#   ONLINE http://127.0.0.1:50061           STORAGE_READER http://127.0.0.1:60083
+# 把对应的 *_SERVICE_URL 设成 http:// 地址即直接连接，不再先尝试发现；下游不在同一容器时
+# 填它的私网地址。见 release/README.md「DEP-08 单容器静态发现候选」。
 
 # Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
 [services.admin_gateway.metrics]

@@ -385,6 +385,26 @@ WebSocket `60051`、QUIC `60052` 和 gRPC `60060`，以匹配 Core 内部的
 GatewayRouter 静态目标。Signaling Gateway 的 Online 调用在这一模式下仅
 回退同一 Core 容器的 `50061`。
 
+API Gateway 与 Admin Gateway 的下游 gRPC 路由缺省是 `discovery://`。static 模式
+不做服务发现，两个网关启动时对每个下游各打印一条 WARN
+`service discovery failed, falling back to static gRPC URI`，然后改用
+`*_STATIC_FALLBACK` 的缺省值，即同一 Core 容器内的固定地址：
+
+| 下游 | 固定 URI | 覆盖变量（`<P>` 为 `FLARE_API_GATEWAY` 或 `FLARE_ADMIN_GATEWAY`） |
+| --- | --- | --- |
+| media | `http://127.0.0.1:60081` | `<P>_GRPC_MEDIA_SERVICE_URL` |
+| message-ingest | `http://127.0.0.1:50182` | `<P>_GRPC_MESSAGE_INGEST_SERVICE_URL` |
+| message-orchestrator | `http://127.0.0.1:50181` | `<P>_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL` |
+| conversation | `http://127.0.0.1:50090` | `<P>_GRPC_CONVERSATION_SERVICE_URL` |
+| signaling-online | `http://127.0.0.1:50061` | `<P>_GRPC_ONLINE_SERVICE_URL` |
+| storage-reader | `http://127.0.0.1:60083` | `<P>_GRPC_STORAGE_READER_SERVICE_URL` |
+| push-proxy（仅 API Gateway，始终直连） | `http://127.0.0.1:50091` | `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` |
+
+`*_SERVICE_URL` 设为 `http://` 地址时网关直接连接（static URI override），不再
+先尝试服务发现，也就没有这些 WARN；下游不在同一容器时，改成对应的私网地址。
+`*_STATIC_FALLBACK` 只在 `discovery://` 解析失败时才用。supervisor 清单按前缀
+`FLARE_API_GATEWAY_` / `FLARE_ADMIN_GATEWAY_` 把这些变量传给对应子进程。
+
 启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
 `discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在
 连接 Redis/MQ 前拒绝启动。部署方必须提供已审核、指向 Social 私网
