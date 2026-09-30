@@ -77,8 +77,19 @@ impl ConfigManager {
         base_config: &mut FlareAppConfig,
         config_root: Option<&Path>,
     ) -> Result<()> {
-        let env = Self::get_environment();
-        let env_config_path = environment_config_path(config_root, &env);
+        Self::load_environment_config_for(base_config, config_root, &Self::get_environment())
+    }
+
+    /// 按显式环境名加载 `environments/{env}.toml` 覆盖；文件不存在时不做任何覆盖。
+    ///
+    /// 仓库只提交 `*.example.toml` 示例，避免设置 `FLARE_ENV` 就让示例值顶掉
+    /// base/环境变量里的真实对象存储与 MQ 配置。
+    pub fn load_environment_config_for(
+        base_config: &mut FlareAppConfig,
+        config_root: Option<&Path>,
+        env: &str,
+    ) -> Result<()> {
+        let env_config_path = environment_config_path(config_root, env);
 
         if env_config_path.exists() {
             let env_config = super::load_toml_value(&env_config_path)
@@ -175,5 +186,43 @@ fn environment_config_path(config_root: Option<&Path>, env: &str) -> PathBuf {
             .map(|parent| parent.join("environments").join(&file_name))
             .unwrap_or_else(|| PathBuf::from("config").join("environments").join(file_name)),
         None => PathBuf::from("config").join("environments").join(file_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn real_config_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+    }
+
+    #[test]
+    fn production_env_keeps_object_storage_from_base_and_env() {
+        let root = real_config_root();
+        let mut config =
+            super::super::load_config_from_source(&root).expect("load committed config root");
+        let before = config
+            .object_storage
+            .get("default")
+            .cloned()
+            .expect("base.toml defines object_storage.default");
+
+        ConfigManager::load_environment_config_for(&mut config, Some(&root), "production")
+            .expect("FLARE_ENV=production must not fail config loading");
+
+        let after = config
+            .object_storage
+            .get("default")
+            .expect("object_storage.default survives the environment layer");
+        assert_eq!(after.profile_type, before.profile_type);
+        assert_eq!(after.endpoint, before.endpoint);
+        assert_eq!(after.public_endpoint, before.public_endpoint);
+        assert_eq!(after.bucket, before.bucket);
+        assert_eq!(after.region, before.region);
+        assert_eq!(after.cdn_base_url, before.cdn_base_url);
+        // Credentials are compared without printing them.
+        assert!(after.access_key == before.access_key, "access_key replaced");
+        assert!(after.secret_key == before.secret_key, "secret_key replaced");
     }
 }
