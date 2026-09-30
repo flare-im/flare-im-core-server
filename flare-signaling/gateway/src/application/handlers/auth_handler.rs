@@ -147,7 +147,16 @@ impl AuthHandler {
 
 #[async_trait]
 impl Authenticator for AuthHandler {
-    #[instrument(skip(self), fields(connection_id, token_len = token.len()))]
+    // The token and the CONNECT metadata (which repeats it) must never reach a span.
+    #[instrument(
+        skip_all,
+        fields(
+            connection_id = %connection_id,
+            token_len = token.len(),
+            device_id = tracing::field::Empty,
+            platform = tracing::field::Empty
+        )
+    )]
     async fn authenticate(
         &self,
         token: &str,
@@ -293,6 +302,50 @@ mod tests {
             scopes: Vec::new(),
             metadata: Default::default(),
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_never_logs_the_token_or_connect_metadata() {
+        const SECRET_PART: &str = "SIGNATURE-THAT-MUST-NOT-BE-LOGGED";
+        let token = format!("eyJhbGciOi.payload.{SECRET_PART}");
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mut device = DeviceInfo::new("device-a".to_string(), DevicePlatform::Web);
+        device.metadata.insert("token".to_string(), token.clone());
+        let metadata = HashMap::from([("token".to_string(), token.clone().into_bytes())]);
+        for principal in [None, Some(principal(Some("device-a")))] {
+            let handler = handler(
+                principal,
+                TenantRuntimeCache::disabled(),
+                TenantAccessPolicy::Lenient,
+            );
+            let _ = handler
+                .authenticate(&token, "conn-a", Some(&device), Some(&metadata))
+                .await;
+        }
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("conn-a"), "{output}");
+        assert!(!output.contains(SECRET_PART), "{output}");
     }
 
     #[tokio::test]
