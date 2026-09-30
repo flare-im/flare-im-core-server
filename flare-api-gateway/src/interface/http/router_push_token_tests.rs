@@ -1,7 +1,7 @@
 //! 设备推送令牌接口与未知路由兜底的契约测试。
 //!
 //! 替身 Push Proxy 挂真实的 `SignedContextLayer`（与 Push Proxy 进程相同的准入层），
-//! 按真实 Push Proxy 的规则校验 User 身份与 user_id 归属，并以签名租户为键存令牌；
+//! 按真实 Push Proxy 的规则校验 User 身份、规范租户与 user_id 归属，并以签名租户为键存令牌；
 //! 测试断言到达下游的身份只来自 IM 令牌主体。
 use super::*;
 use crate::interface::http::MessageContextSigner;
@@ -31,7 +31,8 @@ use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower::ServiceExt;
 
-/// 令牌字符串 → 主体。`alice-a` / `alice-b` 是同名用户在两个租户下的令牌。
+/// 令牌字符串 → 主体。`alice-a` / `alice-b` 是同名用户在两个租户下的令牌；
+/// `alice-default` 带的是非规范写法的默认租户 `default`。
 struct Validator;
 
 #[async_trait::async_trait]
@@ -44,6 +45,7 @@ impl TokenValidator for Validator {
             match request.token.as_str() {
                 "alice-a" => (Some("tenant-a"), None, vec![]),
                 "alice-b" => (Some("tenant-b"), None, vec![]),
+                "alice-default" => (Some("default"), None, vec![]),
                 "bound-d1" => (Some("tenant-a"), Some("d1"), vec![]),
                 "unbound" => (None, None, vec![]),
                 "blank-tenant" => (Some(""), None, vec![]),
@@ -75,7 +77,8 @@ struct Call {
 
 type StoreKey = (String, String, i32, String);
 
-/// 按真实 Push Proxy 的规则工作的替身：只接受 User 签名身份，请求 user_id 必须等于签名用户，
+/// 按真实 Push Proxy 的规则工作的替身：只接受 User 签名身份，签名租户必须是规范写法
+/// （`validate_actor_claims`：合法且 `normalize_tenant_id(t) == t`），请求 user_id 必须等于签名用户，
 /// 令牌按（签名租户, 用户, 通道, 设备）存取。`deny_tenant` 模拟下游拒绝某租户。
 #[derive(Clone, Default)]
 struct FakePushProxy {
@@ -94,6 +97,13 @@ impl FakePushProxy {
             .ok_or_else(|| tonic::Status::unauthenticated("signed identity required"))?;
         if claims.actor_type != SignedActorType::User {
             return Err(tonic::Status::permission_denied("user actor required"));
+        }
+        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+            || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+        {
+            return Err(tonic::Status::permission_denied(
+                "canonical signed tenant_id is required",
+            ));
         }
         if self.deny_tenant == Some(claims.tenant_id.as_str()) {
             return Err(tonic::Status::permission_denied("tenant not permitted"));
@@ -469,6 +479,32 @@ async fn caller_cannot_name_another_tenant_or_user() {
         DevicePushProvider::Getui as i32,
         "d1".to_string()
     )));
+}
+
+#[tokio::test]
+async fn default_tenant_alias_is_signed_as_the_canonical_tenant() {
+    // Push Proxy 只认规范租户：令牌里的 `default` 必须以 `0` 签发，否则真实下游回 403。
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let (status, body) = send(
+        &router,
+        put_request(Some("alice-default"), "d1", registration()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        &router,
+        delete_request(Some("alice-default"), "d1", "provider=getui"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert_eq!(call.claims.tenant_id, "0", "{}", call.rpc);
+        assert_eq!(call.user_id, "alice");
+    }
+    assert!(fake.store.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
