@@ -390,3 +390,12 @@ GatewayRouter 静态目标。Signaling Gateway 的 Online 调用在这一模式�
 Hook 来让健康检查变绿。
 这只是 fail-fast/端口候选，尚无跨 Core/Social 的 Hook、Presence/Kick、
 消息与 QUIC 端到端验收，也不能据此替换现有生产启动流程。
+
+`release/Dockerfile` 自带的 `HEALTHCHECK` 是 `/usr/local/bin/flare-supervise health`
+（间隔 10s、超时 3s、启动宽限 90s、重试 3 次，与单机 Compose 的 `core` 一致），
+只对默认命令 `flare-core supervise` 成立：它读 supervisor 的健康 socket，
+所有子进程都在跑、且声明了 `tcp_health` 的端口都能连上才算健康。用 `command`
+只跑单个二进制的容器没有这个 socket，必须在 Compose 里关掉或换掉该检查
+（`deploy/docker-compose.stack.yml` 已统一 `healthcheck: disable: true`）；
+自己维护的单进程部署文件也要加，否则容器启动 90 秒后会显示 unhealthy。
+`python3 release/tests/test_runtime_image.py` 静态校验这两处。

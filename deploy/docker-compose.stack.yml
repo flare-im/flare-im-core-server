@@ -25,6 +25,12 @@ x-flare-service: &flare-service
   restart: unless-stopped
   networks: [flare-network]
   logging: *default-logging
+  # 镜像自带的 HEALTHCHECK 是给默认命令（flare-core supervise）用的：它问的是
+  # supervisor 的健康 socket。这里每个容器都用 command 只跑一个二进制，没有
+  # supervisor，也就没有那个 socket——不关掉的话启动 90 秒后这里的容器全部显示
+  # unhealthy，`up --wait` 会直接失败。
+  healthcheck:
+    disable: true
   environment: &flare-env
     RUST_LOG: ${RUST_LOG:-info}
     # 名字必须是 FLARE_CONFIG_PATH（service-kit 的 runtime.rs 读的是它）。

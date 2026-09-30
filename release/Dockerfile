@@ -158,5 +158,16 @@ ENV FLARE_CONFIG_PATH=/etc/flare/config \
 
 # The existing one-process-per-container Compose declares an explicit command
 # for every service. A container started without one uses the opt-in Core Cell
-# supervisor and its manifest. DEP-08 supplies a supervisor-specific healthcheck.
+# supervisor and its manifest.
+#
+# The healthcheck belongs to that default supervisor command: it asks the
+# supervisor's private health socket, which reports healthy only while every
+# child runs and every declared tcp_health port accepts a connection. The
+# DEP-08 single-host Compose runs the same probe with the same timings. A
+# one-process container has no supervisor socket, so a Compose that overrides
+# the command must also disable or replace this check
+# (deploy/docker-compose.stack.yml disables it).
+HEALTHCHECK --interval=10s --timeout=3s --start-period=90s --retries=3 \
+    CMD ["/usr/local/bin/flare-supervise", "health"]
+
 CMD ["flare-core", "supervise", "--services=all"]

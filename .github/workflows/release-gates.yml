@@ -28,6 +28,14 @@ jobs:
       - name: Validate the isolated migrator build context
         run: python3 tools/flare-migrate/test_image.py
 
+  core-runtime-image-healthcheck:
+    name: Core runtime image healthcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the supervisor healthcheck and the one-process override
+        run: python3 release/tests/test_runtime_image.py
+
   large-group-primitives:
     name: Large group primitives
     runs-on: ubuntu-latest
