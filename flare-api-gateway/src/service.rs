@@ -33,6 +33,10 @@ impl ApplicationBootstrap {
             flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Api)?;
+        ensure_dev_issue_allowed(
+            std::env::var("FLARE_ENV").ok().as_deref(),
+            settings.auth.dev_issue,
+        )?;
         let gateway_config = app_config.api_gateway_service();
         let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
             app_config,
@@ -252,5 +256,51 @@ impl ApplicationBootstrap {
                 })
             })
             .await?)
+    }
+}
+
+/// 生产环境拒绝联调签发：开着它，任何能访问网关的人都可以不带凭据、按任意 userId 和
+/// tenantId 拿到令牌。只打一条告警不够，必须在监听之前拒绝启动。
+fn ensure_dev_issue_allowed(environment: Option<&str>, dev_issue: bool) -> Result<()> {
+    let production =
+        environment.is_some_and(|value| value.trim().eq_ignore_ascii_case("production"));
+    if dev_issue && production {
+        return Err(flare_server_core::error::FlareError::system(
+            "FLARE_ENV=production forbids FLARE_API_GATEWAY_AUTH_DEV_ISSUE=true: \
+             dev issuance mints tokens for any userId without app credentials",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_dev_issue_allowed;
+
+    #[test]
+    fn production_refuses_dev_issue() {
+        for environment in ["production", "Production", " PRODUCTION "] {
+            let err = ensure_dev_issue_allowed(Some(environment), true)
+                .expect_err("production must not start with dev issuance");
+            assert!(
+                err.to_string().contains("FLARE_API_GATEWAY_AUTH_DEV_ISSUE"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_issue_stays_available_outside_production() {
+        for environment in [None, Some(""), Some("development"), Some("staging")] {
+            assert!(
+                ensure_dev_issue_allowed(environment, true).is_ok(),
+                "{environment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_without_dev_issue_starts() {
+        assert!(ensure_dev_issue_allowed(Some("production"), false).is_ok());
     }
 }

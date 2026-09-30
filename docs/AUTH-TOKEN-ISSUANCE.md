@@ -27,7 +27,8 @@ Per `GATEWAY_SPEC.md` the gateway owns no token lifecycle: issue/refresh/revoke 
 - `POST /api/v1/auth/tokens` body `{userId, tenantId?, deviceId?, ttlSecs?}`. Callers: a business backend
   with `x-app-id` + `x-app-secret` (`FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS="app:tenant:secret,..."`), or, for
   local development only, a gateway started with `FLARE_API_GATEWAY_AUTH_DEV_ISSUE=true` (default false,
-  loud startup warning). Response `{token, expiresAt, userId, tenantId?, deviceId?}`.
+  loud startup warning; with `FLARE_ENV=production` the gateway refuses to start).
+  Response `{token, expiresAt, userId, tenantId?, deviceId?}`.
   The credential owns `tenantId`: omission uses its configured tenant; a mismatched or empty value
   returns 403 even with dev issuance enabled. Duplicate app IDs, empty tenants and old two-field
   credentials are rejected at startup. Secrets must contain at least 16 bytes.
