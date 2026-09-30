@@ -197,8 +197,8 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
     }
 
-    #[test]
-    fn production_env_keeps_object_storage_from_base_and_env() {
+    /// 以真实配置根按 `env` 加载环境层：不得失败，且对象存储仍取自 base/环境变量。
+    fn assert_env_layer_keeps_object_storage(env: &str) {
         let root = real_config_root();
         let mut config =
             super::super::load_config_from_source(&root).expect("load committed config root");
@@ -208,21 +208,73 @@ mod tests {
             .cloned()
             .expect("base.toml defines object_storage.default");
 
-        ConfigManager::load_environment_config_for(&mut config, Some(&root), "production")
-            .expect("FLARE_ENV=production must not fail config loading");
+        if let Err(err) = ConfigManager::load_environment_config_for(&mut config, Some(&root), env)
+        {
+            panic!("FLARE_ENV={env} must not fail config loading: {err}");
+        }
 
         let after = config
             .object_storage
             .get("default")
             .expect("object_storage.default survives the environment layer");
-        assert_eq!(after.profile_type, before.profile_type);
-        assert_eq!(after.endpoint, before.endpoint);
-        assert_eq!(after.public_endpoint, before.public_endpoint);
-        assert_eq!(after.bucket, before.bucket);
-        assert_eq!(after.region, before.region);
-        assert_eq!(after.cdn_base_url, before.cdn_base_url);
+        assert_eq!(after.profile_type, before.profile_type, "FLARE_ENV={env}");
+        assert_eq!(after.endpoint, before.endpoint, "FLARE_ENV={env}");
+        assert_eq!(
+            after.public_endpoint, before.public_endpoint,
+            "FLARE_ENV={env}"
+        );
+        assert_eq!(after.bucket, before.bucket, "FLARE_ENV={env}");
+        assert_eq!(after.region, before.region, "FLARE_ENV={env}");
+        assert_eq!(after.cdn_base_url, before.cdn_base_url, "FLARE_ENV={env}");
         // Credentials are compared without printing them.
-        assert!(after.access_key == before.access_key, "access_key replaced");
-        assert!(after.secret_key == before.secret_key, "secret_key replaced");
+        assert!(
+            after.access_key == before.access_key,
+            "FLARE_ENV={env}: access_key replaced"
+        );
+        assert!(
+            after.secret_key == before.secret_key,
+            "FLARE_ENV={env}: secret_key replaced"
+        );
+    }
+
+    #[test]
+    fn production_env_keeps_object_storage_from_base_and_env() {
+        assert_env_layer_keeps_object_storage("production");
+    }
+
+    #[test]
+    fn staging_env_keeps_object_storage_from_base_and_env() {
+        assert_env_layer_keeps_object_storage("staging");
+    }
+
+    /// 仓库里任何会被加载的环境层（非 `*.example.toml`）都要满足同一约束，
+    /// 避免再提交一个 `{FLARE_ENV}.toml` 让示例值顶掉真实对象存储。
+    #[test]
+    fn every_committed_environment_layer_keeps_object_storage_from_base_and_env() {
+        let dir = real_config_root().join("environments");
+        let mut envs = vec![
+            "development".to_string(),
+            "staging".to_string(),
+            "production".to_string(),
+        ];
+        for entry in std::fs::read_dir(&dir).expect("read config/environments") {
+            let name = entry
+                .expect("read config/environments entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            if name.ends_with(".example.toml") {
+                continue;
+            }
+            if let Some(env) = name.strip_suffix(".toml") {
+                envs.push(env.to_string());
+            }
+        }
+        envs.sort();
+        envs.dedup();
+
+        for env in &envs {
+            assert_env_layer_keeps_object_storage(env);
+        }
     }
 }

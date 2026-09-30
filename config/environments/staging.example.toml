@@ -1,4 +1,8 @@
-# 预发布环境覆盖示例。
+# 预发布环境覆盖示例（不会被加载）。
+# 加载器只读取 `environments/{FLARE_ENV}.toml`；本文件以 `.example.toml` 结尾，
+# 因此设置 FLARE_ENV=staging 不会因缺 ALIYUN_* 而加载失败，也不会让示例里的
+# OSS 桶、CDN 与凭据占位覆盖 base.toml 的对象存储（取自 FLARE_S3_* 等环境变量）。
+# 需要预发布覆盖时复制为 staging.toml 并按部署填写，勿提交真实凭据。
 # 仅支持 root [mq] 与 [object_storage.*]；完整服务覆盖请使用 config/overrides/*.toml。
 # `${VAR}` 会在加载时展开，缺失则配置加载失败。
 

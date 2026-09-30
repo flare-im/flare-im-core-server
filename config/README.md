@@ -72,5 +72,5 @@ Do not add active TOML keys that are not consumed by `FlareAppConfig` or a servi
 - Commit concise defaults and examples, not secrets.
 - Use `overrides/*.toml` for deployment overlays that need the full recursive merge surface.
 - Use `environments/{FLARE_ENV}.toml` only for `[mq]` and `[object_storage.*]` until the loader is widened.
-- `environments/production.example.toml` is an example and is never loaded: `FLARE_ENV=production` keeps the object store from `base.toml` and `FLARE_S3_*`. Copy it to `production.toml` in the deployment to activate an overlay.
+- `environments/production.example.toml` and `environments/staging.example.toml` are examples and are never loaded: `FLARE_ENV=production` or `FLARE_ENV=staging` keeps the object store from `base.toml` and `FLARE_S3_*`. Copy one to `production.toml` / `staging.toml` in the deployment to activate an overlay. Only `*.example.toml` files are committed here.
 - Keep service config files one service per file, kebab-case file names, snake_case table names.
