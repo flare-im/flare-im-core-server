@@ -27,7 +27,8 @@ flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"
 hex = { workspace = true }
 moka = { workspace = true }
 once_cell = { workspace = true }
-prometheus = { workspace = true }
+# process：Linux 上默认注册表自带进程指标（CPU、RSS、fd、线程数），/metrics 合并默认注册表导出。
+prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rand = { workspace = true }

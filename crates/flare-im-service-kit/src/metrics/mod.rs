@@ -148,10 +148,35 @@ fn normalize_metrics_path(path: String) -> String {
     }
 }
 
-/// 将全局注册表编码为 Prometheus text format。
+/// 收集 [`REGISTRY`] 与 prometheus 默认注册表的全部指标族，按名称排序。
+///
+/// 默认注册表以前没有任何出口，注册在那里的指标等于不存在：server-core 的
+/// `mq_process_ack_total`/`mq_process_ack_duration_seconds` 就在其中，发布门禁面板与
+/// nack/term、死信告警全靠它。默认注册表在 Linux 上还自带进程指标
+/// （`process_cpu_seconds_total`、`process_resident_memory_bytes`、`process_open_fds` 等，
+/// 依赖本 crate 打开的 `process` 特性），不在 [`REGISTRY`] 再注册一份，免得每次抓取读两遍 /proc。
+///
+/// 同名指标族只保留 [`REGISTRY`] 的那份：同一名字输出两次会让 Prometheus 整次抓取失败。
+fn gather_all_registries() -> Vec<prometheus::proto::MetricFamily> {
+    let mut families = REGISTRY.gather();
+    let own: std::collections::HashSet<String> = families
+        .iter()
+        .map(|family| family.name().to_string())
+        .collect();
+    families.extend(
+        prometheus::default_registry()
+            .gather()
+            .into_iter()
+            .filter(|family| !own.contains(family.name())),
+    );
+    families.sort_by(|a, b| a.name().cmp(b.name()));
+    families
+}
+
+/// 将全部注册表编码为 Prometheus text format（见 [`gather_all_registries`]）。
 pub fn encode_prometheus_text() -> std::result::Result<String, prometheus::Error> {
     let encoder = TextEncoder::new();
-    let metric_families = REGISTRY.gather();
+    let metric_families = gather_all_registries();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer)?;
     Ok(String::from_utf8_lossy(&buffer).into_owned())
@@ -924,5 +949,69 @@ mod tests {
 
         assert!(encoded.contains("message_orchestrator_send_stage_duration_seconds"));
         assert!(encoded.contains("stage=\"mq_publish\""));
+    }
+
+    /// server-core 的 MQ ack 指标注册在默认注册表；/metrics 必须把它带出来，
+    /// 否则发布门禁的 nack/term 与死信告警永远无数。
+    #[test]
+    fn encode_prometheus_text_exports_default_registry_metrics() {
+        let probe = IntCounter::new(
+            "service_kit_default_registry_probe_total",
+            "probe registered in the prometheus default registry",
+        )
+        .expect("probe metric definition is static");
+        prometheus::default_registry()
+            .register(Box::new(probe.clone()))
+            .expect("probe registers once");
+        probe.inc();
+
+        let encoded = encode_prometheus_text().expect("metrics encode succeeds");
+
+        assert!(
+            encoded.contains("service_kit_default_registry_probe_total 1"),
+            "default registry metric missing from /metrics output"
+        );
+    }
+
+    /// 两个注册表里同名的指标族只能输出一次：重复的 `# TYPE` 会让整次抓取失败。
+    #[test]
+    fn encode_prometheus_text_keeps_one_family_per_name() {
+        let name = "service_kit_duplicate_probe_total";
+        let own = IntCounter::new(name, "probe in the service kit registry")
+            .expect("probe metric definition is static");
+        let default = IntCounter::new(name, "probe in the default registry")
+            .expect("probe metric definition is static");
+        REGISTRY
+            .register(Box::new(own.clone()))
+            .expect("probe registers once");
+        prometheus::default_registry()
+            .register(Box::new(default.clone()))
+            .expect("probe registers once");
+        own.inc_by(2);
+        default.inc_by(5);
+
+        let encoded = encode_prometheus_text().expect("metrics encode succeeds");
+
+        assert_eq!(encoded.matches(&format!("# TYPE {name} ")).count(), 1);
+        assert!(encoded.contains(&format!("{name} 2")));
+    }
+
+    /// 面板的 CPU/内存/fd 图依赖进程指标；它们只在 Linux 上由默认注册表提供。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn encode_prometheus_text_exports_process_metrics_on_linux() {
+        let encoded = encode_prometheus_text().expect("metrics encode succeeds");
+        for name in [
+            "process_cpu_seconds_total",
+            "process_resident_memory_bytes",
+            "process_open_fds",
+            "process_max_fds",
+            "process_threads",
+        ] {
+            assert!(
+                encoded.contains(&format!("# TYPE {name} ")),
+                "{name} missing from /metrics output"
+            );
+        }
     }
 }
