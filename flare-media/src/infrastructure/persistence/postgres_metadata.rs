@@ -13,13 +13,20 @@ use crate::domain::model::{
     FileAccessType, MediaAssetStatus, MediaFileMetadata, MediaReference,
     STORAGE_BUCKET_METADATA_KEY, STORAGE_PATH_METADATA_KEY,
 };
-use crate::domain::repository::{MediaMetadataStore, MediaReferenceStore};
+use crate::domain::repository::{MediaMetadataStore, MediaReferenceStore, OrphanAssetClaim};
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+const MEDIA_ASSET_COLUMNS: &str = "owner_id, file_id, file_name, mime_type, file_size, url, \
+     cdn_url, md5, sha256, metadata, uploaded_at, reference_count, status, grace_expires_at, \
+     access_type";
 
 #[cfg(test)]
 #[path = "postgres_metadata_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "postgres_race_tests.rs"]
+mod race_tests;
 
 #[derive(Debug, FromRow)]
 struct MediaAssetRow {
@@ -153,6 +160,29 @@ impl TryFrom<MediaReferenceRow> for MediaReference {
             metadata: metadata_map,
             created_at: row.created_at,
             expires_at: row.expires_at,
+        })
+    }
+}
+
+/// 未提交的孤儿认领：持有事务即持有资产行的 FOR UPDATE 锁。
+struct PostgresOrphanClaim {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    asset: MediaFileMetadata,
+}
+
+#[async_trait::async_trait]
+impl OrphanAssetClaim for PostgresOrphanClaim {
+    fn asset(&self) -> &MediaFileMetadata {
+        &self.asset
+    }
+
+    async fn commit(self: Box<Self>) -> Result<()> {
+        self.tx.commit().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to commit orphaned media claim",
+            )
         })
     }
 }
@@ -481,6 +511,71 @@ impl MediaMetadataStore for PostgresMetadataStore {
         rows.into_iter().map(MediaFileMetadata::try_from).collect()
     }
 
+    async fn claim_orphaned_asset(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Option<Box<dyn OrphanAssetClaim>>> {
+        let tenant_id = crate::domain::service::require_tenant(ctx)?;
+        let db_error = |e: sqlx::Error, action: &'static str| {
+            map_infra_error(e, ErrorCode::DatabaseError, action)
+        };
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| db_error(e, "failed to begin orphaned media claim"))?;
+        // 先拿行锁。进行中的引用插入持有该行的 FOR KEY SHARE（create_reference 显式加锁，
+        // 外键检查也会加），这里会等它提交；之后开始的插入则等本次认领结束。
+        let row = sqlx::query_as::<_, MediaAssetRow>(&format!(
+            "SELECT {MEDIA_ASSET_COLUMNS} FROM media_assets
+             WHERE tenant_id = $1 AND file_id = $2
+               AND reference_count = 0
+               AND status = 'pending'
+               AND grace_expires_at IS NOT NULL
+               AND grace_expires_at <= $3
+             FOR UPDATE"
+        ))
+        .bind(tenant_id)
+        .bind(file_id)
+        .bind(before)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_error(e, "failed to lock orphaned media asset"))?;
+        let Some(row) = row else {
+            tx.rollback()
+                .await
+                .map_err(|e| db_error(e, "failed to release orphaned media claim"))?;
+            return Ok(None);
+        };
+        // READ COMMITTED 下这条语句的快照取于拿锁之后：拿锁前已提交的引用都可见，会取消认领。
+        let deleted = sqlx::query(
+            "DELETE FROM media_assets a
+             WHERE a.tenant_id = $1 AND a.file_id = $2
+               AND NOT EXISTS (
+                   SELECT 1 FROM media_references r
+                   WHERE r.tenant_id = a.tenant_id AND r.file_id = a.file_id
+               )",
+        )
+        .bind(tenant_id)
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_error(e, "failed to claim orphaned media asset"))?
+        .rows_affected();
+        if deleted == 0 {
+            tx.rollback()
+                .await
+                .map_err(|e| db_error(e, "failed to release orphaned media claim"))?;
+            return Ok(None);
+        }
+        Ok(Some(Box::new(PostgresOrphanClaim {
+            tx,
+            asset: row.try_into()?,
+        })))
+    }
+
     async fn update_status(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -528,6 +623,44 @@ impl MediaReferenceStore for PostgresMetadataStore {
             ));
         }
 
+        let mut tx = self.pool().begin().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to begin media reference creation",
+            )
+        })?;
+        // 在本事务内钉住资产行：持有 FOR UPDATE 的孤儿认领会让这里等待并随后看到删除；
+        // 被钉住的资产无法被认领。
+        let asset_present: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM media_assets WHERE tenant_id = $1 AND file_id = $2 FOR KEY SHARE",
+        )
+        .bind(tenant_id)
+        .bind(&reference.file_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to lock media asset for reference",
+            )
+        })?;
+        if asset_present.is_none() {
+            tx.rollback().await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DatabaseError,
+                    "failed to abort media reference creation",
+                )
+            })?;
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::MessageNotFound,
+                "metadata not found",
+                reference.file_id.clone()
+            ));
+        }
+
         let result = sqlx::query(
             r#"
             INSERT INTO media_references (
@@ -554,13 +687,20 @@ impl MediaReferenceStore for PostgresMetadataStore {
         .bind(metadata_json)
         .bind(reference.created_at)
         .bind(reference.expires_at)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             map_infra_error(
                 e,
                 ErrorCode::DatabaseError,
                 "failed to create media reference",
+            )
+        })?;
+        tx.commit().await.map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "failed to commit media reference",
             )
         })?;
 

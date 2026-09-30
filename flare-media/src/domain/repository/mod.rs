@@ -136,6 +136,17 @@ pub trait MediaMetadataStore: Send + Sync {
         before: DateTime<Utc>,
         limit: u32,
     ) -> Result<Vec<MediaFileMetadata>>;
+    /// 原子认领一个到期孤儿。`list_orphaned_assets` 只是快照；认领时锁住资产行并在锁内
+    /// 重新确认“无引用计数、待归档、宽限期已过、且没有任何引用记录”，然后删除元数据但
+    /// 暂不提交。调用方删完对象后 `commit`；丢弃认领即回滚，元数据保持原样可重试。
+    /// 与引用创建互斥：先提交的引用会让认领放弃；认领持锁期间的新引用会等待，
+    /// 认领提交后因资产不存在而失败。
+    async fn claim_orphaned_asset(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Option<Box<dyn OrphanAssetClaim>>>;
     async fn update_status(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -143,6 +154,14 @@ pub trait MediaMetadataStore: Send + Sync {
         status: MediaAssetStatus,
         grace_expires_at: Option<DateTime<Utc>>,
     ) -> Result<()>;
+}
+
+/// 一次尚未提交的孤儿认领；持有期间资产行对引用创建保持锁定。
+#[async_trait::async_trait]
+pub trait OrphanAssetClaim: Send {
+    fn asset(&self) -> &MediaFileMetadata;
+    /// 提交元数据删除。未调用即丢弃时回滚认领。
+    async fn commit(self: Box<Self>) -> Result<()>;
 }
 
 /// 媒体元数据缓存接口

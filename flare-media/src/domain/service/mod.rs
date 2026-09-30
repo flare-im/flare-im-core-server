@@ -80,7 +80,7 @@ impl MediaService {
 mod direct;
 mod helpers;
 #[cfg(test)]
-mod isolation_tests;
+pub(crate) mod isolation_tests;
 mod multipart;
 mod references;
 mod storage;

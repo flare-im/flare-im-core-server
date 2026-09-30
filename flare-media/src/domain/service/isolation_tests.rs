@@ -1,11 +1,43 @@
 //! Deterministic domain regression: real upload/read/session/cleanup orchestration,
 //! in-memory ports. PostgreSQL/S3 and HTTP end-to-end gates remain separate.
 use super::*;
-use crate::domain::repository::{MediaLocalStore, MediaMetadataStore, UploadSessionStore};
+use crate::domain::repository::{
+    MediaLocalStore, MediaMetadataStore, OrphanAssetClaim, UploadSessionStore,
+};
 use std::sync::{Arc, Mutex};
 
+type MetadataMap = Arc<Mutex<HashMap<(String, String), MediaFileMetadata>>>;
+
 #[derive(Default)]
-struct Metadata(Mutex<HashMap<(String, String), MediaFileMetadata>>);
+pub(crate) struct Metadata(pub(crate) MetadataMap);
+
+/// In-memory claim: the entry is removed at claim time and restored unless committed.
+struct MemoryClaim {
+    map: MetadataMap,
+    key: (String, String),
+    asset: Option<MediaFileMetadata>,
+}
+
+#[async_trait::async_trait]
+impl OrphanAssetClaim for MemoryClaim {
+    fn asset(&self) -> &MediaFileMetadata {
+        self.asset
+            .as_ref()
+            .expect("claim holds its asset until commit")
+    }
+    async fn commit(mut self: Box<Self>) -> Result<()> {
+        self.asset = None;
+        Ok(())
+    }
+}
+
+impl Drop for MemoryClaim {
+    fn drop(&mut self) {
+        if let Some(asset) = self.asset.take() {
+            self.map.lock().unwrap().insert(self.key.clone(), asset);
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl MediaMetadataStore for Metadata {
@@ -63,6 +95,29 @@ impl MediaMetadataStore for Metadata {
             .map(|(_, value)| value.clone())
             .collect())
     }
+    async fn claim_orphaned_asset(
+        &self,
+        ctx: &Context,
+        id: &str,
+        before: chrono::DateTime<Utc>,
+    ) -> Result<Option<Box<dyn OrphanAssetClaim>>> {
+        let key = (require_tenant(ctx)?.to_string(), id.to_string());
+        let mut map = self.0.lock().unwrap();
+        let orphan = map.get(&key).is_some_and(|value| {
+            value.reference_count == 0
+                && value.status == MediaAssetStatus::Pending
+                && value.grace_expires_at.is_some_and(|at| at <= before)
+        });
+        if !orphan {
+            return Ok(None);
+        }
+        let asset = map.remove(&key);
+        Ok(Some(Box::new(MemoryClaim {
+            map: self.0.clone(),
+            key,
+            asset,
+        })))
+    }
     async fn update_status(
         &self,
         ctx: &Context,
@@ -84,7 +139,7 @@ impl MediaMetadataStore for Metadata {
 }
 
 #[derive(Default)]
-struct Files(Mutex<HashMap<String, Vec<u8>>>);
+pub(crate) struct Files(pub(crate) Mutex<HashMap<String, Vec<u8>>>);
 
 #[async_trait::async_trait]
 impl MediaLocalStore for Files {
@@ -115,7 +170,7 @@ impl MediaLocalStore for Files {
 }
 
 #[derive(Default)]
-struct Sessions(Mutex<HashMap<String, UploadSession>>);
+pub(crate) struct Sessions(pub(crate) Mutex<HashMap<String, UploadSession>>);
 
 #[async_trait::async_trait]
 impl UploadSessionStore for Sessions {

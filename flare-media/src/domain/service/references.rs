@@ -123,49 +123,58 @@ impl MediaService {
             return Ok(vec![]);
         };
 
-        let expired = store
-            .list_orphaned_assets(ctx, Utc::now(), limit)
+        let now = Utc::now();
+        let candidates = store
+            .list_orphaned_assets(ctx, now, limit)
             .await
             .map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "list orphaned media assets")
             })?;
 
-        for asset in &expired {
-            if !Self::is_message_managed_asset(asset) {
+        let mut cleaned = Vec::new();
+        for candidate in candidates {
+            if !Self::is_message_managed_asset(&candidate) {
                 tracing::trace!(
-                    file_id = asset.file_id,
+                    file_id = candidate.file_id,
                     "跳过非消息生命周期媒体的自动归档清理"
                 );
                 continue;
             }
 
+            // 候选列表只是快照：删除前在行锁内重新确认仍是孤儿。期间已被引用的资产会被放弃；
+            // 认领持有期间的新引用会等待，认领提交后因资产不存在而失败。
+            let Some(claim) = store
+                .claim_orphaned_asset(ctx, &candidate.file_id, now)
+                .await?
+            else {
+                tracing::debug!(
+                    file_id = candidate.file_id,
+                    "孤儿候选在清理前已被引用或变更，跳过"
+                );
+                continue;
+            };
+            let asset = claim.asset();
+            let file_id = asset.file_id.clone();
             let storage_path = asset
                 .storage_path()
                 .map(|s| s.to_string())
                 .or_else(|| asset.metadata.get(STORAGE_PATH_METADATA_KEY).cloned())
                 .unwrap_or_else(|| asset.file_id.clone());
 
+            // 对象删除失败时丢弃认领（回滚），元数据原样保留供下次重试；删除对象是幂等的。
             if let Some(repo) = &self.object_repo {
                 repo.delete_object(&storage_path).await?;
             }
             if let Some(local) = &self.local_store {
                 local.delete(&storage_path).await?;
             }
-            if let Some(reference_store) = &self.reference_store {
-                reference_store
-                    .delete_all_references(ctx, &asset.file_id)
-                    .await?;
-            }
-            store.delete_metadata(ctx, &asset.file_id).await?;
+            claim.commit().await?;
             if let Some(cache) = &self.metadata_cache {
-                cache.invalidate(ctx, &asset.file_id).await?;
+                cache.invalidate(ctx, &file_id).await?;
             }
+            cleaned.push(file_id);
         }
 
-        Ok(expired
-            .into_iter()
-            .filter(Self::is_message_managed_asset)
-            .map(|asset| asset.file_id)
-            .collect())
+        Ok(cleaned)
     }
 }
