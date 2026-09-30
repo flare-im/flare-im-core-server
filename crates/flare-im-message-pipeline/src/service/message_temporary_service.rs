@@ -27,7 +27,7 @@ impl MessageTemporaryService {
     }
 
     /// 处理临时消息（只推送，不持久化）
-    #[instrument(skip(self, ctx), fields(
+    #[instrument(skip_all, fields(
         request_id = %ctx.request_id(),
         trace_id = %ctx.trace_id(),
         message_id = %message.server_id,

@@ -152,7 +152,8 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(())`: 校验通过
     /// - `Err`: 校验失败
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
+        tenant_id = %tenant_id,
         conversation_id = %message.conversation_id,
         message_type = message.message_type,
     ))]
@@ -198,7 +199,7 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(submission)`: 已填充默认值和消息 ID 的提交
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_type = message.message_type,
     ))]
@@ -357,7 +358,8 @@ impl MessageIngestService {
     }
 
     /// 为已准备好的提交分配会话序列号。
-    #[instrument(skip(self, submission), fields(
+    #[instrument(skip_all, fields(
+        tenant_id = %tenant_id,
         conversation_id = %submission.message.conversation_id,
         message_id = %submission.message_id,
     ))]
@@ -400,7 +402,8 @@ impl MessageIngestService {
     ///
     /// 保留给已有测试和直接调用方；发送主链应在会话 ensure / decorate 成功后再调用
     /// [`Self::allocate_seq_for_submission`]，减少失败路径消耗会话序列号。
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
+        tenant_id = %tenant_id,
         conversation_id = %message.conversation_id,
         message_type = message.message_type,
     ))]
@@ -424,7 +427,8 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(())`: 成功
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
+        tenant_id = %tenant_id,
         conversation_id = %submission.message.conversation_id,
         message_id = %submission.message_id,
     ))]
@@ -449,7 +453,7 @@ impl MessageIngestService {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %submission.message.conversation_id,
         message_id = %submission.message_id,
     ))]
@@ -476,7 +480,7 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(decorated_message)`: 装饰后的消息
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
     ))]
@@ -498,7 +502,7 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(recipient_user_ids)`: 接收者用户 ID 列表
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
     ))]
     pub async fn get_recipient_user_ids(
@@ -603,7 +607,7 @@ impl MessageIngestService {
     /// 仅推送消息（不持久化），接收者由调用方显式提供
     ///
     /// 适用于上游已完成路由决策的场景，避免重复成员查询。
-    #[instrument(skip(self, recipient_user_ids), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
         recipient_count = recipient_user_ids.len(),
@@ -629,7 +633,7 @@ impl MessageIngestService {
     }
 
     /// 仅推送消息（不持久化），由服务内部自动解析接收者
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
     ))]
@@ -655,7 +659,7 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(())`: 成功
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
     ))]
@@ -681,7 +685,7 @@ impl MessageIngestService {
     ///
     /// 主消息队列只承载一次可靠输入；这里把它拆成存储与实时投递两个专用流，
     /// 保持 Storage Writer 和 Push Server 的职责清晰。
-    #[instrument(skip(self, recipient_user_ids), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
         message_id = %message.server_id,
         recipient_count = recipient_user_ids.len(),
@@ -720,7 +724,7 @@ impl MessageIngestService {
     /// # 返回
     /// - `Ok(())`: 成功
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %submission.message.conversation_id,
         message_id = %submission.message_id,
         message_type = profile.message_type_label(),

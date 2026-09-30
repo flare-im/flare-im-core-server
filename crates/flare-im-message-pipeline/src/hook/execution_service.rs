@@ -61,8 +61,10 @@ impl HookExecutionService {
     /// # 返回
     /// - `Ok(HookExecutionContext)`: 包含更新后的消息和 Hook 上下文
     /// - `Err`: 错误
-    #[instrument(skip(self), fields(
+    // The message body and the caller context must never be recorded on the span.
+    #[instrument(skip_all, fields(
         conversation_id = %message.conversation_id,
+        client_msg_id = %message.client_msg_id,
         message_type = message.message_type,
     ))]
     pub async fn execute_pre_send(
@@ -112,7 +114,7 @@ impl HookExecutionService {
     /// # 返回
     /// - `Ok(())`: 成功
     /// - `Err`: 错误
-    #[instrument(skip(self, submission), fields(
+    #[instrument(skip_all, fields(
         conversation_id = %submission.message().conversation_id,
         message_id = %submission.message_id(),
     ))]
