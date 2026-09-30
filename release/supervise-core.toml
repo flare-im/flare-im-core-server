@@ -43,6 +43,8 @@ inherit_env_prefixes = ["SIGNALING_ONLINE_"]
 inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CONSOLE_PUBLIC_KEY"]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50061"
+[services.environment]
+SIGNALING_ONLINE_TENANT_POLICY = "strict"
 
 [[services]]
 name = "signaling-route"

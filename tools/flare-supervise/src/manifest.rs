@@ -739,5 +739,25 @@ required_env_unless = [
                 .iter()
                 .any(|name| name == "FLARE_CONSOLE_SIGNING_KEY")
         );
+        // Every data-plane tenant gate is pinned to strict. `environment` is
+        // applied after inherited variables, so an inherited lenient value
+        // cannot re-admit unknown or unprojected tenants.
+        for (service_name, policy_env) in [
+            ("signaling-online", "SIGNALING_ONLINE_TENANT_POLICY"),
+            ("message-ingest", "MESSAGE_INGEST_TENANT_POLICY"),
+            ("api-gateway", "FLARE_API_GATEWAY_TENANT_POLICY"),
+            ("signaling-gateway", "ACCESS_GATEWAY_TENANT_POLICY"),
+        ] {
+            let service = manifest
+                .services
+                .iter()
+                .find(|service| service.name == service_name)
+                .unwrap();
+            assert_eq!(
+                service.environment.get(policy_env).map(String::as_str),
+                Some("strict"),
+                "{service_name}"
+            );
+        }
     }
 }
