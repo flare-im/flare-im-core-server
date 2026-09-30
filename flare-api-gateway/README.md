@@ -242,6 +242,8 @@ cargo run --release
 
 Open in a browser: http://localhost:8080/swagger-ui/
 
+The Swagger UI stylesheet and script are embedded in the binary and served from `/swagger-ui/swagger-ui.css` and `/swagger-ui/swagger-ui-bundle.js`, so the page loads no external resources and works on isolated networks. They are unmodified Swagger UI 5.3.1 `dist/` files under Apache-2.0, shared with the Admin Gateway: the files, license and NOTICE are kept in `../flare-admin-gateway/assets/swagger-ui/`.
+
 ## API endpoints
 
 ### MediaService

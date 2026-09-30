@@ -242,6 +242,8 @@ cargo run --release
 
 打开浏览器访问: http://localhost:8080/swagger-ui/
 
+Swagger UI 的样式与脚本内嵌在二进制中，经 `/swagger-ui/swagger-ui.css` 与 `/swagger-ui/swagger-ui-bundle.js` 提供，页面不加载任何外部资源，隔离网络中也能打开。这两个文件是未经修改的 Swagger UI 5.3.1 `dist/` 产物，许可为 Apache-2.0；与 Admin Gateway 共用同一份文件，文件本体、许可证与 NOTICE 保存在 `../flare-admin-gateway/assets/swagger-ui/`。
+
 ## API 接口
 
 ### MediaService

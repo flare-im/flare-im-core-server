@@ -1,6 +1,8 @@
 use axum::{
-    Json, Router, middleware,
-    response::Html,
+    Json, Router,
+    http::header,
+    middleware,
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
 use std::sync::Arc;
@@ -135,7 +137,22 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+// Swagger UI 5.3.1 的静态资源随二进制内嵌，文档页不依赖公网 CDN：私有化/离线部署
+// 打开不会白屏，也不会把访问行为暴露给第三方。资源与 Apache-2.0 LICENSE/NOTICE 只在
+// flare-admin-gateway/assets/swagger-ui/ 保存一份（取自 swagger-ui 官方 dist/，未改动），
+// 两个网关共用同一份文件，升级时只改一处；该目录移动时这里会编译失败而不是静默漂移。
+const SWAGGER_UI_CSS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../flare-admin-gateway/assets/swagger-ui/swagger-ui.css"
+));
+const SWAGGER_UI_BUNDLE_JS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../flare-admin-gateway/assets/swagger-ui/swagger-ui-bundle.js"
+));
+
 async fn swagger_ui_html() -> Html<&'static str> {
+    // validatorUrl 置空：Swagger UI 默认会让浏览器去 validator.swagger.io 取校验徽章，
+    // 并把 OpenAPI 地址一并带出去。
     Html(
         r#"<!doctype html>
 <html>
@@ -143,21 +160,55 @@ async fn swagger_ui_html() -> Html<&'static str> {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Flare API Gateway Docs</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+    <link rel="stylesheet" href="/swagger-ui/swagger-ui.css" />
   </head>
   <body>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="/swagger-ui/swagger-ui-bundle.js"></script>
     <script>
       window.ui = SwaggerUIBundle({
         url: '/api-doc/openapi.json',
-        dom_id: '#swagger-ui'
+        dom_id: '#swagger-ui',
+        validatorUrl: null
       });
     </script>
   </body>
 </html>
 "#,
     )
+}
+
+fn embedded_asset(content_type: &'static str, body: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn swagger_ui_css() -> Response {
+    embedded_asset("text/css; charset=utf-8", SWAGGER_UI_CSS)
+}
+
+async fn swagger_ui_bundle_js() -> Response {
+    embedded_asset("text/javascript; charset=utf-8", SWAGGER_UI_BUNDLE_JS)
+}
+
+/// OpenAPI 文档与 Swagger UI 路由；全部资源来自本进程，不引用任何外部源。
+fn api_docs_router() -> Router {
+    Router::new()
+        .route("/api-doc/openapi.json", get(openapi_json))
+        .route("/swagger-ui", get(swagger_ui_html))
+        .route("/swagger-ui/", get(swagger_ui_html))
+        .route("/swagger-ui/swagger-ui.css", get(swagger_ui_css))
+        .route(
+            "/swagger-ui/swagger-ui-bundle.js",
+            get(swagger_ui_bundle_js),
+        )
 }
 
 /// 创建默认路由。
@@ -277,15 +328,20 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .route("/tokens/refresh", post(auth_handler::refresh_token))
         .route("/revoke", post(auth_handler::revoke_user));
 
-    Router::new()
+    let api_router = Router::new()
         .nest("/api/v1/auth", auth_router)
         .nest("/api/v1/medias", media_router)
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)
-        .nest("/api/v1/presence", presence_router)
-        .route("/api-doc/openapi.json", get(openapi_json))
-        .route("/swagger-ui", get(swagger_ui_html))
-        .route("/swagger-ui/", get(swagger_ui_html))
+        .nest("/api/v1/presence", presence_router);
+
+    compose_router(api_router)
+}
+
+/// 顶层路由装配；与下游 gRPC 客户端无关，单测可直接用它验证文档页与健康检查。
+fn compose_router(api_router: Router) -> Router {
+    api_router
+        .merge(api_docs_router())
         // 健康检查
         .route("/health", get(|| async { "OK" }))
 }
@@ -293,3 +349,102 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
 #[cfg(test)]
 #[path = "router_media_tests.rs"]
 mod media_tests;
+
+#[cfg(test)]
+mod api_docs_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get_path(path: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let api_stub = Router::new().route("/api/v1/presence/stub", get(|| async { "stub" }));
+        let response = compose_router(api_stub)
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, content_type, body.to_vec())
+    }
+
+    /// 取出 HTML 中所有 `src="..."` / `href="..."` 的取值。
+    fn referenced_urls(html: &str) -> Vec<String> {
+        let mut urls = Vec::new();
+        for attr in ["src=\"", "href=\""] {
+            let mut rest = html;
+            while let Some(start) = rest.find(attr) {
+                rest = &rest[start + attr.len()..];
+                let end = rest.find('"').unwrap();
+                urls.push(rest[..end].to_owned());
+                rest = &rest[end..];
+            }
+        }
+        urls
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_bundle_is_served_from_embedded_asset() {
+        let (status, content_type, body) = get_path("/swagger-ui/swagger-ui-bundle.js").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            content_type.as_deref(),
+            Some("text/javascript; charset=utf-8")
+        );
+        assert_eq!(body, SWAGGER_UI_BUNDLE_JS);
+        assert!(String::from_utf8_lossy(&body).contains("SwaggerUIBundle"));
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_css_is_served_from_embedded_asset() {
+        let (status, content_type, body) = get_path("/swagger-ui/swagger-ui.css").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("text/css; charset=utf-8"));
+        assert!(!body.is_empty());
+        assert_eq!(body, SWAGGER_UI_CSS);
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_html_references_only_local_resources() {
+        for page in ["/swagger-ui", "/swagger-ui/"] {
+            let (status, _, body) = get_path(page).await;
+            assert_eq!(status, StatusCode::OK);
+            let html = String::from_utf8(body).unwrap();
+
+            assert!(!html.contains("unpkg"), "{page} still loads from unpkg");
+            assert!(
+                !html.contains("://"),
+                "{page} references an external origin"
+            );
+
+            let urls = referenced_urls(&html);
+            assert_eq!(
+                urls.len(),
+                2,
+                "{page} should reference exactly the css and bundle: {urls:?}"
+            );
+            for url in urls {
+                let (status, _, body) = get_path(&url).await;
+                assert_eq!(status, StatusCode::OK, "{page} references missing {url}");
+                assert!(!body.is_empty(), "{url} is empty");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openapi_json_and_health_stay_reachable_next_to_swagger_ui() {
+        let (status, content_type, _) = get_path("/api-doc/openapi.json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+
+        let (status, _, body) = get_path("/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"OK");
+    }
+}
