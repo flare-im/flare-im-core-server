@@ -325,6 +325,35 @@ GET /api/v1/conversations?user_id=user-123&page=1&page_size=20
 Authorization: Bearer <token>
 ```
 
+### Device push tokens
+
+The user and tenant come only from the IM token. The gateway signs an internal User context for them and calls Push Proxy `RegisterDevicePushToken` / `UnregisterDevicePushToken`. Request bodies and queries reject unknown fields, so a caller cannot name another user or tenant. A token bound to a device can only manage that device. `provider` currently accepts only `getui`.
+
+#### Register or update a push token
+```http
+PUT /api/v1/devices/device-123/push-token
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "platform": "ios",
+  "provider": "getui",
+  "token": "<push token issued by the provider>"
+}
+```
+
+#### Remove a push token
+```http
+DELETE /api/v1/devices/device-123/push-token?provider=getui
+Authorization: Bearer <token>
+```
+
+Push Proxy is reached at the static gRPC address `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`. When it is unset, the gateway uses `http://127.0.0.1:50091`, where Push Proxy listens in the single topology (same container). Other topologies must set it. The channel connects lazily: the gateway starts without Push Proxy and these routes answer 503 until it is reachable.
+
+### Unknown routes
+
+A path that matches no route, including an unknown path under a known prefix such as `/api/v1/medias/`, returns 404 with the same JSON envelope as other errors: `{"code":404,"reason":"NOT_FOUND","message":"route not found"}`. This lets a caller tell a Core 404 from one returned by Edge or a reverse proxy.
+
 ## Project structure
 
 ```

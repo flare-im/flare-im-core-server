@@ -29,6 +29,7 @@ fn public_router_exposes_bff_routes_and_keeps_admin_out() {
         ".nest(\"/api/v1/messages\"",
         ".nest(\"/api/v1/conversations\"",
         ".nest(\"/api/v1/presence\"",
+        ".nest(\"/api/v1/devices\"",
         ".route(\"/api-doc/openapi.json\"",
         ".route(\"/swagger-ui\"",
         ".route(\"/health\"",
@@ -49,8 +50,8 @@ fn protected_api_groups_are_wrapped_by_gateway_auth() {
         .match_indices(".route_layer(middleware::from_fn(gateway_auth_middleware));")
         .count();
     assert_eq!(
-        auth_layers, 4,
-        "media/message/conversation/presence API groups must all be protected"
+        auth_layers, 5,
+        "media/message/conversation/presence/device API groups must all be protected"
     );
 }
 

@@ -42,10 +42,13 @@
 | `/api/v1/conversations/participants` | GET | 分页读取会话参与者 | 必须 |
 | `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用 | 管理权限 |
 | `/api/v1/medias/*` | GET/POST/DELETE | 媒体能力 | 除公开下载外必须 |
+| `/api/v1/devices/{device_id}/push-token` | PUT/DELETE | 登记/注销本用户设备的推送令牌，转 Push Proxy | 必须（租户绑定的终端用户令牌） |
 | `/api/v1/capabilities/*` | GET/POST | 能力管理面，后续补齐 | 管理权限 |
 | `/api/v1/admin/*` | GET/POST/PATCH/DELETE | 管理后台、运维、审计接口 | 管理主体 |
 | `/health` | GET | 存活检查 | 不需要 |
 | `/api-doc/openapi.json` | GET | OpenAPI | 可按环境关闭 |
+
+没有匹配任何路由的请求返回 404 与统一的 `ApiResponse` 错误信封（`reason = NOT_FOUND`），不返回空体。
 
 REST 命名规则：
 

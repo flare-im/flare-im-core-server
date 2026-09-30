@@ -163,6 +163,7 @@ Gateway 访问下游 gRPC 时必须透传：
 | Conversation | `POST /api/v1/conversations/participants/manage` | 参与者管理 | 已接入 typed gRPC，需 Admin/强权限 |
 | Media | `/api/v1/medias/*` | 上传、预签名、引用、处理、对象管理 | 已接入 |
 | Presence | `/api/v1/presence/*` | 在线状态查询、登出 | 已接入 |
+| Device | `PUT/DELETE /api/v1/devices/{device_id}/push-token` | 登记/注销本用户设备的推送令牌 | 已接入 typed gRPC（Push Proxy） |
 | Capability | `/api/v1/capabilities/*` | 能力列表、授权、插件管理 | 待接入 |
 | Storage Query | `POST /api/v1/admin/messages/query` | 管理端多维消息查询 | 已在 `flare-admin-gateway` 接入 storage reader typed facade |
 
@@ -269,6 +270,8 @@ Gateway 访问下游 gRPC 时必须透传：
 | `/presence/users/{user_id}/devices` | GET | 设备列表 | `OnlineService.ListUserDevices` |
 | `/presence/devices/{device_id}` | GET | 设备详情 | `OnlineService.GetDevice` |
 | `/presence/devices/{device_id}/kick` | POST | 强制下线 | `OnlineService.KickDevice` |
+| `/devices/{device_id}/push-token` | PUT | 登记/更新推送令牌 | `PushService.RegisterDevicePushToken` |
+| `/devices/{device_id}/push-token?provider=` | DELETE | 注销推送令牌 | `PushService.UnregisterDevicePushToken` |
 
 强制下线必须记录 `x-actor-id` 和 `x-audit-reason`。
 

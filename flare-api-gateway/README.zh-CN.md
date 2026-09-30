@@ -325,6 +325,35 @@ GET /api/v1/conversations?user_id=user-123&page=1&page_size=20
 Authorization: Bearer <token>
 ```
 
+### 设备推送令牌
+
+用户与租户只取自 IM 令牌。网关按该身份现签 User 内部上下文，再调用 Push Proxy 的 `RegisterDevicePushToken` / `UnregisterDevicePushToken`。请求体和查询串拒收未知字段，调用方无法指定其他用户或租户。绑定了设备的令牌只能管理本设备。`provider` 目前只接受 `getui`。
+
+#### 登记或更新推送令牌
+```http
+PUT /api/v1/devices/device-123/push-token
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "platform": "ios",
+  "provider": "getui",
+  "token": "<推送通道下发的令牌>"
+}
+```
+
+#### 注销推送令牌
+```http
+DELETE /api/v1/devices/device-123/push-token?provider=getui
+Authorization: Bearer <token>
+```
+
+Push Proxy 的 gRPC 地址由 `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` 静态配置。未配置时使用 `http://127.0.0.1:50091`，即 single 拓扑里同容器 Push Proxy 的监听地址；其他拓扑必须显式配置。通道惰性连接：Push Proxy 不在时网关照常启动，这两个接口在其可达之前返回 503。
+
+### 未知路由
+
+没有匹配任何路由的路径（包括已知前缀下的未知子路径，如 `/api/v1/medias/` 下）返回 404，响应体与其他错误相同的 JSON 信封：`{"code":404,"reason":"NOT_FOUND","message":"route not found"}`。调用方据此区分 Core 的 404 与 Edge 或反向代理返回的 404。
+
 ## 项目结构
 
 ```

@@ -3,7 +3,7 @@ use axum::{
     http::header,
     middleware,
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use std::sync::Arc;
 use utoipa::OpenApi;
@@ -14,7 +14,9 @@ use super::conversation_handler;
 use super::media_handler;
 use super::message_handler;
 use super::presence_handler;
+use super::push_token_handler;
 use flare_im_service_kit::clients::GrpcClients;
+use flare_server_core::http::HttpApiError;
 
 /// OpenAPI 文档定义（由 utoipa 过程宏消费，编译器视为未构造）
 #[allow(dead_code)]
@@ -53,6 +55,8 @@ use flare_im_service_kit::clients::GrpcClients;
         presence_handler::batch_get_user_presence,
         presence_handler::kick_device,
         presence_handler::logout_presence,
+        push_token_handler::register_push_token,
+        push_token_handler::unregister_push_token,
         auth_handler::issue_token,
         auth_handler::refresh_token,
         auth_handler::revoke_user,
@@ -120,6 +124,8 @@ use flare_im_service_kit::clients::GrpcClients;
             super::presence_handler::KickDeviceHttpResponse,
             super::presence_handler::LogoutPresenceHttpRequest,
             super::presence_handler::LogoutPresenceHttpResponse,
+            super::push_token_handler::RegisterPushTokenHttpRequest,
+            super::push_token_handler::PushTokenHttpResponse,
             super::auth_handler::IssueTokenHttpRequest,
         auth_handler::RevokeUserHttpRequest,
             super::auth_handler::IssuedTokenHttp,
@@ -129,6 +135,7 @@ use flare_im_service_kit::clients::GrpcClients;
         (name = "Media", description = "媒体文件管理接口"),
         (name = "Message", description = "消息管理接口"),
         (name = "Presence", description = "在线状态接口"),
+        (name = "Device", description = "设备推送令牌接口"),
     )
 )]
 struct ApiDoc;
@@ -320,6 +327,16 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .layer(axum::Extension(clients.clone()))
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
+    // Device API 路由：设备推送令牌。用户/租户只取自 IM 令牌，Push Proxy 客户端由启动层以
+    // Extension 注入。
+    let device_router = Router::new()
+        .route(
+            "/{device_id}/push-token",
+            put(push_token_handler::register_push_token)
+                .delete(push_token_handler::unregister_push_token),
+        )
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
+
     // 主路由
     // 签发/刷新是"拿 token 之前"的接口，不能套 bearer 中间件；自己的鉴权（app 凭据 / 联调开关 /
     // 刷新用旧 token）在 handler 里做。生命周期实现不在网关（GATEWAY_SPEC 第 3 节）。
@@ -333,7 +350,8 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .nest("/api/v1/medias", media_router)
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)
-        .nest("/api/v1/presence", presence_router);
+        .nest("/api/v1/presence", presence_router)
+        .nest("/api/v1/devices", device_router);
 
     compose_router(api_router)
 }
@@ -344,11 +362,22 @@ fn compose_router(api_router: Router) -> Router {
         .merge(api_docs_router())
         // 健康检查
         .route("/health", get(|| async { "OK" }))
+        // 未知路由（含各分组前缀下的未知子路径）回与其它错误一致的 JSON 信封，
+        // 调用方据此区分 Core 的 404 与 Edge/反代的 404。
+        .fallback(route_not_found)
+}
+
+async fn route_not_found() -> HttpApiError {
+    HttpApiError::not_found("route not found")
 }
 
 #[cfg(test)]
 #[path = "router_media_tests.rs"]
 mod media_tests;
+
+#[cfg(test)]
+#[path = "router_push_token_tests.rs"]
+mod push_token_tests;
 
 #[cfg(test)]
 mod api_docs_tests {
@@ -434,6 +463,19 @@ mod api_docs_tests {
                 assert_eq!(status, StatusCode::OK, "{page} references missing {url}");
                 assert!(!body.is_empty(), "{url} is empty");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_route_returns_json_not_found_envelope() {
+        for path in ["/nope", "/api/v1/presence/nope", "/swagger-ui/nope.js"] {
+            let (status, content_type, body) = get_path(path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(content_type.as_deref(), Some("application/json"), "{path}");
+            let json: serde_json::Value = serde_json::from_slice(&body)
+                .unwrap_or_else(|_| panic!("{path}: 404 body is not JSON: {body:?}"));
+            assert_eq!(json["code"], 404, "{path}: {json}");
+            assert_eq!(json["reason"], "NOT_FOUND", "{path}: {json}");
         }
     }
 

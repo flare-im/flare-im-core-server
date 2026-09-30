@@ -14,6 +14,7 @@ use flare_server_core::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -21,6 +22,7 @@ use tracing::{info, warn};
 
 use crate::interface::http::MessageContextSigner;
 use crate::interface::http::create_public_router;
+use crate::interface::http::{PushTokenClient, push_proxy_url_from_env};
 
 pub struct ApplicationBootstrap;
 
@@ -52,6 +54,16 @@ impl ApplicationBootstrap {
         let clients =
             Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
         info!("gRPC clients initialized");
+
+        // 设备推送令牌接口直连 Push Proxy 的静态地址（惰性连接，不阻塞启动）。
+        let push_proxy_url = push_proxy_url_from_env();
+        let push_tokens = PushTokenClient::connect_lazy(
+            &push_proxy_url,
+            Duration::from_secs(settings.grpc.connect_timeout_secs),
+            Duration::from_secs(settings.grpc.request_timeout_secs),
+        )
+        .map_err(flare_server_core::error::FlareError::system)?;
+        info!(push_proxy_url = %push_proxy_url, "device push token endpoint uses static Push Proxy address");
 
         let token_service = {
             let base = TokenService::new(
@@ -195,6 +207,7 @@ impl ApplicationBootstrap {
             .layer(axum::Extension(token_issuer))
             .layer(axum::Extension(token_service))
             .layer(axum::Extension(MessageContextSigner(message_signer)))
+            .layer(axum::Extension(push_tokens))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())

@@ -463,6 +463,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::ServiceEndpoint,
     ),
     env(
+        "FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "FLARE_API_GATEWAY_SERVER_PORT",
         EnvOwner::ApiGateway,
         EnvPurpose::GatewayRuntime,
