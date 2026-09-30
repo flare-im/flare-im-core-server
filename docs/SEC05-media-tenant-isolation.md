@@ -61,7 +61,7 @@ Run API Gateway, Admin Gateway and Media against **disposable** active tenants A
 - `FLARE_MEDIA_E2E_TENANT_A`, `FLARE_MEDIA_E2E_TENANT_B`: distinct fixture tenants
 - `FLARE_MEDIA_E2E_USER_A`, `FLARE_MEDIA_E2E_USER_B`: normal user bearer tokens (prefer the same user ID in the two tenants)
 - `FLARE_MEDIA_E2E_OTHER_A`: a different user in tenant A
-- `FLARE_MEDIA_E2E_ADMIN_A`: current Admin Gateway assertion authorized for tenant A only
+- `FLARE_MEDIA_E2E_ADMIN_A`: current Admin Gateway assertion authorized for tenant A only (required only with `--admin-url`)
 
 ```sh
 python3 scripts/test_media_isolation_http.py \
@@ -69,11 +69,26 @@ python3 scripts/test_media_isolation_http.py \
   --bucket fixture-bucket --storage-origin http://127.0.0.1:9000
 ```
 
-Ports are examples; use the actual isolated deployment. Remote services must use HTTPS. The script rejects automatic redirects, never forwards an application bearer to S3, downloads only from the explicitly allowed storage origin, and never logs tokens, bodies or signed URLs. It creates one random fixture and deletes only that file. It deliberately does **not** invoke tenant-wide orphan cleanup. Repeat once for local storage and once for S3; complete multipart/direct transport tests in the existing client integration suite before release.
+Through an installation's Edge (Core mounted under `/api`, objects under `/flare-media/`), dialing the numeric loopback address while TLS SNI, certificate verification and `Host` keep the installation domain, and trusting only the installation CA:
+
+```sh
+python3 scripts/test_media_isolation_http.py \
+  --api-url https://p0e2e.127-0-0-1.sslip.io:18443/api \
+  --storage-origin https://p0e2e.127-0-0-1.sslip.io:18443/flare-media/ \
+  --ca-file ~/.flare-p0e2e/edge/tls/fullchain.pem --connect-address 127.0.0.1
+```
+
+- `--api-url` / `--admin-url` are an origin plus an optional path prefix (plain segments only; no query, encoding or dot segments).
+- `--storage-origin` is an origin plus an optional path prefix. The owner's presigned `file-url` and the `/files/{id}` 307 target must be absolute URLs under it; both are fetched without the application bearer and must return the uploaded bytes. Without it, a redirect fails the gate and the presigned check prints `presigned: not evaluated`.
+- `--connect-address` must be a numeric IP; plaintext is allowed only to loopback.
+- Without `--admin-url` the admin half is skipped and the output says `admin: not evaluated`; the result is then not evidence for the Admin Gateway boundary.
+
+Ports are examples; use the actual isolated deployment. Remote services must use HTTPS. The script rejects automatic redirects, ignores proxy settings, never forwards an application bearer to storage, and never logs tokens, bodies or signed URLs. It creates one random fixture and deletes only that file (also when a check fails). It deliberately does **not** invoke tenant-wide orphan cleanup. Repeat once for local storage and once for S3; complete multipart/direct transport tests in the existing client integration suite before release.
 
 ## Remaining limitations to track explicitly
 
 - Generic gRPC error conversion still maps some denied / unsupported operations to HTTP 500. The external test asserts no data/redirect plus a failing status, not a fabricated stable 403 contract.
 - Only reference *creation* is serialized with cleanup. Reference release and owner deletion still write the whole metadata row with an upsert, so releasing a reference on an asset that a concurrent cleanup has just removed can re-insert a metadata row without an object. `CleanupOrphanedAssetsRequest.dry_run` is not honored: a dry run deletes like a real run.
+- `GET /api/v1/medias/files/{id}` redirects to `cdn_url` whenever it is non-empty. With the default empty CDN setting (`cdn_base_url = "${FLARE_S3_CDN_BASE_URL:-}"`) the S3 repository normalizes its own copy to unset, but the Media service configuration keeps `Some("")`, so `cdn_url` becomes the bare object key (also persisted in metadata at upload) and the 307 `Location` is a relative path that clients resolve against the API. The HTTP gate fails on this redirect until it is fixed; the presigned `file-url` path is not affected.
 - Direct upload URL generation / ACL / object inventory and typed cross-user attachment grants need separate completed contracts. The SEC-05 patch does not claim these prototypes are production-complete.
 - Actual PostgreSQL, HTTP and S3 acceptance must be recorded separately from source checks and in-memory tests. A skipped external test is not an acceptance result.
