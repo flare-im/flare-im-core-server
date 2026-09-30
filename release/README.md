@@ -318,13 +318,13 @@ cd /opt/flare-im-core/current
 ./scripts/smoke.sh
 ```
 
-`smoke.sh` 会发送一条单聊文本消息，并验证：
+`smoke.sh` 调用 `smoke_message_flow.sh`，只走对外 Edge：用 Social 公共 API 在隔离的 `e2e-` 租户注册、登录两个用户并加好友，再用 IM 令牌经 Core HTTP API 发送一条单聊消息，并验证：
 
-- `flare-message-ingest` 返回成功
-- ACK durability 至少达到 `SEND_ACK_DURABILITY_BROKER_ACCEPTED`
-- PostgreSQL `messages` 有持久化记录
-- `message_write_ledger.write_state` 至少达到 `archive_persisted`
-- `flare-storage-reader` 可按 seq 读回刚发送的消息
+- `/api/v1/messages/send` 返回成功及正的会话序号
+- 收发双方经 `/api/v1/conversations` 回读到该会话
+- PostgreSQL `messages` 有持久化记录，`message_write_ledger.write_state` 至少达到 `archive_persisted`（数据库容器内只读 SELECT）
+
+因此部署前方需要 Edge 与 Social；只有 Core 的发布包无法通过。所需变量见 `.env.example` 与 `./scripts/smoke_message_flow.sh --help`。
 
 也可以启动后自动跑 smoke：
 

@@ -67,19 +67,22 @@ cargo run --example chatroom_client -- user2
 
 ### 4. 验证消息收发读链路
 
-启动 Core 后，用烟测脚本发送一条单聊文本消息，确认 `messages` 与 `message_write_ledger` 已收敛，并通过 storage-reader 读回该消息：
+消息流烟测只走对外入口（经 Edge 的 HTTPS），需要 Edge + Core + Social + PostgreSQL 全栈，单独启动 Core 不够：用 Social 公共 API 在隔离的 `e2e-` 租户里注册、登录两个新用户并互加好友，再用 Social 登录返回的 IM 令牌经 Core api-gateway 发送一条单聊消息、经会话列表回读，最后在数据库容器内以只读事务核对落库：
 
 ```bash
+SMOKE_BASE_URL=https://im.example.test:18443 \
+SMOKE_CA_FILE=/path/to/edge-ca.pem \
+SMOKE_TENANT_ID=e2e-0123456789abcdef0123 \
+SMOKE_PG_CONTAINER=<postgres 容器名> \
 ./scripts/smoke_message_flow.sh
 ```
 
-脚本默认检查：
-- `flare-message-ingest` `MessageSendService/SendMessage`：`127.0.0.1:50182`
-- `flare-storage-reader` `StorageReaderService/QueryMessagesBySeq`：`127.0.0.1:60083`
-- PostgreSQL / TimescaleDB：`postgres://flare:flare123@localhost:25432/flare2`
-- ACK durability 至少达到：`SEND_ACK_DURABILITY_BROKER_ACCEPTED`
-- 持久化账本至少达到：`message_write_ledger.write_state = archive_persisted`
-- 读模型返回刚发送的 `server_msg_id`
+脚本检查：
+- 发送：`POST {Edge}/api/api/v1/messages/send` 成功并返回正的会话序号，Bearer 为 Social 登录返回的 IM 令牌
+- 回读：收发双方 `GET {Edge}/api/api/v1/conversations` 中该会话的 `max_seq` 不低于发送序号
+- 持久化：`messages` 有该条记录，`message_write_ledger.write_state` 至少达到 `archive_persisted`
+
+约束：租户只接受 `e2e-<20 位小写十六进制>`（可用 `flare-social/scripts/prepare_e2e_fixture.py` 创建），不接受默认租户 `0`；不提供直连 gRPC 模式；口令只从 `SMOKE_PASSWORD_FILE`（600 权限）读取或在私有临时目录生成，令牌与口令不进命令行参数、不回显。全部参数见 `./scripts/smoke_message_flow.sh --help`，脚本自检为 `python3 scripts/test_smoke_message_flow.py`。
 
 ---
 
@@ -102,7 +105,7 @@ cargo run --example chatroom_client -- user2
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
 | `migrate_db.sh` | Core 原子迁移账本 | migrations/*.sql；非破坏性升级，不执行 init.sql |
 | `dev_reset_db.sh` | 显式开发重置 | 删除 Core 数据；仅 make dev-reset + FLARE_ALLOW_DEV_RESET=1 |
-| `smoke_message_flow.sh` | 消息流烟测 | 发送一条消息，检查落库、ledger，并通过读侧读回 |
+| `smoke_message_flow.sh` | 消息流烟测 | 经 Edge 发送一条消息，检查会话回读、落库与 ledger |
 | `check_memory_budget.sh` | 校验容器内存预算现状 | 每容器都设 `mem_limit`、上限之和不超过物理内存 |
 | `plan_mem_budget.py` | 计算最优内存预算 | 按物理内存/核数推算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`/`effective_cache_size` 等），经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值 |
 
@@ -303,16 +306,14 @@ jetstream-broker-api-versions --bootstrap-server localhost:29092
 
 ### 消息流烟测
 
-```bash
-./scripts/smoke_message_flow.sh
-```
-
-可覆盖默认 endpoint：
+参数与检查项见上文「验证消息收发读链路」。Edge 证书名与连接地址不同（例如按 IP 连本机映射端口）时，用 `SMOKE_SERVER_NAME` 指定 SNI 与 Host：
 
 ```bash
-SMOKE_MESSAGE_INGEST_ENDPOINT=127.0.0.1:50182 \
-SMOKE_STORAGE_READER_ENDPOINT=127.0.0.1:60083 \
-SMOKE_POSTGRES_URL=postgres://flare:flare123@localhost:25432/flare2 \
+SMOKE_BASE_URL=https://127.0.0.1:18443 \
+SMOKE_SERVER_NAME=im.example.test \
+SMOKE_CA_FILE=/path/to/edge-ca.pem \
+SMOKE_TENANT_ID=e2e-0123456789abcdef0123 \
+SMOKE_PG_CONTAINER=<postgres 容器名> \
 ./scripts/smoke_message_flow.sh
 ```
 

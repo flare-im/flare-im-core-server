@@ -33,13 +33,15 @@ cd flare-im-core
 ./scripts/start_server_core.sh
 ```
 
-验证消息收发读链路：
+验证消息收发读链路（需要 Edge + Core + Social 全栈）：
 
 ```bash
+SMOKE_BASE_URL=https://im.example.test SMOKE_CA_FILE=/path/to/edge-ca.pem \
+SMOKE_TENANT_ID=e2e-0123456789abcdef0123 SMOKE_PG_CONTAINER=<postgres 容器名> \
 ./scripts/smoke_message_flow.sh
 ```
 
-该烟测通过 `flare-message-ingest` 的 `MessageSendService/SendMessage` 发送一条文本消息，等待 PostgreSQL / TimescaleDB 中的 `messages` 与 `message_write_ledger` 至少收敛到 `archive_persisted`，再通过 `flare-storage-reader` 的 `StorageReaderService/QueryMessagesBySeq` 读回刚发送的 `server_msg_id`。
+该烟测只走对外入口：经 Edge 用 Social 公共 API 在隔离 `e2e-` 租户建立两名互为好友的新用户，用 Social 登录返回的 IM 令牌调用 `/api/v1/messages/send` 发送、经 `/api/v1/conversations` 回读，再在数据库容器内以只读事务核对 `messages` 与 `message_write_ledger` 至少收敛到 `archive_persisted`。直连 gRPC 的旧模式已删除（Ingest 只接受 Cell 内签名的身份上下文）；参数见 `--help`。
 
 接入业务系统 Hook：
 
@@ -91,7 +93,8 @@ cargo test --workspace
 cargo test -p flare-orchestrator
 cargo test -p flare-storage-writer
 cargo test -p flare-im-service-kit --test startup_contract
-./scripts/smoke_message_flow.sh
+python3 scripts/test_smoke_message_flow.py
+./scripts/smoke_message_flow.sh --help
 ```
 
 针对真实中间件的测试需要先启动 Docker Compose，并按测试说明准备环境变量。
@@ -121,19 +124,13 @@ cargo test -p flare-im-service-kit --test startup_contract
 
 ## 消息收发读链路烟测
 
-启动 Core 后执行：
+Edge + Core + Social 全栈起来、并用 `flare-social/scripts/prepare_e2e_fixture.py` 建好隔离租户后执行（参数见 `./scripts/smoke_message_flow.sh --help`）。该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
 
-```bash
-./scripts/smoke_message_flow.sh
-```
-
-该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
-
-- `flare-message-ingest` gRPC send entrypoint。
-- ACK durability 至少达到 `SEND_ACK_DURABILITY_BROKER_ACCEPTED`。
-- `messages` 落库。
-- `message_write_ledger.write_state` 至少达到 `archive_persisted`。
-- `flare-storage-reader` gRPC read model readback。
+- 经 Edge 的 Social 注册、登录、加好友（满足 social 档 PreSend 的好友判定）。
+- 用 Social 登录返回的 IM 令牌经 Edge 调 Core `/api/v1/messages/send`，返回成功及正的会话序号。
+- 收发双方经 Core `/api/v1/conversations` 回读到该会话且 `max_seq` 不低于发送序号。
+- 数据库容器内只读 SELECT：`messages` 落库，`message_write_ledger.write_state` 至少达到 `archive_persisted`。
+- 任何模式都不发送未签名的身份头，不接受默认租户 `0`；`scripts/test_smoke_message_flow.py` 以桩程序自检这些约束。
 
 ## 消息发送压测入口状态
 

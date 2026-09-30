@@ -11,15 +11,18 @@ usage() {
     cat <<'USAGE'
 Usage: smoke.sh [options]
 
-Run the Flare IM Core message-flow smoke test against a started release bundle.
+Run the Flare IM message-flow smoke test. It only uses the public Edge
+(Social login + Core HTTP API), so the deployment needs Edge and Social in
+front of this Core; a Core-only bundle cannot pass it.
 
 Options:
   -h, --help   Show this help.
 
-Environment overrides:
-  SMOKE_MESSAGE_INGEST_ENDPOINT  Default: 127.0.0.1:50182
-  SMOKE_STORAGE_READER_ENDPOINT  Default: 127.0.0.1:60083
-  SMOKE_POSTGRES_URL             Default: postgres://flare:flare123@localhost:25432/flare2
+Required environment (see scripts/smoke_message_flow.sh --help for all):
+  SMOKE_BASE_URL       Public Edge origin, e.g. https://im.example.test
+  SMOKE_TENANT_ID      Isolated fixture tenant e2e-<20 lowercase hex>
+  SMOKE_PG_CONTAINER   PostgreSQL container for the read-only check
+                       (or SMOKE_SKIP_DB_CHECK=1)
 USAGE
 }
 
@@ -46,9 +49,4 @@ if [ ! -x "$runner" ]; then
     runner="$source_runner"
 fi
 
-if [ -d "$APP_HOME/proto/flare-grpc-proto/proto" ] && [ -d "$APP_HOME/proto/flare-proto/proto" ]; then
-    export SMOKE_PROTO_ROOT="${SMOKE_PROTO_ROOT:-$APP_HOME/proto}"
-fi
-
-export SMOKE_POSTGRES_URL="${SMOKE_POSTGRES_URL:-postgres://flare:flare123@localhost:25432/flare2}"
 "$runner"
