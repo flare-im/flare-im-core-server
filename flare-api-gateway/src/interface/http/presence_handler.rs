@@ -110,9 +110,12 @@ pub struct BatchGetUserPresenceHttpResponse {
     pub presences: HashMap<String, UserPresenceHttp>,
 }
 
+/// 与本文件其它 HTTP DTO 一致使用 camelCase（SDK 发送 `conversationId`）；
+/// `conversation_id` 作为旧写法别名保留。
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LogoutPresenceHttpRequest {
-    #[serde(default)]
+    #[serde(default, alias = "conversation_id")]
     pub conversation_id: String,
 }
 
@@ -536,6 +539,20 @@ mod tests {
                 .map(|q| q.network_type.as_str()),
             Some("wifi")
         );
+    }
+
+    #[test]
+    fn logout_request_accepts_sdk_camel_case_and_legacy_snake_case() {
+        for body in [
+            r#"{"conversationId":"conv-1"}"#,
+            r#"{"conversation_id":"conv-1"}"#,
+        ] {
+            let req: LogoutPresenceHttpRequest = serde_json::from_str(body).expect(body);
+            assert_eq!(req.conversation_id, "conv-1", "{body}");
+        }
+
+        let empty: LogoutPresenceHttpRequest = serde_json::from_str("{}").unwrap();
+        assert!(empty.conversation_id.is_empty());
     }
 
     #[test]
