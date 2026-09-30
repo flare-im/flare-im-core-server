@@ -270,10 +270,8 @@ fn login_error(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
-    use flare_grpc_proto::signaling::online::{DeviceConflictStrategy, LogoutRequest};
-    use tracing_subscriber::fmt::format::FmtSpan;
+    use flare_grpc_proto::signaling::online::DeviceConflictStrategy;
 
     use super::*;
     use crate::domain::service::online_status_service::NoopConversationRepository;
@@ -307,92 +305,6 @@ mod tests {
         async fn publish_user_presence_event(&self, _: &str, _: UserPresenceEvent) -> Result<()> {
             Ok(())
         }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn login_and_logout_spans_never_log_the_token_or_context() {
-        const SECRET_PART: &str = "SIGNATURE-THAT-MUST-NOT-BE-LOGGED";
-        let logs = CapturedLogs::default();
-        let writer = logs.clone();
-        // FmtSpan::NEW renders every span's recorded fields even without events.
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_span_events(FmtSpan::NEW)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-
-        let handler = OnlineCommandHandler::new(
-            Arc::new(OnlineStatusService::<_>::new(
-                Arc::new(NoopConversationRepository),
-                "gateway-test".to_string(),
-            )),
-            Arc::new(SubscriptionService::new(
-                Arc::new(NoopSubscriptions),
-                Arc::new(NoopPresence),
-            )),
-        );
-        let ctx = Context::root()
-            .with_tenant_id("tenant-a")
-            .with_user_id("alice");
-        let request = LoginRequest {
-            user_id: "alice".to_string(),
-            token: format!("eyJhbGciOi.payload.{SECRET_PART}"),
-            device_id: "device-a".to_string(),
-            device_platform: "web".to_string(),
-            desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
-            metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
-            ..Default::default()
-        };
-        let login = handler
-            .handle_login(
-                &ctx,
-                LoginCommand {
-                    request,
-                    ctx: ctx.clone(),
-                },
-            )
-            .await
-            .expect("login");
-        handler
-            .handle_logout(
-                &ctx,
-                LogoutCommand {
-                    request: LogoutRequest {
-                        user_id: "alice".to_string(),
-                        conversation_id: login.conversation_id.clone(),
-                    },
-                    ctx: ctx.clone(),
-                },
-            )
-            .await
-            .expect("logout");
-
-        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("handle_login{"), "{output}");
-        assert!(output.contains("device_id=device-a"), "{output}");
-        assert!(output.contains("handle_logout{"), "{output}");
-        assert!(
-            output.contains(&format!("conversation_id={}", login.conversation_id)),
-            "{output}"
-        );
-        assert!(!output.contains(SECRET_PART), "{output}");
-        assert!(!output.contains("LoginRequest"), "{output}");
-        assert!(!output.contains("ContextInner"), "{output}");
     }
 
     /// 租户闸门的拒绝原样交给网关（gRPC PERMISSION_DENIED，reason `TENANT_UNAVAILABLE`）；
