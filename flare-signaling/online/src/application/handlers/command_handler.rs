@@ -43,7 +43,12 @@ where
     }
 
     /// 处理登录命令
-    #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, device_id = %command.request.device_id))]
+    // LoginRequest carries the access token and LoginCommand repeats the Context:
+    // record only identifying fields, never the request/command as a whole.
+    #[instrument(
+        skip_all,
+        fields(user_id = %command.request.user_id, device_id = %command.request.device_id)
+    )]
     pub async fn handle_login(
         &self,
         ctx: &Context,
@@ -61,7 +66,10 @@ where
     }
 
     /// 处理登出命令
-    #[instrument(skip(self, ctx), fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id))]
+    #[instrument(
+        skip_all,
+        fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id)
+    )]
     pub async fn handle_logout(
         &self,
         ctx: &Context,
@@ -80,7 +88,10 @@ where
     }
 
     /// 处理心跳命令
-    #[instrument(skip(self, ctx), fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id))]
+    #[instrument(
+        skip_all,
+        fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id)
+    )]
     pub async fn handle_heartbeat(
         &self,
         ctx: &Context,
@@ -240,5 +251,134 @@ where
         {
             warn!(%err, user_id = %user_id, "publish user presence snapshot event failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use flare_grpc_proto::signaling::online::{DeviceConflictStrategy, LogoutRequest};
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    use super::*;
+    use crate::domain::service::online_status_service::NoopConversationRepository;
+
+    struct NoopSubscriptions;
+
+    impl SubscriptionRepository for NoopSubscriptions {
+        async fn add_subscription(&self, _: &str, _: String, _: String) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_subscription(&self, _: &Context, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn get_user_subscriptions(
+            &self,
+            _: &Context,
+        ) -> Result<Vec<(String, HashMap<String, String>)>> {
+            Ok(Vec::new())
+        }
+        async fn get_topic_subscribers(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct NoopPresence;
+
+    impl PresencePublisher for NoopPresence {
+        async fn publish_presence_event(&self, _: &str, _: PresenceEvent) -> Result<()> {
+            Ok(())
+        }
+        async fn publish_user_presence_event(&self, _: &str, _: UserPresenceEvent) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn login_and_logout_spans_never_log_the_token_or_context() {
+        const SECRET_PART: &str = "SIGNATURE-THAT-MUST-NOT-BE-LOGGED";
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        // FmtSpan::NEW renders every span's recorded fields even without events.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_span_events(FmtSpan::NEW)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let handler = OnlineCommandHandler::new(
+            Arc::new(OnlineStatusService::<_>::new(
+                Arc::new(NoopConversationRepository),
+                "gateway-test".to_string(),
+            )),
+            Arc::new(SubscriptionService::new(
+                Arc::new(NoopSubscriptions),
+                Arc::new(NoopPresence),
+            )),
+        );
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+        let request = LoginRequest {
+            user_id: "alice".to_string(),
+            token: format!("eyJhbGciOi.payload.{SECRET_PART}"),
+            device_id: "device-a".to_string(),
+            device_platform: "web".to_string(),
+            desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+            metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
+            ..Default::default()
+        };
+        let login = handler
+            .handle_login(
+                &ctx,
+                LoginCommand {
+                    request,
+                    ctx: ctx.clone(),
+                },
+            )
+            .await
+            .expect("login");
+        handler
+            .handle_logout(
+                &ctx,
+                LogoutCommand {
+                    request: LogoutRequest {
+                        user_id: "alice".to_string(),
+                        conversation_id: login.conversation_id.clone(),
+                    },
+                    ctx: ctx.clone(),
+                },
+            )
+            .await
+            .expect("logout");
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("handle_login{"), "{output}");
+        assert!(output.contains("device_id=device-a"), "{output}");
+        assert!(output.contains("handle_logout{"), "{output}");
+        assert!(
+            output.contains(&format!("conversation_id={}", login.conversation_id)),
+            "{output}"
+        );
+        assert!(!output.contains(SECRET_PART), "{output}");
+        assert!(!output.contains("LoginRequest"), "{output}");
+        assert!(!output.contains("ContextInner"), "{output}");
     }
 }
