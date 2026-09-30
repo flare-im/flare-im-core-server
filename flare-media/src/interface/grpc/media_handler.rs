@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_grpc_proto::media::media_service_server::MediaService;
+use flare_grpc_proto::media::media_service_server::MediaServiceServer;
 use flare_grpc_proto::media::upload_file_request;
 use flare_grpc_proto::media::{
     AbortDirectUploadRequest, AbortMultipartUploadRequest, AbortMultipartUploadResponse,
@@ -19,8 +20,12 @@ use flare_grpc_proto::media::{
     UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
     UploadMultipartChunkResponse,
 };
+use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;
-use flare_server_core::utils::require_ctx_from_request;
+use flare_server_core::{
+    SignedActorType, SignedContextLayer, SignedContextService, SignedContextVerifier,
+    VerifiedContext,
+};
 use prost_types::Timestamp;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -59,7 +64,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<tonic::Streaming<UploadFileRequest>>,
     ) -> Result<Response<UploadFileResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
 
         let mut stream = request.into_inner();
@@ -130,7 +135,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<InitiateMultipartUploadRequest>,
     ) -> Result<Response<InitiateMultipartUploadResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let session = self
             .command_handler
@@ -152,7 +157,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<UploadMultipartChunkRequest>,
     ) -> Result<Response<UploadMultipartChunkResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let chunk_index = req.chunk_index;
         let session = self
@@ -176,7 +181,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<CompleteMultipartUploadRequest>,
     ) -> Result<Response<UploadFileResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let metadata = self
             .command_handler
@@ -214,7 +219,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<AbortMultipartUploadRequest>,
     ) -> Result<Response<AbortMultipartUploadResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         self.command_handler
             .handle_abort_multipart_upload(&ctx, req)
@@ -232,7 +237,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<InitiateDirectUploadRequest>,
     ) -> Result<Response<InitiateDirectUploadResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let session = self
             .command_handler
@@ -247,7 +252,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<GetDirectUploadStatusRequest>,
     ) -> Result<Response<GetDirectUploadStatusResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -262,7 +267,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<PresignDirectUploadPartsRequest>,
     ) -> Result<Response<PresignDirectUploadPartsResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -277,7 +282,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<CommitDirectUploadPartsRequest>,
     ) -> Result<Response<CommitDirectUploadPartsResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let session = self
             .command_handler
@@ -301,7 +306,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<CompleteDirectUploadRequest>,
     ) -> Result<Response<UploadFileResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let metadata = self
             .command_handler
@@ -338,7 +343,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<AbortDirectUploadRequest>,
     ) -> Result<Response<AbortMultipartUploadResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         self.command_handler
             .handle_abort_direct_upload(&ctx, req)
@@ -355,7 +360,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<CreateReferenceRequest>,
     ) -> Result<Response<CreateReferenceResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let metadata = req.metadata;
 
@@ -405,7 +410,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<DeleteReferenceRequest>,
     ) -> Result<Response<DeleteReferenceResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
 
         if req.file_id.is_empty() {
@@ -436,7 +441,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<ListReferencesRequest>,
     ) -> Result<Response<ListReferencesResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
 
         if req.file_id.is_empty() {
@@ -464,7 +469,8 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<CleanupOrphanedAssetsRequest>,
     ) -> Result<Response<CleanupOrphanedAssetsResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
+        require_media_admin(&ctx)?;
         let req = request.into_inner();
 
         let cleaned = self
@@ -487,7 +493,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<GetFileUrlRequest>,
     ) -> Result<Response<GetFileUrlResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let presigned = self
             .query_handler
@@ -508,7 +514,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<GetFileInfoRequest>,
     ) -> Result<Response<GetFileInfoResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let metadata = self
             .query_handler
@@ -527,7 +533,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<DownloadFileRequest>,
     ) -> Result<Response<Self::DownloadFileStream>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let chunks = self
             .query_handler
@@ -543,7 +549,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<DeleteFileRequest>,
     ) -> Result<Response<DeleteFileResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         self.command_handler
             .handle_delete_file(&ctx, req)
@@ -560,7 +566,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<ProcessImageRequest>,
     ) -> Result<Response<ProcessImageResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let result = self
             .command_handler
@@ -581,7 +587,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<ProcessVideoRequest>,
     ) -> Result<Response<ProcessVideoResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let result = self
             .command_handler
@@ -601,7 +607,8 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<SetObjectAclRequest>,
     ) -> Result<Response<()>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
+        require_media_admin(&ctx)?;
         let req = request.into_inner();
         self.command_handler
             .handle_set_object_acl(&ctx, req)
@@ -614,7 +621,8 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<ListObjectsRequest>,
     ) -> Result<Response<ListObjectsResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
+        require_media_admin(&ctx)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -628,7 +636,7 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<GenerateUploadUrlRequest>,
     ) -> Result<Response<GenerateUploadUrlResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -642,7 +650,8 @@ impl MediaService for MediaGrpcHandler {
         &self,
         request: Request<DescribeBucketRequest>,
     ) -> Result<Response<DescribeBucketResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = verified_ctx(&request)?;
+        require_media_admin(&ctx)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -652,6 +661,49 @@ impl MediaService for MediaGrpcHandler {
         Ok(Response::new(response))
     }
 }
+
+/// Media gRPC 服务端组合：只有持 Cell 签名内部上下文（`x-flare-ctx`）的调用方
+/// 能进入 handler；缺失、伪造、过期或重复的令牌在层内直接 UNAUTHENTICATED，
+/// 调用方自带的 `x-tenant-id` / `x-user-id` 等旧 metadata 会被剥离。
+pub fn authenticated_media_service(
+    handler: MediaGrpcHandler,
+    verifier: SignedContextVerifier,
+) -> SignedContextService<MediaServiceServer<MediaGrpcHandler>> {
+    SignedContextLayer::new(verifier).layer(MediaServiceServer::new(handler))
+}
+
+/// 身份只来自签名层注入的已验上下文。即便 handler 被错误地挂在没有签名层的
+/// Server 上，也不回落到调用方 metadata，而是拒绝。
+fn verified_ctx<T>(request: &Request<T>) -> Result<Ctx, Status> {
+    request
+        .extensions()
+        .get::<Ctx>()
+        .filter(|ctx| {
+            ctx.get_data::<VerifiedContext>()
+                .and_then(VerifiedContext::claims)
+                .is_some()
+        })
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("signed context required"))
+}
+
+/// 孤儿清理、对象清单、ACL、桶描述是租户管理操作，普通用户身份即便签名有效也不能调用。
+fn require_media_admin(ctx: &Ctx) -> Result<(), Status> {
+    let actor_type = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .map(|claims| claims.actor_type);
+    match actor_type {
+        Some(SignedActorType::TenantAdmin | SignedActorType::System) => Ok(()),
+        _ => Err(Status::permission_denied(
+            "media administration requires a tenant administrator",
+        )),
+    }
+}
+
+#[cfg(test)]
+#[path = "media_handler_auth_tests.rs"]
+mod auth_tests;
 
 fn status_internal<E: std::fmt::Display>(err: E) -> Status {
     Status::internal(err.to_string())

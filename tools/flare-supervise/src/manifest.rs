@@ -662,15 +662,29 @@ required_env_unless = [
             .map(|service| service.name.as_str())
             .collect();
         // Push Server/Worker attest broker records (broker-isolated); Push Proxy only verifies.
+        // Admin Gateway signs the Control-verified tenant admin for Media.
         assert_eq!(
             signer_users,
             [
                 "push-server",
                 "push-worker",
                 "api-gateway",
-                "signaling-gateway"
+                "signaling-gateway",
+                "admin-gateway"
             ]
         );
+        let media = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "media")
+            .unwrap();
+        assert!(
+            media
+                .required_env
+                .iter()
+                .any(|name| name == "FLARE_INTERNAL_CTX_PUBLIC_KEY")
+        );
+        assert!(!manifest.env_allowed(media, "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
         let push_proxy = manifest
             .services
             .iter()

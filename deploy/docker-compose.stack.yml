@@ -109,6 +109,8 @@ services:
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: admin-gateway
       FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      # 把已验证的租户管理员签成 Media 能校验的内部上下文（媒资管理接口）。
+      FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
     command: ["flare-admin-gateway"]
 
   # ── Signaling ──────────────────────────────────────────────────────────────
@@ -252,6 +254,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: media
+      # Media gRPC 只接受 Cell 签名的内部上下文，缺公钥时拒绝启动。
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-media"]
 
 networks:

@@ -15,7 +15,7 @@ pub use conversation_client::{
     ConversationManageServiceClientWrapper, ConversationReadServiceClientWrapper,
 };
 pub use flare_server_core::context::Ctx;
-pub use media_client::MediaServiceClientWrapper;
+pub use media_client::{MediaCaller, MediaServiceClientWrapper};
 pub use message_client::{
     MessageActionServiceClientWrapper, MessageEventServiceClientWrapper,
     MessageSendServiceClientWrapper,

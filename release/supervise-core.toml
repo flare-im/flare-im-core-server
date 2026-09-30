@@ -138,8 +138,12 @@ required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY
 name = "media"
 command = "/usr/local/bin/flare-media"
 inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_"]
-inherit_env = ["FLARE_OBJECT_STORE_PROFILE"]
-required_env = ["FLARE_S3_ENDPOINT", "FLARE_S3_ACCESS_KEY", "FLARE_S3_SECRET_KEY"]
+# Media gRPC admits only Cell-signed internal context (verify-only public key).
+inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+required_env = [
+  "FLARE_S3_ENDPOINT", "FLARE_S3_ACCESS_KEY", "FLARE_S3_SECRET_KEY",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+]
 tcp_health = "127.0.0.1:60081"
 
 [[services]]
@@ -177,8 +181,9 @@ name = "admin-gateway"
 command = "/usr/local/bin/flare-admin-gateway"
 enabled_if_env = "FLARE_CONSOLE_PUBLIC_KEY"
 inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
-inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
-required_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
+# Signs the Control-verified tenant admin into the context Media authenticates.
+inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+required_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50051"
 [services.environment]
 FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE = "false"

@@ -1,4 +1,5 @@
 pub(crate) mod files;
+pub(crate) mod identity;
 pub(crate) mod processing;
 pub(crate) mod references;
 pub(crate) mod uploads;

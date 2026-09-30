@@ -2,4 +2,4 @@
 
 mod media_handler;
 
-pub use media_handler::MediaGrpcHandler;
+pub use media_handler::{MediaGrpcHandler, authenticated_media_service};

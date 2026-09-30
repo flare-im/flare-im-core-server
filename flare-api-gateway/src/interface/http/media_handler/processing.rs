@@ -1,7 +1,4 @@
-use axum::{
-    extract::{Extension, Json},
-    http::HeaderMap,
-};
+use axum::extract::{Extension, Json};
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -11,10 +8,9 @@ use crate::application::dto::{
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
-use flare_server_core::{
-    context::Ctx,
-    http::{ApiResponse, ContextFromHeaders, Result},
-};
+use flare_server_core::http::{ApiResponse, Result};
+
+use super::identity::MediaIdentity;
 
 #[utoipa::path(
     post,
@@ -23,13 +19,13 @@ use flare_server_core::{
     request_body = ProcessImageHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn process_image(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<ProcessImageHttpRequest>,
 ) -> Result<Json<ApiResponse<ProcessImageHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Processing image");
 
     let grpc_req = ProcessImageRequest {
@@ -65,7 +61,7 @@ pub async fn process_image(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_image(&ctx, grpc_req).await?;
+    let grpc_res = media_client.process_image(&caller, grpc_req).await?;
     Ok(Json(ApiResponse::success(ProcessImageHttpResponse::from(
         grpc_res,
     ))))
@@ -78,13 +74,13 @@ pub async fn process_image(
     request_body = ProcessVideoHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn process_video(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<ProcessVideoHttpRequest>,
 ) -> Result<Json<ApiResponse<ProcessVideoHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Processing video");
 
     let grpc_req = ProcessVideoRequest {
@@ -131,7 +127,7 @@ pub async fn process_video(
     };
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.process_video(&ctx, grpc_req).await?;
+    let grpc_res = media_client.process_video(&caller, grpc_req).await?;
     Ok(Json(ApiResponse::success(ProcessVideoHttpResponse::from(
         grpc_res,
     ))))

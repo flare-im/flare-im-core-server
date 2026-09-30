@@ -1,7 +1,4 @@
-use axum::{
-    extract::{Extension, Json},
-    http::HeaderMap,
-};
+use axum::extract::{Extension, Json};
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -10,10 +7,9 @@ use crate::application::dto::{
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
-use flare_server_core::{
-    context::Ctx,
-    http::{ApiResponse, ContextFromHeaders, Result},
-};
+use flare_server_core::http::{ApiResponse, Result};
+
+use super::identity::MediaIdentity;
 
 #[utoipa::path(
     post,
@@ -21,17 +17,17 @@ use flare_server_core::{
     tag = "Media",
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn create_reference(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<CreateReferenceRequest>,
 ) -> Result<Json<ApiResponse<CreateReferenceHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Creating media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.create_reference(&ctx, req).await?;
+    let grpc_res = media_client.create_reference(&caller, req).await?;
     Ok(Json(ApiResponse::success(
         CreateReferenceHttpResponse::from(grpc_res),
     )))
@@ -43,17 +39,17 @@ pub async fn create_reference(
     tag = "Media",
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn delete_reference(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<DeleteReferenceRequest>,
 ) -> Result<Json<ApiResponse<DeleteReferenceHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting media reference");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.delete_reference(&ctx, req).await?;
+    let grpc_res = media_client.delete_reference(&caller, req).await?;
     Ok(Json(ApiResponse::success(
         DeleteReferenceHttpResponse::from(grpc_res),
     )))
@@ -68,13 +64,13 @@ pub async fn delete_reference(
     ),
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn list_references(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     axum::extract::Query(req): axum::extract::Query<GetFileInfoRequest>,
 ) -> Result<Json<ApiResponse<ListReferencesHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Listing media references");
 
     let grpc_req = ListReferencesRequest {
@@ -84,7 +80,7 @@ pub async fn list_references(
         sort: Vec::new(),
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.list_references(&ctx, grpc_req).await?;
+    let grpc_res = media_client.list_references(&caller, grpc_req).await?;
     Ok(Json(ApiResponse::success(
         ListReferencesHttpResponse::from(grpc_res),
     )))

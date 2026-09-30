@@ -51,5 +51,8 @@ image = { workspace = true }
 
 # Media processing dependencies
 
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
 [lints]
 workspace = true

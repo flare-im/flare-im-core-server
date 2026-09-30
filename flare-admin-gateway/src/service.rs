@@ -6,15 +6,16 @@ use flare_im_service_kit::{
     gateway::{GatewayEnvScope, GatewaySettings},
     service_names::ADMIN_GATEWAY,
 };
+use flare_server_core::SignedContextSigner;
 use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::interface::http::create_admin_router;
+use crate::interface::http::{MediaContextSigner, create_admin_router};
 
 pub struct ApplicationBootstrap;
 
@@ -68,6 +69,21 @@ impl ApplicationBootstrap {
         );
         info!("Admin Gateway Console public-key verifier initialized");
 
+        // Media admits only Cell-signed context; the Control-verified admin is signed here.
+        let media_signer = match std::env::var("FLARE_INTERNAL_CTX_PRIVATE_KEY") {
+            Ok(material) => Some(SignedContextSigner::from_private_key(&material).map_err(
+                |_| {
+                    flare_server_core::error::FlareError::system(
+                        "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY for admin gateway",
+                    )
+                },
+            )?),
+            Err(_) => {
+                warn!("FLARE_INTERNAL_CTX_PRIVATE_KEY missing; admin media API fails closed");
+                None
+            }
+        };
+
         let app = create_admin_router(clients)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 ADMIN_GATEWAY,
@@ -75,6 +91,7 @@ impl ApplicationBootstrap {
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(control_verifier))
+            .layer(axum::Extension(MediaContextSigner(media_signer)))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())

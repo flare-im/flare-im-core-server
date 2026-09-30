@@ -1,7 +1,4 @@
-use axum::{
-    extract::{Extension, Json},
-    http::HeaderMap,
-};
+use axum::extract::{Extension, Json};
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -18,11 +15,9 @@ use crate::application::dto::{
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::GrpcClients;
-use flare_server_core::context::keys;
-use flare_server_core::{
-    context::Ctx,
-    http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
-};
+use flare_server_core::http::{ApiResponse, HttpApiError as GatewayError, Result};
+
+use super::identity::MediaIdentity;
 
 #[utoipa::path(
     post,
@@ -34,21 +29,17 @@ use flare_server_core::{
         (status = 500, description = "内部错误"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn generate_upload_url(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<GenerateUploadUrlRequest>,
 ) -> Result<Json<ApiResponse<GenerateUploadUrlResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
-    let user_id = headers
-        .get(keys::USER_ID)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous");
-    debug!(trace_id = %ctx.trace_id(), user_id = %user_id, "Generating upload URL");
+    let ctx = caller.ctx();
+    debug!(trace_id = %ctx.trace_id(), user_id = %caller.actor_id(), "Generating upload URL");
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.generate_upload_url(&ctx, req).await?;
+    let grpc_res = media_client.generate_upload_url(&caller, req).await?;
     Ok(Json(ApiResponse::success(grpc_res)))
 }
 
@@ -59,13 +50,13 @@ pub async fn generate_upload_url(
     request_body = UploadFileHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn upload_file(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<UploadFileHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(
         trace_id = %ctx.trace_id(),
         file_name = %req.metadata.file_name,
@@ -91,7 +82,7 @@ pub async fn upload_file(
     }
 
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.upload_file(&ctx, chunks).await?;
+    let grpc_res = media_client.upload_file(&caller, chunks).await?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
         grpc_res,
     ))))
@@ -104,13 +95,13 @@ pub async fn upload_file(
     request_body = InitiateMultipartUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn initiate_multipart_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<InitiateMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<InitiateMultipartUploadHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_name = %req.metadata.file_name, "Initiating multipart upload");
 
     let grpc_req = InitiateMultipartUploadRequest {
@@ -119,7 +110,7 @@ pub async fn initiate_multipart_upload(
     };
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .initiate_multipart_upload(&ctx, grpc_req)
+        .initiate_multipart_upload(&caller, grpc_req)
         .await
         .map_err(|err| {
             tracing::error!(
@@ -141,13 +132,13 @@ pub async fn initiate_multipart_upload(
     request_body = UploadMultipartChunkHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn upload_multipart_chunk(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<UploadMultipartChunkHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadMultipartChunkHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(
         trace_id = %ctx.trace_id(),
         upload_id = %req.upload_id,
@@ -162,7 +153,9 @@ pub async fn upload_multipart_chunk(
         payload: req.payload,
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.upload_multipart_chunk(&ctx, grpc_req).await?;
+    let grpc_res = media_client
+        .upload_multipart_chunk(&caller, grpc_req)
+        .await?;
     Ok(Json(ApiResponse::success(
         UploadMultipartChunkHttpResponse::from(grpc_res),
     )))
@@ -175,19 +168,19 @@ pub async fn upload_multipart_chunk(
     request_body = CompleteMultipartUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn complete_multipart_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<CompleteMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing multipart upload");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
         .complete_multipart_upload(
-            &ctx,
+            &caller,
             CompleteMultipartUploadRequest {
                 upload_id: req.upload_id,
             },
@@ -205,19 +198,19 @@ pub async fn complete_multipart_upload(
     request_body = AbortMultipartUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn abort_multipart_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<AbortMultipartUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<AbortMultipartUploadHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting multipart upload");
 
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
         .abort_multipart_upload(
-            &ctx,
+            &caller,
             AbortMultipartUploadRequest {
                 upload_id: req.upload_id,
             },
@@ -235,13 +228,13 @@ pub async fn abort_multipart_upload(
     request_body = InitiateDirectUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn initiate_direct_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<InitiateDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<InitiateDirectUploadHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let grpc_req = InitiateDirectUploadRequest {
         metadata: Some(UploadFileMetadata::from(req.metadata)),
         desired_part_size: req.desired_part_size,
@@ -250,7 +243,7 @@ pub async fn initiate_direct_upload(
         full_sha256: req.full_sha256,
     };
     let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client.initiate_direct_upload(&ctx, grpc_req).await.map_err(|err| {
+    let grpc_res = media_client.initiate_direct_upload(&caller, grpc_req).await.map_err(|err| {
         tracing::error!(trace_id = %ctx.trace_id(), error = %err, "initiate direct upload grpc call failed");
         GatewayError::internal("MEDIA_DIRECT_UPLOAD_INITIATE_FAILED", err.to_string())
     })?;
@@ -266,16 +259,16 @@ pub async fn initiate_direct_upload(
     params(("upload_id" = String, Query, description = "上传 ID")),
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn get_direct_upload_status(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     axum::extract::Query(req): axum::extract::Query<GetDirectUploadStatusHttpRequest>,
 ) -> Result<Json<ApiResponse<GetDirectUploadStatusHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .get_direct_upload_status(&ctx, GetDirectUploadStatusRequest {
+        .get_direct_upload_status(&caller, GetDirectUploadStatusRequest {
             upload_id: req.upload_id,
         })
         .await
@@ -295,16 +288,16 @@ pub async fn get_direct_upload_status(
     request_body = PresignDirectUploadPartsHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn presign_direct_upload_parts(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<PresignDirectUploadPartsHttpRequest>,
 ) -> Result<Json<ApiResponse<PresignDirectUploadPartsHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .presign_direct_upload_parts(&ctx, PresignDirectUploadPartsRequest {
+        .presign_direct_upload_parts(&caller, PresignDirectUploadPartsRequest {
             upload_id: req.upload_id,
             part_numbers: req.part_numbers,
             expires_in: req.expires_in,
@@ -326,13 +319,13 @@ pub async fn presign_direct_upload_parts(
     request_body = CommitDirectUploadPartsHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn commit_direct_upload_parts(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<CommitDirectUploadPartsHttpRequest>,
 ) -> Result<Json<ApiResponse<CommitDirectUploadPartsHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let grpc_parts = req
         .parts
         .into_iter()
@@ -345,7 +338,7 @@ pub async fn commit_direct_upload_parts(
         .collect();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .commit_direct_upload_parts(&ctx, CommitDirectUploadPartsRequest {
+        .commit_direct_upload_parts(&caller, CommitDirectUploadPartsRequest {
             upload_id: req.upload_id,
             parts: grpc_parts,
         })
@@ -366,16 +359,16 @@ pub async fn commit_direct_upload_parts(
     request_body = CompleteDirectUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn complete_direct_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<CompleteDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .complete_direct_upload(&ctx, CompleteDirectUploadRequest {
+        .complete_direct_upload(&caller, CompleteDirectUploadRequest {
             upload_id: req.upload_id,
         })
         .await
@@ -395,16 +388,16 @@ pub async fn complete_direct_upload(
     request_body = AbortDirectUploadHttpRequest,
     responses((status = 200, description = "成功")),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(caller, clients))]
 pub async fn abort_direct_upload(
-    headers: HeaderMap,
+    MediaIdentity(caller): MediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(req): Json<AbortDirectUploadHttpRequest>,
 ) -> Result<Json<ApiResponse<AbortMultipartUploadHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = caller.ctx();
     let mut media_client = clients.media.lock().await;
     let grpc_res = media_client
-        .abort_direct_upload(&ctx, AbortDirectUploadRequest {
+        .abort_direct_upload(&caller, AbortDirectUploadRequest {
             upload_id: req.upload_id,
         })
         .await
