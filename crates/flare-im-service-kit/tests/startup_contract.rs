@@ -44,21 +44,26 @@ fn startup_scripts_guard_message_ingest_as_required_send_entrypoint() {
 }
 
 #[test]
-fn smoke_message_flow_script_exercises_send_ack_and_durable_storage() {
+fn smoke_message_flow_script_sends_through_edge_and_checks_durable_storage() {
     let smoke = script("scripts/smoke_message_flow.sh");
 
     for required in [
-        "flare.message.v1.MessageSendService/SendMessage",
-        "SEND_ACK_DURABILITY_BROKER_ACCEPTED",
+        "/api/v1/auth/register",
+        "/api/v1/auth/login",
+        "/api/v1/relations/friend-requests",
+        "/api/v1/messages/send",
+        "/api/v1/conversations",
+        "tokens.im_connect_token",
+        "SMOKE_BASE_URL",
+        "SMOKE_CA_FILE",
+        "SMOKE_SERVER_NAME",
+        "SMOKE_PG_CONTAINER",
+        "BEGIN TRANSACTION READ ONLY",
+        "default_transaction_read_only=on",
         "message_write_ledger",
+        "archive_persisted",
         "ack_published",
-        "messages",
-        "SMOKE_MESSAGE_INGEST_ENDPOINT",
-        "SMOKE_STORAGE_READER_ENDPOINT",
-        "SMOKE_POSTGRES_URL",
-        "flare.storage.v1.StorageReaderService/QueryMessagesBySeq",
         "flare_message_flow_smoke_report",
-        "storage_reader_messages_count",
     ] {
         assert!(
             smoke.contains(required),
@@ -66,8 +71,19 @@ fn smoke_message_flow_script_exercises_send_ack_and_durable_storage() {
         );
     }
 
-    assert!(
-        smoke.contains("* 1000"),
-        "smoke_message_flow.sh must send createdAt in milliseconds, not Unix seconds"
-    );
+    // Message Ingest only accepts identities signed inside the Cell; the smoke
+    // must never fall back to a direct gRPC call with unsigned identity headers.
+    let lowered = smoke.to_ascii_lowercase();
+    for forbidden in ["x-tenant-id:", "x-user-id:", "x-flare-ctx:"] {
+        assert!(
+            !lowered.contains(forbidden),
+            "smoke_message_flow.sh must not send the {forbidden:?} header"
+        );
+    }
+    for forbidden in ["grpcurl ", "\"$grpcurl", "SMOKE_TENANT_ID:-0"] {
+        assert!(
+            !smoke.contains(forbidden),
+            "smoke_message_flow.sh must not contain {forbidden:?}"
+        );
+    }
 }
