@@ -214,10 +214,8 @@ fn capability_config_from_env(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let config_center_endpoint = default_config_center(
-        explicit_endpoint,
-        app_config.uses_static_registry(),
-    );
+    let config_center_endpoint =
+        default_config_center(explicit_endpoint, app_config.uses_static_registry());
 
     let tenant_id = std::env::var("TENANT_ID").ok();
     let config_file = std::env::var("CONFIG_FILE")
