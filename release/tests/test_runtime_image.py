@@ -8,6 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "release/Dockerfile"
+MIGRATOR = ROOT / "release/Dockerfile.migrate"
+PARTIAL = ROOT / "release/Dockerfile.partial"
 STACK = ROOT / "deploy/docker-compose.stack.yml"
 SUPERVISOR_PROBE = ["/usr/local/bin/flare-supervise", "health"]
 
@@ -93,6 +95,23 @@ class RuntimeImageHealthcheckTests(unittest.TestCase):
                 # service turns the supervisor socket probe back on.
                 self.assertIn("<<: *flare-service", block)
                 self.assertNotIn("healthcheck:", block)
+
+
+class DerivedImageHealthcheckTests(unittest.TestCase):
+    def test_one_shot_migrator_disables_healthcheck_explicitly(self):
+        # flare-deploy/release/build_local.py rejects a one-shot image whose
+        # Config.Healthcheck is not an explicit NONE.
+        steps = final_stage(MIGRATOR.read_text())
+        found = [step for step in steps if step.startswith("HEALTHCHECK ")]
+        self.assertEqual(found, ["HEALTHCHECK NONE"])
+        self.assertEqual(steps[-1], 'CMD ["run"]')
+
+    def test_partial_image_inherits_the_runtime_healthcheck(self):
+        # The overlay keeps the full image's supervisor probe; release/README.md
+        # tells one-binary-per-container deployments to disable it in Compose.
+        steps = final_stage(PARTIAL.read_text())
+        self.assertEqual(steps[0], "FROM ${BASE_IMAGE}")
+        self.assertFalse([step for step in steps if step.startswith("HEALTHCHECK ")])
 
 
 if __name__ == "__main__":

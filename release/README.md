@@ -106,6 +106,11 @@ docker build \
 （比如中间改过共享 crate 又没全量重编过）老老实实走全量，
 否则新旧二进制混在一起，问题极难查。
 
+⚠️ 增量镜像会继承 `BASE_IMAGE` 的 `HEALTHCHECK`。`ca9c41a` 之后的完整镜像自带
+supervisor 健康检查，而 118 这类每个容器用 `command` 只跑一个二进制的部署没有
+supervisor。换用这些镜像（包括叠在它们上面的增量镜像）之前，先在 compose 的每个
+服务上加 `healthcheck: disable: true`，见下文「DEP-08 单容器静态发现候选」一节末尾的健康检查说明。
+
 **构建时务必给磁盘设熔断**，别指望构建自己会礼貌退出：
 
 ```bash
@@ -398,4 +403,10 @@ Hook 来让健康检查变绿。
 只跑单个二进制的容器没有这个 socket，必须在 Compose 里关掉或换掉该检查
 （`deploy/docker-compose.stack.yml` 已统一 `healthcheck: disable: true`）；
 自己维护的单进程部署文件也要加，否则容器启动 90 秒后会显示 unhealthy。
-`python3 release/tests/test_runtime_image.py` 静态校验这两处。
+`Dockerfile.partial` 不声明检查，增量镜像原样继承这一条，所以 118 这类单进程
+部署在换用 `ca9c41a` 之后的完整镜像或其增量镜像之前，必须先在 compose 里给
+每个服务关掉健康检查。
+一次性迁移镜像 `Dockerfile.migrate` 显式声明 `HEALTHCHECK NONE`：
+`flare-deploy/release/build_local.py` 对缺检查的常驻镜像和没写 NONE 的一次性
+镜像都直接拒绝。
+`python3 release/tests/test_runtime_image.py` 静态校验上述几处。

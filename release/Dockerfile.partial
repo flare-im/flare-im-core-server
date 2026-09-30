@@ -84,5 +84,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && ls -la /out
 
 # ── 叠加到已有完整镜像 ───────────────────────────────────────────────────────
+# 不声明 HEALTHCHECK：产物继承 BASE_IMAGE 的检查。ca9c41a 之后的完整镜像自带
+# supervisor 健康检查（flare-supervise health），每个容器用 command 只跑一个二进制的
+# 部署必须在 compose 里给每个服务写 `healthcheck: disable: true`，见 release/README.md。
 FROM ${BASE_IMAGE}
 COPY --from=builder /out/ /usr/local/bin/
