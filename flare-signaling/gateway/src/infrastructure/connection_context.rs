@@ -38,7 +38,7 @@ impl AuthenticatedConnectionOrigin {
 }
 
 /// 连接上下文键（用于存储在 ConnectionInfo.metadata 中）
-pub const METADATA_KEY_TENANT_ID: &str = "tenant_id";
+pub const METADATA_KEY_TENANT_ID: &str = crate::constants::METADATA_KEY_TENANT_ID;
 pub const METADATA_KEY_USER_ID: &str = "user_id";
 pub const METADATA_KEY_DEVICE_ID: &str = "device_id";
 

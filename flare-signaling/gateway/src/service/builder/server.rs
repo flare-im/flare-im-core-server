@@ -98,6 +98,9 @@ pub async fn build_long_connection_server(
     use tracing::{error, info, warn};
 
     // 创建设备管理器（平台互斥策略）
+    //
+    // 同平台互斥只在同一（租户，用户）内生效：租户取自 AuthHandler 写进认证结果的已验证租户，
+    // 两个租户里 user_id 相同的用户不会互相顶掉设备。
     use flare_core::common::device::DeviceConflictStrategyBuilder;
     use flare_core::server::device::DeviceManager;
     let device_manager = Arc::new(DeviceManager::new(

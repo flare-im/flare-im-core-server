@@ -6,7 +6,10 @@ pub const SYSTEM_COMMAND_TYPE_PING: i32 = 2;
 /// 用户元数据 key：用户 ID
 pub const METADATA_KEY_USER_ID: &str = "user_id";
 /// 用户元数据 key：租户 ID
-pub const METADATA_KEY_TENANT_ID: &str = "tenant_id";
+///
+/// 直接取 flare-core 的键：flare-core 按这个键读认证结果里的租户，给设备冲突按（租户，用户）分桶，
+/// 并原样写进连接元数据；网关从连接元数据构建上下文时读的也是它，两边的租户始终是同一个值。
+pub const METADATA_KEY_TENANT_ID: &str = flare_core::server::auth::TENANT_ID_METADATA_KEY;
 /// 用户元数据 key：设备 ID
 pub const METADATA_KEY_DEVICE_ID: &str = "device_id";
 /// 默认租户 ID 的环境变量名

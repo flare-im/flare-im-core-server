@@ -9,7 +9,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::constants::{
     AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID,
-    ENV_DEFAULT_TENANT_ID, METADATA_KEY_DEVICE_ID, METADATA_KEY_TENANT_ID, METADATA_KEY_USER_ID,
+    ENV_DEFAULT_TENANT_ID, METADATA_KEY_DEVICE_ID, METADATA_KEY_USER_ID,
 };
 
 pub struct AuthHandler {
@@ -188,20 +188,20 @@ impl Authenticator for AuthHandler {
                     };
 
                 // 构建用户元数据（包含 tenant_id、device_id 等信息）
-                // 关键：确保 tenant_id 总是存在，如果没有则使用默认值
                 let mut user_metadata = std::collections::HashMap::new();
                 user_metadata.insert(METADATA_KEY_USER_ID.to_string(), user_id.clone());
-                user_metadata.insert(METADATA_KEY_TENANT_ID.to_string(), tenant_id.clone());
 
                 if let Some(device_id) = device_id {
                     user_metadata.insert(METADATA_KEY_DEVICE_ID.to_string(), device_id);
                 }
 
                 debug!( connection_id = %connection_id,user_id = %user_id,tenant_id = %tenant_id,"✅ Token 验证成功，租户ID已设置");
-                Ok(AuthResult::success_with_metadata(
-                    Some(user_id),
-                    user_metadata,
-                ))
+                // 关键：已验证的租户总是存在（令牌没带就用默认租户）。flare-core 用它给设备冲突
+                // 按（租户，用户）分桶，并写进连接元数据；两个租户里 user_id 相同的用户不会互踢。
+                Ok(
+                    AuthResult::success_with_metadata(Some(user_id), user_metadata)
+                        .with_tenant_id(tenant_id),
+                )
             }
             None => {
                 warn!(
@@ -228,6 +228,7 @@ fn default_tenant_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::METADATA_KEY_TENANT_ID;
     use flare_core::common::DevicePlatform;
     use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
     use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
@@ -364,6 +365,8 @@ mod tests {
 
         assert!(result.authenticated);
         assert_eq!(result.user_id.as_deref(), Some("user-a"));
+        // flare-core 按这个租户给设备冲突分桶
+        assert_eq!(result.tenant_id(), Some("tenant-a"));
         let metadata = result.user_metadata.expect("metadata");
         assert_eq!(
             metadata.get(METADATA_KEY_USER_ID).map(String::as_str),
@@ -416,6 +419,7 @@ mod tests {
             .expect("auth result");
 
         assert!(result.authenticated);
+        assert_eq!(result.tenant_id(), Some("tenant-default"));
         let metadata = result.user_metadata.expect("metadata");
         assert_eq!(
             metadata.get(METADATA_KEY_TENANT_ID).map(String::as_str),
