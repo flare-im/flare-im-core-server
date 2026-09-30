@@ -157,6 +157,14 @@ impl ApplicationBootstrap {
     }
 }
 
+fn default_config_center(explicit: Option<String>, static_registry: bool) -> Option<String> {
+    match explicit {
+        Some(endpoint) => Some(endpoint),
+        None if static_registry => None,
+        None => Some("consul://localhost:28500".to_string()),
+    }
+}
+
 fn capability_config_from_env(
     app_config: &flare_im_service_kit::FlareAppConfig,
 ) -> CapabilityServiceConfig {
@@ -200,9 +208,16 @@ fn capability_config_from_env(
     // Config center is Consul (see deploy/docker-compose.yml: Consul serves both service
     // registry and config center); there is no etcd in the deployment. Defaulting to the
     // stale etcd endpoint caused the config watcher to fail every 60s with "tcp connect error".
-    let config_center_endpoint = std::env::var("CONFIG_CENTER_ENDPOINT")
+    // Explicit static mode has no Consul at all: only an explicitly configured config
+    // center is used, otherwise the watcher polls a nonexistent localhost agent forever.
+    let explicit_endpoint = std::env::var("CONFIG_CENTER_ENDPOINT")
         .ok()
-        .or_else(|| Some("consul://localhost:28500".to_string()));
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let config_center_endpoint = default_config_center(
+        explicit_endpoint,
+        app_config.uses_static_registry(),
+    );
 
     let tenant_id = std::env::var("TENANT_ID").ok();
     let config_file = std::env::var("CONFIG_FILE")
@@ -227,5 +242,23 @@ fn capability_config_from_env(
         tenant_id,
         execution_mode: ExecutionMode::Sequential,
         refresh_interval_secs: 60,
+    }
+}
+
+#[cfg(test)]
+mod config_center_tests {
+    use super::default_config_center;
+
+    #[test]
+    fn static_registry_uses_only_an_explicit_config_center() {
+        assert_eq!(default_config_center(None, true), None);
+        assert_eq!(
+            default_config_center(Some("consul://consul:8500".into()), true).as_deref(),
+            Some("consul://consul:8500")
+        );
+        assert_eq!(
+            default_config_center(None, false).as_deref(),
+            Some("consul://localhost:28500")
+        );
     }
 }
