@@ -132,13 +132,15 @@ impl AuthHandler {
         }
     }
 
-    /// 获取 token 预览（用于日志记录）
-    fn token_preview(&self, token: &str) -> String {
-        if token.len() > 12 {
-            format!("{}...", &token[..12])
-        } else {
-            token.to_string()
-        }
+    /// 令牌在日志里的指纹：SHA-256 的前 8 个十六进制字符，不可逆，足以把同一枚令牌的多次失败
+    /// 对上。令牌本身的任何片段都不进日志：以前记前 12 个字符，对不透明令牌那可能就是秘密的一部分
+    /// （按字节切片遇到多字节字符还会 panic）。
+    fn token_fingerprint(token: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(token.as_bytes())[..4]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     /// 连接的租户：令牌里的租户，没有就用网关的默认租户；两者都按 `normalize_tenant_id` 归一，
@@ -208,7 +210,13 @@ impl Authenticator for AuthHandler {
             tracing::Span::current().record("platform", device.platform.as_str());
         }
 
-        debug!( connection_id = %connection_id,token_preview = %self.token_preview(token), device_id = ?device_info.map(|d| d.device_id.clone()),"验证 token");
+        debug!(
+            connection_id = %connection_id,
+            token_len = token.len(),
+            token_sha256 = %Self::token_fingerprint(token),
+            device_id = ?device_info.map(|d| d.device_id.clone()),
+            "验证 token"
+        );
 
         match self.verify_token(token, connection_id).await {
             TokenVerdict::Valid(principal) => {
@@ -242,7 +250,7 @@ impl Authenticator for AuthHandler {
                     user_metadata.insert(METADATA_KEY_DEVICE_ID.to_string(), device_id);
                 }
 
-                debug!( connection_id = %connection_id,user_id = %user_id,tenant_id = %tenant_id,"✅ Token 验证成功，租户ID已设置");
+                debug!( connection_id = %connection_id,user_id = %user_id,tenant_id = %tenant_id,"Token 验证成功，租户ID已设置");
                 // 关键：已验证的租户总是存在（令牌没带就用默认租户）。flare-core 用它给设备冲突
                 // 按（租户，用户）分桶，并写进连接元数据；两个租户里 user_id 相同的用户不会互踢。
                 Ok(
@@ -253,7 +261,8 @@ impl Authenticator for AuthHandler {
             TokenVerdict::Rejected => {
                 warn!(
                     connection_id = %connection_id,
-                    token_preview = %self.token_preview(token),
+                    token_len = token.len(),
+                    token_sha256 = %Self::token_fingerprint(token),
                     "Token 验证失败"
                 );
                 Ok(AuthResult::failure(

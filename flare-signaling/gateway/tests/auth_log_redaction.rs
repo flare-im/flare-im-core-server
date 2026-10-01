@@ -45,21 +45,34 @@ impl std::io::Write for CapturedLogs {
     }
 }
 
+/// 日志里不能出现令牌的任何 8 个字符以上的片段（以前记前 12 个字符，不透明令牌的开头可能就是
+/// 秘密的一部分）。
+fn assert_no_token_fragment(output: &str, token: &str) {
+    let chars: Vec<char> = token.chars().collect();
+    for window in chars.windows(8) {
+        let fragment: String = window.iter().collect();
+        assert!(
+            !output.contains(&fragment),
+            "log leaks a token fragment {fragment:?}:\n{output}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn authenticate_never_logs_the_token_or_connect_metadata() {
     const SECRET_PART: &str = "SIGNATURE-THAT-MUST-NOT-BE-LOGGED";
-    let token = format!("eyJhbGciOi.payload.{SECRET_PART}");
+    let jwt = format!("eyJhbGciOi.payload.{SECRET_PART}");
+    // 不透明令牌：整枚都是秘密，开头的字符同样不能进日志
+    let opaque = "opq_HEADSECRET_Zx81Qm_TAILSECRET_Kp20".to_string();
     let logs = CapturedLogs::default();
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let mut device = DeviceInfo::new("device-a".to_string(), DevicePlatform::Web);
-    device.metadata.insert("token".to_string(), token.clone());
-    let metadata = HashMap::from([("token".to_string(), token.clone().into_bytes())]);
     let principal = AuthenticatedPrincipal {
         user_id: "user-a".to_string(),
         tenant_id: Some("tenant-a".to_string()),
@@ -69,21 +82,33 @@ async fn authenticate_never_logs_the_token_or_connect_metadata() {
         scopes: Vec::new(),
         metadata: Default::default(),
     };
-    // 令牌被拒、令牌通过两条路径都走一遍
-    for principal in [None, Some(principal)] {
-        let handler = AuthHandler::with_default_tenant_id(
-            Arc::new(StaticTokenValidator(principal)),
-            "tenant-default",
-            TenantRuntimeCache::disabled(),
-            TenantAccessPolicy::Lenient,
-        );
-        let _ = handler
-            .authenticate(&token, "conn-a", Some(&device), Some(&metadata))
-            .await;
+    // 两种令牌 × 令牌被拒、令牌通过两条路径都走一遍
+    for token in [&jwt, &opaque] {
+        let mut device = DeviceInfo::new("device-a".to_string(), DevicePlatform::Web);
+        device.metadata.insert("token".to_string(), token.clone());
+        let metadata = HashMap::from([("token".to_string(), token.clone().into_bytes())]);
+        for principal in [None, Some(principal.clone())] {
+            let handler = AuthHandler::with_default_tenant_id(
+                Arc::new(StaticTokenValidator(principal)),
+                "tenant-default",
+                TenantRuntimeCache::disabled(),
+                TenantAccessPolicy::Lenient,
+            );
+            let _ = handler
+                .authenticate(token, "conn-a", Some(&device), Some(&metadata))
+                .await;
+        }
     }
 
     let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    // 先确认日志确实采到了（否则下一条断言是空转）
+    // 先确认日志确实采到了（否则下面的断言是空转）：两条路径都记了长度
     assert!(output.contains("conn-a"), "{output}");
+    assert!(output.contains("Token 验证失败"), "{output}");
+    assert!(
+        output.contains(&format!("token_len={}", opaque.len())),
+        "{output}"
+    );
     assert!(!output.contains(SECRET_PART), "{output}");
+    assert_no_token_fragment(&output, &jwt);
+    assert_no_token_fragment(&output, &opaque);
 }
