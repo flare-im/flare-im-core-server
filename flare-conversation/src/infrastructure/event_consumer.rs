@@ -6,13 +6,15 @@
 //! 注意：事件 topic 仅接受 **protobuf MqEnvelope**（`payload_kind=Event`）。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
-use flare_server_core::mq::consumer::MessageFetcher;
+use flare_server_core::mq::consumer::{Message as MqMessage, MessageFetcher};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaMessageFetcher, KafkaProducerConfig};
 use flare_server_core::mq::nats::{NatsConsumerConfig, NatsMessageFetcher, NatsStreamSpec};
 use prost::Message as _;
@@ -26,6 +28,72 @@ use flare_im_contracts::constants::topics::{
 use crate::config::ConversationConfig;
 use crate::domain::model::{ConversationParticipant, ConversationType, ConversationVisibility};
 use crate::domain::service::DefaultConversationDomainService;
+
+/// 一次取消息最多等多久；超时后回到循环顶部重新检查停机信号。
+const FETCH_WAIT: Duration = Duration::from_secs(5);
+/// 取消息出错后的退避。
+const FETCH_ERROR_BACKOFF: Duration = Duration::from_millis(500);
+
+/// 消费循环：取一条消息交给 `handle`，直到 `shutdown` 完成。
+///
+/// 停机信号在等消息、出错退避时立即生效；已经取到的消息先处理完（含 ack/nack）再退出，
+/// 不在处理半途中打断。等消息时被打断的那次拉取没有交给处理，broker 按 ack 超时重投。
+/// 此前两个消费者的循环都不看停机信号，每次停机都要等运行时 5 s 的任务停机超时后被 abort
+/// （W6-S2 F6）。
+pub(crate) async fn consume_until<F, Fut>(
+    consumer: &str,
+    fetcher: &tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>,
+    shutdown: impl Future<Output = ()>,
+    mut handle: F,
+) where
+    F: FnMut(MqMessage) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            next = async {
+                let mut fetcher = fetcher.lock().await;
+                tokio::time::timeout(FETCH_WAIT, fetcher.fetch()).await
+            } => next,
+        };
+        match next {
+            Ok(Ok(Some(message))) => handle(message).await,
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(e)) => {
+                error!(consumer, error = ?e, "JetStream recv error");
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break,
+                    _ = tokio::time::sleep(FETCH_ERROR_BACKOFF) => {}
+                }
+            }
+        }
+    }
+    info!(consumer, "consumer loop stopped on shutdown");
+}
+
+/// 处理一条消息后 ack，处理失败 nack。
+async fn settle_message<Fut>(kind: &str, message: MqMessage, process: impl FnOnce(Vec<u8>) -> Fut)
+where
+    Fut: Future<Output = Result<()>>,
+{
+    let ack = message.ack_handle.clone();
+    if let Err(e) = process(message.payload).await {
+        error!(error = %e, "Process {kind} event failed");
+        if let Some(ack) = ack
+            && let Err(err) = ack.nack().await
+        {
+            warn!(error = %err, "JetStream nack failed");
+        }
+    } else if let Some(ack) = ack
+        && let Err(err) = ack.ack().await
+    {
+        warn!(error = %err, "JetStream ack failed");
+    }
+}
 
 const CONVERSATION_ENSURE_NAMESPACE: &str = "flare.core";
 const CONVERSATION_ENSURE_EVENT_NAME: &str = "conversation.ensure";
@@ -172,38 +240,16 @@ impl ReadReceiptEventConsumer {
         })
     }
 
-    /// 消费循环：只处理 payload 为 Read 的事件
-    pub async fn run(&self) -> Result<()> {
+    /// 消费循环：只处理 payload 为 Read 的事件，`shutdown` 完成即退出（见 [`consume_until`]）。
+    pub async fn run_until(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         info!(subject = %self.subject, "ReadReceipt consumer loop started");
-
-        loop {
-            let next = {
-                let mut fetcher = self.fetcher.lock().await;
-                tokio::time::timeout(std::time::Duration::from_secs(5), fetcher.fetch()).await
-            };
-            match next {
-                Ok(Ok(Some(message))) => {
-                    let ack = message.ack_handle.clone();
-                    if let Err(e) = self.process_payload(&message.payload).await {
-                        error!(error = %e, "Process ReadReceipt event failed");
-                        if let Some(ack) = ack
-                            && let Err(err) = ack.nack().await
-                        {
-                            warn!(error = %err, "JetStream nack failed");
-                        }
-                    } else if let Some(ack) = ack
-                        && let Err(err) = ack.ack().await
-                    {
-                        warn!(error = %err, "JetStream ack failed");
-                    }
-                }
-                Ok(Ok(None)) | Err(_) => {}
-                Ok(Err(e)) => {
-                    error!(error = ?e, "JetStream recv error");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
+        consume_until("read-receipt", &self.fetcher, shutdown, |message| {
+            settle_message("ReadReceipt", message, |payload| async move {
+                self.process_payload(&payload).await
+            })
+        })
+        .await;
+        Ok(())
     }
 
     async fn process_payload(&self, raw: &[u8]) -> Result<()> {
@@ -517,37 +563,16 @@ impl ConversationEnsureEventConsumer {
         })
     }
 
-    pub async fn run(&self) -> Result<()> {
+    /// 消费循环，`shutdown` 完成即退出（见 [`consume_until`]）。
+    pub async fn run_until(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         info!(subject = %self.subject, "ConversationEnsure consumer loop started");
-
-        loop {
-            let next = {
-                let mut fetcher = self.fetcher.lock().await;
-                tokio::time::timeout(std::time::Duration::from_secs(5), fetcher.fetch()).await
-            };
-            match next {
-                Ok(Ok(Some(message))) => {
-                    let ack = message.ack_handle.clone();
-                    if let Err(e) = self.process_payload(&message.payload).await {
-                        error!(error = %e, "Process ConversationEnsure event failed");
-                        if let Some(ack) = ack
-                            && let Err(err) = ack.nack().await
-                        {
-                            warn!(error = %err, "JetStream nack failed");
-                        }
-                    } else if let Some(ack) = ack
-                        && let Err(err) = ack.ack().await
-                    {
-                        warn!(error = %err, "JetStream ack failed");
-                    }
-                }
-                Ok(Ok(None)) | Err(_) => {}
-                Ok(Err(e)) => {
-                    error!(error = ?e, "JetStream recv error");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
+        consume_until("conversation-ensure", &self.fetcher, shutdown, |message| {
+            settle_message("ConversationEnsure", message, |payload| async move {
+                self.process_payload(&payload).await
+            })
+        })
+        .await;
+        Ok(())
     }
 
     async fn process_payload(&self, raw: &[u8]) -> Result<()> {
@@ -603,6 +628,107 @@ impl ConversationEnsureEventConsumer {
             "Conversation ensured from event (async)"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    //! 消费循环必须响应停机信号（W6-S2 F6）。
+
+    use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
+
+    use flare_server_core::mq::consumer::{ConsumerError, ContentType, MessageContext};
+
+    use super::*;
+
+    /// 先交出 `queued` 里的消息，之后的拉取永远等不到消息（空闲的 JetStream 拉取）。
+    struct ScriptedFetcher {
+        queued: Vec<MqMessage>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageFetcher for ScriptedFetcher {
+        async fn fetch(&mut self) -> std::result::Result<Option<MqMessage>, ConsumerError> {
+            match self.queued.pop() {
+                Some(message) => Ok(Some(message)),
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    fn fetcher(queued: Vec<MqMessage>) -> tokio::sync::Mutex<Box<dyn MessageFetcher + Send>> {
+        tokio::sync::Mutex::new(Box::new(ScriptedFetcher { queued }))
+    }
+
+    fn message() -> MqMessage {
+        MqMessage::new(
+            b"payload".to_vec(),
+            ContentType::Protobuf,
+            MessageContext::new(
+                Arc::new(Context::with_request_id("req-1")),
+                TOPIC_MESSAGE_EVENTS.to_string(),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_idle_loop_stops_as_soon_as_shutdown_fires() {
+        let fetcher = fetcher(Vec::new());
+        let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let started = Instant::now();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = stop.send(());
+        });
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            consume_until(
+                "test",
+                &fetcher,
+                async {
+                    let _ = stop_rx.await;
+                },
+                |_message| async {},
+            ),
+        )
+        .await
+        .expect("consumer loop ignored the shutdown signal");
+        stopper.await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "stopped after {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_in_hand_is_finished_before_the_loop_stops() {
+        let fetcher = fetcher(vec![message()]);
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handled = Arc::new(StdMutex::new(Vec::new()));
+        let wait = Arc::clone(&shutdown);
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            consume_until(
+                "test",
+                &fetcher,
+                async move { wait.notified().await },
+                |message| {
+                    let shutdown = Arc::clone(&shutdown);
+                    let handled = Arc::clone(&handled);
+                    async move {
+                        // 停机信号在处理途中到达。
+                        shutdown.notify_one();
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        handled.lock().unwrap().push(message.payload);
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("consumer loop ignored the shutdown signal");
+        assert_eq!(*handled.lock().unwrap(), vec![b"payload".to_vec()]);
     }
 }
 

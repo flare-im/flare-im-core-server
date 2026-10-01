@@ -90,34 +90,45 @@ impl ApplicationBootstrap {
             },
         );
 
-        // 将 ReadReceipt JetStream 消费者纳入 Runtime 管理
+        // 将 ReadReceipt JetStream 消费者纳入 Runtime 管理；停机信号到达即退出循环，
+        // 不再等运行时的任务停机超时。
         if let Some(consumer) = context.read_receipt_consumer {
-            runtime = runtime.add_spawn("read-receipt-consumer", async move {
-                consumer
-                    .run()
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(std::io::Error::other(format!(
-                            "read-receipt-consumer error: {}",
-                            e
-                        )))
-                    })
-            });
+            runtime = runtime.add_spawn_with_shutdown(
+                "read-receipt-consumer",
+                |shutdown_rx| async move {
+                    consumer
+                        .run_until(async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(std::io::Error::other(format!(
+                                "read-receipt-consumer error: {}",
+                                e
+                            )))
+                        })
+                },
+            );
         }
 
         // 将 ConversationEnsure JetStream 消费者纳入 Runtime 管理
         if let Some(consumer) = context.conversation_ensure_consumer {
-            runtime = runtime.add_spawn("conversation-ensure-consumer", async move {
-                consumer
-                    .run()
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(std::io::Error::other(format!(
-                            "conversation-ensure-consumer error: {}",
-                            e
-                        )))
-                    })
-            });
+            runtime = runtime.add_spawn_with_shutdown(
+                "conversation-ensure-consumer",
+                |shutdown_rx| async move {
+                    consumer
+                        .run_until(async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(std::io::Error::other(format!(
+                                "conversation-ensure-consumer error: {}",
+                                e
+                            )))
+                        })
+                },
+            );
         }
 
         // 运行服务（带服务注册）
