@@ -192,3 +192,7 @@ jobs:
       # 照文档传了 CARGO_BUILD_JOBS 却毫无作用，小内存构建机照样 OOM。
       - name: 校验 Dockerfile 构建参数
         run: ./scripts/check_dockerfile_build_args.sh
+
+      # 门禁自测：冻结仓（flare-im-console）整目录排除，其余仓缺参数照常拦下。
+      - name: Dockerfile 构建参数门禁自测
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_check_dockerfile_build_args.py -v

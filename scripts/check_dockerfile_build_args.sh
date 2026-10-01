@@ -7,7 +7,9 @@
 # flare-social 的 Dockerfile 就缺这两个参数，实测传了等于没传。
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# 扫描根默认是多仓工作区（本仓的上一级），CI 也按同级布局拉取依赖仓。
+# FLARE_DOCKERFILE_SCAN_ROOT 只供门禁自测指向临时目录。
+ROOT="${FLARE_DOCKERFILE_SCAN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 python3 - "$ROOT" <<'PY'
 import pathlib, re, sys
@@ -21,7 +23,14 @@ REQUIRED = ["APT_MIRROR", "CARGO_REGISTRY_MIRROR", "CARGO_BUILD_JOBS"]
 # 直到真的去跨架构构建才暴露——这种跨文件漂移正是门禁该管的。
 REQUIRED_ENV = ["RUST_MIN_STACK"]
 
+# 按工作区顶层目录名整目录排除的冻结仓。只按「扫描根下的第一级目录名」精确匹配，
+# 同名前缀的新仓（如 flare-im-console-next）与更深层的同名目录照常扫描。
+# flare-im-console：后端已迁到 flare-social/platform/control，本仓只留旧后端树
+# 供 MIG-06 对照，验收后归档只读；不再从它构建镜像，也不改冻结仓。
+FROZEN_REPOS = {"flare-im-console"}
+
 targets = []
+skipped_frozen = []
 # 必须匹配 Dockerfile* 而不是精确的 "Dockerfile"：
 # 仓里还有 Dockerfile.bundle / Dockerfile.partial 这类变体，
 # 只扫精确名会漏掉它们——判据漏扫和判据写错一样，都会报绿。
@@ -30,6 +39,9 @@ for df in sorted(root.rglob("Dockerfile*")):
     if "/target/" in sp or "/dist/" in sp or "/node_modules/" in sp:
         continue
     if sp.endswith(".dockerignore"):
+        continue
+    if df.relative_to(root).parts[0] in FROZEN_REPOS:
+        skipped_frozen.append(df.relative_to(root))
         continue
     text = df.read_text(errors="replace")
     # 只管从源码编译 Rust 的镜像；纯运行时镜像不需要这些
@@ -57,5 +69,6 @@ if bad:
     print("照文档传了参数却毫无作用，比没有这个参数更难排查。", file=sys.stderr)
     raise SystemExit(1)
 
-print(f"✓ {len(targets)} 个源码构建 Dockerfile 都声明了构建机相关参数")
+frozen_note = f"（另有 {len(skipped_frozen)} 个 Dockerfile 属已冻结仓，未扫描）" if skipped_frozen else ""
+print(f"✓ {len(targets)} 个源码构建 Dockerfile 都声明了构建机相关参数{frozen_note}")
 PY

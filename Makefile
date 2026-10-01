@@ -5,7 +5,7 @@ CARGO ?= cargo
 # 自动检测 protoc 路径
 PROTOC ?= $(shell which protoc || echo "/opt/homebrew/bin/protoc" || echo "/usr/local/bin/protoc" || echo "")
 
-.PHONY: help build fmt lint check check-dashboard-metrics test clean start-core start-social stop
+.PHONY: help build fmt lint check check-dashboard-metrics check-dockerfile-build-args test clean start-core start-social stop
 
 help:
 	@echo "Flare IM Core Make targets"
@@ -45,13 +45,18 @@ fmt:
 lint:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
-check: check-dashboard-metrics
+check: check-dashboard-metrics check-dockerfile-build-args
 	$(CARGO) check
 
 # 面板与告警只能引用源码里注册过的指标与标签（依赖同级仓库 flare-server-core、flare-core）。
 check-dashboard-metrics:
 	bash scripts/check_dashboard_metrics.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_check_dashboard_metrics.py'
+
+# 文档教人传的 --build-arg 必须在 Dockerfile 里声明；扫描整个多仓工作区，冻结仓除外。
+check-dockerfile-build-args:
+	bash scripts/check_dockerfile_build_args.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_check_dockerfile_build_args.py'
 
 test:
 	$(CARGO) test --all
