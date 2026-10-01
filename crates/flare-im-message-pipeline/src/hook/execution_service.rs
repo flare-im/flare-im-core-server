@@ -250,4 +250,36 @@ mod tests {
             Some("kept")
         );
     }
+
+    /// 不经 PreSend 的消息（ingest 对已验签的 Social Bridge 服务身份传 `false`）原样保留发送方
+    /// 写的 attributes，即使注册了会改写纪元的 Hook。Social Bridge 给「已成为好友」通知写上
+    /// 本段关系的纪元，下次重新加好友时 Core 才能按纪元而不是按时间清除它。
+    #[tokio::test]
+    async fn a_message_that_skips_presend_keeps_the_epoch_its_sender_wrote() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_name("epoch"),
+                HookSelector::default(),
+                Arc::new(StampEpoch),
+            )
+            .await;
+        let service = HookExecutionService::new(Arc::new(HookDispatcher::new(registry)), None);
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        let mut message = Message::default();
+        message
+            .attributes
+            .insert("flare.social.friendship_epoch".into(), "2".into());
+        let out = service
+            .execute_pre_send(&ctx, message, false)
+            .await
+            .expect("no hook runs");
+        assert_eq!(
+            out.message
+                .attributes
+                .get("flare.social.friendship_epoch")
+                .map(String::as_str),
+            Some("2")
+        );
+    }
 }
