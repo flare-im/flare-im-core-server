@@ -1,6 +1,7 @@
 mod admin_auth_middleware;
 mod admin_contract;
 mod admin_handler;
+mod audit_target;
 mod media_handler;
 mod ops_handler;
 mod router;

@@ -17,6 +17,7 @@ use flare_server_core::{
 };
 use std::sync::Arc;
 
+use super::audit_target::AuditTarget;
 use super::ops_handler::{admin_rpc_error, audit_write, verified_tenant};
 
 /// Cell internal-context signer, used only to turn the Control-verified admin into a
@@ -131,7 +132,7 @@ pub async fn cleanup_orphaned_assets(
         "medias.cleanup_orphaned_assets",
         &principal,
         &headers,
-        &tenant_id,
+        &AuditTarget::id(&tenant_id),
     );
     let response = clients
         .media
@@ -167,7 +168,12 @@ pub async fn set_object_acl(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(request): Json<SetObjectAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
-    audit_write("medias.object_acl", &principal, &headers, &request.file_id);
+    audit_write(
+        "medias.object_acl",
+        &principal,
+        &headers,
+        &AuditTarget::id(&request.file_id),
+    );
     clients
         .media
         .lock()

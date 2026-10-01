@@ -213,9 +213,71 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
     let events = capture.take();
     assert!(events.is_empty(), "{events:?}");
 
-    // 共 3+1 条敏感读、1 条踢线、2 条媒资写；任何事件里都没有令牌。
+    // 目标取自解码后的路径参数（ACL 取自请求体），一律转义后才进事件：换行与控制字符
+    // 不能伪造日志行，`/` 只作复合目标的分隔符，超长输入截断并标明原长。
+    let long_user = "a".repeat(1_000);
+    let escaped = [
+        (
+            "GET".to_string(),
+            "/api/v1/admin/users/u1%0AINFO%20admin_audit%20access=write/devices".to_string(),
+            "users.devices",
+            "u1%0AINFO%20admin_audit%20access%3Dwrite".to_string(),
+        ),
+        (
+            "GET".to_string(),
+            "/api/v1/admin/conversations/c%00%09%1B%5B2J%7F/participants".to_string(),
+            "conversations.participants",
+            "c%00%09%1B%5B2J%7F".to_string(),
+        ),
+        (
+            "POST".to_string(),
+            "/api/v1/admin/users/u1%2Fd1/devices/x/kick".to_string(),
+            "devices.kick",
+            "u1%2Fd1/x".to_string(),
+        ),
+        (
+            "POST".to_string(),
+            "/api/v1/admin/users/u1/devices/d1%2Fx/kick".to_string(),
+            "devices.kick",
+            "u1/d1%2Fx".to_string(),
+        ),
+        (
+            "GET".to_string(),
+            format!("/api/v1/admin/users/{long_user}/presence"),
+            "users.presence",
+            format!("{}!truncated:1000", "a".repeat(256)),
+        ),
+    ];
+    for (method, path, route, target) in &escaped {
+        send(&h.router, admin_request(method, path, &h.token)).await;
+        let events = capture.take();
+        assert_eq!(events.len(), 1, "{path}: {events:?}");
+        assert_eq!(field(&events[0], "route"), *route, "{path}");
+        assert_eq!(field(&events[0], "target"), target, "{path}");
+    }
+    send(
+        &m.router,
+        media_admin_request("POST", OBJECT_ACL, &m.token, Some(&acl_body(r"f\n1/x"))),
+    )
+    .await;
+    let events = capture.take();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(field(&events[0], "route"), "medias.object_acl");
+    assert_eq!(field(&events[0], "target"), "f%0A1%2Fx");
+
+    // 共 3+1 条敏感读、1 条踢线、2 条媒资写，加上 6 条转义用例；任何事件里都没有令牌，
+    // 任何目标都只含 unreserved 字符、`%XX`、分隔符 `/` 与截断标记。
     let history = capture.history();
-    assert_eq!(history.len(), 7, "{history:?}");
+    assert_eq!(history.len(), 13, "{history:?}");
     let all = format!("{history:?}");
     assert!(!all.contains(&h.token) && !all.contains(&m.token));
+    for event in &history {
+        let target = field(event, "target");
+        assert!(
+            target
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~%/!:".contains(&b)),
+            "{target:?}"
+        );
+    }
 }

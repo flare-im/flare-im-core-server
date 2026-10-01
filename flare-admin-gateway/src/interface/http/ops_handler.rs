@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER};
+use super::audit_target::AuditTarget;
 use crate::application::admin_ops::{
     AdminConversationDetailHttp, AdminConversationListQuery, AdminConversationPageHttp,
     AdminDeviceKickHttp, AdminParticipantListQuery, AdminParticipantPageHttp, AdminPluginListQuery,
@@ -162,13 +163,14 @@ fn header(headers: &HeaderMap, name: &str) -> String {
 }
 
 /// 写操作审计：谁、哪个租户、哪条入口、原因、请求号/幂等键。中间件已保证原因与请求号存在。
+/// `target` 只收已转义的 [`AuditTarget`]，规则见该模块。
 ///
 /// 幂等键只用于关联日志，网关不保存、不去重：同一键重放会再执行一次。
 pub(super) fn audit_write(
     route: &'static str,
     principal: &AuthenticatedPrincipal,
     headers: &HeaderMap,
-    target: &str,
+    target: &AuditTarget,
 ) -> String {
     let reason = header(headers, AUDIT_REASON_HEADER);
     tracing::info!(
@@ -177,7 +179,7 @@ pub(super) fn audit_write(
         route,
         actor_id = %principal.user_id,
         tenant_id = %principal.tenant_id.as_deref().unwrap_or_default(),
-        target,
+        target = target.as_str(),
         audit_reason = %reason,
         request_id = %header(headers, keys::REQUEST_ID),
         idempotency_key = %header(headers, IDEMPOTENCY_KEY_HEADER),
@@ -196,7 +198,7 @@ fn audit_sensitive_read(
     route: &'static str,
     principal: &AuthenticatedPrincipal,
     headers: &HeaderMap,
-    target: &str,
+    target: &AuditTarget,
 ) {
     tracing::info!(
         target: "admin_audit",
@@ -204,7 +206,7 @@ fn audit_sensitive_read(
         route,
         actor_id = %principal.user_id,
         tenant_id = %principal.tenant_id.as_deref().unwrap_or_default(),
-        target,
+        target = target.as_str(),
         audit_reason = %header(headers, AUDIT_REASON_HEADER),
         request_id = %header(headers, keys::REQUEST_ID),
         "admin sensitive read accepted"
@@ -326,7 +328,7 @@ pub async fn list_participants(
         "conversations.participants",
         &principal,
         &headers,
-        &conversation_id,
+        &AuditTarget::id(&conversation_id),
     );
     let mut conversation = clients.conversation_read.lock().await.clone();
     let response = conversation
@@ -367,7 +369,12 @@ pub async fn list_user_devices(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminUserDevicesHttp>>> {
-    audit_sensitive_read("users.devices", &principal, &headers, &user_id);
+    audit_sensitive_read(
+        "users.devices",
+        &principal,
+        &headers,
+        &AuditTarget::id(&user_id),
+    );
     let mut online = clients.online.lock().await.clone();
     let response = online
         .admin_list_user_devices(
@@ -405,7 +412,12 @@ pub async fn get_user_presence(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminUserPresenceHttp>>> {
-    audit_sensitive_read("users.presence", &principal, &headers, &user_id);
+    audit_sensitive_read(
+        "users.presence",
+        &principal,
+        &headers,
+        &AuditTarget::id(&user_id),
+    );
     let mut online = clients.online.lock().await.clone();
     let response = online
         .admin_get_user_presence(
@@ -448,7 +460,12 @@ pub async fn kick_user(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminUserKickHttp>>> {
-    let reason = audit_write("users.kick", &principal, &headers, &user_id);
+    let reason = audit_write(
+        "users.kick",
+        &principal,
+        &headers,
+        &AuditTarget::id(&user_id),
+    );
     let mut online = clients.online.lock().await.clone();
     let devices = online
         .admin_list_user_devices(
@@ -517,8 +534,12 @@ pub async fn kick_device(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path((user_id, device_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<AdminDeviceKickHttp>>> {
-    let target = format!("{user_id}/{device_id}");
-    let reason = audit_write("devices.kick", &principal, &headers, &target);
+    let reason = audit_write(
+        "devices.kick",
+        &principal,
+        &headers,
+        &AuditTarget::pair(&user_id, &device_id),
+    );
     let mut online = clients.online.lock().await.clone();
     let response = online
         .kick_device(
@@ -562,7 +583,12 @@ pub async fn kick_tenant(
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<ApiResponse<AdminTenantKickHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
-    let reason = audit_write("tenant.kick_all", &principal, &headers, &tenant_id);
+    let reason = audit_write(
+        "tenant.kick_all",
+        &principal,
+        &headers,
+        &AuditTarget::id(&tenant_id),
+    );
     let mut online = clients.online.lock().await.clone();
     let response = online
         .kick_tenant(
