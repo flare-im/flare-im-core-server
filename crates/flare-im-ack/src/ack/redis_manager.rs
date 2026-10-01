@@ -376,18 +376,17 @@ mod tests {
         );
     }
 
-    fn redis_test_url() -> Option<String> {
+    fn redis_test_url() -> String {
         std::env::var("FLARE_REDIS_TEST_URL")
             .ok()
             .filter(|url| !url.trim().is_empty())
+            .expect("set FLARE_REDIS_TEST_URL to a disposable Redis instance")
     }
 
     #[tokio::test]
+    #[ignore = "requires FLARE_REDIS_TEST_URL pointing at a disposable Redis"]
     async fn test_ack_status_management() -> RedisResult<()> {
-        let Some(redis_url) = redis_test_url() else {
-            eprintln!("skip Redis integration test: set FLARE_REDIS_TEST_URL to enable");
-            return Ok(());
-        };
+        let redis_url = redis_test_url();
         let manager = RedisAckManager::new(&redis_url, 3600)?;
 
         let ack_info = AckStatusInfo {

@@ -1,9 +1,10 @@
 //! `PurgeConversationHistory` 契约：按服务端时间边界硬删会话历史，边界及之后的一条都不碰。
 //!
-//! 真库部分只在设置了 `FLARE_CONVERSATION_TEST_DATABASE_URL` 时运行（任意可建 schema 的
-//! PostgreSQL；用例在独立 schema 里建出清理会碰到的几张表，跑完整个删掉），否则打印 skipped
-//! 并直接通过。Redis 热缓存失效另需 `FLARE_CONVERSATION_TEST_REDIS_URL`（用完删掉自己写的键）。
-//! 线格式部分不依赖数据库。
+//! 真库部分需要 `FLARE_CONVERSATION_TEST_DATABASE_URL`（任意可建 schema 的 PostgreSQL；用例在
+//! 独立 schema 里建出清理会碰到的几张表，跑完整个删掉），Redis 热缓存失效另需
+//! `FLARE_CONVERSATION_TEST_REDIS_URL`（用完删掉自己写的键）。这三个用例标了 `#[ignore]`：
+//! 默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时对应变量必须已设置，否则直接
+//! 失败，不会把没跑的用例记为通过。线格式部分不依赖数据库，照常运行。
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -261,11 +262,10 @@ fn domain_over(repo: PostgresConversationRepository) -> DefaultConversationDomai
 }
 
 #[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
 async fn purge_deletes_only_history_before_the_boundary() {
-    let Ok(url) = std::env::var(ENV_DATABASE_URL) else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipped");
-        return;
-    };
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
     let (admin, pool, schema) = isolated_schema(&url).await;
 
     const BOUNDARY: i64 = 1_790_000_000_000;
@@ -460,11 +460,10 @@ async fn unread(pool: &PgPool, tenant: &str, conversation: &str) -> Vec<(String,
 /// 清除之后：成员未读按剩余消息重算（只会变少），被删消息的读侧热缓存在提交前失效；
 /// 缓存失效失败则整次清除回滚，重试时拿到同一组消息 ID。
 #[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
 async fn purge_recomputes_unread_and_invalidates_reader_cache() {
-    let Ok(url) = std::env::var(ENV_DATABASE_URL) else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipped");
-        return;
-    };
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
     let (admin, pool, schema) = isolated_schema(&url).await;
     const BOUNDARY: i64 = 1_790_000_000_000;
     let tenant = "tenant-a";
@@ -594,11 +593,10 @@ async fn purge_recomputes_unread_and_invalidates_reader_cache() {
 
 /// 真 Redis：失效只摘掉被删消息的尾部索引与单条缓存，同会话其余消息、别的租户原样保留。
 #[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_REDIS_URL pointing at a disposable Redis"]
 async fn redis_invalidator_removes_only_purged_messages_from_reader_cache() {
-    let Ok(url) = std::env::var(ENV_REDIS_URL) else {
-        eprintln!("{ENV_REDIS_URL} not set; skipped");
-        return;
-    };
+    let url = std::env::var(ENV_REDIS_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_REDIS_URL} to a disposable Redis instance"));
     let client = Arc::new(redis::Client::open(url).unwrap());
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let run = uuid::Uuid::new_v4().simple().to_string();

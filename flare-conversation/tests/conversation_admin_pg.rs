@@ -1,7 +1,8 @@
 //! 管理员只读仓储的真库校验：按租户翻页、游标稳定、NULL 时间列、跨租户隔离、成员分页。
 //!
-//! 只在设置了 `FLARE_CONVERSATION_TEST_DATABASE_URL`（任意可建 schema 的 PostgreSQL）时运行，
-//! 否则打印 skipped 并直接通过。表结构直接取自 `migrations/0001_baseline.sql` 与后续迁移，
+//! 需要 `FLARE_CONVERSATION_TEST_DATABASE_URL`（任意可建 schema 的 PostgreSQL）。用例标了
+//! `#[ignore]`：默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置，
+//! 否则直接失败，不会把没跑的用例记为通过。表结构直接取自 `migrations/0001_baseline.sql` 与后续迁移，
 //! 建在独立 schema 里，跑完整个删掉；不依赖 TimescaleDB。
 
 use std::sync::Arc;
@@ -141,11 +142,10 @@ async fn member(
 }
 
 #[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
 async fn admin_repository_pages_by_tenant_and_isolates_other_tenants() {
-    let Ok(url) = std::env::var(ENV_DATABASE_URL) else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipped");
-        return;
-    };
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
     let (admin, pool, schema) = isolated_schema(&url).await;
     let pool_arc = Arc::new(pool.clone());
     let repo = PostgresConversationAdminRepository::new(pool_arc);

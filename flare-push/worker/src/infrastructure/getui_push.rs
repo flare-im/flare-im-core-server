@@ -811,12 +811,11 @@ mod tests {
         assert_eq!(request.body, "你收到一条新消息");
     }
 
+    /// Real push to the Getui sandbox. `cargo test -- --ignored` fails when the
+    /// variables below are missing instead of counting as passed.
     #[tokio::test]
-    async fn getui_sandbox_push_when_env_is_enabled() {
-        if std::env::var("FLARE_GETUI_INTEGRATION").ok().as_deref() != Some("1") {
-            eprintln!("skip getui sandbox push: set FLARE_GETUI_INTEGRATION=1 to enable");
-            return;
-        }
+    #[ignore = "requires PUSH_WORKER_GETUI_APP_ID/APP_KEY/MASTER_SECRET/SANDBOX_CID for the Getui sandbox"]
+    async fn getui_sandbox_push() {
         let app_id = required_env("PUSH_WORKER_GETUI_APP_ID");
         let app_key = required_env("PUSH_WORKER_GETUI_APP_KEY");
         let master_secret = required_env("PUSH_WORKER_GETUI_MASTER_SECRET");

@@ -1,13 +1,14 @@
 //! 租户投影的真库校验：写 `tenants` 表的幂等 SQL、`GetVersions` 与网关侧 `PgTenantRuntimeSource` 读回。
 //!
-//! 只在设置了 `FLARE_TENANT_TEST_DATABASE_URL`（一个已用 `deploy/init.sql` 初始化的库）时运行，
-//! 否则直接通过。用法：
+//! 需要 `FLARE_TENANT_TEST_DATABASE_URL`（一个已用 `deploy/init.sql` 初始化的库）。用例标了
+//! `#[ignore]`：默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置，
+//! 否则直接失败。用法：
 //!
 //! ```bash
 //! docker exec flare-postgres psql -U flare -d postgres -c "CREATE DATABASE flare_d0_check"
 //! docker exec -i flare-postgres psql -U flare -d flare_d0_check < deploy/init.sql
 //! FLARE_TENANT_TEST_DATABASE_URL=postgres://flare:flare123@localhost:25432/flare_d0_check \
-//!   cargo test -p flare-capability --test tenant_projection_pg
+//!   cargo test -p flare-capability --test tenant_projection_pg -- --ignored
 //! ```
 
 use std::sync::Arc;
@@ -23,15 +24,15 @@ use sqlx::postgres::PgPoolOptions;
 
 const ENV_DATABASE_URL: &str = "FLARE_TENANT_TEST_DATABASE_URL";
 
-async fn pool() -> Option<sqlx::PgPool> {
-    let url = std::env::var(ENV_DATABASE_URL).ok()?;
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect tenant test database"),
-    )
+async fn pool() -> sqlx::PgPool {
+    let url = std::env::var(ENV_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {ENV_DATABASE_URL} to a database initialised with deploy/init.sql")
+    });
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect tenant test database")
 }
 
 fn upsert(
@@ -61,11 +62,9 @@ fn upsert(
 }
 
 #[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
 async fn projection_round_trips_through_postgres() {
-    let Some(pool) = pool().await else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipping");
-        return;
-    };
+    let pool = pool().await;
     // 租户 ID 上限 32 字符：取 uuid 的前 12 个十六进制位即可唯一。
     let tenant = format!("t{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     let repo = PostgresTenantProjectionRepository::new(Arc::new(pool.clone()));
@@ -138,11 +137,9 @@ async fn projection_round_trips_through_postgres() {
 }
 
 #[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
 async fn seeded_default_tenant_is_active_and_unversioned() {
-    let Some(pool) = pool().await else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipping");
-        return;
-    };
+    let pool = pool().await;
     let source = PgTenantRuntimeSource::new(pool);
     let zero = source
         .load("0")

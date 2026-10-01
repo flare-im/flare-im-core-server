@@ -1,7 +1,8 @@
 //! 管理员只读数据源的真库校验：租户运行时投影读回与租户能力开关列表。
 //!
-//! 只在设置了 `FLARE_TENANT_TEST_DATABASE_URL`（已建 `tenants` 与 `capability_tenant_switches`
-//! 的库，例如用 `deploy/init.sql` 初始化）时运行，否则直接通过。用例只写随机租户，结束时删除。
+//! 需要 `FLARE_TENANT_TEST_DATABASE_URL`（已建 `tenants` 与 `capability_tenant_switches` 的库，
+//! 例如用 `deploy/init.sql` 初始化）。用例标了 `#[ignore]`：默认的 `cargo test` 只记为 ignored，
+//! `-- --ignored` 显式运行时变量必须已设置，否则直接失败。用例只写随机租户，结束时删除。
 
 use std::sync::Arc;
 
@@ -23,11 +24,11 @@ fn tenant() -> String {
 }
 
 #[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
 async fn tenant_runtime_and_switches_read_back_per_tenant() {
-    let Ok(url) = std::env::var(ENV_DATABASE_URL) else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipping");
-        return;
-    };
+    let url = std::env::var(ENV_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {ENV_DATABASE_URL} to a database initialised with deploy/init.sql")
+    });
     let pool = Arc::new(
         PgPoolOptions::new()
             .max_connections(2)

@@ -1,6 +1,7 @@
 //! `threads` / `thread_participants` 主键含 `tenant_id` 后的真库校验：同一 thread_id 在两个租户里互不可见。
 //!
-//! 只在设置了 `FLARE_TENANT_TEST_DATABASE_URL`（已用 `deploy/init.sql` 初始化的库）时运行，否则直接通过。
+//! 需要 `FLARE_TENANT_TEST_DATABASE_URL`（已用 `deploy/init.sql` 初始化的库）。用例标了 `#[ignore]`：
+//! 默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置，否则直接失败。
 
 use std::sync::Arc;
 
@@ -13,11 +14,11 @@ use sqlx::postgres::PgPoolOptions;
 const ENV_DATABASE_URL: &str = "FLARE_TENANT_TEST_DATABASE_URL";
 
 #[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
 async fn threads_are_isolated_per_tenant() {
-    let Ok(url) = std::env::var(ENV_DATABASE_URL) else {
-        eprintln!("{ENV_DATABASE_URL} not set; skipping");
-        return;
-    };
+    let url = std::env::var(ENV_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {ENV_DATABASE_URL} to a database initialised with deploy/init.sql")
+    });
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)

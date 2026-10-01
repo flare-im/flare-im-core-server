@@ -99,6 +99,31 @@ python3 scripts/test_smoke_message_flow.py
 
 针对真实中间件的测试需要先启动 Docker Compose，并按测试说明准备环境变量。
 
+### 依赖真实中间件的用例
+
+需要真实 PostgreSQL、Redis 或第三方沙箱的用例统一这样写：
+
+- 标 `#[ignore = "requires <变量> ..."]`。默认的 `cargo test` 把它们记为 ignored，测试汇总里看得见，不会记为 passed。
+- 用 `-- --ignored` 显式运行时，所需变量必须已经设置；没设置或连不上就直接失败。不要写「打印 skip 后 return」，那样没跑的用例会被记为通过。
+- 新增此类用例照此处理，并补进下表。
+
+| 变量 | 需要的环境 | 用例 |
+|------|------------|------|
+| `FLARE_TENANT_TEST_DATABASE_URL` | 已用 `deploy/init.sql` 初始化的库（含 TimescaleDB） | `flare-capability` 的 `tenant_projection_pg`（2 条）、`capability_admin_pg`；`flare-conversation` 的 `thread_repository_pg` |
+| `FLARE_CONVERSATION_TEST_DATABASE_URL` | 任意可建 schema 的一次性 PostgreSQL | `flare-conversation` 的 `conversation_admin_pg`、`conversation_history_purge_pg`（2 条） |
+| `FLARE_CONVERSATION_TEST_REDIS_URL` | 一次性 Redis | `conversation_history_purge_pg` 的读侧缓存失效用例 |
+| `FLARE_MEDIA_TEST_DATABASE_URL` | 一次性 PostgreSQL | `flare-media` lib 的 5 条 |
+| `FLARE_REDIS_TEST_URL` | 一次性 Redis | `flare-im-ack` 的 `test_ack_status_management` |
+| `FLARE_TEST_REDIS_URL` | 一次性 Redis | `flare-signaling-online` 的准入用例；`flare-im-seq` 的 `leased_allocator` 3 条（未设置时连本机 `redis://127.0.0.1/`，`sequence_allocator` 的 3 条固定连这个地址） |
+| `PUSH_WORKER_GETUI_APP_ID` / `_APP_KEY` / `_MASTER_SECRET` / `_SANDBOX_CID` | 个推沙箱凭据 | `flare-push-worker` 的 `getui_sandbox_push` |
+
+示例（连接串从本机 0600 文件读入环境变量，不要写进命令历史）：
+
+```bash
+cargo test -p flare-conversation --test conversation_admin_pg -- --ignored
+cargo test -p flare-media --lib -- --ignored
+```
+
 ## 发布门禁矩阵（2026-06-30）
 
 本节记录当前一期生产就绪门禁。发布前优先执行模块级命令，避免在仓库根目录做不可控的全量扫描或 clean install。
