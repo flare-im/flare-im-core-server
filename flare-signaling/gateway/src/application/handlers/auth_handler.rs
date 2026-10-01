@@ -8,9 +8,22 @@ use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 use crate::constants::{
-    AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID,
-    ENV_DEFAULT_TENANT_ID, METADATA_KEY_DEVICE_ID, METADATA_KEY_USER_ID,
+    AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE, AUTH_FAILURE_MSG_TENANT_UNAVAILABLE,
+    AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID, ENV_DEFAULT_TENANT_ID,
+    METADATA_KEY_DEVICE_ID, METADATA_KEY_USER_ID,
 };
+
+/// 租户闸门的判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenantAdmission {
+    Admitted,
+    /// 确定的租户结论：停用 / 删除中，或严格策略下没有投影。客户端收到 `TENANT_UNAVAILABLE`，
+    /// 会终止会话、不再重连。
+    Rejected,
+    /// 严格策略下投影读不到（数据库抖动等）：不是租户结论，只是此刻放不了行。按可重试拒绝，
+    /// 客户端收到 `SERVICE_UNAVAILABLE` 后退避重连。
+    Unreadable,
+}
 
 pub struct AuthHandler {
     token_validator: Arc<dyn TokenValidator>,
@@ -49,24 +62,35 @@ impl AuthHandler {
     }
 
     /// 租户闸门：`suspended` / `deleting` 一律拒；未投影或投影库不可用按策略（宽松放行、严格拒绝）。
-    async fn tenant_admits(&self, tenant_id: &str, connection_id: &str) -> bool {
+    /// 严格策略下投影库不可用的拒绝是暂时性的，与租户确实不可用分开报。
+    async fn tenant_admission(&self, tenant_id: &str, connection_id: &str) -> TenantAdmission {
         let lookup = self.tenant_runtime.lookup(tenant_id).await;
-        let admitted = lookup.admits_connection(self.tenant_policy);
-        if !admitted {
-            let reason = match &lookup {
-                TenantLookup::Known(snapshot) => snapshot.status.as_str(),
-                TenantLookup::Unknown => "unknown",
-                TenantLookup::Unavailable => "unavailable",
-            };
+        if lookup.admits_connection(self.tenant_policy) {
+            return TenantAdmission::Admitted;
+        }
+        let (tenant_state, admission) = match &lookup {
+            TenantLookup::Known(snapshot) => (snapshot.status.as_str(), TenantAdmission::Rejected),
+            TenantLookup::Unknown => ("unknown", TenantAdmission::Rejected),
+            TenantLookup::Unavailable => ("unavailable", TenantAdmission::Unreadable),
+        };
+        if admission == TenantAdmission::Unreadable {
             warn!(
                 connection_id = %connection_id,
                 tenant_id = %tenant_id,
-                tenant_state = reason,
+                tenant_state,
+                policy = self.tenant_policy.as_str(),
+                "connection rejected for now: tenant runtime projection unreadable (retryable)"
+            );
+        } else {
+            warn!(
+                connection_id = %connection_id,
+                tenant_id = %tenant_id,
+                tenant_state,
                 policy = self.tenant_policy.as_str(),
                 "connection rejected: tenant unavailable"
             );
         }
-        admitted
+        admission
     }
 
     /// 验证 token（由 server-core auth provider 统一处理 JWT / Hook / SSO）。
@@ -176,10 +200,19 @@ impl Authenticator for AuthHandler {
             Some(principal) => {
                 let user_id = principal.user_id.clone();
                 let tenant_id = self.resolve_tenant_id(&principal);
-                if !self.tenant_admits(&tenant_id, connection_id).await {
-                    return Ok(AuthResult::failure(
-                        AUTH_FAILURE_MSG_TENANT_UNAVAILABLE.to_string(),
-                    ));
+                match self.tenant_admission(&tenant_id, connection_id).await {
+                    TenantAdmission::Admitted => {}
+                    TenantAdmission::Rejected => {
+                        return Ok(AuthResult::failure(
+                            AUTH_FAILURE_MSG_TENANT_UNAVAILABLE.to_string(),
+                        ));
+                    }
+                    // flare-core 以 SERVICE_UNAVAILABLE 拒绝 CONNECT；说明文本不下发给客户端
+                    TenantAdmission::Unreadable => {
+                        return Ok(AuthResult::retryable_failure(
+                            AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE.to_string(),
+                        ));
+                    }
                 }
                 let device_id =
                     match self.resolve_bound_device_id(&principal, device_info, connection_id) {
@@ -257,6 +290,23 @@ mod tests {
                     version: 1,
                 }))
         }
+    }
+
+    /// 投影库读不到（如 PG 抖动）。
+    struct UnreachableTenants;
+
+    #[async_trait]
+    impl TenantRuntimeSource for UnreachableTenants {
+        async fn load(&self, _tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String> {
+            Err("connection refused".to_string())
+        }
+    }
+
+    fn unreachable_tenants() -> TenantRuntimeCache {
+        TenantRuntimeCache::with_source(
+            Arc::new(UnreachableTenants),
+            TenantRuntimeCacheOptions::default(),
+        )
     }
 
     fn tenants(rows: &[(&str, TenantStatus)]) -> TenantRuntimeCache {
@@ -400,12 +450,57 @@ mod tests {
                     .await
                     .expect("auth result");
                 assert!(!result.authenticated, "{status:?}/{policy:?}");
+                assert!(!result.retryable, "{status:?}/{policy:?}");
                 assert_eq!(
                     result.error_message.as_deref(),
                     Some(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE)
                 );
             }
         }
+    }
+
+    /// 严格策略下投影库读不到：仍然拒绝（fail-closed），但这是暂时性拒绝，不是 `TENANT_UNAVAILABLE`。
+    /// 客户端收到 `TENANT_UNAVAILABLE` 会终止会话、不再重连，一次数据库抖动就会让这段时间里
+    /// 连进来的客户端一直离线；暂时性拒绝经 flare-core 变成 `SERVICE_UNAVAILABLE`，客户端退避重连。
+    #[tokio::test]
+    async fn projection_outage_under_strict_is_a_retryable_rejection() {
+        let handler = handler(
+            Some(principal(Some("device-a"))),
+            unreachable_tenants(),
+            TenantAccessPolicy::Strict,
+        );
+        let result = handler
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .expect("auth result");
+
+        assert!(!result.authenticated);
+        assert!(result.retryable, "a projection outage is not a verdict");
+        assert_ne!(
+            result.error_message.as_deref(),
+            Some(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE)
+        );
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE)
+        );
+    }
+
+    /// 宽松策略下投影库读不到照常放行（会话登记时 Online 再判一次）。
+    #[tokio::test]
+    async fn projection_outage_under_lenient_admits() {
+        let handler = handler(
+            Some(principal(Some("device-a"))),
+            unreachable_tenants(),
+            TenantAccessPolicy::Lenient,
+        );
+        let result = handler
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .expect("auth result");
+
+        assert!(result.authenticated);
+        assert_eq!(result.tenant_id(), Some("tenant-a"));
     }
 
     #[tokio::test]
@@ -447,6 +542,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.authenticated);
+        assert!(!result.retryable, "no projection under strict is a verdict");
         assert_eq!(
             result.error_message.as_deref(),
             Some(AUTH_FAILURE_MSG_TENANT_UNAVAILABLE)

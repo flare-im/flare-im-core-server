@@ -117,6 +117,45 @@ impl MessageIngestHandler {
         self
     }
 
+    /// 租户闸门。停用 / 删除中，或严格策略下没有投影：`PERMISSION_DENIED TENANT_UNAVAILABLE`，
+    /// 是确定的租户结论。严格策略下投影读不到（数据库抖动等）：仍然拒绝，但只是此刻放不了行，
+    /// 答可重试的 `SERVICE_UNAVAILABLE`，API 网关据此回 503 而不是 403，与它自己的租户门一致。
+    /// 宽松策略下未投影或读不到都放行。
+    fn tenant_gate(
+        tenant_id: &str,
+        lookup: &TenantLookup,
+        policy: TenantAccessPolicy,
+    ) -> Result<()> {
+        if lookup.admits_connection(policy) {
+            return Ok(());
+        }
+        let reason = match lookup {
+            TenantLookup::Known(snapshot) => snapshot.status.as_str(),
+            TenantLookup::Unknown => "unknown",
+            TenantLookup::Unavailable => "unavailable",
+        };
+        if matches!(lookup, TenantLookup::Unavailable) {
+            tracing::warn!(
+                tenant_id,
+                reason,
+                policy = policy.as_str(),
+                "message rejected for now: tenant runtime projection unreadable (retryable)"
+            );
+            return Err(ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "tenant runtime projection unavailable",
+            )
+            .build_error());
+        }
+        tracing::warn!(
+            tenant_id,
+            reason,
+            policy = policy.as_str(),
+            "message rejected: tenant unavailable"
+        );
+        Err(ErrorBuilder::new(ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE").build_error())
+    }
+
     /// 摄入幂等 key：
     /// - 有可信设备上下文：`idem:{tenant}:{sender}:device:{device}:{conversation}:{client_msg_id}`。
     /// - 无设备上下文：`idem:{tenant}:{sender}:{conversation}:{client_msg_id}`。
@@ -305,22 +344,7 @@ impl MessageIngestHandler {
         // Run the tenant gate before limiter, WAL, hooks and every dedup path.
         let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
         let tenant_lookup = self.tenant_runtime.lookup(&tenant_id).await;
-        if !tenant_lookup.admits_connection(self.tenant_policy) {
-            let reason = match &tenant_lookup {
-                TenantLookup::Known(snapshot) => snapshot.status.as_str(),
-                TenantLookup::Unknown => "unknown",
-                TenantLookup::Unavailable => "unavailable",
-            };
-            tracing::warn!(
-                tenant_id,
-                reason,
-                policy = self.tenant_policy.as_str(),
-                "message rejected: tenant unavailable"
-            );
-            return Err(
-                ErrorBuilder::new(ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE").build_error(),
-            );
-        }
+        Self::tenant_gate(&tenant_id, &tenant_lookup, self.tenant_policy)?;
         // 摄入边界幂等：按 client_msg_id 去重重发，闭合"首发成功但 ACK 丢失 → SDK 重试"导致的重复 echo + seq 空洞。
         let device_id = ctx.device_id().filter(|device_id| !device_id.is_empty());
         let idem_key = self
@@ -878,6 +902,66 @@ mod tests {
             recoverable_publish_failure_outcome(&submission, SendAckDurability::TransientAccepted)
                 .is_none()
         );
+    }
+
+    fn known(status: flare_im_contracts::domain::tenant::TenantStatus) -> TenantLookup {
+        TenantLookup::Known(Arc::new(
+            flare_im_contracts::domain::tenant::TenantRuntimeSnapshot {
+                tenant_id: "tenant-a".to_string(),
+                status,
+                quota: Default::default(),
+                version: 1,
+            },
+        ))
+    }
+
+    /// 停用 / 删除中的租户、严格策略下没有投影的租户：确定的租户结论，`TENANT_UNAVAILABLE`。
+    #[test]
+    fn tenant_gate_rejects_unavailable_tenants_with_a_typed_reason() {
+        use flare_im_contracts::domain::tenant::TenantStatus;
+        for (lookup, policy) in [
+            (known(TenantStatus::Suspended), TenantAccessPolicy::Lenient),
+            (known(TenantStatus::Suspended), TenantAccessPolicy::Strict),
+            (known(TenantStatus::Deleting), TenantAccessPolicy::Strict),
+            (TenantLookup::Unknown, TenantAccessPolicy::Strict),
+        ] {
+            let err = MessageIngestHandler::tenant_gate("tenant-a", &lookup, policy)
+                .expect_err("unavailable tenant must be rejected");
+            assert_eq!(err.code(), Some(ErrorCode::PermissionDenied), "{policy:?}");
+            assert_eq!(err.reason(), "TENANT_UNAVAILABLE", "{policy:?}");
+        }
+    }
+
+    /// 严格策略下投影读不到：仍然拒绝，但按可重试的服务不可用答，不是 `TENANT_UNAVAILABLE`——
+    /// 后者经 API 网关是确定的 403，客户端会当成租户被停用。
+    #[test]
+    fn tenant_gate_reports_a_projection_outage_as_retryable() {
+        let err = MessageIngestHandler::tenant_gate(
+            "tenant-a",
+            &TenantLookup::Unavailable,
+            TenantAccessPolicy::Strict,
+        )
+        .expect_err("strict policy fails closed while the projection is unreadable");
+
+        assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable));
+        assert!(
+            !err.reason().contains("TENANT_UNAVAILABLE"),
+            "{}",
+            err.reason()
+        );
+    }
+
+    #[test]
+    fn tenant_gate_admits_active_and_lenient_cases() {
+        use flare_im_contracts::domain::tenant::TenantStatus;
+        for (lookup, policy) in [
+            (known(TenantStatus::Active), TenantAccessPolicy::Strict),
+            (TenantLookup::Unknown, TenantAccessPolicy::Lenient),
+            (TenantLookup::Unavailable, TenantAccessPolicy::Lenient),
+        ] {
+            MessageIngestHandler::tenant_gate("tenant-a", &lookup, policy)
+                .unwrap_or_else(|err| panic!("{policy:?}: {err}"));
+        }
     }
 
     #[tokio::test]

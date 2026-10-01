@@ -39,6 +39,8 @@ pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
     responses(
         (status = 200, description = "成功", body = ApiResponse<SendMessageHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 403, description = "租户不可用（TENANT_UNAVAILABLE）或无权发送"),
+        (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -150,7 +152,15 @@ pub async fn send_message(
 
 /// MessageIngest 拒绝映射为 HTTP。摄入侧有自己的租户闸门：租户刚停用时它的缓存可能比本网关先看到，
 /// 答 `PERMISSION_DENIED TENANT_UNAVAILABLE`。那和网关自己的拒绝是同一回事，要回确定的 403，不能当 500。
+/// 摄入侧暂时放不了行（严格策略下租户投影读不到、同一条消息正在处理、摄入不可达）答
+/// `SERVICE_UNAVAILABLE`：回 503，调用方退避重试；不能回 403，否则会被当成租户被停用。内部文本不回显。
 fn send_failure(err: FlareError) -> GatewayError {
+    if err.code() == Some(ErrorCode::ServiceUnavailable) {
+        return GatewayError(
+            ErrorBuilder::new(ErrorCode::HttpServiceUnavailable, "SERVICE_UNAVAILABLE")
+                .build_error(),
+        );
+    }
     if err.code() != Some(ErrorCode::PermissionDenied) {
         return GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string());
     }
@@ -390,6 +400,37 @@ mod tests {
         assert_eq!(
             err.into_response().status(),
             axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    /// 摄入侧读不到租户投影（严格策略）是暂时性拒绝：503 `SERVICE_UNAVAILABLE`，不是 403
+    /// `TENANT_UNAVAILABLE`，也不回显内部文本。
+    #[test]
+    fn ingest_transient_rejection_is_a_503_not_a_tenant_403() {
+        use axum::response::IntoResponse;
+        let ingest = FlareError::from(tonic::Status::from(
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "tenant runtime projection unavailable",
+            )
+            .build_error(),
+        ));
+        let err = send_failure(ingest);
+        let localized = err.0.as_localized().expect("localized error");
+        assert_eq!(localized.reason, "SERVICE_UNAVAILABLE");
+        assert_eq!(localized.details, None);
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let unreachable = send_failure(ingest_rejection(
+            tonic::Code::Unavailable,
+            "connection refused",
+        ));
+        assert_eq!(
+            unreachable.into_response().status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

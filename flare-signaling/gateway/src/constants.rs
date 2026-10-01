@@ -20,6 +20,10 @@ pub const DEFAULT_TENANT_ID: &str = "0";
 pub const AUTH_FAILURE_MSG_TOKEN_INVALID: &str = "Token 无效或已过期";
 /// 租户被停用 / 删除中 / 严格模式下未投影时的拒连错误码（原样下发给客户端）
 pub const AUTH_FAILURE_MSG_TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
+/// 严格模式下读不到租户投影时的暂时性拒连说明：只进服务端日志，客户端收到的是可重试的
+/// `SERVICE_UNAVAILABLE`
+pub const AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE: &str =
+    "tenant runtime projection unavailable";
 
 /// Router `RouteMessage` / `RouteEvent` / `RouteAck` / `RouteData` 默认 SVID（与 `router.proto` 约定一致）
 pub const DEFAULT_ROUTE_SVID: &str = "svid.im";
