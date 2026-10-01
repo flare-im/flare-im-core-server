@@ -140,8 +140,8 @@ async fn every_documented_operation_is_routed_behind_admin_auth() {
     assert!(h.recorder.calls().is_empty());
 }
 
-/// ADM-01 与 SEC-05 媒资路由都经 `admin_rpc_error` 映射下游失败：文档同时列出不可用 503 与
-/// 超时 504（与 API Gateway 的 Media 路由同一口径）。
+/// ADM-01、SEC-05 媒资路由与消息检索的 5 条路由都经 `admin_rpc_error` 映射下游失败：文档同时
+/// 列出不可用 503 与超时 504（与 API Gateway 的 Media 路由同一口径）。
 #[tokio::test]
 async fn downstream_routes_document_both_unavailable_and_timeout() {
     let h = harness(true).await;
@@ -158,6 +158,7 @@ async fn downstream_routes_document_both_unavailable_and_timeout() {
         "/api/v1/admin/capabilities/tenant",
         "/api/v1/admin/plugins",
         "/api/v1/admin/medias/",
+        "/api/v1/admin/messages/",
     ];
     let mut checked = 0;
     for (path, item) in doc["paths"].as_object().expect("paths object") {
@@ -175,7 +176,7 @@ async fn downstream_routes_document_both_unavailable_and_timeout() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 15);
+    assert_eq!(checked, 20);
 }
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];

@@ -84,7 +84,8 @@ impl AdminCapability {
     }
 }
 
-/// 下游拒绝 → 类型化 HTTP 错误；不回显下游文案，也不带请求里的标识。媒资路由同样用它。
+/// 下游拒绝 → 类型化 HTTP 错误；不回显下游文案，也不带请求里的标识。媒资路由与消息检索的
+/// 5 条路由（Storage Reader）同样用它。
 ///
 /// 下游对已由网关验过的 admin 令牌回 UNAUTHENTICATED，只可能是部署问题（例如下游缺
 /// `FLARE_CONSOLE_PUBLIC_KEY`；Media 则是 Cell 签名密钥与公钥不配对），因此报 502 而不是让

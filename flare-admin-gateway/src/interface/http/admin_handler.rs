@@ -12,7 +12,7 @@ use flare_server_core::{
 use serde::Serialize;
 
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
-use super::ops_handler::AdminCapability;
+use super::ops_handler::{AdminCapability, admin_rpc_error};
 use crate::application::admin_messages::{
     AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
     AdminMessageEventsQueryHttpRequest, AdminMessageExportHttpRequest,
@@ -285,8 +285,11 @@ pub async fn admin_gateway_config(
         (status = 200, description = "Admin message query result", body = ApiResponse<AdminMessageQueryHttpResponse>),
         (status = 400, description = "Query is unbounded or invalid"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
-        (status = 503, description = "Storage reader is unavailable"),
+        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_QUERY_FAILED); its error text is not returned"),
+        (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn admin_query_messages(
@@ -307,7 +310,7 @@ pub async fn admin_query_messages(
     let storage_response = storage
         .search_messages_with_ctx(&ctx, storage_request)
         .await
-        .map_err(|err| GatewayError::internal("ADMIN_MESSAGE_QUERY_FAILED", err.to_string()))?;
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_QUERY_FAILED"))?;
 
     Ok(Json(ApiResponse::success(admin_message_query_response(
         storage_response,
@@ -326,9 +329,12 @@ pub async fn admin_query_messages(
         (status = 200, description = "Admin message detail", body = ApiResponse<AdminMessageDetailHttpResponse>),
         (status = 400, description = "Message id is missing"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
+        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
         (status = 404, description = "Message is not found"),
-        (status = 503, description = "Storage reader is unavailable"),
+        (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_DETAIL_FAILED); its error text is not returned"),
+        (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn admin_get_message(
@@ -344,7 +350,7 @@ pub async fn admin_get_message(
     let storage_response = storage
         .get_message_with_ctx(&ctx, storage_request)
         .await
-        .map_err(|err| GatewayError::internal("ADMIN_MESSAGE_DETAIL_FAILED", err.to_string()))?;
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_DETAIL_FAILED"))?;
     let response = admin_message_detail_response(storage_response)
         .ok_or_else(|| GatewayError::not_found("message not found"))?;
 
@@ -365,8 +371,11 @@ pub async fn admin_get_message(
         (status = 200, description = "Admin message event chain", body = ApiResponse<AdminMessageEventsHttpResponse>),
         (status = 400, description = "Message id or event type query is invalid"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
-        (status = 503, description = "Storage reader is unavailable"),
+        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_EVENTS_FAILED); its error text is not returned"),
+        (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn admin_query_message_events(
@@ -388,7 +397,7 @@ pub async fn admin_query_message_events(
     let storage_response = storage
         .query_message_events_with_ctx(&ctx, storage_request)
         .await
-        .map_err(|err| GatewayError::internal("ADMIN_MESSAGE_EVENTS_FAILED", err.to_string()))?;
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EVENTS_FAILED"))?;
 
     Ok(Json(ApiResponse::success(admin_message_events_response(
         storage_response,
@@ -405,8 +414,11 @@ pub async fn admin_query_message_events(
         (status = 200, description = "Admin message write ledger query result", body = ApiResponse<AdminMessageWriteLedgerHttpResponse>),
         (status = 400, description = "Ledger query is unbounded or invalid"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
-        (status = 503, description = "Storage reader is unavailable"),
+        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED); its error text is not returned"),
+        (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn admin_query_message_write_ledger(
@@ -427,9 +439,7 @@ pub async fn admin_query_message_write_ledger(
     let storage_response = storage
         .query_message_write_ledger_with_ctx(&ctx, storage_request)
         .await
-        .map_err(|err| {
-            GatewayError::internal("ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED", err.to_string())
-        })?;
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED"))?;
 
     Ok(Json(ApiResponse::success(
         admin_message_write_ledger_response(storage_response, requested_limit),
@@ -445,8 +455,11 @@ pub async fn admin_query_message_write_ledger(
         (status = 200, description = "Admin message export task accepted", body = ApiResponse<AdminMessageExportHttpResponse>),
         (status = 400, description = "Export request is unbounded or invalid"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
-        (status = 503, description = "Storage reader is unavailable"),
+        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_EXPORT_FAILED); its error text is not returned"),
+        (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn admin_export_messages(
@@ -462,7 +475,7 @@ pub async fn admin_export_messages(
     let storage_response = storage
         .export_messages_with_ctx(&ctx, storage_request)
         .await
-        .map_err(|err| GatewayError::internal("ADMIN_MESSAGE_EXPORT_FAILED", err.to_string()))?;
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EXPORT_FAILED"))?;
 
     Ok(Json(ApiResponse::success(admin_message_export_response(
         storage_response,
