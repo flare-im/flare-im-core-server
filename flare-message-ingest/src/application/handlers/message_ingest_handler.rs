@@ -352,6 +352,7 @@ impl MessageIngestHandler {
             .as_ref()
             .and_then(|_| Self::idempotency_key(&tenant_id, device_id, &cmd.message));
 
+        let mut reservation = None;
         if let (Some(store), Some(key)) = (self.idempotency.as_ref(), idem_key.as_ref()) {
             let idempotency_start = Instant::now();
             match store.begin(key).await? {
@@ -386,6 +387,8 @@ impl MessageIngestHandler {
                         "fresh",
                         idempotency_start.elapsed(),
                     );
+                    // 从这里起每条退出路径都要释放或提交占位，包括被取消（见守卫说明）。
+                    reservation = Some(IdempotencyReservation::new(Arc::clone(store), key));
                 }
             }
         }
@@ -405,31 +408,12 @@ impl MessageIngestHandler {
                 .observe_send_stage("rate_limit", "accepted", rate_limit_start.elapsed());
         }
 
-        let result = self.ingest_send_inner(ctx, cmd, &tenant_id).await;
+        let result = self
+            .ingest_send_inner(ctx, cmd, &tenant_id, reservation.as_ref())
+            .await;
 
-        if let (Some(store), Some(key)) = (self.idempotency.as_ref(), idem_key.as_ref()) {
-            match &result {
-                Ok(outcome) => {
-                    if let Err(error) = store
-                        .commit(
-                            key,
-                            &crate::domain::repository::IdempotentRecord {
-                                server_id: outcome.message_id.clone(),
-                                conversation_seq: outcome.conversation_seq,
-                                durability: outcome.durability,
-                            },
-                        )
-                        .await
-                    {
-                        // commit 失败只削弱后续去重能力，不影响本次已 durable 的发送。
-                        tracing::warn!(key = %key, error = %error, "ingest idempotency commit failed");
-                    }
-                }
-                // 失败：清除占位，让后续重试可干净地重新处理（否则重试会被误判为 InFlight 直到 TTL）。
-                Err(_) => {
-                    let _ = store.rollback(key).await;
-                }
-            }
+        if let Some(reservation) = reservation {
+            reservation.settle(&result).await;
         }
 
         result
@@ -440,6 +424,7 @@ impl MessageIngestHandler {
         ctx: &Ctx,
         cmd: SendMessageCommand,
         tenant_id: &str,
+        reservation: Option<&IdempotencyReservation>,
     ) -> Result<SendMessageOutcome> {
         let tenant_id = tenant_id.to_string();
         let mut message = cmd.message;
@@ -567,6 +552,14 @@ impl MessageIngestHandler {
         .await?;
 
         let durability = send_ack_durability(&profile, &persistence_mode);
+        // WAL 已写入：从这里起显式路径一定回成功（发布失败也回 WalAccepted，靠重放恢复），
+        // 结果已确定。此后被取消，占位按这个结果提交，重发拿回同一个 server_id 与 seq。
+        if let (Some(reservation), Some(outcome)) = (
+            reservation,
+            recoverable_publish_failure_outcome(&submission, durability),
+        ) {
+            reservation.mark_accepted(&outcome);
+        }
 
         // 9. 推送消息
         let publish_result = self
@@ -595,6 +588,14 @@ impl MessageIngestHandler {
                 return Ok(outcome);
             }
             return Err(error);
+        }
+        let outcome = SendMessageOutcome {
+            message_id: submission.message_id.clone(),
+            conversation_seq: submission.message.conversation_seq,
+            durability,
+        };
+        if let Some(reservation) = reservation {
+            reservation.mark_accepted(&outcome);
         }
 
         // 10. broker 已确认接受后，主队列成为恢复来源，可以清理发送侧 WAL。
@@ -626,11 +627,7 @@ impl MessageIngestHandler {
             );
         }
 
-        Ok(SendMessageOutcome {
-            message_id: submission.message_id,
-            conversation_seq: submission.message.conversation_seq,
-            durability,
-        })
+        Ok(outcome)
     }
 
     /// 发送系统消息
@@ -738,6 +735,122 @@ fn stage_timeout_error(stage: &'static str, timeout: Duration) -> FlareError {
         .param("stage", stage)
         .param("timeout_ms", timeout.as_millis().to_string())
         .build_error()
+}
+
+/// 摄入幂等占位的守卫：`begin` 占位成功后，保证每条退出路径都释放或提交占位。
+///
+/// 发送处理可能在提交或回滚之前被取消：调用方断开、上游超时、停机时入口与本服务一起停止
+/// （W6-S2 F3）。占位不释放的话，同一 `client_msg_id` 的重发在占位 TTL（默认 180 s）内都得到
+/// `duplicate send in progress`。守卫被丢弃时若还没结算，就按显式路径在同一阶段会做的收尾：
+/// 已经到达确定结果的（WAL 已写入，或已发布）提交该结果，重发拿回同一个 server_id 与 seq；
+/// 否则回滚，重发重新处理，与显式失败相同。丢弃时只能另起任务做 Redis 调用，进程同时退出时
+/// 这次收尾可能来不及，占位就留到 TTL 到期。
+struct IdempotencyReservation {
+    store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>,
+    key: String,
+    state: std::sync::Mutex<ReservationState>,
+}
+
+enum ReservationState {
+    /// 已占位，还没有确定的结果：取消时回滚。
+    Reserved,
+    /// 结果已确定：取消时提交它。
+    Accepted(crate::domain::repository::IdempotentRecord),
+    /// 已显式结算完毕。
+    Settled,
+}
+
+impl IdempotencyReservation {
+    fn new(store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>, key: &str) -> Self {
+        Self {
+            store,
+            key: key.to_string(),
+            state: std::sync::Mutex::new(ReservationState::Reserved),
+        }
+    }
+
+    fn replace_state(&self, next: ReservationState) -> ReservationState {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *state, next)
+    }
+
+    /// 发送已到达确定结果：此后被取消就提交它。
+    fn mark_accepted(&self, outcome: &SendMessageOutcome) {
+        self.replace_state(ReservationState::Accepted(record_of(outcome)));
+    }
+
+    /// 显式结算：成功提交结果，失败回滚。结算途中被取消，由 `Drop` 重做同一件事。
+    async fn settle(self, result: &Result<SendMessageOutcome>) {
+        match result {
+            Ok(outcome) => {
+                let record = record_of(outcome);
+                self.replace_state(ReservationState::Accepted(record.clone()));
+                if let Err(error) = self.store.commit(&self.key, &record).await {
+                    // commit 失败只削弱后续去重能力，不影响本次已 durable 的发送。
+                    tracing::warn!(key = %self.key, error = %error, "ingest idempotency commit failed");
+                }
+            }
+            // 失败：清除占位，让后续重试可干净地重新处理（否则重试会被误判为 InFlight 直到 TTL）。
+            Err(_) => {
+                self.replace_state(ReservationState::Reserved);
+                let _ = self.store.rollback(&self.key).await;
+            }
+        }
+        self.replace_state(ReservationState::Settled);
+    }
+}
+
+impl Drop for IdempotencyReservation {
+    fn drop(&mut self) {
+        let state = self.replace_state(ReservationState::Settled);
+        if matches!(state, ReservationState::Settled) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                key = %self.key,
+                "send cancelled outside a runtime; idempotency reservation kept until its TTL"
+            );
+            return;
+        };
+        let store = Arc::clone(&self.store);
+        let key = std::mem::take(&mut self.key);
+        runtime.spawn(async move {
+            match state {
+                ReservationState::Accepted(record) => {
+                    tracing::info!(
+                        key = %key,
+                        message_id = %record.server_id,
+                        "send cancelled after acceptance; committing its idempotency result"
+                    );
+                    if let Err(error) = store.commit(&key, &record).await {
+                        tracing::warn!(key = %key, error = %error, "ingest idempotency commit failed");
+                    }
+                }
+                ReservationState::Reserved => {
+                    tracing::info!(
+                        key = %key,
+                        "send cancelled before acceptance; releasing its idempotency reservation"
+                    );
+                    if let Err(error) = store.rollback(&key).await {
+                        tracing::warn!(key = %key, error = %error, "ingest idempotency rollback failed");
+                    }
+                }
+                ReservationState::Settled => {}
+            }
+        });
+    }
+}
+
+fn record_of(outcome: &SendMessageOutcome) -> crate::domain::repository::IdempotentRecord {
+    crate::domain::repository::IdempotentRecord {
+        server_id: outcome.message_id.clone(),
+        conversation_seq: outcome.conversation_seq,
+        durability: outcome.durability,
+    }
 }
 
 fn send_ack_durability(
