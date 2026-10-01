@@ -70,12 +70,17 @@ pub(crate) async fn supervise(
         }
     };
     eprintln!("[supervisor] stopping children ({reason})");
+    let stopping = Instant::now();
     let _ = stop_tx.send(true);
     while let Some(result) = workers.join_next().await {
         if let Err(error) = result.context("join service supervisor task")? {
             eprintln!("[supervisor] service supervisor error: {error:#}");
         }
     }
+    eprintln!(
+        "[supervisor] all children stopped in {} ms",
+        stopping.elapsed().as_millis()
+    );
     if !health_finished {
         health_task.abort();
         let _ = health_task.await;
@@ -133,7 +138,7 @@ async fn run_service(
                     }
                     _ = stop.changed() => {
                         set_running(&state, &service.name, false).await;
-                        terminate_child(&mut child, Duration::from_secs(manifest.restart.stop_grace_secs)).await;
+                        terminate_child(&service.name, &mut child, Duration::from_secs(manifest.restart.stop_grace_secs)).await;
                     }
                 }
                 drain_log(stdout).await;
@@ -178,18 +183,42 @@ async fn set_running(state: &HealthState, name: &str, running: bool) {
     }
 }
 
-async fn terminate_child(child: &mut Child, grace: Duration) {
+/// 停一个子进程：SIGTERM 整个进程组，宽限期内没退出再 SIGKILL。每个子进程记一行退出状态
+/// 与从 SIGTERM 到退出的毫秒数（W6-S2 F7：此前停机路径丢弃 `wait` 的结果，只能在容器外轮询
+/// `/proc` 补证）。
+async fn terminate_child(name: &str, child: &mut Child, grace: Duration) {
+    let started = Instant::now();
     if let Some(pid) = child.id() {
         eprintln!("[supervisor] SIGTERM process group {pid}");
         send_group_signal(pid, 15);
     }
-    if timeout(grace, child.wait()).await.is_err() {
-        if let Some(pid) = child.id() {
-            eprintln!("[supervisor] SIGKILL process group {pid} after grace timeout");
-            send_group_signal(pid, 9);
+    match timeout(grace, child.wait()).await {
+        Ok(status) => eprintln!(
+            "[{name}] stopped after {} ms: {}",
+            started.elapsed().as_millis(),
+            describe_exit(status)
+        ),
+        Err(_) => {
+            if let Some(pid) = child.id() {
+                eprintln!("[supervisor] SIGKILL process group {pid} after grace timeout");
+                send_group_signal(pid, 9);
+            }
+            let _ = child.start_kill();
+            let status = child.wait().await;
+            eprintln!(
+                "[{name}] killed after {} ms (grace {} s exceeded): {}",
+                started.elapsed().as_millis(),
+                grace.as_secs(),
+                describe_exit(status)
+            );
         }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+    }
+}
+
+fn describe_exit(status: std::io::Result<std::process::ExitStatus>) -> String {
+    match status {
+        Ok(status) => status.to_string(),
+        Err(error) => format!("wait failed: {error}"),
     }
 }
 
