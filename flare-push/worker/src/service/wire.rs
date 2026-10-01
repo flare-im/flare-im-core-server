@@ -1,6 +1,7 @@
 //! Wire 风格依赖注入：组装 Push Worker 相关组件
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use flare_server_core::error::Result;
 use flare_server_core::mq::NatsConsumerConfig;
@@ -15,6 +16,7 @@ use flare_im_service_kit::push_delivery::{
     AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
 };
 use flare_server_core::mq::consumer::ConsumerConfig;
+use flare_server_core::mq::consumer::RetryBackoff;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
@@ -219,11 +221,7 @@ pub async fn initialize(
     };
 
     // 6. 配置 ConsumerConfig
-    let consumer_cfg = ConsumerConfig::default()
-        .with_concurrency(128)
-        .with_batch_size(config.batch_size())
-        .with_batch_timeout_ms(config.batch_timeout_ms())
-        .with_ordered(true);
+    let consumer_cfg = push_consumer_config(config.batch_size(), config.batch_timeout_ms());
 
     // 7. 注册到 Dispatcher
     let mut dispatcher = TopicDispatcher::new();
@@ -259,6 +257,32 @@ pub async fn initialize(
     })
 }
 
+/// 推送消费者的重试次数上限（online 与 offline 两个 handler 共用这一个消费者配置）。
+///
+/// handler 遇到暂时性失败（Access Gateway 停机或重启、网关过载、离线推送后端暂时不可用）
+/// 返回 Nack，交给 JetStream 按 [`push_delivery_retry_backoff`] 延迟重投：12 次重试的等待合计
+/// 135 s，之后仍失败才进 `flare.im.dlq.push-delivery`。不设退避时 NAK 立即重投，连接被拒在
+/// 毫秒内返回，默认的 3 次重试会在同一瞬间用完，停机或重启窗口里的推送照样进 DLQ（W6-S2 F4）。
+///
+/// 首投加全部重试不得超过 JetStream 的最大投递次数，否则 broker 先停止投递，消息既不送达
+/// 也不进 DLQ；见 `wire_tests` 的门禁。
+pub(crate) const PUSH_DELIVERY_MAX_RETRIES: u32 = 12;
+
+/// 推送重投的退避：1 s 起翻倍，封顶 15 s。网关恢复后，处于退避中的推送最迟 15 s 内重投。
+pub(crate) fn push_delivery_retry_backoff() -> RetryBackoff {
+    RetryBackoff::new(Duration::from_secs(1), Duration::from_secs(15))
+}
+
+pub(crate) fn push_consumer_config(batch_size: usize, batch_timeout_ms: u64) -> ConsumerConfig {
+    ConsumerConfig::default()
+        .with_concurrency(128)
+        .with_batch_size(batch_size)
+        .with_batch_timeout_ms(batch_timeout_ms)
+        .with_ordered(true)
+        .with_max_retries(PUSH_DELIVERY_MAX_RETRIES)
+        .with_retry_backoff(push_delivery_retry_backoff())
+}
+
 fn required_config(value: Option<String>, name: &'static str) -> Result<String> {
     value.ok_or_else(|| {
         FlareError::localized(
@@ -266,4 +290,61 @@ fn required_config(value: Option<String>, name: &'static str) -> Result<String> 
             format!("missing required config {name}"),
         )
     })
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    /// 只实现必需项的消费者配置：`build_nats_consumer_tasks_*` 按流解析时只保留这几项，
+    /// `max_deliver` 等一律取 trait 默认值，所以这里读到的就是 JetStream 消费者实际的
+    /// 最大投递次数。
+    struct EffectiveNatsConsumer;
+
+    impl NatsConsumerConfig for EffectiveNatsConsumer {
+        fn nats_url(&self) -> &str {
+            "nats://127.0.0.1:1"
+        }
+        fn consumer_group(&self) -> &str {
+            "push-worker"
+        }
+        fn enable_manual_ack(&self) -> bool {
+            true
+        }
+        fn batch_size(&self) -> usize {
+            64
+        }
+        fn batch_timeout_ms(&self) -> u64 {
+            50
+        }
+        fn enable_durable(&self) -> bool {
+            true
+        }
+    }
+
+    /// 门禁：推送的重试预算覆盖停机与重启窗口，且首投加全部重试落在 JetStream 的
+    /// `max_deliver` 之内（否则 broker 先停投，消息既不送达也不进 DLQ）。
+    #[test]
+    fn push_retry_budget_spans_a_restart_window_inside_max_deliver() {
+        let consumer = push_consumer_config(64, 50);
+        let backoff = consumer
+            .retry_backoff
+            .expect("push consumer retries with backoff");
+        let max_deliver = EffectiveNatsConsumer.max_deliver();
+        println!(
+            "push retries {} over {:?}, max_deliver {max_deliver}",
+            consumer.max_retries,
+            backoff.total_for(consumer.max_retries)
+        );
+        assert_eq!(consumer.max_retries, PUSH_DELIVERY_MAX_RETRIES);
+        // 首投 + max_retries 次重投 ≤ max_deliver。
+        assert!(i64::from(consumer.max_retries) < max_deliver);
+        // W6-S2：core 从 stop 到重新 healthy 约 16 s（停机 5.3 s、间隔 5 s、启动 11 s）；
+        // 重试窗口至少留出它的数倍。
+        assert!(backoff.total_for(consumer.max_retries) >= Duration::from_secs(120));
+        assert!(backoff.delay_for(0) > Duration::ZERO);
+        assert!(backoff.delay_for(u32::MAX) <= Duration::from_secs(15));
+        assert!(consumer.ordered);
+        assert!(consumer.enable_dlq);
+    }
 }

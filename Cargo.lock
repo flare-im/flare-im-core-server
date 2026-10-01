@@ -2313,6 +2313,7 @@ dependencies = [
  "base64",
  "chrono",
  "deadpool-redis",
+ "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
  "flare-im-contracts",

@@ -43,5 +43,9 @@ reqwest = { workspace = true, features = ["http2"] }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
 
+[dev-dependencies]
+# 测试里为模拟的 broker 记录签发认证上下文（与 flare-im-service-kit 同一版本与特性）
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
 [lints]
 workspace = true
