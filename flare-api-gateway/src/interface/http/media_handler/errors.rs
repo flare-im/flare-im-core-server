@@ -7,8 +7,10 @@ use flare_server_core::http::HttpApiError as GatewayError;
 ///
 /// - 越权 → 403 `FORBIDDEN`；不存在（含他人或别的租户的上传会话）→ 404 `NOT_FOUND`；
 ///   参数不合法 → 400 `BAD_REQUEST`。
-/// - 其余（Media 不可用、内部故障、签名上下文被拒等）仍是 500，reason 固定为
-///   `MEDIA_REQUEST_FAILED`。
+/// - Media 不可用（gRPC `UNAVAILABLE`，含连不上 Media、Media 报存储不可用）→ 503
+///   `MEDIA_UNAVAILABLE`；超时（`DEADLINE_EXCEEDED`）→ 504 `MEDIA_TIMEOUT`。调用方可以稍后重试，
+///   不要当成请求本身有错。
+/// - 其余（内部故障、签名上下文被拒等）仍是 500，reason 固定为 `MEDIA_REQUEST_FAILED`。
 ///
 /// Media 的文案会带内部标识：NotFound 的是调用方传入的 file_id（跨租户查不到时也是它），
 /// 上传会话错误带 upload_id，存储错误带对象 key，越权文案描述内部授权规则。这些只进日志。
@@ -24,6 +26,26 @@ pub(crate) fn media_rpc_error(err: FlareError) -> GatewayError {
             | ErrorCode::MessageFormatError
             | ErrorCode::InvalidCommand,
         ) => (ErrorCode::HttpBadRequest, "BAD_REQUEST"),
+        Some(
+            ErrorCode::ServiceUnavailable
+            | ErrorCode::NetworkError
+            | ErrorCode::NetworkUnreachable
+            | ErrorCode::NetworkConnectionLost,
+        ) => {
+            tracing::warn!(error = %err, "media is unavailable");
+            return GatewayError(
+                ErrorBuilder::new(ErrorCode::HttpServiceUnavailable, "MEDIA_UNAVAILABLE")
+                    .build_error(),
+            );
+        }
+        Some(
+            ErrorCode::OperationTimeout | ErrorCode::NetworkTimeout | ErrorCode::ConnectionTimeout,
+        ) => {
+            tracing::warn!(error = %err, "media request timed out");
+            return GatewayError(
+                ErrorBuilder::new(ErrorCode::HttpGatewayTimeout, "MEDIA_TIMEOUT").build_error(),
+            );
+        }
         _ => {
             tracing::warn!(error = %err, "media rpc failed");
             return GatewayError(
@@ -106,19 +128,57 @@ mod tests {
         }
     }
 
-    /// 其余失败（Media 不可用、签名上下文被拒、存储故障等）仍是服务端错误，不能伪装成
-    /// 4xx；响应体同样不带 Media 文案（存储错误里有对象 key）。
+    /// Media 不可用与超时是暂时性故障：503/504，调用方可重试；响应体不带 Media 文案
+    /// （存储错误里有对象 key）。Media 把存储网络错误编码成 `UNAVAILABLE`，同样是 503。
+    #[tokio::test]
+    async fn unavailable_and_deadline_map_to_503_and_504_without_echoing_media_text() {
+        for (status, code, reason) in [
+            (
+                tonic::Status::unavailable("media down secret-object-key"),
+                503,
+                "MEDIA_UNAVAILABLE",
+            ),
+            (
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::NetworkError,
+                    "failed to presign s3 put url",
+                    "key=secret-object-key"
+                )),
+                503,
+                "MEDIA_UNAVAILABLE",
+            ),
+            (
+                tonic::Status::deadline_exceeded("media slow secret-object-key"),
+                504,
+                "MEDIA_TIMEOUT",
+            ),
+        ] {
+            let (status, body) = body_of(media_rpc_error(FlareError::from(status))).await;
+            assert_eq!(status, code, "{body}");
+            assert_eq!(body["code"], code);
+            assert_eq!(body["reason"], reason);
+            assert!(!body.to_string().contains("secret-object-key"), "{body}");
+        }
+        // 网关进程内的传输错误（未经 gRPC 往返）同样按不可用处理。
+        let (status, body) = body_of(media_rpc_error(FlareError::localized(
+            ErrorCode::NetworkError,
+            "gRPC transport error: secret-object-key",
+        )))
+        .await;
+        assert_eq!(
+            (status, body["reason"].as_str()),
+            (503, Some("MEDIA_UNAVAILABLE"))
+        );
+    }
+
+    /// 其余失败（签名上下文被拒、内部故障等）仍是服务端错误，不能伪装成 4xx 或可重试；
+    /// 响应体同样不带 Media 文案。
     #[tokio::test]
     async fn other_failures_stay_server_errors_without_echoing_media_text() {
         for status in [
-            tonic::Status::unavailable("media down secret-object-key"),
             tonic::Status::unauthenticated("signed context required secret-object-key"),
             tonic::Status::internal("boom secret-object-key"),
-            tonic::Status::from(flare_server_core::flare_err_details!(
-                ErrorCode::NetworkError,
-                "failed to presign s3 put url",
-                "key=secret-object-key"
-            )),
+            tonic::Status::unknown("unknown secret-object-key"),
         ] {
             let (code, body) = body_of(media_rpc_error(FlareError::from(status))).await;
             assert_eq!(code, 500);

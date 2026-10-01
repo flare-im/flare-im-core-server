@@ -273,6 +273,37 @@ fn public_openapi_has_no_media_management_operations() {
     }
 }
 
+/// The OpenAPI document must describe what the upload-class routes really answer: the typed
+/// Media rejections, the gateway's own 401/403, and the retryable 503/504.
+#[test]
+fn upload_class_operations_document_their_error_responses() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let mut documented = 0;
+    for (method, uri, _) in upload_routes() {
+        let path = uri.split('?').next().unwrap();
+        let operation = &document["paths"][path][method.to_ascii_lowercase()];
+        let responses = operation["responses"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{method} {path} is not documented"));
+        let mut expected = vec!["200", "400", "401", "403", "500", "503", "504"];
+        let session_or_file = path.contains("/multipart/") && !path.ends_with("/initiate")
+            || path.contains("/uploads/") && !path.ends_with("/initiate")
+            || path.contains("/process-");
+        if session_or_file {
+            expected.push("404");
+        }
+        for status in expected {
+            assert!(
+                responses.contains_key(status),
+                "{method} {path} does not document {status}: {:?}",
+                responses.keys().collect::<Vec<_>>()
+            );
+        }
+        documented += 1;
+    }
+    assert_eq!(documented, 14);
+}
+
 /// What the scripted Media endpoint answers to every file RPC.
 #[derive(Clone, Copy)]
 enum MediaVerdict {
@@ -286,8 +317,12 @@ enum MediaVerdict {
     ForeignUploadSession,
     /// Media rejected the arguments (part out of range, oversized chunk, caller-chosen key).
     InvalidArgument,
-    /// Storage or Media-internal failure whose text carries an object key.
+    /// Storage failure whose text carries an object key; Media encodes it as UNAVAILABLE.
     StorageFailure,
+    /// Media did not answer in time.
+    Timeout,
+    /// Media-internal failure whose text carries an object key.
+    InternalFailure,
 }
 
 const FILE_ID: &str = "4a8f0c2e-5d1b-4f7e-9c3a-7b6d5e4f3a21";
@@ -363,6 +398,18 @@ impl tower::Service<axum::http::Request<tonic::body::Body>> for ScriptedMedia {
             MediaVerdict::StorageFailure => {
                 tonic::Status::from(flare_server_core::flare_err_details!(
                     ErrorCode::NetworkError,
+                    "failed to presign s3 put url",
+                    format!("key={LEGACY_CDN_KEY}")
+                ))
+                .into_http()
+            }
+            MediaVerdict::Timeout => {
+                tonic::Status::deadline_exceeded(format!("media slow key={LEGACY_CDN_KEY}"))
+                    .into_http()
+            }
+            MediaVerdict::InternalFailure => {
+                tonic::Status::from(flare_server_core::flare_err_details!(
+                    ErrorCode::InternalError,
                     "failed to presign s3 put url",
                     format!("key={LEGACY_CDN_KEY}")
                 ))
@@ -668,6 +715,16 @@ async fn upload_class_routes_map_media_rejections_to_typed_statuses_without_echo
         ),
         (
             MediaVerdict::StorageFailure,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MEDIA_UNAVAILABLE",
+        ),
+        (
+            MediaVerdict::Timeout,
+            StatusCode::GATEWAY_TIMEOUT,
+            "MEDIA_TIMEOUT",
+        ),
+        (
+            MediaVerdict::InternalFailure,
             StatusCode::INTERNAL_SERVER_ERROR,
             "MEDIA_REQUEST_FAILED",
         ),
@@ -677,6 +734,32 @@ async fn upload_class_routes_map_media_rejections_to_typed_statuses_without_echo
             let response = call(&router, method, uri, body.clone()).await;
             assert_typed_rejection(response, status, reason, &format!("{method} {uri}")).await;
         }
+    }
+}
+
+/// Media itself unreachable (nothing listens on its address): every Media route answers a
+/// retryable 503, not the generic 500, and the file routes behave the same way.
+#[tokio::test]
+async fn unreachable_media_is_a_retryable_503_on_every_media_route() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let channel = Channel::from_shared(format!("http://{address}"))
+        .unwrap()
+        .connect_lazy();
+    let (signer, _) = cell_keys();
+    let router = router_with(channel, Some(signer));
+    let mut routes = upload_routes();
+    routes.extend(file_routes());
+    for (method, uri, body) in &routes {
+        let response = call(&router, method, uri, body.clone()).await;
+        assert_typed_rejection(
+            response,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MEDIA_UNAVAILABLE",
+            &format!("{method} {uri}"),
+        )
+        .await;
     }
 }
 

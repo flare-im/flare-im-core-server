@@ -18,7 +18,16 @@ use super::identity::MediaIdentity;
     path = "/api/v1/medias/process-image",
     tag = "Media",
     request_body = ProcessImageHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "文件不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn process_image(
@@ -76,7 +85,16 @@ pub async fn process_image(
     path = "/api/v1/medias/process-video",
     tag = "Media",
     request_body = ProcessVideoHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "文件不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn process_video(

@@ -27,8 +27,11 @@ use super::identity::MediaIdentity;
     responses(
         (status = 200, description = "成功：object_key 首段为调用方租户"),
         (status = 400, description = "参数错误（含调用方指定 object_key）"),
-        (status = 403, description = "bucket 不属于本服务"),
-        (status = 500, description = "内部错误"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "bucket 不属于本服务，或不是绑定租户的终端用户令牌"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
     ),
 )]
 #[instrument(skip(caller, clients))]
@@ -53,7 +56,15 @@ pub async fn generate_upload_url(
     path = "/api/v1/medias/upload-file",
     tag = "Media",
     request_body = UploadFileHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn upload_file(
@@ -101,7 +112,15 @@ pub async fn upload_file(
     path = "/api/v1/medias/multipart/initiate",
     tag = "Media",
     request_body = InitiateMultipartUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn initiate_multipart_upload(
@@ -131,7 +150,16 @@ pub async fn initiate_multipart_upload(
     path = "/api/v1/medias/multipart/chunk",
     tag = "Media",
     request_body = UploadMultipartChunkHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn upload_multipart_chunk(
@@ -168,7 +196,16 @@ pub async fn upload_multipart_chunk(
     path = "/api/v1/medias/multipart/complete",
     tag = "Media",
     request_body = CompleteMultipartUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn complete_multipart_upload(
@@ -199,7 +236,16 @@ pub async fn complete_multipart_upload(
     path = "/api/v1/medias/multipart/abort",
     tag = "Media",
     request_body = AbortMultipartUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功；会话不存在时视为已中止"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn abort_multipart_upload(
@@ -230,7 +276,15 @@ pub async fn abort_multipart_upload(
     path = "/api/v1/medias/uploads/initiate",
     tag = "Media",
     request_body = InitiateDirectUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功：单次 PUT 地址已签入声明的大小，有效期不超过会话"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn initiate_direct_upload(
@@ -262,7 +316,16 @@ pub async fn initiate_direct_upload(
     path = "/api/v1/medias/uploads/status",
     tag = "Media",
     params(("upload_id" = String, Query, description = "上传 ID")),
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn get_direct_upload_status(
@@ -292,7 +355,16 @@ pub async fn get_direct_upload_status(
     path = "/api/v1/medias/uploads/presign-parts",
     tag = "Media",
     request_body = PresignDirectUploadPartsHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn presign_direct_upload_parts(
@@ -324,7 +396,16 @@ pub async fn presign_direct_upload_parts(
     path = "/api/v1/medias/uploads/commit-parts",
     tag = "Media",
     request_body = CommitDirectUploadPartsHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn commit_direct_upload_parts(
@@ -365,7 +446,16 @@ pub async fn commit_direct_upload_parts(
     path = "/api/v1/medias/uploads/complete",
     tag = "Media",
     request_body = CompleteDirectUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功；存储中的对象大小与声明不符时回 400 并删除该对象"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn complete_direct_upload(
@@ -395,7 +485,16 @@ pub async fn complete_direct_upload(
     path = "/api/v1/medias/uploads/abort",
     tag = "Media",
     request_body = AbortDirectUploadHttpRequest,
-    responses((status = 200, description = "成功")),
+    responses(
+        (status = 200, description = "成功：已写入的对象与未完成的分片上传一并释放"),
+        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 401, description = "缺少或无效的访问令牌"),
+        (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
+        (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),
+        (status = 500, description = "内部错误（reason=MEDIA_REQUEST_FAILED，不回显 Media 文案）"),
+        (status = 503, description = "Media 不可用，可稍后重试（reason=MEDIA_UNAVAILABLE）"),
+        (status = 504, description = "Media 超时，可稍后重试（reason=MEDIA_TIMEOUT）"),
+    ),
 )]
 #[instrument(skip(caller, clients))]
 pub async fn abort_direct_upload(
