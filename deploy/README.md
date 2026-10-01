@@ -21,6 +21,8 @@
 cd flare-im-core
 cp deploy/.env.example deploy/.env
 # 至少填 FLARE_TOKEN_SECRET：openssl rand -base64 48 | tr -d '\n' | head -c 64
+# 以及三项 Ed25519 密钥 FLARE_INTERNAL_CTX_SIGNING_KEY / FLARE_INTERNAL_CTX_PUBLIC_KEY /
+# FLARE_CONSOLE_PUBLIC_KEY，生成方法写在 .env.example 里
 
 docker compose --env-file deploy/.env \
   -f deploy/docker-compose.yml \
@@ -48,7 +50,7 @@ NATS；使用 Kafka 时同时设置 `FLARE_MQ_DEFAULT_BACKEND=kafka`。
 
 **`FLARE_TOKEN_SECRET` 没有默认值，不填直接启动失败。** 发一个默认签名密钥等于发一个
 漏洞：拿到它的人能伪造任意用户身份，而且完全没有症状——服务正常启动、登录正常、
-日志干净。
+日志干净。三项 Ed25519 密钥同理：缺任何一项，`docker compose` 直接拒绝启动。
 
 ### B. 只起中间件（服务跑在本机，开发用）
 

@@ -1,6 +1,8 @@
 # Full Flare IM Core stack from a prebuilt image — no Rust toolchain required.
 #
 #   export FLARE_TOKEN_SECRET="$(openssl rand -base64 48 | tr -d '\n' | head -c 64)"
+#   # also required: FLARE_INTERNAL_CTX_SIGNING_KEY, FLARE_INTERNAL_CTX_PUBLIC_KEY and
+#   # FLARE_CONSOLE_PUBLIC_KEY (Ed25519; how to generate them is in deploy/.env.example)
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
 #                  -f deploy/docker-compose.stack.yml up -d
 #
