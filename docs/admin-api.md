@@ -14,7 +14,7 @@ Every `/api/v1/admin/**` request needs `authorization: Bearer <admin assertion>`
 
 The request must also carry exactly one `x-tenant-id` equal to the token tenant. The gateway verifies with `FLARE_CONSOLE_PUBLIC_KEY` only and holds no signing key. After verification it drops every identity header from the request (`x-user-id`, `x-tenant-id`, `x-actor-*`, device and session headers) and re-inserts the signed subject and tenant.
 
-For the ADM-01 routes below, the gateway forwards the same admin assertion, unchanged, as the only identity on the downstream gRPC call. Conversation, Online and Capability verify it again and scope every read or kick to the token tenant; requests carry no tenant or caller ID of their own. See [SEC02](SEC02-console-control-auth.md#forwarded-admin-assertion-adm-01) for the downstream side.
+For the ADM-01 routes below, the gateway forwards the same admin assertion, unchanged, as the only identity on the downstream gRPC call. Conversation, Online and Capability verify it again and scope every read or kick to the token tenant; requests carry no tenant or caller ID of their own. See [SEC02](SEC02-console-control-auth.md#forwarded-admin-assertion-adm-01) for the downstream side. Media does not accept the assertion; the media routes sign their own Cell internal context instead (see [Media routes](#media-routes)).
 
 | Condition | Status | `reason` |
 | --- | --- | --- |
@@ -30,10 +30,12 @@ A write is any `POST`, `PUT`, `PATCH` or `DELETE`, except the two bounded read-o
 x-tenant-id: <token tenant>
 x-actor-id: <token subject>
 x-audit-reason: <why the operator is doing this>
-idempotency-key: <stable key>      # or x-request-id
+idempotency-key: <correlation key>      # or x-request-id
 ```
 
-The gateway writes one `admin_audit` log line per accepted write (route, actor, tenant, target, reason, request ID, idempotency key). The three kick routes are naturally idempotent: a repeated kick finds the device already offline. The JWT alone does not deduplicate a replay inside its 60-second window.
+`idempotency-key` (or `x-request-id`) only correlates the request with the caller's records and the gateway's audit log. The gateway does not store or deduplicate it: a replay with the same key runs again, and so does a replay of the same JWT inside its 60-second window. Repeating a kick is harmless because the device is already offline. Repeating orphan cleanup is harmless because it only deletes assets that are orphaned and past their grace period.
+
+What the gateway logs for writes, and where the durable audit row lives, is described under [Audit](#audit).
 
 ## Responses and errors
 
@@ -45,7 +47,7 @@ Success is `{"code": 0, "data": {...}}`. Errors are `{"code": <non-zero>, "reaso
 | `NOT_FOUND` (a conversation of another tenant answers the same as a missing one) | 404 | `NOT_FOUND` |
 | `INVALID_ARGUMENT` (bad cursor, blank ID) | 400 | `BAD_REQUEST` |
 | `UNAVAILABLE`, `DEADLINE_EXCEEDED`, connection failure | 503 | `ADMIN_UPSTREAM_UNAVAILABLE` |
-| `UNAUTHENTICATED` for an assertion the gateway already verified (deployment error, e.g. the downstream lacks `FLARE_CONSOLE_PUBLIC_KEY`) | 502 | `ADMIN_UPSTREAM_REJECTED_ASSERTION` |
+| `UNAUTHENTICATED` for an assertion the gateway already verified (deployment error, e.g. the downstream lacks `FLARE_CONSOLE_PUBLIC_KEY`, or Media's `FLARE_INTERNAL_CTX_PUBLIC_KEY` does not pair with the gateway's private key) | 502 | `ADMIN_UPSTREAM_REJECTED_ASSERTION` |
 | Anything else | 500 | a fixed per-route reason such as `ADMIN_CONVERSATION_LIST_FAILED` |
 | Capability downstream disabled | 503 | `ADMIN_CAPABILITY_DISABLED` |
 | `limit` below 1 | 400 | `ADMIN_PAGE_LIMIT_INVALID` |
@@ -84,7 +86,7 @@ All paths are under `/api/v1/admin`.
 
 `GET /users/{user_id}/presence` returns `{user_id, online, last_seen_at, devices}`. A user Online has never seen reads as offline with `last_seen_at: null`.
 
-`POST /users/{user_id}/kick` lists the user's devices and kicks them one by one. It returns `{user_id, kicked, already_offline}`; `already_offline` holds devices that went offline between the list and the kick. Any other failure (for example Online refusing the tenant scope) stops the request and is returned as an error; devices kicked before it stay offline, and a retry only sees the rest.
+`POST /users/{user_id}/kick` lists the user's devices and kicks them one by one. It returns `{user_id, kicked, already_offline}`; `already_offline` holds devices that went offline between the list and the kick. Any other failure (for example Online refusing the tenant scope, or Online becoming unavailable) stops the request and is returned as an error. The request is not transactional: devices kicked before the failure are not rolled back, because a kick cannot be undone, and the error response does not say which ones they were. Read `GET /users/{user_id}/devices` to see what is still online; a retry lists and kicks only those devices.
 
 `POST /users/{user_id}/devices/{device_id}/kick` returns `{user_id, device_id, kicked}`, or 404 when the device is not online.
 
@@ -100,9 +102,48 @@ These three routes use the Admin-Gateway-only Capability downstream. When it is 
 
 `GET /plugins?capability_id=` returns `{tenant_id, plugins}`, sorted by `plugin_id`. Each plugin has `plugin_id`, `capability_id`, `grpc_authority`, `plugin_version`, `api_version`, `manifest_sha256`, `declared_operations`, `unverified`, `seat_model` and `labels`. With `capability_id`, only instances serving that capability are listed, whether by registration or by declared operation.
 
+## Media routes
+
+The four `medias/*` routes moved here from API Gateway with SEC-05. All paths are under `/api/v1/admin`.
+
+| Method and path | Media RPC | Write | Contract `status` |
+| --- | --- | --- | --- |
+| `GET /medias/bucket?bucket=` | `MediaService.DescribeBucket` | no | `available` |
+| `GET /medias/objects?bucket=&prefix=` | `MediaService.ListObjects` | no | `not_implemented` |
+| `POST /medias/cleanup-orphaned-assets` | `MediaService.CleanupOrphanedAssets` | yes | `available` |
+| `POST /medias/object-acl` | `MediaService.SetObjectAcl` | yes | `not_implemented` |
+
+Authentication, tenant scope and write headers are the same as for every other route. The downstream identity differs: Media accepts only a Cell-signed internal context (`x-flare-ctx`, EdDSA, 60 seconds), so the gateway signs a fresh one for every RPC with `FLARE_INTERNAL_CTX_PRIVATE_KEY`. It names the token subject as `tenant_admin` of the token tenant and carries the request ID. The admin assertion itself is not sent to Media, and caller-supplied `x-user-id`, `x-actor-*` or `x-flare-ctx` headers never reach it. Without the private key every media route answers 500 `MEDIA_SIGNER_UNAVAILABLE` and does not call Media. Media's side of this boundary is described in [SEC05](SEC05-media-tenant-isolation.md).
+
+Media rejections use the error table above. The 500 reasons are `ADMIN_MEDIA_BUCKET_FAILED`, `ADMIN_MEDIA_LIST_OBJECTS_FAILED`, `ADMIN_MEDIA_CLEANUP_FAILED` and `ADMIN_MEDIA_OBJECT_ACL_FAILED`.
+
+`GET /medias/bucket?bucket=` returns `{bucket, region, storage_class, versioning_enabled, metadata}` for the bucket Media is configured with. `metadata.tenant_prefix` is the token tenant's object-key prefix. A different bucket name is 403; a missing `bucket` parameter is 400. It reports no object statistics.
+
+`GET /medias/objects?bucket=&prefix=` returns `{files}`, each with only `file_id`, `file_name`, `mime_type`, `size` and `object_key`; signed URLs, CDN URLs and file metadata are not passed on. `prefix` is relative to the tenant and optional. The current Media does not implement the tenant object inventory and refuses it, so the route answers 500 `ADMIN_MEDIA_LIST_OBJECTS_FAILED`, never an empty list.
+
+`POST /medias/cleanup-orphaned-assets` takes `{"limit": <n>, "dry_run": false}`; both fields are required (422 otherwise). `limit` 0 means 100, and Media caps it at 1,000. Media does not honor `dry_run` and would delete as in a real run, so the gateway refuses `dry_run: true` with 400 `ADMIN_MEDIA_DRY_RUN_UNSUPPORTED` without calling Media. It returns `{file_ids, success, error_message, scanned}`: `file_ids` are the orphaned message assets of the token tenant that this pass deleted, and `scanned` is their count. The audit target is the tenant.
+
+`POST /medias/object-acl` takes `{file_id, entries: [{principal, permissions}]}` and returns `data: true`. The current Media does not implement ACL changes and refuses every request, so the route answers 500 `ADMIN_MEDIA_OBJECT_ACL_FAILED`, never a successful no-op. The audit target is the file ID.
+
+## Audit
+
+Core has no audit table for Admin Gateway calls. The gateway records structured log events with the tracing target `admin_audit`; the durable audit row belongs to the caller, Control.
+
+| Request | `admin_audit` event |
+| --- | --- |
+| Writes: the three kick routes, orphan cleanup and object ACL | `access=write`, `route`, `actor_id`, `tenant_id`, `target`, `audit_reason`, `request_id`, `idempotency_key` |
+| Sensitive reads: conversation participants, user devices, user presence | `access=read` with the same fields except `idempotency_key`; `audit_reason` is empty unless the caller sent `x-audit-reason`, which reads do not require |
+| Every other read | none |
+
+The three sensitive reads show which conversations a person is in, which devices they use and when they are online, so each one is recorded like a write. The tenant-wide lists, the tenant runtime, capability switches, plugins, the media bucket and object list are not. The events are written after the gateway has accepted the request and before the downstream call, so a request that fails downstream is still recorded; a request the gateway refuses itself (for example 401, 403 or 400) is not. Events never contain the token.
+
+`POST /messages/export` and the two read-only message query POSTs produce no `admin_audit` event.
+
+Control's audit middleware reserves a durable row for every non-GET Console request before it calls the data plane, and completes the row with the result. It writes no row for GET requests. Today Control calls only `gateway/*` and `POST /messages/query` on Admin Gateway. The Console pages that will call the writes and the three sensitive reads (ADM-03) must keep the writes behind non-GET Console requests and write their own audit rows for the sensitive reads.
+
 ## Other routes
 
-`auth/check`, `capabilities` (this contract as JSON), `gateway/{health,upstreams,routes,config}`, `messages/*` and `medias/*` predate ADM-01. `GET /capabilities` and `GET /gateway/routes` list every operation with its write flag; tests keep them equal to the OpenAPI document.
+`auth/check`, `capabilities` (this contract as JSON), `gateway/{health,upstreams,routes,config}` and `messages/*` predate ADM-01 and are described only by the OpenAPI document. `GET /capabilities` and `GET /gateway/routes` list every operation with its write flag; tests keep them equal to the OpenAPI document.
 
 ## Downstream configuration
 
@@ -112,14 +153,18 @@ These three routes use the Admin-Gateway-only Capability downstream. When it is 
 | Online | `FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL` | `http://127.0.0.1:50061` |
 | Capability (optional; an empty value disables it) | `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL` | `http://127.0.0.1:50110` |
 
-The other four downstreams and their fallbacks are listed in `config/services/admin-gateway.toml` and `release/README.md`. The flare-deploy single-host template pins all seven `FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL` values to these in-container addresses in Compose, and its preflight refuses any other value. Conversation, Online and Capability each need `FLARE_CONSOLE_PUBLIC_KEY`; without it they answer the forwarded assertion with `UNAUTHENTICATED`, which the gateway reports as 502.
+The other four downstreams, Media among them, and their fallbacks are listed in `config/services/admin-gateway.toml` and `release/README.md`. The flare-deploy single-host template pins all seven `FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL` values to these in-container addresses in Compose, and its preflight refuses any other value. Conversation, Online and Capability each need `FLARE_CONSOLE_PUBLIC_KEY`; without it they answer the forwarded assertion with `UNAUTHENTICATED`, which the gateway reports as 502. The media routes need `FLARE_INTERNAL_CTX_PRIVATE_KEY` in the gateway and the paired `FLARE_INTERNAL_CTX_PUBLIC_KEY` in Media.
 
 ## Contract tests
 
 - `flare-admin-gateway/tests/admin_ops_contract.rs` starts stand-in Conversation, Online and Capability services on `127.0.0.1` and drives the router. For every ADM-01 route it checks the missing-token 401, the foreign-tenant 403 and, for writes, the audit-header 403s. It also checks the exact response fields, what the downstream received, and that only the verified assertion reaches the downstream.
-- `flare-admin-gateway/tests/admin_openapi_snapshot.rs` compares the `AdminApiDoc` operation set with `tests/snapshots/admin_openapi_operations.txt`. It also requires `GET /capabilities` and `GET /gateway/routes` to list the same operations, and every documented operation to be routed behind admin authentication (401 without a token, never 404). After an intended API change, rerun it with `FLARE_UPDATE_SNAPSHOTS=1` and review the snapshot diff together with the change.
+- `flare-admin-gateway/tests/admin_media_contract.rs` does the same for the four media routes against a stand-in Media on `127.0.0.1`: missing-token 401, foreign-tenant 403, write-header 403s, response fields, the request Media received, the refused `dry_run`, and the typed rejections that never echo Media's text. It verifies the signed context Media received with the Cell public key, checks that Media's real signed-context layer accepts it and refuses a context signed by another Cell key, and that no admin assertion or forged header reaches Media.
+- `flare-admin-gateway/tests/admin_audit_log.rs` captures the `admin_audit` events: one per write and per sensitive read, none for other reads or for writes the gateway refused, and no token in any event.
+- `flare-admin-gateway/tests/admin_openapi_snapshot.rs` compares the `AdminApiDoc` operation set with `tests/snapshots/admin_openapi_operations.txt`. It also requires `GET /capabilities` and `GET /gateway/routes` to list the same operations, every documented operation to be routed behind admin authentication (401 without a token, never 404), the endpoint lists in both Admin Gateway READMEs to match the document, and the route tables on this page to cover the ADM-01 and media routes and nothing else. After an intended API change, rerun it with `FLARE_UPDATE_SNAPSHOTS=1` and review the snapshot diff together with the change.
 
 ## Known limits
 
-- Admin reads are logged with `tracing` by the downstream services and are not written to the Capability audit table.
+- Core writes no durable audit row for admin calls, reads or writes; see [Audit](#audit). The `capability_audit_log` table records capability policy changes only.
+- Idempotency keys are not deduplicated; see [Write operations](#write-operations).
+- `GET /medias/objects` and `POST /medias/object-acl` fail until Media implements them.
 - `POST /users/{user_id}/kick` kicks devices sequentially within one request; a user with many devices takes one Online round trip per device.

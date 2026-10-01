@@ -1,4 +1,4 @@
-//! `AdminApiDoc` 的操作集合快照，以及它与能力契约、路由清单、实际路由三者的一致性。
+//! `AdminApiDoc` 的操作集合快照，以及它与能力契约、路由清单、实际路由、文档四者的一致性。
 //!
 //! 快照文件 `tests/snapshots/admin_openapi_operations.txt` 每行一个 `METHOD path`，已排序。
 //! 有意改动接口后用 `FLARE_UPDATE_SNAPSHOTS=1 cargo test -p flare-admin-gateway --test
@@ -138,4 +138,78 @@ async fn every_documented_operation_is_routed_behind_admin_auth() {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{operation}");
     }
     assert!(h.recorder.calls().is_empty());
+}
+
+const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/// 文档里列出的操作：README 入口清单的 `METHOD /api/v1/admin/...` 行。
+fn readme_operations(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (method, path) = (parts.next()?, parts.next()?);
+            (HTTP_METHODS.contains(&method)
+                && path.starts_with("/api/v1/admin/")
+                && parts.next().is_none())
+            .then(|| format!("{method} {path}"))
+        })
+        .collect()
+}
+
+/// docs/admin-api.md 路由表首列的 `` `METHOD /path?query` ``，路径相对 `/api/v1/admin`。
+fn guide_table_operations(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("| `")?.split('`').next())
+        .filter_map(|cell| {
+            let (method, path) = cell.split_once(' ')?;
+            let path = path.split('?').next()?;
+            (HTTP_METHODS.contains(&method) && path.starts_with('/'))
+                .then(|| format!("{method} /api/v1/admin{path}"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn readmes_and_admin_api_guide_list_the_routed_operations() {
+    let documented = documented_operations().await;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // 两份 README 的入口清单列全部操作，不多不少。
+    for readme in ["README.md", "README.zh-CN.md"] {
+        let text = std::fs::read_to_string(root.join(readme)).unwrap();
+        assert_eq!(
+            readme_operations(&text),
+            documented,
+            "{readme} endpoint list vs AdminApiDoc"
+        );
+    }
+
+    // docs/admin-api.md 的路由表只列真实操作，且 ADM-01 与 SEC-05 媒资路由一条不缺。
+    let guide = std::fs::read_to_string(root.join("../docs/admin-api.md")).unwrap();
+    let tabled = guide_table_operations(&guide);
+    let stale: Vec<_> = tabled.difference(&documented).collect();
+    assert!(
+        stale.is_empty(),
+        "docs/admin-api.md lists unrouted {stale:?}"
+    );
+    let described_prefixes = [
+        "/api/v1/admin/conversations",
+        "/api/v1/admin/users/",
+        "/api/v1/admin/tenant/",
+        "/api/v1/admin/capabilities/tenant",
+        "/api/v1/admin/plugins",
+        "/api/v1/admin/medias/",
+    ];
+    let required: BTreeSet<String> = documented
+        .iter()
+        .filter(|op| {
+            let path = op.split_once(' ').unwrap().1;
+            described_prefixes
+                .iter()
+                .any(|prefix| path.starts_with(prefix))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(required.len(), 15, "{required:?}");
+    let missing: Vec<_> = required.difference(&tabled).collect();
+    assert!(missing.is_empty(), "docs/admin-api.md misses {missing:?}");
 }

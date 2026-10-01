@@ -39,9 +39,13 @@ POST /api/v1/admin/tenant/kick-all
 GET  /api/v1/admin/tenant/runtime
 GET  /api/v1/admin/capabilities/tenant
 GET  /api/v1/admin/plugins
+GET  /api/v1/admin/medias/bucket
+GET  /api/v1/admin/medias/objects
+POST /api/v1/admin/medias/cleanup-orphaned-assets
+POST /api/v1/admin/medias/object-acl
 ```
 
-`medias/*` 路由见 OpenAPI 文档。会话、在线、踢线、租户运行时、能力开关与插件路由（ADM-01）的说明见 [docs/admin-api.md](../docs/admin-api.md)（英文）。
+会话、在线、踢线、租户运行时、能力开关与插件路由（ADM-01）以及媒资路由的说明见 [docs/admin-api.md](../docs/admin-api.md)（英文）。本清单与 OpenAPI 文档的一致性由测试保证。
 
 本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin-gateway.toml`。
 
@@ -51,36 +55,30 @@ GET  /api/v1/admin/plugins
 
 ## 认证
 
-Admin Gateway 不签发、不刷新、不存储 token。它只通过 `FLARE_ADMIN_GATEWAY_AUTH_MODE=core_jwt` 或 `FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook` 恢复标准 principal。
-
-示例：
-
-```bash
-FLARE_ADMIN_GATEWAY_SERVER_PORT=50051
-FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_URL=http://127.0.0.1:8088/internal/admin/auth/validate
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_TIMEOUT_MS=800
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET=change-me
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET_HEADER=x-flare-admin-auth-hook-secret
-```
-
-推荐业务认证系统返回以下 scope：
-
-```text
-admin_gateway:admin
-admin_gateway:admin:*
-```
-
-Admin 写操作必须携带：
+Admin Gateway 不签发、不刷新、不存储 token，也不持有签发用的密钥。每个 `/api/v1/admin/**` 请求都带 Console（Control 后端）签发的 admin 令牌：
 
 ```http
+authorization: Bearer <admin 令牌>
 x-tenant-id: tenant-1
-x-actor-id: admin-1
-x-audit-reason: compliance-investigation
-x-request-id: request-1
 ```
 
-也可以用 `idempotency-key` 替代 `x-request-id` 做幂等和审计关联。
+- EdDSA，issuer 为 `flare-im-console`，audience 为 `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒；
+- 主体必须是员工（投影 worker 与调度器主体被拒绝），令牌只含一个具体租户（`*` 被拒绝）；
+- `x-tenant-id` 恰好出现一次，且等于令牌租户。
+
+网关用 `FLARE_CONSOLE_PUBLIC_KEY` 验签，启动时缺失即失败。验签后删掉请求里所有身份头，再按令牌写回主体与租户。令牌缺失、格式错误、过期或由其他密钥签发时回 401；租户不一致回 403。
+
+下游调用不带调用方自报的身份。会话、在线、能力与插件路由把同一枚令牌原样转发，由下游服务再验一次。Media 不认这枚令牌：媒资路由用 `FLARE_INTERNAL_CTX_PRIVATE_KEY` 把该员工签成令牌租户的 `tenant_admin`，作为 Cell 内部上下文发给 Media；没有这把私钥时媒资路由回 500 `MEDIA_SIGNER_UNAVAILABLE`，不会调用 Media。详见 [docs/admin-api.md](../docs/admin-api.md) 与 [SEC02](../docs/SEC02-console-control-auth.md)。
+
+Admin 写操作还必须携带：
+
+```http
+x-actor-id: <令牌主体>
+x-audit-reason: compliance-investigation
+idempotency-key: request-1
+```
+
+也可以用 `x-request-id` 替代 `idempotency-key`。两者都只用于审计日志关联，网关不保存也不去重，同一个键重放会再执行一次。
 两个受限的只读 POST：`/messages/query` 与 `/messages/write-ledger/query`，仍要求已签名的员工令牌和明确租户，但不要求写操作审计头；`/messages/export` 仍按受保护的写类操作处理。
 
 ## 消息写链路账本查询

@@ -39,9 +39,13 @@ POST /api/v1/admin/tenant/kick-all
 GET  /api/v1/admin/tenant/runtime
 GET  /api/v1/admin/capabilities/tenant
 GET  /api/v1/admin/plugins
+GET  /api/v1/admin/medias/bucket
+GET  /api/v1/admin/medias/objects
+POST /api/v1/admin/medias/cleanup-orphaned-assets
+POST /api/v1/admin/medias/object-acl
 ```
 
-The `medias/*` routes are listed in the OpenAPI document. The conversation, session, kick, tenant runtime, capability switch and plugin routes (ADM-01) are described in [docs/admin-api.md](../docs/admin-api.md).
+The conversation, session, kick, tenant runtime, capability switch and plugin routes (ADM-01) and the media routes are described in [docs/admin-api.md](../docs/admin-api.md). A test keeps this list equal to the OpenAPI document.
 
 Locally it listens on `0.0.0.0:50051` by default, and its configuration file is `config/services/admin-gateway.toml`.
 
@@ -51,36 +55,30 @@ Locally it listens on `0.0.0.0:50051` by default, and its configuration file is 
 
 ## Authentication
 
-The Admin Gateway does not issue, refresh, or store tokens. It only restores the standard principal via `FLARE_ADMIN_GATEWAY_AUTH_MODE=core_jwt` or `FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook`.
-
-Example:
-
-```bash
-FLARE_ADMIN_GATEWAY_SERVER_PORT=50051
-FLARE_ADMIN_GATEWAY_AUTH_MODE=http_hook
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_URL=http://127.0.0.1:8088/internal/admin/auth/validate
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_TIMEOUT_MS=800
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET=change-me
-FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET_HEADER=x-flare-admin-auth-hook-secret
-```
-
-It is recommended that the business authentication system return the following scopes:
-
-```text
-admin_gateway:admin
-admin_gateway:admin:*
-```
-
-Admin write operations must carry:
+The Admin Gateway does not issue, refresh or store tokens, and it holds no key to sign them. Every `/api/v1/admin/**` request carries an admin assertion signed by Console (the Control backend):
 
 ```http
+authorization: Bearer <admin assertion>
 x-tenant-id: tenant-1
-x-actor-id: admin-1
-x-audit-reason: compliance-investigation
-x-request-id: request-1
 ```
 
-You may also use `idempotency-key` instead of `x-request-id` for idempotency and audit correlation.
+- EdDSA, issuer `flare-im-console`, audience `flare-core-admin`, `token_use=admin`, lifetime at most 60 seconds;
+- the subject is an employee (the projection worker and scheduler subjects are refused), and the token names one concrete tenant (`*` is refused);
+- `x-tenant-id` appears exactly once and equals the token tenant.
+
+The gateway verifies the assertion with `FLARE_CONSOLE_PUBLIC_KEY`, which it requires at startup. It then drops every identity header from the request and puts back the subject and tenant from the token. A missing, malformed, expired or foreign-signed token is 401; a tenant mismatch is 403.
+
+Downstream calls carry no caller-supplied identity. The conversation, online, capability and plugin routes forward the same assertion unchanged, and those services verify it again. Media does not accept the assertion: the media routes sign the employee as `tenant_admin` of the token tenant in a Cell internal context, using `FLARE_INTERNAL_CTX_PRIVATE_KEY`. Without that key they answer 500 `MEDIA_SIGNER_UNAVAILABLE` and never call Media. See [docs/admin-api.md](../docs/admin-api.md) and [SEC02](../docs/SEC02-console-control-auth.md).
+
+Admin write operations must also carry:
+
+```http
+x-actor-id: <token subject>
+x-audit-reason: compliance-investigation
+idempotency-key: request-1
+```
+
+`x-request-id` may replace `idempotency-key`. Either one only correlates the request in audit logs; the gateway does not store or deduplicate it, so a replay runs again.
 The two bounded read-only POSTs, `/messages/query` and `/messages/write-ledger/query`, require the signed employee token and concrete tenant but not write-operation audit headers. `/messages/export` remains a protected write-class operation.
 
 ## Message write-path ledger query
