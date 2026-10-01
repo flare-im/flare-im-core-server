@@ -2,7 +2,8 @@
 //!
 //! 只经 `admin_auth_middleware` 可达。下游调用只带中间件刚验过的 admin 令牌原样转发
 //! （[`VerifiedAdminAssertion`]），不带任何未签名的身份头；租户只取自令牌。写操作
-//! （三个踢线入口）的审计原因与幂等键已由中间件强制，这里只记审计日志。
+//! （三个踢线入口）的审计原因与幂等键已由中间件强制，这里只记审计日志；会话成员、用户设备、
+//! 在线状态三条敏感读也记一条审计日志。
 use axum::{
     Json,
     extract::{Extension, Path, Query},
@@ -82,11 +83,12 @@ impl AdminCapability {
     }
 }
 
-/// 下游拒绝 → 类型化 HTTP 错误；不回显下游文案，也不带请求里的标识。
+/// 下游拒绝 → 类型化 HTTP 错误；不回显下游文案，也不带请求里的标识。媒资路由同样用它。
 ///
 /// 下游对已由网关验过的 admin 令牌回 UNAUTHENTICATED，只可能是部署问题（例如下游缺
-/// `FLARE_CONSOLE_PUBLIC_KEY`），因此报 502 而不是让调用方去重新登录。
-fn admin_rpc_error(err: FlareError, failure_reason: &'static str) -> HttpApiError {
+/// `FLARE_CONSOLE_PUBLIC_KEY`；Media 则是 Cell 签名密钥与公钥不配对），因此报 502 而不是让
+/// 调用方去重新登录。
+pub(super) fn admin_rpc_error(err: FlareError, failure_reason: &'static str) -> HttpApiError {
     let (code, reason) = match err.code() {
         Some(ErrorCode::PermissionDenied) => (ErrorCode::HttpForbidden, "FORBIDDEN"),
         Some(ErrorCode::UserNotFound | ErrorCode::MessageNotFound) => {
@@ -128,7 +130,7 @@ fn bad_request(code: &'static str, message: String) -> HttpApiError {
 }
 
 /// 中间件放进扩展的已验证租户；缺失即未经中间件，按 403 拒绝。
-fn verified_tenant(principal: &AuthenticatedPrincipal) -> Result<String> {
+pub(super) fn verified_tenant(principal: &AuthenticatedPrincipal) -> Result<String> {
     principal
         .tenant_id
         .clone()
@@ -151,7 +153,9 @@ fn header(headers: &HeaderMap, name: &str) -> String {
 }
 
 /// 写操作审计：谁、哪个租户、哪条入口、原因、请求号/幂等键。中间件已保证原因与请求号存在。
-fn audit_write(
+///
+/// 幂等键只用于关联日志，网关不保存、不去重：同一键重放会再执行一次。
+pub(super) fn audit_write(
     route: &'static str,
     principal: &AuthenticatedPrincipal,
     headers: &HeaderMap,
@@ -160,6 +164,7 @@ fn audit_write(
     let reason = header(headers, AUDIT_REASON_HEADER);
     tracing::info!(
         target: "admin_audit",
+        access = "write",
         route,
         actor_id = %principal.user_id,
         tenant_id = %principal.tenant_id.as_deref().unwrap_or_default(),
@@ -170,6 +175,31 @@ fn audit_write(
         "admin write accepted"
     );
     reason
+}
+
+/// 敏感读审计：会话成员、用户设备、在线状态能看出某人在哪些会话、用什么设备、何时在线，
+/// 因此与写操作记同一种 `admin_audit` 事件（`access=read`）；其余管理读不记。读不强制审计
+/// 原因，调用方带了 `x-audit-reason` 就一并记下。
+///
+/// Core 不落审计表：写与敏感读的持久审计行都归调用方 Control（见 docs/admin-api.md
+/// 「Audit」）。Control 目前只为非 GET 请求落行，接这三条读的 Console 页面需要自己补审计行。
+fn audit_sensitive_read(
+    route: &'static str,
+    principal: &AuthenticatedPrincipal,
+    headers: &HeaderMap,
+    target: &str,
+) {
+    tracing::info!(
+        target: "admin_audit",
+        access = "read",
+        route,
+        actor_id = %principal.user_id,
+        tenant_id = %principal.tenant_id.as_deref().unwrap_or_default(),
+        target,
+        audit_reason = %header(headers, AUDIT_REASON_HEADER),
+        request_id = %header(headers, keys::REQUEST_ID),
+        "admin sensitive read accepted"
+    );
 }
 
 #[utoipa::path(
@@ -271,13 +301,21 @@ pub async fn get_conversation(
     ),
 )]
 pub async fn list_participants(
+    headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(conversation_id): Path<String>,
     Query(query): Query<AdminParticipantListQuery>,
 ) -> Result<Json<ApiResponse<AdminParticipantPageHttp>>> {
     let limit = page_limit(query.limit, DEFAULT_PARTICIPANT_PAGE, MAX_PARTICIPANT_PAGE)
         .map_err(|err| bad_request(err.code, err.message))?;
+    audit_sensitive_read(
+        "conversations.participants",
+        &principal,
+        &headers,
+        &conversation_id,
+    );
     let mut conversation = clients.conversation_read.lock().await.clone();
     let response = conversation
         .admin_list_participants(
@@ -310,10 +348,13 @@ pub async fn list_participants(
     ),
 )]
 pub async fn list_user_devices(
+    headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminUserDevicesHttp>>> {
+    audit_sensitive_read("users.devices", &principal, &headers, &user_id);
     let mut online = clients.online.lock().await.clone();
     let response = online
         .admin_list_user_devices(
@@ -344,10 +385,13 @@ pub async fn list_user_devices(
     ),
 )]
 pub async fn get_user_presence(
+    headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminUserPresenceHttp>>> {
+    audit_sensitive_read("users.presence", &principal, &headers, &user_id);
     let mut online = clients.online.lock().await.clone();
     let response = online
         .admin_get_user_presence(
@@ -371,7 +415,7 @@ pub async fn get_user_presence(
     params(
         ("user_id" = String, Path, description = "User id in the token tenant"),
         ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log and passed to Online"),
-        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
@@ -401,8 +445,8 @@ pub async fn kick_user(
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_USER_KICK_FAILED"))?
         .devices;
-    // 逐台踢：任何一台失败即停止并报错；已踢下线的设备不会再出现在下一次列表里，
-    // 所以同一请求重试是安全的。
+    // 逐台踢：任何一台失败即停止并报错。已踢下线的设备不回滚（踢线无法撤销），也不会再
+    // 出现在下一次列表里，所以同一请求重试是安全的。
     let mut kicked = Vec::new();
     let mut already_offline = Vec::new();
     for device in devices {
@@ -438,7 +482,7 @@ pub async fn kick_user(
         ("user_id" = String, Path, description = "User id in the token tenant"),
         ("device_id" = String, Path, description = "Device id of that user"),
         ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log and passed to Online"),
-        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
@@ -484,7 +528,7 @@ pub async fn kick_device(
     tag = "Admin",
     params(
         ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log and passed to Online"),
-        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(

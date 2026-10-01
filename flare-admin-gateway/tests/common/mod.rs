@@ -3,7 +3,11 @@
 //!
 //! 替身按输入给出固定回答，并记下每次调用收到的 `authorization` 与所有 `x-*` 元数据，
 //! 用来断言网关只原样转发已验过的 admin 令牌、不带任何未签名的身份头。
+//!
+//! 媒资路由的替身 Media 与夹具在 [`media`]。
 #![allow(dead_code)]
+
+pub mod media;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -602,10 +606,11 @@ pub struct Harness {
     pub downstream: std::net::SocketAddr,
 }
 
-fn clients(channel: Channel, unused: Channel) -> GrpcClients {
+/// `channel` 接 Conversation / Online 替身，`media` 接 Media 替身，其余下游接 `unused`。
+fn clients(channel: Channel, media: Channel, unused: Channel) -> GrpcClients {
     GrpcClients {
         media: Arc::new(tokio::sync::Mutex::new(
-            MediaServiceClientWrapper::from_channel(unused.clone(), None),
+            MediaServiceClientWrapper::from_channel(media, None),
         )),
         message_ingest_send: Arc::new(tokio::sync::Mutex::new(
             MessageSendServiceClientWrapper::from_channel(unused.clone()),
@@ -647,8 +652,11 @@ pub async fn harness(capability: bool) -> Harness {
         client: CapabilityAdminClientWrapper::from_channel(channel.clone()),
     });
     let console = Console::new();
-    let router = create_admin_router(Arc::new(clients(channel, unused)), capability)
-        .layer(axum::Extension(Arc::new(console.verifier.clone())));
+    let router = create_admin_router(
+        Arc::new(clients(channel, unused.clone(), unused)),
+        capability,
+    )
+    .layer(axum::Extension(Arc::new(console.verifier.clone())));
     let token = console.admin_token(EMPLOYEE, TENANT);
     Harness {
         router,

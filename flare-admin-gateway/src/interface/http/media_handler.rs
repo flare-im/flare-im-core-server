@@ -1,8 +1,11 @@
 //! Tenant-scoped media operations; reachable only through admin_auth_middleware.
+//!
+//! Media rejections go through the same typed mapping as the other admin routes
+//! ([`admin_rpc_error`]): Media's own error text is never echoed.
 use axum::{
     Json,
     extract::{Extension, FromRequestParts, Query},
-    http::request::Parts,
+    http::{HeaderMap, request::Parts},
 };
 use flare_grpc_proto::media::*;
 use flare_im_service_kit::clients::{GrpcClients, MediaCaller};
@@ -13,6 +16,8 @@ use flare_server_core::{
     http::{ApiResponse, ContextFromHeaders, HttpApiError, Result},
 };
 use std::sync::Arc;
+
+use super::ops_handler::{admin_rpc_error, audit_write, verified_tenant};
 
 /// Cell internal-context signer, used only to turn the Control-verified admin into a
 /// context Media can verify. Without it every media admin route fails; nothing unsigned
@@ -91,40 +96,96 @@ pub struct AdminMediaObjects {
 }
 
 #[utoipa::path(post, path = "/api/v1/admin/medias/cleanup-orphaned-assets", tag = "Admin",
-    responses((status = 200, description = "Tenant-scoped cleanup; limit defaults to 100, capped at 1000")))]
+    request_body(content = CleanupOrphanedAssetsRequest, description = "Both fields are required; `limit` 0 means 100, capped at 1000 by Media; `dry_run` must be false"),
+    params(
+        ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
+        ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
+    ),
+    responses(
+        (status = 200, description = "Orphaned message assets of the token tenant that this pass deleted", body = ApiResponse<CleanupOrphanedAssetsResponse>),
+        (status = 400, description = "dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting"),
+        (status = 401, description = "Admin token is missing or invalid"),
+        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin"),
+        (status = 422, description = "Body is not a JSON object with both limit and dry_run"),
+        (status = 500, description = "Media failed, or the internal identity signer is not configured"),
+        (status = 503, description = "Media service is unavailable"),
+    ))]
 pub async fn cleanup_orphaned_assets(
     AdminMediaIdentity(caller): AdminMediaIdentity,
+    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(request): Json<CleanupOrphanedAssetsRequest>,
 ) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
+    // Media ignores dry_run and deletes as in a real run; a "preview" must not delete.
+    if request.dry_run {
+        return Err(HttpApiError::bad_request(
+            "ADMIN_MEDIA_DRY_RUN_UNSUPPORTED",
+            "media cleanup has no dry run; send dry_run=false to run it",
+        ));
+    }
+    let tenant_id = verified_tenant(&principal)?;
+    audit_write(
+        "medias.cleanup_orphaned_assets",
+        &principal,
+        &headers,
+        &tenant_id,
+    );
     let response = clients
         .media
         .lock()
         .await
         .cleanup_orphaned_assets(&caller, request)
-        .await?;
+        .await
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_CLEANUP_FAILED"))?;
     Ok(Json(ApiResponse::success(response)))
 }
 
 #[utoipa::path(post, path = "/api/v1/admin/medias/object-acl", tag = "Admin",
-    responses((status = 500, description = "ACL mutation is not implemented; never reports a successful no-op")))]
+    request_body(content = SetObjectAclRequest, description = "File of the token tenant and its ACL entries"),
+    params(
+        ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
+        ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
+    ),
+    responses(
+        (status = 200, description = "ACL applied (`data: true`)", body = ApiResponse<bool>),
+        (status = 401, description = "Admin token is missing or invalid"),
+        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin"),
+        (status = 404, description = "No such file in the token tenant"),
+        (status = 422, description = "Body is not a valid SetObjectAclRequest"),
+        (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented); never reports a successful no-op"),
+        (status = 503, description = "Media service is unavailable"),
+    ))]
 pub async fn set_object_acl(
     AdminMediaIdentity(caller): AdminMediaIdentity,
+    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Json(request): Json<SetObjectAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
+    audit_write("medias.object_acl", &principal, &headers, &request.file_id);
     clients
         .media
         .lock()
         .await
         .set_object_acl(&caller, request)
-        .await?;
+        .await
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_OBJECT_ACL_FAILED"))?;
     Ok(Json(ApiResponse::success(true)))
 }
 
 #[utoipa::path(get, path = "/api/v1/admin/medias/objects", tag = "Admin",
     params(("bucket" = String, Query, description = "Configured bucket"), ("prefix" = Option<String>, Query, description = "Tenant-relative prefix")),
-    responses((status = 500, description = "Object inventory is not implemented; never returns a fabricated empty inventory")))]
+    responses(
+        (status = 200, description = "Objects of the token tenant; only file_id, file_name, mime_type, size and object_key", body = ApiResponse<AdminMediaObjects>),
+        (status = 400, description = "bucket query parameter is missing"),
+        (status = 401, description = "Admin token is missing or invalid"),
+        (status = 403, description = "Tenant header mismatch, or Media refused the tenant admin or the bucket"),
+        (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented); never returns a fabricated empty inventory"),
+        (status = 503, description = "Media service is unavailable"),
+    ))]
 pub async fn list_objects(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
@@ -144,7 +205,8 @@ pub async fn list_objects(
                 sort: Vec::new(),
             },
         )
-        .await?;
+        .await
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_LIST_OBJECTS_FAILED"))?;
     Ok(Json(ApiResponse::success(AdminMediaObjects {
         files: response
             .files
@@ -162,7 +224,14 @@ pub async fn list_objects(
 
 #[utoipa::path(get, path = "/api/v1/admin/medias/bucket", tag = "Admin",
     params(("bucket" = String, Query, description = "Configured bucket")),
-    responses((status = 200, description = "Configured media bucket with this tenant's object-key prefix; no global object statistics")))]
+    responses(
+        (status = 200, description = "Configured media bucket with this tenant's object-key prefix; no global object statistics", body = ApiResponse<DescribeBucketResponse>),
+        (status = 400, description = "bucket query parameter is missing"),
+        (status = 401, description = "Admin token is missing or invalid"),
+        (status = 403, description = "Tenant header mismatch, or the bucket is not the one Media serves"),
+        (status = 500, description = "Media failed, or the internal identity signer is not configured"),
+        (status = 503, description = "Media service is unavailable"),
+    ))]
 pub async fn describe_bucket(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
@@ -173,7 +242,8 @@ pub async fn describe_bucket(
         .lock()
         .await
         .describe_bucket(&caller, request)
-        .await?;
+        .await
+        .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_BUCKET_FAILED"))?;
     Ok(Json(ApiResponse::success(response)))
 }
 
