@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
 use flare_core::server::{AuthResult, Authenticator};
+use flare_im_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
 use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
 use flare_server_core::auth::{AuthenticatedPrincipal, TokenValidationRequest, TokenValidator};
 use std::collections::HashMap;
@@ -125,14 +126,12 @@ impl AuthHandler {
         }
     }
 
+    /// 连接的租户：令牌里的租户，没有就用网关的默认租户；两者都按 `normalize_tenant_id` 归一，
+    /// `default` 与 `0` 是同一个默认租户。这个值会写进连接元数据，flare-core 按它给设备冲突、
+    /// 按用户投递分桶，网关的连接查询也按它精确比对，所以必须与租户闸门、Online 用的写法一致。
     fn resolve_tenant_id(&self, principal: &AuthenticatedPrincipal) -> String {
-        principal
-            .tenant_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|tenant_id| !tenant_id.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.default_tenant_id.clone())
+        normalize_optional_tenant_id(principal.tenant_id.as_deref())
+            .unwrap_or_else(|| normalize_tenant_id(&self.default_tenant_id))
     }
 
     fn resolve_bound_device_id(
@@ -434,6 +433,47 @@ mod tests {
             metadata.get(METADATA_KEY_TENANT_ID).map(String::as_str),
             Some("tenant-default")
         );
+    }
+
+    /// `default` 与 `0` 是同一个默认租户：令牌里的租户与网关默认租户都按 normalize_tenant_id 归一，
+    /// 否则同一个默认租户的用户会因为写法不同落进两个桶，设备冲突与按用户投递都对不上。
+    #[tokio::test]
+    async fn authenticate_normalizes_the_default_tenant_alias() {
+        for (principal_tenant, gateway_default, expected) in [
+            (Some("default"), "tenant-default", "0"),
+            (Some(" default "), "tenant-default", "0"),
+            (Some(" tenant-a "), "tenant-default", "tenant-a"),
+            (None, "default", "0"),
+            (Some("  "), "default", "0"),
+        ] {
+            let mut principal = principal(None);
+            principal.tenant_id = principal_tenant.map(ToOwned::to_owned);
+            let handler = AuthHandler::with_default_tenant_id(
+                Arc::new(StaticTokenValidator {
+                    principal: Some(principal),
+                }),
+                gateway_default,
+                TenantRuntimeCache::disabled(),
+                TenantAccessPolicy::Lenient,
+            );
+
+            let result = handler
+                .authenticate("token", "conn-a", None, None)
+                .await
+                .expect("auth result");
+
+            assert!(result.authenticated, "{principal_tenant:?}");
+            assert_eq!(result.tenant_id(), Some(expected), "{principal_tenant:?}");
+            assert_eq!(
+                result
+                    .user_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get(METADATA_KEY_TENANT_ID))
+                    .map(String::as_str),
+                Some(expected),
+                "{principal_tenant:?}"
+            );
+        }
     }
 
     #[tokio::test]
