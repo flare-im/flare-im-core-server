@@ -197,7 +197,7 @@ pub async fn build_long_connection_server(
         .build_error()
     })?;
 
-    info!(ws_addr = %ws_addr, quic_addr = %quic_addr, "✅ Long connection server started");
+    info!(ws_addr = %ws_addr, quic_addr = %quic_addr, "Long connection server started");
 
     Ok(Arc::new(tokio::sync::Mutex::new(Some(server))))
 }

@@ -63,7 +63,7 @@ pub async fn setup_encryption_config(
     match Aes256GcmEncryptor::new(&encryption_key) {
         Ok(encryptor) => {
             EncryptionUtil::register_custom(std::sync::Arc::new(encryptor));
-            info!("🔐 AES-256-GCM encryption enabled with custom key");
+            info!("AES-256-GCM encryption enabled with custom key");
             EncryptionConfig { enabled: true }
         }
         Err(e) => {

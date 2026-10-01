@@ -23,11 +23,11 @@ impl ApplicationBootstrap {
         info!("开始创建应用上下文...");
         let context = match Self::create_context(app_config).await {
             Ok(ctx) => {
-                info!("✅ 应用上下文创建成功");
+                info!("应用上下文创建成功");
                 ctx
             }
             Err(e) => {
-                error!(error = %e, "❌ 应用上下文创建失败");
+                error!(error = %e, "应用上下文创建失败");
                 return Err(e);
             }
         };
@@ -71,7 +71,7 @@ impl ApplicationBootstrap {
         let port_config = PortConfig::from_env_or_config(runtime_config.server.port);
 
         info!(
-            "✅ 端口配置: gRPC {}:{}, WebSocket {}:{}, QUIC {}:{}",
+            "端口配置: gRPC {}:{}, WebSocket {}:{}, QUIC {}:{}",
             runtime_config.server.address,
             port_config.grpc_port,
             runtime_config.server.address,
@@ -86,7 +86,7 @@ impl ApplicationBootstrap {
         // 使用 Wire 风格的依赖注入构建应用上下文
         let context = wire::initialize(config, &runtime_config, port_config).await?;
 
-        info!("✅ 应用上下文创建完成");
+        info!("应用上下文创建完成");
 
         // 服务注册将在 start_services 中通过 ServiceRuntime 统一管理
         // 这里不再需要后台任务注册

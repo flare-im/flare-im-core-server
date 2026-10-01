@@ -59,7 +59,7 @@ impl StartupInfo {
         info!("");
 
         // 网关信息
-        info!("📋 网关信息:");
+        info!("网关信息:");
         info!("   Gateway ID: {}", self.gateway_id);
         if let Some(ref region) = self.region {
             info!("   Region:     {}", region);
@@ -67,7 +67,7 @@ impl StartupInfo {
         info!("");
 
         // gRPC 服务信息
-        info!("🔌 gRPC 服务 (服务间调用，已注册到服务注册中心):");
+        info!("gRPC 服务 (服务间调用，已注册到服务注册中心):");
         let grpc_addr = format!("{}:{}", self.address, self.port_config.grpc_port);
         info!("   gRPC 地址:  {}", grpc_addr);
         info!("");
@@ -78,7 +78,7 @@ impl StartupInfo {
         info!("");
 
         // 长连接服务信息
-        info!("🌐 长连接服务 (客户端连接):");
+        info!("长连接服务 (客户端连接):");
         let ws_addr = format!("{}:{}", self.address, self.port_config.ws_port);
         let quic_addr = format!("{}:{}", self.address, self.port_config.quic_port);
         info!(
@@ -89,7 +89,7 @@ impl StartupInfo {
         info!("");
 
         // 端口映射说明
-        info!("📝 端口说明:");
+        info!("端口说明:");
         info!(
             "   • gRPC 端口 ({}) 用于服务间调用，已注册到服务注册中心",
             self.port_config.grpc_port
@@ -105,7 +105,7 @@ impl StartupInfo {
         info!("");
 
         // 连接示例
-        info!("💡 连接示例:");
+        info!("连接示例:");
         info!("   客户端连接 WebSocket:");
         info!("     ws://{}/ws", ws_addr);
         info!("   客户端连接 QUIC:");
@@ -114,7 +114,7 @@ impl StartupInfo {
         info!("     grpc://{}", grpc_addr);
         info!("");
 
-        info!("✅ 所有服务已就绪，等待客户端连接...");
+        info!("所有服务已就绪，等待客户端连接...");
         info!("");
     }
 

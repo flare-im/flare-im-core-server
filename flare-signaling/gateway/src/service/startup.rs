@@ -51,12 +51,12 @@ pub async fn start_services(
     {
         let server_guard = context.long_connection_server.lock().await;
         if server_guard.is_none() {
-            error!("❌ 长连接服务器未启动");
+            error!("长连接服务器未启动");
             return Err(
                 ErrorBuilder::new(ErrorCode::InternalError, "长连接服务器未启动").build_error(),
             );
         }
-        info!("✅ 长连接服务器已在 wire.rs 中启动");
+        info!("长连接服务器已在 wire.rs 中启动");
     }
 
     // 配置 Runtime
@@ -79,7 +79,7 @@ pub async fn start_services(
         let addr = grpc_addr;
 
         async move {
-            info!("🚀 Starting gRPC server on {}", addr);
+            info!("Starting gRPC server on {}", addr);
 
             let service = ContextLayer::new()
                 .allow_missing()
@@ -111,7 +111,7 @@ pub async fn start_services(
         let server = context.long_connection_server.clone();
 
         async move {
-            info!("✅ Long connection server is running");
+            info!("Long connection server is running");
 
             // 等待 shutdown 信号
             let _ = shutdown_rx.await;
@@ -150,7 +150,7 @@ pub async fn start_services(
 
                 if registry.is_some() {
                     info!(
-                        "✅ Service registered: {} (instance_id={}, region={:?})",
+                        "Service registered: {} (instance_id={}, region={:?})",
                         ACCESS_GATEWAY, gateway_id_clone, region_clone
                     );
                 }
