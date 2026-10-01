@@ -90,12 +90,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # promtool 钉到本地复验用的同一个镜像：v3.14.0 的多架构索引 digest
+      # （含 linux/amd64 与 linux/arm64），标签只作说明，拉取以 digest 为准。
+      # 原先钉的 v2.55.1 从未在本地跑过；升级 promtool 时先用新镜像本地复验
+      # 同一条命令，再改这里的标签与 digest。
       - name: Validate Prometheus config and alert rules
         run: |
           docker run --rm \
             --entrypoint promtool \
             -v "$PWD/deploy:/etc/prometheus:ro" \
-            prom/prometheus:v2.55.1 \
+            prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0 \
             check config /etc/prometheus/prometheus.yml
       - name: Validate Grafana dashboard JSON
         run: |
