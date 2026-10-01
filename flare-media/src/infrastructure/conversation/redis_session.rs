@@ -124,6 +124,14 @@ impl UploadSessionStore for RedisUploadSessionStore {
     }
 
     async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        // 过期会话不再可用；记录留给回收任务释放资源，这里不删。
+        Ok(self
+            .get_session_record(upload_id)
+            .await?
+            .filter(|session| session.expires_at >= Utc::now()))
+    }
+
+    async fn get_session_record(&self, upload_id: &str) -> Result<Option<UploadSession>> {
         let mut conn = self.connection.lock().await;
         let payload: Option<String> = conn.get(self.key(upload_id)).await.map_err(|e| {
             map_infra_error(
@@ -142,10 +150,6 @@ impl UploadSessionStore for RedisUploadSessionStore {
                 "failed to deserialize upload session",
             )
         })?;
-        // 过期会话不再可用；记录留给回收任务释放资源，这里不删。
-        if session.expires_at < Utc::now() {
-            return Ok(None);
-        }
         Ok(Some(session))
     }
 
@@ -320,6 +324,23 @@ mod tests {
                 .is_none()
         );
         assert!(store.get_session(&live.upload_id).await.unwrap().is_some());
+        // 回收任务复查用的原始记录：过期了也读得到。
+        let record = store
+            .get_session_record(&expired.upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.expires_at.timestamp_millis(),
+            expired.expires_at.timestamp_millis()
+        );
+        assert!(
+            store
+                .get_session_record(&uuid::Uuid::new_v4().to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let lease = now + Duration::minutes(5);
         let claimed = store.claim_expired_sessions(now, lease, 10).await.unwrap();
@@ -385,5 +406,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((remaining, records), (0, 0));
+    }
+    /// 领取之后被续期（完成直传开始合并）：记录与索引都换成新的过期时刻，原租期过后也领
+    /// 不到；回收任务复查时读到的是续期后的记录。
+    #[tokio::test]
+    #[ignore = "requires FLARE_TEST_REDIS_URL"]
+    async fn a_session_renewed_after_its_claim_is_not_claimed_again() {
+        let url = std::env::var("FLARE_TEST_REDIS_URL").expect("FLARE_TEST_REDIS_URL");
+        let namespace = format!("media-upload-renew-test-{}", uuid::Uuid::new_v4());
+        let store = RedisUploadSessionStore::new(&url, namespace, 3600)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut renewed = session(
+            &uuid::Uuid::new_v4().to_string(),
+            now - Duration::minutes(10),
+        );
+        store.create_session(&renewed).await.unwrap();
+        let lease = now + Duration::minutes(5);
+        assert_eq!(
+            store
+                .claim_expired_sessions(now, lease, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        renewed.expires_at = now + Duration::hours(1);
+        store.upsert_session(&renewed).await.unwrap();
+        let record = store
+            .get_session_record(&renewed.upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.expires_at.timestamp_millis(),
+            renewed.expires_at.timestamp_millis()
+        );
+        assert!(
+            store
+                .get_session(&renewed.upload_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .claim_expired_sessions(
+                    lease + Duration::seconds(1),
+                    lease + Duration::minutes(10),
+                    10
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        store.delete_session(&renewed.upload_id).await.unwrap();
+        let mut conn = store.connection.lock().await;
+        let remaining: usize = conn.zcard(store.reclaim_index_key()).await.unwrap();
+        assert_eq!(remaining, 0);
     }
 }

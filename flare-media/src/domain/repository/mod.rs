@@ -255,6 +255,12 @@ pub trait UploadSessionStore: Send + Sync {
     /// 已过期（`expires_at` 已过）的会话按不存在返回，但记录留给回收任务：它还要凭记录里的
     /// 对象 key、存储侧分片上传 id 与分块目录释放资源。
     async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>>;
+    /// 读出记录本身，不论是否过期；记录不存在时为 `None`。回收任务在释放资源前用它复查
+    /// 领到的会话是否已被续期。默认退回 [`Self::get_session`]：只看得到未过期的会话，
+    /// 看不到时回收任务按领取时的快照处理，结论相同。
+    async fn get_session_record(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        self.get_session(upload_id).await
+    }
     async fn upsert_session(&self, session: &UploadSession) -> Result<()>;
     async fn delete_session(&self, upload_id: &str) -> Result<()>;
     /// 领取 `expires_at` 早于 `expired_before` 的会话，至多 `limit` 个，并把它们租给调用方到

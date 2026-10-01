@@ -1,6 +1,10 @@
 //! 过期上传会话的回收：会话占着的存储侧资源（单次 PUT 已写入的对象、未完成的分片上传、
 //! 网关分块的本地目录）在会话过期后释放，记录随之删除。由 Media 进程里的定时任务驱动，
 //! 多副本同时运行时靠会话存储的领取租约分工。
+//!
+//! 与完成直传的并发：完成在合并前先续期会话，续期后的会话领不到；领取后才续期的，释放前
+//! 重读记录时会发现并跳过。过期会话对完成不可见，所以剩下的窗口只有一种：某次完成在会话
+//! 过期前读到它，却在续期之前停顿了 5 分钟以上（宽限期），续期又恰好落在本任务重读之后。
 use super::*;
 use chrono::DateTime;
 
@@ -20,6 +24,8 @@ pub struct UploadReclaimReport {
     pub reclaimed: usize,
     /// 释放或删除失败、留待租期过后重试的会话数。
     pub failed: usize,
+    /// 领取之后又被续期（例如完成直传开始合并）、这一轮不动的会话数。
+    pub renewed: usize,
     /// 本机上没有对应活跃会话、已删除的过期分块目录数。
     pub stale_chunk_dirs: usize,
 }
@@ -34,14 +40,34 @@ impl MediaService {
         let Some(store) = &self.upload_conversation_store else {
             return Ok(report);
         };
+        let expired_before = now - Duration::seconds(UPLOAD_SESSION_RECLAIM_GRACE_SECONDS);
         let sessions = store
             .claim_expired_sessions(
-                now - Duration::seconds(UPLOAD_SESSION_RECLAIM_GRACE_SECONDS),
+                expired_before,
                 now + Duration::seconds(UPLOAD_SESSION_RECLAIM_LEASE_SECONDS),
                 UPLOAD_SESSION_RECLAIM_BATCH,
             )
             .await?;
-        for session in sessions {
+        for claimed in sessions {
+            // 领到的是领取那一刻的快照。完成直传在开始合并前会续期会话，提交分片也会续期：
+            // 释放前重读记录，续期过的不动（它不再过期，之后按新的过期时刻再回收）；其余按
+            // 最新记录释放，已完成的会话、已登记的文件都不删对象。
+            let session = match store.get_session_record(&claimed.upload_id).await {
+                Ok(Some(current)) if current.expires_at >= expired_before => {
+                    report.renewed += 1;
+                    continue;
+                }
+                Ok(current) => current.unwrap_or(claimed),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        upload_id = %claimed.upload_id,
+                        "failed to re-read a claimed upload session; retrying after the lease"
+                    );
+                    report.failed += 1;
+                    continue;
+                }
+            };
             let released = match self.release_upload_resources(&session).await {
                 Ok(()) => store.delete_session(&session.upload_id).await,
                 Err(err) => Err(err),

@@ -120,6 +120,7 @@ async fn reclaim_round(media_service: &MediaService) {
         Ok(report) => info!(
             reclaimed = report.reclaimed,
             failed = report.failed,
+            renewed = report.renewed,
             stale_chunk_dirs = report.stale_chunk_dirs,
             "expired upload sessions reclaimed"
         ),

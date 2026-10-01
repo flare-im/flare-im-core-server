@@ -66,6 +66,15 @@ impl UploadSessionStore for MemoryUploadSessionStore {
             .map(|entry| entry.session.clone()))
     }
 
+    async fn get_session_record(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .get(upload_id)
+            .map(|entry| entry.session.clone()))
+    }
+
     async fn upsert_session(&self, session: &UploadSession) -> Result<()> {
         let mut guard = self.sessions.write().await;
         guard.insert(session.upload_id.clone(), Entry::new(session));

@@ -630,6 +630,20 @@ impl MediaObjectRepository for S3ObjectStore {
                     format!("key={object_path}")
                 ))
             }
+            // 分片上传已合并（上一次完成）或已中止（回收任务、桶生命周期规则）：再试也不会
+            // 成功，不能报成存储不可用让客户端一直重试。领域层先看合并出的对象在不在，
+            // 不在才把它作为「重新发起上传」的参数错误答复。
+            Err(err)
+                if err
+                    .as_service_error()
+                    .is_some_and(|service| service.code() == Some("NoSuchUpload")) =>
+            {
+                Err(flare_server_core::flare_err_details!(
+                    ErrorCode::InvalidParameter,
+                    "multipart upload no longer exists; start a new upload",
+                    format!("key={object_path}")
+                ))
+            }
             Err(err) => Err(map_infra_error(
                 err,
                 ErrorCode::NetworkError,
@@ -1013,6 +1027,31 @@ mod tenant_key_tests {
         assert_eq!(err.code(), Some(ErrorCode::NetworkError));
     }
 
+    /// 分片上传已合并或已中止后再合并，存储回 NoSuchUpload：重试不会成功，回参数错误（由
+    /// 领域层先核对合并出的对象），不报成存储不可用让客户端无限重试。
+    #[tokio::test]
+    async fn completing_an_upload_the_store_no_longer_has_is_an_invalid_argument() {
+        let parts = [UploadedPartRecord {
+            part_number: 1,
+            etag: "\"etag-1\"".to_string(),
+            size: 5,
+            sha256: None,
+        }];
+        let (endpoint, seen) = s3_error_endpoint("404 Not Found", "NoSuchUpload").await;
+        let err = store_at(&endpoint)
+            .complete_multipart_upload("tenant-a/file.bin", "storage-upload-id", &parts)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+        let lines = seen.lock().unwrap().clone();
+        assert!(
+            lines.len() == 1
+                && lines[0].starts_with("POST /media/tenant-a/file.bin?")
+                && lines[0].contains("uploadId=storage-upload-id"),
+            "{lines:?}"
+        );
+    }
+
     /// 本机回环上的假 S3：每个连接读完请求头后回同一个错误响应，返回地址与收到的请求行。
     async fn s3_error_endpoint(
         status: &'static str,
@@ -1119,8 +1158,8 @@ mod tenant_key_tests {
 }
 
 /// 对一次性的 S3 兼容存储核对直传依赖的存储行为：签进地址的长度确实被存储执行（单次 PUT
-/// 与分片），对象不存在时 HEAD 回 404，提交存储里没有的分片时合并被拒，而这些都按领域层
-/// 期望的类别报出。离线签名与回环假 S3 只能证明地址里有长度、错误码怎么映射，证明不了存储
+/// 与分片，含长度 0），对象不存在时 HEAD 回 404，提交存储里没有的分片时合并被拒，已合并的
+/// 上传不能再合并，而这些都按领域层期望的类别报出。离线签名与回环假 S3 只能证明地址里有长度、错误码怎么映射，证明不了存储
 /// 真的校验。
 ///
 /// `FLARE_MEDIA_TEST_S3_ENDPOINT` 必须是回环上的 `http://127.0.0.1:<port>`，只供本测试使用；
@@ -1261,13 +1300,42 @@ mod live_store_tests {
             .unwrap();
         let stat = store.stat_object(&merged).await.unwrap().unwrap();
         assert_eq!(stat.size, Some(5));
+        // 已合并的上传再合并：存储回 NoSuchUpload，报参数错误而不是存储故障（领域层随后核对
+        // 合并出的对象，补登记合并后登记失败的上传）。
+        let err = store
+            .complete_multipart_upload(&merged, &upload_id, &uploaded)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
         // 已合并的上传再 abort：幂等成功（回收任务依赖这一点）。
         store
             .abort_multipart_upload(&merged, &upload_id)
             .await
             .unwrap();
 
-        for key in [&single, &merged] {
+        // 零字节：签了长度 0 的地址只接受空体，HEAD 报 0。长度在签名里，空体也必须带
+        // `Content-Length: 0`：reqwest 等客户端对空体不发这个头，存储按签名不符拒绝（403）。
+        let empty = store.build_object_key_for("tenant-live", "empty", "e.txt", "file");
+        let url = store
+            .presign_put_object(&empty, "text/plain", 0, 60)
+            .await
+            .unwrap();
+        assert_eq!(put(&url, b"x", Some("text/plain")).await.0, 403);
+        assert_eq!(put(&url, b"", Some("text/plain")).await.0, 403);
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = http
+            .put(&url)
+            .header("content-type", "text/plain")
+            .header("content-length", "0")
+            .body(Vec::new())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let stat = store.stat_object(&empty).await.unwrap().unwrap();
+        assert_eq!(stat.size, Some(0));
+
+        for key in [&single, &merged, &empty] {
             store.delete_object(key).await.unwrap();
             assert!(store.stat_object(key).await.unwrap().is_none());
         }

@@ -24,6 +24,8 @@ struct RecordingBucket {
     completed: Mutex<Vec<String>>,
     /// 为真时删除对象失败（存储暂时不可用）。
     fail_deletes: Mutex<bool>,
+    /// 设了就在合并里停住：先通知第一个，等第二个通知了才合并（模拟耗时的大文件合并）。
+    merge_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl RecordingBucket {
@@ -104,6 +106,31 @@ impl MediaObjectRepository for RecordingBucket {
         _upload_id: &str,
         _parts: &[UploadedPartRecord],
     ) -> Result<()> {
+        let gate = self.merge_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+        // 与 S3 一致：已合并或已中止的分片上传不能再合并（存储回 NoSuchUpload，S3 实现映射
+        // 成参数错误）。
+        let gone = self
+            .completed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|key| key == object_path)
+            || self
+                .aborted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key == object_path);
+        if gone {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "multipart upload no longer exists; start a new upload"
+            ));
+        }
         // 合并后的对象大小由测试事先用 client_wrote 设定（模拟不校验 signed headers 的存储）。
         self.completed.lock().unwrap().push(object_path.to_string());
         Ok(())
@@ -150,16 +177,27 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(
+            |metadata| metadata as Arc<dyn MediaMetadataStore>,
+            |sessions| sessions as Arc<dyn UploadSessionStore>,
+        )
+    }
+
+    /// 服务经包装后的端口访问存储，测试仍直接读写里面的内存存储。
+    fn with(
+        metadata_port: impl FnOnce(Arc<Metadata>) -> Arc<dyn MediaMetadataStore>,
+        sessions_port: impl FnOnce(Arc<MemoryUploadSessionStore>) -> Arc<dyn UploadSessionStore>,
+    ) -> Self {
         let bucket = Arc::new(RecordingBucket::default());
         let metadata = Arc::new(Metadata::default());
         let sessions = Arc::new(MemoryUploadSessionStore::new());
         let chunks = std::env::temp_dir().join(format!("flare-media-reclaim-{}", Uuid::new_v4()));
         let service = MediaService::new(
             Some(bucket.clone()),
-            Some(metadata.clone()),
+            Some(metadata_port(metadata.clone())),
             None,
             None,
-            Some(sessions.clone()),
+            Some(sessions_port(sessions.clone())),
             None,
             MediaDomainConfig::new(
                 DEFAULT_URL_TTL,
@@ -734,4 +772,485 @@ async fn stale_chunk_directories_without_a_live_session_are_swept_locally() {
     assert!(!f.chunks.join(&orphan).exists());
     assert!(foreign.exists());
     assert!(f.service.session_dir(&live.upload_id).unwrap().exists());
+}
+
+/// 元数据端口：前 `fail_saves` 次登记失败（数据库暂时不可用），其余照常。
+struct FlakyMetadata {
+    inner: Arc<Metadata>,
+    fail_saves: Mutex<u32>,
+}
+
+impl FlakyMetadata {
+    fn port(fail_saves: u32) -> impl FnOnce(Arc<Metadata>) -> Arc<dyn MediaMetadataStore> {
+        move |inner| {
+            Arc::new(Self {
+                inner,
+                fail_saves: Mutex::new(fail_saves),
+            })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MediaMetadataStore for FlakyMetadata {
+    async fn save_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
+        {
+            let mut left = self.fail_saves.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(flare_server_core::flare_err!(
+                    ErrorCode::DatabaseError,
+                    "database unavailable"
+                ));
+            }
+        }
+        self.inner.save_metadata(ctx, metadata).await
+    }
+    async fn load_metadata(&self, ctx: &Context, id: &str) -> Result<Option<MediaFileMetadata>> {
+        self.inner.load_metadata(ctx, id).await
+    }
+    async fn load_by_hash(&self, ctx: &Context, hash: &str) -> Result<Option<MediaFileMetadata>> {
+        self.inner.load_by_hash(ctx, hash).await
+    }
+    async fn delete_metadata(&self, ctx: &Context, id: &str) -> Result<()> {
+        self.inner.delete_metadata(ctx, id).await
+    }
+    async fn list_orphaned_assets(
+        &self,
+        ctx: &Context,
+        before: chrono::DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<MediaFileMetadata>> {
+        self.inner.list_orphaned_assets(ctx, before, limit).await
+    }
+    async fn claim_orphaned_asset(
+        &self,
+        ctx: &Context,
+        id: &str,
+        before: chrono::DateTime<Utc>,
+    ) -> Result<Option<Box<dyn crate::domain::repository::OrphanAssetClaim>>> {
+        self.inner.claim_orphaned_asset(ctx, id, before).await
+    }
+    async fn update_status(
+        &self,
+        ctx: &Context,
+        id: &str,
+        status: MediaAssetStatus,
+        grace_expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
+        self.inner
+            .update_status(ctx, id, status, grace_expires_at)
+            .await
+    }
+}
+
+/// 会话端口：把会话标为中止的写入前 `fail_aborted_upserts` 次失败，并计数；
+/// `renew_after_claim` 设了就在下一次领取之后把领到的会话续期到该时刻（模拟紧接着领取
+/// 开始的一次完成）。
+struct FlakySessions {
+    inner: Arc<MemoryUploadSessionStore>,
+    fail_aborted_upserts: Mutex<u32>,
+    aborted_upserts: Mutex<u32>,
+    renew_after_claim: Mutex<Option<chrono::DateTime<Utc>>>,
+}
+
+impl FlakySessions {
+    fn new(inner: Arc<MemoryUploadSessionStore>) -> Self {
+        Self {
+            inner,
+            fail_aborted_upserts: Mutex::new(0),
+            aborted_upserts: Mutex::new(0),
+            renew_after_claim: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UploadSessionStore for FlakySessions {
+    async fn create_session(&self, session: &UploadSession) -> Result<()> {
+        self.inner.create_session(session).await
+    }
+    async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        self.inner.get_session(upload_id).await
+    }
+    async fn get_session_record(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        self.inner.get_session_record(upload_id).await
+    }
+    async fn upsert_session(&self, session: &UploadSession) -> Result<()> {
+        if session.status == UploadSessionStatus::Aborted {
+            *self.aborted_upserts.lock().unwrap() += 1;
+            let mut left = self.fail_aborted_upserts.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(flare_server_core::flare_err!(
+                    ErrorCode::NetworkError,
+                    "session store unavailable"
+                ));
+            }
+        }
+        self.inner.upsert_session(session).await
+    }
+    async fn delete_session(&self, upload_id: &str) -> Result<()> {
+        self.inner.delete_session(upload_id).await
+    }
+    async fn claim_expired_sessions(
+        &self,
+        expired_before: chrono::DateTime<Utc>,
+        lease_until: chrono::DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<UploadSession>> {
+        let claimed = self
+            .inner
+            .claim_expired_sessions(expired_before, lease_until, limit)
+            .await?;
+        let renew = self.renew_after_claim.lock().unwrap().take();
+        if let Some(expires_at) = renew {
+            for session in &claimed {
+                let mut renewed = session.clone();
+                renewed.expires_at = expires_at;
+                self.inner.upsert_session(&renewed).await?;
+            }
+        }
+        Ok(claimed)
+    }
+}
+
+/// 用 [`FlakySessions`] 作会话端口的夹具，同时交回这个端口供测试布置故障。
+fn fixture_with_flaky_sessions() -> (Fixture, Arc<FlakySessions>) {
+    let mut port = None;
+    let f = Fixture::with(
+        |metadata| metadata as Arc<dyn MediaMetadataStore>,
+        |inner| {
+            let flaky = Arc::new(FlakySessions::new(inner));
+            port = Some(flaky.clone());
+            flaky
+        },
+    );
+    (f, port.unwrap())
+}
+
+/// 分片合并成功、登记失败（数据库暂时不可用）后客户端重试完成：存储里已没有这个分片
+/// 上传（S3 回 NoSuchUpload），合并出的对象却在。重试按这个对象核对大小并补登记；修复前
+/// 重试永远失败（NoSuchUpload 经 NetworkError 回 503）。
+#[tokio::test]
+async fn a_retried_completion_registers_the_object_merged_before_registration_failed() {
+    let f = Fixture::with(FlakyMetadata::port(1), |sessions| {
+        sessions as Arc<dyn UploadSessionStore>
+    });
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap_err();
+    assert_ne!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert_eq!(f.bucket.completed.lock().unwrap().len(), 1);
+    assert!(
+        f.metadata
+            .load_metadata(&owner(), &state.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let kept = f.stored_session(&state.upload_id).await.unwrap();
+    assert_eq!(kept.status, UploadSessionStatus::Pending);
+
+    let saved = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(saved.file_id, state.file_id);
+    assert_eq!(saved.file_size, declared);
+    // 第二次合并被存储拒绝（已合并），没有再合并一次。
+    assert_eq!(f.bucket.completed.lock().unwrap().len(), 1);
+    assert!(f.bucket.holds(&state.object_key));
+    assert!(
+        f.metadata
+            .load_metadata(&owner(), &state.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+}
+
+/// 存储里的分片上传已不在（例如被桶生命周期规则中止）、也没有合并出的对象：再试也不会
+/// 成功，回 400 让客户端重新发起上传，而不是可重试的 503。
+#[tokio::test]
+async fn completing_a_multipart_upload_the_store_dropped_asks_for_a_new_upload() {
+    let f = Fixture::new();
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket
+        .aborted
+        .lock()
+        .unwrap()
+        .push((state.object_key.clone(), STORAGE_UPLOAD_ID.to_string()));
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert!(
+        f.metadata
+            .load_metadata(&owner(), &state.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// 已完成登记、只是删会话失败（或答复丢了）后重试完成：答复已登记的文件，不再碰存储，
+/// 也不重写登记，否则其间加上的引用计数会被清掉。
+#[tokio::test]
+async fn retrying_a_completed_upload_answers_the_registered_file_without_rewriting_it() {
+    let f = Fixture::new();
+    let state = f.initiate(5).await;
+    f.bucket.client_wrote(&state.object_key, 5);
+    let pending = f.stored_session(&state.upload_id).await.unwrap();
+    let first = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    f.sessions.upsert_session(&pending).await.unwrap();
+    let mut referenced = f
+        .metadata
+        .load_metadata(&owner(), &state.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    referenced.reference_count = 2;
+    f.metadata
+        .save_metadata(&owner(), &referenced)
+        .await
+        .unwrap();
+
+    let again = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(again.file_id, first.file_id);
+    assert_eq!(again.reference_count, 2);
+    let stored = f
+        .metadata
+        .load_metadata(&owner(), &state.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.reference_count, 2);
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+    assert!(f.bucket.holds(&state.object_key));
+}
+
+/// 零字节文件：声明大小为 0 的单次 PUT 写入 0 字节对象即可完成，与经 Media 中转的上传
+/// 一致；修复前完成时回 400「对象缺失或为空」，零字节文件永远传不上去。
+#[tokio::test]
+async fn a_zero_byte_single_put_completes() {
+    let f = Fixture::new();
+    let state = f.initiate(0).await;
+    assert_eq!(state.transport_kind, DirectUploadTransportKind::SinglePut);
+    let presigned = f.bucket.presigned_puts.lock().unwrap().clone();
+    assert_eq!(presigned.len(), 1);
+    assert_eq!(presigned[0].1, 0, "the PUT url signs content-length 0");
+
+    // 还没 PUT：对象不存在仍是调用方错误，会话保留。
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert!(f.stored_session(&state.upload_id).await.is_some());
+
+    f.bucket.client_wrote(&state.object_key, 0);
+    let saved = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(saved.file_size, 0);
+    assert!(f.bucket.holds(&state.object_key));
+    assert!(
+        f.metadata
+            .load_metadata(&owner(), &state.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// 声明 0 字节却写进了内容：与其他大小不符一样回 400 并删掉对象。
+#[tokio::test]
+async fn a_zero_byte_declaration_refuses_a_non_empty_object() {
+    let f = Fixture::new();
+    let state = f.initiate(0).await;
+    f.bucket.client_wrote(&state.object_key, 3);
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert!(!f.bucket.holds(&state.object_key));
+    assert!(
+        f.metadata
+            .load_metadata(&owner(), &state.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// 合并后大小不符、删对象失败时把会话标为中止；这次写入失败会重试，而不是被忽略。
+#[tokio::test]
+async fn marking_a_merged_mismatch_aborted_retries_a_failed_write() {
+    let (f, port) = fixture_with_flaky_sessions();
+    *port.fail_aborted_upserts.lock().unwrap() = 1;
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared * 3);
+    *f.bucket.fail_deletes.lock().unwrap() = true;
+
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert_eq!(*port.aborted_upserts.lock().unwrap(), 2);
+    let kept = f.stored_session(&state.upload_id).await.unwrap();
+    assert_eq!(kept.status, UploadSessionStatus::Aborted);
+}
+
+/// 标记中止一直写不进去：答复仍是大小不符的 400；会话停在待完成，再次完成仍被大小核对
+/// 拒绝、不会登记，回收任务到期后删掉这个未登记的对象。
+#[tokio::test]
+async fn an_unrecorded_abort_still_refuses_completion_and_reclaim_removes_the_object() {
+    let (f, port) = fixture_with_flaky_sessions();
+    *port.fail_aborted_upserts.lock().unwrap() = u32::MAX;
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared * 3);
+    *f.bucket.fail_deletes.lock().unwrap() = true;
+
+    for round in 1..=2 {
+        let err = f
+            .service
+            .complete_direct_upload(&owner(), &state.upload_id)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            Some(ErrorCode::InvalidParameter),
+            "round {round}: {err}"
+        );
+        assert_eq!(
+            *port.aborted_upserts.lock().unwrap(),
+            round * super::super::direct::ABORT_MARK_ATTEMPTS
+        );
+        let kept = f.stored_session(&state.upload_id).await.unwrap();
+        assert_eq!(kept.status, UploadSessionStatus::Pending);
+        assert!(f.bucket.holds(&state.object_key));
+        assert!(
+            f.metadata
+                .load_metadata(&owner(), &state.file_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(f.bucket.completed.lock().unwrap().len(), 1);
+
+    *f.bucket.fail_deletes.lock().unwrap() = false;
+    let report = f
+        .service
+        .reclaim_expired_upload_sessions(f.after_expiry())
+        .await
+        .unwrap();
+    assert_eq!((report.reclaimed, report.failed), (1, 0), "{report:?}");
+    assert!(!f.bucket.holds(&state.object_key));
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+}
+
+/// 会话临近过期时开始完成、合并耗时超过过期时刻加宽限期：完成在合并前先续期，回收任务
+/// 领不到它，不会中止分片上传，也不会删掉刚合并的对象。
+#[tokio::test]
+async fn reclaim_leaves_a_session_whose_completion_is_merging() {
+    let f = Fixture::new();
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    let mut about_to_expire = f.stored_session(&state.upload_id).await.unwrap();
+    about_to_expire.expires_at = Utc::now() + Duration::seconds(30);
+    f.sessions.upsert_session(&about_to_expire).await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.bucket.merge_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let at =
+        about_to_expire.expires_at + Duration::seconds(UPLOAD_SESSION_RECLAIM_GRACE_SECONDS + 5);
+
+    let owner = owner();
+    let (completed, report) = tokio::join!(
+        f.service.complete_direct_upload(&owner, &state.upload_id),
+        async {
+            entered.notified().await;
+            let report = f.service.reclaim_expired_upload_sessions(at).await.unwrap();
+            release.notify_one();
+            report
+        }
+    );
+    assert_eq!(report.reclaimed, 0, "{report:?}");
+    assert!(f.bucket.aborted.lock().unwrap().is_empty());
+    let saved = completed.unwrap();
+    assert_eq!(saved.file_size, declared);
+    assert!(f.bucket.holds(&state.object_key));
+    assert!(
+        f.metadata
+            .load_metadata(&owner, &state.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// 领取之后会话才被续期（一次完成紧接着领取开始）：回收任务释放前重读记录，看到续期就
+/// 不动它（不中止分片上传、不删对象、不删记录），之后照常完成。
+#[tokio::test]
+async fn reclaim_skips_a_session_renewed_after_it_was_claimed() {
+    let (f, port) = fixture_with_flaky_sessions();
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    let at = f.after_expiry();
+    *port.renew_after_claim.lock().unwrap() = Some(at + Duration::seconds(SESSION_TTL));
+
+    let report = f.service.reclaim_expired_upload_sessions(at).await.unwrap();
+    assert_eq!(
+        (report.reclaimed, report.renewed, report.failed),
+        (0, 1, 0),
+        "{report:?}"
+    );
+    assert!(f.bucket.aborted.lock().unwrap().is_empty());
+    assert!(f.bucket.holds(&state.object_key));
+    assert!(f.stored_session(&state.upload_id).await.is_some());
+
+    let saved = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(saved.file_size, declared);
 }
