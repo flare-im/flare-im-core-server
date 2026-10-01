@@ -38,7 +38,15 @@ reuse the same binary with its own service list. `--socket=/absolute/path` (or
   values.
 - Child environments start empty. `shared_env`, `shared_env_prefixes`, and each
   service's `inherit_env` / `inherit_env_prefixes` are the only variables copied
-  from the parent; `environment` provides service-local literals. Core's Cell
+  from the parent; `environment` provides service-local literals, applied last
+  so they override inherited values. `environment_defaults` entries
+  (`when_env`, `equals`, `values`) give a child values only while the inherited
+  `when_env` equals `equals` exactly, and only for variables the parent does
+  not set at all: a parent value, even an empty one, wins. Validation requires
+  the mode variable and every default to be inherited by that child (so the
+  parent can still override a default), and rejects a mode pinned by a literal,
+  a name that is both a literal and a default, empty or padded values, duplicate
+  names and defaults that set a mode variable. Core's Cell
   signing private key reaches only API and signaling gateways. Push credentials
   reach only `push-worker`. Add any new service setting to the proper manifest
   scope; an unlisted setting is intentionally ignored.
@@ -88,6 +96,13 @@ explicit `FLARE_REGISTRY_MODE=configured`, `FLARE_CONSUL_ENDPOINT` is also
 required. Only exact `FLARE_REGISTRY_MODE=static` lets the supervisor omit it;
 Core then disables service registration and discovery, and this does not by
 itself provide static targets for every caller or prove DEP-08 viability.
+In static mode the manifest's `environment_defaults` give API Gateway and
+Admin Gateway the `FLARE_{API,ADMIN}_GATEWAY_GRPC_*_SERVICE_URL` of this
+container's listeners (media 60081, message ingest 50182, orchestrator 50181,
+conversation 50090, online 50061, storage reader 60083, and capability 50110
+for Admin Gateway only), so they connect directly instead of trying discovery
+and logging a fallback WARN per downstream; values the deployment sets win,
+and configured mode keeps discovery.
 The Core manifest fixes the signaling gateway child `PORT=60051` and
 `GRPC_PORT=60060` regardless of parent values, preserving WS/QUIC 60051/60052
 and matching the in-Cell GatewayRouter gRPC target. In static mode, an enabled

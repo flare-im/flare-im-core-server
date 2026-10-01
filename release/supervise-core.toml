@@ -158,6 +158,20 @@ tcp_health = "127.0.0.1:50050"
 [services.environment]
 FLARE_API_GATEWAY_AUTH_DEV_ISSUE = "false"
 FLARE_API_GATEWAY_TENANT_POLICY = "strict"
+# FLARE_REGISTRY_MODE=static has no discovery: name the listeners of this
+# container directly instead of trying discovery and falling back, with a WARN,
+# once per downstream. Values the parent sets still win; configured mode keeps
+# discovery.
+[[services.environment_defaults]]
+when_env = "FLARE_REGISTRY_MODE"
+equals = "static"
+[services.environment_defaults.values]
+FLARE_API_GATEWAY_GRPC_MEDIA_SERVICE_URL = "http://127.0.0.1:60081"
+FLARE_API_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL = "http://127.0.0.1:50182"
+FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL = "http://127.0.0.1:50181"
+FLARE_API_GATEWAY_GRPC_CONVERSATION_SERVICE_URL = "http://127.0.0.1:50090"
+FLARE_API_GATEWAY_GRPC_ONLINE_SERVICE_URL = "http://127.0.0.1:50061"
+FLARE_API_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"
 
 [[services]]
 name = "signaling-gateway"
@@ -189,3 +203,18 @@ required_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50051"
 [services.environment]
 FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE = "false"
+# FLARE_REGISTRY_MODE=static has no discovery: name the listeners of this
+# container directly instead of trying discovery and falling back, with a WARN,
+# once per downstream. Values the parent sets still win; configured mode keeps
+# discovery.
+[[services.environment_defaults]]
+when_env = "FLARE_REGISTRY_MODE"
+equals = "static"
+[services.environment_defaults.values]
+FLARE_ADMIN_GATEWAY_GRPC_MEDIA_SERVICE_URL = "http://127.0.0.1:60081"
+FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL = "http://127.0.0.1:50182"
+FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL = "http://127.0.0.1:50181"
+FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL = "http://127.0.0.1:50090"
+FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL = "http://127.0.0.1:50061"
+FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"
+FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL = "http://127.0.0.1:50110"

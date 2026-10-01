@@ -1,4 +1,11 @@
-use std::{collections::HashSet, env, fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    env,
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+};
 
 use crate::error::{Context, Result, ensure, fail};
 use serde::Deserialize;
@@ -28,6 +35,17 @@ struct RequiredEnvUnless {
     name: String,
     when_env: String,
     equals: String,
+}
+
+/// Values a child receives only while the parent environment selects one mode,
+/// and only for variables the parent does not set at all. A value the parent
+/// sets, even an empty one, reaches the child unchanged.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnvironmentDefaults {
+    when_env: String,
+    equals: String,
+    values: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -85,7 +103,9 @@ pub(crate) struct Service {
     #[serde(default)]
     pub(crate) enabled_if_env: Option<String>,
     #[serde(default)]
-    pub(crate) environment: std::collections::BTreeMap<String, String>,
+    pub(crate) environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) environment_defaults: Vec<EnvironmentDefaults>,
     #[serde(default)]
     pub(crate) tcp_health: Option<String>,
 }
@@ -194,6 +214,7 @@ impl Manifest {
                     condition.when_env
                 );
             }
+            self.validate_environment_defaults(service)?;
             if let Some(name) = &service.enabled_if_env {
                 validate_env_name(name)?;
             }
@@ -311,6 +332,105 @@ impl Manifest {
                 .inherit_env_prefixes
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
+    }
+
+    /// A default must stay overridable by the parent (so it names an inherited
+    /// variable), and its mode must be the one the child sees.
+    fn validate_environment_defaults(&self, service: &Service) -> Result<()> {
+        let mut names = HashSet::new();
+        for defaults in &service.environment_defaults {
+            validate_env_name(&defaults.when_env)?;
+            ensure!(
+                self.env_allowed(service, &defaults.when_env),
+                "{} environment defaults check an env not inherited by the child: {}",
+                service.name,
+                defaults.when_env
+            );
+            ensure!(
+                !service.environment.contains_key(&defaults.when_env),
+                "{} overrides the mode of its environment defaults: {}",
+                service.name,
+                defaults.when_env
+            );
+            ensure!(
+                !defaults.equals.is_empty() && defaults.equals.trim() == defaults.equals,
+                "{} environment defaults for {} have an empty or padded mode value",
+                service.name,
+                defaults.when_env
+            );
+            ensure!(
+                !defaults.values.is_empty(),
+                "{} environment defaults for {} are empty",
+                service.name,
+                defaults.when_env
+            );
+            for (name, value) in &defaults.values {
+                validate_env_name(name)?;
+                ensure!(
+                    !service
+                        .environment_defaults
+                        .iter()
+                        .any(|other| &other.when_env == name),
+                    "{} environment default sets a mode its defaults depend on: {name}",
+                    service.name
+                );
+                ensure!(
+                    self.env_allowed(service, name),
+                    "{} environment default {name} is not inherited by the child, so the parent could not override it",
+                    service.name
+                );
+                ensure!(
+                    !service.environment.contains_key(name),
+                    "{} sets {name} both as a literal and as an environment default",
+                    service.name
+                );
+                ensure!(
+                    !value.is_empty() && value.trim() == value,
+                    "{} environment default {name} is empty or padded",
+                    service.name
+                );
+                ensure!(
+                    names.insert(name.as_str()),
+                    "{} duplicate environment default: {name}",
+                    service.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The child's environment: the parent variables it may inherit, then the
+    /// defaults of the selected mode for variables the parent does not set,
+    /// then the service's `environment` literals, which override everything.
+    pub(crate) fn child_environment(
+        &self,
+        service: &Service,
+        parent: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Vec<(OsString, OsString)> {
+        let mut child: BTreeMap<OsString, OsString> = parent
+            .into_iter()
+            .filter(|(key, _)| {
+                key.to_str()
+                    .is_some_and(|name| self.env_allowed(service, name))
+            })
+            .collect();
+        for defaults in &service.environment_defaults {
+            let selected = child
+                .get(&OsString::from(&defaults.when_env))
+                .is_some_and(|mode| mode.to_str() == Some(defaults.equals.as_str()));
+            if !selected {
+                continue;
+            }
+            for (name, value) in &defaults.values {
+                child
+                    .entry(OsString::from(name))
+                    .or_insert_with(|| OsString::from(value));
+            }
+        }
+        for (name, value) in &service.environment {
+            child.insert(OsString::from(name), OsString::from(value));
+        }
+        child.into_iter().collect()
     }
 }
 
@@ -807,6 +927,201 @@ required_env_unless = [
                 Some("strict"),
                 "{service_name}"
             );
+        }
+    }
+
+    fn defaults_fixture(extra: &str) -> std::result::Result<Manifest, String> {
+        let manifest: Manifest = toml::from_str(&format!(
+            r#"
+version = 1
+shared_env = ["MODE"]
+[[services]]
+name = "gateway"
+command = "/bin/sh"
+inherit_env_prefixes = ["GW_"]
+[services.environment]
+GW_POLICY = "strict"
+{extra}
+"#
+        ))
+        .map_err(|error| error.to_string())?;
+        manifest
+            .validate()
+            .map(|()| manifest)
+            .map_err(|error| error.to_string())
+    }
+
+    const STATIC_DEFAULTS: &str = r#"
+[[services.environment_defaults]]
+when_env = "MODE"
+equals = "static"
+[services.environment_defaults.values]
+GW_MEDIA_URL = "http://127.0.0.1:60081"
+GW_ONLINE_URL = "http://127.0.0.1:50061"
+"#;
+
+    fn child(manifest: &Manifest, parent: &[(&str, &str)]) -> BTreeMap<String, String> {
+        manifest
+            .child_environment(
+                &manifest.services[0],
+                parent
+                    .iter()
+                    .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+            )
+            .into_iter()
+            .map(|(key, value)| (key.into_string().unwrap(), value.into_string().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn environment_defaults_apply_only_in_their_mode_and_never_over_the_parent() {
+        let manifest = defaults_fixture(STATIC_DEFAULTS).unwrap();
+        let static_mode = child(&manifest, &[("MODE", "static"), ("OTHER", "x")]);
+        assert_eq!(
+            static_mode,
+            BTreeMap::from([
+                ("MODE".to_string(), "static".to_string()),
+                (
+                    "GW_MEDIA_URL".to_string(),
+                    "http://127.0.0.1:60081".to_string()
+                ),
+                (
+                    "GW_ONLINE_URL".to_string(),
+                    "http://127.0.0.1:50061".to_string()
+                ),
+                ("GW_POLICY".to_string(), "strict".to_string()),
+            ])
+        );
+        // The parent's value wins, an empty one included (it may mean "off").
+        let set = child(
+            &manifest,
+            &[
+                ("MODE", "static"),
+                ("GW_MEDIA_URL", "http://media.internal:60081"),
+                ("GW_ONLINE_URL", ""),
+            ],
+        );
+        assert_eq!(set["GW_MEDIA_URL"], "http://media.internal:60081");
+        assert_eq!(set["GW_ONLINE_URL"], "");
+        // Another, padded or absent mode leaves discovery to the child.
+        for parent in [
+            &[("MODE", "configured")][..],
+            &[("MODE", " static")][..],
+            &[][..],
+        ] {
+            let other = child(&manifest, parent);
+            assert!(!other.contains_key("GW_MEDIA_URL"), "{parent:?}");
+            assert!(!other.contains_key("GW_ONLINE_URL"), "{parent:?}");
+        }
+        // Literals still override whatever the parent passes.
+        let literal = child(&manifest, &[("MODE", "static"), ("GW_POLICY", "lenient")]);
+        assert_eq!(literal["GW_POLICY"], "strict");
+    }
+
+    #[test]
+    fn environment_defaults_must_stay_overridable_and_tied_to_the_childs_mode() {
+        let rejected = [
+            (
+                STATIC_DEFAULTS.replace("when_env = \"MODE\"", "when_env = \"SECRET_MODE\""),
+                "not inherited by the child: SECRET_MODE",
+            ),
+            (
+                STATIC_DEFAULTS.replace("GW_MEDIA_URL", "MEDIA_URL"),
+                "MEDIA_URL is not inherited by the child",
+            ),
+            (
+                STATIC_DEFAULTS.replace("GW_MEDIA_URL", "GW_POLICY"),
+                "GW_POLICY both as a literal and as an environment default",
+            ),
+            (
+                STATIC_DEFAULTS.replace("\"http://127.0.0.1:60081\"", "\"\""),
+                "GW_MEDIA_URL is empty or padded",
+            ),
+            (
+                STATIC_DEFAULTS.replace("equals = \"static\"", "equals = \" static\""),
+                "empty or padded mode value",
+            ),
+            (
+                STATIC_DEFAULTS.replace("GW_ONLINE_URL", "MODE"),
+                "sets a mode its defaults depend on: MODE",
+            ),
+            (
+                format!("{STATIC_DEFAULTS}{}", STATIC_DEFAULTS.replace("GW_ONLINE_URL", "GW_OTHER_URL")),
+                "duplicate environment default: GW_MEDIA_URL",
+            ),
+            (
+                "[[services.environment_defaults]]\nwhen_env = \"MODE\"\nequals = \"static\"\nvalues = {}\n"
+                    .to_string(),
+                "are empty",
+            ),
+        ];
+        for (extra, reason) in rejected {
+            let error = defaults_fixture(&extra).unwrap_err();
+            assert!(error.contains(reason), "{reason}: {error}");
+        }
+        // The mode itself cannot be pinned by a literal, so the child sees what was checked.
+        let pinned = defaults_fixture(&STATIC_DEFAULTS.replace(
+            "[[services.environment_defaults]]",
+            "MODE = \"static\"\n[[services.environment_defaults]]",
+        ))
+        .unwrap_err();
+        assert!(pinned.contains("overrides the mode"), "{pinned}");
+        let unknown = defaults_fixture(&STATIC_DEFAULTS.replace("equals", "matches")).unwrap_err();
+        assert!(unknown.contains("unknown field"), "{unknown}");
+    }
+
+    #[test]
+    fn core_gateways_name_their_in_container_downstreams_in_static_mode() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        manifest.validate().unwrap();
+        // Each downstream variable suffix and the manifest service that listens for it.
+        let downstreams = [
+            ("MEDIA", "media"),
+            ("MESSAGE_INGEST", "message-ingest"),
+            ("MESSAGE_ORCHESTRATOR", "orchestrator"),
+            ("CONVERSATION", "conversation"),
+            ("ONLINE", "signaling-online"),
+            ("STORAGE_READER", "storage-reader"),
+            ("CAPABILITY", "capability"),
+        ];
+        let listener = |name: &str| {
+            let service = manifest.services.iter().find(|s| s.name == name).unwrap();
+            format!("http://{}", service.tcp_health.as_deref().unwrap())
+        };
+        for (gateway, prefix, count) in [
+            ("api-gateway", "FLARE_API_GATEWAY", 6),
+            ("admin-gateway", "FLARE_ADMIN_GATEWAY", 7),
+        ] {
+            let service = manifest
+                .services
+                .iter()
+                .find(|s| s.name == gateway)
+                .unwrap();
+            let parent = |mode: &str| {
+                manifest
+                    .child_environment(
+                        service,
+                        [(OsString::from("FLARE_REGISTRY_MODE"), OsString::from(mode))],
+                    )
+                    .into_iter()
+                    .map(|(key, value)| (key.into_string().unwrap(), value.into_string().unwrap()))
+                    .filter(|(key, _)| key.ends_with("_SERVICE_URL"))
+                    .collect::<BTreeMap<_, _>>()
+            };
+            let expected: BTreeMap<_, _> = downstreams
+                .iter()
+                .take(count)
+                .map(|(suffix, listener_service)| {
+                    (
+                        format!("{prefix}_GRPC_{suffix}_SERVICE_URL"),
+                        listener(listener_service),
+                    )
+                })
+                .collect();
+            assert_eq!(parent("static"), expected, "{gateway}");
+            // Configured mode keeps discovery.
+            assert!(parent("configured").is_empty(), "{gateway}");
         }
     }
 }

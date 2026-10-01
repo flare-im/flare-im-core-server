@@ -108,15 +108,7 @@ async fn run_service(
         // Each child is a process-group leader so graceful shutdown also reaches
         // any subprocess it launched. No shell is involved in the production path.
         command.as_std_mut().process_group(0);
-        for (key, value) in env::vars_os() {
-            if key
-                .to_str()
-                .is_some_and(|name| manifest.env_allowed(&service, name))
-            {
-                command.env(key, value);
-            }
-        }
-        command.envs(&service.environment);
+        command.envs(manifest.child_environment(&service, env::vars_os()));
         let started = Instant::now();
         match command.spawn() {
             Ok(mut child) => {
