@@ -20,6 +20,18 @@ use flare_server_core::error::{FlareError, Result};
 
 const PENDING_MARKER: &str = "PENDING";
 
+/// 占位 TTL 默认值（秒，`INGEST_IDEMPOTENCY_RESERVE_TTL_SECS`）：覆盖一次发送的处理时长。
+pub const DEFAULT_IDEMPOTENCY_RESERVE_TTL_SECS: u64 = 180;
+/// 结果 TTL 默认值（秒，`INGEST_IDEMPOTENCY_RESULT_TTL_SECS`）：去重窗口。
+pub const DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 3_600;
+/// 结果 TTL 的下限（秒），是对上游可靠重投的承诺（MIG-06）。
+///
+/// 首发已被接受而结果没回到上游时，上游用同一个 `client_msg_id` 重投，靠这里折叠成同一条消息；
+/// 重投落在去重窗口之外就会生成第二条。最长的上游是 Social outbox：同一行最多投递 12 次，按其
+/// 退避、租约与投递超时算最坏跨度约 2391 s，flare-social `outbox_dispatcher` 的门禁按本下限
+/// 校验它。配置低于下限时启动告警。
+pub const MIN_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 2_700;
+
 pub struct RedisIngestIdempotencyStore {
     client: Arc<redis::Client>,
     connection: OnceCell<ConnectionManager>,
@@ -142,6 +154,15 @@ impl IngestIdempotencyStore for RedisIngestIdempotencyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MIG-06：默认去重窗口必须覆盖上游最长的重投跨度（见 [`MIN_IDEMPOTENCY_RESULT_TTL_SECS`]），
+    /// 占位 TTL 只管一次处理，不能拿来充当去重窗口。
+    #[test]
+    fn default_result_ttl_covers_the_longest_upstream_redelivery_span() {
+        const { assert!(DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS >= MIN_IDEMPOTENCY_RESULT_TTL_SECS) };
+        const { assert!(DEFAULT_IDEMPOTENCY_RESERVE_TTL_SECS < MIN_IDEMPOTENCY_RESULT_TTL_SECS) };
+        assert_eq!(MIN_IDEMPOTENCY_RESULT_TTL_SECS, 2_700);
+    }
 
     #[test]
     fn encode_decode_roundtrip() {

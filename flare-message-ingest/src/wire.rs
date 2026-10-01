@@ -176,14 +176,25 @@ async fn initialize_with_config(
 
     // 摄入边界幂等(按 client_msg_id 去重重发)。reserve_ttl 须 ≥ 单次发送处理时长(覆盖客户端 ack 超时窗口),
     // 否则慢首发会被并发重试误判;result_ttl 覆盖合理重试窗口(含离线重连补发)。复用 WAL 的 Redis 连接。
+    use crate::infrastructure::persistence::redis_idempotency::{
+        DEFAULT_IDEMPOTENCY_RESERVE_TTL_SECS, DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS,
+        MIN_IDEMPOTENCY_RESULT_TTL_SECS,
+    };
     let idem_reserve_ttl = std::env::var("INGEST_IDEMPOTENCY_RESERVE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(180);
+        .unwrap_or(DEFAULT_IDEMPOTENCY_RESERVE_TTL_SECS);
     let idem_result_ttl = std::env::var("INGEST_IDEMPOTENCY_RESULT_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(3600);
+        .unwrap_or(DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS);
+    if idem_result_ttl < MIN_IDEMPOTENCY_RESULT_TTL_SECS {
+        tracing::warn!(
+            configured_secs = idem_result_ttl,
+            minimum_secs = MIN_IDEMPOTENCY_RESULT_TTL_SECS,
+            "INGEST_IDEMPOTENCY_RESULT_TTL_SECS is shorter than the longest upstream redelivery span; a late retry of an accepted send can be stored twice"
+        );
+    }
     let idempotency_store = Arc::new(
         crate::infrastructure::persistence::redis_idempotency::RedisIngestIdempotencyStore::new(
             redis_client.clone(),
