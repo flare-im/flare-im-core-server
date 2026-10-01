@@ -356,7 +356,7 @@ pub async fn get_direct_upload_status(
     tag = "Media",
     request_body = PresignDirectUploadPartsHttpRequest,
     responses(
-        (status = 200, description = "成功"),
+        (status = 200, description = "成功：每片地址签入该片的长度（最后一片为余下的字节），长度不符的 PUT 由存储拒绝"),
         (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
         (status = 401, description = "缺少或无效的访问令牌"),
         (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
@@ -447,8 +447,8 @@ pub async fn commit_direct_upload_parts(
     tag = "Media",
     request_body = CompleteDirectUploadHttpRequest,
     responses(
-        (status = 200, description = "成功；存储中的对象大小与声明不符时回 400 并删除该对象"),
-        (status = 400, description = "参数错误：请求体不合法，或 Media 拒绝参数（reason=BAD_REQUEST）"),
+        (status = 200, description = "成功"),
+        (status = 400, description = "参数错误（reason=BAD_REQUEST）：请求体不合法；对象尚未上传或为空；提交的分片与存储中的不符；存储中的对象大小与声明不符（对象随即删除，删除失败时同样回 400，残留由回收任务清理）；会话已因大小不符中止"),
         (status = 401, description = "缺少或无效的访问令牌"),
         (status = 403, description = "不是绑定租户的终端用户令牌（reason=MEDIA_IDENTITY_REQUIRED）、租户不可用，或 Media 拒绝越权（reason=FORBIDDEN）"),
         (status = 404, description = "上传会话不存在，或属于其他用户、其他租户（reason=NOT_FOUND，不回显标识）"),

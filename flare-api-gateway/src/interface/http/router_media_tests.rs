@@ -304,6 +304,34 @@ fn upload_class_operations_document_their_error_responses() {
     assert_eq!(documented, 14);
 }
 
+/// File and reference operations answer through the same Media mapping as the upload class, so
+/// their OpenAPI entries list the same statuses: the typed Media rejections (400/403/404), the
+/// gateway's own 401/403, the opaque 500 and the retryable 503/504.
+#[test]
+fn file_and_reference_operations_document_their_error_responses() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let operations = [
+        ("post", "/api/v1/medias/file-url"),
+        ("get", "/api/v1/medias/file-info"),
+        ("delete", "/api/v1/medias/file"),
+        ("post", "/api/v1/medias/references"),
+        ("delete", "/api/v1/medias/references"),
+        ("get", "/api/v1/medias/references"),
+    ];
+    for (method, path) in operations {
+        let responses = document["paths"][path][method]["responses"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{method} {path} is not documented"));
+        for status in ["200", "400", "401", "403", "404", "500", "503", "504"] {
+            assert!(
+                responses.contains_key(status),
+                "{method} {path} does not document {status}: {:?}",
+                responses.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 /// What the scripted Media endpoint answers to every file RPC.
 #[derive(Clone, Copy)]
 enum MediaVerdict {
@@ -737,6 +765,56 @@ async fn upload_class_routes_map_media_rejections_to_typed_statuses_without_echo
     }
 }
 
+/// The file and reference routes (what their OpenAPI entries now document): Media's typed
+/// failures map exactly as on the upload class, including the retryable 503/504.
+#[tokio::test]
+async fn file_and_reference_routes_map_media_failures_like_the_upload_class() {
+    let mut routes = file_routes();
+    routes.extend([
+        (
+            "POST",
+            "/api/v1/medias/references".to_string(),
+            Some(format!(
+                r#"{{"file_id":"{FILE_ID}","namespace":"message","owner_id":"m1","business_tag":"","metadata":{{}},"display_name":"","description":""}}"#
+            )),
+        ),
+        (
+            "DELETE",
+            "/api/v1/medias/references".to_string(),
+            Some(format!(r#"{{"file_id":"{FILE_ID}","reference_id":""}}"#)),
+        ),
+    ]);
+    assert_eq!(routes.len(), 7);
+    for (verdict, status, reason) in [
+        (
+            MediaVerdict::InvalidArgument,
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+        ),
+        (
+            MediaVerdict::StorageFailure,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MEDIA_UNAVAILABLE",
+        ),
+        (
+            MediaVerdict::Timeout,
+            StatusCode::GATEWAY_TIMEOUT,
+            "MEDIA_TIMEOUT",
+        ),
+        (
+            MediaVerdict::InternalFailure,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "MEDIA_REQUEST_FAILED",
+        ),
+    ] {
+        let router = scripted_router(verdict).await;
+        for (method, uri, body) in &routes {
+            let response = call(&router, method, uri, body.clone()).await;
+            assert_typed_rejection(response, status, reason, &format!("{method} {uri}")).await;
+        }
+    }
+}
+
 /// Media itself unreachable (nothing listens on its address): every Media route answers a
 /// retryable 503, not the generic 500, and the file routes behave the same way.
 #[tokio::test]
@@ -816,6 +894,13 @@ mod real_media {
             _expires_in: i64,
         ) -> FlareResult<String> {
             Ok(signed(object_path))
+        }
+        /// Nothing is ever stored: every object is missing, as before the client's PUT.
+        async fn stat_object(
+            &self,
+            _object_path: &str,
+        ) -> FlareResult<Option<flare_media::domain::ObjectStat>> {
+            Ok(None)
         }
         fn base_url(&self) -> Option<String> {
             Some(EDGE_MEDIA.to_string())
@@ -1237,5 +1322,63 @@ mod real_media {
             );
             assert!(!text.contains("upload session"), "{context}: {envelope}");
         }
+    }
+
+    /// Completing a direct upload before the client's PUT: the object does not exist yet, which
+    /// is the caller's mistake (400), not a storage outage (503). The session stays usable.
+    #[tokio::test]
+    async fn completing_a_direct_upload_before_the_put_is_a_typed_bad_request() {
+        let h = serve().await;
+        let initiated = json_data(
+            call(
+                &h.router,
+                "POST",
+                "/api/v1/medias/uploads/initiate",
+                Some(
+                    r#"{"metadata":{"file_name":"a.txt","mime_type":"text/plain","file_size":5,"file_type":0,"upload_id":""}}"#
+                        .to_string(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        let upload_id = initiated["upload_id"].as_str().unwrap().to_string();
+        let object_key = initiated["object_key"].as_str().unwrap().to_string();
+        assert!(
+            !upload_id.is_empty() && !object_key.is_empty(),
+            "{initiated}"
+        );
+
+        let session = format!(r#"{{"upload_id":"{upload_id}"}}"#);
+        let response = call(
+            &h.router,
+            "POST",
+            "/api/v1/medias/uploads/complete",
+            Some(session),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["reason"], "BAD_REQUEST", "{envelope}");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(&upload_id) && !text.contains(&object_key),
+            "{envelope}"
+        );
+
+        let status = json_data(
+            call(
+                &h.router,
+                "GET",
+                &format!("/api/v1/medias/uploads/status?upload_id={upload_id}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["upload_id"], upload_id.as_str());
     }
 }

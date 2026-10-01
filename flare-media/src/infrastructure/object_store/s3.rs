@@ -5,6 +5,7 @@ use aws_config::BehaviorVersion;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{
     BucketLocationConstraint, CompletedMultipartUpload, CompletedPart, CreateBucketConfiguration,
@@ -550,8 +551,11 @@ impl MediaObjectRepository for S3ObjectStore {
         object_path: &str,
         upload_id: &str,
         part_number: u32,
+        content_length: i64,
         expires_in: i64,
     ) -> Result<String> {
+        // 与单次 PUT 相同：Content-Length 进 X-Amz-SignedHeaders，长度不符的分片得到
+        // SignatureDoesNotMatch，写不进比这一片应有长度更大的数据。
         let presigned = self
             .presign_client
             .upload_part()
@@ -559,6 +563,7 @@ impl MediaObjectRepository for S3ObjectStore {
             .key(object_path)
             .upload_id(upload_id)
             .part_number(part_number as i32)
+            .content_length(content_length)
             .presigned(
                 aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
                     (expires_in.max(1) as u64).min(7 * 24 * 3600),
@@ -601,22 +606,36 @@ impl MediaObjectRepository for S3ObjectStore {
             .set_parts(Some(completed_parts))
             .build();
 
-        self.client
+        let result = self
+            .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(object_path)
             .upload_id(upload_id)
             .multipart_upload(upload)
             .send()
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    format!("failed to complete multipart upload, key={}", object_path),
-                )
-            })?;
-        Ok(())
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            // 提交的分片在存储里不存在、ETag 不对或顺序不对：调用方没按地址上传就来完成，
+            // 是参数错误，不是存储不可用。
+            Err(err)
+                if err.as_service_error().is_some_and(|service| {
+                    matches!(service.code(), Some("InvalidPart" | "InvalidPartOrder"))
+                }) =>
+            {
+                Err(flare_server_core::flare_err_details!(
+                    ErrorCode::InvalidParameter,
+                    "committed parts do not match the uploaded parts",
+                    format!("key={object_path}")
+                ))
+            }
+            Err(err) => Err(map_infra_error(
+                err,
+                ErrorCode::NetworkError,
+                format!("failed to complete multipart upload, key={}", object_path),
+            )),
+        }
     }
 
     async fn abort_multipart_upload(&self, object_path: &str, upload_id: &str) -> Result<()> {
@@ -646,25 +665,33 @@ impl MediaObjectRepository for S3ObjectStore {
         }
     }
 
-    async fn stat_object(&self, object_path: &str) -> Result<ObjectStat> {
-        let response = self
+    async fn stat_object(&self, object_path: &str) -> Result<Option<ObjectStat>> {
+        let result = self
             .client
             .head_object()
             .bucket(&self.bucket)
             .key(object_path)
             .send()
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    format!("failed to stat object, key={}", object_path),
-                )
-            })?;
-        Ok(ObjectStat {
-            size: response.content_length(),
-            etag: response.e_tag().map(|s| s.to_string()),
-        })
+            .await;
+        match result {
+            Ok(response) => Ok(Some(ObjectStat {
+                size: response.content_length(),
+                etag: response.e_tag().map(|s| s.to_string()),
+            })),
+            // HEAD 的 404 没有响应体，SDK 把它建模成 NotFound：对象还没写入。
+            Err(err)
+                if err
+                    .as_service_error()
+                    .is_some_and(|service| service.is_not_found()) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(map_infra_error(
+                err,
+                ErrorCode::NetworkError,
+                format!("failed to stat object, key={}", object_path),
+            )),
+        }
     }
 
     fn build_object_key_for(
@@ -901,6 +928,91 @@ mod tenant_key_tests {
         assert!(signed.contains(&"host"), "{signed_headers}");
     }
 
+    /// 分片地址与单次 PUT 一样签入这一片的长度：存储复算签名时长度不符即拒绝，
+    /// 超大的分片在上传时就被挡下。
+    #[tokio::test]
+    async fn multipart_part_presign_signs_the_part_content_length() {
+        // 签名是离线计算，不连接任何存储。
+        let url = store()
+            .presign_upload_part("tenant-a/file.bin", "storage-upload-id", 3, 5_242_880, 60)
+            .await
+            .unwrap();
+        let url = url::Url::parse(&url).unwrap();
+        let query: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("partNumber").map(String::as_str),
+            Some("3"),
+            "{url}"
+        );
+        assert_eq!(
+            query.get("uploadId").map(String::as_str),
+            Some("storage-upload-id")
+        );
+        let signed: Vec<&str> = query
+            .get("X-Amz-SignedHeaders")
+            .expect("presigned part carries X-Amz-SignedHeaders")
+            .split(';')
+            .collect();
+        assert!(signed.contains(&"content-length"), "{signed:?}");
+        assert!(signed.contains(&"host"), "{signed:?}");
+    }
+
+    /// 完成直传早于 PUT：HEAD 得到 404，表示对象还没写入，返回 None 交给领域层判为参数错误；
+    /// 其他失败仍按存储故障上报。
+    #[tokio::test]
+    async fn stat_of_a_missing_object_is_none_but_other_failures_surface() {
+        let (endpoint, seen) = s3_error_endpoint("404 Not Found", "NotFound").await;
+        let stat = store_at(&endpoint)
+            .stat_object("tenant-a/file.png")
+            .await
+            .expect("a missing object is not a storage failure");
+        assert!(stat.is_none());
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines, vec!["HEAD /media/tenant-a/file.png HTTP/1.1"]);
+
+        let (endpoint, _) = s3_error_endpoint("403 Forbidden", "AccessDenied").await;
+        let err = store_at(&endpoint)
+            .stat_object("tenant-a/file.png")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::NetworkError));
+    }
+
+    /// 合并时存储报提交的分片不存在或顺序不对：调用方没按地址上传就来完成，回参数错误；
+    /// 存储的其他拒绝仍是存储故障。
+    #[tokio::test]
+    async fn completing_with_parts_the_store_does_not_hold_is_an_invalid_argument() {
+        let parts = [UploadedPartRecord {
+            part_number: 1,
+            etag: "\"made-up\"".to_string(),
+            size: 5,
+            sha256: None,
+        }];
+        for code in ["InvalidPart", "InvalidPartOrder"] {
+            let (endpoint, seen) = s3_error_endpoint("400 Bad Request", code).await;
+            let err = store_at(&endpoint)
+                .complete_multipart_upload("tenant-a/file.bin", "storage-upload-id", &parts)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{code}");
+            let lines = seen.lock().unwrap().clone();
+            assert!(
+                lines.len() == 1
+                    && lines[0].starts_with("POST /media/tenant-a/file.bin?")
+                    && lines[0].contains("uploadId=storage-upload-id"),
+                "{lines:?}"
+            );
+        }
+
+        let (endpoint, _) = s3_error_endpoint("403 Forbidden", "AccessDenied").await;
+        let err = store_at(&endpoint)
+            .complete_multipart_upload("tenant-a/file.bin", "storage-upload-id", &parts)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::NetworkError));
+    }
+
     /// 本机回环上的假 S3：每个连接读完请求头后回同一个错误响应，返回地址与收到的请求行。
     async fn s3_error_endpoint(
         status: &'static str,
@@ -919,6 +1031,29 @@ mod tenant_key_tests {
                     match socket.read(&mut buffer).await {
                         Ok(0) | Err(_) => break,
                         Ok(read) => head.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                // 读完请求体再应答：带体的请求（合并分片的 POST）若有未读数据就关连接，
+                // 内核会回 RST，客户端看到的是连接错误而不是这个应答。
+                let header_end = head
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map_or(head.len(), |at| at + 4);
+                let body_length = String::from_utf8_lossy(&head[..header_end])
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                let mut received = head.len() - header_end;
+                while received < body_length {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => received += read,
                     }
                 }
                 let line = String::from_utf8_lossy(&head)
@@ -980,5 +1115,163 @@ mod tenant_key_tests {
             url::Url::parse(&url).unwrap().path(),
             "/media/old-layout/2025/file.png"
         );
+    }
+}
+
+/// 对一次性的 S3 兼容存储核对直传依赖的存储行为：签进地址的长度确实被存储执行（单次 PUT
+/// 与分片），对象不存在时 HEAD 回 404，提交存储里没有的分片时合并被拒，而这些都按领域层
+/// 期望的类别报出。离线签名与回环假 S3 只能证明地址里有长度、错误码怎么映射，证明不了存储
+/// 真的校验。
+///
+/// `FLARE_MEDIA_TEST_S3_ENDPOINT` 必须是回环上的 `http://127.0.0.1:<port>`，只供本测试使用；
+/// `FLARE_MEDIA_TEST_S3_ENV_FILE` 是 0600 的文件，含 `RUSTFS_ACCESS_KEY=` 与
+/// `RUSTFS_SECRET_KEY=` 两行（与 RustFS 容器的 env 文件同格式）。测试新建一个随机命名的桶，
+/// 结束时删除它写过的对象与分片上传。
+#[cfg(test)]
+mod live_store_tests {
+    use super::*;
+
+    fn live_store() -> S3ObjectStore {
+        let endpoint =
+            std::env::var("FLARE_MEDIA_TEST_S3_ENDPOINT").expect("FLARE_MEDIA_TEST_S3_ENDPOINT");
+        let parsed = url::Url::parse(&endpoint).expect("endpoint URL");
+        assert!(
+            parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1"),
+            "only a loopback store dedicated to this test"
+        );
+        let path =
+            std::env::var("FLARE_MEDIA_TEST_S3_ENV_FILE").expect("FLARE_MEDIA_TEST_S3_ENV_FILE");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "credential file must be 0600");
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value = |name: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+                .unwrap_or_else(|| panic!("{name} missing from the credential file"))
+                .trim()
+                .to_string()
+        };
+        let client = S3Client::from_conf(
+            S3ConfigBuilder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("us-east-1"))
+                .endpoint_url(&endpoint)
+                .force_path_style(true)
+                .credentials_provider(Credentials::new(
+                    value("RUSTFS_ACCESS_KEY"),
+                    value("RUSTFS_SECRET_KEY"),
+                    None,
+                    None,
+                    "live-store-test",
+                ))
+                .build(),
+        );
+        S3ObjectStore {
+            presign_client: client.clone(),
+            client,
+            bucket: format!("media-live-{}", uuid::Uuid::new_v4().simple()),
+            base_url: None,
+            cdn_base_url: None,
+            upload_prefix: Some("uploads".to_string()),
+            bucket_root_prefix: Some("root".to_string()),
+            force_path_style: true,
+            presign_url_ttl_seconds: 60,
+            use_presign: true,
+        }
+    }
+
+    /// 经预签名地址 PUT，返回状态码与 ETag。
+    async fn put(url: &str, body: &[u8], content_type: Option<&str>) -> (u16, Option<String>) {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut request = http.put(url).body(body.to_vec());
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = request.send().await.unwrap();
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        (response.status().as_u16(), etag)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FLARE_MEDIA_TEST_S3_ENDPOINT and FLARE_MEDIA_TEST_S3_ENV_FILE"]
+    async fn the_store_enforces_signed_lengths_and_reports_missing_objects_and_parts() {
+        let store = live_store();
+        S3ObjectStore::ensure_bucket_exists(&store.client, &store.bucket, "us-east-1")
+            .await
+            .unwrap();
+
+        // 单次 PUT：长度不符被拒，按声明长度写入后 HEAD 报出该长度。
+        let single = store.build_object_key_for("tenant-live", "single", "a.txt", "file");
+        assert!(store.stat_object(&single).await.unwrap().is_none());
+        let url = store
+            .presign_put_object(&single, "text/plain", 3, 60)
+            .await
+            .unwrap();
+        assert_eq!(put(&url, b"abcd", Some("text/plain")).await.0, 403);
+        assert_eq!(put(&url, b"abc", Some("text/plain")).await.0, 200);
+        let stat = store.stat_object(&single).await.unwrap().unwrap();
+        assert_eq!(stat.size, Some(3));
+
+        // 分片：每片签入自己的长度，长了短了都被拒。
+        let merged = store.build_object_key_for("tenant-live", "merged", "b.bin", "file");
+        let upload_id = store
+            .create_multipart_upload(&merged, "application/octet-stream")
+            .await
+            .unwrap();
+        let part_url = store
+            .presign_upload_part(&merged, &upload_id, 1, 5, 60)
+            .await
+            .unwrap();
+        assert_eq!(put(&part_url, b"123456", None).await.0, 403);
+        assert_eq!(put(&part_url, b"1234", None).await.0, 403);
+        let (status, etag) = put(&part_url, b"12345", None).await;
+        assert_eq!(status, 200);
+        let etag = etag.expect("part ETag");
+
+        // 提交存储里没有的分片：参数错误，不是存储不可用。
+        let made_up = [UploadedPartRecord {
+            part_number: 1,
+            etag: "\"00000000000000000000000000000000\"".to_string(),
+            size: 5,
+            sha256: None,
+        }];
+        let err = store
+            .complete_multipart_upload(&merged, &upload_id, &made_up)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+
+        let uploaded = [UploadedPartRecord {
+            part_number: 1,
+            etag,
+            size: 5,
+            sha256: None,
+        }];
+        store
+            .complete_multipart_upload(&merged, &upload_id, &uploaded)
+            .await
+            .unwrap();
+        let stat = store.stat_object(&merged).await.unwrap().unwrap();
+        assert_eq!(stat.size, Some(5));
+        // 已合并的上传再 abort：幂等成功（回收任务依赖这一点）。
+        store
+            .abort_multipart_upload(&merged, &upload_id)
+            .await
+            .unwrap();
+
+        for key in [&single, &merged] {
+            store.delete_object(key).await.unwrap();
+            assert!(store.stat_object(key).await.unwrap().is_none());
+        }
+        // 删除不存在的对象同样成功（回收任务对没写过对象的分片会话照常删除）。
+        store.delete_object(&merged).await.unwrap();
     }
 }

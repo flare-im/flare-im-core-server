@@ -246,11 +246,14 @@ impl MediaService {
                     format!("part_number={} total_parts={}", part_number, total_parts)
                 ));
             }
+            // 每片的长度签进地址：除最后一片外都是 part_size，最后一片是余下的字节。
+            let content_length = Self::direct_part_length(&session, *part_number)?;
             let url = object_repo
                 .presign_upload_part(
                     object_key,
                     storage_upload_id,
                     *part_number,
+                    content_length,
                     if expires_in > 0 {
                         expires_in
                     } else {
@@ -352,6 +355,13 @@ impl MediaService {
         })?;
         Self::authorize_upload_session(ctx, &session)?;
         self.ensure_direct_session(&session)?;
+        if session.status == UploadSessionStatus::Aborted {
+            // 大小不符被拒、对象又没删掉的分片会话：留给回收任务删对象，不能再完成。
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "upload session is no longer active; start a new upload"
+            ));
+        }
 
         let object_key = session.object_key.clone().ok_or_else(|| {
             flare_server_core::flare_err!(ErrorCode::InternalError, "object_key missing in session")
@@ -368,19 +378,27 @@ impl MediaService {
             .unwrap_or(DirectUploadTransportKind::SinglePut)
         {
             DirectUploadTransportKind::SinglePut => {
-                let stat = object_repo.stat_object(&object_key).await?;
-                if let Some(size) = stat.size
-                    && size <= 0
-                {
-                    return Err(flare_server_core::flare_err!(
-                        ErrorCode::InternalError,
-                        "single put object is missing or empty"
-                    ));
-                }
+                // 对象不存在或为空：调用方还没按地址 PUT 就来完成，是调用方错误。
+                let stat = object_repo
+                    .stat_object(&object_key)
+                    .await?
+                    .filter(|stat| stat.size.is_none_or(|size| size > 0))
+                    .ok_or_else(|| {
+                        flare_server_core::flare_err!(
+                            ErrorCode::InvalidParameter,
+                            "single put object is missing or empty"
+                        )
+                    })?;
                 // 地址已签了长度；存储不校验 signed headers 时这里兜底。删掉写错的对象，
-                // 会话保留，调用方可以在地址有效期内按声明大小重传。
+                // 会话保留，调用方可以在地址有效期内按声明大小重传。删除失败不改变答复：
+                // 会话未完成、文件未登记，对象由回收任务在会话过期后删除。
                 if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
-                    object_repo.delete_object(&object_key).await?;
+                    if let Err(delete_err) = object_repo.delete_object(&object_key).await {
+                        tracing::warn!(
+                            error = %delete_err,
+                            "failed to delete a single put object of the wrong size; reclaim will retry"
+                        );
+                    }
                     return Err(err);
                 }
             }
@@ -410,12 +428,30 @@ impl MediaService {
                         &session.uploaded_parts,
                     )
                     .await?;
-                // 分片地址不绑定长度，合并后的对象按声明大小核对；分片上传已合并、无法重来，
-                // 不符时删除对象并结束会话。
-                let stat = object_repo.stat_object(&object_key).await?;
+                // 每片地址已签了长度；存储不校验 signed headers 时，合并后的对象在这里按声明
+                // 大小兜底核对。分片上传已合并、无法重来，不符时删除对象并结束会话。
+                let stat = object_repo.stat_object(&object_key).await?.ok_or_else(|| {
+                    flare_server_core::flare_err!(
+                        ErrorCode::InternalError,
+                        "merged multipart object is missing"
+                    )
+                })?;
                 if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
-                    object_repo.delete_object(&object_key).await?;
-                    store.delete_session(upload_id).await.ok();
+                    match object_repo.delete_object(&object_key).await {
+                        Ok(()) => {
+                            store.delete_session(upload_id).await.ok();
+                        }
+                        Err(delete_err) => {
+                            // 删除失败不改变答复。会话标为中止并保留，到期后由回收任务删对象。
+                            tracing::warn!(
+                                error = %delete_err,
+                                "failed to delete a merged object of the wrong size; reclaim will retry"
+                            );
+                            session.status = UploadSessionStatus::Aborted;
+                            session.updated_at = Utc::now();
+                            store.upsert_session(&session).await.ok();
+                        }
+                    }
                     return Err(err);
                 }
             }
@@ -472,6 +508,23 @@ impl MediaService {
 }
 
 impl MediaService {
+    /// 分片直传第 `part_number` 片（从 1 起）应有的长度：除最后一片外都是 part_size，
+    /// 最后一片是余下的字节。客户端按同样的规则切分（会话回给它 part_size 与 total_parts）。
+    pub(super) fn direct_part_length(session: &UploadSession, part_number: u32) -> Result<i64> {
+        let total_size = session.total_size.unwrap_or_default();
+        let part_size = session.chunk_size;
+        let offset = i64::from(part_number.saturating_sub(1)).saturating_mul(part_size);
+        let length = total_size.saturating_sub(offset).min(part_size);
+        if part_number == 0 || length <= 0 {
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::InternalError,
+                "direct upload session has no bytes for this part",
+                format!("part_number={part_number} part_size={part_size} total_size={total_size}")
+            ));
+        }
+        Ok(length)
+    }
+
     /// 存储里的对象大小必须等于会话声明的大小。存储没报大小时按不符处理：
     /// 核对不了就不登记。
     pub(super) fn ensure_declared_size(stat: &ObjectStat, declared: i64) -> Result<()> {

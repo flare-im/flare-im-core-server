@@ -74,26 +74,38 @@ impl MediaService {
             return Ok(());
         };
         match kind {
-            // abort 只作用于未完成的分片上传，已合并的对象不受影响，所以不看会话状态。
-            DirectUploadTransportKind::MultipartPut => match session.storage_upload_id.as_deref() {
-                Some(storage_upload_id) => {
+            // abort 只作用于未完成的分片上传，已合并的对象不受影响，所以先 abort 再单独判断
+            // 合并出的对象：完成时大小不符而没删掉的，或合并后登记失败的，都没有文件记录。
+            DirectUploadTransportKind::MultipartPut => {
+                if let Some(storage_upload_id) = session.storage_upload_id.as_deref() {
                     object_repo
                         .abort_multipart_upload(object_key, storage_upload_id)
-                        .await
+                        .await?;
                 }
-                None => Ok(()),
-            },
-            // 单次 PUT 的对象就是文件本身：会话已完成、或文件已经登记（完成时删会话失败留下
-            // 的记录）时，它属于那个文件，不能删。
+                self.delete_unregistered_object(session, object_key).await
+            }
             DirectUploadTransportKind::SinglePut => {
-                if session.status == UploadSessionStatus::Completed
-                    || self.upload_persisted(session).await?
-                {
-                    return Ok(());
-                }
-                object_repo.delete_object(object_key).await
+                self.delete_unregistered_object(session, object_key).await
             }
         }
+    }
+
+    /// 直传对象就是文件本身：会话已完成、或文件已经登记（完成时删会话失败留下的记录）时，
+    /// 它属于那个文件，不能删。其余情况删除；对象不存在时 S3 的删除同样成功。
+    async fn delete_unregistered_object(
+        &self,
+        session: &UploadSession,
+        object_key: &str,
+    ) -> Result<()> {
+        if session.status == UploadSessionStatus::Completed
+            || self.upload_persisted(session).await?
+        {
+            return Ok(());
+        }
+        let Some(object_repo) = self.object_repo.as_ref() else {
+            return Ok(());
+        };
+        object_repo.delete_object(object_key).await
     }
 
     /// 会话对应的文件是否已登记。核对不了（没有元数据库、会话缺租户或 file_id）时按已登记

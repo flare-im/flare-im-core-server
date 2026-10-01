@@ -49,19 +49,30 @@ pub trait MediaObjectRepository: Send + Sync {
             "multipart direct upload is not supported by current object store"
         ))
     }
+    /// 分片直传单片的预签名地址。`content_length` 是这一片应有的长度，与单次 PUT 一样签进
+    /// 地址：存储拒绝长度不符的分片，超大的分片在上传时就被挡下，不必等到完成时核对。
     async fn presign_upload_part(
         &self,
         object_path: &str,
         upload_id: &str,
         part_number: u32,
+        content_length: i64,
         expires_in: i64,
     ) -> Result<String> {
-        let _ = (object_path, upload_id, part_number, expires_in);
+        let _ = (
+            object_path,
+            upload_id,
+            part_number,
+            content_length,
+            expires_in,
+        );
         Err(flare_server_core::flare_err!(
             flare_server_core::error::ErrorCode::ConfigurationError,
             "multipart direct upload is not supported by current object store"
         ))
     }
+    /// 调用方提交的分片与存储里的不符（分片没上传、ETag 不对、顺序不对）是调用方错误，
+    /// 回 `InvalidParameter`；只有存储本身的故障才是不可用。
     async fn complete_multipart_upload(
         &self,
         object_path: &str,
@@ -82,7 +93,8 @@ pub trait MediaObjectRepository: Send + Sync {
             "multipart direct upload is not supported by current object store"
         ))
     }
-    async fn stat_object(&self, object_path: &str) -> Result<ObjectStat> {
+    /// 对象不存在时返回 `Ok(None)`：调用方据此区分「客户端还没写」与存储故障。
+    async fn stat_object(&self, object_path: &str) -> Result<Option<ObjectStat>> {
         let _ = object_path;
         Err(flare_server_core::flare_err!(
             flare_server_core::error::ErrorCode::ConfigurationError,
