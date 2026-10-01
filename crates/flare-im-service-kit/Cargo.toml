@@ -25,6 +25,8 @@ flare-im-contracts = { version = "1.0.3", path = "../flare-im-contracts" }
 flare-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
 hex = { workspace = true }
+# 静态 gRPC 通道自带连接器，让 tonic 的建连超时同时覆盖名字解析（见 discovery::channel_resolve）。
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 moka = { workspace = true }
 once_cell = { workspace = true }
 # process：Linux 上默认注册表自带进程指标（CPU、RSS、fd、线程数），/metrics 合并默认注册表导出。

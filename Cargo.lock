@@ -2099,6 +2099,7 @@ dependencies = [
  "flare-proto",
  "flare-server-core",
  "hex",
+ "hyper-util",
  "moka",
  "once_cell",
  "prometheus",

@@ -8,20 +8,22 @@
 
 use std::sync::Arc;
 
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 use crate::ServiceClient;
 use crate::config::FlareAppConfig;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 
-use super::channel_resolve::{DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI};
+use super::channel_resolve::{
+    DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI, connect_static_channel_lazy,
+};
 use super::init::create_discover_from_config;
 
+/// 静态地址的懒连接通道，建连上限与 HTTP/2 探活见 [`super::StaticChannelPolicy`]。
 fn connect_static_lazy(
     static_fallback_uri: &str,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-    let endpoint = Endpoint::from_shared(static_fallback_uri.to_string())?;
-    Ok(endpoint.connect_lazy())
+    Ok(connect_static_channel_lazy(static_fallback_uri)?)
 }
 
 /// 启动期连接：立即返回 lazy Channel，**不**等待 Consul / 对端进程。

@@ -20,7 +20,7 @@ use prost::Message;
 use prost_types::Timestamp;
 use tonic::transport::Channel;
 
-use crate::discovery::resolve_grpc_channel;
+use crate::discovery::{invalidate_static_channel_on_transport_failure, resolve_grpc_channel};
 
 use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
@@ -141,6 +141,18 @@ impl Default for GrpcHookFactory {
     }
 }
 
+/// 调用失败出在传输层（连不上、连接被断、HTTP/2 ping 超时）时丢弃缓存的静态通道，下一次
+/// 调用重新解析地址、新建连接；对端回的业务状态不动缓存。
+fn forget_channel_on_transport_failure(endpoint: &str, status: &tonic::Status) {
+    if invalidate_static_channel_on_transport_failure(endpoint, status) {
+        tracing::debug!(
+            endpoint,
+            code = ?status.code(),
+            "hook channel dropped after transport failure"
+        );
+    }
+}
+
 async fn hook_plugin_channel(endpoint: &str) -> Result<Channel> {
     resolve_grpc_channel(endpoint).await.map_err(|e| {
         ErrorBuilder::new(
@@ -195,6 +207,7 @@ impl PreSendHook for GrpcPreSendHook {
                 PreSendDecision::Continue
             }
             Err(status) => {
+                forget_channel_on_transport_failure(&self.grpc_endpoint, &status);
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
                     .details(status.to_string())
                     .build_error();
@@ -248,6 +261,7 @@ impl PostSendHook for GrpcPostSendHook {
                 }
             }
             Err(status) => {
+                forget_channel_on_transport_failure(&self.grpc_endpoint, &status);
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "post-send hook failed")
                     .details(status.to_string())
                     .build_error();
@@ -300,6 +314,7 @@ impl DeliveryHook for GrpcDeliveryHook {
                 }
             }
             Err(status) => {
+                forget_channel_on_transport_failure(&self.grpc_endpoint, &status);
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "delivery hook failed")
                     .details(status.to_string())
                     .build_error();
@@ -349,6 +364,7 @@ impl RecallHook for GrpcRecallHook {
                 }
             }
             Err(status) => {
+                forget_channel_on_transport_failure(&self.grpc_endpoint, &status);
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "recall hook failed")
                     .details(status.to_string())
                     .build_error();
