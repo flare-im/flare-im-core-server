@@ -3,16 +3,28 @@ use flare_core::common::DeviceInfo;
 use flare_core::server::{AuthResult, Authenticator};
 use flare_im_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
 use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
-use flare_server_core::auth::{AuthenticatedPrincipal, TokenValidationRequest, TokenValidator};
+use flare_server_core::auth::{
+    AuthError, AuthenticatedPrincipal, TokenValidationRequest, TokenValidator,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 use crate::constants::{
-    AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE, AUTH_FAILURE_MSG_TENANT_UNAVAILABLE,
-    AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID, ENV_DEFAULT_TENANT_ID,
-    METADATA_KEY_DEVICE_ID, METADATA_KEY_USER_ID,
+    AUTH_FAILURE_MSG_AUTH_PROVIDER_UNAVAILABLE, AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE,
+    AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, AUTH_FAILURE_MSG_TOKEN_INVALID, DEFAULT_TENANT_ID,
+    ENV_DEFAULT_TENANT_ID, METADATA_KEY_DEVICE_ID, METADATA_KEY_USER_ID,
 };
+
+/// 令牌校验的结论。
+enum TokenVerdict {
+    Valid(AuthenticatedPrincipal),
+    /// 令牌缺失、无效、过期，或主体不被允许：这是对令牌的结论，客户端应换令牌。
+    Rejected,
+    /// 认证提供方暂时不可用（如 hook 请求失败）：没有对令牌下结论。按可重试拒绝，客户端收到
+    /// `SERVICE_UNAVAILABLE` 后退避重连；报成令牌无效会让客户端去换一个本来有效的令牌。
+    ProviderUnavailable,
+}
 
 /// 租户闸门的判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,11 +107,7 @@ impl AuthHandler {
     }
 
     /// 验证 token（由 server-core auth provider 统一处理 JWT / Hook / SSO）。
-    async fn verify_token(
-        &self,
-        token: &str,
-        connection_id: &str,
-    ) -> Option<AuthenticatedPrincipal> {
+    async fn verify_token(&self, token: &str, connection_id: &str) -> TokenVerdict {
         let request = TokenValidationRequest {
             token: token.to_string(),
             trace_id: Some(connection_id.to_string()),
@@ -109,10 +117,17 @@ impl AuthHandler {
         };
 
         match self.token_validator.validate(request).await {
-            Ok(principal) => Some(principal),
+            Ok(principal) => TokenVerdict::Valid(principal),
+            Err(err @ AuthError::ProviderUnavailable(_)) => {
+                warn!(
+                    ?err,
+                    "auth provider unavailable, connection rejected for now (retryable)"
+                );
+                TokenVerdict::ProviderUnavailable
+            }
             Err(err) => {
                 warn!(?err, "Token validation failed");
-                None
+                TokenVerdict::Rejected
             }
         }
     }
@@ -196,7 +211,7 @@ impl Authenticator for AuthHandler {
         debug!( connection_id = %connection_id,token_preview = %self.token_preview(token), device_id = ?device_info.map(|d| d.device_id.clone()),"验证 token");
 
         match self.verify_token(token, connection_id).await {
-            Some(principal) => {
+            TokenVerdict::Valid(principal) => {
                 let user_id = principal.user_id.clone();
                 let tenant_id = self.resolve_tenant_id(&principal);
                 match self.tenant_admission(&tenant_id, connection_id).await {
@@ -235,16 +250,20 @@ impl Authenticator for AuthHandler {
                         .with_tenant_id(tenant_id),
                 )
             }
-            None => {
+            TokenVerdict::Rejected => {
                 warn!(
                     connection_id = %connection_id,
                     token_preview = %self.token_preview(token),
-                    "❌ Token 验证失败"
+                    "Token 验证失败"
                 );
                 Ok(AuthResult::failure(
                     AUTH_FAILURE_MSG_TOKEN_INVALID.to_string(),
                 ))
             }
+            // flare-core 以 SERVICE_UNAVAILABLE 拒绝 CONNECT；说明文本不下发给客户端
+            TokenVerdict::ProviderUnavailable => Ok(AuthResult::retryable_failure(
+                AUTH_FAILURE_MSG_AUTH_PROVIDER_UNAVAILABLE.to_string(),
+            )),
         }
     }
 }
@@ -601,5 +620,68 @@ mod tests {
             result.error_message.as_deref(),
             Some(AUTH_FAILURE_MSG_TOKEN_INVALID)
         );
+    }
+
+    /// 令牌校验按给定错误失败。
+    struct FailingTokenValidator(fn() -> AuthError);
+
+    #[async_trait]
+    impl TokenValidator for FailingTokenValidator {
+        async fn validate(
+            &self,
+            _request: TokenValidationRequest,
+        ) -> Result<AuthenticatedPrincipal, AuthError> {
+            Err((self.0)())
+        }
+    }
+
+    fn failing_handler(error: fn() -> AuthError) -> AuthHandler {
+        AuthHandler::with_default_tenant_id(
+            Arc::new(FailingTokenValidator(error)),
+            "tenant-default",
+            TenantRuntimeCache::disabled(),
+            TenantAccessPolicy::Lenient,
+        )
+    }
+
+    /// 认证提供方不可用（hook 请求失败等）不是对令牌的结论：按暂时性拒绝，flare-core 以可重试的
+    /// `SERVICE_UNAVAILABLE` 拒绝 CONNECT。报成令牌无效会让客户端去换一个本来有效的令牌。
+    #[tokio::test]
+    async fn auth_provider_outage_is_a_retryable_rejection() {
+        let result = failing_handler(|| AuthError::ProviderUnavailable("hook down".to_string()))
+            .authenticate("token", "conn-a", None, None)
+            .await
+            .expect("auth result");
+
+        assert!(!result.authenticated);
+        assert!(result.retryable, "a provider outage is not a verdict");
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(AUTH_FAILURE_MSG_AUTH_PROVIDER_UNAVAILABLE)
+        );
+    }
+
+    /// 令牌本身被拒（缺失、无效、主体不被允许）仍是确定的结论，客户端应换令牌。
+    #[tokio::test]
+    async fn token_verdicts_stay_non_retryable() {
+        for error in [
+            (|| AuthError::MissingToken) as fn() -> AuthError,
+            || AuthError::InvalidToken("bad signature".to_string()),
+            || AuthError::Forbidden("scope".to_string()),
+        ] {
+            let result = failing_handler(error)
+                .authenticate("token", "conn-a", None, None)
+                .await
+                .expect("auth result");
+
+            assert!(!result.authenticated, "{:?}", error());
+            assert!(!result.retryable, "{:?}", error());
+            assert_eq!(
+                result.error_message.as_deref(),
+                Some(AUTH_FAILURE_MSG_TOKEN_INVALID),
+                "{:?}",
+                error()
+            );
+        }
     }
 }

@@ -24,6 +24,9 @@ pub const AUTH_FAILURE_MSG_TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
 /// `SERVICE_UNAVAILABLE`
 pub const AUTH_FAILURE_MSG_TENANT_RUNTIME_UNREADABLE: &str =
     "tenant runtime projection unavailable";
+/// 认证提供方（如 hook）暂时不可用时的暂时性拒连说明：只进服务端日志，客户端收到的是可重试的
+/// `SERVICE_UNAVAILABLE`
+pub const AUTH_FAILURE_MSG_AUTH_PROVIDER_UNAVAILABLE: &str = "auth provider unavailable";
 
 /// Router `RouteMessage` / `RouteEvent` / `RouteAck` / `RouteData` 默认 SVID（与 `router.proto` 约定一致）
 pub const DEFAULT_ROUTE_SVID: &str = "svid.im";
