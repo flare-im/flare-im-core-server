@@ -74,9 +74,16 @@ impl MediaService {
         };
 
         let single_part_upload_url = if transport_kind == DirectUploadTransportKind::SinglePut {
+            // 声明的大小签进地址；地址不比会话活得久，会话过期回收后不会再有 PUT 落进来。
+            let session_ttl = (expires_at - now).num_seconds();
             Some(
                 object_repo
-                    .presign_put_object(&object_key, &metadata.mime_type, self.config.default_ttl)
+                    .presign_put_object(
+                        &object_key,
+                        &metadata.mime_type,
+                        file_size,
+                        self.config.default_ttl.min(session_ttl).max(1),
+                    )
                     .await?,
             )
         } else {
@@ -370,6 +377,12 @@ impl MediaService {
                         "single put object is missing or empty"
                     ));
                 }
+                // 地址已签了长度；存储不校验 signed headers 时这里兜底。删掉写错的对象，
+                // 会话保留，调用方可以在地址有效期内按声明大小重传。
+                if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
+                    object_repo.delete_object(&object_key).await?;
+                    return Err(err);
+                }
             }
             DirectUploadTransportKind::MultipartPut => {
                 let total_parts = session.total_parts.unwrap_or_default();
@@ -397,6 +410,14 @@ impl MediaService {
                         &session.uploaded_parts,
                     )
                     .await?;
+                // 分片地址不绑定长度，合并后的对象按声明大小核对；分片上传已合并、无法重来，
+                // 不符时删除对象并结束会话。
+                let stat = object_repo.stat_object(&object_key).await?;
+                if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
+                    object_repo.delete_object(&object_key).await?;
+                    store.delete_session(upload_id).await.ok();
+                    return Err(err);
+                }
             }
         }
 
@@ -435,16 +456,10 @@ impl MediaService {
         if let Some(mut session) = store.get_session(upload_id).await? {
             Self::authorize_upload_session(ctx, &session)?;
             self.ensure_direct_session(&session)?;
-            if let (Some(object_repo), Some(object_key), Some(storage_upload_id), Some(kind)) = (
-                self.object_repo.as_ref(),
-                session.object_key.as_deref(),
-                session.storage_upload_id.as_deref(),
-                session.transport_kind,
-            ) && kind == DirectUploadTransportKind::MultipartPut
-            {
-                let _ = object_repo
-                    .abort_multipart_upload(object_key, storage_upload_id)
-                    .await;
+            // 中止也要释放存储侧资源：分片上传 abort，单次 PUT 已写入的对象删除。
+            // 释放失败不挡中止，会话记录随后删除，残留由存储侧生命周期规则兜底。
+            if let Err(err) = self.release_upload_resources(&session).await {
+                tracing::warn!(error = %err, "failed to release aborted direct upload resources");
             }
             session.status = UploadSessionStatus::Aborted;
             session.updated_at = Utc::now();
@@ -453,5 +468,20 @@ impl MediaService {
 
         store.delete_session(upload_id).await.ok();
         Ok(())
+    }
+}
+
+impl MediaService {
+    /// 存储里的对象大小必须等于会话声明的大小。存储没报大小时按不符处理：
+    /// 核对不了就不登记。
+    pub(super) fn ensure_declared_size(stat: &ObjectStat, declared: i64) -> Result<()> {
+        if stat.size == Some(declared) {
+            return Ok(());
+        }
+        Err(flare_server_core::flare_err_details!(
+            ErrorCode::InvalidParameter,
+            "uploaded object size does not match the declared size",
+            format!("declared={declared} actual={:?}", stat.size)
+        ))
     }
 }

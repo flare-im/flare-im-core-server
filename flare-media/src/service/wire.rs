@@ -27,6 +27,8 @@ use tracing::warn;
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub handler: MediaGrpcHandler,
+    /// 供后台任务（过期上传会话回收）使用的领域服务。
+    pub media_service: Arc<MediaService>,
 }
 
 /// 构建应用上下文
@@ -53,12 +55,15 @@ pub async fn initialize(
     let command_handler = Arc::new(MediaCommandHandler::new(media_service.clone()));
 
     // 4. 构建查询处理器
-    let query_handler = Arc::new(MediaQueryHandler::new(media_service));
+    let query_handler = Arc::new(MediaQueryHandler::new(media_service.clone()));
 
     // 5. 构建 gRPC 处理器
     let handler = MediaGrpcHandler::new(command_handler, query_handler);
 
-    Ok(ApplicationContext { handler })
+    Ok(ApplicationContext {
+        handler,
+        media_service,
+    })
 }
 
 /// 构建媒体服务

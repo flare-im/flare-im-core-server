@@ -191,6 +191,22 @@ impl UploadSessionStore for Sessions {
         self.0.lock().unwrap().remove(id);
         Ok(())
     }
+    async fn claim_expired_sessions(
+        &self,
+        expired_before: chrono::DateTime<Utc>,
+        _lease_until: chrono::DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<UploadSession>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|session| session.expires_at < expired_before)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
 }
 
 struct Fixture {

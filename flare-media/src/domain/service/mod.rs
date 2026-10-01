@@ -14,15 +14,19 @@ use crate::domain::model::{
     FILE_CATEGORY_METADATA_KEY, FileAccessType, MEDIA_LIFECYCLE_SCOPE_METADATA_KEY,
     MESSAGE_MEDIA_LIFECYCLE_SCOPE, MediaAssetStatus, MediaDomainConfig, MediaFileMetadata,
     MediaReference, MediaReferenceScope, MultipartChunkPayload, MultipartUploadInit,
-    MultipartUploadSession, PresignedUploadPartUrl, PresignedUrl, STORAGE_BUCKET_METADATA_KEY,
-    STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession, UploadSessionStatus,
-    UploadedPartRecord, infer_file_category, is_absolute_http_url,
+    MultipartUploadSession, ObjectStat, PresignedUploadPartUrl, PresignedUrl,
+    STORAGE_BUCKET_METADATA_KEY, STORAGE_PATH_METADATA_KEY, UploadContext, UploadSession,
+    UploadSessionStatus, UploadedPartRecord, infer_file_category, is_absolute_http_url,
 };
 use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
     UploadSessionStoreRef,
 };
 use flare_server_core::error::{ErrorCode, Result, map_context_error, map_infra_error};
+pub use reclaim::{
+    UPLOAD_SESSION_RECLAIM_BATCH, UPLOAD_SESSION_RECLAIM_GRACE_SECONDS,
+    UPLOAD_SESSION_RECLAIM_INTERVAL, UPLOAD_SESSION_RECLAIM_LEASE_SECONDS, UploadReclaimReport,
+};
 pub(crate) use tenant::{require_owner, require_tenant, validate_tenant};
 
 const DIRECT_SINGLE_PUT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
@@ -84,6 +88,7 @@ mod helpers;
 #[cfg(test)]
 pub(crate) mod isolation_tests;
 mod multipart;
+mod reclaim;
 mod references;
 mod storage;
 mod tenant;

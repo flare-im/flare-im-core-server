@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::domain::model::UploadSession;
@@ -79,5 +80,37 @@ impl UploadSessionStore for FallbackUploadSessionStore {
         }
 
         fallback_result
+    }
+
+    /// 两边都领：primary 写失败时会话落在 fallback，同样要回收。primary 出错不挡 fallback。
+    async fn claim_expired_sessions(
+        &self,
+        expired_before: DateTime<Utc>,
+        lease_until: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<UploadSession>> {
+        let mut claimed = match self
+            .primary
+            .claim_expired_sessions(expired_before, lease_until, limit)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "primary upload session store claim failed, reclaiming the secondary store only"
+                );
+                Vec::new()
+            }
+        };
+        let remaining = limit.saturating_sub(claimed.len());
+        if remaining > 0 {
+            claimed.extend(
+                self.fallback
+                    .claim_expired_sessions(expired_before, lease_until, remaining)
+                    .await?,
+            );
+        }
+        Ok(claimed)
     }
 }

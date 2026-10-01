@@ -729,6 +729,7 @@ mod real_media {
             &self,
             object_path: &str,
             _content_type: &str,
+            _content_length: i64,
             _expires_in: i64,
         ) -> FlareResult<String> {
             Ok(signed(object_path))
@@ -842,6 +843,14 @@ mod real_media {
         async fn delete_session(&self, upload_id: &str) -> FlareResult<()> {
             self.0.lock().unwrap().remove(upload_id);
             Ok(())
+        }
+        async fn claim_expired_sessions(
+            &self,
+            _expired_before: chrono::DateTime<chrono::Utc>,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+            _limit: usize,
+        ) -> FlareResult<Vec<UploadSession>> {
+            Ok(Vec::new())
         }
     }
 

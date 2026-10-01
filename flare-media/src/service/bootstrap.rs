@@ -7,6 +7,7 @@ use tracing::info;
 use flare_im_contracts::service_names::MEDIA;
 
 use super::wire;
+use crate::domain::service::{MediaService, UPLOAD_SESSION_RECLAIM_INTERVAL, UploadReclaimReport};
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -74,6 +75,24 @@ impl ApplicationBootstrap {
             },
         );
 
+        // 过期上传会话回收：释放存储侧资源与本机分块目录。多副本各跑一份，靠会话存储的
+        // 领取租约分工。
+        let media_service = context.media_service.clone();
+        let runtime = runtime.add_spawn_with_shutdown(
+            "media-upload-session-reaper",
+            move |mut shutdown_rx| async move {
+                let mut interval = tokio::time::interval(UPLOAD_SESSION_RECLAIM_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        _ = interval.tick() => reclaim_round(&media_service).await,
+                    }
+                }
+                Ok(())
+            },
+        );
+
         // 运行服务（带服务注册）
         runtime
             .run_with_registration(|addr| {
@@ -88,6 +107,23 @@ impl ApplicationBootstrap {
             })
             .await
             .map_err(flare_server_core::error::FlareError::from)
+    }
+}
+
+/// 回收一轮过期上传会话；失败只记日志，下一轮重试。
+async fn reclaim_round(media_service: &MediaService) {
+    match media_service
+        .reclaim_expired_upload_sessions(chrono::Utc::now())
+        .await
+    {
+        Ok(report) if report == UploadReclaimReport::default() => {}
+        Ok(report) => info!(
+            reclaimed = report.reclaimed,
+            failed = report.failed,
+            stale_chunk_dirs = report.stale_chunk_dirs,
+            "expired upload sessions reclaimed"
+        ),
+        Err(error) => tracing::warn!(error = %error, "upload session reclaim round failed"),
     }
 }
 

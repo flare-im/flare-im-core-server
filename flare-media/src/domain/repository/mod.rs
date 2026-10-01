@@ -23,13 +23,16 @@ pub trait MediaObjectRepository: Send + Sync {
     async fn put_object(&self, context: &UploadContext<'_>) -> Result<String>;
     async fn delete_object(&self, object_path: &str) -> Result<()>;
     async fn presign_object(&self, object_path: &str, expires_in: i64) -> Result<String>;
+    /// 直传单次 PUT 的预签名地址。`content_length` 必须进签名（SigV4 的 signed headers），
+    /// 存储据此拒绝长度与声明不符的请求体，调用方不能借这个地址写入超出声明大小的对象。
     async fn presign_put_object(
         &self,
         object_path: &str,
         content_type: &str,
+        content_length: i64,
         expires_in: i64,
     ) -> Result<String> {
-        let _ = (object_path, content_type, expires_in);
+        let _ = (object_path, content_type, content_length, expires_in);
         Err(flare_server_core::flare_err!(
             flare_server_core::error::ErrorCode::ConfigurationError,
             "direct upload is not supported by current object store"
@@ -71,6 +74,7 @@ pub trait MediaObjectRepository: Send + Sync {
             "multipart direct upload is not supported by current object store"
         ))
     }
+    /// 幂等：上传已完成或已中止（存储报 NoSuchUpload）时也返回成功，回收任务据此收尾。
     async fn abort_multipart_upload(&self, object_path: &str, upload_id: &str) -> Result<()> {
         let _ = (object_path, upload_id);
         Err(flare_server_core::flare_err!(
@@ -236,9 +240,20 @@ pub trait MediaReferenceStore: Send + Sync {
 #[async_trait::async_trait]
 pub trait UploadSessionStore: Send + Sync {
     async fn create_session(&self, session: &UploadSession) -> Result<()>;
+    /// 已过期（`expires_at` 已过）的会话按不存在返回，但记录留给回收任务：它还要凭记录里的
+    /// 对象 key、存储侧分片上传 id 与分块目录释放资源。
     async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>>;
     async fn upsert_session(&self, session: &UploadSession) -> Result<()>;
     async fn delete_session(&self, upload_id: &str) -> Result<()>;
+    /// 领取 `expires_at` 早于 `expired_before` 的会话，至多 `limit` 个，并把它们租给调用方到
+    /// `lease_until`：租期内其他回收者（含其他副本）领不到同一会话。资源释放成功后调用方
+    /// `delete_session` 收尾；释放失败就什么也不做，租期过后会被重新领取。
+    async fn claim_expired_sessions(
+        &self,
+        expired_before: DateTime<Utc>,
+        lease_until: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<UploadSession>>;
 }
 
 pub type MetadataStoreRef = Arc<dyn MediaMetadataStore>;

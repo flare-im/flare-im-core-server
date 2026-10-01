@@ -486,14 +486,18 @@ impl MediaObjectRepository for S3ObjectStore {
         &self,
         object_path: &str,
         content_type: &str,
+        content_length: i64,
         expires_in: i64,
     ) -> Result<String> {
+        // 显式的 Content-Length 会进 X-Amz-SignedHeaders，存储按签名校验实际请求头，
+        // 长度与声明不符的 PUT 得到 SignatureDoesNotMatch，而不是写进一个更大的对象。
         let presigned = self
             .presign_client
             .put_object()
             .bucket(&self.bucket)
             .key(object_path)
             .content_type(content_type)
+            .content_length(content_length)
             .presigned(
                 aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
                     (expires_in.max(1) as u64).min(7 * 24 * 3600),
@@ -616,21 +620,30 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 
     async fn abort_multipart_upload(&self, object_path: &str, upload_id: &str) -> Result<()> {
-        self.client
+        let result = self
+            .client
             .abort_multipart_upload()
             .bucket(&self.bucket)
             .key(object_path)
             .upload_id(upload_id)
             .send()
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    format!("failed to abort multipart upload, key={}", object_path),
-                )
-            })?;
-        Ok(())
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            // 已完成或已中止的上传：目标状态已经达成，回收任务不必反复重试。
+            Err(err)
+                if err
+                    .as_service_error()
+                    .is_some_and(|service| service.is_no_such_upload()) =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(map_infra_error(
+                err,
+                ErrorCode::NetworkError,
+                format!("failed to abort multipart upload, key={}", object_path),
+            )),
+        }
     }
 
     async fn stat_object(&self, object_path: &str) -> Result<ObjectStat> {
@@ -779,11 +792,15 @@ mod tenant_key_tests {
     use super::*;
 
     fn store() -> S3ObjectStore {
+        store_at("https://objects.example.test")
+    }
+
+    fn store_at(endpoint: &str) -> S3ObjectStore {
         let client = S3Client::from_conf(
             S3ConfigBuilder::new()
                 .behavior_version(BehaviorVersion::latest())
                 .region(Region::new("us-east-1"))
-                .endpoint_url("https://objects.example.test")
+                .endpoint_url(endpoint)
                 .force_path_style(true)
                 .credentials_provider(Credentials::new("test", "test", None, None, "unit-test"))
                 .build(),
@@ -861,6 +878,95 @@ mod tenant_key_tests {
         let (url, key) = generated.unwrap();
         assert!(key.starts_with("tenant-a/root/uploads/uploads/"), "{key}");
         assert_eq!(url, format!("/media/{key}"));
+    }
+
+    /// 直传单次 PUT 的地址把声明的长度签进去：存储按 signed headers 复算签名，
+    /// 请求体长度与声明不符时签名不匹配，写不进超出声明大小的对象。
+    #[tokio::test]
+    async fn single_put_presign_signs_the_declared_content_length() {
+        // 签名是离线计算，不连接任何存储。
+        let url = store()
+            .presign_put_object("tenant-a/file.png", "image/png", 1234, 60)
+            .await
+            .unwrap();
+        let url = url::Url::parse(&url).unwrap();
+        let signed_headers = url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .expect("presigned PUT carries X-Amz-SignedHeaders");
+        let signed: Vec<&str> = signed_headers.split(';').collect();
+        assert!(signed.contains(&"content-length"), "{signed_headers}");
+        assert!(signed.contains(&"content-type"), "{signed_headers}");
+        assert!(signed.contains(&"host"), "{signed_headers}");
+    }
+
+    /// 本机回环上的假 S3：每个连接读完请求头后回同一个错误响应，返回地址与收到的请求行。
+    async fn s3_error_endpoint(
+        status: &'static str,
+        code: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => head.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                requests.lock().unwrap().push(line);
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{code}</Code>\
+                     <Message>unit test</Message><RequestId>r</RequestId></Error>"
+                );
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    /// 回收任务对已完成或已中止的分片上传再 abort 时，存储回 NoSuchUpload：目标状态已达成，
+    /// 按成功处理，不让同一会话每个租期都重试一遍。其他错误照常上报。
+    #[tokio::test]
+    async fn aborting_a_finished_multipart_upload_is_idempotent_but_other_errors_surface() {
+        let (endpoint, seen) = s3_error_endpoint("404 Not Found", "NoSuchUpload").await;
+        store_at(&endpoint)
+            .abort_multipart_upload("tenant-a/file.bin", "storage-upload-id")
+            .await
+            .expect("NoSuchUpload means the upload is already gone");
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("DELETE /media/tenant-a/file.bin?")
+                && lines[0].contains("uploadId=storage-upload-id"),
+            "{lines:?}"
+        );
+
+        let (endpoint, _) = s3_error_endpoint("403 Forbidden", "AccessDenied").await;
+        assert!(
+            store_at(&endpoint)
+                .abort_multipart_upload("tenant-a/file.bin", "storage-upload-id")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
