@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tonic::Request;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 /// 单次批量拉取的并发上限。
 ///
@@ -26,12 +26,21 @@ const MAX_SYNC_FANOUT_CONCURRENCY: usize = 32;
 /// 存储服务客户端（基于 tonic）
 ///
 /// 使用 tonic 框架实现的存储服务客户端，
-/// 通过 gRPC 调用下游的 Storage Reader 服务。
+/// 通过 gRPC 调用下游的 Storage Reader 服务。地址在构造时一次定下：要么一个固定地址的
+/// 懒连接通道（单条查询与批量扇出共用，不逐次建连），要么服务发现；调用路径上不再读环境
+/// 变量，也不再回退到别的端口。
 pub struct StorageReaderClient {
-    service_name: String,
-    service_client: Arc<Mutex<Option<ServiceClient>>>,
-    /// 显式地址的懒连接通道：有它就直连，不做服务发现，也不走环境变量回退。
-    static_channel: Option<Channel>,
+    target: StorageReaderTarget,
+}
+
+enum StorageReaderTarget {
+    /// 固定地址的懒连接通道（建连上限与 HTTP/2 探活见 `StaticChannelPolicy`）。
+    Static { url: String, channel: Channel },
+    /// 服务发现。
+    Discovery {
+        service_name: String,
+        client: Arc<Mutex<ServiceClient>>,
+    },
 }
 
 fn grpc_call_failed(op: &str, status: tonic::Status) -> flare_server_core::error::FlareError {
@@ -44,98 +53,70 @@ fn grpc_call_failed(op: &str, status: tonic::Status) -> flare_server_core::error
 }
 
 impl StorageReaderClient {
-    /// 创建新的存储服务客户端
-    pub fn new(service_name: impl Into<String>) -> Self {
+    /// 经服务发现找 Storage Reader。
+    pub fn with_service_client(
+        service_name: impl Into<String>,
+        service_client: ServiceClient,
+    ) -> Self {
         Self {
-            service_name: service_name.into(),
-            service_client: Arc::new(Mutex::new(None)),
-            static_channel: None,
+            target: StorageReaderTarget::Discovery {
+                service_name: service_name.into(),
+                client: Arc::new(Mutex::new(service_client)),
+            },
         }
     }
 
-    /// 使用 ServiceClient 创建新的存储服务客户端（推荐）
-    pub fn with_service_client(service_client: ServiceClient) -> Self {
-        Self {
-            service_name: String::new(),
-            service_client: Arc::new(Mutex::new(Some(service_client))),
-            static_channel: None,
-        }
-    }
-
-    /// 直连显式地址（`http://` 或 `https://`）。通道懒连接，构造时不连下游。
+    /// 直连固定地址（`http://` 或 `https://`）。通道懒连接，构造时不连下游。
     pub fn with_static_endpoint(url: &str) -> Result<Self> {
-        let channel = Endpoint::from_shared(url.to_string())
-            .map_err(|e| {
+        let channel =
+            flare_im_service_kit::discovery::connect_static_channel_lazy(url).map_err(|e| {
                 map_infra_error(e, ErrorCode::ConfigurationError, "storage reader endpoint")
-            })?
-            .connect_lazy();
+            })?;
         Ok(Self {
-            service_name: String::new(),
-            service_client: Arc::new(Mutex::new(None)),
-            static_channel: Some(channel),
+            target: StorageReaderTarget::Static {
+                url: url.to_string(),
+                channel,
+            },
         })
     }
 
-    pub(crate) async fn client(&self) -> Result<StorageReaderServiceClient<Channel>> {
-        if let Some(channel) = &self.static_channel {
-            return Ok(StorageReaderServiceClient::new(channel.clone()));
+    /// 固定地址模式下的地址；服务发现模式为 `None`。
+    pub fn static_endpoint(&self) -> Option<&str> {
+        match &self.target {
+            StorageReaderTarget::Static { url, .. } => Some(url),
+            StorageReaderTarget::Discovery { .. } => None,
         }
-        let mut service_client_guard = self.service_client.lock().await;
-        if service_client_guard.is_none() {
-            if self.service_name.is_empty() {
-                return Err(ErrorBuilder::new(
-                    ErrorCode::ConfigurationError,
-                    "storage_reader_service is not configured",
-                )
-                .build_error());
-            }
+    }
 
-            let discover = flare_im_service_kit::discovery::create_discover(&self.service_name)
+    /// 本次调用用的通道。服务发现模式下只在取通道时持锁，RPC 往返不持锁。
+    async fn channel(&self) -> Result<Channel> {
+        match &self.target {
+            StorageReaderTarget::Static { channel, .. } => Ok(channel.clone()),
+            StorageReaderTarget::Discovery {
+                service_name,
+                client,
+            } => {
+                let mut client = client.lock().await;
+                let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+                    service_name,
+                    &mut client,
+                )
                 .await
                 .map_err(|e| {
-                    map_infra_error(e, ErrorCode::ServiceUnavailable, "create service discover")
+                    map_infra_error(
+                        e,
+                        ErrorCode::ServiceUnavailable,
+                        "get channel from service discovery",
+                    )
                 })?;
-
-            if let Some(discover) = discover {
-                *service_client_guard = Some(ServiceClient::new(discover));
-            } else {
-                let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
-                    .ok()
-                    .unwrap_or_else(|| "127.0.0.1:60083".to_string());
-                let endpoint = Endpoint::from_shared(format!("http://{}", addr)).map_err(|e| {
-                    map_infra_error(e, ErrorCode::ConfigurationError, "create endpoint")
-                })?;
-                let channel = endpoint.connect().await.map_err(|e| {
-                    map_infra_error(e, ErrorCode::NetworkError, "connect storage reader")
-                })?;
-                tracing::warn!(address = %addr, "Using STORAGE_READER_GRPC_ADDR fallback");
-                return Ok(StorageReaderServiceClient::new(channel));
+                tracing::trace!("Got channel for storage reader service from service discovery");
+                Ok(channel)
             }
         }
+    }
 
-        let service_client = service_client_guard.as_mut().ok_or_else(|| {
-            ErrorBuilder::new(
-                ErrorCode::ConfigurationError,
-                "service client not initialized",
-            )
-            .build_error()
-        })?;
-        let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
-            &self.service_name,
-            service_client,
-        )
-        .await
-        .map_err(|e| {
-            map_infra_error(
-                e,
-                ErrorCode::ServiceUnavailable,
-                "get channel from service discovery",
-            )
-        })?;
-
-        tracing::trace!("Got channel for storage reader service from service discovery");
-
-        Ok(StorageReaderServiceClient::new(channel))
+    pub(crate) async fn client(&self) -> Result<StorageReaderServiceClient<Channel>> {
+        Ok(StorageReaderServiceClient::new(self.channel().await?))
     }
 
     fn last_timestamp(messages: &[flare_proto::common::Message]) -> Option<i64> {
@@ -220,14 +201,19 @@ impl MessageProvider for StorageReaderClient {
     ) -> Result<Vec<flare_proto::common::Message>> {
         use tokio::task::JoinSet;
 
-        // 并行 fan-out 前单次初始化 discovery client，避免每个 task 各自 create_discover 打爆 Consul。
-        let _ = self.client().await?;
+        // 扇出前取一次通道：下游不可用时整批直接失败，而不是逐个会话各失败一次。
+        // 通道自带连接池，clone 很便宜；服务发现模式下每个会话仍各取一次，以便在实例间分摊。
+        let first_channel = self.channel().await?;
 
         let mut join_set = JoinSet::new();
         let fanout_permits = Arc::new(Semaphore::new(MAX_SYNC_FANOUT_CONCURRENCY));
-        let service_client = Arc::clone(&self.service_client);
-        let storage_service_name = self.service_name.clone();
-        let static_channel = self.static_channel.clone();
+        let discovery = match &self.target {
+            StorageReaderTarget::Static { .. } => None,
+            StorageReaderTarget::Discovery {
+                service_name,
+                client,
+            } => Some((service_name.clone(), Arc::clone(client))),
+        };
         let ctx = ctx.clone();
 
         for conversation_id in conversation_ids {
@@ -238,9 +224,8 @@ impl MessageProvider for StorageReaderClient {
                 .unwrap_or(0)
                 .max(0);
             let limit = limit_per_session;
-            let service_client = Arc::clone(&service_client);
-            let storage_service_name = storage_service_name.clone();
-            let static_channel = static_channel.clone();
+            let discovery = discovery.clone();
+            let first_channel = first_channel.clone();
             let task_ctx = ctx.clone();
 
             let permit = Arc::clone(&fanout_permits);
@@ -251,54 +236,29 @@ impl MessageProvider for StorageReaderClient {
                     .await
                     .map_err(|err| map_infra_error(err, ErrorCode::InternalError, "semaphore"))?;
 
-                // 这个 guard 只用来做服务发现。此前它一直活到 async 块结束、
+                // 服务发现的锁只在取通道时持有。此前它一直活到 async 块结束、
                 // **横跨整个 gRPC 往返**——于是这段「并行扇出」实际是串行的：
                 // N 个会话就是 N 次顺序 RPC，而代码看起来是并发的。
-                // 拿到 Channel 就释放（Channel 自带连接池，clone 很便宜）。
-                // 显式地址直接用它的通道，不碰服务发现。
-                let channel: Channel = if let Some(channel) = static_channel {
-                    channel
-                } else {
-                    let mut service_client_guard = service_client.lock().await;
-                    if let Some(service_client) = service_client_guard.as_mut() {
-                        match flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
-                            &storage_service_name,
-                            service_client,
+                // 固定地址直接用它的通道。服务发现失败就让这个会话失败（与单条查询一致），
+                // 不再回退到环境变量或默认端口。
+                let channel: Channel = match discovery {
+                    None => first_channel,
+                    Some((service_name, client)) => {
+                        let mut client = client.lock().await;
+                        flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+                            &service_name,
+                            &mut client,
                         )
                         .await
-                        {
-                            Ok(ch) => ch,
-                            Err(_e) => {
-                                let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
-                                    .ok()
-                                    .unwrap_or_else(|| "127.0.0.1:50091".to_string());
-                                let endpoint = Endpoint::from_shared(format!("http://{}", addr))
-                                    .map_err(|err| {
-                                        map_infra_error(
-                                            err,
-                                            ErrorCode::ConfigurationError,
-                                            "endpoint",
-                                        )
-                                    })?;
-                                endpoint.connect().await.map_err(|err| {
-                                    map_infra_error(err, ErrorCode::NetworkError, "connect")
-                                })?
-                            }
-                        }
-                    } else {
-                        let addr = std::env::var("STORAGE_READER_GRPC_ADDR")
-                            .ok()
-                            .unwrap_or_else(|| "127.0.0.1:50091".to_string());
-                        let endpoint =
-                            Endpoint::from_shared(format!("http://{}", addr)).map_err(|err| {
-                                map_infra_error(err, ErrorCode::ConfigurationError, "endpoint")
-                            })?;
-                        endpoint.connect().await.map_err(|err| {
-                            map_infra_error(err, ErrorCode::NetworkError, "connect")
+                        .map_err(|e| {
+                            map_infra_error(
+                                e,
+                                ErrorCode::ServiceUnavailable,
+                                "get channel from service discovery",
+                            )
                         })?
                     }
                 };
-                // 服务发现锁到此为止；下面的 RPC 不再持有它。
 
                 let mut client = StorageReaderServiceClient::new(channel);
                 if after_seq > 0 {

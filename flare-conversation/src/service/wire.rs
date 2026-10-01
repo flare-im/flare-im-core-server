@@ -134,8 +134,9 @@ pub async fn initialize(
     let message_provider: Option<Arc<StorageReaderClient>> = {
         use flare_im_contracts::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
-        let explicit_url = explicit_storage_reader_url(
+        let explicit_url = storage_reader_url(
             std::env::var("CONVERSATION_STORAGE_READER_SERVICE_URL").ok(),
+            std::env::var("STORAGE_READER_GRPC_ADDR").ok(),
         )?;
         let discover_name = storage_reader_service.clone();
         let provider =
@@ -240,6 +241,39 @@ pub async fn initialize(
     })
 }
 
+/// Storage Reader 的固定地址只认一个变量：`CONVERSATION_STORAGE_READER_SERVICE_URL`（见
+/// [`explicit_storage_reader_url`]）。旧变量 `STORAGE_READER_GRPC_ADDR`（`host:port`，曾只在单条查询
+/// 与批量扇出的回退里各读一次，批量路径的默认端口 50091 实为 push-proxy）仍兼容：新变量没设时
+/// 采用它并告警改名；两个都设时以新变量为准，告警旧变量被忽略。
+fn storage_reader_url(url: Option<String>, legacy_addr: Option<String>) -> Result<Option<String>> {
+    let url = explicit_storage_reader_url(url)?;
+    let legacy = legacy_addr
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok(match (url, legacy) {
+        (Some(url), Some(_)) => {
+            tracing::warn!(
+                "STORAGE_READER_GRPC_ADDR is ignored because CONVERSATION_STORAGE_READER_SERVICE_URL is set; remove the old variable"
+            );
+            Some(url)
+        }
+        (Some(url), None) => Some(url),
+        (None, Some(addr)) => {
+            let url = if addr.starts_with("http://") || addr.starts_with("https://") {
+                addr
+            } else {
+                format!("http://{addr}")
+            };
+            tracing::warn!(
+                url = %url,
+                "STORAGE_READER_GRPC_ADDR is deprecated; set CONVERSATION_STORAGE_READER_SERVICE_URL instead"
+            );
+            Some(url)
+        }
+        (None, None) => None,
+    })
+}
+
 /// `CONVERSATION_STORAGE_READER_SERVICE_URL`：Storage Reader 的显式地址。设了就直连、不做服务发现，
 /// 单容器 static 注册模式由 `release/supervise-core.toml` 写成容器内的监听地址。只收
 /// `http://`、`https://`；空值等于没设。
@@ -261,8 +295,9 @@ fn explicit_storage_reader_url(raw: Option<String>) -> Result<Option<String>> {
     }
 }
 
-/// 消息提供者：有显式地址就直连（不调用 `discover`，也不打印回退告警）；否则按服务发现，
-/// 发现未配置时才告警并改走环境变量回退。
+/// 消息提供者：有显式地址就直连（不调用 `discover`，也不打印回退告警）；否则按服务发现；
+/// 发现也未配置时启动时告警一次，固定连单 Cell 默认地址（Storage Reader 的 60083），单条查询与
+/// 批量扇出共用这一条懒连接通道。
 async fn build_message_provider<D>(
     explicit_url: Option<String>,
     service_name: String,
@@ -277,12 +312,18 @@ where
     }
     Ok(match discover().await? {
         Some(discover) => StorageReaderClient::with_service_client(
+            service_name,
             flare_server_core::discovery::ServiceClient::new(discover),
         ),
         None => {
-            // Fallback: construct provider with service name; provider will try env direct connect
-            tracing::warn!("Storage Reader service discovery not configured, using env fallback");
-            StorageReaderClient::new(service_name)
+            let url = flare_im_service_kit::discovery::default_static_grpc_fallback(
+                flare_im_contracts::service_names::STORAGE_READER,
+            );
+            tracing::warn!(
+                url,
+                "Storage Reader service discovery not configured and no address set; using the single-Cell default (set CONVERSATION_STORAGE_READER_SERVICE_URL)"
+            );
+            StorageReaderClient::with_static_endpoint(url)?
         }
     })
 }
@@ -371,10 +412,59 @@ mod tests {
     #[tokio::test]
     async fn without_an_address_or_discovery_the_fallback_is_still_reported() {
         let (captured, _guard) = capture();
-        build_message_provider(None, "storage-reader".into(), async || Ok(None))
+        let provider = build_message_provider(None, "storage-reader".into(), async || Ok(None))
             .await
             .unwrap();
         let logs = captured.text();
         assert!(logs.contains(FALLBACK_WARNING), "{logs}");
+        // 回退到 Storage Reader 自己的端口，而不是 push-proxy 的 50091。
+        assert_eq!(provider.static_endpoint(), Some("http://127.0.0.1:60083"));
+        // 只在构造时告警一次；取通道不再逐次建连、也不再告警。
+        assert!(provider.client().await.is_ok());
+        assert!(provider.client().await.is_ok());
+        assert_eq!(captured.text().matches(FALLBACK_WARNING).count(), 1);
+    }
+
+    #[test]
+    fn one_variable_names_the_storage_reader_and_the_old_name_still_works() {
+        let (captured, _guard) = capture();
+        assert_eq!(storage_reader_url(None, None).unwrap(), None);
+        assert_eq!(
+            storage_reader_url(Some("http://reader:60083".into()), None).unwrap(),
+            Some("http://reader:60083".to_string())
+        );
+        assert!(!captured.text().contains("STORAGE_READER_GRPC_ADDR"));
+
+        // 旧名：host:port 补成 http://，告警改名。
+        assert_eq!(
+            storage_reader_url(None, Some(" reader-old:60083 ".into())).unwrap(),
+            Some("http://reader-old:60083".to_string())
+        );
+        assert!(
+            captured
+                .text()
+                .contains("STORAGE_READER_GRPC_ADDR is deprecated"),
+            "{}",
+            captured.text()
+        );
+
+        // 两个都设：新变量为准，旧变量被忽略并告警。
+        assert_eq!(
+            storage_reader_url(
+                Some("http://reader-new:60083".into()),
+                Some("reader-old:60083".into())
+            )
+            .unwrap(),
+            Some("http://reader-new:60083".to_string())
+        );
+        assert!(
+            captured
+                .text()
+                .contains("STORAGE_READER_GRPC_ADDR is ignored")
+        );
+
+        // 新变量格式错仍拒绝启动；旧变量为空等于没设。
+        assert!(storage_reader_url(Some("reader:60083".into()), None).is_err());
+        assert_eq!(storage_reader_url(None, Some("  ".into())).unwrap(), None);
     }
 }
