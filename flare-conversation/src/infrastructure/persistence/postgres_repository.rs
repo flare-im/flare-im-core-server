@@ -1266,13 +1266,16 @@ impl ConversationRepository for PostgresConversationRepository {
                 .unwrap_or(0),
         };
         // 纪元围栏下有多少条是按时间回落删掉的（没有纪元属性的老消息或绕过 PreSend 的
-        // 系统消息）：持续不为 0 说明 PreSend 没有给消息打上纪元。
+        // 系统消息）：持续不为 0 说明 PreSend 没有给消息打上纪元。清除少见且不可逆，用 info
+        // 级：部署默认只输出 info，debug 级时这两个计数在栈上看不到。
         let fenced_messages = purged.iter().filter(|(_, _, fenced)| *fenced).count();
-        debug!(
+        tracing::info!(
+            tenant_id = %tenant_id,
             conversation_id = %conversation_id,
             purged_messages = outcome.purged_messages,
             max_purged_seq = outcome.max_purged_seq,
             before_epoch = boundary.epoch_fence.as_ref().map(|fence| fence.before_epoch),
+            time_boundary_ms = boundary.before.map(|before| before.timestamp_millis()),
             fenced_messages,
             time_fallback_messages = purged.len() - fenced_messages,
             "Conversation history purged before boundary"

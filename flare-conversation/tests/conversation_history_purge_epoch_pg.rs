@@ -610,3 +610,104 @@ async fn epoch_fence_without_time_boundary_never_touches_untagged_messages() {
 
     drop_schema(admin, pool, &schema).await;
 }
+
+/// 纪元计数器上线后、回填之前就重新加回的老好友对，两端纪元都是 1，上一段关系的历史没有
+/// 纪元属性。人工修复时以 `before_epoch = 1`、`before_ms = 本段关系的接受时刻 − 余量` 清除：
+/// 只删边界之前没有纪元的旧历史（以及纪元为 0 的值），本段关系里带纪元 1 的消息即使被慢时钟
+/// 盖在边界之前也保留，边界之后没有纪元的消息（纪元打标上线之前发的）也保留。
+/// 清除写的 info 日志在 `conversation_history_purge_log_pg.rs` 里单独验证。
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn epoch_one_repair_purge_keeps_the_current_relationship() {
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+    let tenant = "tenant-a";
+    let conversation = "single-readded";
+
+    // 上一段关系（计数器之前）：没有纪元，盖在边界之前很久。
+    seed_message(
+        &pool,
+        tenant,
+        conversation,
+        "old-untagged",
+        1,
+        BOUNDARY - 86_400_000,
+        None,
+    )
+    .await;
+    seed_event(&pool, tenant, conversation, 2, 5, BOUNDARY - 80_000_000).await; // 旧历史上的已读
+    // 不经 Hook 的消息带着客户端自带的 0：小于 1，按纪元删。
+    seed_message(
+        &pool,
+        tenant,
+        conversation,
+        "client-zero",
+        3,
+        BOUNDARY - 70_000_000,
+        Some("0"),
+    )
+    .await;
+    // 本段关系（纪元 1）：一条被慢时钟盖在边界之前，照留。
+    seed_message(
+        &pool,
+        tenant,
+        conversation,
+        "e1-slow-clock",
+        4,
+        BOUNDARY - 10_000,
+        Some("1"),
+    )
+    .await;
+    // 本段关系里纪元打标上线之前发的消息：没有纪元，但在边界之后，留下。
+    seed_message(
+        &pool,
+        tenant,
+        conversation,
+        "new-untagged",
+        5,
+        BOUNDARY + 60_000,
+        None,
+    )
+    .await;
+    seed_message(
+        &pool,
+        tenant,
+        conversation,
+        "e1",
+        6,
+        BOUNDARY + 120_000,
+        Some("1"),
+    )
+    .await;
+    seed_event(&pool, tenant, conversation, 7, 8, BOUNDARY + 130_000).await; // 反应，在留下的消息之后
+
+    let domain = domain_over(PostgresConversationRepository::new(
+        Arc::new(pool.clone()),
+        test_config(),
+    ));
+    let ctx = Context::with_request_id("purge-epoch-one-repair").with_tenant_id(tenant);
+
+    let repaired = domain
+        .purge_history(&ctx, conversation, BOUNDARY, EPOCH, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        repaired,
+        ConversationHistoryPurge {
+            purged_messages: 2,
+            max_purged_seq: 3,
+        }
+    );
+    assert_eq!(
+        ids(&pool, "messages", "server_id", tenant, conversation).await,
+        vec!["e1", "e1-slow-clock", "new-untagged"],
+    );
+    assert_eq!(
+        event_seqs(&pool, tenant, conversation).await,
+        vec![4, 5, 6, 7],
+        "events of the purged seqs and the read receipt before the first survivor go"
+    );
+
+    drop_schema(admin, pool, &schema).await;
+}
