@@ -63,14 +63,17 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &str,
         hard_delete: bool,
     ) -> Result<()>;
-    /// 物理删除会话里服务端时间严格早于 `before` 的历史（消息、事件、置顶、标记），
-    /// 会话行、成员与 `before` 及之后的消息原样保留。重复调用幂等。
+    /// 物理删除会话里 `boundary` 之前的历史（消息、事件、置顶、标记），会话行、成员与
+    /// 边界之后的消息原样保留。重复调用幂等。边界语义见 [`HistoryPurgeBoundary`]：
+    /// 没有纪元围栏时按服务端时间严格早于 `before` 删除；有纪元围栏时带纪元的消息只看纪元。
     /// 删掉消息时同事务按剩余消息重算成员未读数，并失效这些消息的读侧热缓存。
-    async fn purge_history_before(
+    ///
+    /// [`HistoryPurgeBoundary`]: crate::domain::model::HistoryPurgeBoundary
+    async fn purge_history(
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
-        before: chrono::DateTime<chrono::Utc>,
+        boundary: &crate::domain::model::HistoryPurgeBoundary,
     ) -> Result<crate::domain::model::ConversationHistoryPurge>;
     async fn manage_participants(
         &self,

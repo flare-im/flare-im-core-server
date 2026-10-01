@@ -14,7 +14,7 @@ use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationHistoryPurge,
     ConversationParticipant, ConversationParticipantsPage, ConversationSort, ConversationSummary,
-    ConversationType,
+    ConversationType, HistoryPurgeBoundary,
 };
 use crate::domain::repository::ConversationRepository;
 use crate::infrastructure::persistence::message_cache::MessageCacheInvalidator;
@@ -1037,11 +1037,11 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(())
     }
 
-    async fn purge_history_before(
+    async fn purge_history(
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
-        before: DateTime<Utc>,
+        boundary: &HistoryPurgeBoundary,
     ) -> Result<ConversationHistoryPurge> {
         let tenant_id = ctx.tenant_id().unwrap_or("0");
         if conversation_id.trim().is_empty() {
@@ -1051,8 +1051,14 @@ impl ConversationRepository for PostgresConversationRepository {
             )
             .build_error());
         }
-        // 与整会话硬删同一组表，只是按时间截断：messages.created_at 与 events.created_at
-        // 都是 ingest 盖的服务端时间，边界之后写入的消息与事件一条都不碰。
+        if boundary.epoch_fence.is_none() && boundary.before.is_none() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "a history purge needs a time boundary or an epoch fence",
+            )
+            .build_error());
+        }
+        // 与整会话硬删同一组表，只是按边界截断，边界之后写入的消息与事件一条都不碰。
         let mut tx = self.pool.begin().await.map_err(|e| {
             map_infra_error(
                 e,
@@ -1060,15 +1066,44 @@ impl ConversationRepository for PostgresConversationRepository {
                 "begin conversation history purge",
             )
         })?;
-        let purged: Vec<(String, i64)> = sqlx::query_as(
-            "DELETE FROM messages WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3 \
-             RETURNING server_id, seq",
-        )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .bind(before)
-        .fetch_all(&mut *tx)
-        .await
+        // (server_id, seq, 是否按纪元判定)
+        let purged: Vec<(String, i64, bool)> = match &boundary.epoch_fence {
+            // 时间边界：messages.created_at 是 ingest 盖的服务端时间。
+            None => sqlx::query_as(
+                "DELETE FROM messages WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3 \
+                 RETURNING server_id, seq, FALSE",
+            )
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(boundary.before)
+            .fetch_all(&mut *tx)
+            .await,
+            // 纪元围栏：纪元由业务方在 PreSend 放行时写进消息 attributes（落在 extra），
+            // 值是非负整数的消息只看纪元、不看时间，任何一台主机的时钟偏差都影响不到它。
+            // 没有纪元（或值不合法：客户端可以自带任意 attributes）的回落到时间边界，
+            // 没给时间边界就不删。正则先挡住非数字与超出 BIGINT 的值，CASE 保证只有
+            // 通过校验的值才会被转成 BIGINT。
+            Some(fence) => sqlx::query_as(
+                r#"
+                DELETE FROM messages
+                WHERE tenant_id = $1
+                  AND conversation_id = $2
+                  AND CASE
+                        WHEN COALESCE(extra ->> $3::TEXT, '') ~ '^[0-9]{1,18}$'
+                            THEN (extra ->> $3::TEXT)::BIGINT < $4
+                        ELSE $5::TIMESTAMPTZ IS NOT NULL AND created_at < $5::TIMESTAMPTZ
+                      END
+                RETURNING server_id, seq, COALESCE(extra ->> $3::TEXT, '') ~ '^[0-9]{1,18}$'
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(&fence.attribute)
+            .bind(fence.before_epoch)
+            .bind(boundary.before)
+            .fetch_all(&mut *tx)
+            .await,
+        }
         .map_err(|e| {
             map_infra_error(
                 e,
@@ -1076,7 +1111,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 "Failed to purge conversation messages before boundary",
             )
         })?;
-        let purged_ids: Vec<String> = purged.iter().map(|(id, _)| id.clone()).collect();
+        let purged_ids: Vec<String> = purged.iter().map(|(id, _, _)| id.clone()).collect();
         if !purged_ids.is_empty() {
             for stmt in [
                 "DELETE FROM pinned_messages WHERE tenant_id = $1 AND conversation_id = $2 AND message_id = ANY($3)",
@@ -1097,14 +1132,48 @@ impl ConversationRepository for PostgresConversationRepository {
                     })?;
             }
         }
-        sqlx::query(
-            "DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3",
-        )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .bind(before)
-        .execute(&mut *tx)
-        .await
+        match &boundary.epoch_fence {
+            None => sqlx::query(
+                "DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2 AND created_at < $3",
+            )
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(boundary.before)
+            .execute(&mut *tx)
+            .await,
+            // 纪元围栏下事件也不看时间（EVENT_MESSAGE 行的 created_at 还是 storage-writer
+            // 的时钟）。事件与消息共用会话 seq：被删消息所在 seq 上的事件随消息一起删；
+            // 其余非消息事件（已读、撤回、编辑、反应……）只要 seq 小于剩余最早的消息，
+            // 就产生于留下来的第一条消息之前，只可能指向被清除的旧历史，一并删掉；会话里
+            // 不剩消息时全部非消息事件都属于旧历史。剩余最早 seq 在删消息之后的新语句里读，
+            // 能看到这期间刚提交的新消息。
+            Some(_) => {
+                let purged_seqs: Vec<i64> = purged.iter().map(|(_, seq, _)| *seq).collect();
+                sqlx::query(
+                    r#"
+                    DELETE FROM events
+                    WHERE tenant_id = $1
+                      AND conversation_id = $2
+                      AND (
+                        seq = ANY($3::BIGINT[])
+                        OR (
+                          event_type <> 1
+                          AND seq < COALESCE(
+                            (SELECT MIN(m.seq) FROM messages m
+                              WHERE m.tenant_id = $1 AND m.conversation_id = $2),
+                            9223372036854775807
+                          )
+                        )
+                      )
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(conversation_id)
+                .bind(&purged_seqs)
+                .execute(&mut *tx)
+                .await
+            }
+        }
         .map_err(|e| {
             map_infra_error(
                 e,
@@ -1192,14 +1261,20 @@ impl ConversationRepository for PostgresConversationRepository {
             purged_messages: purged.len() as u64,
             max_purged_seq: purged
                 .iter()
-                .map(|(_, seq)| (*seq).max(0) as u64)
+                .map(|(_, seq, _)| (*seq).max(0) as u64)
                 .max()
                 .unwrap_or(0),
         };
+        // 纪元围栏下有多少条是按时间回落删掉的（没有纪元属性的老消息或绕过 PreSend 的
+        // 系统消息）：持续不为 0 说明 PreSend 没有给消息打上纪元。
+        let fenced_messages = purged.iter().filter(|(_, _, fenced)| *fenced).count();
         debug!(
             conversation_id = %conversation_id,
             purged_messages = outcome.purged_messages,
             max_purged_seq = outcome.max_purged_seq,
+            before_epoch = boundary.epoch_fence.as_ref().map(|fence| fence.before_epoch),
+            fenced_messages,
+            time_fallback_messages = purged.len() - fenced_messages,
             "Conversation history purged before boundary"
         );
         Ok(outcome)

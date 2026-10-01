@@ -257,13 +257,13 @@ impl ConversationRepository for RedisConversationRepository {
         Err(redis_not_supported("delete_conversation"))
     }
 
-    async fn purge_history_before(
+    async fn purge_history(
         &self,
         _ctx: &flare_server_core::context::Context,
         _conversation_id: &str,
-        _before: chrono::DateTime<chrono::Utc>,
+        _boundary: &crate::domain::model::HistoryPurgeBoundary,
     ) -> Result<crate::domain::model::ConversationHistoryPurge> {
-        Err(redis_not_supported("purge_history_before"))
+        Err(redis_not_supported("purge_history"))
     }
 
     async fn manage_participants(

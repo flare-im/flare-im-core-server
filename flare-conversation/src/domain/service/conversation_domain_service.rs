@@ -27,6 +27,9 @@ use crate::domain::repository::{
     ConversationRepository, MessageProvider, PresenceRepository, PresenceUpdate,
 };
 
+/// 纪元属性名（消息 attributes 的键）的长度上限，字节。
+const MAX_EPOCH_ATTRIBUTE_LEN: usize = 128;
+
 /// 会话领域服务 - 包含所有业务逻辑
 ///
 /// 使用泛型参数以获得更好的性能（静态分发）
@@ -705,22 +708,73 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         conversation_id: &str,
         before_ms: i64,
     ) -> Result<crate::domain::model::ConversationHistoryPurge> {
-        if before_ms <= 0 {
-            return Err(ErrorBuilder::new(
-                ErrorCode::InvalidParameter,
-                "before_ms must be a positive server timestamp in milliseconds",
-            )
-            .build_error());
+        self.purge_history(ctx, conversation_id, before_ms, "", 0)
+            .await
+    }
+
+    /// 清除会话历史（业务逻辑），可带纪元围栏。
+    ///
+    /// `before_epoch == 0`：只按时间边界，`before_ms` 必须为正，`epoch_attribute` 必须为空。
+    /// `before_epoch > 0`：消息 attributes 里 `epoch_attribute` 是非负整数的，纪元小于
+    /// `before_epoch` 才删，与时间无关；其余消息回落到 `before_ms`，此时 `before_ms` 可以为 0
+    /// （这类消息一条不删）。负的纪元或时间一律是参数错误。
+    pub async fn purge_history(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        before_ms: i64,
+        epoch_attribute: &str,
+        before_epoch: i64,
+    ) -> Result<crate::domain::model::ConversationHistoryPurge> {
+        let invalid =
+            |message: &str| ErrorBuilder::new(ErrorCode::InvalidParameter, message).build_error();
+        if before_epoch < 0 {
+            return Err(invalid("before_epoch must not be negative"));
         }
-        let before = chrono::Utc
-            .timestamp_millis_opt(before_ms)
-            .single()
-            .ok_or_else(|| {
-                ErrorBuilder::new(ErrorCode::InvalidParameter, "before_ms is out of range")
-                    .build_error()
-            })?;
+        let epoch_attribute = epoch_attribute.trim();
+        let epoch_fence = if before_epoch == 0 {
+            if !epoch_attribute.is_empty() {
+                return Err(invalid("epoch_attribute requires a positive before_epoch"));
+            }
+            if before_ms <= 0 {
+                return Err(invalid(
+                    "before_ms must be a positive server timestamp in milliseconds",
+                ));
+            }
+            None
+        } else {
+            if epoch_attribute.is_empty() || epoch_attribute.len() > MAX_EPOCH_ATTRIBUTE_LEN {
+                return Err(invalid(
+                    "epoch_attribute is required with before_epoch and at most 128 bytes",
+                ));
+            }
+            if before_ms < 0 {
+                return Err(invalid("before_ms must not be negative"));
+            }
+            Some(crate::domain::model::HistoryEpochFence {
+                attribute: epoch_attribute.to_string(),
+                before_epoch,
+            })
+        };
+        let before = if before_ms == 0 {
+            None
+        } else {
+            Some(
+                chrono::Utc
+                    .timestamp_millis_opt(before_ms)
+                    .single()
+                    .ok_or_else(|| invalid("before_ms is out of range"))?,
+            )
+        };
         self.conversation_repo
-            .purge_history_before(ctx, conversation_id, before)
+            .purge_history(
+                ctx,
+                conversation_id,
+                &crate::domain::model::HistoryPurgeBoundary {
+                    before,
+                    epoch_fence,
+                },
+            )
             .await
     }
 

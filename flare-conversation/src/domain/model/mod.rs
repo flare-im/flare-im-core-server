@@ -497,6 +497,26 @@ pub struct ConversationHistoryPurge {
     pub max_purged_seq: u64,
 }
 
+/// 纪元围栏：消息 attributes 里 `attribute` 的值是非负整数时，只按它判定新旧。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEpochFence {
+    /// 纪元属性名（消息 attributes 的键，持久化在 `messages.extra`）
+    pub attribute: String,
+    /// 纪元严格小于它的消息被删除
+    pub before_epoch: i64,
+}
+
+/// 清除会话历史的边界。
+///
+/// 没有纪元围栏时就是原来的时间边界：`before` 必有，作用于全部消息与事件。
+/// 有纪元围栏时，`before` 只作用于没有纪元属性的消息（`None` 表示这类消息一条不删），
+/// 事件按被删消息与剩余消息的 seq 判定，不再看时间。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryPurgeBoundary {
+    pub before: Option<DateTime<Utc>>,
+    pub epoch_fence: Option<HistoryEpochFence>,
+}
+
 /// 会话领域配置值对象（只包含领域相关的配置）
 #[derive(Clone, Debug)]
 pub struct ConversationDomainConfig {

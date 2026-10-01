@@ -91,10 +91,17 @@ impl ConversationCommandHandler {
         debug!(
             conversation_id = %command.conversation_id,
             before_ms = command.before_ms,
+            before_epoch = command.before_epoch,
             "Handling purge conversation history command"
         );
         self.domain_service
-            .purge_history_before(ctx, &command.conversation_id, command.before_ms)
+            .purge_history(
+                ctx,
+                &command.conversation_id,
+                command.before_ms,
+                &command.epoch_attribute,
+                command.before_epoch,
+            )
             .await
     }
 

@@ -28,8 +28,13 @@ pub struct DeleteConversationCommand {
 #[derive(Debug, Clone)]
 pub struct PurgeConversationHistoryCommand {
     pub conversation_id: String,
-    /// 服务端时间（Unix 毫秒）：只删除时间严格早于它的消息与事件
+    /// 服务端时间（Unix 毫秒）：只删除时间严格早于它的消息与事件；
+    /// 有纪元围栏时只作用于没有纪元属性的消息，可以为 0
     pub before_ms: i64,
+    /// 纪元属性名（消息 attributes 的键）；只与 `before_epoch > 0` 一起出现
+    pub epoch_attribute: String,
+    /// 纪元围栏：带纪元属性的消息只在纪元严格小于它时删除；0 = 不按纪元
+    pub before_epoch: i64,
 }
 
 /// 强制会话同步命令

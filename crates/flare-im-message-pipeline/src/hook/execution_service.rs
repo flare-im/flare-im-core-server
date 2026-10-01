@@ -198,4 +198,56 @@ mod tests {
             other => panic!("hook denial was flattened: {other}"),
         }
     }
+
+    /// 放行的 Hook 改写的 metadata 原样成为消息 attributes：Hook 剥掉的客户端属性不能
+    /// 留下来，Hook 写入的属性会随消息持久化。Social 的好友纪元围栏依赖这一点——
+    /// PreSend 剥掉客户端自带的纪元、写入真实纪元，重新加好友时 Core 按它清除旧消息。
+    struct StampEpoch;
+
+    #[async_trait]
+    impl PreSendHook for StampEpoch {
+        async fn handle(&self, _ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
+            draft.metadata.remove("flare.social.friendship_epoch");
+            draft
+                .metadata
+                .insert("flare.social.friendship_epoch".into(), "3".into());
+            PreSendDecision::Continue
+        }
+    }
+
+    #[tokio::test]
+    async fn attributes_written_or_stripped_by_an_allowing_hook_reach_the_message() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_name("epoch"),
+                HookSelector::default(),
+                Arc::new(StampEpoch),
+            )
+            .await;
+        let service = HookExecutionService::new(Arc::new(HookDispatcher::new(registry)), None);
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        let mut message = Message::default();
+        message
+            .attributes
+            .insert("flare.social.friendship_epoch".into(), "999".into());
+        message
+            .attributes
+            .insert("client_tag".into(), "kept".into());
+        let out = service
+            .execute_pre_send(&ctx, message, true)
+            .await
+            .expect("allowed by the hook");
+        assert_eq!(
+            out.message
+                .attributes
+                .get("flare.social.friendship_epoch")
+                .map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            out.message.attributes.get("client_tag").map(String::as_str),
+            Some("kept")
+        );
+    }
 }

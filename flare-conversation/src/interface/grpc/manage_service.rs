@@ -144,6 +144,8 @@ impl ConversationManageService for ConversationGrpcHandler {
                 PurgeConversationHistoryCommand {
                     conversation_id: req.conversation_id,
                     before_ms: req.before_ms,
+                    epoch_attribute: req.epoch_attribute,
+                    before_epoch: req.before_epoch,
                 },
             )
             .await

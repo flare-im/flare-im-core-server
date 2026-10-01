@@ -40,6 +40,7 @@ fn purge_wire_format_is_stable() {
     let request = PurgeConversationHistoryRequest {
         conversation_id: "c".into(),
         before_ms: 5,
+        ..Default::default()
     };
     // field 1 (string) = "c", field 2 (varint) = 5
     assert_eq!(request.encode_to_vec(), vec![0x0a, 0x01, b'c', 0x10, 0x05]);
