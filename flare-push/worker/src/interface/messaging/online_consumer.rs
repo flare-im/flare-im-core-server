@@ -669,6 +669,98 @@ mod tests {
         );
     }
 
+    /// 记录 DLQ 发布次数的假 producer。
+    #[derive(Default)]
+    struct CountingProducer {
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl flare_server_core::mq::producer::Producer for CountingProducer {
+        async fn send(
+            &self,
+            _ctx: &flare_im_contracts::Ctx,
+            _topic: &str,
+            _key: Option<&str>,
+            _payload: Vec<u8>,
+            _headers: Option<HashMap<String, String>>,
+        ) -> std::result::Result<(), flare_server_core::mq::producer::ProducerError> {
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_batch(
+            &self,
+            _ctx: &flare_im_contracts::Ctx,
+            _messages: Vec<flare_server_core::mq::producer::ProducerMessage>,
+        ) -> std::result::Result<(), flare_server_core::mq::producer::ProducerError> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "counting-producer"
+        }
+    }
+
+    /// 停机、重启窗口里 Access Gateway 连不上（W6-S2 F4）：push-worker 必须 Nack 交给 broker
+    /// 重投，不能把推送送进 DLQ；网关明确拒绝的仍进 DLQ。
+    #[tokio::test]
+    async fn gateway_connection_failure_is_nacked_not_dead_lettered() {
+        use flare_im_service_kit::gateway::{
+            GatewayRouter, GatewayRouterConfig, GatewayRouterTrait,
+        };
+
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let router = GatewayRouter::new(GatewayRouterConfig {
+            connection_timeout_ms: 1_000,
+            static_fallback_endpoint: Some(closed.clone()),
+            ..Default::default()
+        });
+        let gateway_error = router
+            .route_push_notification("gw-1", Default::default())
+            .await
+            .expect_err("nothing listens on the gateway port");
+
+        let online = crate::infrastructure::rpc::OnlineServiceClient::from_channel(
+            tonic::transport::Endpoint::from_shared(closed)
+                .unwrap()
+                .connect_lazy(),
+        );
+        let producer = Arc::new(CountingProducer::default());
+        let handler = OnlinePushHandler::new(
+            Arc::new(GatewayPushExecutor::new(Arc::new(online), router)),
+            Arc::new(DlqPublisher::from_producer(
+                producer.clone(),
+                "flare.im.dlq.push",
+            )),
+        );
+        let entry = batch_entry(0, "bob", "m1");
+        let ctx = entry.message.context.ctx.clone();
+
+        let outcome = handler
+            .apply_route_result(
+                &ctx,
+                &entry.envelope,
+                &entry.message.payload,
+                Err(gateway_error),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MessageResult::Nack), "{outcome:?}");
+        assert_eq!(producer.sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let rejected = flare_err!(ErrorCode::InvalidParameter, "rejected by the gateway");
+        let outcome = handler
+            .apply_route_result(&ctx, &entry.envelope, &entry.message.payload, Err(rejected))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MessageResult::Ack), "{outcome:?}");
+        assert_eq!(producer.sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn ack_entry_positions_finds_ungrouped_ack_entries() {
         let entries = vec![

@@ -25,10 +25,42 @@ use flare_grpc_proto::access_gateway::{
     PushResponse, RelayRealtimeControlRequest,
 };
 use tokio::sync::RwLock;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use crate::discovery::{StaticChannelPolicy, is_transport_failure, static_grpc_endpoint};
 use crate::{ServiceClient, ServiceDiscover};
+
+/// Access Gateway 暂时不可达：连不上、连接被断、调用超时、网关在停机或重启（W6-S2 F4：core
+/// 停机窗口里 `tcp connect error` 被当成不可重试，推送直接进了 DLQ）。按 `ServiceUnavailable`
+/// 报出，push-worker 据此 Nack 交给 broker 重投（JetStream 有投递次数上限）。必须用
+/// `localized`：只有它带 `ErrorCode`，`system` 的 `is_retryable()` 恒为 false。
+fn gateway_unavailable(message: String) -> FlareError {
+    FlareError::localized(ErrorCode::ServiceUnavailable, message)
+}
+
+/// 网关调用的失败是否暂时性的：传输层失败，或网关回的是「稍后重试」类状态。
+fn is_transient_gateway_status(status: &tonic::Status) -> bool {
+    use tonic::Code;
+    is_transport_failure(status)
+        || matches!(
+            status.code(),
+            Code::Unavailable
+                | Code::Cancelled
+                | Code::DeadlineExceeded
+                | Code::ResourceExhausted
+                | Code::Aborted
+        )
+}
+
+/// 网关调用失败的错误：暂时性的可重试，网关明确拒绝（参数、鉴权等）仍不可重试。
+fn gateway_call_failure(message: String, status: &tonic::Status) -> FlareError {
+    if is_transient_gateway_status(status) {
+        gateway_unavailable(message)
+    } else {
+        FlareError::system(message)
+    }
+}
 
 /// Gateway Router 配置
 #[derive(Debug, Clone)]
@@ -187,14 +219,15 @@ impl GatewayRouter {
 
     async fn connect_channel(&self, uri: &str, target: impl Into<String>) -> Result<Channel> {
         let target = target.into();
-        let endpoint = Endpoint::from_shared(uri.to_string())
+        let endpoint = static_grpc_endpoint(uri, StaticChannelPolicy::DEFAULT)
+            .map_err(FlareError::system)
             .with_context(|| format!("Invalid URI for {}: {}", target, uri))?;
         let timeout_duration = Duration::from_millis(self.config.connection_timeout_ms);
 
         tokio::time::timeout(timeout_duration, endpoint.connect())
             .await
             .map_err(|_| {
-                flare_server_core::error::FlareError::system(format!(
+                gateway_unavailable(format!(
                     "Timeout connecting to {} at {} (timeout: {}ms)",
                     target,
                     uri,
@@ -202,10 +235,7 @@ impl GatewayRouter {
                 ))
             })?
             .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "Failed to connect to {} at {}: {}",
-                    target, uri, e
-                ))
+                gateway_unavailable(format!("Failed to connect to {} at {}: {}", target, uri, e))
             })
     }
 
@@ -311,14 +341,14 @@ impl GatewayRouter {
             tokio::time::timeout(timeout_duration, service_client.get_channel())
                 .await
                 .map_err(|_| {
-                    flare_server_core::error::FlareError::system(format!(
+                    gateway_unavailable(format!(
                         "Timeout waiting for service discovery to get channel for gateway {} (timeout: {}ms)",
                         gateway_id,
                         timeout_duration.as_millis()
                     ))
                 })?
                 .map_err(|e| {
-                    flare_server_core::error::FlareError::system(format!(
+                    gateway_unavailable(format!(
                         "Failed to get channel from service discovery: {}",
                         e
                     ))
@@ -411,6 +441,19 @@ impl GatewayRouter {
         }
     }
 
+    /// 无服务发现实例：单端点（get_or_create_client 内部回退 static_fallback_endpoint）。
+    /// 请求已带好签名身份。
+    async fn deliver_via_static_fallback(
+        &self,
+        request: tonic::Request<DeliverToConversationRequest>,
+    ) -> Result<()> {
+        let mut client = self.get_or_create_client("__static_fallback__").await?;
+        client.deliver_to_conversation(request).await.map_err(|e| {
+            gateway_call_failure(format!("deliver_to_conversation failed: {e}"), &e)
+        })?;
+        Ok(())
+    }
+
     /// 统一读扩散：把会话消息**广播到所有网关节点**，各节点按本地会话订阅过滤投递。
     /// 上游（push-worker）无需解析收件人。best-effort：单节点失败不影响其他节点（在线投递为软实时，
     /// 离线成员靠版本号增量拉兜底）。无服务发现实例时走静态 fallback 单端点。
@@ -433,14 +476,7 @@ impl GatewayRouter {
         };
 
         if gateway_ids.is_empty() {
-            // 无服务发现实例：单端点（get_or_create_client 内部回退 static_fallback_endpoint）。
-            let mut client = self.get_or_create_client("__static_fallback__").await?;
-            client.deliver_to_conversation(request).await.map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "deliver_to_conversation failed: {e}"
-                ))
-            })?;
-            return Ok(());
+            return self.deliver_via_static_fallback(request).await;
         }
 
         for gateway_id in gateway_ids {
@@ -567,10 +603,10 @@ impl GatewayRouterTrait for GatewayRouter {
                     gateway_id = %gateway_id,
                     "Failed to call Access Gateway push_message"
                 );
-                return Err(flare_server_core::error::FlareError::system(format!(
-                    "Failed to call access gateway: {}",
-                    e
-                )));
+                return Err(gateway_call_failure(
+                    format!("Failed to call access gateway: {}", e),
+                    &e,
+                ));
             }
             Err(_) => {
                 warn!(
@@ -578,7 +614,7 @@ impl GatewayRouterTrait for GatewayRouter {
                     timeout_secs = timeout_duration.as_secs(),
                     "Timeout calling Access Gateway push_message"
                 );
-                return Err(flare_server_core::error::FlareError::system(format!(
+                return Err(gateway_unavailable(format!(
                     "Timeout calling access gateway push_message (timeout: {}s)",
                     timeout_duration.as_secs()
                 )));
@@ -621,11 +657,8 @@ impl GatewayRouterTrait for GatewayRouter {
 
                 Ok(response)
             }
-            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
-                "push_event: {}",
-                e
-            ))),
-            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
+            Ok(Err(e)) => Err(gateway_call_failure(format!("push_event: {}", e), &e)),
+            Err(_) => Err(gateway_unavailable(format!(
                 "Timeout access gateway push_event ({}s)",
                 timeout_duration.as_secs()
             ))),
@@ -646,11 +679,11 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
-                "push_notification: {}",
-                e
-            ))),
-            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
+            Ok(Err(e)) => Err(gateway_call_failure(
+                format!("push_notification: {}", e),
+                &e,
+            )),
+            Err(_) => Err(gateway_unavailable(format!(
                 "Timeout access gateway push_notification ({}s)",
                 timeout_duration.as_secs()
             ))),
@@ -671,11 +704,8 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
-                "push_ack: {}",
-                e
-            ))),
-            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
+            Ok(Err(e)) => Err(gateway_call_failure(format!("push_ack: {}", e), &e)),
+            Err(_) => Err(gateway_unavailable(format!(
                 "Timeout access gateway push_ack ({}s)",
                 timeout_duration.as_secs()
             ))),
@@ -696,11 +726,8 @@ impl GatewayRouterTrait for GatewayRouter {
         .await
         {
             Ok(Ok(resp)) => Ok(resp.into_inner()),
-            Ok(Err(e)) => Err(flare_server_core::error::FlareError::system(format!(
-                "push_custom: {}",
-                e
-            ))),
-            Err(_) => Err(flare_server_core::error::FlareError::system(format!(
+            Ok(Err(e)) => Err(gateway_call_failure(format!("push_custom: {}", e), &e)),
+            Err(_) => Err(gateway_unavailable(format!(
                 "Timeout access gateway push_custom ({}s)",
                 timeout_duration.as_secs()
             ))),
@@ -889,5 +916,181 @@ mod realtime_broadcast_tests {
             peer_gateway_ids(instances.into_iter(), Some("gw-a")),
             vec!["gw-b".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod delivery_retry_tests {
+    //! Access Gateway 停机、重启窗口里的推送失败必须可重试（W6-S2 F4），否则 push-worker
+    //! 把它送进 DLQ，在线投递就此丢掉。
+
+    use super::*;
+    use flare_grpc_proto::access_gateway::access_gateway_server::{
+        AccessGateway, AccessGatewayServer,
+    };
+    use flare_grpc_proto::access_gateway::{GetUserConnectionsRequest, GetUserConnectionsResponse};
+    use tokio::sync::oneshot;
+    use tonic::{Request, Response, Status};
+
+    struct FakeGateway;
+
+    #[tonic::async_trait]
+    impl AccessGateway for FakeGateway {
+        async fn push_message(
+            &self,
+            _request: Request<PushMessageRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn push_event(
+            &self,
+            _request: Request<PushEventRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn push_notification(
+            &self,
+            _request: Request<PushNotificationRequest>,
+        ) -> std::result::Result<Response<PushNotificationResponse>, Status> {
+            Ok(Response::new(PushNotificationResponse::default()))
+        }
+        async fn push_ack(
+            &self,
+            _request: Request<PushAckRequest>,
+        ) -> std::result::Result<Response<PushAckResponse>, Status> {
+            Err(Status::invalid_argument("rejected by the gateway"))
+        }
+        async fn push_custom(
+            &self,
+            _request: Request<PushCustomRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn deliver_to_conversation(
+            &self,
+            _request: Request<DeliverToConversationRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Ok(Response::new(PushResponse::default()))
+        }
+        async fn get_user_connections(
+            &self,
+            _request: Request<GetUserConnectionsRequest>,
+        ) -> std::result::Result<Response<GetUserConnectionsResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn relay_realtime_control(
+            &self,
+            _request: Request<RelayRealtimeControlRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+    }
+
+    async fn start_gateway() -> (String, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stop_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(AccessGatewayServer::new(FakeGateway))
+                .serve_with_incoming_shutdown(
+                    tonic::transport::server::TcpIncoming::from(listener),
+                    async {
+                        let _ = stop_rx.await;
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        (format!("http://{addr}"), stop, task)
+    }
+
+    fn static_router(endpoint: String) -> Arc<GatewayRouter> {
+        GatewayRouter::new(GatewayRouterConfig {
+            connection_timeout_ms: 1_000,
+            static_fallback_endpoint: Some(endpoint),
+            ..Default::default()
+        })
+    }
+
+    async fn closed_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    }
+
+    #[tokio::test]
+    async fn conversation_delivery_to_a_stopped_gateway_is_retryable() {
+        let (endpoint, stop, task) = start_gateway().await;
+        let router = static_router(endpoint);
+        router
+            .deliver_via_static_fallback(Request::new(DeliverToConversationRequest::default()))
+            .await
+            .expect("gateway is up");
+
+        // 网关停机：池里的通道还在，这次调用在传输层失败。
+        let _ = stop.send(());
+        let _ = task.await;
+        let error = router
+            .deliver_via_static_fallback(Request::new(DeliverToConversationRequest::default()))
+            .await
+            .expect_err("gateway is down");
+        println!("stopped gateway: {error}");
+        assert!(error.is_retryable(), "{error}");
+        assert!(error.to_string().contains("deliver_to_conversation failed"));
+    }
+
+    #[tokio::test]
+    async fn a_gateway_that_never_answers_the_connect_is_retryable() {
+        let router = static_router(closed_endpoint().await);
+        let error = router
+            .deliver_via_static_fallback(Request::new(DeliverToConversationRequest::default()))
+            .await
+            .expect_err("nothing listens");
+        println!("closed port: {error}");
+        assert!(error.is_retryable(), "{error}");
+
+        let error = router
+            .route_push_notification("gw-1", PushNotificationRequest::default())
+            .await
+            .expect_err("nothing listens");
+        assert!(error.is_retryable(), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_gateway_rejection_stays_non_retryable() {
+        let (endpoint, stop, task) = start_gateway().await;
+        let router = static_router(endpoint);
+        router
+            .route_push_notification("gw-1", PushNotificationRequest::default())
+            .await
+            .expect("gateway is up");
+        let error = router
+            .route_push_ack("gw-1", PushAckRequest::default())
+            .await
+            .expect_err("the fake gateway rejects acks");
+        assert!(!error.is_retryable(), "{error}");
+        let _ = stop.send(());
+        let _ = task.await;
+    }
+
+    #[test]
+    fn transient_gateway_statuses() {
+        for status in [
+            Status::unavailable("shutting down"),
+            Status::cancelled("connection reset"),
+            Status::deadline_exceeded("slow"),
+            Status::resource_exhausted("busy"),
+            Status::aborted("retry"),
+        ] {
+            assert!(is_transient_gateway_status(&status), "{status:?}");
+        }
+        for status in [
+            Status::invalid_argument("bad"),
+            Status::permission_denied("no"),
+            Status::unauthenticated("no"),
+            Status::internal("bug"),
+        ] {
+            assert!(!is_transient_gateway_status(&status), "{status:?}");
+        }
     }
 }

@@ -51,7 +51,7 @@ impl DlqPublisher {
     }
 
     #[cfg(test)]
-    fn from_producer(producer: Arc<dyn Producer>, dlq_topic: impl Into<String>) -> Self {
+    pub(crate) fn from_producer(producer: Arc<dyn Producer>, dlq_topic: impl Into<String>) -> Self {
         Self {
             event_publisher: MqEventBus::new(producer),
             dlq_topic: dlq_topic.into(),
