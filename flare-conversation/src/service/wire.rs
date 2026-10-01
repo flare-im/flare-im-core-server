@@ -134,30 +134,26 @@ pub async fn initialize(
     let message_provider: Option<Arc<StorageReaderClient>> = {
         use flare_im_contracts::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
-
-        // 创建 Storage Reader 服务发现
-        let storage_discover =
-            flare_im_service_kit::discovery::create_discover(&storage_reader_service)
-                .await
-                .map_err(|e| {
-                    ErrorBuilder::new(
-                        ErrorCode::NetworkError,
-                        format!(
-                            "Failed to create storage reader service discover for {}: {}",
-                            storage_reader_service, e
-                        ),
-                    )
-                    .build_error()
-                })?;
-
-        let provider = if let Some(discover) = storage_discover {
-            let service_client = flare_server_core::discovery::ServiceClient::new(discover);
-            StorageReaderClient::with_service_client(service_client)
-        } else {
-            // Fallback: construct provider with service name; provider will try env direct connect
-            tracing::warn!("Storage Reader service discovery not configured, using env fallback");
-            StorageReaderClient::new(storage_reader_service)
-        };
+        let explicit_url = explicit_storage_reader_url(
+            std::env::var("CONVERSATION_STORAGE_READER_SERVICE_URL").ok(),
+        )?;
+        let discover_name = storage_reader_service.clone();
+        let provider =
+            build_message_provider(explicit_url, storage_reader_service, async move || {
+                flare_im_service_kit::discovery::create_discover(&discover_name)
+                    .await
+                    .map_err(|e| {
+                        ErrorBuilder::new(
+                            ErrorCode::NetworkError,
+                            format!(
+                                "Failed to create storage reader service discover for {}: {}",
+                                discover_name, e
+                            ),
+                        )
+                        .build_error()
+                    })
+            })
+            .await?;
 
         Some(Arc::new(provider))
     };
@@ -242,4 +238,143 @@ pub async fn initialize(
         read_receipt_consumer,
         conversation_ensure_consumer,
     })
+}
+
+/// `CONVERSATION_STORAGE_READER_SERVICE_URL`：Storage Reader 的显式地址。设了就直连、不做服务发现，
+/// 单容器 static 注册模式由 `release/supervise-core.toml` 写成容器内的监听地址。只收
+/// `http://`、`https://`；空值等于没设。
+fn explicit_storage_reader_url(raw: Option<String>) -> Result<Option<String>> {
+    let Some(url) = raw.map(|value| value.trim().to_string()) else {
+        return Ok(None);
+    };
+    if url.is_empty() {
+        return Ok(None);
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(Some(url))
+    } else {
+        Err(ErrorBuilder::new(
+            ErrorCode::ConfigurationError,
+            "CONVERSATION_STORAGE_READER_SERVICE_URL must be an http:// or https:// URL",
+        )
+        .build_error())
+    }
+}
+
+/// 消息提供者：有显式地址就直连（不调用 `discover`，也不打印回退告警）；否则按服务发现，
+/// 发现未配置时才告警并改走环境变量回退。
+async fn build_message_provider<D>(
+    explicit_url: Option<String>,
+    service_name: String,
+    discover: D,
+) -> Result<StorageReaderClient>
+where
+    D: AsyncFnOnce() -> Result<Option<flare_im_service_kit::ServiceDiscover>>,
+{
+    if let Some(url) = explicit_url {
+        tracing::info!(url = %url, "Storage Reader at its explicit address; service discovery not used");
+        return StorageReaderClient::with_static_endpoint(&url);
+    }
+    Ok(match discover().await? {
+        Some(discover) => StorageReaderClient::with_service_client(
+            flare_server_core::discovery::ServiceClient::new(discover),
+        ),
+        None => {
+            // Fallback: construct provider with service name; provider will try env direct connect
+            tracing::warn!("Storage Reader service discovery not configured, using env fallback");
+            StorageReaderClient::new(service_name)
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    const FALLBACK_WARNING: &str = "Storage Reader service discovery not configured";
+
+    /// 收集本线程上的日志输出。
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        (captured, tracing::subscriber::set_default(subscriber))
+    }
+
+    #[test]
+    fn explicit_url_accepts_http_schemes_and_treats_blank_as_unset() {
+        assert_eq!(explicit_storage_reader_url(None).unwrap(), None);
+        assert_eq!(
+            explicit_storage_reader_url(Some("  ".into())).unwrap(),
+            None
+        );
+        assert_eq!(
+            explicit_storage_reader_url(Some(" http://127.0.0.1:60083 ".into())).unwrap(),
+            Some("http://127.0.0.1:60083".to_string())
+        );
+        assert!(
+            explicit_storage_reader_url(Some("https://reader.internal:443".into()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(explicit_storage_reader_url(Some("127.0.0.1:60083".into())).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_url_skips_discovery_and_the_fallback_warning() {
+        let (captured, _guard) = capture();
+        let provider = build_message_provider(
+            Some("http://127.0.0.1:60083".into()),
+            "storage-reader".into(),
+            async || -> Result<Option<flare_im_service_kit::ServiceDiscover>> {
+                panic!("discovery must not run when the address is explicit")
+            },
+        )
+        .await
+        .unwrap();
+        // The lazy channel answers without discovery or a connection attempt.
+        assert!(provider.client().await.is_ok());
+        let logs = captured.text();
+        assert!(!logs.contains(FALLBACK_WARNING), "{logs}");
+        assert!(
+            logs.contains("Storage Reader at its explicit address"),
+            "{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_address_or_discovery_the_fallback_is_still_reported() {
+        let (captured, _guard) = capture();
+        build_message_provider(None, "storage-reader".into(), async || Ok(None))
+            .await
+            .unwrap();
+        let logs = captured.text();
+        assert!(logs.contains(FALLBACK_WARNING), "{logs}");
+    }
 }

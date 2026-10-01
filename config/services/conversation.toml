@@ -27,7 +27,9 @@ large_conversation_precise_unread_threshold = 500
 
 # 消息存储服务配置（可选）
 # 如果配置了，将启用消息同步功能
-# 通过服务发现自动获取服务地址
+# 通过服务发现自动获取服务地址；设了 CONVERSATION_STORAGE_READER_SERVICE_URL（http:// 或 https://）
+# 就直连该地址、不做服务发现（单容器 static 模式由 release/supervise-core.toml 写成
+# http://127.0.0.1:60083）
 
 # 会话引导配置
 recent_message_limit = 20  # 最近消息数量限制

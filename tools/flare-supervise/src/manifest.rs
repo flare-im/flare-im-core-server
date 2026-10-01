@@ -1124,4 +1124,35 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
             assert!(parent("configured").is_empty(), "{gateway}");
         }
     }
+
+    #[test]
+    fn conversation_reaches_the_in_container_storage_reader_in_static_mode() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        manifest.validate().unwrap();
+        let service = |name: &str| manifest.services.iter().find(|s| s.name == name).unwrap();
+        let reader = format!(
+            "http://{}",
+            service("storage-reader").tcp_health.as_deref().unwrap()
+        );
+        let url = |parent: Vec<(OsString, OsString)>| {
+            manifest
+                .child_environment(service("conversation"), parent)
+                .into_iter()
+                .find(|(key, _)| key == "CONVERSATION_STORAGE_READER_SERVICE_URL")
+                .map(|(_, value)| value.into_string().unwrap())
+        };
+        let mode = |value: &str| (OsString::from("FLARE_REGISTRY_MODE"), OsString::from(value));
+        assert_eq!(url(vec![mode("static")]), Some(reader));
+        // Configured mode keeps discovery; a value the parent sets still wins.
+        assert_eq!(url(vec![mode("configured")]), None);
+        let mine = (
+            OsString::from("CONVERSATION_STORAGE_READER_SERVICE_URL"),
+            OsString::from("http://10.0.0.7:60083"),
+        );
+        assert_eq!(
+            url(vec![mode("static"), mine]),
+            Some("http://10.0.0.7:60083".to_string())
+        );
+    }
 }

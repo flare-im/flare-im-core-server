@@ -347,6 +347,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::ServiceEndpoint,
     ),
     env(
+        "CONVERSATION_STORAGE_READER_SERVICE_URL",
+        EnvOwner::Conversation,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "CONVERSATION_UNREAD_PREFIX",
         EnvOwner::Conversation,
         EnvPurpose::Redis,

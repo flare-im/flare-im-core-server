@@ -30,6 +30,8 @@ const MAX_SYNC_FANOUT_CONCURRENCY: usize = 32;
 pub struct StorageReaderClient {
     service_name: String,
     service_client: Arc<Mutex<Option<ServiceClient>>>,
+    /// 显式地址的懒连接通道：有它就直连，不做服务发现，也不走环境变量回退。
+    static_channel: Option<Channel>,
 }
 
 fn grpc_call_failed(op: &str, status: tonic::Status) -> flare_server_core::error::FlareError {
@@ -47,6 +49,7 @@ impl StorageReaderClient {
         Self {
             service_name: service_name.into(),
             service_client: Arc::new(Mutex::new(None)),
+            static_channel: None,
         }
     }
 
@@ -55,10 +58,28 @@ impl StorageReaderClient {
         Self {
             service_name: String::new(),
             service_client: Arc::new(Mutex::new(Some(service_client))),
+            static_channel: None,
         }
     }
 
-    async fn client(&self) -> Result<StorageReaderServiceClient<Channel>> {
+    /// 直连显式地址（`http://` 或 `https://`）。通道懒连接，构造时不连下游。
+    pub fn with_static_endpoint(url: &str) -> Result<Self> {
+        let channel = Endpoint::from_shared(url.to_string())
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::ConfigurationError, "storage reader endpoint")
+            })?
+            .connect_lazy();
+        Ok(Self {
+            service_name: String::new(),
+            service_client: Arc::new(Mutex::new(None)),
+            static_channel: Some(channel),
+        })
+    }
+
+    pub(crate) async fn client(&self) -> Result<StorageReaderServiceClient<Channel>> {
+        if let Some(channel) = &self.static_channel {
+            return Ok(StorageReaderServiceClient::new(channel.clone()));
+        }
         let mut service_client_guard = self.service_client.lock().await;
         if service_client_guard.is_none() {
             if self.service_name.is_empty() {
@@ -206,6 +227,7 @@ impl MessageProvider for StorageReaderClient {
         let fanout_permits = Arc::new(Semaphore::new(MAX_SYNC_FANOUT_CONCURRENCY));
         let service_client = Arc::clone(&self.service_client);
         let storage_service_name = self.service_name.clone();
+        let static_channel = self.static_channel.clone();
         let ctx = ctx.clone();
 
         for conversation_id in conversation_ids {
@@ -218,6 +240,7 @@ impl MessageProvider for StorageReaderClient {
             let limit = limit_per_session;
             let service_client = Arc::clone(&service_client);
             let storage_service_name = storage_service_name.clone();
+            let static_channel = static_channel.clone();
             let task_ctx = ctx.clone();
 
             let permit = Arc::clone(&fanout_permits);
@@ -232,7 +255,10 @@ impl MessageProvider for StorageReaderClient {
                 // **横跨整个 gRPC 往返**——于是这段「并行扇出」实际是串行的：
                 // N 个会话就是 N 次顺序 RPC，而代码看起来是并发的。
                 // 拿到 Channel 就释放（Channel 自带连接池，clone 很便宜）。
-                let channel: Channel = {
+                // 显式地址直接用它的通道，不碰服务发现。
+                let channel: Channel = if let Some(channel) = static_channel {
+                    channel
+                } else {
                     let mut service_client_guard = service_client.lock().await;
                     if let Some(service_client) = service_client_guard.as_mut() {
                         match flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
