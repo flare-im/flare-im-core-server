@@ -264,6 +264,11 @@ async fn get_conversation_shape_and_downstream_rejections() {
             StatusCode::SERVICE_UNAVAILABLE,
             "ADMIN_UPSTREAM_UNAVAILABLE",
         ),
+        (
+            "slow",
+            StatusCode::GATEWAY_TIMEOUT,
+            "ADMIN_UPSTREAM_TIMEOUT",
+        ),
     ] {
         let path = format!("/api/v1/admin/conversations/{id}");
         let (status, body) = send(&h.router, admin_request("GET", &path, &h.token)).await;

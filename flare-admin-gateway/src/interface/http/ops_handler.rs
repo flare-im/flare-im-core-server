@@ -88,6 +88,9 @@ impl AdminCapability {
 /// 下游对已由网关验过的 admin 令牌回 UNAUTHENTICATED，只可能是部署问题（例如下游缺
 /// `FLARE_CONSOLE_PUBLIC_KEY`；Media 则是 Cell 签名密钥与公钥不配对），因此报 502 而不是让
 /// 调用方去重新登录。
+///
+/// 不可用（`UNAVAILABLE`、连不上）回 503，超时（`DEADLINE_EXCEEDED`）回 504，与 API Gateway
+/// 的 Media 映射一致；两者都可稍后重试。
 pub(super) fn admin_rpc_error(err: FlareError, failure_reason: &'static str) -> HttpApiError {
     let (code, reason) = match err.code() {
         Some(ErrorCode::PermissionDenied) => (ErrorCode::HttpForbidden, "FORBIDDEN"),
@@ -98,11 +101,17 @@ pub(super) fn admin_rpc_error(err: FlareError, failure_reason: &'static str) -> 
             (ErrorCode::HttpBadRequest, "BAD_REQUEST")
         }
         Some(
-            ErrorCode::ServiceUnavailable | ErrorCode::NetworkError | ErrorCode::OperationTimeout,
+            ErrorCode::ServiceUnavailable
+            | ErrorCode::NetworkError
+            | ErrorCode::NetworkUnreachable
+            | ErrorCode::NetworkConnectionLost,
         ) => (
             ErrorCode::HttpServiceUnavailable,
             "ADMIN_UPSTREAM_UNAVAILABLE",
         ),
+        Some(
+            ErrorCode::OperationTimeout | ErrorCode::NetworkTimeout | ErrorCode::ConnectionTimeout,
+        ) => (ErrorCode::HttpGatewayTimeout, "ADMIN_UPSTREAM_TIMEOUT"),
         Some(ErrorCode::AuthenticationFailed | ErrorCode::AuthenticationRequired) => (
             ErrorCode::HttpBadGateway,
             "ADMIN_UPSTREAM_REJECTED_ASSERTION",
@@ -217,6 +226,7 @@ fn audit_sensitive_read(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Conversation service is unavailable"),
+        (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_conversations(
@@ -258,6 +268,7 @@ pub async fn list_conversations(
         (status = 403, description = "Tenant header does not match the token"),
         (status = 404, description = "No such conversation in the token tenant"),
         (status = 503, description = "Conversation service is unavailable"),
+        (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn get_conversation(
@@ -298,6 +309,7 @@ pub async fn get_conversation(
         (status = 403, description = "Tenant header does not match the token"),
         (status = 404, description = "No such conversation in the token tenant"),
         (status = 503, description = "Conversation service is unavailable"),
+        (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_participants(
@@ -345,6 +357,7 @@ pub async fn list_participants(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Online service is unavailable"),
+        (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_user_devices(
@@ -382,6 +395,7 @@ pub async fn list_user_devices(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Online service is unavailable"),
+        (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn get_user_presence(
@@ -424,6 +438,7 @@ pub async fn get_user_presence(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing"),
         (status = 503, description = "Online service is unavailable"),
+        (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn kick_user(
@@ -492,6 +507,7 @@ pub async fn kick_user(
         (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or the device session belongs to another tenant"),
         (status = 404, description = "Device is not online"),
         (status = 503, description = "Online service is unavailable"),
+        (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn kick_device(
@@ -536,6 +552,7 @@ pub async fn kick_device(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing"),
         (status = 503, description = "Online service is unavailable"),
+        (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn kick_tenant(
@@ -572,6 +589,7 @@ pub async fn kick_tenant(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn get_tenant_runtime(
@@ -595,6 +613,7 @@ pub async fn get_tenant_runtime(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_tenant_capabilities(
@@ -621,6 +640,7 @@ pub async fn list_tenant_capabilities(
         (status = 401, description = "Admin token is missing or invalid"),
         (status = 403, description = "Tenant header does not match the token"),
         (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_plugins(
@@ -665,7 +685,7 @@ mod tests {
             (tonic::Code::NotFound, 404),
             (tonic::Code::InvalidArgument, 400),
             (tonic::Code::Unavailable, 503),
-            (tonic::Code::DeadlineExceeded, 503),
+            (tonic::Code::DeadlineExceeded, 504),
             (tonic::Code::Unauthenticated, 502),
             (tonic::Code::Internal, 500),
             (tonic::Code::FailedPrecondition, 500),
@@ -673,6 +693,52 @@ mod tests {
             let err = admin_rpc_error(through_grpc(code), "ADMIN_TEST_FAILED");
             assert!(!err.to_string().contains("id-123"), "{code:?}: {err}");
             assert_eq!(status_of(err), status, "{code:?}");
+        }
+    }
+
+    /// 与 API Gateway 的 `media_rpc_error` 同一口径：超时类都是 504 `ADMIN_UPSTREAM_TIMEOUT`，
+    /// 不可用类（含网关进程内未经 gRPC 往返的连接错误）都是 503。
+    #[tokio::test]
+    async fn timeouts_are_504_and_unavailability_503_like_the_api_gateway() {
+        async fn status_and_reason(err: FlareError) -> (u16, String) {
+            let response = admin_rpc_error(err, "ADMIN_TEST_FAILED").into_response();
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(!body.to_string().contains("id-123"), "{body}");
+            (
+                status,
+                body["reason"].as_str().unwrap_or_default().to_string(),
+            )
+        }
+        for code in [
+            ErrorCode::OperationTimeout,
+            ErrorCode::NetworkTimeout,
+            ErrorCode::ConnectionTimeout,
+        ] {
+            assert_eq!(
+                status_and_reason(FlareError::localized(code, "slow id-123")).await,
+                (504, "ADMIN_UPSTREAM_TIMEOUT".to_string()),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            status_and_reason(through_grpc(tonic::Code::DeadlineExceeded)).await,
+            (504, "ADMIN_UPSTREAM_TIMEOUT".to_string())
+        );
+        for code in [
+            ErrorCode::ServiceUnavailable,
+            ErrorCode::NetworkError,
+            ErrorCode::NetworkUnreachable,
+            ErrorCode::NetworkConnectionLost,
+        ] {
+            assert_eq!(
+                status_and_reason(FlareError::localized(code, "down id-123")).await,
+                (503, "ADMIN_UPSTREAM_UNAVAILABLE".to_string()),
+                "{code:?}"
+            );
         }
     }
 

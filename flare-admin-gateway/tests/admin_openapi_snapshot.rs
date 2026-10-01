@@ -140,6 +140,44 @@ async fn every_documented_operation_is_routed_behind_admin_auth() {
     assert!(h.recorder.calls().is_empty());
 }
 
+/// ADM-01 与 SEC-05 媒资路由都经 `admin_rpc_error` 映射下游失败：文档同时列出不可用 503 与
+/// 超时 504（与 API Gateway 的 Media 路由同一口径）。
+#[tokio::test]
+async fn downstream_routes_document_both_unavailable_and_timeout() {
+    let h = harness(true).await;
+    let (status, doc) = send(
+        &h.router,
+        request("GET", "/api-doc/openapi.json", None, None, &[]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let prefixes = [
+        "/api/v1/admin/conversations",
+        "/api/v1/admin/users/",
+        "/api/v1/admin/tenant/",
+        "/api/v1/admin/capabilities/tenant",
+        "/api/v1/admin/plugins",
+        "/api/v1/admin/medias/",
+    ];
+    let mut checked = 0;
+    for (path, item) in doc["paths"].as_object().expect("paths object") {
+        if !prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+            continue;
+        }
+        for (method, operation) in item.as_object().expect("path item") {
+            let responses = operation["responses"].as_object().expect("responses");
+            for code in ["503", "504"] {
+                assert!(
+                    responses.contains_key(code),
+                    "{method} {path} does not document {code}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 15);
+}
+
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 /// 文档里列出的操作：README 入口清单的 `METHOD /api/v1/admin/...` 行。

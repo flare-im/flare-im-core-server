@@ -455,6 +455,12 @@ async fn media_rejections_are_typed_and_never_echo_media_text() {
             StatusCode::SERVICE_UNAVAILABLE,
             "ADMIN_UPSTREAM_UNAVAILABLE",
         ),
+        // 超时与 API Gateway 的 Media 映射同为 504。
+        (
+            "slow",
+            StatusCode::GATEWAY_TIMEOUT,
+            "ADMIN_UPSTREAM_TIMEOUT",
+        ),
         (
             "rejected",
             StatusCode::BAD_GATEWAY,
@@ -465,6 +471,7 @@ async fn media_rejections_are_typed_and_never_echo_media_text() {
     let limit_of = |key: &str| match key {
         "denied" => 403,
         "down" => 503,
+        "slow" => 504,
         "rejected" => 401,
         _ => 500,
     };

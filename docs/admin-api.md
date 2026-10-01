@@ -46,7 +46,8 @@ Success is `{"code": 0, "data": {...}}`. Errors are `{"code": <non-zero>, "reaso
 | `PERMISSION_DENIED` (the downstream refused the tenant scope) | 403 | `FORBIDDEN` |
 | `NOT_FOUND` (a conversation of another tenant answers the same as a missing one) | 404 | `NOT_FOUND` |
 | `INVALID_ARGUMENT` (bad cursor, blank ID) | 400 | `BAD_REQUEST` |
-| `UNAVAILABLE`, `DEADLINE_EXCEEDED`, connection failure | 503 | `ADMIN_UPSTREAM_UNAVAILABLE` |
+| `UNAVAILABLE`, connection failure | 503 | `ADMIN_UPSTREAM_UNAVAILABLE` |
+| `DEADLINE_EXCEEDED` (the same as API Gateway's Media routes, which answer 504 `MEDIA_TIMEOUT`) | 504 | `ADMIN_UPSTREAM_TIMEOUT` |
 | `UNAUTHENTICATED` for an assertion the gateway already verified (deployment error, e.g. the downstream lacks `FLARE_CONSOLE_PUBLIC_KEY`, or Media's `FLARE_INTERNAL_CTX_PUBLIC_KEY` does not pair with the gateway's private key) | 502 | `ADMIN_UPSTREAM_REJECTED_ASSERTION` |
 | Anything else | 500 | a fixed per-route reason such as `ADMIN_CONVERSATION_LIST_FAILED` |
 | Capability downstream disabled | 503 | `ADMIN_CAPABILITY_DISABLED` |

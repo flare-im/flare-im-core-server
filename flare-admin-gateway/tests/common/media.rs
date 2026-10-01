@@ -87,6 +87,7 @@ fn failure(key: &str) -> Option<Status> {
     match key {
         "denied" => Some(Status::permission_denied(detail)),
         "down" => Some(Status::unavailable(detail)),
+        "slow" => Some(Status::deadline_exceeded(detail)),
         "missing" => Some(Status::not_found(detail)),
         "unsupported" => Some(Status::unknown(detail)),
         "rejected" => Some(Status::unauthenticated(detail)),
@@ -98,6 +99,7 @@ fn cleanup_failure(limit: u32) -> Option<Status> {
     failure(match limit {
         403 => "denied",
         503 => "down",
+        504 => "slow",
         500 => "unsupported",
         401 => "rejected",
         _ => "",

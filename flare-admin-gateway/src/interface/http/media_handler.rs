@@ -110,6 +110,7 @@ pub struct AdminMediaObjects {
         (status = 422, description = "Body is not a JSON object with both limit and dry_run"),
         (status = 500, description = "Media failed, or the internal identity signer is not configured"),
         (status = 503, description = "Media service is unavailable"),
+        (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn cleanup_orphaned_assets(
     AdminMediaIdentity(caller): AdminMediaIdentity,
@@ -157,6 +158,7 @@ pub async fn cleanup_orphaned_assets(
         (status = 422, description = "Body is not a valid SetObjectAclRequest"),
         (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented); never reports a successful no-op"),
         (status = 503, description = "Media service is unavailable"),
+        (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn set_object_acl(
     AdminMediaIdentity(caller): AdminMediaIdentity,
@@ -185,6 +187,7 @@ pub async fn set_object_acl(
         (status = 403, description = "Tenant header mismatch, or Media refused the tenant admin or the bucket"),
         (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented); never returns a fabricated empty inventory"),
         (status = 503, description = "Media service is unavailable"),
+        (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn list_objects(
     AdminMediaIdentity(caller): AdminMediaIdentity,
@@ -231,6 +234,7 @@ pub async fn list_objects(
         (status = 403, description = "Tenant header mismatch, or the bucket is not the one Media serves"),
         (status = 500, description = "Media failed, or the internal identity signer is not configured"),
         (status = 503, description = "Media service is unavailable"),
+        (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn describe_bucket(
     AdminMediaIdentity(caller): AdminMediaIdentity,

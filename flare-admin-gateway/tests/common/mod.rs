@@ -151,6 +151,7 @@ fn downstream_failure(key: &str) -> Option<Status> {
         "missing" | "d-gone" => Some(Status::not_found("not here: id-secret-1")),
         "denied" | "d-foreign" => Some(Status::permission_denied("tenant id-secret-1")),
         "down" | "d-down" => Some(Status::unavailable("backend id-secret-1")),
+        "slow" => Some(Status::deadline_exceeded("backend id-secret-1")),
         _ => None,
     }
 }
