@@ -231,8 +231,12 @@ impl Drop for Fixture {
     }
 }
 
-fn ctx(tenant: &str, user: &str) -> Context {
-    Context::root().with_tenant_id(tenant).with_user_id(user)
+/// 网关签给终端用户的身份：签名层同时填 `user_id` 与 `actor_type=User` 的 actor。
+pub(crate) fn ctx(tenant: &str, user: &str) -> Context {
+    Context::root()
+        .with_tenant_id(tenant)
+        .with_user_id(user)
+        .with_actor(flare_server_core::context::ActorContext::new(user))
 }
 
 #[tokio::test]
@@ -452,6 +456,178 @@ async fn multipart_requires_session_tenant_and_owner_before_io_or_abort() {
         .unwrap();
     assert!(f.service.session_dir("../outside").is_err());
     assert!(f.service.session_dir("/tmp").is_err());
+}
+
+/// 签名层给 TenantAdmin 也填 `user_id`（员工 id）。员工、服务、系统主体的数字 id 与 IM 用户
+/// 号段可能相同，凭同号不能成为用户媒资的属主：读不到私有文件、删不了文件、碰不到上传会话、
+/// 也不能以该用户名义上传。公开文件仍按租户可读。
+#[tokio::test]
+async fn employee_and_service_principals_never_count_as_the_im_owner() {
+    use flare_server_core::context::{ActorContext, ActorType};
+    let f = Fixture::new();
+    let owner = ctx("tenant-a", "1001");
+    let data = b"owner bytes";
+    let saved = f
+        .service
+        .store_media_file(
+            &owner,
+            UploadContext {
+                tenant_id: "tenant-a",
+                file_id: "private-file",
+                file_name: "file.txt",
+                mime_type: "text/plain",
+                file_size: data.len() as i64,
+                payload: data,
+                file_category: "file".to_string(),
+                user_id: "1001",
+                trace_id: None,
+                namespace: None,
+                business_tag: None,
+                metadata: HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.owner_id.as_deref(), Some("1001"));
+    let session = f
+        .service
+        .initiate_multipart_upload(
+            &owner,
+            MultipartUploadInit {
+                file_name: "x.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                file_type: "file".to_string(),
+                file_size: Some(1),
+                chunk_size: 256 * 1024,
+                user_id: "1001".to_string(),
+                namespace: None,
+                business_tag: None,
+                trace_id: None,
+                metadata: HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // 同租户、同数字 id，但签名主体不是 IM 用户。
+    let impostor = |actor_type: ActorType| {
+        Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("1001")
+            .with_actor(ActorContext::new("1001").with_type(actor_type))
+    };
+    for actor_type in [
+        ActorType::TenantAdmin,
+        ActorType::Service,
+        ActorType::System,
+    ] {
+        let as_owner = impostor(actor_type);
+        assert_eq!(
+            f.service
+                .get_metadata(&as_owner, "private-file")
+                .await
+                .unwrap_err()
+                .code(),
+            Some(ErrorCode::PermissionDenied),
+            "{actor_type:?}"
+        );
+        assert!(
+            f.service
+                .create_presigned_url(&as_owner, "private-file", 60)
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .download_local_file(&as_owner, "private-file")
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .delete_media_file(&as_owner, "private-file")
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .abort_multipart_upload(&as_owner, &session.upload_id)
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .upload_multipart_chunk(
+                    &as_owner,
+                    MultipartChunkPayload {
+                        upload_id: session.upload_id.clone(),
+                        chunk_index: 0,
+                        bytes: vec![1],
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            f.service
+                .store_media_file(
+                    &as_owner,
+                    UploadContext {
+                        tenant_id: "tenant-a",
+                        file_id: "forged",
+                        file_name: "file.txt",
+                        mime_type: "text/plain",
+                        file_size: 1,
+                        payload: b"x",
+                        file_category: "file".to_string(),
+                        user_id: "1001",
+                        trace_id: None,
+                        namespace: None,
+                        business_tag: None,
+                        metadata: HashMap::new(),
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            Some(ErrorCode::PermissionDenied),
+            "{actor_type:?}"
+        );
+    }
+    // A User actor whose signed id differs from the context user is not the owner either.
+    let mismatched = Context::root()
+        .with_tenant_id("tenant-a")
+        .with_user_id("1001")
+        .with_actor(ActorContext::new("2002"));
+    assert!(
+        f.service
+            .get_metadata(&mismatched, "private-file")
+            .await
+            .is_err()
+    );
+    // The owner keeps every right; the session and file are untouched by the refusals.
+    assert!(f.service.get_metadata(&owner, "private-file").await.is_ok());
+    assert!(
+        f.sessions
+            .get_session(&session.upload_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Public files stay readable by any principal of the tenant, including administrators.
+    let mut public = f
+        .service
+        .get_metadata(&owner, "private-file")
+        .await
+        .unwrap();
+    public.access_type = FileAccessType::Public;
+    f.metadata.save_metadata(&owner, &public).await.unwrap();
+    assert!(
+        f.service
+            .get_metadata(&impostor(ActorType::TenantAdmin), "private-file")
+            .await
+            .is_ok()
+    );
 }
 
 #[test]

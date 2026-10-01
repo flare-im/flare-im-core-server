@@ -204,6 +204,58 @@ async fn signed_caller_of_another_tenant_or_user_cannot_read_even_with_spoofed_m
     );
 }
 
+/// 签名层给 TenantAdmin 填了 `user_id = actor_id`（员工 id）。员工 id 与 IM 用户 id 同号时，
+/// 修复前员工能以属主身份读、删用户的私有文件。服务与系统主体同样不算属主。
+#[tokio::test]
+async fn employee_service_or_system_ids_never_act_as_the_im_owner() {
+    let h = serve().await;
+    let file_id = seed_private_file(&h).await;
+    for actor in [
+        SignedActorType::TenantAdmin,
+        SignedActorType::Service,
+        SignedActorType::System,
+    ] {
+        let impostor = token(&h.signer, actor, "tenant-a", "owner");
+        let get = GetFileInfoRequest {
+            file_id: file_id.clone(),
+        };
+        assert_eq!(
+            file_info_code(&h, raw(get, Some(&impostor), "tenant-a", "owner")).await,
+            Code::PermissionDenied,
+            "{actor:?}"
+        );
+        let delete = raw(
+            DeleteFileRequest {
+                file_id: file_id.clone(),
+                ..Default::default()
+            },
+            Some(&impostor),
+            "tenant-a",
+            "owner",
+        );
+        let code = MediaServiceClient::new(h.channel.clone())
+            .delete_file(delete)
+            .await
+            .map(|_| Code::Ok)
+            .unwrap_or_else(|status| status.code());
+        assert_eq!(code, Code::PermissionDenied, "{actor:?}");
+    }
+    let owner = token(&h.signer, SignedActorType::User, "tenant-a", "owner");
+    assert_eq!(
+        file_info_code(
+            &h,
+            raw(
+                GetFileInfoRequest { file_id },
+                Some(&owner),
+                "tenant-a",
+                "owner"
+            )
+        )
+        .await,
+        Code::Ok
+    );
+}
+
 #[tokio::test]
 async fn core_client_wrapper_uploads_and_reads_back_as_the_signed_owner() {
     let h = serve().await;

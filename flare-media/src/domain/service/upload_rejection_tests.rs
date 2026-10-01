@@ -73,7 +73,7 @@ impl Drop for Fixture {
 }
 
 fn ctx(tenant: &str, user: &str) -> Context {
-    Context::root().with_tenant_id(tenant).with_user_id(user)
+    super::isolation_tests::ctx(tenant, user)
 }
 
 #[tokio::test]

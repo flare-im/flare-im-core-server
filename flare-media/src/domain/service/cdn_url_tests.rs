@@ -104,9 +104,7 @@ impl Drop for Fixture {
 }
 
 fn owner() -> Context {
-    Context::root()
-        .with_tenant_id("tenant-a")
-        .with_user_id("owner")
+    super::isolation_tests::ctx("tenant-a", "owner")
 }
 
 fn assert_signed(url: &str, key: &str) {

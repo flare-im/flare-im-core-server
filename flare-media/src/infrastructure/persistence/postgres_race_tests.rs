@@ -21,7 +21,7 @@ const TENANT: &str = "race-tenant";
 const OWNER: &str = "race-owner";
 
 fn ctx() -> Context {
-    Context::root().with_tenant_id(TENANT).with_user_id(OWNER)
+    crate::domain::service::isolation_tests::ctx(TENANT, OWNER)
 }
 
 fn scope() -> MediaReferenceScope {
