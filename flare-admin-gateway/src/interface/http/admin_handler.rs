@@ -6,7 +6,6 @@ use axum::{
 use flare_core_base::context::keys;
 use flare_server_core::{
     AuthenticatedPrincipal,
-    auth::AuthProviderMode,
     context::Ctx,
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
@@ -125,14 +124,29 @@ pub struct AdminGrpcConfigSnapshot {
     pub request_timeout_secs: u64,
 }
 
+/// Admin Gateway 实际使用的认证方式。
+///
+/// 管理请求只经 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言（EdDSA，issuer
+/// `flare-im-console`，audience `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒）。
+/// `FLARE_ADMIN_GATEWAY_AUTH_*`（`core_jwt` / `http_hook`）虽仍随网关设置一起解析，但本服务
+/// 从不使用，所以快照不再转述它们。四个 `hook_*` 字段只为保持 Control 已登记的响应结构，
+/// 取值固定为「没有认证 hook」。
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminAuthConfigSnapshot {
+    /// 固定为 `console_ed25519`。
     pub mode: String,
+    /// 不调用认证 hook，固定为 `null`。
     pub hook_url: Option<String>,
+    /// 不调用认证 hook，固定为 `0`。
     pub hook_timeout_ms: u64,
+    /// 不调用认证 hook，固定为空串。
     pub hook_secret_header: String,
+    /// 不调用认证 hook，固定为 `null`。
     pub hook_secret_configured: Option<String>,
 }
+
+/// `gateway/config` 报告的认证方式：Console Ed25519 公钥验签。
+const ADMIN_AUTH_MODE: &str = "console_ed25519";
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminRateLimitConfigSnapshot {
@@ -856,17 +870,13 @@ fn build_gateway_config_snapshot(
             connect_timeout_secs: settings.grpc.connect_timeout_secs,
             request_timeout_secs: settings.grpc.request_timeout_secs,
         },
+        // 认证方式由 admin_auth_middleware 决定，与 settings.auth 无关。
         auth: AdminAuthConfigSnapshot {
-            mode: auth_mode_label(settings.auth.mode).to_string(),
-            hook_url: settings.auth.hook_url.clone(),
-            hook_timeout_ms: settings.auth.hook_timeout_ms,
-            hook_secret_header: settings.auth.hook_secret_header.clone(),
-            hook_secret_configured: settings
-                .auth
-                .hook_secret
-                .as_deref()
-                .filter(|secret| !secret.trim().is_empty())
-                .map(|_| "<redacted>".to_string()),
+            mode: ADMIN_AUTH_MODE.to_string(),
+            hook_url: None,
+            hook_timeout_ms: 0,
+            hook_secret_header: String::new(),
+            hook_secret_configured: None,
         },
         rate_limit: AdminRateLimitConfigSnapshot {
             enabled: settings.rate_limit.enabled,
@@ -878,14 +888,8 @@ fn build_gateway_config_snapshot(
             service_name: settings.tracing.service_name.clone(),
             sample_rate: settings.tracing.sample_rate,
         },
-        redacted_fields: vec!["auth.hook_secret".to_string()],
-    }
-}
-
-fn auth_mode_label(mode: AuthProviderMode) -> &'static str {
-    match mode {
-        AuthProviderMode::CoreJwt => "core_jwt",
-        AuthProviderMode::HttpHook => "http_hook",
+        // 快照不含任何密钥材料，没有需要打码的字段。
+        redacted_fields: Vec::new(),
     }
 }
 
@@ -977,22 +981,23 @@ mod tests {
     }
 
     #[test]
-    fn admin_config_snapshot_redacts_auth_secret() {
-        let settings = test_settings();
+    fn admin_config_snapshot_reports_console_ed25519_whatever_the_unused_auth_settings() {
+        // 网关设置里的 auth 是 API Gateway 那套（这里故意配成 http_hook 带 URL 与密钥），
+        // Admin Gateway 不用它，快照也不能转述它。
+        let hook = test_settings();
+        let mut core_jwt = test_settings();
+        core_jwt.auth = AuthProviderConfig::default();
+        assert_eq!(core_jwt.auth.mode, AuthProviderMode::CoreJwt);
 
-        let snapshot = build_gateway_config_snapshot(&settings, None);
-
-        assert_eq!(snapshot.auth.mode, "http_hook");
-        assert_eq!(
-            snapshot.auth.hook_secret_configured.as_deref(),
-            Some("<redacted>")
-        );
-        assert!(
-            snapshot
-                .redacted_fields
-                .iter()
-                .any(|field| field == "auth.hook_secret")
-        );
+        for settings in [&hook, &core_jwt] {
+            let snapshot = build_gateway_config_snapshot(settings, None);
+            assert_eq!(snapshot.auth.mode, "console_ed25519");
+            assert_eq!(snapshot.auth.hook_url, None);
+            assert_eq!(snapshot.auth.hook_timeout_ms, 0);
+            assert_eq!(snapshot.auth.hook_secret_header, "");
+            assert_eq!(snapshot.auth.hook_secret_configured, None);
+            assert!(snapshot.redacted_fields.is_empty());
+        }
     }
 
     #[test]
