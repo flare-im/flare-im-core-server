@@ -116,24 +116,20 @@ impl KickDispatcher {
     }
 
     /// 等到有名额后在独立任务里执行信号，返回任务句柄（结果为关闭的连接数）。
+    ///
+    /// 名额池正常不会被关闭。万一被关闭，不 panic 也不丢信号：在调用方任务里串行执行，
+    /// 由订阅循环本身限流，句柄在返回时已完成。
     async fn dispatch(&self, signal: KickSignal) -> tokio::task::JoinHandle<usize> {
-        let permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("kick semaphore is never closed");
         let connection_manager = self.connection_manager.clone();
         let kicker = self.kicker.clone();
+        let Ok(permit) = self.permits.clone().acquire_owned().await else {
+            warn!("kick limiter closed; executing kick signal inline");
+            let closed = kicker.kick(connection_manager.as_ref(), &signal).await;
+            return tokio::spawn(std::future::ready(closed));
+        };
         tokio::spawn(async move {
             let _permit = permit;
-            let closed = kicker
-                .close_matching(connection_manager.as_ref(), &signal)
-                .await;
-            if closed > 0 {
-                info!(tenant_id = %signal.tenant_id, user_id = %signal.user_id, reason = kick_reason(&signal), closed, "revoked user: force-closed live connections on this node");
-            }
-            closed
+            kicker.kick(connection_manager.as_ref(), &signal).await
         })
     }
 }
@@ -151,6 +147,19 @@ impl Kicker {
             send_timeout,
             in_flight: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// 执行一个踢线信号并记录结果；返回关闭数。
+    async fn kick(
+        &self,
+        connection_manager: &dyn ConnectionManagerTrait,
+        signal: &KickSignal,
+    ) -> usize {
+        let closed = self.close_matching(connection_manager, signal).await;
+        if closed > 0 {
+            info!(tenant_id = %signal.tenant_id, user_id = %signal.user_id, reason = kick_reason(signal), closed, "revoked user: force-closed live connections on this node");
+        }
+        closed
     }
 
     /// 关闭本节点上与信号匹配的连接，每条先下发带原因的 KICKED 帧；返回关闭数。
@@ -619,5 +628,33 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200));
         assert!(stuck.is_finished());
         assert_eq!(next.await.unwrap(), 0);
+    }
+
+    /// 名额池被关闭时不 panic：信号改在订阅循环里串行执行，连接照样收到 KICKED 并被移除，
+    /// 后一个信号等前一个做完，不会无界地起任务。
+    #[tokio::test]
+    async fn a_closed_limiter_still_kicks_one_signal_at_a_time() {
+        const TIMEOUT: Duration = Duration::from_millis(300);
+        let manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
+        connected(&manager, "stuck", "tenant-a", "slow-user", Peer::Stuck).await;
+        let reader = connected(&manager, "reader", "tenant-a", "u1", Peer::Reads).await;
+        let dispatcher = KickDispatcher::new(manager.clone(), 8, TIMEOUT);
+        dispatcher.permits.close();
+
+        let started = std::time::Instant::now();
+        let stuck = dispatcher.dispatch(tenant_kick("slow-user")).await;
+        assert!(started.elapsed() >= TIMEOUT, "ran inline before returning");
+        assert_eq!(stuck.await.unwrap(), 1);
+        assert!(manager.get_connection("stuck").is_none());
+
+        assert_eq!(
+            dispatcher.dispatch(tenant_kick("u1")).await.await.unwrap(),
+            1
+        );
+        assert_eq!(
+            kicked_message(&reader.lock().unwrap()[0]),
+            "TENANT_UNAVAILABLE"
+        );
+        assert!(manager.get_connection("reader").is_none());
     }
 }
