@@ -128,8 +128,8 @@ pub struct AdminGrpcConfigSnapshot {
 ///
 /// 管理请求只经 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言（EdDSA，issuer
 /// `flare-im-console`，audience `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒）。
-/// `FLARE_ADMIN_GATEWAY_AUTH_*`（`core_jwt` / `http_hook`）虽仍随网关设置一起解析，但本服务
-/// 从不使用，所以快照不再转述它们。四个 `hook_*` 字段只为保持 Control 已登记的响应结构，
+/// `FLARE_ADMIN_GATEWAY_AUTH_*`（`core_jwt` / `http_hook`）在 Admin 作用域下不读取（出现时启动
+/// 日志 WARN），快照也不转述它们。四个 `hook_*` 字段只为保持 Control 已登记的响应结构，
 /// 取值固定为「没有认证 hook」。
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminAuthConfigSnapshot {
@@ -148,10 +148,17 @@ pub struct AdminAuthConfigSnapshot {
 /// `gateway/config` 报告的认证方式：Console Ed25519 公钥验签。
 const ADMIN_AUTH_MODE: &str = "console_ed25519";
 
+/// Admin Gateway 的请求限流：它不做限流，所以固定报告关闭。
+///
+/// `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*` 在 Admin 作用域下不读取（出现时启动日志 WARN）；三个
+/// 字段只为保持 Control 已登记的响应结构。
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminRateLimitConfigSnapshot {
+    /// 固定为 `false`。
     pub enabled: bool,
+    /// 不限流，固定为 `0`。
     pub requests_per_second: u32,
+    /// 不限流，固定为 `0`。
     pub burst_capacity: u32,
 }
 
@@ -891,10 +898,11 @@ fn build_gateway_config_snapshot(
             hook_secret_header: String::new(),
             hook_secret_configured: None,
         },
+        // 网关没有限流层：不论设置如何都如实报告「未限流」。
         rate_limit: AdminRateLimitConfigSnapshot {
-            enabled: settings.rate_limit.enabled,
-            requests_per_second: settings.rate_limit.requests_per_second,
-            burst_capacity: settings.rate_limit.burst_capacity,
+            enabled: false,
+            requests_per_second: 0,
+            burst_capacity: 0,
         },
         tracing: AdminTracingConfigSnapshot {
             enabled: settings.tracing.enabled,
@@ -1011,6 +1019,17 @@ mod tests {
             assert_eq!(snapshot.auth.hook_secret_configured, None);
             assert!(snapshot.redacted_fields.is_empty());
         }
+    }
+
+    #[test]
+    fn admin_config_snapshot_reports_no_rate_limit_whatever_the_settings() {
+        // Admin Gateway 没有限流层：设置里开着 1000/2000 也不能报成在限流。
+        let settings = test_settings();
+        assert!(settings.rate_limit.enabled);
+        let snapshot = build_gateway_config_snapshot(&settings, None);
+        assert!(!snapshot.rate_limit.enabled);
+        assert_eq!(snapshot.rate_limit.requests_per_second, 0);
+        assert_eq!(snapshot.rate_limit.burst_capacity, 0);
     }
 
     #[test]

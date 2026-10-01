@@ -66,7 +66,7 @@ x-tenant-id: tenant-1
 - 主体必须是员工（投影 worker 与调度器主体被拒绝），令牌只含一个具体租户（`*` 被拒绝）；
 - `x-tenant-id` 恰好出现一次，且等于令牌租户。
 
-网关用 `FLARE_CONSOLE_PUBLIC_KEY` 验签，启动时缺失即失败。验签后删掉请求里所有身份头，再按令牌写回主体与租户。令牌缺失、格式错误、过期或由其他密钥签发时回 401；租户不一致回 403。
+网关用 `FLARE_CONSOLE_PUBLIC_KEY` 验签，启动时缺失即失败。验签后删掉请求里所有身份头，再按令牌写回主体与租户。令牌缺失、格式错误、过期或由其他密钥签发时回 401；租户不一致回 403。网关不读 `FLARE_ADMIN_GATEWAY_AUTH_*`（没有 `core_jwt`、`http_hook`），也不读 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`（网关不做限流）；配了其中任何一个，启动日志记一条带变量名的 WARN，照常启动。
 
 下游调用不带调用方自报的身份。会话、在线、能力与插件路由把同一枚令牌原样转发，由下游服务再验一次。Media 不认这枚令牌：媒资路由用 `FLARE_INTERNAL_CTX_PRIVATE_KEY` 把该员工签成令牌租户的 `tenant_admin`，作为 Cell 内部上下文发给 Media；没有这把私钥时媒资路由回 500 `MEDIA_SIGNER_UNAVAILABLE`，不会调用 Media。详见 [docs/admin-api.md](../docs/admin-api.md) 与 [SEC02](../docs/SEC02-console-control-auth.md)。
 

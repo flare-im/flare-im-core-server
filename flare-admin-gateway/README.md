@@ -66,7 +66,7 @@ x-tenant-id: tenant-1
 - the subject is an employee (the projection worker and scheduler subjects are refused), and the token names one concrete tenant (`*` is refused);
 - `x-tenant-id` appears exactly once and equals the token tenant.
 
-The gateway verifies the assertion with `FLARE_CONSOLE_PUBLIC_KEY`, which it requires at startup. It then drops every identity header from the request and puts back the subject and tenant from the token. A missing, malformed, expired or foreign-signed token is 401; a tenant mismatch is 403.
+The gateway verifies the assertion with `FLARE_CONSOLE_PUBLIC_KEY`, which it requires at startup. It then drops every identity header from the request and puts back the subject and tenant from the token. A missing, malformed, expired or foreign-signed token is 401; a tenant mismatch is 403. The gateway does not read `FLARE_ADMIN_GATEWAY_AUTH_*` (no `core_jwt` or `http_hook`) or `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*` (it applies no rate limit); if one is set, startup logs a WARN with the variable name and goes on.
 
 Downstream calls carry no caller-supplied identity. The conversation, online, capability and plugin routes forward the same assertion unchanged, and those services verify it again. Media does not accept the assertion: the media routes sign the employee as `tenant_admin` of the token tenant in a Cell internal context, using `FLARE_INTERNAL_CTX_PRIVATE_KEY`. Without that key they answer 500 `MEDIA_SIGNER_UNAVAILABLE` and never call Media. See [docs/admin-api.md](../docs/admin-api.md) and [SEC02](../docs/SEC02-console-control-auth.md).
 

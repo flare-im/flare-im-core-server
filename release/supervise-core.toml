@@ -209,8 +209,6 @@ inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
 inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 required_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50051"
-[services.environment]
-FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE = "false"
 # FLARE_REGISTRY_MODE=static has no discovery: name the listeners of this
 # container directly instead of trying discovery and falling back, with a WARN,
 # once per downstream. Values the parent sets still win; configured mode keeps

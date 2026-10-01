@@ -50,9 +50,11 @@ pub struct GatewaySettings {
     pub server: ServerConfig,
     /// gRPC 客户端配置
     pub grpc: GatewayGrpcConfig,
-    /// 认证配置
+    /// 认证配置。只有 API 作用域读取 `*_AUTH_*`；Admin 作用域恒为默认值，见
+    /// [`ignored_admin_settings`]。
     pub auth: AuthProviderConfig,
-    /// 限流配置
+    /// 限流配置。只有 API 作用域读取 `*_RATE_LIMIT_*`；Admin 作用域恒为
+    /// [`RateLimitConfig::not_applied`]。
     pub rate_limit: RateLimitConfig,
     /// 追踪配置
     pub tracing: TracingConfig,
@@ -80,6 +82,17 @@ pub struct RateLimitConfig {
     pub requests_per_second: u32,
     /// 突发容量
     pub burst_capacity: u32,
+}
+
+impl RateLimitConfig {
+    /// 不做请求限流的网关（Admin Gateway）报告的取值：关闭，速率与突发都是 0。
+    pub fn not_applied() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: 0,
+            burst_capacity: 0,
+        }
+    }
 }
 
 /// 追踪配置
@@ -194,34 +207,25 @@ impl GatewaySettings {
             request_timeout_secs: parse_env(&mut source, scope, "GRPC_REQUEST_TIMEOUT_SECS", "10")?,
         };
 
-        let auth = AuthProviderConfig {
-            mode: parse_env(&mut source, scope, "AUTH_MODE", "core_jwt")?,
-            hook_url: env_value(&mut source, scope, "AUTH_HOOK_URL")
-                .filter(|value| !value.trim().is_empty()),
-            hook_timeout_ms: parse_env(&mut source, scope, "AUTH_HOOK_TIMEOUT_MS", "800")?,
-            hook_secret_header: env_or(
-                &mut source,
-                scope,
-                "AUTH_HOOK_SECRET_HEADER",
-                "x-flare-auth-hook-secret",
+        let (auth, rate_limit) = match scope {
+            GatewayEnvScope::Api => (
+                parse_auth(&mut source, scope)?,
+                parse_rate_limit(&mut source, scope)?,
             ),
-            hook_secret: env_value(&mut source, scope, "AUTH_HOOK_SECRET")
-                .filter(|value| !value.trim().is_empty()),
-            hook_issue_url: env_value(&mut source, scope, "AUTH_HOOK_ISSUE_URL")
-                .filter(|value| !value.trim().is_empty()),
-            dev_issue: parse_env(&mut source, scope, "AUTH_DEV_ISSUE", "false")?,
-            app_credentials: match env_value(&mut source, scope, "AUTH_APP_CREDENTIALS") {
-                Some(raw) if !raw.trim().is_empty() => AppCredential::parse_list(&raw)
-                    .map_err(|err| config_error(format!("AUTH_APP_CREDENTIALS: {err}")))?,
-                _ => Vec::new(),
-            },
-            refresh_grace_secs: parse_env(&mut source, scope, "AUTH_REFRESH_GRACE_SECS", "604800")?,
-        };
-
-        let rate_limit = RateLimitConfig {
-            enabled: parse_env(&mut source, scope, "RATE_LIMIT_ENABLED", "true")?,
-            requests_per_second: parse_env(&mut source, scope, "RATE_LIMIT_RPS", "1000")?,
-            burst_capacity: parse_env(&mut source, scope, "RATE_LIMIT_BURST", "2000")?,
+            // Admin Gateway 只用 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言，也不做
+            // 请求限流：这两组变量在 Admin 作用域下不解析、不校验，误配不会挡住启动。
+            GatewayEnvScope::Admin => {
+                for key in ignored_admin_settings(&mut source) {
+                    tracing::warn!(
+                        key = %key,
+                        "admin-gateway ignores this setting: it verifies Console admin assertions with FLARE_CONSOLE_PUBLIC_KEY and applies no request rate limit"
+                    );
+                }
+                (
+                    AuthProviderConfig::default(),
+                    RateLimitConfig::not_applied(),
+                )
+            }
         };
 
         let tracing = TracingConfig {
@@ -348,6 +352,75 @@ impl GatewaySettings {
 
         Ok(())
     }
+}
+
+/// Admin Gateway 不读取的设置名（不含作用域前缀）。
+const ADMIN_IGNORED_SETTINGS: &[&str] = &[
+    "AUTH_MODE",
+    "AUTH_HOOK_URL",
+    "AUTH_HOOK_TIMEOUT_MS",
+    "AUTH_HOOK_SECRET_HEADER",
+    "AUTH_HOOK_SECRET",
+    "AUTH_HOOK_ISSUE_URL",
+    "AUTH_DEV_ISSUE",
+    "AUTH_APP_CREDENTIALS",
+    "AUTH_REFRESH_GRACE_SECS",
+    "RATE_LIMIT_ENABLED",
+    "RATE_LIMIT_RPS",
+    "RATE_LIMIT_BURST",
+];
+
+/// 环境里出现、而 Admin Gateway 会忽略的变量全名。只返回名字：其中有 hook 密钥与应用凭据，
+/// 值不能进日志。
+pub fn ignored_admin_settings<F>(mut source: F) -> Vec<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    ADMIN_IGNORED_SETTINGS
+        .iter()
+        .map(|name| env_key(GatewayEnvScope::Admin, name))
+        .filter(|key| source(key).is_some())
+        .collect()
+}
+
+fn parse_auth<F>(source: &mut F, scope: GatewayEnvScope) -> Result<AuthProviderConfig>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    Ok(AuthProviderConfig {
+        mode: parse_env(source, scope, "AUTH_MODE", "core_jwt")?,
+        hook_url: env_value(source, scope, "AUTH_HOOK_URL")
+            .filter(|value| !value.trim().is_empty()),
+        hook_timeout_ms: parse_env(source, scope, "AUTH_HOOK_TIMEOUT_MS", "800")?,
+        hook_secret_header: env_or(
+            source,
+            scope,
+            "AUTH_HOOK_SECRET_HEADER",
+            "x-flare-auth-hook-secret",
+        ),
+        hook_secret: env_value(source, scope, "AUTH_HOOK_SECRET")
+            .filter(|value| !value.trim().is_empty()),
+        hook_issue_url: env_value(source, scope, "AUTH_HOOK_ISSUE_URL")
+            .filter(|value| !value.trim().is_empty()),
+        dev_issue: parse_env(source, scope, "AUTH_DEV_ISSUE", "false")?,
+        app_credentials: match env_value(source, scope, "AUTH_APP_CREDENTIALS") {
+            Some(raw) if !raw.trim().is_empty() => AppCredential::parse_list(&raw)
+                .map_err(|err| config_error(format!("AUTH_APP_CREDENTIALS: {err}")))?,
+            _ => Vec::new(),
+        },
+        refresh_grace_secs: parse_env(source, scope, "AUTH_REFRESH_GRACE_SECS", "604800")?,
+    })
+}
+
+fn parse_rate_limit<F>(source: &mut F, scope: GatewayEnvScope) -> Result<RateLimitConfig>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    Ok(RateLimitConfig {
+        enabled: parse_env(source, scope, "RATE_LIMIT_ENABLED", "true")?,
+        requests_per_second: parse_env(source, scope, "RATE_LIMIT_RPS", "1000")?,
+        burst_capacity: parse_env(source, scope, "RATE_LIMIT_BURST", "2000")?,
+    })
 }
 
 /// Admin Gateway 专用的可选下游 Capability（租户能力开关、租户运行时只读）。
@@ -625,16 +698,109 @@ mod tests {
                 .expect("api settings");
 
         assert_eq!(admin.server.port, 51051);
-        assert_eq!(admin.auth.mode, AuthProviderMode::HttpHook);
-        assert_eq!(
-            admin.auth.hook_url.as_deref(),
-            Some("https://admin-auth.example.com/validate")
-        );
+        // Admin 作用域不读认证变量：配了 http_hook 也仍是默认值。
+        assert_eq!(admin.auth.mode, AuthProviderMode::CoreJwt);
+        assert_eq!(admin.auth.hook_url, None);
         assert_eq!(admin.tracing.service_name, "flare-admin-gateway");
 
         assert_eq!(api.server.port, 51050);
         assert_eq!(api.auth.mode, AuthProviderMode::CoreJwt);
         assert_eq!(api.auth.hook_url, None);
         assert_eq!(api.tracing.service_name, "flare-api-gateway");
+    }
+    /// 误配到 Admin 作用域的认证与限流变量：http_hook 没有 URL、超时写错、限流开着却是 0。
+    /// 这些放在 API 作用域都会拒绝启动；Admin Gateway 从不使用它们，所以照常启动。
+    fn misconfigured(prefix: &str) -> HashMap<String, String> {
+        [
+            ("AUTH_MODE", "http_hook"),
+            ("AUTH_HOOK_TIMEOUT_MS", "not-a-number"),
+            ("AUTH_HOOK_SECRET", "hook-secret-marker"),
+            ("RATE_LIMIT_ENABLED", "true"),
+            ("RATE_LIMIT_RPS", "0"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (format!("{prefix}_{name}"), value.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn admin_scope_ignores_auth_and_rate_limit_settings() {
+        let env = misconfigured("FLARE_ADMIN_GATEWAY");
+        let admin =
+            GatewaySettings::from_env_source(GatewayEnvScope::Admin, |key| env.get(key).cloned())
+                .expect("admin-gateway starts despite unused auth and rate-limit settings");
+        assert_eq!(admin.auth.mode, AuthProviderMode::CoreJwt);
+        assert_eq!(admin.auth.hook_url, None);
+        assert_eq!(admin.auth.hook_secret, None);
+        assert!(!admin.auth.dev_issue);
+        assert!(admin.auth.app_credentials.is_empty());
+        assert!(!admin.rate_limit.enabled);
+        assert_eq!(admin.rate_limit.requests_per_second, 0);
+        assert_eq!(admin.rate_limit.burst_capacity, 0);
+
+        let mut ignored = ignored_admin_settings(|key| env.get(key).cloned());
+        ignored.sort();
+        let mut expected: Vec<String> = env.keys().cloned().collect();
+        expected.sort();
+        assert_eq!(ignored, expected);
+        assert!(ignored_admin_settings(|_| None).is_empty());
+
+        // 同样的错误放在 API 作用域照旧拒绝启动。
+        let api_env = misconfigured("FLARE_API_GATEWAY");
+        assert!(
+            GatewaySettings::from_env_source(GatewayEnvScope::Api, |key| api_env.get(key).cloned())
+                .is_err()
+        );
+        let hook_without_url = HashMap::from([(
+            "FLARE_API_GATEWAY_AUTH_MODE".to_string(),
+            "http_hook".to_string(),
+        )]);
+        assert!(
+            GatewaySettings::from_env_source(GatewayEnvScope::Api, |key| hook_without_url
+                .get(key)
+                .cloned())
+            .is_err()
+        );
+    }
+
+    /// 忽略时只记变量名：hook 密钥这类值不能进日志。
+    #[test]
+    fn ignored_admin_settings_are_logged_by_name_only() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Captured;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let env = misconfigured("FLARE_ADMIN_GATEWAY");
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            GatewaySettings::from_env_source(GatewayEnvScope::Admin, |key| env.get(key).cloned())
+                .unwrap();
+        });
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(logged.matches(" WARN ").count(), env.len(), "{logged}");
+        for key in env.keys() {
+            assert!(logged.contains(key.as_str()), "{key} not logged: {logged}");
+        }
+        for value in ["hook-secret-marker", "not-a-number", "http_hook"] {
+            assert!(!logged.contains(value), "{value} leaked: {logged}");
+        }
     }
 }

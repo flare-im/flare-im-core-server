@@ -1,5 +1,6 @@
-//! `GET /api/v1/admin/gateway/config` 的认证一节：如实报告 Admin Gateway 只用 Console Ed25519
-//! 公钥验签，不转述随网关设置一起解析、但本服务从不使用的 `FLARE_ADMIN_GATEWAY_AUTH_*`。
+//! `GET /api/v1/admin/gateway/config` 的认证与限流两节：如实报告 Admin Gateway 只用 Console
+//! Ed25519 公钥验签、不做请求限流，不转述 Admin 作用域下不读取的 `FLARE_ADMIN_GATEWAY_AUTH_*`
+//! 与 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`。
 //!
 //! Control 原样转发这份快照，并在 flare-social 的管理契约里登记了它的结构，所以这里同时钉住
 //! 响应里 `auth` 的字段集与 OpenAPI 的 `AdminAuthConfigSnapshot` 字段集。
@@ -15,9 +16,12 @@ use serde_json::json;
 const HOOK_URL: &str = "https://admin-auth.example.com/validate";
 const HOOK_SECRET_MARKER: &str = "hook-secret-marker-not-a-real-key";
 
-/// 部署方把 API Gateway 那套认证变量误配到 Admin 作用域：http_hook 带 URL 与 hook 密钥。
+/// 部署方把 API Gateway 那套认证与限流变量误配到 Admin 作用域：http_hook 带 URL 与 hook 密钥，
+/// 限流开着。
 fn settings_with_unused_hook() -> GatewaySettings {
     let env = HashMap::from([
+        ("FLARE_ADMIN_GATEWAY_RATE_LIMIT_ENABLED", "true"),
+        ("FLARE_ADMIN_GATEWAY_RATE_LIMIT_RPS", "1000"),
         ("FLARE_ADMIN_GATEWAY_AUTH_MODE", "http_hook"),
         ("FLARE_ADMIN_GATEWAY_AUTH_HOOK_URL", HOOK_URL),
         ("FLARE_ADMIN_GATEWAY_AUTH_HOOK_SECRET", HOOK_SECRET_MARKER),
@@ -66,6 +70,14 @@ async fn gateway_config_reports_console_ed25519_and_no_hook() {
             "hook_timeout_ms": 0,
             "hook_secret_header": "",
             "hook_secret_configured": null,
+        })
+    );
+    assert_eq!(
+        data["rate_limit"],
+        json!({
+            "enabled": false,
+            "requests_per_second": 0,
+            "burst_capacity": 0,
         })
     );
     // 快照里没有密钥材料，也就没有打码字段。
