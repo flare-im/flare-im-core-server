@@ -244,7 +244,8 @@ pub async fn initialize(
 /// Storage Reader 的固定地址只认一个变量：`CONVERSATION_STORAGE_READER_SERVICE_URL`（见
 /// [`explicit_storage_reader_url`]）。旧变量 `STORAGE_READER_GRPC_ADDR`（`host:port`，曾只在单条查询
 /// 与批量扇出的回退里各读一次，批量路径的默认端口 50091 实为 push-proxy）仍兼容：新变量没设时
-/// 采用它并告警改名；两个都设时以新变量为准，告警旧变量被忽略。
+/// 采用它并告警改名；两个都设时以新变量为准，告警旧变量被忽略。旧变量因此从「服务发现缺失或
+/// 失败时的回退」变成了与新变量同义的固定地址：设了就不做服务发现。
 fn storage_reader_url(url: Option<String>, legacy_addr: Option<String>) -> Result<Option<String>> {
     let url = explicit_storage_reader_url(url)?;
     let legacy = legacy_addr
