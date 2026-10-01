@@ -9,8 +9,10 @@ use flare_core::common::protocol::{
     PayloadCommand, Reliability, frame_with_payload_command, generate_message_id,
     payload_command::Type as PayloadType,
 };
+use flare_core::server::DeviceOwner;
 use flare_core::server::handle::ServerHandle;
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -27,6 +29,19 @@ impl PushRepository {
         Self { server_handle }
     }
 
+    /// 按用户推送的目标：（租户，用户）。flare-core 只投递到该租户下的连接，
+    /// 上下文没有租户时拒绝，不会退到默认租户去投。
+    fn target_user(tx: &Ctx, user_id: &str) -> Result<DeviceOwner> {
+        let tenant_id = normalize_optional_tenant_id(tx.tenant_id()).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "tenant required to push to a user",
+            )
+            .build_error()
+        })?;
+        Ok(DeviceOwner::new(Some(tenant_id.as_str()), user_id))
+    }
+
     async fn server_handle(&self, details: &'static str) -> Result<Arc<dyn ServerHandle>> {
         let guard = self.server_handle.lock().await;
         Ok(Arc::clone(guard.as_ref().ok_or_else(|| {
@@ -39,7 +54,8 @@ impl PushRepository {
 
 #[async_trait]
 impl IPushPort for PushRepository {
-    async fn push_message_to_user(&self, _tx: &Ctx, user_id: &str, message: Vec<u8>) -> Result<()> {
+    async fn push_message_to_user(&self, tx: &Ctx, user_id: &str, message: Vec<u8>) -> Result<()> {
+        let target = Self::target_user(tx, user_id)?;
         let handle = self.server_handle("push_message_to_user").await?;
 
         let cmd = PayloadCommand {
@@ -51,7 +67,7 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle.send_to_user(user_id, &frame).await.map_err(|e| {
+        handle.send_to_user(&target, &frame).await.map_err(|e| {
             ErrorBuilder::new(ErrorCode::InternalError, "Failed to send message to user")
                 .details(format!("user_id={}, error={}", user_id, e))
                 .build_error()
@@ -129,11 +145,12 @@ impl IPushPort for PushRepository {
 
     async fn push_payload_to_user(
         &self,
-        _tx: &Ctx,
+        tx: &Ctx,
         user_id: &str,
         payload_type: i32,
         payload: Vec<u8>,
     ) -> Result<()> {
+        let target = Self::target_user(tx, user_id)?;
         let handle = self.server_handle("push_payload_to_user").await?;
 
         let message_id = generate_message_id();
@@ -146,7 +163,7 @@ impl IPushPort for PushRepository {
         };
         let frame = frame_with_payload_command(cmd, Reliability::AtLeastOnce);
 
-        handle.send_to_user(user_id, &frame).await.map_err(|e| {
+        handle.send_to_user(&target, &frame).await.map_err(|e| {
             ErrorBuilder::new(ErrorCode::InternalError, "Failed to send payload to user")
                 .details(format!("user_id={}, error={}", user_id, e))
                 .build_error()
@@ -205,5 +222,108 @@ impl IPushPort for PushRepository {
             );
         }
         Ok((success, failure))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_core::common::error::Result as CoreResult;
+    use flare_core::common::protocol::Frame;
+    use std::sync::Mutex as StdMutex;
+
+    /// 记下每次按用户推送的目标（租户，用户）。
+    #[derive(Default)]
+    struct RecordingHandle {
+        targets: StdMutex<Vec<DeviceOwner>>,
+    }
+
+    #[async_trait]
+    impl ServerHandle for RecordingHandle {
+        async fn send_to(&self, _connection_id: &str, _frame: &Frame) -> CoreResult<()> {
+            Ok(())
+        }
+
+        async fn send_to_user(&self, owner: &DeviceOwner, _frame: &Frame) -> CoreResult<()> {
+            self.targets.lock().unwrap().push(owner.clone());
+            Ok(())
+        }
+
+        async fn broadcast(&self, _frame: &Frame) -> CoreResult<()> {
+            Ok(())
+        }
+
+        async fn broadcast_except(&self, _frame: &Frame, _exclude: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self, _connection_id: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn connection_count(&self) -> usize {
+            0
+        }
+
+        fn user_count(&self) -> usize {
+            0
+        }
+    }
+
+    fn repository() -> (PushRepository, Arc<RecordingHandle>) {
+        let handle = Arc::new(RecordingHandle::default());
+        let slot: Arc<dyn ServerHandle> = handle.clone();
+        (
+            PushRepository::new(Arc::new(Mutex::new(Some(slot)))),
+            handle,
+        )
+    }
+
+    fn ctx(tenant_id: Option<&str>) -> Ctx {
+        let root = flare_server_core::Context::root();
+        Arc::new(match tenant_id {
+            Some(tenant_id) => root.with_tenant_id(tenant_id),
+            None => root,
+        })
+    }
+
+    /// 按用户推送只投到上下文租户下的同名用户；`default` 与 `0` 是同一个默认租户。
+    #[tokio::test]
+    async fn push_to_user_targets_the_context_tenant() {
+        let (repository, handle) = repository();
+        repository
+            .push_payload_to_user(&ctx(Some("acme")), "u1", PayloadType::Ack as i32, vec![1])
+            .await
+            .unwrap();
+        repository
+            .push_message_to_user(&ctx(Some("default")), "u1", vec![2])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *handle.targets.lock().unwrap(),
+            vec![
+                DeviceOwner::new(Some("acme"), "u1"),
+                DeviceOwner::new(Some("0"), "u1"),
+            ]
+        );
+    }
+
+    /// 上下文没有租户时拒绝推送，不会退到默认租户去投。
+    #[tokio::test]
+    async fn push_to_user_without_a_tenant_is_rejected() {
+        let (repository, handle) = repository();
+        let error = repository
+            .push_payload_to_user(&ctx(None), "u1", PayloadType::Ack as i32, vec![1])
+            .await
+            .expect_err("no tenant, no push");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert!(
+            repository
+                .push_message_to_user(&ctx(None), "u1", vec![2])
+                .await
+                .is_err()
+        );
+        assert!(handle.targets.lock().unwrap().is_empty());
     }
 }

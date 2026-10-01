@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use flare_core::server::DeviceOwner;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_grpc_proto::signaling::online::{
@@ -314,7 +315,11 @@ impl IConnectionPort for ConnectionRepository {
         tenant_id: &str,
         user_id: &str,
     ) -> Result<Vec<DomainConnectionInfo>> {
-        let connection_ids = self.connection_manager.get_user_connections(user_id).await;
+        // flare-core 的用户索引按（租户，用户）建立，这里只拿到本租户的连接；下面仍逐条核对认证状态与租户
+        let connection_ids = self
+            .connection_manager
+            .get_user_connections(&DeviceOwner::new(Some(tenant_id), user_id))
+            .await;
         let mut list = Vec::with_capacity(connection_ids.len());
         for connection_id in connection_ids {
             if let Some((_, core_info)) =

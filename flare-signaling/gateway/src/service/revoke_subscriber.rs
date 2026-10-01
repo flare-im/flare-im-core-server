@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use flare_core::common::MessageParser;
 use flare_core::common::protocol::{Reliability, builder, frame_with_system_command};
+use flare_core::server::DeviceOwner;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
 use flare_core::transport::connection::Connection;
 use flare_im_contracts::domain::tenant::is_valid_tenant_id;
@@ -169,8 +170,12 @@ impl Kicker {
         signal: &KickSignal,
     ) -> usize {
         let reason = kick_reason(signal);
+        // 只取信号所属租户的连接；kick_matches 仍逐条核对租户、用户与设备
         let conn_ids = connection_manager
-            .get_user_connections(&signal.user_id)
+            .get_user_connections(&DeviceOwner::new(
+                Some(signal.tenant_id.as_str()),
+                signal.user_id.as_str(),
+            ))
             .await;
         let mut targets = Vec::new();
         for cid in conn_ids {

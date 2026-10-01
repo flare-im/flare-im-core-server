@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use flare_core::server::DeviceOwner;
 use flare_core::server::connection::ConnectionManagerTrait;
 use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
@@ -36,7 +37,10 @@ impl ConnectionQuery for ManagerConnectionQuery {
         user_id: &str,
     ) -> Result<Vec<DomainConnectionInfo>> {
         let tenant_id = required_tenant(tx)?;
-        let connection_ids = self.manager.get_user_connections(user_id).await;
+        let connection_ids = self
+            .manager
+            .get_user_connections(&DeviceOwner::new(Some(tenant_id), user_id))
+            .await;
         let mut list = Vec::with_capacity(connection_ids.len());
         for connection_id in connection_ids {
             if let Some((_, core_info)) = self.manager.get_connection(&connection_id).await {
@@ -69,7 +73,11 @@ impl ConnectionQuery for ManagerConnectionQuery {
     async fn list_user_connection_ids(&self, tx: &Ctx, user_id: &str) -> Result<Vec<String>> {
         let tenant_id = required_tenant(tx)?;
         let mut scoped = Vec::new();
-        for connection_id in self.manager.get_user_connections(user_id).await {
+        for connection_id in self
+            .manager
+            .get_user_connections(&DeviceOwner::new(Some(tenant_id), user_id))
+            .await
+        {
             if let Some((_, info)) = self.manager.get_connection(&connection_id).await
                 && matches_tenant_connection(&info, tenant_id, user_id)
             {
