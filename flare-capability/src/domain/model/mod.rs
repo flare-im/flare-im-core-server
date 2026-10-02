@@ -13,7 +13,7 @@ use flare_im_hooks::{
     PreSendHook, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
-use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result as FlareResult};
 use tokio::time::timeout;
 
 pub mod tenant_projection;
@@ -48,9 +48,11 @@ pub struct HookConfigItem {
     /// 注意：priority < 100 自动归入business组，priority >= 100 自动归入validation组
     pub priority: i32,
     /// Hook分组（可选，如果不指定则根据priority自动分组）
-    /// validation: 校验类Hook组（串行执行，快速失败）
-    /// critical: 关键业务处理Hook组（串行执行，保证顺序）
-    /// business: 非关键业务处理Hook组（并发执行，容错）
+    /// validation: 校验类Hook组（串行执行，快速失败）；Hook 不可达或超时按 `require_success` 拒绝或放行
+    /// critical: 关键业务处理Hook组（串行执行，保证顺序）；Hook 不可达或超时一律拒绝，不看 `require_success`
+    /// business: 非关键业务处理Hook组（容错）：拒绝与不可达都不中断主流程，`require_success` 只决定
+    /// 不可达时记 WARN 还是 DEBUG
+    /// 取值只认这三个（不区分大小写），其他值在加载与物化时报配置错误，见 [`HookConfigItem::resolved_group`]。
     #[serde(default)]
     pub group: Option<String>,
     /// 超时时间（毫秒）
@@ -71,6 +73,56 @@ pub struct HookConfigItem {
     /// 元数据
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+}
+
+impl HookConfigItem {
+    /// 这条 Hook 所在的组：配置了 `group` 就按它（`validation` / `critical` / `business`，不区分大小写，
+    /// 两端空白忽略），没配或为空串时按 priority 自动分组（`>= 100` 为 validation，否则 business）。
+    ///
+    /// 以前 `group` 只被存取、从不参与分组，critical 组因此永远为空。
+    pub fn resolved_group(&self) -> FlareResult<HookGroup> {
+        match self
+            .group
+            .as_deref()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+        {
+            None => Ok(HookGroup::from_priority(self.priority)),
+            Some(group) => parse_hook_group(group).ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "hook group must be validation, critical or business",
+                )
+                .details(format!("hook={}", self.name))
+                .build_error()
+            }),
+        }
+    }
+}
+
+fn parse_hook_group(value: &str) -> Option<HookGroup> {
+    match value.to_ascii_lowercase().as_str() {
+        "validation" => Some(HookGroup::Validation),
+        "critical" => Some(HookGroup::Critical),
+        "business" => Some(HookGroup::Business),
+        _ => None,
+    }
+}
+
+/// 进程内标记：这个拒绝不是 Hook 的决定，而是 Hook 没能给出决定（连不上、对端报错、应答解不开、
+/// 超时）。只放在错误的 `params` 里；HookPlugin 据此回可重试的 gRPC 状态，而不是回
+/// `allow=false`——调用方（Message Ingest）把 `allow=false` 当成策略拒绝（HTTP 422，不要重试）。
+pub const HOOK_UNAVAILABLE_PARAM: &str = "hook_unavailable";
+
+/// 这个错误是否为 Hook 不可用造成的拒绝（见 [`HOOK_UNAVAILABLE_PARAM`]）。
+pub fn is_hook_unavailable(error: &FlareError) -> bool {
+    matches!(
+        error,
+        FlareError::Localized {
+            params: Some(params),
+            ..
+        } if params.get(HOOK_UNAVAILABLE_PARAM).is_some_and(|value| value == "true")
+    )
 }
 
 fn default_max_retries() -> u32 {
@@ -238,6 +290,8 @@ pub struct HookConfig {
 /// Hook执行计划
 pub struct HookExecutionPlan {
     metadata: HookMetadata,
+    /// 所在组：配置项的 `group`，没配时按 priority（见 [`HookConfigItem::resolved_group`]）
+    group: HookGroup,
     /// PreSend Hook处理器（可选，用于 Local Plugin）
     pre_send_handler: Option<Arc<dyn PreSendHook>>,
     /// Hook适配器（用于 gRPC/WebHook/Local Plugin）
@@ -252,6 +306,7 @@ impl std::fmt::Debug for HookExecutionPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HookExecutionPlan")
             .field("metadata", &self.metadata)
+            .field("group", &self.group)
             .field(
                 "pre_send_handler",
                 &self.pre_send_handler.as_ref().map(|_| "Some(PreSendHook)"),
@@ -265,6 +320,7 @@ impl HookExecutionPlan {
     /// 从HookMetadata创建HookExecutionPlan（用于PreSend）
     pub fn new_pre_send(metadata: HookMetadata, handler: Arc<dyn PreSendHook>) -> Self {
         Self {
+            group: HookGroup::from_priority(metadata.priority),
             metadata,
             pre_send_handler: Some(handler),
             adapter: None,
@@ -276,12 +332,19 @@ impl HookExecutionPlan {
     /// 从HookMetadata创建HookExecutionPlan（用于PostSend/Delivery/Recall）
     pub fn new(metadata: HookMetadata) -> Self {
         Self {
+            group: HookGroup::from_priority(metadata.priority),
             metadata,
             pre_send_handler: None,
             adapter: None,
             transport_config: None,
             local_target: None,
         }
+    }
+
+    /// 指定所在组（覆盖按 priority 的自动分组）
+    pub fn with_group(mut self, group: HookGroup) -> Self {
+        self.group = group;
+        self
     }
 
     /// 设置适配器
@@ -343,8 +406,15 @@ impl HookExecutionPlan {
             error_policy,
             require_success: config.require_success,
         };
+        // 物化前已校验（`validate_hook_item_for_materialization`、`ConfigValidator`）；直接构造的
+        // 非法分组按 priority 归组并告警，不让一条配置拖垮整条链。
+        let group = config.resolved_group().unwrap_or_else(|error| {
+            tracing::warn!(%error, "invalid hook group, falling back to priority grouping");
+            HookGroup::from_priority(config.priority)
+        });
         Self {
             metadata,
+            group,
             pre_send_handler: None,
             adapter: None,
             transport_config: Some(config.transport.clone()),
@@ -372,12 +442,17 @@ impl HookExecutionPlan {
     }
 
     pub fn group(&self) -> HookGroup {
-        // HookGroup::from_priority 会根据 priority 自动分组
-        HookGroup::from_priority(self.metadata.priority)
+        self.group
     }
 
     pub fn require_success(&self) -> bool {
         self.metadata.require_success
+    }
+
+    /// Hook 没能给出结果（不可达、对端报错、超时）时是否让这一步失败：critical 组一律失败，
+    /// 其余组按 `require_success`。business 组的失败与拒绝在编排层只记日志，不中断主流程。
+    pub fn must_succeed(&self) -> bool {
+        self.group == HookGroup::Critical || self.metadata.require_success
     }
 
     /// 执行PreSend Hook
@@ -402,40 +477,55 @@ impl HookExecutionPlan {
             // 拒绝，可选的放行。以前这里原样上抛，不可达的可选 Hook 与 business 组也让每次
             // PreSend 失败。
             Ok(Err(cause)) => Ok(self.unavailable_decision("pre-send", &cause)),
-            Err(_) => {
-                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
-                    .details(format!("hook={}", self.name()))
-                    .build_error();
-                if self.require_success() {
-                    Ok(PreSendDecision::Reject { error: err })
-                } else {
-                    tracing::warn!(hook = %self.name(), "pre-send hook timeout ignored");
-                    Ok(PreSendDecision::Continue)
-                }
-            }
+            Err(_) => Ok(self.timeout_decision("pre-send")),
         }
     }
 
-    /// Hook 调用失败（非超时）时的决定，与超时分支一致：`require_success` 时拒绝，否则放行。
-    ///
-    /// 拒绝原因只带 Hook 名，不带下游错误原文（其中可能有内部地址），原文只进日志。
-    fn unavailable_decision(
-        &self,
-        stage: &'static str,
-        cause: &flare_server_core::error::FlareError,
-    ) -> PreSendDecision {
-        if self.require_success() {
-            tracing::warn!(hook = %self.name(), stage, error = %cause, "required hook unavailable, rejecting");
+    /// Hook 超时时的决定：与不可达同样按 [`Self::must_succeed`] 拒绝或放行，拒绝带
+    /// [`HOOK_UNAVAILABLE_PARAM`] 标记。
+    fn timeout_decision(&self, stage: &'static str) -> PreSendDecision {
+        if self.must_succeed() {
+            tracing::warn!(hook = %self.name(), stage, group = ?self.group, "required hook timed out, rejecting");
             PreSendDecision::Reject {
-                error: ErrorBuilder::new(
-                    ErrorCode::ServiceUnavailable,
-                    format!("{stage} hook unavailable"),
-                )
-                .details(format!("hook={}", self.name()))
-                .build_error(),
+                error: unavailable_rejection(
+                    ErrorCode::OperationTimeout,
+                    format!("{stage} hook timed out"),
+                    self.name(),
+                ),
             }
         } else {
-            tracing::warn!(hook = %self.name(), stage, error = %cause, "optional hook unavailable, ignored");
+            self.log_skipped_unavailable(stage, "timed out");
+            PreSendDecision::Continue
+        }
+    }
+
+    /// 可选 Hook（不要求成功、也不在 critical 组）不可用被跳过：validation 组记 WARN，business 组
+    /// 记 DEBUG（business 组本就容错；要求成功的 business Hook 不可用时由编排层记 WARN）。
+    fn log_skipped_unavailable(&self, stage: &'static str, what: &'static str) {
+        if self.group == HookGroup::Business && !self.require_success() {
+            tracing::debug!(hook = %self.name(), stage, what, "optional business hook unavailable, ignored");
+        } else {
+            tracing::warn!(hook = %self.name(), stage, what, group = ?self.group, "optional hook unavailable, ignored");
+        }
+    }
+
+    /// Hook 调用失败（非超时）时的决定，与超时分支一致：[`Self::must_succeed`] 时拒绝（带
+    /// [`HOOK_UNAVAILABLE_PARAM`] 标记），否则放行。
+    ///
+    /// 拒绝原因只带 Hook 名，不带下游错误原文（其中可能有内部地址），原文只进日志。
+    fn unavailable_decision(&self, stage: &'static str, cause: &FlareError) -> PreSendDecision {
+        if self.must_succeed() {
+            tracing::warn!(hook = %self.name(), stage, group = ?self.group, error = %cause, "required hook unavailable, rejecting");
+            PreSendDecision::Reject {
+                error: unavailable_rejection(
+                    ErrorCode::ServiceUnavailable,
+                    format!("{stage} hook unavailable"),
+                    self.name(),
+                ),
+            }
+        } else {
+            tracing::debug!(hook = %self.name(), stage, error = %cause, "hook call failed");
+            self.log_skipped_unavailable(stage, "call failed");
             PreSendDecision::Continue
         }
     }
@@ -462,7 +552,7 @@ impl HookExecutionPlan {
                     ErrorBuilder::new(ErrorCode::OperationTimeout, "post-send hook timed out")
                         .details(format!("hook={}", self.name()))
                         .build_error();
-                if self.require_success() {
+                if self.must_succeed() {
                     Err(err)
                 } else {
                     tracing::warn!(hook = %self.name(), "post-send hook timeout ignored");
@@ -488,7 +578,7 @@ impl HookExecutionPlan {
                 let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "delivery hook timed out")
                     .details(format!("hook={}", self.name()))
                     .build_error();
-                if self.require_success() {
+                if self.must_succeed() {
                     Err(err)
                 } else {
                     tracing::warn!(hook = %self.name(), "delivery hook timeout ignored");
@@ -515,19 +605,18 @@ impl HookExecutionPlan {
         match timeout(self.metadata.timeout, fut).await {
             Ok(Ok(decision)) => Ok(decision),
             Ok(Err(cause)) => Ok(self.unavailable_decision("recall", &cause)),
-            Err(_) => {
-                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "recall hook timed out")
-                    .details(format!("hook={}", self.name()))
-                    .build_error();
-                if self.require_success() {
-                    Ok(PreSendDecision::Reject { error: err })
-                } else {
-                    tracing::warn!(hook = %self.name(), "recall hook timeout ignored");
-                    Ok(PreSendDecision::Continue)
-                }
-            }
+            Err(_) => Ok(self.timeout_decision("recall")),
         }
     }
+}
+
+/// Hook 不可用造成的拒绝：错误码区分不可达与超时，原因固定，说明只有 Hook 名，带
+/// [`HOOK_UNAVAILABLE_PARAM`] 标记。
+fn unavailable_rejection(code: ErrorCode, reason: String, hook: &str) -> FlareError {
+    ErrorBuilder::new(code, reason)
+        .details(format!("hook={hook}"))
+        .param(HOOK_UNAVAILABLE_PARAM, "true")
+        .build_error()
 }
 
 /// Hook执行结果
@@ -684,6 +773,58 @@ mod tests {
 
         let plan = HookExecutionPlan::from_hook_config(config, "recall");
         assert_eq!(plan.metadata().kind, flare_im_hooks::HookKind::Recall);
+    }
+
+    fn config_item(priority: i32, group: Option<&str>) -> HookConfigItem {
+        HookConfigItem {
+            name: "grouped".to_string(),
+            version: None,
+            description: None,
+            enabled: true,
+            priority,
+            group: group.map(str::to_string),
+            timeout_ms: 1000,
+            max_retries: 0,
+            error_policy: "fail_fast".to_string(),
+            require_success: false,
+            selector: HookSelectorConfig::default(),
+            transport: HookTransportConfig::Local {
+                target: "noop".to_string(),
+            },
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// 配置的 group 优先于 priority；没配或为空串时按 priority；未知值报错。
+    #[test]
+    fn configured_group_wins_over_priority() {
+        use flare_im_hooks::HookGroup;
+        for (priority, group, expected) in [
+            (10, Some("critical"), HookGroup::Critical),
+            (150, Some(" CRITICAL "), HookGroup::Critical),
+            (150, Some("business"), HookGroup::Business),
+            (10, Some("Validation"), HookGroup::Validation),
+            (150, None, HookGroup::Validation),
+            (10, None, HookGroup::Business),
+            (10, Some("  "), HookGroup::Business),
+        ] {
+            let item = config_item(priority, group);
+            assert_eq!(item.resolved_group().unwrap(), expected, "{group:?}");
+            let plan = HookExecutionPlan::from_hook_config(item, "pre_send");
+            assert_eq!(plan.group(), expected, "{group:?}");
+        }
+        assert!(config_item(10, Some("critcal")).resolved_group().is_err());
+    }
+
+    /// critical 组的 Hook 不论 `require_success` 都必须成功；其余组按 `require_success`。
+    #[test]
+    fn critical_hooks_must_succeed() {
+        let plan =
+            HookExecutionPlan::from_hook_config(config_item(10, Some("critical")), "pre_send");
+        assert!(!plan.require_success());
+        assert!(plan.must_succeed());
+        let plan = HookExecutionPlan::from_hook_config(config_item(150, None), "pre_send");
+        assert!(!plan.must_succeed());
     }
 
     #[test]

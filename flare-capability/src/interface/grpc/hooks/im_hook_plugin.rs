@@ -23,7 +23,7 @@ use crate::application::commands::materialize_hook_execution_plan;
 use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::capability::GuardDecision;
-use crate::domain::model::HookExecutionPlan;
+use crate::domain::model::{HookExecutionPlan, is_hook_unavailable};
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
@@ -46,6 +46,80 @@ fn proto_conversation_type_wire_name(value: i32) -> Option<&'static str> {
         Ok(ConversationType::Channel) => Some("channel"),
         Ok(ConversationType::Broadcast) => Some("broadcast"),
         Err(_) => Some("unspecified"),
+    }
+}
+
+/// Hook 编排因 Hook 不可用（必需的 Hook 连不上、对端报错、超时）而拒绝时回的 gRPC 状态：
+/// 不可达为 `UNAVAILABLE`，超时为 `DEADLINE_EXCEEDED`，说明只有固定原因与 Hook 名。
+///
+/// 不能回 `allow=false`：调用方（Message Ingest 的 gRPC Hook 适配器）把 `allow=false` 当成策略
+/// 拒绝，HTTP 发送回 422 `MESSAGE_REJECTED`（不要重试）；而这里是暂时性故障，调用方据状态码得到
+/// 可重试的 `SERVICE_UNAVAILABLE`（HTTP 503）。
+fn hook_unavailable_status(error: flare_server_core::error::FlareError) -> Status {
+    Status::from(error)
+}
+
+/// PreSend 编排结果 → 应答：放行带（可能被改写的）草稿；Hook 明确拒绝回 `allow=false` 与拒绝
+/// 原因；Hook 不可用造成的拒绝回可重试的 gRPC 状态（见 [`hook_unavailable_status`]）。
+fn pre_send_response(
+    decision: PreSendDecision,
+    draft: flare_grpc_proto::capability::HookMessageDraft,
+) -> Result<PreSendHookResponse, Status> {
+    match decision {
+        PreSendDecision::Continue => Ok(PreSendHookResponse {
+            allow: true,
+            draft: Some(draft),
+            routing: None,
+            annotations: std::collections::HashMap::new(),
+            outcome_extensions: None,
+            deny_reason_code: String::new(),
+            deny_reason_message: String::new(),
+        }),
+        PreSendDecision::Reject { error } if is_hook_unavailable(&error) => {
+            Err(hook_unavailable_status(error))
+        }
+        PreSendDecision::Reject { error } => {
+            let (deny_reason_code, deny_reason_message) = match error {
+                flare_server_core::error::FlareError::Localized {
+                    reason, details, ..
+                } => (reason, details.unwrap_or_default()),
+                other => ("HOOK_REJECTED".to_string(), other.to_string()),
+            };
+            Ok(PreSendHookResponse {
+                allow: false,
+                draft: None,
+                routing: None,
+                annotations: std::collections::HashMap::new(),
+                outcome_extensions: None,
+                deny_reason_code,
+                deny_reason_message,
+            })
+        }
+    }
+}
+
+/// Recall 编排结果 → 应答，规则同 [`pre_send_response`]。
+fn recall_response(decision: PreSendDecision) -> Result<RecallHookResponse, Status> {
+    match decision {
+        PreSendDecision::Continue => Ok(RecallHookResponse {
+            allow: true,
+            routing: None,
+            annotations: std::collections::HashMap::new(),
+            outcome_extensions: None,
+            deny_reason_code: String::new(),
+            deny_reason_message: String::new(),
+        }),
+        PreSendDecision::Reject { error } if is_hook_unavailable(&error) => {
+            Err(hook_unavailable_status(error))
+        }
+        PreSendDecision::Reject { .. } => Ok(RecallHookResponse {
+            allow: false,
+            routing: None,
+            annotations: std::collections::HashMap::new(),
+            outcome_extensions: None,
+            deny_reason_code: String::new(),
+            deny_reason_message: String::new(),
+        }),
     }
 }
 
@@ -228,37 +302,7 @@ impl ImHookPluginServer {
         // 更新 draft（如果被 Hook 修改）
         draft = message_draft_to_proto(&message_draft);
 
-        // 转换响应
-        let response = match decision {
-            PreSendDecision::Continue => PreSendHookResponse {
-                allow: true,
-                draft: Some(draft),
-                routing: None,
-                annotations: std::collections::HashMap::new(),
-                outcome_extensions: None,
-                deny_reason_code: String::new(),
-                deny_reason_message: String::new(),
-            },
-            PreSendDecision::Reject { error } => {
-                let (deny_reason_code, deny_reason_message) = match error {
-                    flare_server_core::error::FlareError::Localized {
-                        reason, details, ..
-                    } => (reason, details.unwrap_or_default()),
-                    other => ("HOOK_REJECTED".to_string(), other.to_string()),
-                };
-                PreSendHookResponse {
-                    allow: false,
-                    draft: None,
-                    routing: None,
-                    annotations: std::collections::HashMap::new(),
-                    outcome_extensions: None,
-                    deny_reason_code,
-                    deny_reason_message,
-                }
-            }
-        };
-
-        Ok(Response::new(response))
+        pre_send_response(decision, draft).map(Response::new)
     }
 
     pub async fn grpc_invoke_post_send(
@@ -416,27 +460,7 @@ impl ImHookPluginServer {
             .await
             .map_err(|e| Status::internal(format!("Failed to execute hooks: {}", e)))?;
 
-        // 转换响应
-        let response = match decision {
-            PreSendDecision::Continue => RecallHookResponse {
-                allow: true,
-                routing: None,
-                annotations: std::collections::HashMap::new(),
-                outcome_extensions: None,
-                deny_reason_code: String::new(),
-                deny_reason_message: String::new(),
-            },
-            PreSendDecision::Reject { .. } => RecallHookResponse {
-                allow: false,
-                routing: None,
-                annotations: std::collections::HashMap::new(),
-                outcome_extensions: None,
-                deny_reason_code: String::new(),
-                deny_reason_message: String::new(),
-            },
-        };
-
-        Ok(Response::new(response))
+        recall_response(decision).map(Response::new)
     }
 
     pub async fn grpc_notify_conversation_lifecycle(
@@ -1244,6 +1268,241 @@ impl HookPlugin for ImHookPluginServer {
 mod tests {
     use super::proto_conversation_type_wire_name;
     use flare_proto::common::ConversationType;
+
+    mod hook_unavailable {
+        //! Hook 不可用与 Hook 拒绝在 HookPlugin 应答上分得开：前者回可重试的 gRPC 状态，后者回
+        //! `allow=false`。Message Ingest 的 gRPC Hook 适配器把 `allow=false` 当成策略拒绝（HTTP
+        //! 422，不要重试），把 gRPC 失败当成暂时不可用（HTTP 503，可重试）。
+        use super::super::*;
+        use crate::application::handler::HookCommandHandler;
+        use crate::domain::model::{
+            HOOK_UNAVAILABLE_PARAM, HookConfig, HookConfigItem, HookSelectorConfig,
+            HookTransportConfig,
+        };
+        use crate::domain::service::HookOrchestrationService;
+        use crate::infrastructure::config::ConfigWatcher;
+        use ed25519_dalek::SigningKey;
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use flare_grpc_proto::capability::hook_plugin_server::HookPluginServer;
+        use flare_grpc_proto::capability::{GenericResponse, HookMessageDraft};
+        use flare_im_hooks::hooks::adapters::GrpcHookFactory;
+        use flare_im_hooks::{MessageDraft, PreSendHook, is_pre_send_rejection};
+        use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
+        use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};
+        use flare_server_core::{SignedContextVerifier, error::FlareError};
+        use prost::Message as _;
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        fn unavailable(code: ErrorCode, reason: &str) -> FlareError {
+            ErrorBuilder::new(code, reason)
+                .details("hook=required-closed")
+                .param(HOOK_UNAVAILABLE_PARAM, "true")
+                .build_error()
+        }
+
+        #[test]
+        fn unavailable_rejections_are_retryable_statuses_not_allow_false() {
+            let status = pre_send_response(
+                PreSendDecision::Reject {
+                    error: unavailable(ErrorCode::ServiceUnavailable, "pre-send hook unavailable"),
+                },
+                HookMessageDraft::default(),
+            )
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+
+            let status = pre_send_response(
+                PreSendDecision::Reject {
+                    error: unavailable(ErrorCode::OperationTimeout, "pre-send hook timed out"),
+                },
+                HookMessageDraft::default(),
+            )
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status:?}");
+
+            let status = recall_response(PreSendDecision::Reject {
+                error: unavailable(ErrorCode::ServiceUnavailable, "recall hook unavailable"),
+            })
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        }
+
+        #[test]
+        fn hook_decisions_stay_in_the_response_body() {
+            let denied = pre_send_response(
+                PreSendDecision::Reject {
+                    error: ErrorBuilder::new(ErrorCode::PermissionDenied, "SOCIAL_PRESEND_DENIED")
+                        .details("not friends")
+                        .build_error(),
+                },
+                HookMessageDraft::default(),
+            )
+            .unwrap();
+            assert!(!denied.allow);
+            assert_eq!(denied.deny_reason_code, "SOCIAL_PRESEND_DENIED");
+            assert_eq!(denied.deny_reason_message, "not friends");
+
+            let allowed =
+                pre_send_response(PreSendDecision::Continue, HookMessageDraft::default()).unwrap();
+            assert!(allowed.allow && allowed.draft.is_some());
+
+            let recall_denied = recall_response(PreSendDecision::Reject {
+                error: ErrorBuilder::new(ErrorCode::OperationFailed, "recall denied").build_error(),
+            })
+            .unwrap();
+            assert!(!recall_denied.allow);
+            assert!(recall_response(PreSendDecision::Continue).unwrap().allow);
+        }
+
+        /// 下游 Hook：对 PreSend 一律回 `allow=false`（策略拒绝）。
+        struct DenyAll;
+
+        #[tonic::async_trait]
+        impl HookPlugin for DenyAll {
+            async fn call(
+                &self,
+                request: Request<GenericRequest>,
+            ) -> Result<Response<GenericResponse>, Status> {
+                let response = PreSendHookResponse {
+                    allow: false,
+                    deny_reason_code: "SOCIAL_PRESEND_DENIED".into(),
+                    ..Default::default()
+                };
+                Ok(Response::new(GenericResponse {
+                    ok: true,
+                    request_id: request.into_inner().request_id,
+                    payload: Some(prost_types::Any {
+                        type_url: "type.googleapis.com/flare.capability.v1.PreSendHookResponse"
+                            .into(),
+                        value: response.encode_to_vec(),
+                    }),
+                    error_code: String::new(),
+                    error_message: String::new(),
+                }))
+            }
+        }
+
+        async fn serve<S>(service: S) -> String
+        where
+            S: HookPlugin,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(HookPluginServer::new(service))
+                    .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+            );
+            format!("http://{address}")
+        }
+
+        async fn closed_port_endpoint() -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            format!("http://{address}")
+        }
+
+        fn required_pre_send_hook(endpoint: &str) -> HookConfigItem {
+            HookConfigItem {
+                name: "required-pre-send".into(),
+                version: None,
+                description: None,
+                enabled: true,
+                priority: 110,
+                group: None,
+                timeout_ms: 10_000,
+                max_retries: 0,
+                error_policy: "fail_fast".into(),
+                require_success: true,
+                selector: HookSelectorConfig::default(),
+                transport: HookTransportConfig::Grpc {
+                    endpoint: Some(endpoint.into()),
+                    service_name: None,
+                    registry_type: None,
+                    namespace: None,
+                    load_balance: None,
+                    metadata: HashMap::new(),
+                },
+                metadata: HashMap::new(),
+            }
+        }
+
+        /// Capability 的 HookPlugin 服务，PreSend 只挂 `hook` 一条。
+        async fn capability_with(hook: HookConfigItem) -> String {
+            let watcher = Arc::new(ConfigWatcher::with_config(HookConfig {
+                pre_send: vec![hook],
+                ..Default::default()
+            }));
+            let server = ImHookPluginServer::new(
+                Arc::new(HookCommandHandler::new(Arc::new(HookOrchestrationService))),
+                Arc::new(CoreHookRegistry::new(watcher)),
+                Arc::new(HookAdapterFactory::new()),
+                CapabilityExtensionRegistry::new(),
+            );
+            serve(server).await
+        }
+
+        /// Message Ingest 调 Hook 时的上下文：Cell 签名的用户身份（gRPC Hook 适配器要求）。
+        fn signed_user_ctx() -> flare_server_core::context::Ctx {
+            let key = SigningKey::from_bytes(&[61; 32]);
+            let private = key.to_pkcs8_pem(Default::default()).unwrap();
+            let public = key
+                .verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap();
+            let signer = SignedContextSigner::from_private_key(&private).unwrap();
+            let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
+            let token = signer
+                .sign(&SignedContextIdentity::new(
+                    SignedActorType::User,
+                    "u1",
+                    "0",
+                    "req-hook-unavailable",
+                ))
+                .unwrap();
+            let mut metadata = tonic::metadata::MetadataMap::new();
+            metadata.insert("x-flare-ctx", token.parse().unwrap());
+            verify_signed_context_metadata(&metadata, &verifier).unwrap()
+        }
+
+        /// 以 Message Ingest 的 gRPC Hook 适配器调 Capability 的 PreSend。
+        async fn ingest_pre_send(capability: &str) -> PreSendDecision {
+            let hook = GrpcHookFactory::new().build_pre_send(HashMap::new(), capability.into());
+            let mut draft = MessageDraft::new(b"hello".to_vec());
+            hook.handle(&signed_user_ctx(), &mut draft).await
+        }
+
+        /// 必需的下游 Hook 不可达：Message Ingest 得到的是不带策略拒绝标记的
+        /// `SERVICE_UNAVAILABLE`（发送方 503、可重试），不是策略拒绝（422）。修复前 Capability 回
+        /// `allow=false`，Ingest 把它当成策略拒绝。
+        #[tokio::test]
+        async fn ingest_sees_an_unreachable_required_hook_as_unavailable_not_a_policy_rejection() {
+            let capability =
+                capability_with(required_pre_send_hook(&closed_port_endpoint().await)).await;
+            match ingest_pre_send(&capability).await {
+                PreSendDecision::Reject { error } => {
+                    assert!(!is_pre_send_rejection(&error), "{error}");
+                    assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+                }
+                PreSendDecision::Continue => panic!("an unreachable required hook must not allow"),
+            }
+        }
+
+        /// 对照：下游 Hook 明确拒绝时，Message Ingest 仍得到带标记的策略拒绝（422）。
+        #[tokio::test]
+        async fn ingest_still_sees_a_hook_denial_as_a_policy_rejection() {
+            let downstream = serve(DenyAll).await;
+            let capability = capability_with(required_pre_send_hook(&downstream)).await;
+            match ingest_pre_send(&capability).await {
+                PreSendDecision::Reject { error } => {
+                    assert!(is_pre_send_rejection(&error), "{error}");
+                }
+                PreSendDecision::Continue => panic!("a denying hook must not allow"),
+            }
+        }
+    }
 
     #[test]
     fn maps_proto_conversation_types_to_hook_wire_names() {

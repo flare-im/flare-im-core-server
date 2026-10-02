@@ -133,6 +133,12 @@ impl ConfigValidator {
             return Err(config_error("Hook timeout must be between 1ms and 30000ms"));
         }
 
+        if hook.resolved_group().is_err() {
+            return Err(config_error(
+                "Hook group must be validation, critical or business",
+            ));
+        }
+
         Ok(())
     }
 }

@@ -30,6 +30,16 @@ impl ConfigWatcher {
         }
     }
 
+    /// 测试用：没有加载器、当前配置固定为 `config` 的监听器。
+    #[cfg(test)]
+    pub(crate) fn with_config(config: HookConfig) -> Self {
+        Self {
+            loaders: Vec::new(),
+            current_config: Arc::new(RwLock::new(config)),
+            refresh_interval: Duration::from_secs(3600),
+        }
+    }
+
     /// 获取当前配置
     pub async fn get_config(&self) -> HookConfig {
         self.current_config.read().await.clone()

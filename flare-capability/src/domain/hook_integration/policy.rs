@@ -8,6 +8,7 @@ pub fn validate_hook_item_for_materialization(item: &HookConfigItem) -> FlareRes
     if !item.enabled {
         return Ok(());
     }
+    item.resolved_group()?;
     match &item.transport {
         HookTransportConfig::Grpc {
             endpoint,
