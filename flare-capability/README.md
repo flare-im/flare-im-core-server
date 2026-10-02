@@ -208,7 +208,7 @@ Hook configuration supports multi-tenant scenarios:
 
 - **Tenant isolation**: each tenant can have its own independent hook configuration
 - **Global configuration**: a configuration with `tenant_id` = `NULL` (and the configuration file) applies to all tenants
-- **Tenant configuration**: a specific tenant's configuration overrides the global configuration of the same name, for that tenant only
+- **Tenant configuration**: a tenant's own hooks run for that tenant only, in addition to the global ones; they cannot replace a global hook. The name of a global hook is reserved within its hook type: Administer rejects a tenant create/update that uses it with `ALREADY_EXISTS` (a disabled global row reserves its name too), and a same-named tenant row written some other way is not loaded (a warning is logged) while the global hook keeps running
 - **Selector**: a non-empty `selector.tenants` limits a hook to the listed tenants
 
 **Loading and execution** (process without `TENANT_ID`, the multi-tenant default):
@@ -218,7 +218,8 @@ that tenant. `HookPlugin.Call` selects the hooks by the tenant of the caller's
 signed context: global hooks plus that tenant's bucket. A tenant's invalid rows only
 keep that tenant on its previous hooks; a failed source keeps its last loaded hooks.
 An Administer write reloads that tenant's bucket immediately. A process started with
-`TENANT_ID` keeps the single-tenant behaviour and loads, as global configuration:
+`TENANT_ID` keeps the single-tenant behaviour (no name reservation) and loads, as
+global configuration:
 ```sql
 SELECT * FROM hook_configs
 WHERE enabled = true

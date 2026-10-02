@@ -119,12 +119,16 @@ announcing would be a way to take the system down from outside.
 The Capability service's hook engine also runs the hooks tenants register through
 `CapabilityService/Administer` (`hook_config.*`). Rows without a tenant (and the
 Capability configuration file) apply to every tenant; a tenant's rows apply only to
-that tenant's events, and override a global hook of the same name for that tenant
-only. A non-empty `selector.tenants` further limits a hook to the listed tenants. A
-write through Administer reloads that tenant's hooks at once; other changes arrive
-with the periodic refresh (60 s by default). A Capability process started with
+that tenant's events and run in addition to the global hooks. A tenant cannot replace
+or switch off a global hook: the name of a global hook is reserved within its hook
+type, Administer rejects a tenant `hook_config.create` or `update` that uses it with
+`ALREADY_EXISTS` (a disabled global row reserves its name too), and a same-named
+tenant row written some other way is not loaded (a warning is logged) while the global
+hook keeps running. A non-empty `selector.tenants` further limits a hook to the listed
+tenants. A write through Administer reloads that tenant's hooks at once; other changes
+arrive with the periodic refresh (60 s by default). A Capability process started with
 `TENANT_ID` keeps the single-tenant behaviour: it loads the global rows and that
-tenant's rows only.
+tenant's rows only, as one configuration, without the name reservation.
 
 ## 7. Context
 

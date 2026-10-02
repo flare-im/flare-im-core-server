@@ -4,14 +4,15 @@
 //! 需要 `FLARE_TENANT_TEST_DATABASE_URL`（用 `deploy/init.sql` 初始化的库）。用例标了 `#[ignore]`：
 //! 默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置，否则直接失败。
 //! 只写随机租户与随机名的行，结束时删除。修复前多租户进程只加载 `tenant_id IS NULL` 的行，租户
-//! 登记的 Webhook 一次都不执行（W10-S2 F1）。
+//! 登记的 Webhook 一次都不执行（W10-S2 F1）。全局 Hook 的名字为平台保留：租户登记同类型同名的
+//! Hook 被拒，绕过 Administer 写进库的同名租户行也顶替不了全局 Hook。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use flare_grpc_proto::capability::{
     CreateHookConfigRequest, CreateHookConfigResponse, DeleteHookConfigRequest, GenericRequest,
-    GenericResponse, HookRetryPolicy, HookSelector, HookTransport,
+    GenericResponse, HookRetryPolicy, HookSelector, HookTransport, UpdateHookConfigRequest,
 };
 use flare_im_hooks::PreSendDecision;
 use flare_im_service_kit::control_auth::{ControlActorKind, VerifiedControlActor};
@@ -91,6 +92,23 @@ fn delete(hook_id: &str) -> GenericRequest {
             .encode_to_vec(),
         }),
         request_id: format!("w11h-delete-{hook_id}"),
+    }
+}
+
+fn rename(hook_id: &str, name: &str) -> GenericRequest {
+    GenericRequest {
+        operation: "flare.extension.v1.hook_config.update".into(),
+        metadata: Default::default(),
+        payload: Some(prost_types::Any {
+            type_url: "type.googleapis.com/flare.capability.v1.UpdateHookConfigRequest".into(),
+            value: UpdateHookConfigRequest {
+                hook_id: hook_id.into(),
+                name: name.into(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        }),
+        request_id: format!("w11h-rename-{hook_id}"),
     }
 }
 
@@ -263,6 +281,107 @@ async fn tenant_webhooks_registered_through_administer_run_only_for_their_tenant
         )
         .await,
         ["/global"]
+    );
+
+    // 全局 Hook 的名字为平台保留：租户登记或改名成同类型同名的被拒，停用的全局行也算。
+    let off_name = format!("w11h-global-off-{run}");
+    let mut off = webhook_hook(&off_name, &receiver.url("/global-off"));
+    off.enabled = false;
+    repository.save(None, "pre_send", &off, None).await.unwrap();
+    for name in [&global_name, &off_name] {
+        let status = dispatch_hook_administer(
+            &governance,
+            create(&tenant_a, name, &receiver.url("/a-noop")),
+            &employee(&tenant_a),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::AlreadyExists, "{status:?}");
+    }
+    let status = dispatch_hook_administer(
+        &governance,
+        rename(&hook_a, &global_name),
+        &employee(&tenant_a),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::AlreadyExists, "{status:?}");
+
+    // 绕过 Administer 写进库的同名租户行（例如修复前登记的）顶替不了全局 Hook：全局的照常
+    // 投递，租户那条不装。
+    repository
+        .save(
+            Some(&tenant_a),
+            "pre_send",
+            &webhook_hook(&global_name, &receiver.url("/a-noop")),
+            None,
+        )
+        .await
+        .unwrap();
+    registry.reload_tenant(&tenant_a).await.unwrap();
+    assert_eq!(
+        trigger(
+            &endpoint,
+            &keys,
+            &receiver,
+            &tenant_a,
+            &format!("{run}-a-shadow"),
+            2
+        )
+        .await,
+        ["/a", "/global"]
+    );
+    watcher.reload().await.unwrap();
+    assert_eq!(
+        trigger(
+            &endpoint,
+            &keys,
+            &receiver,
+            &tenant_a,
+            &format!("{run}-a-shadow-full"),
+            2
+        )
+        .await,
+        ["/a", "/global"]
+    );
+    assert!(
+        repository
+            .delete(Some(&tenant_a), "pre_send", &global_name)
+            .await
+            .unwrap()
+    );
+
+    // 固定 TENANT_ID 的进程不做这项限制（同以前）。
+    let pinned_watcher = self::watcher(&repository, Some(&tenant_a));
+    pinned_watcher.reload().await.unwrap();
+    let pinned_governance = HookServiceServer::new(
+        Arc::clone(&repository),
+        Arc::new(CoreHookRegistry::new(pinned_watcher)),
+    );
+    let pinned_hook = created_id(
+        dispatch_hook_administer(
+            &pinned_governance,
+            create(&tenant_a, &global_name, &receiver.url("/a-pinned")),
+            &employee(&tenant_a),
+        )
+        .await
+        .unwrap()
+        .into_inner(),
+    );
+    let deleted = dispatch_hook_administer(
+        &pinned_governance,
+        delete(&pinned_hook),
+        &employee(&tenant_a),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(deleted.ok, "{deleted:?}");
+    assert!(
+        repository
+            .delete(None, "pre_send", &off_name)
+            .await
+            .unwrap()
     );
 
     // 全量重载（定时刷新走的路径）同样按租户分桶。

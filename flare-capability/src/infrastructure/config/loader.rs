@@ -51,6 +51,14 @@ impl ConfigLoaderItem {
             ConfigLoaderItem::File(_) | ConfigLoaderItem::ConfigCenter(_) => None,
         }
     }
+
+    /// 本源把租户的行与全局行分开加载（未设 `TENANT_ID` 的数据库源）。
+    pub fn buckets_by_tenant(&self) -> bool {
+        match self {
+            ConfigLoaderItem::Database(loader) => loader.buckets_by_tenant(),
+            ConfigLoaderItem::File(_) | ConfigLoaderItem::ConfigCenter(_) => false,
+        }
+    }
 }
 
 /// 一个配置源一次加载的结果。
@@ -284,9 +292,14 @@ impl DatabaseConfigLoader {
         Ok(loaded)
     }
 
+    /// 未固定租户：全局行与各租户的行分桶加载。
+    pub fn buckets_by_tenant(&self) -> bool {
+        self.tenant_id.is_none()
+    }
+
     /// 只加载一个租户自己登记的行；固定了租户的进程不分桶，返回 `None`。
     pub async fn load_tenant(&self, tenant_id: &str) -> Option<Result<HookConfig>> {
-        if self.tenant_id.is_some() {
+        if !self.buckets_by_tenant() {
             return None;
         }
         Some(

@@ -420,6 +420,30 @@ impl PostgresHookConfigRepository {
         }
     }
 
+    /// 有没有该类型、该名字的全局行（`tenant_id IS NULL`，停用的也算）。
+    pub async fn global_name_exists(&self, hook_type: &str, name: &str) -> Result<bool> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM hook_configs
+                WHERE tenant_id IS NULL
+                  AND hook_type = $1
+                  AND name = $2
+            )
+            "#,
+        )
+        .bind(hook_type)
+        .bind(name)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to check global hook name: {}",
+                e
+            ))
+        })
+    }
+
     /// 更新Hook配置
     pub async fn update(&self, hook_id: i64, hook_item: &HookConfigItem) -> Result<bool> {
         let selector_json = serde_json::to_value(&hook_item.selector)

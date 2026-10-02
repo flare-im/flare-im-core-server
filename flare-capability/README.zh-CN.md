@@ -208,14 +208,14 @@ Hook 配置支持多租户场景：
 
 - **租户隔离**：每个租户可以有独立的Hook配置
 - **全局配置**：`tenant_id`为`NULL`的配置（以及配置文件）对所有租户生效
-- **租户配置**：特定租户的配置覆盖同名的全局配置，只对该租户
+- **租户配置**：租户自己的 Hook 只对该租户生效，与全局 Hook 一起执行，不能顶替全局 Hook。全局 Hook 的名字在同类型内为平台保留：租户经 Administer 创建或改名成这个名字时返回 `ALREADY_EXISTS`（停用的全局行同样保留名字）；绕过 Administer 写进库的同名租户行不加载（记告警），全局 Hook 照常执行
 - **选择器**：`selector.tenants` 非空时，Hook 只作用于所列租户
 
 **加载与执行**（未设 `TENANT_ID` 的进程，即多租户默认）：数据库加载器把全局行作为全局配置，
 各租户经 `CapabilityService/Administer` 登记的行按租户分桶。`HookPlugin.Call` 按调用方签名
 上下文里的租户选 Hook：全局配置加该租户的桶。某个租户的行无效时只让该租户停在上一版配置；
 某个配置源加载失败时沿用它上一次加载的结果。Administer 写入后立即重载该租户的桶。设了
-`TENANT_ID` 的进程保持单租户行为，加载下面这些行作为全局配置：
+`TENANT_ID` 的进程保持单租户行为（不保留全局 Hook 的名字），加载下面这些行作为全局配置：
 ```sql
 SELECT * FROM hook_configs
 WHERE enabled = true

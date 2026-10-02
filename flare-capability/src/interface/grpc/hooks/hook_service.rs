@@ -72,6 +72,28 @@ impl HookServiceServer {
         reloaded.map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))
     }
 
+    /// 多租户进程里，租户不能登记与全局 Hook 同类型同名的 Hook：全局 Hook 的名字为平台保留，
+    /// 否则一条同名的空操作 Hook 就能让平台的审核、审计或合规 Hook 对该租户失效（快照里也不会
+    /// 装这样的条目，这里提前拒绝）。全局行停用时名字同样保留。固定了 `TENANT_ID` 的进程不做
+    /// 这项限制（行为不变）。
+    async fn reject_global_name(&self, hook_type: &str, name: &str) -> Result<(), Status> {
+        if !self.registry.buckets_by_tenant() {
+            return Ok(());
+        }
+        let reserved = self.registry.reserves_global_name(hook_type, name).await
+            || self
+                .repository
+                .global_name_exists(hook_type, name)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to check hook name: {}", e)))?;
+        if reserved {
+            return Err(Status::already_exists(format!(
+                "hook name '{name}' is reserved by a global {hook_type} hook"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn grpc_create_hook_config(
         &self,
         request: Request<CreateHookConfigRequest>,
@@ -134,6 +156,8 @@ impl HookServiceServer {
         // 与重载时的校验一致：存进去却加载不了的行会让该租户的配置停在旧版本。
         ConfigValidator::validate_hook(&hook_item)
             .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
+        self.reject_global_name(&req.hook_type, &hook_item.name)
+            .await?;
 
         // 保存到数据库（优先从 Context 提取，其次从请求参数）
         let created_by = ctx.user_id().map(|s: &str| s).or(None);
@@ -353,6 +377,14 @@ impl HookServiceServer {
 
         ConfigValidator::validate_hook(&hook_item)
             .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
+        if row
+            .tenant_id
+            .as_deref()
+            .is_some_and(|tenant| !tenant.is_empty())
+        {
+            self.reject_global_name(&row.hook_type, &hook_item.name)
+                .await?;
+        }
 
         // 更新数据库
         let updated = self

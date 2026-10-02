@@ -352,7 +352,67 @@ impl HookConfig {
             list.retain(|hook| hook.selector.matches_tenant(tenant_id));
         }
     }
+
+    /// `hook_type` 类型（与字段名相同，如 `pre_send`）里有没有名为 `name` 的 Hook；
+    /// 未知类型返回 `false`。
+    pub fn has_hook(&self, hook_type: &str, name: &str) -> bool {
+        HOOK_TYPES
+            .iter()
+            .zip(self.lists())
+            .any(|(ty, list)| *ty == hook_type && list.iter().any(|hook| hook.name == name))
+    }
+
+    /// 删掉与 `reserved` 同类型同名的 Hook，返回被删的 `(类型, 名称)`。
+    ///
+    /// 租户的配置不能顶替全局配置：全局 Hook 的名字在同类型内为平台保留。
+    pub fn remove_reserved(&mut self, reserved: &HookConfig) -> Vec<(&'static str, String)> {
+        let mut removed = Vec::new();
+        for ((ty, list), reserved_list) in HOOK_TYPES
+            .iter()
+            .zip(self.lists_mut())
+            .zip(reserved.lists())
+        {
+            list.retain(|hook| {
+                let shadows = reserved_list.iter().any(|kept| kept.name == hook.name);
+                if shadows {
+                    removed.push((*ty, hook.name.clone()));
+                }
+                !shadows
+            });
+        }
+        removed
+    }
+
+    /// 把 `other` 的 Hook 追加到同类型列表；与已有 Hook 同名的跳过，已有的不被替换。
+    pub fn extend_keeping_existing(&mut self, other: &HookConfig) {
+        for (list, extra) in self.lists_mut().into_iter().zip(other.lists()) {
+            for hook in extra {
+                if !list.iter().any(|kept| kept.name == hook.name) {
+                    list.push(hook.clone());
+                }
+            }
+        }
+    }
 }
+
+/// Hook 类型名，顺序同 [`HookConfig::lists`]；与 `hook_configs.hook_type` 的取值相同。
+const HOOK_TYPES: [&str; 15] = [
+    "pre_send",
+    "post_send",
+    "delivery",
+    "recall",
+    "session_create",
+    "session_update",
+    "session_delete",
+    "user_login",
+    "user_logout",
+    "user_online",
+    "user_offline",
+    "push_pre_send",
+    "push_post_send",
+    "push_delivery",
+    "get_conversation_participants",
+];
 
 /// Hook执行计划
 pub struct HookExecutionPlan {

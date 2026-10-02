@@ -24,6 +24,9 @@ pub struct ConfigWatcher {
 
 struct WatcherState {
     loaders: Vec<Arc<ConfigLoaderItem>>,
+    /// 有配置源把租户的行与全局行分开加载（多租户进程）。只有这时全局配置才不含租户的行，
+    /// 全局 Hook 的名字才为平台保留（见 [`ConfigWatcher::reserves_global_name`]）。
+    buckets_by_tenant: bool,
     /// 各配置源最近一次成功加载的结果（与 `loaders` 一一对应）。某个源加载失败时沿用它，
     /// 一次数据库或配置中心故障不会清掉该源登记的 Hook。锁同时串行化全量与按租户的重载，
     /// 避免较早开始的全量重载覆盖较晚完成的租户重载。
@@ -34,9 +37,11 @@ struct WatcherState {
 impl ConfigWatcher {
     pub fn new(loaders: Vec<Arc<ConfigLoaderItem>>, refresh_interval: Duration) -> Self {
         let slots = vec![None; loaders.len()];
+        let buckets_by_tenant = loaders.iter().any(|loader| loader.buckets_by_tenant());
         Self {
             state: Arc::new(WatcherState {
                 loaders,
+                buckets_by_tenant,
                 loaded: Mutex::new(slots),
                 current: RwLock::new(Arc::new(HookConfigSnapshot::default())),
             }),
@@ -50,12 +55,13 @@ impl ConfigWatcher {
         Self::with_snapshot(HookConfigSnapshot::new(config, Default::default()))
     }
 
-    /// 测试用：没有加载器、当前快照固定为 `snapshot` 的监听器。
+    /// 测试用：没有加载器、当前快照固定为 `snapshot` 的监听器（按多租户进程对待）。
     #[cfg(test)]
     pub(crate) fn with_snapshot(snapshot: HookConfigSnapshot) -> Self {
         Self {
             state: Arc::new(WatcherState {
                 loaders: Vec::new(),
+                buckets_by_tenant: true,
                 loaded: Mutex::new(Vec::new()),
                 current: RwLock::new(Arc::new(snapshot)),
             }),
@@ -71,6 +77,18 @@ impl ConfigWatcher {
     /// `tenant_id` 的事件实际要执行的配置（见 [`HookConfigSnapshot::for_tenant`]）。
     pub async fn config_for_tenant(&self, tenant_id: &str) -> HookConfig {
         self.snapshot().await.for_tenant(tenant_id)
+    }
+
+    /// 租户不能登记 `hook_type` 类型、名为 `name` 的 Hook：多租户进程里该名字已被当前的
+    /// 全局配置占用。固定了 `TENANT_ID` 的进程全局配置里含该租户自己的行，不做这项限制
+    /// （行为不变）。
+    pub async fn reserves_global_name(&self, hook_type: &str, name: &str) -> bool {
+        self.state.buckets_by_tenant && self.snapshot().await.is_global_hook(hook_type, name)
+    }
+
+    /// 是否按租户分桶（多租户进程）。
+    pub fn buckets_by_tenant(&self) -> bool {
+        self.state.buckets_by_tenant
     }
 
     /// 启动配置监听

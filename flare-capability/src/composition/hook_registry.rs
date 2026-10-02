@@ -116,6 +116,18 @@ impl CoreHookRegistry {
         Ok(self.snapshot(tenant_id).await.get_conversation_participants)
     }
 
+    /// 租户不能登记该类型、该名字的 Hook（见 [`ConfigWatcher::reserves_global_name`]）。
+    pub async fn reserves_global_name(&self, hook_type: &str, name: &str) -> bool {
+        self.config_watcher
+            .reserves_global_name(hook_type, name)
+            .await
+    }
+
+    /// 是否按租户分桶（多租户进程）。
+    pub fn buckets_by_tenant(&self) -> bool {
+        self.config_watcher.buckets_by_tenant()
+    }
+
     /// 重新加载所有配置源
     pub async fn reload_config(&self) -> Result<()> {
         self.config_watcher.reload().await
