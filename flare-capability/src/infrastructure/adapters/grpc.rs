@@ -12,7 +12,7 @@ use tokio::time::Duration;
 
 use prost::Message;
 use tonic::Request;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
 use flare_grpc_proto::capability::{
@@ -31,6 +31,9 @@ use crate::infrastructure::adapters::conversion::{
 };
 
 // 导入服务发现相关模块
+use flare_im_service_kit::discovery::{
+    invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
+};
 use flare_server_core::{ServiceClient, ServiceDiscover};
 
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
@@ -38,8 +41,8 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error}
 /// gRPC Hook适配器
 #[allow(dead_code)]
 pub struct GrpcHookAdapter {
-    // 模式1: 直接地址模式（固定客户端）
-    client: Option<Arc<Mutex<HookPluginClient<Channel>>>>,
+    // 模式1: 直接地址模式（`http(s)://` 静态地址，通道取自 service-kit 的静态通道缓存）
+    endpoint: Option<String>,
 
     // 模式2: 服务发现模式（动态选择实例）
     service_client: Option<Arc<Mutex<ServiceClient>>>,
@@ -56,34 +59,27 @@ pub struct GrpcHookAdapter {
 
 impl GrpcHookAdapter {
     /// 从直接地址创建gRPC Hook适配器（模式1: 直接地址模式）
+    ///
+    /// 通道取自 service-kit 的静态通道（建连上限 2 s 覆盖名字解析与握手、HTTP/2 探活，见
+    /// `flare_im_service_kit::discovery::StaticChannelPolicy`），按地址缓存、构造时不连下游；
+    /// 调用遇到传输层失败时丢弃该地址的通道，下一次调用重新解析、新建连接。以前每次构造都
+    /// 立即建一条没有上限、没有探活的新连接。
     pub async fn new_from_endpoint(
         endpoint: String,
         metadata: HashMap<String, String>,
     ) -> Result<Self> {
-        let channel = Endpoint::from_shared(endpoint.clone())
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::InvalidParameter,
-                    "invalid gRPC hook endpoint URI",
-                )
-            })?
-            .connect()
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    "failed to connect to gRPC hook endpoint",
-                )
-            })?;
-
-        let client = HookPluginClient::new(channel);
+        resolve_grpc_channel(&endpoint).await.map_err(|e| {
+            map_infra_error(
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
+                ErrorCode::InvalidParameter,
+                "invalid gRPC hook endpoint URI",
+            )
+        })?;
 
         tracing::trace!(endpoint = %endpoint, "Created gRPC adapter from endpoint");
 
         Ok(Self {
-            client: Some(Arc::new(Mutex::new(client))),
+            endpoint: Some(endpoint),
             service_client: None,
             service_name: String::new(),
             load_balance_strategy: LoadBalanceStrategy::RoundRobin,
@@ -107,7 +103,7 @@ impl GrpcHookAdapter {
         );
 
         Ok(Self {
-            client: None,
+            endpoint: None,
             service_client: Some(service_client),
             service_name,
             load_balance_strategy,
@@ -131,7 +127,7 @@ impl GrpcHookAdapter {
         );
 
         Ok(Self {
-            client: None,
+            endpoint: None,
             service_client: None,
             service_name,
             load_balance_strategy,
@@ -144,8 +140,15 @@ impl GrpcHookAdapter {
     /// 获取客户端（自动选择模式）
     async fn get_client(&self, _key: Option<&str>) -> Result<HookPluginClient<Channel>> {
         // 模式1: 直接地址模式
-        if let Some(ref client) = self.client {
-            return Ok(client.lock().await.clone());
+        if let Some(endpoint) = self.endpoint.as_deref() {
+            let channel = resolve_grpc_channel(endpoint).await.map_err(|e| {
+                map_infra_error(
+                    std::io::Error::other(e),
+                    ErrorCode::ServiceUnavailable,
+                    "failed to resolve gRPC hook endpoint",
+                )
+            })?;
+            return Ok(HookPluginClient::new(channel));
         }
 
         // 模式2: 服务发现模式
@@ -222,13 +225,27 @@ impl GrpcHookAdapter {
         });
         req = self.set_request_metadata(req, ctx);
         let mut client = self.get_client(key).await?;
-        let envelope = client
-            .call(req)
-            .await
-            .map_err(|e| {
-                map_infra_error(e, ErrorCode::InternalError, "gRPC HookPlugin.Call failed")
-            })?
-            .into_inner();
+        let envelope = match client.call(req).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                // 传输层失败（连不上、连接被断、ping 超时）时丢弃该地址的静态通道，下一次调用
+                // 重新解析、新建连接；对端回的状态不动缓存。
+                if let Some(endpoint) = self.endpoint.as_deref()
+                    && invalidate_static_channel_on_transport_failure(endpoint, &status)
+                {
+                    tracing::debug!(
+                        endpoint,
+                        code = ?status.code(),
+                        "hook channel dropped after transport failure"
+                    );
+                }
+                return Err(map_infra_error(
+                    status,
+                    ErrorCode::InternalError,
+                    "gRPC HookPlugin.Call failed",
+                ));
+            }
+        };
         if !envelope.ok {
             return Err(ErrorBuilder::new(
                 ErrorCode::InternalError,
@@ -357,5 +374,94 @@ impl GrpcHookAdapter {
             .await?;
 
         Ok(proto_to_recall_decision(&response))
+    }
+}
+
+#[cfg(test)]
+mod static_channel_tests {
+    use super::*;
+    use flare_grpc_proto::capability::GenericResponse;
+    use flare_grpc_proto::capability::hook_plugin_server::{HookPlugin, HookPluginServer};
+    use flare_im_service_kit::discovery::is_static_channel_cached;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tonic::{Response, Status};
+
+    struct AllowAll;
+
+    #[tonic::async_trait]
+    impl HookPlugin for AllowAll {
+        async fn call(
+            &self,
+            request: Request<GenericRequest>,
+        ) -> std::result::Result<Response<GenericResponse>, Status> {
+            let response = PreSendHookResponse {
+                allow: true,
+                ..Default::default()
+            };
+            Ok(Response::new(GenericResponse {
+                ok: true,
+                request_id: request.into_inner().request_id,
+                payload: Some(prost_types::Any {
+                    type_url: "type.googleapis.com/flare.capability.v1.PreSendHookResponse"
+                        .to_string(),
+                    value: response.encode_to_vec(),
+                }),
+                error_code: String::new(),
+                error_message: String::new(),
+            }))
+        }
+    }
+
+    /// 直接地址模式走 service-kit 的静态通道（建连上限、HTTP/2 探活），传输层失败后丢弃
+    /// 该地址的通道。以前每次构造都立即建一条没有上限、没有探活的新连接。
+    #[tokio::test]
+    async fn endpoint_mode_uses_the_static_channel_and_drops_it_after_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stop_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(HookPluginServer::new(AllowAll))
+                .serve_with_incoming_shutdown(
+                    tonic::transport::server::TcpIncoming::from(listener),
+                    async {
+                        let _ = stop_rx.await;
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        let endpoint = format!("http://{addr}");
+        let adapter = GrpcHookAdapter::new_from_endpoint(endpoint.clone(), HashMap::new())
+            .await
+            .expect("endpoint adapter");
+        assert!(
+            is_static_channel_cached(&endpoint),
+            "endpoint mode must use the service-kit static channel"
+        );
+
+        let ctx = Context::with_request_id("req-static-channel").with_tenant_id("0");
+        let mut draft = MessageDraft::new(b"hello".to_vec());
+        let decision = adapter.pre_send(&ctx, &mut draft).await.expect("allowed");
+        assert!(matches!(decision, PreSendDecision::Continue));
+        assert!(is_static_channel_cached(&endpoint));
+
+        let _ = stop.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+        assert!(adapter.pre_send(&ctx, &mut draft).await.is_err());
+        assert!(
+            !is_static_channel_cached(&endpoint),
+            "transport failure must drop the cached static channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_endpoint_is_rejected_at_construction() {
+        assert!(
+            GrpcHookAdapter::new_from_endpoint("http://bad host:1".to_string(), HashMap::new())
+                .await
+                .is_err()
+        );
     }
 }

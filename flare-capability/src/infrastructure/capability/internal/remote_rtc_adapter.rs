@@ -38,6 +38,9 @@ use crate::infrastructure::capability::plugin_channel::{
     PLUGIN_DISCOVERY_TIMEOUT, resolve_plugin_channel,
 };
 use crate::infrastructure::config::capability_runtime::discovery_route_authority;
+use flare_im_service_kit::discovery::{
+    StaticChannelPolicy, invalidate_static_channel_on_transport_failure, static_grpc_endpoint,
+};
 
 #[derive(Debug, Deserialize)]
 struct CallRefPayload {
@@ -49,11 +52,11 @@ fn status_to_capability(s: tonic::Status) -> CapabilityError {
 }
 
 enum MediaControlTransport {
-    Static(Channel),
+    /// `http(s)://` 静态地址：通道取自 service-kit 的静态通道缓存（建连上限、HTTP/2 探活），
+    /// 传输层失败时丢弃。
+    Static { authority: String },
     /// `discovery://<service_name>`，与 [`resolve_plugin_channel`] / 健康检查共用缓存。
-    Discovery {
-        route_authority: String,
-    },
+    Discovery { route_authority: String },
 }
 
 /// 独立媒体控制面进程的 gRPC 后端（与进程内媒体后端二选一）。
@@ -63,17 +66,19 @@ pub struct MediaControlGrpcRtcCapability {
 
 impl MediaControlGrpcRtcCapability {
     /// 静态 endpoint 延迟建连：启动阶段不拨号，首次 RTC 调用时再连接。
+    ///
+    /// 通道取自 service-kit 的静态通道（建连上限 2 s 覆盖名字解析与握手、HTTP/2 探活，见
+    /// `flare_im_service_kit::discovery::StaticChannelPolicy`）；调用遇到传输层失败时丢弃，下一次
+    /// 调用重新解析、新建连接。以前是没有建连上限与探活、永久复用的懒连接通道。
     pub fn from_static_lazy(endpoint: impl Into<String>) -> flare_server_core::error::Result<Self> {
         let ep = endpoint.into();
-        let channel = Channel::from_shared(ep.clone())
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "invalid media-control gRPC endpoint {ep}: {e}"
-                ))
-            })?
-            .connect_lazy();
+        static_grpc_endpoint(&ep, StaticChannelPolicy::DEFAULT).map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "invalid media-control gRPC endpoint {ep}: {e}"
+            ))
+        })?;
         Ok(Self {
-            transport: MediaControlTransport::Static(channel),
+            transport: MediaControlTransport::Static { authority: ep },
         })
     }
 
@@ -90,7 +95,12 @@ impl MediaControlGrpcRtcCapability {
 
     pub async fn control_client(&self) -> Result<SfuControlClient<Channel>> {
         match &self.transport {
-            MediaControlTransport::Static(channel) => Ok(SfuControlClient::new(channel.clone())),
+            MediaControlTransport::Static { authority } => {
+                let channel = resolve_plugin_channel(authority).await.map_err(|e| {
+                    CapabilityError::System(format!("media-control channel {authority}: {e}"))
+                })?;
+                Ok(SfuControlClient::new(channel))
+            }
             MediaControlTransport::Discovery { route_authority } => {
                 let channel = match tokio::time::timeout(
                     PLUGIN_DISCOVERY_TIMEOUT,
@@ -119,6 +129,21 @@ impl MediaControlGrpcRtcCapability {
                 Ok(SfuControlClient::new(channel))
             }
         }
+    }
+
+    /// 调用失败转成能力错误；静态地址上的传输层失败（连不上、连接被断、ping 超时）同时丢弃
+    /// 该地址的通道，对端回的状态不动缓存。
+    fn rpc_failed(&self, status: tonic::Status) -> CapabilityError {
+        if let MediaControlTransport::Static { authority } = &self.transport
+            && invalidate_static_channel_on_transport_failure(authority, &status)
+        {
+            tracing::debug!(
+                endpoint = %authority,
+                code = ?status.code(),
+                "media-control channel dropped after transport failure"
+            );
+        }
+        status_to_capability(status)
     }
 
     fn resolve_call_id(req_call_id: &str, ext: &Value) -> String {
@@ -202,7 +227,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .create_room(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(CreateCallResponse {
@@ -232,7 +257,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .accept_call(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(AcceptCallResponse {
@@ -286,7 +311,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .hangup_call(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(HangupCallResponse {
@@ -313,7 +338,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .get_join_token(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(GetJoinTokenResponse {
@@ -362,7 +387,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .join_room(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         let mut ext = Map::new();
@@ -400,7 +425,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .get_room_state(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(MediaGetRoomStateResponse {
@@ -431,7 +456,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .leave_room(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(MediaLeaveTransportResponse {
@@ -458,7 +483,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .handle_sdp_offer(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(HandleSdpOfferResponse {
@@ -485,7 +510,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .handle_sdp_answer(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(HandleSdpAnswerResponse {
@@ -512,7 +537,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .add_ice_candidate(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(AddIceCandidateResponse {
@@ -540,7 +565,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .set_publisher_mute(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
 
         Ok(MediaSetPublisherMuteResponse {
@@ -571,7 +596,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .set_subscription(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
         Ok(MediaSetSubscriptionResponse {
             applied: inner.applied,
@@ -598,7 +623,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .set_simulcast_layer(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
         Ok(MediaSetSimulcastLayerResponse {
             applied: inner.applied,
@@ -623,7 +648,7 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             .await?
             .get_peer_network_quality(grpc_req)
             .await
-            .map_err(status_to_capability)?;
+            .map_err(|status| self.rpc_failed(status))?;
         let inner = resp.into_inner();
         let quality = inner.quality;
         Ok(MediaGetNetworkQualityResponse {
@@ -634,5 +659,54 @@ impl RtcCapability for MediaControlGrpcRtcCapability {
             packet_loss_ratio: quality.as_ref().map(|q| q.packet_loss_ratio).unwrap_or(0.0),
             ext: Value::Null,
         })
+    }
+}
+
+#[cfg(test)]
+mod static_channel_tests {
+    use super::*;
+    use flare_im_service_kit::discovery::is_static_channel_cached;
+
+    /// 静态地址走 service-kit 的静态通道（建连上限、HTTP/2 探活），传输层失败后丢弃该地址的
+    /// 通道。以前是没有建连上限与探活、永久复用的懒连接通道。
+    #[tokio::test]
+    async fn static_media_control_uses_the_static_channel_and_drops_it_after_transport_failure() {
+        // 一个刚关掉的回环端口：连上会被拒绝。
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let authority = format!("http://{closed}");
+        let rtc = MediaControlGrpcRtcCapability::from_static_lazy(authority.clone())
+            .expect("static media-control endpoint");
+        rtc.control_client().await.expect("lazy static channel");
+        assert!(
+            is_static_channel_cached(&authority),
+            "static media-control endpoint must use the service-kit static channel"
+        );
+
+        let ctx: Ctx = std::sync::Arc::new(
+            flare_core_base::context::Context::with_request_id("req-rtc").with_tenant_id("0"),
+        );
+        let result = rtc
+            .media_get_room_state(
+                &ctx,
+                &MediaGetRoomStateRequest {
+                    tenant_id: "0".into(),
+                    request_id: "req-rtc".into(),
+                    room_id: "room".into(),
+                },
+            )
+            .await;
+        assert!(result.is_err(), "nothing listens on a closed port");
+        assert!(
+            !is_static_channel_cached(&authority),
+            "transport failure must drop the cached static channel"
+        );
+    }
+
+    #[test]
+    fn an_invalid_static_endpoint_is_a_startup_error() {
+        assert!(MediaControlGrpcRtcCapability::from_static_lazy("http://bad host:1").is_err());
     }
 }

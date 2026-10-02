@@ -190,6 +190,12 @@ fn resolve_static_channel(grpc_authority: &str) -> Result<Channel, String> {
     Ok(channel)
 }
 
+/// 某个静态地址当前是否有缓存的通道（供观测与测试：确认调用方走的是本模块的静态通道，以及
+/// 传输层失败后缓存已被丢弃）。
+pub fn is_static_channel_cached(grpc_authority: &str) -> bool {
+    STATIC_CHANNEL_CACHE.contains_key(grpc_authority)
+}
+
 /// 丢弃某个静态地址的缓存通道：下一次 [`resolve_grpc_channel`] 新建通道，重新解析名字、
 /// 新建连接，不再沿用旧通道的重连状态。`discovery://` 路由不受影响。
 pub fn invalidate_static_channel(grpc_authority: &str) {

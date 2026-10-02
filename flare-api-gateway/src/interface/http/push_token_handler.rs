@@ -19,6 +19,10 @@ use flare_grpc_proto::push::push_service_client::PushServiceClient;
 use flare_grpc_proto::push::{
     DevicePushProvider, RegisterDevicePushTokenRequest, UnregisterDevicePushTokenRequest,
 };
+use flare_im_service_kit::discovery::{
+    StaticChannelPolicy, invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
+    static_grpc_endpoint,
+};
 use flare_server_core::{
     AuthenticatedPrincipal, SignedActorType, SignedContextIdentity,
     context::Ctx,
@@ -27,7 +31,7 @@ use flare_server_core::{
 };
 use serde::{Deserialize, Serialize};
 use tonic::Code;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 use tracing::{debug, instrument, warn};
 
 use super::MessageContextSigner;
@@ -41,8 +45,24 @@ const MAX_PUSH_TOKEN_LEN: usize = 4096;
 
 /// Push Proxy 设备令牌 RPC 的客户端。通道惰性建立：Push Proxy 暂不可达时网关照常启动，
 /// 该接口按请求返回 503。
+///
+/// 静态地址的通道取自 service-kit 的静态通道缓存（建连上限 2 s 覆盖名字解析与握手、HTTP/2
+/// 探活，见 [`StaticChannelPolicy`]），调用遇到传输层失败时丢弃，下一次请求重新解析、新建连接。
+/// 以前的懒连接通道有建连上限、没有探活，对端消失却没有断开连接时要等 TCP 自己超时。
 #[derive(Clone)]
-pub(crate) struct PushTokenClient(PushServiceClient<Channel>);
+pub(crate) struct PushTokenClient {
+    target: PushTokenTarget,
+    request_timeout: Option<Duration>,
+}
+
+#[derive(Clone)]
+enum PushTokenTarget {
+    /// `http(s)://` 静态地址（service-kit 静态通道缓存的键）。
+    Static(String),
+    /// 调用方给定的通道（测试注入）。
+    #[cfg(test)]
+    Channel(Channel),
+}
 
 /// Push Proxy 的静态 gRPC 地址：`FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`，
 /// 未配置或为空时取 single 拓扑地址；Push Proxy 不在同一容器的拓扑必须显式配置。
@@ -60,7 +80,6 @@ fn resolve_push_proxy_url(configured: Option<String>) -> String {
 impl PushTokenClient {
     pub(crate) fn connect_lazy(
         url: &str,
-        connect_timeout: Duration,
         request_timeout: Duration,
     ) -> std::result::Result<Self, String> {
         let url = url.trim();
@@ -70,15 +89,58 @@ impl PushTokenClient {
                     .to_string(),
             );
         }
-        let endpoint = Endpoint::from_shared(url.to_string())
-            .map_err(|_| "FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL is not a valid URI".to_string())?
-            .connect_timeout(connect_timeout)
-            .timeout(request_timeout);
-        Ok(Self::from_channel(endpoint.connect_lazy()))
+        static_grpc_endpoint(url, StaticChannelPolicy::DEFAULT)
+            .map_err(|_| "FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL is not a valid URI".to_string())?;
+        Ok(Self {
+            target: PushTokenTarget::Static(url.to_string()),
+            request_timeout: Some(request_timeout),
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_channel(channel: Channel) -> Self {
-        Self(PushServiceClient::new(channel))
+        Self {
+            target: PushTokenTarget::Channel(channel),
+            request_timeout: None,
+        }
+    }
+
+    async fn client(&self) -> Result<PushServiceClient<Channel>> {
+        match &self.target {
+            PushTokenTarget::Static(url) => resolve_grpc_channel(url)
+                .await
+                .map(PushServiceClient::new)
+                .map_err(|_| {
+                    push_proxy_error(tonic::Status::unavailable("push proxy channel unavailable"))
+                }),
+            #[cfg(test)]
+            PushTokenTarget::Channel(channel) => Ok(PushServiceClient::new(channel.clone())),
+        }
+    }
+
+    /// 一次 Push Proxy 调用：带请求超时；传输层失败（连不上、连接被断、ping 超时）时丢弃
+    /// 静态地址的通道，对端回的状态不动缓存。
+    async fn call<T, F, Fut>(&self, rpc: F) -> std::result::Result<T, tonic::Status>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let result = match self.request_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, rpc())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tonic::Status::deadline_exceeded(
+                        "push proxy request timed out",
+                    ))
+                }),
+            None => rpc().await,
+        };
+        if let (Err(status), PushTokenTarget::Static(url)) = (&result, &self.target)
+            && invalidate_static_channel_on_transport_failure(url, status)
+        {
+            debug!(code = ?status.code(), "push proxy channel dropped after transport failure");
+        }
+        result
     }
 }
 
@@ -310,9 +372,10 @@ pub async fn register_push_token(
         platform = %request.platform,
         "RegisterDevicePushToken"
     );
-    let mut client = client.0;
+    let grpc_request = caller.request(request)?;
+    let mut push_proxy = client.client().await?;
     let response = client
-        .register_device_push_token(caller.request(request)?)
+        .call(|| push_proxy.register_device_push_token(grpc_request))
         .await
         .map_err(push_proxy_error)?
         .into_inner();
@@ -361,9 +424,10 @@ pub async fn unregister_push_token(
         device_id = %request.device_id,
         "UnregisterDevicePushToken"
     );
-    let mut client = client.0;
+    let grpc_request = caller.request(request)?;
+    let mut push_proxy = client.client().await?;
     let response = client
-        .unregister_device_push_token(caller.request(request)?)
+        .call(|| push_proxy.unregister_device_push_token(grpc_request))
         .await
         .map_err(push_proxy_error)?
         .into_inner();
@@ -496,7 +560,57 @@ mod tests {
     #[test]
     fn invalid_static_address_is_a_startup_error() {
         let timeout = Duration::from_secs(1);
-        assert!(PushTokenClient::connect_lazy("127.0.0.1:50091", timeout, timeout).is_err());
-        assert!(PushTokenClient::connect_lazy("", timeout, timeout).is_err());
+        assert!(PushTokenClient::connect_lazy("127.0.0.1:50091", timeout).is_err());
+        assert!(PushTokenClient::connect_lazy("", timeout).is_err());
+        assert!(PushTokenClient::connect_lazy("http://bad host:1", timeout).is_err());
+    }
+
+    /// 静态地址走 service-kit 的静态通道（建连上限、HTTP/2 探活），传输层失败后丢弃该地址的
+    /// 通道；请求超时按 504 报。以前的懒连接通道有建连上限、没有探活，且永久复用。
+    #[tokio::test]
+    async fn static_push_proxy_uses_the_static_channel_and_drops_it_after_transport_failure() {
+        use flare_im_service_kit::discovery::is_static_channel_cached;
+
+        // 一个刚关掉的回环端口：连上会被拒绝。
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let url = format!("http://{closed}");
+        let client = PushTokenClient::connect_lazy(&url, Duration::from_secs(2)).unwrap();
+        let mut push_proxy = client.client().await.expect("lazy static channel");
+        assert!(
+            is_static_channel_cached(&url),
+            "push proxy must use the service-kit static channel"
+        );
+        let request = tonic::Request::new(UnregisterDevicePushTokenRequest::default());
+        let status = client
+            .call(|| push_proxy.unregister_device_push_token(request))
+            .await
+            .expect_err("nothing listens on a closed port");
+        assert!(
+            !is_static_channel_cached(&url),
+            "transport failure must drop the cached static channel"
+        );
+        let response = axum::response::IntoResponse::into_response(push_proxy_error(status));
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let client = PushTokenClient {
+            request_timeout: Some(Duration::from_millis(50)),
+            ..client
+        };
+        let status = client
+            .call(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok::<(), tonic::Status>(())
+            })
+            .await
+            .expect_err("request timeout");
+        assert_eq!(status.code(), Code::DeadlineExceeded);
+        let response = axum::response::IntoResponse::into_response(push_proxy_error(status));
+        assert_eq!(response.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
     }
 }

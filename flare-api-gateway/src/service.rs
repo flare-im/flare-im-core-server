@@ -63,7 +63,6 @@ impl ApplicationBootstrap {
         let push_proxy_url = push_proxy_url_from_env();
         let push_tokens = PushTokenClient::connect_lazy(
             &push_proxy_url,
-            Duration::from_secs(settings.grpc.connect_timeout_secs),
             Duration::from_secs(settings.grpc.request_timeout_secs),
         )
         .map_err(flare_server_core::error::FlareError::system)?;

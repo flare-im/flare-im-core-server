@@ -4,16 +4,22 @@ use std::sync::Arc;
 use flare_grpc_proto::signaling::online::GetOnlineStatusRequest;
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_im_contracts::Ctx;
+use flare_im_service_kit::discovery::{
+    invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
+};
 use flare_server_core::SignedActorType;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use redis::aio::ConnectionManager;
-use tonic::transport::Channel;
 
 use crate::config::PushServerConfig;
 
 enum OnlineStatusBackend {
-    Grpc(OnlineServiceClient<Channel>),
+    /// signaling-online 的静态 gRPC 地址。通道取自 service-kit 的静态通道缓存（建连上限 2 s 覆盖
+    /// 名字解析与握手、HTTP/2 探活），调用遇到传输层失败时丢弃，下一次调用重新解析、新建连接。
+    Grpc {
+        endpoint: String,
+    },
     Redis(ConnectionManager),
 }
 
@@ -81,17 +87,13 @@ impl OnlineStatusService {
                 OnlineStatusBackend::Redis(manager)
             }
             "grpc" => {
+                // 惰性建连：signaling-online 暂时不可达时照常启动，查询按请求失败。以前启动时
+                // 立即建连，对端没起来就启动失败，建好的通道也没有探活、永久复用。
                 let endpoint = config.online_service_endpoint.clone();
-                let channel = Channel::from_shared(endpoint.clone())
-                    .map_err(|err| {
-                        FlareError::system(format!("invalid online grpc uri {endpoint}: {err}"))
-                    })?
-                    .connect()
-                    .await
-                    .map_err(|err| {
-                        FlareError::system(format!("connect online grpc {endpoint}: {err}"))
-                    })?;
-                OnlineStatusBackend::Grpc(OnlineServiceClient::new(channel))
+                resolve_grpc_channel(&endpoint).await.map_err(|err| {
+                    FlareError::system(format!("invalid online grpc uri {endpoint}: {err}"))
+                })?;
+                OnlineStatusBackend::Grpc { endpoint }
             }
             other => {
                 return Err(ErrorBuilder::new(
@@ -121,8 +123,8 @@ impl OnlineStatusService {
         let tenant_id = require_tenant(ctx)?;
 
         match &self.backend {
-            OnlineStatusBackend::Grpc(client) => {
-                self.grpc_online_statuses(ctx, client, user_ids).await
+            OnlineStatusBackend::Grpc { endpoint } => {
+                self.grpc_online_statuses(ctx, endpoint, user_ids).await
             }
             OnlineStatusBackend::Redis(manager) => {
                 self.redis_online_statuses(manager, tenant_id, user_ids)
@@ -141,7 +143,7 @@ impl OnlineStatusService {
                 self.redis_conversation_online_user_ids(manager, ctx, conversation_id)
                     .await
             }
-            OnlineStatusBackend::Grpc(_) => Err(ErrorBuilder::new(
+            OnlineStatusBackend::Grpc { .. } => Err(ErrorBuilder::new(
                 ErrorCode::ConfigurationError,
                 "conversation online index requires redis online status backend",
             )
@@ -153,13 +155,9 @@ impl OnlineStatusService {
     async fn grpc_online_statuses(
         &self,
         ctx: &Ctx,
-        client: &OnlineServiceClient<Channel>,
+        endpoint: &str,
         user_ids: &[String],
     ) -> Result<HashMap<String, bool>> {
-        let mut client = client.clone();
-        let mut req = tonic::Request::new(GetOnlineStatusRequest {
-            user_ids: user_ids.to_vec(),
-        });
         // MQ context headers are not a signing authority. Forward only a token
         // that an upstream gRPC boundary actually verified; otherwise fail closed.
         let token = ctx
@@ -172,13 +170,7 @@ impl OnlineStatusService {
                 )
                 .build_error()
             })?;
-        flare_server_core::set_signed_context_token(&mut req, token)?;
-        let resp = client.get_online_status(req).await?.into_inner();
-        Ok(resp
-            .statuses
-            .into_iter()
-            .map(|(user_id, status)| (user_id, status.online))
-            .collect())
+        query_online_service(endpoint, token, user_ids).await
     }
 
     async fn redis_online_statuses(
@@ -274,6 +266,43 @@ impl OnlineStatusService {
     }
 }
 
+/// 向 signaling-online 查询在线状态。传输层失败（连不上、连接被断、ping 超时）时丢弃该地址的
+/// 静态通道，对端回的状态不动缓存。
+async fn query_online_service(
+    endpoint: &str,
+    token: &str,
+    user_ids: &[String],
+) -> Result<HashMap<String, bool>> {
+    let channel = resolve_grpc_channel(endpoint).await.map_err(|err| {
+        ErrorBuilder::new(ErrorCode::ServiceUnavailable, "online grpc channel")
+            .details(err)
+            .build_error()
+    })?;
+    let mut client = OnlineServiceClient::new(channel);
+    let mut req = tonic::Request::new(GetOnlineStatusRequest {
+        user_ids: user_ids.to_vec(),
+    });
+    flare_server_core::set_signed_context_token(&mut req, token)?;
+    let resp = match client.get_online_status(req).await {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            if invalidate_static_channel_on_transport_failure(endpoint, &status) {
+                tracing::debug!(
+                    endpoint,
+                    code = ?status.code(),
+                    "online grpc channel dropped after transport failure"
+                );
+            }
+            return Err(status.into());
+        }
+    };
+    Ok(resp
+        .statuses
+        .into_iter()
+        .map(|(user_id, status)| (user_id, status.online))
+        .collect())
+}
+
 #[cfg(test)]
 mod online_index_scan_tests {
     use super::*;
@@ -323,6 +352,74 @@ mod online_index_scan_tests {
         assert!(
             OnlineStatusService::ONLINE_SCAN_BATCH < OnlineStatusService::ONLINE_SCAN_HARD_CAP,
             "单批不该超过总上限"
+        );
+    }
+}
+
+#[cfg(test)]
+mod online_grpc_channel_tests {
+    use super::*;
+    use flare_im_service_kit::discovery::is_static_channel_cached;
+
+    fn grpc_backend_config(endpoint: &str) -> PushServerConfig {
+        PushServerConfig {
+            mq_backend: "nats".into(),
+            jetstream_url: "nats://127.0.0.1:1".into(),
+            jetstream_timeout_ms: 1_000,
+            jetstream_retries: 0,
+            jetstream_retry_backoff_ms: 0,
+            jetstream_stream_specs: Vec::new(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+            kafka_options: Default::default(),
+            consumer_group: "push-server".into(),
+            push_message_topic: String::new(),
+            push_event_topic: String::new(),
+            push_envelope_topic: String::new(),
+            push_online_topic: String::new(),
+            push_offline_topic: String::new(),
+            push_dlq_topic: String::new(),
+            redis_url: String::new(),
+            online_status_backend: "grpc".into(),
+            online_service_endpoint: endpoint.to_string(),
+            event_ping_coalesce_window_ms: 0,
+            default_tenant_id: "0".into(),
+        }
+    }
+
+    /// gRPC 在线状态后端走 service-kit 的静态通道（建连上限、HTTP/2 探活），启动时不连下游，
+    /// 传输层失败后丢弃该地址的通道。以前启动时立即建连（对端没起来就启动失败），建好的通道
+    /// 没有探活、永久复用。
+    #[tokio::test]
+    async fn grpc_backend_uses_the_static_channel_and_drops_it_after_transport_failure() {
+        // 一个刚关掉的回环端口：连上会被拒绝。
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let endpoint = format!("http://{closed}");
+        OnlineStatusService::new(Arc::new(grpc_backend_config(&endpoint)))
+            .await
+            .unwrap_or_else(|_| panic!("unreachable online service must not fail startup"));
+        assert!(
+            is_static_channel_cached(&endpoint),
+            "online grpc backend must use the service-kit static channel"
+        );
+
+        let result = query_online_service(&endpoint, "token", &["u1".to_string()]).await;
+        assert!(result.is_err(), "nothing listens on a closed port");
+        assert!(
+            !is_static_channel_cached(&endpoint),
+            "transport failure must drop the cached static channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_online_endpoint_is_a_startup_error() {
+        assert!(
+            OnlineStatusService::new(Arc::new(grpc_backend_config("http://bad host:1")))
+                .await
+                .is_err()
         );
     }
 }
