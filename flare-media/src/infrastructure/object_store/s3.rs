@@ -618,10 +618,14 @@ impl MediaObjectRepository for S3ObjectStore {
         match result {
             Ok(_) => Ok(()),
             // 提交的分片在存储里不存在、ETag 不对或顺序不对：调用方没按地址上传就来完成，
-            // 是参数错误，不是存储不可用。
+            // 是参数错误，不是存储不可用。RustFS 在一片都没上传时回 404 `NoSuchKey`
+            // （S3 回 `InvalidPart`），同样是参数错误。
             Err(err)
                 if err.as_service_error().is_some_and(|service| {
-                    matches!(service.code(), Some("InvalidPart" | "InvalidPartOrder"))
+                    matches!(
+                        service.code(),
+                        Some("InvalidPart" | "InvalidPartOrder" | "NoSuchKey")
+                    )
                 }) =>
             {
                 Err(flare_server_core::flare_err_details!(
@@ -994,7 +998,7 @@ mod tenant_key_tests {
     }
 
     /// 合并时存储报提交的分片不存在或顺序不对：调用方没按地址上传就来完成，回参数错误；
-    /// 存储的其他拒绝仍是存储故障。
+    /// 存储的其他拒绝仍是存储故障。RustFS 在一片都没上传时回 404 `NoSuchKey`。
     #[tokio::test]
     async fn completing_with_parts_the_store_does_not_hold_is_an_invalid_argument() {
         let parts = [UploadedPartRecord {
@@ -1003,8 +1007,12 @@ mod tenant_key_tests {
             size: 5,
             sha256: None,
         }];
-        for code in ["InvalidPart", "InvalidPartOrder"] {
-            let (endpoint, seen) = s3_error_endpoint("400 Bad Request", code).await;
+        for (status, code) in [
+            ("400 Bad Request", "InvalidPart"),
+            ("400 Bad Request", "InvalidPartOrder"),
+            ("404 Not Found", "NoSuchKey"),
+        ] {
+            let (endpoint, seen) = s3_error_endpoint(status, code).await;
             let err = store_at(&endpoint)
                 .complete_multipart_upload("tenant-a/file.bin", "storage-upload-id", &parts)
                 .await
@@ -1287,6 +1295,24 @@ mod live_store_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+
+        // 分片已提交、一片都没上传就完成：RustFS 回 NoSuchKey（不是 InvalidPart），同样是
+        // 参数错误；随后中止这个上传。
+        let untouched = store.build_object_key_for("tenant-live", "untouched", "u.bin", "file");
+        let untouched_id = store
+            .create_multipart_upload(&untouched, "application/octet-stream")
+            .await
+            .unwrap();
+        let err = store
+            .complete_multipart_upload(&untouched, &untouched_id, &made_up)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+        assert!(store.stat_object(&untouched).await.unwrap().is_none());
+        store
+            .abort_multipart_upload(&untouched, &untouched_id)
+            .await
+            .unwrap();
 
         let uploaded = [UploadedPartRecord {
             part_number: 1,
