@@ -6,9 +6,9 @@ use redis::aio::ConnectionManager;
 
 use crate::domain::repository::{ConversationChange, UserSyncIndexRepository};
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_server_core::error::{FlareError, Result};
 
-const DEFAULT_TENANT_ID: &str = "0";
 /// 单个 Redis pipeline 里最多塞多少个用户的 EVAL。
 ///
 /// 线上事故：十万人群里**一条已读回执**触发 recipient_count=100000 的扇出，
@@ -122,11 +122,11 @@ impl RedisUserSyncIndexRepository {
             .map_err(|err| FlareError::system(format!("Redis user sync index connect: {err}")))
     }
 
-    fn tenant_id(ctx: &Ctx) -> String {
-        ctx.tenant_id()
-            .filter(|tenant_id| !tenant_id.trim().is_empty())
-            .unwrap_or(DEFAULT_TENANT_ID)
-            .to_string()
+    /// 同步索引键的租户：缺租户时报错，不写进、也不读租户 "0" 的键（显式的 "0" 照常）。
+    fn tenant_id(ctx: &Ctx) -> Result<String> {
+        normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+            FlareError::system("tenant required for the user sync index".to_string())
+        })
     }
 
     fn version_key(tenant_id: &str, user_id: &str) -> String {
@@ -263,7 +263,7 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
             return Ok(());
         }
 
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         let mut conn = self.get_connection().await?;
         let seq = max_conversation_seq.to_string();
         let occurred_at = occurred_at_ms.to_string();
@@ -338,7 +338,7 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
             return Ok(0);
         }
 
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         let mut conn = self.get_connection().await?;
         redis::Script::new(RECORD_CONVERSATION_VERSION_BUMP_SCRIPT)
             .key(Self::conversation_version_key(&tenant_id, conversation_id))
@@ -369,7 +369,7 @@ impl UserSyncIndexRepository for RedisUserSyncIndexRepository {
             return Ok(Vec::new());
         }
 
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         let mut conn = self.get_connection().await?;
         let mut pipe = redis::pipe();
         for (conversation_id, _) in &known {
@@ -495,6 +495,23 @@ mod tests {
             RedisUserSyncIndexRepository::normalized_user_ids(&ids),
             vec!["user-a".to_string(), "user-b".to_string()]
         );
+    }
+
+    /// 缺租户的上下文不再读写租户 "0" 的同步索引键（W11-T）；显式租户 "0" 照常。
+    #[test]
+    fn index_tenant_must_come_from_the_context() {
+        use flare_im_contracts::Ctx;
+        use flare_server_core::Context;
+        use std::sync::Arc;
+        for missing in [
+            Context::with_request_id("req"),
+            Context::with_request_id("req").with_tenant_id(" "),
+        ] {
+            let ctx: Ctx = Arc::new(missing);
+            assert!(RedisUserSyncIndexRepository::tenant_id(&ctx).is_err());
+        }
+        let zero: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("0"));
+        assert_eq!(RedisUserSyncIndexRepository::tenant_id(&zero).unwrap(), "0");
     }
 
     #[test]

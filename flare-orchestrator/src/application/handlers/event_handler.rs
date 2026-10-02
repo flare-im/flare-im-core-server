@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_proto::common::Event;
 use tracing::instrument;
 
@@ -43,6 +44,16 @@ fn parse_event_slow_log_ms(raw: Option<&str>) -> u64 {
     }
 }
 
+/// 事件的租户只来自上下文；缺失即拒绝，不再按租户 "0" 分配 seq 与发布（显式的 "0" 照常）。
+fn event_tenant(ctx: &Ctx) -> Result<String> {
+    normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+        flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::InvalidParameter,
+            "tenant required to handle a message event"
+        )
+    })
+}
+
 impl EventHandler {
     pub fn new(event_domain_service: Arc<EventDomainService>) -> Self {
         Self {
@@ -71,7 +82,7 @@ impl EventHandler {
         conversation_id = %event.conversation_id,
     ))]
     pub async fn handle_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let tenant_id = event_tenant(ctx)?;
         // 所有事件统一走通用流程（校验 → 分配序列号 → 推送）。
         // 会话标题/头像/删除等读模型变更走直接 gRPC（flare-conversation 同步写读模型），
         // 不经事件路径——避免与直接 API 形成双路径。
@@ -146,7 +157,31 @@ impl EventHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_event_slow_log_ms;
+    use super::{event_tenant, parse_event_slow_log_ms};
+    use flare_im_contracts::Ctx;
+    use flare_server_core::Context;
+    use std::sync::Arc;
+
+    /// ExecuteEvent 与内部事件入口在上下文缺租户时拒绝，不按租户 "0" 处理（W11-T）。
+    #[test]
+    fn events_require_a_context_tenant() {
+        for missing in [
+            Context::with_request_id("req"),
+            Context::with_request_id("req").with_tenant_id(""),
+            Context::with_request_id("req").with_tenant_id("  "),
+        ] {
+            let ctx: Ctx = Arc::new(missing);
+            let error = event_tenant(&ctx).expect_err("no tenant");
+            assert_eq!(
+                error.code(),
+                Some(flare_server_core::error::ErrorCode::InvalidParameter)
+            );
+        }
+        for tenant in ["tenant-a", "0"] {
+            let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
+            assert_eq!(event_tenant(&ctx).expect("tenant"), tenant);
+        }
+    }
 
     #[test]
     fn slow_log_threshold_rejects_garbage_without_falling_back_to_zero() {

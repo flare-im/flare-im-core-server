@@ -18,8 +18,9 @@ use flare_grpc_proto::storage::{
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_proto::Message;
-use flare_server_core::error::FlareError;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use redis::aio::ConnectionManager;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -33,8 +34,6 @@ use crate::application::ports::{
     ConversationEventReadPort, ConversationSyncPort, ConversationVersionChange,
     ConversationVersionIndexPort, QueryEventsPage, StorageConversationMessageHead, StorageReadPort,
 };
-
-const DEFAULT_TENANT_ID: &str = "0";
 
 /// 下游请求：调用方元数据，另把入站验过签的 `x-flare-ctx` 原样转发。会话与 Storage Reader 的
 /// 读接口以签名为准；两者一致，所以元数据不会被判为冲突。入站没有签名时只带元数据，由下游的
@@ -136,11 +135,15 @@ impl GrpcSyncAdapters {
             })
     }
 
-    fn tenant_id(ctx: &Ctx) -> String {
-        ctx.tenant_id()
-            .filter(|tenant_id| !tenant_id.trim().is_empty())
-            .unwrap_or(DEFAULT_TENANT_ID)
-            .to_string()
+    /// 会话版本索引键的租户：缺租户时报错，不读租户 "0" 的键（显式的 "0" 照常）。
+    fn tenant_id(ctx: &Ctx) -> Result<String, FlareError> {
+        normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "tenant required for the conversation version index",
+            )
+            .build_error()
+        })
     }
 
     fn conversation_sync_state_key(tenant_id: &str, conversation_id: &str) -> String {
@@ -451,7 +454,7 @@ impl ConversationVersionIndexPort for GrpcSyncAdapters {
             return Ok(Vec::new());
         };
 
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         let mut pipe = redis::pipe();
         for (conversation_id, _) in &known {
             pipe.cmd("HGETALL").arg(Self::conversation_sync_state_key(
@@ -477,5 +480,27 @@ impl ConversationVersionIndexPort for GrpcSyncAdapters {
             }
         }
         Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GrpcSyncAdapters;
+    use flare_im_contracts::Ctx;
+    use flare_server_core::Context;
+    use std::sync::Arc;
+
+    /// 缺租户的读不再落到租户 "0" 的会话版本键（W11-T）；显式租户 "0" 照常。
+    #[test]
+    fn version_index_tenant_must_come_from_the_context() {
+        for missing in [
+            Context::with_request_id("req"),
+            Context::with_request_id("req").with_tenant_id(" "),
+        ] {
+            let ctx: Ctx = Arc::new(missing);
+            assert!(GrpcSyncAdapters::tenant_id(&ctx).is_err());
+        }
+        let zero: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("0"));
+        assert_eq!(GrpcSyncAdapters::tenant_id(&zero).unwrap(), "0");
     }
 }

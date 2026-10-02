@@ -318,6 +318,21 @@ impl PostgresConversationRepository {
     }
 }
 
+/// 本仓储读写所用的租户：只取上下文。读接口经签名优先层（签名必带租户），会话管理接口按调用方
+/// 元数据，事件消费者按事件声明的租户建上下文；缺失时报错，不再按租户 "0" 读写——单聊会话 ID
+/// 不含租户，落到 "0" 会读写租户 0 的同 ID 会话（W11-T）。显式的租户 "0" 照常。
+fn required_tenant(ctx: &flare_server_core::context::Context) -> Result<&str> {
+    ctx.tenant_id()
+        .filter(|tenant_id| !tenant_id.trim().is_empty())
+        .ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "tenant required for conversation storage",
+            )
+            .build_error()
+        })
+}
+
 impl ConversationRepository for PostgresConversationRepository {
     async fn load_bootstrap(
         &self,
@@ -325,7 +340,7 @@ impl ConversationRepository for PostgresConversationRepository {
         client_cursor: &HashMap<String, i64>,
         updated_after_ms: i64,
     ) -> Result<ConversationBootstrapResult> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = require_user_id(ctx)?;
         // 增量过滤边界（None=全量）。EXISTS 探针走 idx_messages_conversation_ts，
         // 使热启/重连列表同步的存储成本从 O(全账号会话×LATERAL) 降到 O(变化)。
@@ -620,7 +635,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         sync_seq: i64,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = require_user_id(ctx)?;
         if conversation_id == "__conversations__" {
             sqlx::query(
@@ -672,7 +687,7 @@ impl ConversationRepository for PostgresConversationRepository {
         ctx: &flare_server_core::context::Context,
         session: &Conversation,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         if session.conversation_id.trim().is_empty() {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
@@ -777,7 +792,7 @@ impl ConversationRepository for PostgresConversationRepository {
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
     ) -> Result<Option<Conversation>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let row = sqlx::query(
             r#"
             SELECT conversation_id, conversation_type, business_type, display_name,
@@ -883,7 +898,7 @@ impl ConversationRepository for PostgresConversationRepository {
         ctx: &flare_server_core::context::Context,
         session: &Conversation,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         sqlx::query(
             r#"
             UPDATE conversations
@@ -925,7 +940,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         hard_delete: bool,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         if hard_delete {
             // 物理删除：消息/事件与元数据一并清理，避免同 conversation_id 重建后 sync 拉回旧历史。
             let mut tx =
@@ -1043,7 +1058,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         boundary: &HistoryPurgeBoundary,
     ) -> Result<ConversationHistoryPurge> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         if conversation_id.trim().is_empty() {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
@@ -1291,7 +1306,7 @@ impl ConversationRepository for PostgresConversationRepository {
         to_remove: &[String],
         role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let mut tx = self
             .pool
             .begin()
@@ -1440,7 +1455,7 @@ impl ConversationRepository for PostgresConversationRepository {
         include_removed: bool,
         skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         // 受信内部调用（Service/System actor，如网关读扩散成员订阅 bootstrap）跳过"调用者须为成员"的鉴权，
         // 仅按 tenant + conversation 范围读取成员；用户态调用仍要求 user_id 且必须是会话成员。
         let is_internal = ctx
@@ -1681,7 +1696,7 @@ impl ConversationRepository for PostgresConversationRepository {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<ConversationSummary>, usize)> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = ctx.user_id();
         // 构建基础查询
         let mut query = if user_id.is_some() {
@@ -1956,7 +1971,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         seq: i64,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = require_user_id(ctx)?;
         // 更新 conversation_participants 的 last_read_seq 和 unread_count（init_v2 列名）
         let updated = sqlx::query(
@@ -2077,7 +2092,7 @@ impl ConversationRepository for PostgresConversationRepository {
     ) -> Result<crate::domain::model::ConversationUserSettings> {
         use crate::domain::model::ConversationUserSettings;
 
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = require_user_id(ctx)?;
 
         let has_patch = patch.is_pinned.is_some()
@@ -2162,7 +2177,7 @@ impl ConversationRepository for PostgresConversationRepository {
         seq: i64,
         status: i32,
     ) -> Result<()> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let precise_unread_threshold = self.config.large_conversation_precise_unread_threshold;
 
         // 步骤 1：推进会话 last_message_seq(PK 定位,O(1)),始终执行。
@@ -2264,7 +2279,7 @@ impl ConversationRepository for PostgresConversationRepository {
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
     ) -> Result<i32> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = required_tenant(ctx)?;
         let user_id = require_user_id(ctx)?;
         // 从 conversation_participants 表读取未读数
         let row = sqlx::query(

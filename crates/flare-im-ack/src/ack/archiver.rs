@@ -12,8 +12,7 @@ use tokio::time::interval;
 /// ACK归档记录
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AckArchiveRecord {
-    /// 租户ID（主键的一部分；缺省 "0"）
-    #[serde(default = "default_tenant_id")]
+    /// 租户ID（主键的一部分；必填，缺失时反序列化失败，不再落到租户 "0"）
     pub tenant_id: String,
     /// 消息ID
     pub message_id: String,
@@ -31,10 +30,6 @@ pub struct AckArchiveRecord {
     pub metadata: Option<serde_json::Value>,
     /// 归档时间
     pub archived_at: i64,
-}
-
-fn default_tenant_id() -> String {
-    "0".to_string()
 }
 
 /// ACK归档器

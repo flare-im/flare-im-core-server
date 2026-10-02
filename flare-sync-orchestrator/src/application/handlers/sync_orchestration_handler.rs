@@ -10,6 +10,7 @@ use flare_grpc_proto::conversation::{
     UpdateConversationUserSettingsRequest, UpdateCursorRequest,
 };
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_proto::Message;
 use flare_proto::common::SyncRecoveryHint;
 use flare_proto::common::sync::Payload as SyncPayload;
@@ -245,7 +246,7 @@ where
         // 续拉页（cursor 非空）在 TTL 内复用同一份 bootstrap 快照：
         // 消灭"每页全量 bootstrap"的 DB 放大，并让同一分页序列看到一致数据集。
         // 第 1 页（cursor 为空）恒新鲜并回填缓存。缓存按"超集规则"服务（见 BootstrapPageCache）。
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let tenant_id = snapshot_tenant(ctx)?;
         let is_continuation_page = !req.snapshot_cursor.trim().is_empty();
         let cached = if is_continuation_page {
             self.bootstrap_page_cache
@@ -1686,6 +1687,17 @@ fn valid_sync_conversation_id(conversation_id: &str) -> bool {
         )
 }
 
+/// 快照分页缓存按租户分键：缺租户时报错，不与租户 "0" 共用缓存（显式的 "0" 照常）。
+fn snapshot_tenant(ctx: &Ctx) -> Result<String, FlareError> {
+    normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "tenant required for a sync snapshot",
+        )
+        .build_error()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1694,6 +1706,21 @@ mod tests {
     };
     use flare_server_core::context::Context;
     use std::sync::Mutex;
+
+    /// 快照分页缓存不再把缺租户的请求记到租户 "0" 名下（W11-T）；显式租户 "0" 照常。
+    #[test]
+    fn snapshot_requires_a_context_tenant() {
+        for missing in [
+            Context::with_request_id("req"),
+            Context::with_request_id("req").with_tenant_id(""),
+        ] {
+            let ctx: Ctx = Arc::new(missing);
+            let error = snapshot_tenant(&ctx).expect_err("no tenant");
+            assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+        }
+        let zero: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("0"));
+        assert_eq!(snapshot_tenant(&zero).unwrap(), "0");
+    }
 
     /// channel_id 必须以会话自身为准，不能被单条消息污染。
     ///

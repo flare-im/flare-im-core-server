@@ -12,12 +12,38 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::context_from_mq_metadata;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_contracts::{Ctx, context_from_mq_metadata};
 use flare_proto::common::MqEnvelope;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::handlers::StorageHandler;
+
+/// 主队列信封的消息头里没有租户：不扇出，首投即进死信（不再按租户 "0" 继续）。
+const ENVELOPE_WITHOUT_TENANT: &str = "main queue envelope without a tenant header";
+
+/// 从外层 MQ headers + 内层 MqEnvelope headers 重建上下文。租户只认生产方（ingest）按已验证
+/// 上下文写的 `x-tenant-id`；缺失时返回不可重试的 [`ConsumerError::DeadLetter`]。
+fn envelope_context(message: &Message, envelope: &MqEnvelope) -> Result<Ctx, ConsumerError> {
+    let mut merged_headers = message.context.headers.clone();
+    for (key, value) in &envelope.headers {
+        merged_headers.insert(key.clone(), value.clone());
+    }
+    let ctx = context_from_mq_metadata(&merged_headers);
+    if normalize_optional_tenant_id(ctx.tenant_id()).is_none() {
+        tracing::error!(
+            envelope_id = %envelope.envelope_id,
+            conversation_id = %envelope.conversation_id,
+            reason = ENVELOPE_WITHOUT_TENANT,
+            "Rejecting main queue envelope without a tenant header"
+        );
+        return Err(ConsumerError::DeadLetter(
+            ENVELOPE_WITHOUT_TENANT.to_string(),
+        ));
+    }
+    Ok(ctx)
+}
 
 /// 存储消费者处理器
 ///
@@ -74,12 +100,8 @@ impl MessageHandler for StorageConsumerHandler {
             "Processing MqEnvelope from TOPIC_MESSAGE_MAIN"
         );
 
-        // 2. 从外层 MQ headers + 内层 MqEnvelope headers 中重建上下文。
-        let mut merged_headers = message.context.headers.clone();
-        for (key, value) in &envelope.headers {
-            merged_headers.insert(key.clone(), value.clone());
-        }
-        let ctx = context_from_mq_metadata(&merged_headers);
+        // 2. 从外层 MQ headers + 内层 MqEnvelope headers 中重建上下文；没有租户首投即进死信。
+        let ctx = envelope_context(&message, &envelope)?;
 
         // 3. 调用 StorageHandler 处理
         match self.storage_handler.handle_envelope(&ctx, envelope).await {
@@ -113,5 +135,51 @@ impl MessageHandler for StorageConsumerHandler {
     /// 获取处理器名称
     fn name(&self) -> &str {
         "storage-consumer-handler"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_contracts::context_to_mq_metadata;
+    use flare_server_core::Context;
+    use flare_server_core::mq::consumer::{ContentType, MessageContext};
+
+    fn main_queue_message(header_tenant: Option<&str>) -> (Message, MqEnvelope) {
+        let mut sender = Context::with_request_id("req-main");
+        if let Some(tenant_id) = header_tenant {
+            sender = sender.with_tenant_id(tenant_id);
+        }
+        let headers = context_to_mq_metadata(&std::sync::Arc::new(sender));
+        let envelope = MqEnvelope {
+            envelope_id: "env-1".to_string(),
+            conversation_id: "conv-1".to_string(),
+            headers: headers.clone(),
+            ..MqEnvelope::default()
+        };
+        let mut context = MessageContext::new(
+            std::sync::Arc::new(Context::with_request_id("transport")),
+            "flare.im.message.main".to_string(),
+        );
+        context.headers = headers;
+        (
+            Message::new(Vec::new(), ContentType::Protobuf, context),
+            envelope,
+        )
+    }
+
+    /// 主队列信封缺租户时直接进死信，不再以租户 "0" 继续扇出到存储与推送（W11-T）。
+    #[test]
+    fn envelope_without_tenant_is_dead_lettered() {
+        let (message, envelope) = main_queue_message(None);
+        let error = envelope_context(&message, &envelope).expect_err("no tenant");
+        assert!(matches!(error, ConsumerError::DeadLetter(_)), "{error:?}");
+        assert!(!error.is_retryable());
+
+        for tenant in ["tenant-a", "0"] {
+            let (message, envelope) = main_queue_message(Some(tenant));
+            let ctx = envelope_context(&message, &envelope).expect("tenant header");
+            assert_eq!(ctx.tenant_id(), Some(tenant));
+        }
     }
 }
