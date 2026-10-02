@@ -24,6 +24,7 @@ use flare_server_core::{
 };
 
 const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
+const MESSAGE_REJECTED: &str = "MESSAGE_REJECTED";
 
 /// Present only to the API gateway ingress process; no downstream Core worker
 /// receives this private signing capability.
@@ -40,6 +41,7 @@ pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
         (status = 200, description = "成功", body = ApiResponse<SendMessageHttpResponse>),
         (status = 400, description = "参数错误"),
         (status = 403, description = "租户不可用（TENANT_UNAVAILABLE）或无权发送"),
+        (status = 422, description = "PreSend 扩展按策略拒绝了这条消息（MESSAGE_REJECTED），不要原样重试"),
         (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
@@ -140,7 +142,7 @@ pub async fn send_message(
     let grpc_res = message_client
         .send_message_with_signed_context(grpc_req, &signed_token)
         .await
-        .map_err(send_failure)?;
+        .map_err(send_status_failure)?;
     let response = SendMessageHttpResponse {
         server_msg_id: grpc_res.server_msg_id,
         seq: grpc_res.conversation_seq,
@@ -148,6 +150,27 @@ pub async fn send_message(
     };
 
     Ok(Json(ApiResponse::success(response)))
+}
+
+/// MessageIngest 回的 gRPC 状态映射为 HTTP。
+///
+/// `FAILED_PRECONDITION` 是 PreSend 扩展的策略拒绝（摄入侧只对它回这个状态码，`ErrorDetail` 与以前
+/// 相同）：发送方可预期的业务结果，不是网关或下游故障。回 422 `MESSAGE_REJECTED`，说明取
+/// `ErrorDetail.reason`（扩展给出的拒绝原因，WS 路径上客户端看到的也是它）。以前它被并进未知
+/// 错误，回 500 `MESSAGE_SEND_FAILED`。其余状态照旧见 [`send_failure`]。
+fn send_status_failure(status: tonic::Status) -> GatewayError {
+    if status.code() == tonic::Code::FailedPrecondition {
+        let reason = <flare_proto::common::ErrorDetail as prost::Message>::decode(status.details())
+            .ok()
+            .map(|detail| detail.reason)
+            .filter(|reason| !reason.trim().is_empty());
+        let mut error = ErrorBuilder::new(ErrorCode::HttpUnprocessableEntity, MESSAGE_REJECTED);
+        if let Some(reason) = reason {
+            error = error.details(reason);
+        }
+        return GatewayError(error.build_error());
+    }
+    send_failure(FlareError::from(status))
 }
 
 /// MessageIngest 拒绝映射为 HTTP。摄入侧有自己的租户闸门：租户刚停用时它的缓存可能比本网关先看到，

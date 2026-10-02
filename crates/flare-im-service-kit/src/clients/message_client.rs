@@ -47,11 +47,15 @@ impl MessageSendServiceClientWrapper {
     }
 
     /// Forward a gateway-authenticated identity to protected MessageIngest.
+    ///
+    /// 失败时原样返回 gRPC `Status`（保留状态码与 `details` 中的 `ErrorDetail`）：转成 `FlareError`
+    /// 会把 `FAILED_PRECONDITION`（PreSend 策略拒绝）并进未知错误，调用方（API Gateway 的 HTTP
+    /// 发送）要按状态码映射。
     pub async fn send_message_with_signed_context(
         &mut self,
         request: SendMessageRequest,
         token: &str,
-    ) -> Result<SendMessageResponse> {
+    ) -> std::result::Result<SendMessageResponse, tonic::Status> {
         let mut request = tonic::Request::new(request);
         flare_server_core::grpc::client::set_signed_context_token(&mut request, token)?;
         Ok(self.client.send_message(request).await?.into_inner())

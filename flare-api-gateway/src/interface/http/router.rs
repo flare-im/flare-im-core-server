@@ -380,6 +380,10 @@ mod media_tests;
 mod push_token_tests;
 
 #[cfg(test)]
+#[path = "router_message_send_tests.rs"]
+mod message_send_tests;
+
+#[cfg(test)]
 mod api_docs_tests {
     use super::*;
     use axum::body::{Body, to_bytes};
