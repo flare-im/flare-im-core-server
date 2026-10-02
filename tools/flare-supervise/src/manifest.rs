@@ -818,10 +818,12 @@ required_env_unless = [
             .map(|service| service.name.as_str())
             .collect();
         // Push Server/Worker attest broker records (broker-isolated); Push Proxy only verifies.
-        // Admin Gateway signs the Control-verified tenant admin for Media.
+        // Admin Gateway signs the Control-verified tenant admin for Media. The orchestrator
+        // signs its own Service identity for conversation member reads.
         assert_eq!(
             signer_users,
             [
+                "orchestrator",
                 "push-server",
                 "push-worker",
                 "api-gateway",
@@ -829,6 +831,62 @@ required_env_unless = [
                 "admin-gateway"
             ]
         );
+        // Read services verify signed context; static mode (the single-host template)
+        // refuses unsigned reads unless the parent turns the switch off.
+        for name in ["conversation", "storage-reader", "sync-orchestrator"] {
+            let service = manifest
+                .services
+                .iter()
+                .find(|service| service.name == name)
+                .unwrap();
+            assert!(
+                service
+                    .required_env
+                    .iter()
+                    .any(|env| env == "FLARE_INTERNAL_CTX_PUBLIC_KEY"),
+                "{name}"
+            );
+            assert!(
+                !manifest.env_allowed(service, "FLARE_INTERNAL_CTX_PRIVATE_KEY"),
+                "{name}"
+            );
+            let child = |parent: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+                manifest
+                    .child_environment(
+                        service,
+                        parent
+                            .iter()
+                            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+                    )
+                    .into_iter()
+                    .map(|(key, value)| (key.into_string().unwrap(), value.into_string().unwrap()))
+                    .collect()
+            };
+            let static_mode = child(&[("FLARE_REGISTRY_MODE", "static")]);
+            assert_eq!(
+                static_mode
+                    .get("FLARE_REQUIRE_SIGNED_READ_CTX")
+                    .map(String::as_str),
+                Some("true"),
+                "{name}"
+            );
+            let opted_out = child(&[
+                ("FLARE_REGISTRY_MODE", "static"),
+                ("FLARE_REQUIRE_SIGNED_READ_CTX", "false"),
+            ]);
+            assert_eq!(
+                opted_out
+                    .get("FLARE_REQUIRE_SIGNED_READ_CTX")
+                    .map(String::as_str),
+                Some("false"),
+                "{name}"
+            );
+            let configured = child(&[("FLARE_REGISTRY_MODE", "consul")]);
+            assert!(
+                !configured.contains_key("FLARE_REQUIRE_SIGNED_READ_CTX"),
+                "{name}"
+            );
+        }
         let media = manifest
             .services
             .iter()

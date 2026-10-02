@@ -28,16 +28,21 @@ impl ApplicationBootstrap {
 
         info!("ApplicationBootstrap created successfully");
 
+        // 读接口的身份边界：带 x-flare-ctx 就验签并以之为准，FLARE_REQUIRE_SIGNED_READ_CTX
+        // 打开时拒绝未签名调用；管理检索照旧只认 admin 令牌。
+        let read_layer =
+            flare_im_service_kit::signed_read::signed_read_layer_from_env(STORAGE_READER)?;
+
         // 运行服务
-        Self::run_with_context(context, runtime_plan).await
+        Self::run_with_context(context, runtime_plan, read_layer).await
     }
 
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: ApplicationContext<MessageStorageType>,
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        read_layer: flare_server_core::SignedFirstContextLayer,
     ) -> Result<()> {
-        use flare_grpc_proto::storage::storage_reader_service_server::StorageReaderServiceServer;
         use tonic::transport::Server;
 
         let address = runtime_plan.address;
@@ -56,12 +61,8 @@ impl ApplicationBootstrap {
         let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
             "storage-reader-grpc",
             move |shutdown_rx| async move {
-                // 使用 ContextLayer 包裹 Service
-                use flare_server_core::middleware::ContextLayer;
-
-                let storage_reader_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(StorageReaderServiceServer::new(handler));
+                let storage_reader_service =
+                    crate::interface::grpc::signed_read_service(handler, &read_layer);
 
                 Server::builder()
                     .layer(grpc_metrics)

@@ -68,18 +68,24 @@ command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
 # Verifies the admin assertion Admin Gateway forwards; without it every admin read fails closed.
 # PurgeConversationHistory verifies the flare-social-bridge service context with the Cell public
-# key; without it that RPC fails closed.
-inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+# key; without it that RPC fails closed. The read service verifies x-flare-ctx with the same key
+# and, with FLARE_REQUIRE_SIGNED_READ_CTX, refuses unsigned reads.
+inherit_env = [
+  "FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50090"
 # FLARE_REGISTRY_MODE=static has no discovery: reach this container's Storage
 # Reader directly instead of falling back, with a WARN, on every startup. A
 # value the parent sets still wins; configured mode keeps discovery.
+# Static mode is the single-host template, whose callers all sign: unsigned
+# reads are refused unless the parent sets FLARE_REQUIRE_SIGNED_READ_CTX=false.
 [[services.environment_defaults]]
 when_env = "FLARE_REGISTRY_MODE"
 equals = "static"
 [services.environment_defaults.values]
 CONVERSATION_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"
+FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 
 [[services]]
 name = "message-ingest"
@@ -95,7 +101,11 @@ MESSAGE_INGEST_TENANT_POLICY = "strict"
 name = "orchestrator"
 command = "/usr/local/bin/flare-orchestrator"
 inherit_env_prefixes = ["MESSAGE_ORCHESTRATOR_", "ORCHESTRATOR_"]
-inherit_env = ["FLARE_USER_SYNC_INDEX_CHUNK"]
+# Event recipients read single-chat members from the conversation read service,
+# which admits only signed context: the orchestrator signs those reads as its own
+# Service identity (it has no inbound token to forward from MQ or action RPCs).
+inherit_env = ["FLARE_USER_SYNC_INDEX_CHUNK", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+required_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50181"
 
 [[services]]
@@ -109,14 +119,33 @@ name = "storage-reader"
 command = "/usr/local/bin/flare-storage-reader"
 inherit_env_prefixes = ["STORAGE_"]
 # Verifies the admin assertion Admin Gateway forwards on message retrieval; without it those reads fail closed.
-inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT", "FLARE_CONSOLE_PUBLIC_KEY"]
+# The other reads verify x-flare-ctx with the Cell public key; see conversation for the switch.
+inherit_env = [
+  "POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT", "FLARE_CONSOLE_PUBLIC_KEY",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX",
+]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60083"
+[[services.environment_defaults]]
+when_env = "FLARE_REGISTRY_MODE"
+equals = "static"
+[services.environment_defaults.values]
+FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 
 [[services]]
 name = "sync-orchestrator"
 command = "/usr/local/bin/flare-sync-orchestrator"
 inherit_env_prefixes = ["SYNC_ORCHESTRATOR_", "SNAPSHOT_", "BOOTSTRAP_", "MULTI_SYNC_"]
+# ExecuteSync verifies the gateway's signed user context and forwards it to the
+# conversation and Storage Reader reads; see conversation for the switch.
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60084"
+[[services.environment_defaults]]
+when_env = "FLARE_REGISTRY_MODE"
+equals = "static"
+[services.environment_defaults.values]
+FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 
 [[services]]
 name = "push-server"
