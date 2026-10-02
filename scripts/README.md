@@ -123,6 +123,7 @@ SMOKE_GRPC_DB_PASSWORD_FILE=<600 文件：该角色口令> \
 | `start_client.sh` | 启动客户端 | 快速启动聊天客户端 |
 | `migrate_db.sh` | Core 原子迁移账本 | migrations/*.sql；非破坏性升级，不执行 init.sql |
 | `dev_reset_db.sh` | 显式开发重置 | 删除 Core 数据；仅 make dev-reset + FLARE_ALLOW_DEV_RESET=1 |
+| `backfill_conversation_last_message_seq.sql` | 会话 `last_message_seq` 存量回填 | 按租户对齐、只升不降、可重复执行；用法与不覆盖的范围见文件头 |
 | `smoke_message_flow.sh` | 消息流烟测 | 经 Edge 发送一条消息，检查会话回读、落库与 ledger；`--mode grpc` 带签名直连 Message Ingest，只读数据库回读 |
 | `check_memory_budget.sh` | 校验容器内存预算现状 | 每容器都设 `mem_limit`、上限之和不超过物理内存 |
 | `plan_mem_budget.py` | 计算最优内存预算 | 按物理内存/核数推算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`/`effective_cache_size` 等），经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值 |

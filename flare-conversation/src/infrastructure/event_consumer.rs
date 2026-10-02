@@ -4,16 +4,20 @@
 //! - ConversationEnsure：消费 TOPIC_CONVERSATION_ENSURE（与 Orchestrator `publish_conversation_ensure` 对齐）
 //!
 //! 注意：事件 topic 仅接受 **protobuf MqEnvelope**（`payload_kind=Event`）。
+//!
+//! 事件属于哪个租户只看生产方写进事件的租户声明（见 [`resolve_event_tenant`]），取不到就拒绝，
+//! 不落到默认租户。
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
-use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result, map_infra_error};
 use flare_server_core::mq::consumer::{
     ConsumerConfig, DeadLetterPublisher, FailureAction, FailureContext, FailureTopic,
     Message as MqMessage, MessageAck, MessageFetcher, ProducerDeadLetterPublisher, RetryPolicy,
@@ -165,11 +169,15 @@ async fn dead_letter_publisher(
 /// 处理一条消息并结算。
 ///
 /// - 成功：ack；这是一次重投（`retry_count > 0`）时记一行 INFO，说明此前失败的事件已经生效。
-/// - 失败：按 [`consumer_retry_config`] 的退避延迟 NAK，由 broker 重投；重试耗尽，或载荷解不开
-///   （重投也不会好）时投死信流再 term。死信投递失败时按退避再 NAK，不丢消息。
+/// - 失败：按 [`consumer_retry_config`] 的退避延迟 NAK，由 broker 重投；重试耗尽，或重投也不会好
+///   （载荷解不开、事件没有可用的租户，见 [`permanent_rejection`]）时投死信流再 term。死信投递
+///   失败时按退避再 NAK，不丢消息。
 ///
 /// 以前失败时立即 nack：下游（Postgres、Redis）重启期间 16 次重投在同一瞬间用完，JetStream 随即
 /// 停投，事件既没有生效也不在 DLQ 里。
+///
+/// `process` 收到载荷与传输层消息头里的租户（NATS 与 Kafka 的拉取端都已把 `x-tenant-id` 解进
+/// 消息上下文）。
 ///
 /// Kafka 后端的确认句柄不支持重投（`nack` 不提交也不重投，后面的偏移一提交就跳过它），这里只记
 /// ERROR，行为不变。
@@ -177,12 +185,13 @@ async fn settle_message<Fut>(
     kind: &str,
     message: MqMessage,
     failure: &FailureSettlement,
-    process: impl FnOnce(Vec<u8>) -> Fut,
+    process: impl FnOnce(Vec<u8>, Option<String>) -> Fut,
 ) where
     Fut: Future<Output = Result<()>>,
 {
     let retry_count = message.context.retry_count;
-    let outcome = process(message.payload.clone()).await;
+    let transport_tenant = message.context.ctx.tenant_id().map(str::to_string);
+    let outcome = process(message.payload.clone(), transport_tenant).await;
     let Some(ack) = message.ack_handle.clone() else {
         if let Err(e) = outcome {
             error!(error = %e, "Process {kind} event failed");
@@ -217,8 +226,8 @@ async fn settle_message<Fut>(
         return;
     }
 
-    let undecodable = error.code() == Some(ErrorCode::DeserializationError);
-    let action = if undecodable {
+    let permanent = permanent_rejection(&error);
+    let action = if permanent.is_some() {
         failure.policy.action_for_dead_letter()
     } else {
         failure.policy.action_for_nack(retry_count)
@@ -236,11 +245,7 @@ async fn settle_message<Fut>(
             redeliver(ack.as_ref(), delay).await;
         }
         FailureAction::DeadLetter => {
-            let reason = if undecodable {
-                "undecodable conversation event"
-            } else {
-                "conversation event retries exhausted"
-            };
+            let reason = permanent.unwrap_or("conversation event retries exhausted");
             dead_letter(
                 kind,
                 &message,
@@ -250,6 +255,18 @@ async fn settle_message<Fut>(
             )
             .await;
         }
+    }
+}
+
+/// 事件没有可用租户时进死信的原因（见 [`resolve_event_tenant`]）。
+const TENANT_REJECTION_REASON: &str = "conversation event without a single declared tenant";
+
+/// 重投也不会好的失败：首投就进死信流，返回写进死信的原因；其余失败返回 `None`，按退避重投。
+fn permanent_rejection(error: &FlareError) -> Option<&'static str> {
+    match error.code() {
+        Some(ErrorCode::DeserializationError) => Some("undecodable conversation event"),
+        Some(ErrorCode::MessageFormatError) => Some(TENANT_REJECTION_REASON),
+        _ => None,
     }
 }
 
@@ -313,6 +330,256 @@ const CONVERSATION_ENSURE_NAMESPACE: &str = "flare.core";
 const CONVERSATION_ENSURE_EVENT_NAME: &str = "conversation.ensure";
 const CONVERSATION_ENSURE_EVENT_VERSION: &str = "1";
 
+/// 租户头。消息与事件的生产方（`MqPushRepository` 的 `build_headers_from_ctx`）从发送方已验证的
+/// 上下文写入，信封头与传输层消息头各一份。
+const TENANT_HEADER: &str = "x-tenant-id";
+/// 会话确保事件的发布方（message-ingest）在信封头里用的租户键。
+const ENSURE_TENANT_HEADER: &str = "tenant_id";
+
+/// 从一条事件的各处租户声明定出它属于哪个租户。
+///
+/// 生产方把发送方已验证上下文里的租户同时写进信封头与传输层消息头（会话确保事件另有载荷字段）。
+/// 这里取其中非空的几处，按 `normalize_tenant_id` 归一后必须一致；一处都没有或彼此不一致时返回
+/// `MessageFormatError`，消费者据此直接投死信流并记 ERROR（见 [`permanent_rejection`]），不落到
+/// 默认租户。错误里只写来源，不写租户取值。
+///
+/// 以前这里写死 `"0"`（会话确保在载荷缺租户时也落到 `"0"`）：非 0 租户的会话 seq 与持久化未读
+/// 从不推进；单聊会话 ID 只由两名用户 id 推出、不含租户，同一 user_id 对出现在两个租户时，非 0
+/// 租户的事件还会改写租户 0 中同 ID 会话的 seq、未读与已读游标（W9-S3 F1）。
+fn resolve_event_tenant(declared: &[(&'static str, Option<&str>)]) -> Result<String> {
+    let mut resolved: Option<(&'static str, String)> = None;
+    for &(source, value) in declared {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let tenant = normalize_tenant_id(value);
+        match &resolved {
+            None => resolved = Some((source, tenant)),
+            Some((first, existing)) if *existing != tenant => {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::MessageFormatError,
+                    "conversation event carries conflicting tenants",
+                )
+                .details(format!("{first} and {source} disagree"))
+                .build_error());
+            }
+            Some(_) => {}
+        }
+    }
+    resolved.map(|(_, tenant)| tenant).ok_or_else(|| {
+        ErrorBuilder::new(
+            ErrorCode::MessageFormatError,
+            "conversation event carries no tenant",
+        )
+        .details("no tenant in envelope headers, transport headers or payload")
+        .build_error()
+    })
+}
+
+/// 消息与已读事件的租户：信封头与传输层消息头。
+fn message_event_tenant(
+    envelope_headers: &HashMap<String, String>,
+    transport_tenant: Option<&str>,
+) -> Result<String> {
+    resolve_event_tenant(&[
+        (
+            "envelope x-tenant-id",
+            envelope_headers.get(TENANT_HEADER).map(String::as_str),
+        ),
+        (
+            "envelope tenant_id",
+            envelope_headers
+                .get(ENSURE_TENANT_HEADER)
+                .map(String::as_str),
+        ),
+        ("transport x-tenant-id", transport_tenant),
+    ])
+}
+
+/// 会话事件的处理：解码、定租户、交给领域服务。与 broker 无关，两个消费者共用，真库用例也直接
+/// 驱动它。
+pub struct ConversationEventHandler {
+    domain_service: Arc<DefaultConversationDomainService>,
+}
+
+impl ConversationEventHandler {
+    pub fn new(domain_service: Arc<DefaultConversationDomainService>) -> Self {
+        Self { domain_service }
+    }
+
+    /// `TOPIC_MESSAGE_EVENTS` 上的已读事件与 `TOPIC_MESSAGE_CREATED` 上的消息本体：推进成员已读
+    /// 游标、会话 `last_message_seq` 与成员未读。`transport_tenant` 是传输层消息头里的租户。
+    ///
+    /// 要写库的事件取不到租户或几处租户不一致时返回 `MessageFormatError`，不写任何租户；不处理的
+    /// 事件（其他类型、缺会话 ID 或 seq）照旧跳过。
+    pub async fn handle_message_event(
+        &self,
+        raw: &[u8],
+        transport_tenant: Option<&str>,
+    ) -> Result<()> {
+        let Some(DecodedMessageEvent {
+            event,
+            envelope_headers,
+        }) = decode_message_event(raw)?
+        else {
+            return Ok(());
+        };
+
+        match event.payload.as_ref() {
+            Some(Payload::Read(read)) => {
+                let conversation_id = event.conversation_id.as_str();
+                if conversation_id.is_empty() {
+                    debug!("ReadReceipt with empty conversation_id, skip");
+                    return Ok(());
+                }
+
+                let user_id = read.user_id.as_str();
+                if user_id.is_empty() {
+                    debug!("ReadReceipt with empty user_id, skip");
+                    return Ok(());
+                }
+
+                let Some(read_seq) = read_seq_for_conversation_cursor(read.read_seq) else {
+                    debug!(
+                        conversation_id = %conversation_id,
+                        user_id = %user_id,
+                        message_id_count = read.message_ids.len(),
+                        "ReadReceipt without positive read_seq does not advance conversation read cursor"
+                    );
+                    return Ok(());
+                };
+
+                let tenant_id = message_event_tenant(&envelope_headers, transport_tenant)?;
+                let ctx = Context::root()
+                    .with_tenant_id(tenant_id)
+                    .with_user_id(user_id);
+
+                self.domain_service
+                    .mark_as_read(&ctx, conversation_id, read_seq)
+                    .await?;
+
+                debug!(
+                    conversation_id = %conversation_id,
+                    user_id = %user_id,
+                    read_seq = read_seq,
+                    "Unread updated from ReadReceipt"
+                );
+            }
+            Some(Payload::Message(msg)) => {
+                let conversation_id = if event.conversation_id.is_empty() {
+                    msg.conversation_id.as_str()
+                } else {
+                    event.conversation_id.as_str()
+                };
+                if conversation_id.is_empty() {
+                    debug!("Message event with empty conversation_id, skip");
+                    return Ok(());
+                }
+                let sender_id = msg.sender_id.as_str();
+                if sender_id.is_empty() {
+                    debug!("Message event with empty sender_id, skip");
+                    return Ok(());
+                }
+                let seq = msg.conversation_seq as i64;
+                if seq <= 0 {
+                    debug!(conversation_id = %conversation_id, seq, "Message event with invalid seq, skip");
+                    return Ok(());
+                }
+
+                let tenant_id = message_event_tenant(&envelope_headers, transport_tenant)?;
+                let ctx = Context::root().with_tenant_id(tenant_id);
+                self.domain_service
+                    .apply_message_event(&ctx, conversation_id, sender_id, seq, msg.status)
+                    .await?;
+                debug!(
+                    conversation_id = %conversation_id,
+                    sender_id = %sender_id,
+                    seq,
+                    status = msg.status,
+                    "Unread increment applied from message event"
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `TOPIC_CONVERSATION_ENSURE` 上的会话确保事件：幂等建会话。租户取载荷字段、信封头与传输层
+    /// 消息头中一致的那个，取不到或不一致时返回 `MessageFormatError`，不建会话。
+    pub async fn handle_conversation_ensure(
+        &self,
+        raw: &[u8],
+        transport_tenant: Option<&str>,
+    ) -> Result<()> {
+        let Some(DecodedConversationEnsure {
+            conversation_id,
+            payload: ensure_payload,
+            envelope_headers,
+        }) = decode_conversation_ensure(raw)?
+        else {
+            return Ok(());
+        };
+
+        if conversation_id.is_empty() {
+            debug!("ConversationEnsure with empty conversation_id, skip");
+            return Ok(());
+        }
+
+        let tenant_id = resolve_event_tenant(&[
+            ("payload tenant_id", Some(ensure_payload.tenant_id.as_str())),
+            (
+                "envelope tenant_id",
+                envelope_headers
+                    .get(ENSURE_TENANT_HEADER)
+                    .map(String::as_str),
+            ),
+            (
+                "envelope x-tenant-id",
+                envelope_headers.get(TENANT_HEADER).map(String::as_str),
+            ),
+            ("transport x-tenant-id", transport_tenant),
+        ])?;
+
+        let participants: Vec<ConversationParticipant> = ensure_payload
+            .participants
+            .into_iter()
+            .map(|user_id| ConversationParticipant {
+                user_id,
+                roles: vec![],
+                muted: false,
+                pinned: false,
+                attributes: HashMap::new(),
+                // 建会话时的初始成员无历史下限：他们本来就在场，没有「入群前」可言。
+                visible_from_seq: 0,
+                mention_only: false,
+            })
+            .collect();
+
+        let mut attributes = HashMap::new();
+        attributes.insert("conversation_id".to_string(), conversation_id.clone());
+
+        let ctx = Context::root().with_tenant_id(tenant_id);
+
+        self.domain_service
+            .create_conversation(
+                &ctx,
+                ConversationType::from_proto(ensure_payload.conversation_type),
+                ensure_payload.business_type,
+                participants,
+                attributes,
+                ConversationVisibility::Private,
+                ensure_payload.channel_id,
+            )
+            .await?;
+
+        debug!(
+            conversation_id = %conversation_id,
+            "Conversation ensured from event (async)"
+        );
+        Ok(())
+    }
+}
+
 /// JetStream 消费者配置（实现 NatsConsumerConfig）
 struct ReadReceiptConsumerConfig {
     url: String,
@@ -373,7 +640,7 @@ impl KafkaConsumerConfig for ReadReceiptConsumerConfig {
 /// ReadReceipt 事件消费者：仅处理 EVENT_READ_RECEIPT，调用 mark_as_read 更新未读数
 pub struct ReadReceiptEventConsumer {
     fetcher: tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>,
-    domain_service: Arc<DefaultConversationDomainService>,
+    handler: ConversationEventHandler,
     subject: String,
     failure: FailureSettlement,
 }
@@ -452,7 +719,7 @@ impl ReadReceiptEventConsumer {
 
         Ok(Self {
             fetcher: tokio::sync::Mutex::new(fetcher),
-            domain_service,
+            handler: ConversationEventHandler::new(domain_service),
             subject: subject.to_string(),
             failure: FailureSettlement::new(dead_letter),
         })
@@ -466,93 +733,14 @@ impl ReadReceiptEventConsumer {
                 "ReadReceipt",
                 message,
                 &self.failure,
-                |payload| async move { self.process_payload(&payload).await },
+                |payload, transport_tenant| async move {
+                    self.handler
+                        .handle_message_event(&payload, transport_tenant.as_deref())
+                        .await
+                },
             )
         })
         .await;
-        Ok(())
-    }
-
-    async fn process_payload(&self, raw: &[u8]) -> Result<()> {
-        let Some(event) = decode_message_event(raw)? else {
-            return Ok(());
-        };
-
-        match event.payload.as_ref() {
-            Some(Payload::Read(read)) => {
-                let conversation_id = event.conversation_id.as_str();
-                if conversation_id.is_empty() {
-                    debug!("ReadReceipt with empty conversation_id, skip");
-                    return Ok(());
-                }
-
-                let tenant_id = "0";
-                let user_id = read.user_id.as_str();
-                if user_id.is_empty() {
-                    debug!("ReadReceipt with empty user_id, skip");
-                    return Ok(());
-                }
-
-                let Some(read_seq) = read_seq_for_conversation_cursor(read.read_seq) else {
-                    debug!(
-                        conversation_id = %conversation_id,
-                        user_id = %user_id,
-                        message_id_count = read.message_ids.len(),
-                        "ReadReceipt without positive read_seq does not advance conversation read cursor"
-                    );
-                    return Ok(());
-                };
-
-                let ctx = Context::root()
-                    .with_tenant_id(tenant_id)
-                    .with_user_id(user_id);
-
-                self.domain_service
-                    .mark_as_read(&ctx, conversation_id, read_seq)
-                    .await?;
-
-                debug!(
-                    conversation_id = %conversation_id,
-                    user_id = %user_id,
-                    read_seq = read_seq,
-                    "Unread updated from ReadReceipt"
-                );
-            }
-            Some(Payload::Message(msg)) => {
-                let conversation_id = if event.conversation_id.is_empty() {
-                    msg.conversation_id.as_str()
-                } else {
-                    event.conversation_id.as_str()
-                };
-                if conversation_id.is_empty() {
-                    debug!("Message event with empty conversation_id, skip");
-                    return Ok(());
-                }
-                let sender_id = msg.sender_id.as_str();
-                if sender_id.is_empty() {
-                    debug!("Message event with empty sender_id, skip");
-                    return Ok(());
-                }
-                let seq = msg.conversation_seq as i64;
-                if seq <= 0 {
-                    debug!(conversation_id = %conversation_id, seq, "Message event with invalid seq, skip");
-                    return Ok(());
-                }
-
-                let ctx = Context::root().with_tenant_id("0");
-                self.domain_service
-                    .apply_message_event(&ctx, conversation_id, sender_id, seq, msg.status)
-                    .await?;
-                debug!(
-                    conversation_id = %conversation_id,
-                    sender_id = %sender_id,
-                    seq,
-                    status = msg.status,
-                    "Unread increment applied from message event"
-                );
-            }
-            _ => {}
-        }
         Ok(())
     }
 }
@@ -565,30 +753,48 @@ fn read_seq_for_conversation_cursor(read_seq: u64) -> Option<i64> {
     }
 }
 
-fn decode_message_event(raw: &[u8]) -> Result<Option<Event>> {
+/// 解出的消息或已读事件，连同信封头（租户声明之一，见 [`message_event_tenant`]）。
+struct DecodedMessageEvent {
+    event: Event,
+    envelope_headers: HashMap<String, String>,
+}
+
+fn decode_message_event(raw: &[u8]) -> Result<Option<DecodedMessageEvent>> {
     let mq = MqEnvelope::decode(raw)
         .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "decode MqEnvelope"))?;
+    let envelope_headers = mq.headers;
 
-    match mq.payload {
+    let event = match mq.payload {
         // TOPIC_MESSAGE_EVENTS 上的"事件记录"（已读 / 撤回 / 编辑）。
         Some(mq_envelope::Payload::Event(event))
             if mq.payload_kind == MqPayloadKind::Event as i32 =>
         {
-            Ok(matches_supported_event(&event).then_some(event))
+            matches_supported_event(&event).then_some(event)
         }
         // TOPIC_MESSAGE_CREATED 上的消息本体：信封直接装 Message，不套 Event。
         // 包成 Event 交给同一个处理分支，避免把处理逻辑写两遍。
-        Some(mq_envelope::Payload::Message(message)) => Ok(Some(Event {
+        Some(mq_envelope::Payload::Message(message)) => Some(Event {
             conversation_id: message.conversation_id.clone(),
             conversation_seq: message.conversation_seq,
             payload: Some(Payload::Message(message)),
             ..Default::default()
-        })),
-        _ => Ok(None),
-    }
+        }),
+        _ => None,
+    };
+    Ok(event.map(|event| DecodedMessageEvent {
+        event,
+        envelope_headers,
+    }))
 }
 
-fn decode_conversation_ensure(raw: &[u8]) -> Result<Option<(String, ConversationEnsurePayload)>> {
+/// 解出的会话确保事件，连同信封头（租户声明之一）。
+struct DecodedConversationEnsure {
+    conversation_id: String,
+    payload: ConversationEnsurePayload,
+    envelope_headers: HashMap<String, String>,
+}
+
+fn decode_conversation_ensure(raw: &[u8]) -> Result<Option<DecodedConversationEnsure>> {
     let mq = MqEnvelope::decode(raw).map_err(|e| {
         map_infra_error(
             e,
@@ -627,7 +833,11 @@ fn decode_conversation_ensure(raw: &[u8]) -> Result<Option<(String, Conversation
     let ensure_payload: ConversationEnsurePayload = serde_json::from_slice(&custom.payload)
         .map_err(|e| map_infra_error(e, ErrorCode::DeserializationError, "parse ensure"))?;
 
-    Ok(Some((conversation_id, ensure_payload)))
+    Ok(Some(DecodedConversationEnsure {
+        conversation_id,
+        payload: ensure_payload,
+        envelope_headers: mq.headers,
+    }))
 }
 
 fn matches_supported_event(event: &Event) -> bool {
@@ -708,7 +918,7 @@ impl KafkaConsumerConfig for ConversationEnsureConsumerConfig {
 /// 会话确保事件消费者：消费 conversation.ensure 事件，幂等创建会话
 pub struct ConversationEnsureEventConsumer {
     fetcher: tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>,
-    domain_service: Arc<DefaultConversationDomainService>,
+    handler: ConversationEventHandler,
     subject: String,
     failure: FailureSettlement,
 }
@@ -786,7 +996,7 @@ impl ConversationEnsureEventConsumer {
 
         Ok(Self {
             fetcher: tokio::sync::Mutex::new(fetcher),
-            domain_service,
+            handler: ConversationEventHandler::new(domain_service),
             subject: subject.to_string(),
             failure: FailureSettlement::new(dead_letter),
         })
@@ -800,65 +1010,14 @@ impl ConversationEnsureEventConsumer {
                 "ConversationEnsure",
                 message,
                 &self.failure,
-                |payload| async move { self.process_payload(&payload).await },
+                |payload, transport_tenant| async move {
+                    self.handler
+                        .handle_conversation_ensure(&payload, transport_tenant.as_deref())
+                        .await
+                },
             )
         })
         .await;
-        Ok(())
-    }
-
-    async fn process_payload(&self, raw: &[u8]) -> Result<()> {
-        let Some((conversation_id, ensure_payload)) = decode_conversation_ensure(raw)? else {
-            return Ok(());
-        };
-
-        if conversation_id.is_empty() {
-            debug!("ConversationEnsure with empty conversation_id, skip");
-            return Ok(());
-        }
-
-        let tenant_id = if ensure_payload.tenant_id.trim().is_empty() {
-            "0".to_string()
-        } else {
-            ensure_payload.tenant_id.trim().to_string()
-        };
-
-        let participants: Vec<ConversationParticipant> = ensure_payload
-            .participants
-            .into_iter()
-            .map(|user_id| ConversationParticipant {
-                user_id,
-                roles: vec![],
-                muted: false,
-                pinned: false,
-                attributes: HashMap::new(),
-                // 建会话时的初始成员无历史下限：他们本来就在场，没有「入群前」可言。
-                visible_from_seq: 0,
-                mention_only: false,
-            })
-            .collect();
-
-        let mut attributes = HashMap::new();
-        attributes.insert("conversation_id".to_string(), conversation_id.clone());
-
-        let ctx = Context::root().with_tenant_id(tenant_id);
-
-        self.domain_service
-            .create_conversation(
-                &ctx,
-                ConversationType::from_proto(ensure_payload.conversation_type),
-                ensure_payload.business_type,
-                participants,
-                attributes,
-                ConversationVisibility::Private,
-                ensure_payload.channel_id,
-            )
-            .await?;
-
-        debug!(
-            conversation_id = %conversation_id,
-            "Conversation ensured from event (async)"
-        );
         Ok(())
     }
 }
@@ -974,10 +1133,13 @@ mod tests {
     };
     use prost::Message as _;
 
+    use flare_server_core::error::ErrorCode;
+
     use super::{
         CONVERSATION_ENSURE_EVENT_NAME, CONVERSATION_ENSURE_EVENT_VERSION,
         CONVERSATION_ENSURE_NAMESPACE, ConversationEnsurePayload, decode_conversation_ensure,
-        decode_message_event, read_seq_for_conversation_cursor,
+        decode_message_event, message_event_tenant, read_seq_for_conversation_cursor,
+        resolve_event_tenant,
     };
 
     #[test]
@@ -1009,7 +1171,8 @@ mod tests {
 
         let event = decode_message_event(&mq.encode_to_vec())
             .expect("decode")
-            .expect("消息信封必须能解出事件，否则会话摘要永远不更新");
+            .expect("消息信封必须能解出事件，否则会话摘要永远不更新")
+            .event;
 
         assert_eq!(event.conversation_id, "conv-1");
         assert_eq!(event.conversation_seq, 42);
@@ -1024,12 +1187,38 @@ mod tests {
     fn decode_message_event_accepts_mq_envelope_event() {
         let raw = encode_event_envelope(read_receipt_event());
 
-        let event = decode_message_event(&raw)
+        let decoded = decode_message_event(&raw)
             .expect("decode")
             .expect("supported event");
 
-        assert_eq!(event.conversation_id, "conv-1");
-        assert_eq!(event.r#type, EventType::EventReadReceipt as i32);
+        assert_eq!(decoded.event.conversation_id, "conv-1");
+        assert_eq!(decoded.event.r#type, EventType::EventReadReceipt as i32);
+    }
+
+    /// 信封头随事件一起交出：它是租户声明之一（W9-S3 F1）。
+    #[test]
+    fn decode_message_event_keeps_envelope_headers() {
+        let message = Message {
+            conversation_id: "conv-1".to_string(),
+            conversation_seq: 7,
+            sender_id: "u-1".to_string(),
+            ..Default::default()
+        };
+        let mq = MqEnvelope {
+            payload_kind: MqPayloadKind::Message as i32,
+            headers: HashMap::from([("x-tenant-id".to_string(), "tenant-a".to_string())]),
+            payload: Some(mq_envelope::Payload::Message(message)),
+            ..Default::default()
+        };
+
+        let decoded = decode_message_event(&mq.encode_to_vec())
+            .expect("decode")
+            .expect("message event");
+
+        assert_eq!(
+            message_event_tenant(&decoded.envelope_headers, None).expect("tenant"),
+            "tenant-a"
+        );
     }
 
     #[test]
@@ -1068,16 +1257,67 @@ mod tests {
         };
         let raw = encode_event_envelope(event);
 
-        let (conversation_id, decoded) = decode_conversation_ensure(&raw)
+        let ensure = decode_conversation_ensure(&raw)
             .expect("decode")
             .expect("ensure event");
+        let decoded = &ensure.payload;
 
-        assert_eq!(conversation_id, "conv-ensure");
+        assert_eq!(ensure.conversation_id, "conv-ensure");
         assert_eq!(decoded.tenant_id, "tenant-a");
         assert_eq!(decoded.conversation_type, 2);
         assert_eq!(decoded.business_type, "team");
         assert_eq!(decoded.participants, vec!["u1", "u2"]);
         assert_eq!(decoded.channel_id, "channel-1");
+    }
+
+    /// 事件属于哪个租户只看事件自己的声明：取得到的几处必须一致，一处都没有就拒绝，绝不落到
+    /// 默认租户 `"0"`（W9-S3 F1：以前两条路径都写死 `"0"`）。
+    #[test]
+    fn event_tenant_comes_from_the_event_and_is_never_defaulted() {
+        let headers =
+            |tenant: &str| HashMap::from([("x-tenant-id".to_string(), tenant.to_string())]);
+
+        // 信封头与传输层消息头一致；只有一处时取那一处。
+        assert_eq!(
+            message_event_tenant(&headers("tenant-a"), Some("tenant-a")).unwrap(),
+            "tenant-a"
+        );
+        assert_eq!(
+            message_event_tenant(&headers("tenant-a"), None).unwrap(),
+            "tenant-a"
+        );
+        assert_eq!(
+            message_event_tenant(&HashMap::new(), Some("tenant-b")).unwrap(),
+            "tenant-b"
+        );
+        // 租户 0 是正常租户：显式声明时照常处理；`default` 按全仓口径归一为 0。
+        assert_eq!(message_event_tenant(&headers("0"), Some("0")).unwrap(), "0");
+        assert_eq!(
+            message_event_tenant(&headers("default"), Some("0")).unwrap(),
+            "0"
+        );
+
+        // 一处都没有（空白也算没有）：拒绝。
+        for transport in [None, Some(""), Some("  ")] {
+            let error = message_event_tenant(&HashMap::new(), transport).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::MessageFormatError));
+        }
+        // 彼此不一致：拒绝，不挑其中一个。
+        let error = message_event_tenant(&headers("tenant-a"), Some("0")).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::MessageFormatError));
+        assert!(!error.to_string().contains("tenant-a"), "{error}");
+
+        // 会话确保：载荷字段与信封头不一致也拒绝。
+        let error = resolve_event_tenant(&[
+            ("payload tenant_id", Some("tenant-a")),
+            ("envelope tenant_id", Some("tenant-b")),
+        ])
+        .unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::MessageFormatError));
+        assert_eq!(
+            resolve_event_tenant(&[("payload tenant_id", Some(" tenant-a "))]).unwrap(),
+            "tenant-a"
+        );
     }
 
     fn read_receipt_event() -> Event {
@@ -1212,7 +1452,7 @@ mod settle_tests {
             "Test",
             message,
             failure,
-            |_payload| async move { outcome() },
+            |_payload, _transport_tenant| async move { outcome() },
         )
         .await;
         ack.0.lock().unwrap().clone()
@@ -1224,6 +1464,10 @@ mod settle_tests {
 
     fn undecodable() -> Result<()> {
         Err(ErrorBuilder::new(ErrorCode::DeserializationError, "decode MqEnvelope").build_error())
+    }
+
+    fn tenantless() -> Result<()> {
+        resolve_event_tenant(&[("transport x-tenant-id", None)]).map(|_| ())
     }
 
     fn ok() -> Result<()> {
@@ -1275,6 +1519,49 @@ mod settle_tests {
             dlq.published.lock().unwrap()[0].1,
             "undecodable conversation event"
         );
+    }
+
+    /// 没有租户的事件重投也不会有租户：首投就进 DLQ 并写明原因，不按退避重投 12 次，也不落到
+    /// 默认租户（W9-S3 F1）。
+    #[tokio::test]
+    async fn a_tenantless_event_goes_straight_to_the_dlq() {
+        let dlq = Arc::new(RecordingDeadLetters::default());
+        let failure = settlement(dlq.clone());
+        assert_eq!(settle(0, &failure, tenantless).await, vec![Settled::Term]);
+        assert_eq!(
+            *dlq.published.lock().unwrap(),
+            vec![(
+                TOPIC_MESSAGE_EVENTS.to_string(),
+                TENANT_REJECTION_REASON.to_string(),
+                0
+            )]
+        );
+    }
+
+    /// 传输层消息头里的租户（拉取端已解进消息上下文）原样交给处理函数。
+    #[tokio::test]
+    async fn the_transport_tenant_reaches_the_processor() {
+        let ack = Arc::new(RecordingAck::default());
+        let context = MessageContext::new(
+            Arc::new(Context::with_request_id("req-tenant").with_tenant_id("tenant-a")),
+            TOPIC_MESSAGE_EVENTS.to_string(),
+        );
+        let message = MqMessage::new(b"payload".to_vec(), ContentType::Protobuf, context)
+            .with_ack_handle(ack.clone());
+        let seen = Arc::new(StdMutex::new(None));
+        let record = Arc::clone(&seen);
+        settle_message(
+            "Test",
+            message,
+            &settlement(Arc::new(RecordingDeadLetters::default())),
+            |_payload, transport_tenant| async move {
+                *record.lock().unwrap() = transport_tenant;
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("tenant-a"));
+        assert_eq!(*ack.0.lock().unwrap(), vec![Settled::Ack]);
     }
 
     /// 死信投递失败：按退避 NAK，消息留在原流里，不 term（否则就丢了）。
