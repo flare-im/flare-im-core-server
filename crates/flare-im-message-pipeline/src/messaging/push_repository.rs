@@ -24,7 +24,7 @@ use flare_im_contracts::event::{
 };
 use flare_im_contracts::utils::{
     TimelineMetadata, context_to_mq_metadata, current_millis, embed_timeline_in_extra_map,
-    normalize_tenant_id,
+    normalize_optional_tenant_id,
 };
 use flare_proto::common::{Event, EventType, Message, MqEnvelope, PushEnvelope};
 use flare_server_core::mq::producer::{Producer, ProducerError};
@@ -56,18 +56,29 @@ impl MqPushRepository {
         e.into_flare_error()
     }
 
-    /// 从 Ctx 构造跨队列 headers，供外层 MQ 与内层 MqEnvelope 同时携带。
-    fn build_headers_from_ctx(ctx: &Ctx) -> HashMap<String, String> {
-        let mut headers = context_to_mq_metadata(ctx);
-        headers
-            .entry("x-tenant-id".to_string())
-            .or_insert_with(|| normalize_tenant_id(ctx.tenant_id().unwrap_or("0")));
-        headers
+    /// 上下文没有租户时拒绝发布：下游消费者（Storage Writer、会话、推送等）按消息头的
+    /// `x-tenant-id` 落库或投递，这里以前盖上 "0"，使缺租户的消息与事件被当成租户 0 处理，
+    /// 消费者的死信分支也就永远走不到（W10-A 复审）。显式的租户 "0" 照常发布。
+    fn missing_tenant_error() -> flare_server_core::error::FlareError {
+        ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "tenant required to publish to the message queue",
+        )
+        .build_error()
     }
 
-    fn build_timeline_headers(ctx: &Ctx, emit_ts: Option<i64>) -> HashMap<String, String> {
+    /// 从 Ctx 构造跨队列 headers，供外层 MQ 与内层 MqEnvelope 同时携带。
+    fn build_headers_from_ctx(ctx: &Ctx) -> Result<HashMap<String, String>> {
+        let tenant_id =
+            normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(Self::missing_tenant_error)?;
+        let mut headers = context_to_mq_metadata(ctx);
+        headers.insert("x-tenant-id".to_string(), tenant_id);
+        Ok(headers)
+    }
+
+    fn build_timeline_headers(ctx: &Ctx, emit_ts: Option<i64>) -> Result<HashMap<String, String>> {
         let ingestion_ts = current_millis();
-        let mut headers = Self::build_headers_from_ctx(ctx);
+        let mut headers = Self::build_headers_from_ctx(ctx)?;
         embed_timeline_in_extra_map(
             &mut headers,
             &TimelineMetadata {
@@ -76,14 +87,14 @@ impl MqPushRepository {
                 ..TimelineMetadata::default()
             },
         );
-        headers
+        Ok(headers)
     }
 
-    fn message_headers(ctx: &Ctx, message: &Message) -> HashMap<String, String> {
+    fn message_headers(ctx: &Ctx, message: &Message) -> Result<HashMap<String, String>> {
         Self::build_timeline_headers(ctx, (message.created_at > 0).then_some(message.created_at))
     }
 
-    fn event_headers(ctx: &Ctx, event: &Event) -> HashMap<String, String> {
+    fn event_headers(ctx: &Ctx, event: &Event) -> Result<HashMap<String, String>> {
         Self::build_timeline_headers(ctx, (event.created_at > 0).then_some(event.created_at))
     }
 
@@ -102,20 +113,34 @@ impl MqPushRepository {
             .or_insert_with(|| mq.seq.to_string());
     }
 
-    fn envelope_headers(ctx: &Ctx, envelope: &mut PushEnvelope) -> HashMap<String, String> {
+    /// 推送信封的租户：信封自带的 `tenant_id`，或上下文与信封头里的 `x-tenant-id`；一处都没有、
+    /// 或两处不一致时拒绝发布。
+    fn envelope_headers(ctx: &Ctx, envelope: &mut PushEnvelope) -> Result<HashMap<String, String>> {
         if envelope.envelope_id.trim().is_empty() {
             envelope.envelope_id = uuid::Uuid::new_v4().to_string();
         }
-        let mut headers = Self::build_headers_from_ctx(ctx);
+        let mut headers = context_to_mq_metadata(ctx);
         for (key, value) in envelope.headers.drain() {
             headers.insert(key, value);
         }
-        if envelope.tenant_id.trim().is_empty() {
-            envelope.tenant_id = headers
-                .get("x-tenant-id")
-                .cloned()
-                .unwrap_or_else(|| "0".to_string());
-        }
+        let header_tenant =
+            normalize_optional_tenant_id(headers.get("x-tenant-id").map(String::as_str));
+        let tenant_id = match (
+            normalize_optional_tenant_id(Some(envelope.tenant_id.as_str())),
+            header_tenant,
+        ) {
+            (Some(envelope_tenant), Some(header_tenant)) if envelope_tenant != header_tenant => {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "push envelope tenant differs from its context tenant",
+                )
+                .build_error());
+            }
+            (Some(tenant_id), _) | (None, Some(tenant_id)) => tenant_id,
+            (None, None) => return Err(Self::missing_tenant_error()),
+        };
+        envelope.tenant_id = tenant_id.clone();
+        headers.insert("x-tenant-id".to_string(), tenant_id);
         if envelope.trace_id.trim().is_empty()
             && let Some(trace_id) = headers.get("x-trace-id")
         {
@@ -128,7 +153,7 @@ impl MqPushRepository {
             .entry("x-produced-at-ms".to_string())
             .or_insert_with(|| envelope.created_at.to_string());
         envelope.headers = headers.clone();
-        headers
+        Ok(headers)
     }
 
     fn message_event(message: &Message, include_payload: bool) -> Event {
@@ -180,7 +205,7 @@ impl MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_event_with_headers(
             &event,
             recipient_user_ids,
-            Self::event_headers(ctx, &event),
+            Self::event_headers(ctx, &event)?,
         );
         mq.push_only = true;
         mq.large_conversation = large_conversation;
@@ -237,7 +262,7 @@ impl MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_event_with_headers(
             &event,
             recipient_user_ids,
-            Self::event_headers(ctx, &event),
+            Self::event_headers(ctx, &event)?,
         );
         mq.push_only = true;
         mq.headers
@@ -303,7 +328,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             recipient_user_ids,
-            Self::message_headers(ctx, &message),
+            Self::message_headers(ctx, &message)?,
             large_conversation,
         );
         Self::finalize_mq_headers(&mut mq);
@@ -360,7 +385,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_event_with_headers(
             &event,
             recipient_user_ids,
-            Self::event_headers(ctx, &event),
+            Self::event_headers(ctx, &event)?,
         );
         Self::finalize_mq_headers(&mut mq);
         let payload = mq.encode_to_vec();
@@ -422,7 +447,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             recipient_user_ids,
-            Self::message_headers(ctx, &message),
+            Self::message_headers(ctx, &message)?,
             false,
         );
 
@@ -491,7 +516,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_event_with_headers(
             &event,
             recipient_user_ids,
-            Self::event_headers(ctx, &event),
+            Self::event_headers(ctx, &event)?,
         );
 
         // 标记为仅推送（不持久化）
@@ -556,7 +581,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             Vec::new(),
-            Self::message_headers(ctx, &message),
+            Self::message_headers(ctx, &message)?,
             false,
         );
 
@@ -624,7 +649,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_event_with_headers(
             &event,
             Vec::new(),
-            Self::event_headers(ctx, &event),
+            Self::event_headers(ctx, &event)?,
         );
 
         // 标记为仅持久化（不推送）
@@ -680,7 +705,7 @@ impl PushRepository for MqPushRepository {
     async fn publish_push_envelope(&self, ctx: &Ctx, mut envelope: PushEnvelope) -> Result<()> {
         const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-        let headers = Self::envelope_headers(ctx, &mut envelope);
+        let headers = Self::envelope_headers(ctx, &mut envelope)?;
 
         // 序列化 PushEnvelope
         let payload = envelope.encode_to_vec();
@@ -1024,6 +1049,141 @@ mod tests {
             }
             other => panic!("expected event payload, got {other:?}"),
         }
+    }
+
+    fn captured(producer: &CapturingProducer) -> Option<CapturedSend> {
+        producer
+            .send
+            .lock()
+            .expect("capture producer poisoned")
+            .clone()
+    }
+
+    /// 上下文没有租户时每条发布路径都拒绝，不再盖上 "0"（W11-T）：下游按消息头的
+    /// `x-tenant-id` 落库与投递，缺租户的消息应停在生产方。
+    #[tokio::test]
+    async fn every_publish_path_refuses_a_context_without_tenant() {
+        let message = Message {
+            server_id: "message-a".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            conversation_seq: 1,
+            ..Message::default()
+        };
+        let event = MqPushRepository::message_inline_event(&message);
+        for ctx in [
+            Arc::new(Context::with_request_id("req-no-tenant")),
+            Arc::new(Context::with_request_id("req-blank-tenant").with_tenant_id(" ")),
+        ] {
+            let ctx: Ctx = ctx;
+            let producer = Arc::new(CapturingProducer::default());
+            let repo = MqPushRepository::new(producer.clone());
+            let conversation = || "conversation-a".to_string();
+            let results = [
+                repo.publish_message(&ctx, message.clone(), Vec::new(), conversation(), false)
+                    .await,
+                repo.publish_event(&ctx, event.clone(), Vec::new(), conversation())
+                    .await,
+                repo.push_only_message(&ctx, message.clone(), Vec::new(), conversation())
+                    .await,
+                repo.push_only_event(&ctx, event.clone(), Vec::new(), conversation())
+                    .await,
+                repo.persistence_only_message(&ctx, message.clone(), conversation())
+                    .await,
+                repo.persistence_only_event(&ctx, event.clone(), conversation())
+                    .await,
+                repo.push_only_message_ping(&ctx, &message, Vec::new(), conversation(), false)
+                    .await,
+                repo.push_only_message_inline_event(&ctx, &message, Vec::new(), conversation())
+                    .await,
+                repo.publish_push_envelope(&ctx, PushEnvelope::default())
+                    .await,
+            ];
+            for (index, result) in results.into_iter().enumerate() {
+                let error = result.expect_err("published without a tenant");
+                assert_eq!(
+                    error.code(),
+                    Some(ErrorCode::InvalidParameter),
+                    "path {index}"
+                );
+            }
+            assert!(captured(&producer).is_none(), "nothing reached the broker");
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_tenant_zero_is_published_as_tenant_zero() {
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let ctx: Ctx = Arc::new(Context::with_request_id("req-zero").with_tenant_id("0"));
+        let message = Message {
+            server_id: "message-zero".to_string(),
+            conversation_id: "conversation-zero".to_string(),
+            conversation_seq: 1,
+            ..Message::default()
+        };
+        repo.persistence_only_message(&ctx, message, "conversation-zero".to_string())
+            .await
+            .expect("explicit tenant 0 publishes");
+        let sent = captured(&producer).expect("sent");
+        assert_eq!(
+            sent.headers
+                .expect("headers")
+                .get("x-tenant-id")
+                .map(String::as_str),
+            Some("0")
+        );
+        let envelope = MqEnvelope::decode(sent.payload.as_slice()).expect("envelope");
+        assert_eq!(
+            envelope.headers.get("x-tenant-id").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
+    async fn push_envelope_tenant_comes_from_the_envelope_or_context_and_must_agree() {
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("req-envelope"));
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        repo.publish_push_envelope(
+            &no_tenant,
+            PushEnvelope {
+                tenant_id: "tenant-e".to_string(),
+                ..PushEnvelope::default()
+            },
+        )
+        .await
+        .expect("envelope tenant is explicit");
+        let sent = captured(&producer).expect("sent");
+        assert_eq!(
+            sent.headers
+                .expect("headers")
+                .get("x-tenant-id")
+                .map(String::as_str),
+            Some("tenant-e")
+        );
+        let envelope = PushEnvelope::decode(sent.payload.as_slice()).expect("envelope");
+        assert_eq!(envelope.tenant_id, "tenant-e");
+
+        let tenant_a: Ctx =
+            Arc::new(Context::with_request_id("req-envelope").with_tenant_id("tenant-a"));
+        let error = repo
+            .publish_push_envelope(
+                &tenant_a,
+                PushEnvelope {
+                    tenant_id: "tenant-e".to_string(),
+                    ..PushEnvelope::default()
+                },
+            )
+            .await
+            .expect_err("conflicting tenants");
+        assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+
+        repo.publish_push_envelope(&tenant_a, PushEnvelope::default())
+            .await
+            .expect("context tenant fills the envelope");
+        let envelope = PushEnvelope::decode(captured(&producer).expect("sent").payload.as_slice())
+            .expect("envelope");
+        assert_eq!(envelope.tenant_id, "tenant-a");
     }
 
     #[test]

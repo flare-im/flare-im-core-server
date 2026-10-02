@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_im_hooks::hooks::HookDispatcher;
 use flare_proto::common::Message;
 use flare_server_core::error::AnyhowContext;
@@ -73,6 +74,18 @@ impl HookExecutionService {
         mut message: Message,
         execute_pre_send: bool,
     ) -> Result<HookExecutionContext> {
+        // Hook 上下文的租户取发送上下文，其次是显式配置的默认租户；都没有就拒绝，
+        // 不再让 Hook 与之后的发布按租户 "0" 处理（W11-T）。
+        if normalize_optional_tenant_id(ctx.tenant_id())
+            .or_else(|| normalize_optional_tenant_id(self.default_tenant_id.as_deref()))
+            .is_none()
+        {
+            return Err(flare_err!(
+                ErrorCode::InvalidParameter,
+                "tenant required to run message hooks"
+            ));
+        }
+
         // 构建原始 Hook 上下文
         let original_context = build_hook_context_from_ctx(ctx, &message);
 
@@ -318,5 +331,54 @@ mod tests {
                 .map(String::as_str),
             Some("2")
         );
+    }
+
+    /// 缺租户的发送上下文不再被当成租户 "0" 跑 Hook（W11-T）；显式配置的默认租户可用。
+    #[tokio::test]
+    async fn hooks_refuse_a_context_without_tenant_unless_a_default_is_configured() {
+        let dispatcher = || Arc::new(HookDispatcher::new(HookRegistry::new()));
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("req"));
+
+        let error = match HookExecutionService::new(dispatcher(), None)
+            .execute_pre_send(&no_tenant, Message::default(), true)
+            .await
+        {
+            Ok(_) => panic!("hooks ran without a tenant"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+
+        let out = HookExecutionService::new(dispatcher(), Some("tenant-d".to_string()))
+            .execute_pre_send(&no_tenant, Message::default(), true)
+            .await
+            .expect("configured default tenant");
+        assert_eq!(out.hook_context.tenant_id(), Some("tenant-d"));
+    }
+
+    /// Hook 上下文的租户是发送上下文的租户，未验证的上下文也一样；以前 attributes 不带租户时
+    /// 盖上 "0" 并在合并时顶掉发送上下文的租户。
+    #[tokio::test]
+    async fn hook_context_keeps_the_sender_tenant() {
+        let service =
+            HookExecutionService::new(Arc::new(HookDispatcher::new(HookRegistry::new())), None);
+        for tenant in ["tenant-a", "0"] {
+            let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
+            let out = service
+                .execute_pre_send(&ctx, Message::default(), true)
+                .await
+                .expect("tenant present");
+            assert_eq!(out.hook_context.tenant_id(), Some(tenant));
+        }
+
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        let mut message = Message::default();
+        message
+            .attributes
+            .insert("x-tenant-id".into(), "tenant-b".into());
+        let out = service
+            .execute_pre_send(&ctx, message, true)
+            .await
+            .expect("tenant present");
+        assert_eq!(out.hook_context.tenant_id(), Some("tenant-a"));
     }
 }

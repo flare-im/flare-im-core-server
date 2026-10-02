@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use flare_im_contracts::abstractions::storage_payload::{EXTRA_KEY_SYNC, EXTRA_KEY_TAGS};
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
 use flare_im_hooks::hooks::hook_context_data::{HookContextData, set_hook_context_data};
 use flare_im_hooks::hooks::{MessageDraft, MessageRecord};
 use flare_proto::common::{Message, MessageContent};
@@ -15,15 +15,6 @@ use serde_json::json;
 
 use super::SubmittedMessage;
 use flare_server_core::error::Result;
-
-#[allow(dead_code)]
-fn tenant_id_from_opt(tenant: Option<&str>, default: Option<&String>) -> String {
-    tenant
-        .and_then(|s| non_empty(normalize_tenant_id(s)))
-        .or_else(|| default.cloned())
-        .map(normalize_tenant_id)
-        .unwrap_or_else(|| "0".to_string())
-}
 
 fn non_empty(value: String) -> Option<String> {
     if value.trim().is_empty() {
@@ -139,16 +130,16 @@ pub fn build_hook_context_from_ctx(ctx: &Ctx, request: &Message) -> Ctx {
 }
 
 /// 从 Message.attributes 还原 Ctx（MQ 编解码）
+///
+/// attributes 没带租户时只补显式配置的默认租户；没有就不设租户，由 [`merge_context`] 取发送
+/// 上下文的租户。以前这里盖上 "0"，合并时又只在缺租户时才取原上下文，未验证上下文的
+/// Hook 上下文因此一律成了租户 0（W11-T）。
 pub fn build_hook_context(request: &Message, default_tenant: Option<&String>) -> Ctx {
     let mut ctx = context_from_nats_headers(&request.attributes);
-    if ctx.tenant_id().is_none() || ctx.tenant_id().map(|s| s.is_empty()).unwrap_or(true) {
-        let mut c = (*ctx).clone();
-        if let Some(t) = default_tenant {
-            c = c.with_tenant_id(normalize_tenant_id(t));
-        } else {
-            c = c.with_tenant_id("0");
-        }
-        ctx = Arc::new(c);
+    if normalize_optional_tenant_id(ctx.tenant_id()).is_none()
+        && let Some(tenant_id) = normalize_optional_tenant_id(default_tenant.map(String::as_str))
+    {
+        ctx = Arc::new((*ctx).clone().with_tenant_id(tenant_id));
     }
     let mut hook_data = HookContextData::new();
     hook_data.conversation_id = non_empty(request.conversation_id.clone());
@@ -486,15 +477,9 @@ pub fn merge_context(original: &Ctx, updated: Ctx) -> Ctx {
         }
     }
 
-    // 合并 tenant_id（如果 updated 没有）
-    if merged_ctx
-        .tenant_id()
-        .map(|id| id.is_empty())
-        .unwrap_or(true)
-        && let Some(tenant_id) = original.tenant_id()
-        && !tenant_id.is_empty()
-    {
-        merged_ctx = merged_ctx.with_tenant_id(normalize_tenant_id(tenant_id));
+    // 租户以发送上下文为准：消息 attributes 还原出的租户只在发送上下文没有租户时才用。
+    if let Some(tenant_id) = normalize_optional_tenant_id(original.tenant_id()) {
+        merged_ctx = merged_ctx.with_tenant_id(tenant_id);
     }
 
     // 合并 HookContextData
