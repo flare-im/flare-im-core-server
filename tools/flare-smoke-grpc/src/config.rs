@@ -7,6 +7,9 @@ use std::time::Duration;
 use crate::error::{Result, ensure, err, fail};
 
 pub const DEFAULT_DB_PORT: u16 = 5432;
+/// 单容器 Core 里 Storage Reader 与会话服务的固定端口（`release/supervise-core.toml`）。
+pub const DEFAULT_STORAGE_READER_PORT: u16 = 60083;
+pub const DEFAULT_CONVERSATION_PORT: u16 = 50090;
 pub const DEFAULT_DB_NAME: &str = "flare_core";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 pub const MAX_TIMEOUT_SECS: u64 = 900;
@@ -24,6 +27,8 @@ pub const REFUSED_SECRET_ENV: [&str; 6] = [
 
 pub const USAGE: &str = "\
 Usage: flare-smoke-grpc [--dry-run] --ingest-endpoint http://HOST:PORT
+         [--storage-reader-endpoint http://HOST:60083]
+         [--conversation-endpoint http://HOST:50090]
          --tenant-id e2e-<20 hex> --sender-id ID --recipient-id ID
          --signing-key-file PATH
          --db-host HOST [--db-port 5432] [--db-name flare_core] --db-user ROLE
@@ -37,16 +42,21 @@ EdDSA internal context signed in this process with the Cell private key read
 from --signing-key-file (mode 600). No call is ever made without it, and no
 legacy identity metadata is sent.
 
-Read-back goes through a read-only PostgreSQL session (startup option
-default_transaction_read_only=on plus BEGIN TRANSACTION READ ONLY): the
-message row (storage), the write ledger at archive_persisted or later
-(archive), and both participants' conversation seq at least the sent seq,
-read the way Core's conversation list reads it: conversation and member not
-deleted, seq = GREATEST(conversations.last_message_seq, newest message the
-member may see) (conversation). The password comes only from
---db-password-file (mode 600) and default or weak passwords are refused.
-Core's read RPCs (conversation, storage-reader) only take unsigned identity
-metadata, so they are not called.
+Read-back is first over signed gRPC, each call carrying x-flare-ctx signed
+for the reading user and nothing else: Storage Reader's QueryMessagesBySeq,
+as the recipient, returns the message at the sent seq, and the conversation
+service's ListConversations, as the sender and as the recipient, lists the
+conversation at that seq or later. The endpoints default to the ingest host
+on ports 60083 and 50090.
+
+A read-only PostgreSQL session (startup option default_transaction_read_only=on
+plus BEGIN TRANSACTION READ ONLY) is the second evidence: the message row
+(storage), the write ledger at archive_persisted or later (archive), and both
+participants' conversation seq at least the sent seq, read the way Core's
+conversation list reads it: conversation and member not deleted, seq =
+GREATEST(conversations.last_message_seq, newest message the member may see)
+(conversation). The password comes only from --db-password-file (mode 600)
+and default or weak passwords are refused.
 
 --dry-run validates every setting, loads and test-signs with the key, checks
 the password policy and prints the plan without opening any connection.
@@ -71,6 +81,8 @@ pub struct DbTarget {
 pub struct Config {
     pub dry_run: bool,
     pub ingest_endpoint: String,
+    pub storage_reader_endpoint: String,
+    pub conversation_endpoint: String,
     pub tenant_id: String,
     pub sender_id: String,
     pub recipient_id: String,
@@ -143,7 +155,16 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
     };
     let required = |key: &str| take(key).ok_or_else(|| err!("{key} is required (see --help)"));
 
-    let ingest_endpoint = validate_endpoint(&required("--ingest-endpoint")?)?;
+    let (ingest_endpoint, ingest_host) =
+        validate_endpoint("--ingest-endpoint", &required("--ingest-endpoint")?)?;
+    let read_endpoint = |flag: &str, default_port: u16| match take(flag) {
+        Some(value) => validate_endpoint(flag, &value).map(|(endpoint, _)| endpoint),
+        None => Ok(format!("http://{ingest_host}:{default_port}")),
+    };
+    let storage_reader_endpoint =
+        read_endpoint("--storage-reader-endpoint", DEFAULT_STORAGE_READER_PORT)?;
+    let conversation_endpoint =
+        read_endpoint("--conversation-endpoint", DEFAULT_CONVERSATION_PORT)?;
     let tenant_id = required("--tenant-id")?;
     ensure!(
         is_fixture_tenant(&tenant_id),
@@ -186,6 +207,8 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
     Ok(Parsed::Run(Box::new(Config {
         dry_run,
         ingest_endpoint,
+        storage_reader_endpoint,
+        conversation_endpoint,
         tenant_id,
         sender_id,
         recipient_id,
@@ -195,8 +218,10 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
     })))
 }
 
-const FLAGS: [&str; 11] = [
+const FLAGS: [&str; 13] = [
     "--ingest-endpoint",
+    "--storage-reader-endpoint",
+    "--conversation-endpoint",
     "--tenant-id",
     "--sender-id",
     "--recipient-id",
@@ -217,20 +242,19 @@ pub fn is_fixture_tenant(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Message Ingest 只在 compose 内网可达且不带 TLS：只接受 `http://主机:端口`。
-fn validate_endpoint(value: &str) -> Result<String> {
+/// Core 的 gRPC 只在 compose 内网可达且不带 TLS：只接受 `http://主机:端口`。返回规范化的
+/// 地址与主机名。
+fn validate_endpoint(flag: &str, value: &str) -> Result<(String, String)> {
     let rest = value.strip_prefix("http://").ok_or_else(|| {
-        err!(
-            "--ingest-endpoint must be http://HOST:PORT (plaintext gRPC inside the compose network)"
-        )
+        err!("{flag} must be http://HOST:PORT (plaintext gRPC inside the compose network)")
     })?;
     let authority = rest.strip_suffix('/').unwrap_or(rest);
     let (host, port) = authority
         .rsplit_once(':')
-        .ok_or_else(|| err!("--ingest-endpoint must name an explicit port"))?;
-    validate_host("--ingest-endpoint host", host)?;
-    parse_port("--ingest-endpoint port", port)?;
-    Ok(format!("http://{host}:{port}"))
+        .ok_or_else(|| err!("{flag} must name an explicit port"))?;
+    validate_host(&format!("{flag} host"), host)?;
+    parse_port(&format!("{flag} port"), port)?;
+    Ok((format!("http://{host}:{port}"), host.to_owned()))
 }
 
 fn validate_host(what: &str, host: &str) -> Result<String> {
@@ -406,6 +430,36 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(parsed.ingest_endpoint, "http://127.0.0.1:50182");
+    }
+
+    #[test]
+    fn read_endpoints_default_to_the_ingest_host_and_can_be_named() {
+        let parsed = config(&base()).unwrap();
+        assert_eq!(parsed.storage_reader_endpoint, "http://core:60083");
+        assert_eq!(parsed.conversation_endpoint, "http://core:50090");
+
+        let mut args = base();
+        args.extend(
+            [
+                "--storage-reader-endpoint",
+                "http://reader:7001/",
+                "--conversation-endpoint=http://10.0.0.5:7002",
+            ]
+            .iter()
+            .map(|value| value.to_string()),
+        );
+        let parsed = config(&args).unwrap();
+        assert_eq!(parsed.storage_reader_endpoint, "http://reader:7001");
+        assert_eq!(parsed.conversation_endpoint, "http://10.0.0.5:7002");
+
+        for flag in ["--storage-reader-endpoint", "--conversation-endpoint"] {
+            for endpoint in ["https://core:60083", "http://core", "http://u:p@core:1"] {
+                let mut args = base();
+                args.extend([flag.to_string(), endpoint.to_string()]);
+                let error = config(&args).unwrap_err().to_string();
+                assert!(error.contains(flag), "{flag} {endpoint}: {error}");
+            }
+        }
     }
 
     #[test]

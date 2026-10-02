@@ -685,6 +685,11 @@ class GrpcModeTests(GrpcHarness):
         argv = self.client_calls(custom)[0]["argv"]
         self.assertEqual(argv[argv.index("--db-port") + 1], "15432")
         self.assertEqual(argv[argv.index("--db-name") + 1], "core_db")
+        readers = self.run_grpc({"SMOKE_GRPC_STORAGE_READER_ENDPOINT": "http://core:60083",
+                                 "SMOKE_GRPC_CONVERSATION_ENDPOINT": "http://core:50090"})
+        argv = self.client_calls(readers)[0]["argv"]
+        self.assertEqual(argv[argv.index("--storage-reader-endpoint") + 1], "http://core:60083")
+        self.assertEqual(argv[argv.index("--conversation-endpoint") + 1], "http://core:50090")
         via_env = self.run_grpc({"SMOKE_MODE": "grpc"}, args=())
         self.assertEqual(via_env.proc.returncode, 0, via_env.output)
         failing = self.run_grpc({"FAKE_GRPC_EXIT": "1"})

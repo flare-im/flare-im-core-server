@@ -6,6 +6,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use flare_grpc_proto::conversation::conversation_read_service_server::{
+    ConversationReadService, ConversationReadServiceServer,
+};
+use flare_grpc_proto::conversation::{
+    ConversationBootstrapRequest, ConversationBootstrapResponse, GetConversationDetailRequest,
+    GetConversationDetailResponse, ListConversationParticipantsRequest,
+    ListConversationParticipantsResponse, ListConversationsRequest, ListConversationsResponse,
+};
 use flare_grpc_proto::message::message_send_service_server::{
     MessageSendService, MessageSendServiceServer,
 };
@@ -14,12 +22,16 @@ use flare_grpc_proto::message::{
     SendCustomDataRequest, SendCustomDataResponse, SendMessageRequest, SendMessageResponse,
     SendSystemMessageRequest, SendSystemMessageResponse,
 };
-use flare_proto::common::{MessageSource, SendAckDurability};
-use flare_server_core::SignedContextVerifier;
+use flare_grpc_proto::storage::storage_reader_service_server::{
+    StorageReaderService, StorageReaderServiceServer,
+};
+use flare_grpc_proto::storage::*;
+use flare_proto::common::{ConversationSummary, MessageSource, SendAckDurability};
 use flare_server_core::auth::SignedActorType;
 use flare_server_core::grpc::middleware::signed_context::{
     SIGNED_CONTEXT_HEADER, VerifiedContext, verify_signed_context_metadata,
 };
+use flare_server_core::{SignedContextVerifier, SignedFirstContextLayer};
 use tonic::metadata::KeyRef;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
@@ -133,20 +145,277 @@ impl MessageSendService for FakeIngest {
     }
 }
 
-async fn start_ingest(public_key: &str) -> (String, Arc<Mutex<Seen>>) {
+/// 一次签名读：哪个 RPC、签名里的谁（读接口的身份边界验过之后的上下文）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignedRead {
+    rpc: &'static str,
+    actor_type: SignedActorType,
+    actor: String,
+    tenant: String,
+}
+
+#[derive(Default)]
+struct ReadsSeen {
+    reads: Vec<SignedRead>,
+    /// 进入身份边界之前，请求带的全部元数据键。
+    metadata_keys: Vec<Vec<String>>,
+}
+
+/// 与 Core 的读接口同样把关：外面套 `SignedFirstContextLayer`（要求签名），处理器只看边界放进来
+/// 的已验证上下文。回的数据固定：消息 srv-smoke-grpc-1 在 seq 7，会话列表里该会话的 seq 是
+/// `conversation_seq`。
+#[derive(Clone)]
+struct FakeReads {
+    seen: Arc<Mutex<ReadsSeen>>,
+    conversation_seq: u64,
+}
+
+impl FakeReads {
+    fn record<T>(
+        &self,
+        rpc: &'static str,
+        request: &Request<T>,
+    ) -> std::result::Result<(), Status> {
+        let ctx = request
+            .extensions()
+            .get::<flare_server_core::context::Ctx>()
+            .ok_or_else(|| Status::internal("no context"))?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .ok_or_else(|| Status::unauthenticated("signed read identity required"))?;
+        self.seen.lock().unwrap().reads.push(SignedRead {
+            rpc,
+            actor_type: claims.actor_type,
+            actor: claims.actor_id.clone(),
+            tenant: claims.tenant_id.clone(),
+        });
+        Ok(())
+    }
+}
+
+fn unused<T>() -> std::result::Result<Response<T>, Status> {
+    Err(Status::unimplemented("not used by the smoke"))
+}
+
+#[tonic::async_trait]
+impl StorageReaderService for FakeReads {
+    async fn query_messages_by_seq(
+        &self,
+        request: Request<QueryMessagesBySeqRequest>,
+    ) -> std::result::Result<Response<QueryMessagesBySeqResponse>, Status> {
+        self.record("QueryMessagesBySeq", &request)?;
+        let request = request.into_inner();
+        assert_eq!(request.after_seq, 6);
+        assert_eq!(request.user_id, RECIPIENT);
+        Ok(Response::new(QueryMessagesBySeqResponse {
+            messages: vec![flare_proto::common::Message {
+                server_id: "srv-smoke-grpc-1".into(),
+                conversation_id: request.conversation_id,
+                conversation_seq: 7,
+                ..Default::default()
+            }],
+            last_seq: 7,
+            ..Default::default()
+        }))
+    }
+
+    async fn query_messages(
+        &self,
+        _: Request<QueryMessagesRequest>,
+    ) -> std::result::Result<Response<QueryMessagesResponse>, Status> {
+        unused()
+    }
+
+    async fn query_conversations_message_windows(
+        &self,
+        _: Request<QueryConversationsMessageWindowsRequest>,
+    ) -> std::result::Result<Response<QueryConversationsMessageWindowsResponse>, Status> {
+        unused()
+    }
+
+    async fn search_messages(
+        &self,
+        _: Request<SearchMessagesRequest>,
+    ) -> std::result::Result<Response<SearchMessagesResponse>, Status> {
+        unused()
+    }
+
+    async fn get_message(
+        &self,
+        _: Request<GetMessageRequest>,
+    ) -> std::result::Result<Response<GetMessageResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_events(
+        &self,
+        _: Request<QueryMessageEventsRequest>,
+    ) -> std::result::Result<Response<QueryMessageEventsResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_edit_history(
+        &self,
+        _: Request<QueryMessageEditHistoryRequest>,
+    ) -> std::result::Result<Response<QueryMessageEditHistoryResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_read_list(
+        &self,
+        _: Request<QueryMessageReadListRequest>,
+    ) -> std::result::Result<Response<QueryMessageReadListResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_marks(
+        &self,
+        _: Request<QueryMessageMarksRequest>,
+    ) -> std::result::Result<Response<QueryMessageMarksResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_reactions(
+        &self,
+        _: Request<QueryMessageReactionsRequest>,
+    ) -> std::result::Result<Response<QueryMessageReactionsResponse>, Status> {
+        unused()
+    }
+
+    async fn list_message_tags(
+        &self,
+        _: Request<ListMessageTagsRequest>,
+    ) -> std::result::Result<Response<ListMessageTagsResponse>, Status> {
+        unused()
+    }
+
+    async fn export_messages(
+        &self,
+        _: Request<ExportMessagesRequest>,
+    ) -> std::result::Result<Response<ExportMessagesResponse>, Status> {
+        unused()
+    }
+
+    async fn query_message_write_ledger(
+        &self,
+        _: Request<QueryMessageWriteLedgerRequest>,
+    ) -> std::result::Result<Response<QueryMessageWriteLedgerResponse>, Status> {
+        unused()
+    }
+
+    async fn query_conversation_events(
+        &self,
+        _: Request<QueryConversationEventsRequest>,
+    ) -> std::result::Result<Response<QueryConversationEventsResponse>, Status> {
+        unused()
+    }
+
+    async fn get_conversation_message_head(
+        &self,
+        _: Request<GetConversationMessageHeadRequest>,
+    ) -> std::result::Result<Response<GetConversationMessageHeadResponse>, Status> {
+        unused()
+    }
+}
+
+#[tonic::async_trait]
+impl ConversationReadService for FakeReads {
+    async fn list_conversations(
+        &self,
+        request: Request<ListConversationsRequest>,
+    ) -> std::result::Result<Response<ListConversationsResponse>, Status> {
+        self.record("ListConversations", &request)?;
+        Ok(Response::new(ListConversationsResponse {
+            conversations: vec![
+                ConversationSummary {
+                    conversation_id: "some-other-conversation".into(),
+                    max_conversation_seq: 99,
+                    ..Default::default()
+                },
+                ConversationSummary {
+                    conversation_id: cid::single_chat_conversation_id(SENDER, RECIPIENT),
+                    max_conversation_seq: self.conversation_seq,
+                    ..Default::default()
+                },
+            ],
+            next_cursor: String::new(),
+            has_more: false,
+        }))
+    }
+
+    async fn conversation_bootstrap(
+        &self,
+        _: Request<ConversationBootstrapRequest>,
+    ) -> std::result::Result<Response<ConversationBootstrapResponse>, Status> {
+        unused()
+    }
+
+    async fn get_conversation_detail(
+        &self,
+        _: Request<GetConversationDetailRequest>,
+    ) -> std::result::Result<Response<GetConversationDetailResponse>, Status> {
+        unused()
+    }
+
+    async fn list_conversation_participants(
+        &self,
+        _: Request<ListConversationParticipantsRequest>,
+    ) -> std::result::Result<Response<ListConversationParticipantsResponse>, Status> {
+        unused()
+    }
+}
+
+/// 假 Core：Ingest 按 `ingest_public` 验签；两个读接口套与 Core 相同的身份边界（要求签名），按
+/// `reads_public` 验签。三者同一端口。
+async fn start_core(
+    ingest_public: &str,
+    reads_public: &str,
+    conversation_seq: u64,
+) -> (String, Arc<Mutex<Seen>>, Arc<Mutex<ReadsSeen>>) {
     let seen = Arc::new(Mutex::new(Seen::default()));
+    let reads_seen = Arc::new(Mutex::new(ReadsSeen::default()));
     let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let port = incoming.local_addr().unwrap().port();
-    let service = MessageSendServiceServer::new(FakeIngest {
-        verifier: SignedContextVerifier::from_public_key(public_key).unwrap(),
+    let ingest = MessageSendServiceServer::new(FakeIngest {
+        verifier: SignedContextVerifier::from_public_key(ingest_public).unwrap(),
         seen: Arc::clone(&seen),
     });
+    let reads = FakeReads {
+        seen: Arc::clone(&reads_seen),
+        conversation_seq,
+    };
+    let boundary = SignedFirstContextLayer::new(Some(
+        SignedContextVerifier::from_public_key(reads_public).unwrap(),
+    ))
+    .require_signed(true);
+    let keys_seen = Arc::clone(&reads_seen);
+    let record_keys = move |request: Request<()>| {
+        let keys = request
+            .metadata()
+            .keys()
+            .map(|key| match key {
+                KeyRef::Ascii(key) => key.as_str().to_owned(),
+                KeyRef::Binary(key) => key.as_str().to_owned(),
+            })
+            .collect();
+        keys_seen.lock().unwrap().metadata_keys.push(keys);
+        Ok(request)
+    };
     tokio::spawn(
         tonic::transport::Server::builder()
-            .add_service(service)
+            .layer(tonic::service::InterceptorLayer::new(record_keys))
+            .add_service(ingest)
+            .add_service(boundary.layer(StorageReaderServiceServer::new(reads.clone())))
+            .add_service(boundary.layer(ConversationReadServiceServer::new(reads)))
             .serve_with_incoming(incoming),
     );
-    (format!("http://127.0.0.1:{port}"), seen)
+    (format!("http://127.0.0.1:{port}"), seen, reads_seen)
+}
+
+async fn start_ingest(public_key: &str) -> (String, Arc<Mutex<Seen>>) {
+    let (endpoint, seen, _) = start_core(public_key, public_key, 7).await;
+    (endpoint, seen)
 }
 
 struct Fixture {
@@ -176,6 +445,10 @@ impl Fixture {
     fn args(&self, endpoint: &str, db_port: u16) -> Vec<String> {
         [
             "--ingest-endpoint",
+            endpoint,
+            "--storage-reader-endpoint",
+            endpoint,
+            "--conversation-endpoint",
             endpoint,
             "--tenant-id",
             TENANT,
@@ -266,7 +539,8 @@ fn report(bytes: &[u8]) -> std::collections::BTreeMap<String, String> {
 #[tokio::test]
 async fn signed_send_is_accepted_and_read_back() {
     let fixture = Fixture::new();
-    let (endpoint, seen) = start_ingest(&fixture.public_key).await;
+    let (endpoint, seen, reads_seen) =
+        start_core(&fixture.public_key, &fixture.public_key, 7).await;
     let config = fixture.config(&endpoint);
     let prepared = Prepared::load(&config).unwrap();
     let mut reader = FakeReader {
@@ -307,9 +581,52 @@ async fn signed_send_is_accepted_and_read_back() {
     assert_eq!(report["ledger_write_state"], "archive_persisted");
     assert_eq!(report["readback_recipient_conversation_seq"], "7");
     assert_eq!(reader.calls, 2);
+    assert_eq!(report["grpc_readback"], "signed");
+    assert_eq!(report["grpc_readback_storage_message_seq"], "7");
+    assert_eq!(report["grpc_readback_sender_conversation_seq"], "7");
+    assert_eq!(report["grpc_readback_recipient_conversation_seq"], "7");
+    assert_eq!(report["storage_read_rpc"], readback::STORAGE_READ_RPC);
+    assert_eq!(
+        report["conversation_read_rpc"],
+        readback::CONVERSATION_READ_RPC
+    );
+
+    // 回读全部经签名入口，每个读者读的是自己：收件人读消息，收发双方各读自己的会话列表。
+    {
+        let reads_seen = reads_seen.lock().unwrap();
+        let read = |rpc: &'static str, actor: &str| SignedRead {
+            rpc,
+            actor_type: SignedActorType::User,
+            actor: actor.to_owned(),
+            tenant: TENANT.to_owned(),
+        };
+        assert_eq!(
+            reads_seen.reads,
+            [
+                read("QueryMessagesBySeq", RECIPIENT),
+                read("ListConversations", SENDER),
+                read("ListConversations", RECIPIENT),
+            ]
+        );
+        for keys in &reads_seen.metadata_keys {
+            assert_eq!(
+                keys.iter()
+                    .filter(|key| key.as_str() == SIGNED_CONTEXT_HEADER)
+                    .count(),
+                1,
+                "{keys:?}"
+            );
+            for key in legacy_identity_keys()
+                .iter()
+                .chain([&"authorization".to_owned()])
+            {
+                assert!(!keys.contains(key), "{key} sent: {keys:?}");
+            }
+        }
+    }
 
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.requests, 1, "exactly one RPC");
+    assert_eq!(seen.requests, 1, "exactly one send");
     assert_eq!(seen.accepted, 1);
     assert_eq!(seen.signed_contexts, 1);
     assert_eq!(seen.actor, SENDER);
@@ -357,6 +674,76 @@ async fn a_signature_from_another_key_is_rejected() {
     assert_eq!(reader.calls, 0, "no read-back after a rejected send");
     assert!(out.is_empty());
     assert_eq!(seen.lock().unwrap().accepted, 0);
+}
+
+/// 读接口验不过签（别的密钥）时立刻失败，不等超时，也不再做数据库核对。
+#[tokio::test]
+async fn a_read_the_core_cannot_verify_fails_the_smoke() {
+    let fixture = Fixture::new();
+    let (_, foreign_public) = key_pair(12);
+    let (endpoint, seen, reads_seen) = start_core(&fixture.public_key, &foreign_public, 7).await;
+    let mut config = fixture.config(&endpoint);
+    config.timeout = Duration::from_secs(30);
+    let prepared = Prepared::load(&config).unwrap();
+    let mut reader = FakeReader {
+        observations: vec![durable()],
+        calls: 0,
+    };
+    let mut out = Vec::new();
+    let started = std::time::Instant::now();
+    let error = smoke(
+        &config,
+        &prepared,
+        &mut reader,
+        &mut out,
+        Duration::from_millis(5),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(started.elapsed() < Duration::from_secs(10), "{error}");
+    assert!(error.contains("rejected the signed read"), "{error}");
+    assert!(error.contains("Unauthenticated"), "{error}");
+    assert!(error.contains(readback::STORAGE_READ_RPC), "{error}");
+    assert_eq!(seen.lock().unwrap().accepted, 1);
+    assert!(reads_seen.lock().unwrap().reads.is_empty());
+    assert_eq!(reader.calls, 0);
+    assert!(out.is_empty());
+}
+
+/// 会话列表的 seq 一直低于发送 seq：超时后失败并说明是哪一方。
+#[tokio::test]
+async fn a_conversation_list_behind_the_send_fails_after_the_timeout() {
+    let fixture = Fixture::new();
+    let (endpoint, _, reads_seen) = start_core(&fixture.public_key, &fixture.public_key, 6).await;
+    let config = fixture.config(&endpoint);
+    let prepared = Prepared::load(&config).unwrap();
+    let mut reader = FakeReader {
+        observations: vec![durable()],
+        calls: 0,
+    };
+    let mut out = Vec::new();
+    let error = smoke(
+        &config,
+        &prepared,
+        &mut reader,
+        &mut out,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("signed gRPC read-back"), "{error}");
+    assert!(
+        error.contains("sender conversation list seq 6 is below 7"),
+        "{error}"
+    );
+    assert!(
+        error.contains("recipient conversation list seq 6 is below 7"),
+        "{error}"
+    );
+    assert!(reads_seen.lock().unwrap().reads.len() >= 3);
+    assert!(!String::from_utf8_lossy(&out).contains("status=pass"));
 }
 
 #[tokio::test]
@@ -548,6 +935,7 @@ fn sources_never_build_unsigned_identity_metadata() {
         ("config.rs", include_str!("config.rs")),
         ("durability.rs", include_str!("durability.rs")),
         ("ingest.rs", include_str!("ingest.rs")),
+        ("readback.rs", include_str!("readback.rs")),
         ("signed.rs", include_str!("signed.rs")),
         ("cid.rs", include_str!("cid.rs")),
         ("redact.rs", include_str!("redact.rs")),
@@ -562,6 +950,10 @@ fn sources_never_build_unsigned_identity_metadata() {
     }
     let ingest = include_str!("ingest.rs");
     assert_eq!(ingest.matches(".send_message(").count(), 1);
+    // 两个读调用都只能用 signed_request 构造。
+    let readback = include_str!("readback.rs");
+    assert_eq!(readback.matches("signed_request(").count(), 2);
+    assert_eq!(readback.matches("tonic::Request::new").count(), 0);
     assert!(ingest.contains("signed_request(build_request(message), &token)?"));
     let signed = include_str!("signed.rs");
     assert!(signed.contains("set_signed_context_token(&mut request, &token.0)"));

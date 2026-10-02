@@ -1,14 +1,16 @@
 //! flare-smoke-grpc：单容器 Core 的带签名 gRPC 消息链路冒烟（DEP-06）。
 //!
 //! 由 `scripts/smoke_message_flow.sh --mode grpc` 调用，也可单独运行（见 `--help`）。
-//! 发送经 Message Ingest gRPC，`x-flare-ctx` 用 Cell 私钥在进程内签名；回读与落库
-//! 确认走只读数据库会话。私钥与口令只从 600 文件读取，不进 argv、不回显。
+//! 发送经 Message Ingest gRPC，`x-flare-ctx` 用 Cell 私钥在进程内签名；回读先走带签名的
+//! gRPC 读（Storage Reader 与会话列表，见 [`readback`]），再以只读数据库会话核对落库作为
+//! 第二证据。私钥与口令只从 600 文件读取，不进 argv、不回显。
 
 mod cid;
 mod config;
 mod durability;
 mod error;
 mod ingest;
+mod readback;
 mod redact;
 mod secret_file;
 mod signed;
@@ -22,6 +24,7 @@ use crate::error::Result;
 use config::{Config, Parsed};
 use durability::{DurabilityReader, Expectation, MINIMUM_LEDGER_STATE, PgReader};
 use ingest::SmokeMessage;
+use readback::{CONVERSATION_READ_RPC, ReadbackTarget, STORAGE_READ_RPC};
 use signed::ContextSigner;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -152,6 +155,17 @@ async fn smoke<R: DurabilityReader>(
         recipient_id: config.recipient_id.clone(),
         seq: sent.conversation_seq as i64,
     };
+    let read_back = readback::wait_for_signed_readback(
+        &ReadbackTarget {
+            storage_reader: config.storage_reader_endpoint.clone(),
+            conversation: config.conversation_endpoint.clone(),
+        },
+        &prepared.signer,
+        &expected,
+        config.timeout,
+        poll,
+    )
+    .await?;
     let observed = durability::wait_until_durable(reader, &expected, config.timeout, poll).await?;
     let lines = [
         "flare_message_flow_smoke_report".to_owned(),
@@ -159,6 +173,10 @@ async fn smoke<R: DurabilityReader>(
         format!("ingest_endpoint={}", config.ingest_endpoint),
         format!("ingest_rpc={SEND_RPC}"),
         format!("signed_context={SIGNED_CONTEXT}"),
+        format!("storage_reader_endpoint={}", config.storage_reader_endpoint),
+        format!("storage_read_rpc={STORAGE_READ_RPC}"),
+        format!("conversation_endpoint={}", config.conversation_endpoint),
+        format!("conversation_read_rpc={CONVERSATION_READ_RPC}"),
         format!("tenant_id={}", config.tenant_id),
         format!("sender_user_id={}", config.sender_id),
         format!("recipient_user_id={}", config.recipient_id),
@@ -167,6 +185,19 @@ async fn smoke<R: DurabilityReader>(
         format!("server_msg_id={}", sent.server_msg_id),
         format!("conversation_seq={}", sent.conversation_seq),
         format!("send_durability={}", sent.durability.as_str_name()),
+        "grpc_readback=signed".to_owned(),
+        format!(
+            "grpc_readback_storage_message_seq={}",
+            read_back.storage_message_seq.unwrap_or_default()
+        ),
+        format!(
+            "grpc_readback_sender_conversation_seq={}",
+            read_back.sender_conversation_seq.unwrap_or_default()
+        ),
+        format!(
+            "grpc_readback_recipient_conversation_seq={}",
+            read_back.recipient_conversation_seq.unwrap_or_default()
+        ),
         format!("db_target={}", db_target(config)),
         "db_session_read_only=on".to_owned(),
         format!("messages_row_count={}", observed.messages_row_count),
@@ -206,6 +237,10 @@ fn write_plan(out: &mut impl Write, config: &Config, prepared: &Prepared) -> std
         format!("ingest_endpoint={}", config.ingest_endpoint),
         format!("ingest_rpc={SEND_RPC}"),
         format!("signed_context={SIGNED_CONTEXT}"),
+        format!("storage_reader_endpoint={}", config.storage_reader_endpoint),
+        format!("storage_read_rpc={STORAGE_READ_RPC}"),
+        format!("conversation_endpoint={}", config.conversation_endpoint),
+        format!("conversation_read_rpc={CONVERSATION_READ_RPC}"),
         "signing_key=loaded;test_signature=ok".to_owned(),
         format!("tenant_id={}", config.tenant_id),
         format!("sender_user_id={}", config.sender_id),
@@ -214,6 +249,8 @@ fn write_plan(out: &mut impl Write, config: &Config, prepared: &Prepared) -> std
         format!("db_target={}", db_target(config)),
         "db_password=loaded;policy=ok".to_owned(),
         "db_session=default_transaction_read_only=on;BEGIN TRANSACTION READ ONLY;ROLLBACK"
+            .to_owned(),
+        "grpc_readback=signed:QueryMessagesBySeq(recipient),ListConversations(sender,recipient)"
             .to_owned(),
         "readback=messages,message_write_ledger,conversations+conversation_participants".to_owned(),
         format!("minimum_ledger_write_state={MINIMUM_LEDGER_STATE}"),
