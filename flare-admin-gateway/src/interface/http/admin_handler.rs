@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Extension, Json as RequestJson, Path, Query},
+    extract::{Extension, Path},
     http::HeaderMap,
 };
 use flare_core_base::context::keys;
@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
+use super::admin_extract::{AdminJson, AdminQuery};
 use super::ops_handler::{AdminCapability, admin_rpc_error};
 use crate::application::admin_messages::{
     AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
@@ -291,9 +292,9 @@ pub async fn admin_gateway_config(
     request_body = AdminMessageQueryHttpRequest,
     responses(
         (status = 200, description = "Admin message query result", body = ApiResponse<AdminMessageQueryHttpResponse>),
-        (status = 400, description = "Query is unbounded or invalid"),
+        (status = 400, description = "No indexed filter and no time range (ADMIN_MESSAGE_QUERY_FILTER_REQUIRED), or the storage reader refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 403, description = "Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)"),
         (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_QUERY_FAILED); its error text is not returned"),
         (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -304,7 +305,7 @@ pub async fn admin_query_messages(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    RequestJson(req): RequestJson<AdminMessageQueryHttpRequest>,
+    AdminJson(req): AdminJson<AdminMessageQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageQueryHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_search_request(&req)
@@ -336,10 +337,10 @@ pub async fn admin_query_messages(
     ),
     responses(
         (status = 200, description = "Admin message detail", body = ApiResponse<AdminMessageDetailHttpResponse>),
-        (status = 400, description = "Message id is missing"),
+        (status = 400, description = "Message id is blank (ADMIN_MESSAGE_ID_REQUIRED), or the storage reader refused it (BAD_REQUEST)"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
-        (status = 404, description = "Message is not found"),
+        (status = 403, description = "Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)"),
+        (status = 404, description = "Message is not found in the token tenant (NOT_FOUND)"),
         (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_DETAIL_FAILED); its error text is not returned"),
         (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -379,9 +380,9 @@ pub async fn admin_get_message(
     ),
     responses(
         (status = 200, description = "Admin message event chain", body = ApiResponse<AdminMessageEventsHttpResponse>),
-        (status = 400, description = "Message id or event type query is invalid"),
+        (status = 400, description = "Message id is blank (ADMIN_MESSAGE_ID_REQUIRED), an event_types item is not a positive integer (ADMIN_MESSAGE_EVENT_TYPE_INVALID), or the storage reader refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 403, description = "Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)"),
         (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_EVENTS_FAILED); its error text is not returned"),
         (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -393,7 +394,7 @@ pub async fn admin_query_message_events(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Path(message_id): Path<String>,
-    Query(query): Query<AdminMessageEventsQueryHttpRequest>,
+    AdminQuery(query): AdminQuery<AdminMessageEventsQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageEventsHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_message_events_request(&message_id, &query)
@@ -423,9 +424,9 @@ pub async fn admin_query_message_events(
     request_body = AdminMessageWriteLedgerQueryHttpRequest,
     responses(
         (status = 200, description = "Admin message write ledger query result", body = ApiResponse<AdminMessageWriteLedgerHttpResponse>),
-        (status = 400, description = "Ledger query is unbounded or invalid"),
+        (status = 400, description = "No filter and no updated time range (ADMIN_MESSAGE_WRITE_LEDGER_FILTER_REQUIRED), updated_before earlier than updated_after (ADMIN_MESSAGE_WRITE_LEDGER_TIME_RANGE_INVALID), or the storage reader refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 403, description = "Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)"),
         (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED); its error text is not returned"),
         (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -436,7 +437,7 @@ pub async fn admin_query_message_write_ledger(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    RequestJson(req): RequestJson<AdminMessageWriteLedgerQueryHttpRequest>,
+    AdminJson(req): AdminJson<AdminMessageWriteLedgerQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageWriteLedgerHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_write_ledger_request(&req)
@@ -465,9 +466,9 @@ pub async fn admin_query_message_write_ledger(
     request_body = AdminMessageExportHttpRequest,
     responses(
         (status = 200, description = "Admin message export task accepted", body = ApiResponse<AdminMessageExportHttpResponse>),
-        (status = 400, description = "Export request is unbounded or invalid"),
+        (status = 400, description = "Blank conversation_id (ADMIN_MESSAGE_EXPORT_CONVERSATION_REQUIRED), start_time or end_time missing (ADMIN_MESSAGE_EXPORT_TIME_RANGE_REQUIRED), end_time not after start_time (ADMIN_MESSAGE_EXPORT_TIME_RANGE_INVALID), or the storage reader refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing, or the storage reader refused the tenant scope"),
+        (status = 403, description = "Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)"),
         (status = 500, description = "Storage reader failed (ADMIN_MESSAGE_EXPORT_FAILED); its error text is not returned"),
         (status = 502, description = "Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -478,7 +479,7 @@ pub async fn admin_export_messages(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    RequestJson(req): RequestJson<AdminMessageExportHttpRequest>,
+    AdminJson(req): AdminJson<AdminMessageExportHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageExportHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_message_export_request(&req)

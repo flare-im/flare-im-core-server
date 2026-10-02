@@ -1,0 +1,189 @@
+GET /api/v1/admin/auth/check 200 Admin token is valid
+GET /api/v1/admin/auth/check 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/auth/check 401 Token is missing or invalid
+GET /api/v1/admin/auth/check 403 Admin scope or admin context is missing
+GET /api/v1/admin/capabilities 200 Admin API capabilities
+GET /api/v1/admin/capabilities 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/capabilities 401 Token is missing or invalid
+GET /api/v1/admin/capabilities 403 Admin scope or admin context is missing
+GET /api/v1/admin/capabilities/tenant 200 Capability switches set for the token tenant
+GET /api/v1/admin/capabilities/tenant 400 Capability refused the request (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/capabilities/tenant 401 Admin token is missing or invalid
+GET /api/v1/admin/capabilities/tenant 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/capabilities/tenant 500 Capability downstream failed (ADMIN_TENANT_CAPABILITIES_FAILED); its error text is not returned
+GET /api/v1/admin/capabilities/tenant 502 Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/capabilities/tenant 503 Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/capabilities/tenant 504 Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/conversations 200 Conversations of the token tenant, newest update first
+GET /api/v1/admin/conversations 400 Limit below 1 (ADMIN_PAGE_LIMIT_INVALID), or Conversation refused the cursor (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/conversations 401 Admin token is missing or invalid
+GET /api/v1/admin/conversations 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/conversations 500 Conversation service failed (ADMIN_CONVERSATION_LIST_FAILED); its error text is not returned
+GET /api/v1/admin/conversations 502 Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/conversations 503 Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/conversations 504 Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/conversations/{conversation_id} 200 Conversation detail without the member list
+GET /api/v1/admin/conversations/{conversation_id} 400 Conversation refused the conversation id (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/conversations/{conversation_id} 401 Admin token is missing or invalid
+GET /api/v1/admin/conversations/{conversation_id} 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/conversations/{conversation_id} 404 No such conversation in the token tenant (NOT_FOUND)
+GET /api/v1/admin/conversations/{conversation_id} 500 Conversation service failed (ADMIN_CONVERSATION_DETAIL_FAILED); its error text is not returned
+GET /api/v1/admin/conversations/{conversation_id} 502 Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/conversations/{conversation_id} 503 Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/conversations/{conversation_id} 504 Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/conversations/{conversation_id}/participants 200 Members of the conversation, oldest join first
+GET /api/v1/admin/conversations/{conversation_id}/participants 400 Limit below 1 (ADMIN_PAGE_LIMIT_INVALID), or Conversation refused the cursor or conversation id (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/conversations/{conversation_id}/participants 401 Admin token is missing or invalid
+GET /api/v1/admin/conversations/{conversation_id}/participants 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/conversations/{conversation_id}/participants 404 No such conversation in the token tenant (NOT_FOUND)
+GET /api/v1/admin/conversations/{conversation_id}/participants 500 Conversation service failed (ADMIN_PARTICIPANT_LIST_FAILED); its error text is not returned
+GET /api/v1/admin/conversations/{conversation_id}/participants 502 Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/conversations/{conversation_id}/participants 503 Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/conversations/{conversation_id}/participants 504 Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/gateway/config 200 Redacted gateway configuration snapshot
+GET /api/v1/admin/gateway/config 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/gateway/config 401 Token is missing or invalid
+GET /api/v1/admin/gateway/config 403 Admin scope or admin context is missing
+GET /api/v1/admin/gateway/health 200 Gateway management health
+GET /api/v1/admin/gateway/health 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/gateway/health 401 Token is missing or invalid
+GET /api/v1/admin/gateway/health 403 Admin scope or admin context is missing
+GET /api/v1/admin/gateway/routes 200 Gateway route inventory
+GET /api/v1/admin/gateway/routes 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/gateway/routes 401 Token is missing or invalid
+GET /api/v1/admin/gateway/routes 403 Admin scope or admin context is missing
+GET /api/v1/admin/gateway/upstreams 200 Configured downstream gRPC upstreams
+GET /api/v1/admin/gateway/upstreams 400 ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/gateway/upstreams 401 Token is missing or invalid
+GET /api/v1/admin/gateway/upstreams 403 Admin scope or admin context is missing
+GET /api/v1/admin/medias/bucket 200 Configured media bucket with this tenant's object-key prefix; no global object statistics
+GET /api/v1/admin/medias/bucket 400 Media refused the bucket (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/medias/bucket 401 Admin token is missing or invalid
+GET /api/v1/admin/medias/bucket 403 Tenant header mismatch, or the bucket is not the one Media serves (FORBIDDEN)
+GET /api/v1/admin/medias/bucket 500 Media failed (ADMIN_MEDIA_BUCKET_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)
+GET /api/v1/admin/medias/bucket 502 Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/medias/bucket 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/medias/bucket 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/medias/objects 200 Objects of the token tenant; only file_id, file_name, mime_type, size and object_key
+GET /api/v1/admin/medias/objects 400 Media refused the bucket or prefix (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/medias/objects 401 Admin token is missing or invalid
+GET /api/v1/admin/medias/objects 403 Tenant header mismatch, or Media refused the tenant admin or the bucket (FORBIDDEN)
+GET /api/v1/admin/medias/objects 500 Object inventory is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_LIST_OBJECTS_FAILED), never a fabricated empty inventory; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)
+GET /api/v1/admin/medias/objects 502 Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/medias/objects 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/medias/objects 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/messages/{message_id} 200 Admin message detail
+GET /api/v1/admin/messages/{message_id} 400 Message id is blank (ADMIN_MESSAGE_ID_REQUIRED), or the storage reader refused it (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/messages/{message_id} 401 Token is missing or invalid
+GET /api/v1/admin/messages/{message_id} 403 Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)
+GET /api/v1/admin/messages/{message_id} 404 Message is not found in the token tenant (NOT_FOUND)
+GET /api/v1/admin/messages/{message_id} 500 Storage reader failed (ADMIN_MESSAGE_DETAIL_FAILED); its error text is not returned
+GET /api/v1/admin/messages/{message_id} 502 Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/messages/{message_id} 503 Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/messages/{message_id} 504 Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/messages/{message_id}/events 200 Admin message event chain
+GET /api/v1/admin/messages/{message_id}/events 400 Message id is blank (ADMIN_MESSAGE_ID_REQUIRED), an event_types item is not a positive integer (ADMIN_MESSAGE_EVENT_TYPE_INVALID), or the storage reader refused an argument (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/messages/{message_id}/events 401 Token is missing or invalid
+GET /api/v1/admin/messages/{message_id}/events 403 Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)
+GET /api/v1/admin/messages/{message_id}/events 500 Storage reader failed (ADMIN_MESSAGE_EVENTS_FAILED); its error text is not returned
+GET /api/v1/admin/messages/{message_id}/events 502 Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/messages/{message_id}/events 503 Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/messages/{message_id}/events 504 Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/plugins 200 Extension plugin instances registered for the token tenant
+GET /api/v1/admin/plugins 400 Capability refused the capability_id (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/plugins 401 Admin token is missing or invalid
+GET /api/v1/admin/plugins 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/plugins 500 Capability downstream failed (ADMIN_PLUGIN_LIST_FAILED); its error text is not returned
+GET /api/v1/admin/plugins 502 Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/plugins 503 Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/plugins 504 Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/tenant/runtime 200 Tenant projection held by Capability (status, quota, settings, version)
+GET /api/v1/admin/tenant/runtime 400 Capability refused the request (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/tenant/runtime 401 Admin token is missing or invalid
+GET /api/v1/admin/tenant/runtime 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/tenant/runtime 500 Capability downstream failed (ADMIN_TENANT_RUNTIME_FAILED); its error text is not returned
+GET /api/v1/admin/tenant/runtime 502 Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/tenant/runtime 503 Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/tenant/runtime 504 Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/users/{user_id}/devices 200 Online devices of the user
+GET /api/v1/admin/users/{user_id}/devices 400 Online refused the user id (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/users/{user_id}/devices 401 Admin token is missing or invalid
+GET /api/v1/admin/users/{user_id}/devices 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/users/{user_id}/devices 500 Online service failed (ADMIN_USER_DEVICES_FAILED); its error text is not returned
+GET /api/v1/admin/users/{user_id}/devices 502 Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/users/{user_id}/devices 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/users/{user_id}/devices 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+GET /api/v1/admin/users/{user_id}/presence 200 Presence of the user; a user never seen online reads as offline
+GET /api/v1/admin/users/{user_id}/presence 400 Online refused the user id (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+GET /api/v1/admin/users/{user_id}/presence 401 Admin token is missing or invalid
+GET /api/v1/admin/users/{user_id}/presence 403 Tenant header does not match the token (FORBIDDEN)
+GET /api/v1/admin/users/{user_id}/presence 500 Online service failed (ADMIN_USER_PRESENCE_FAILED); its error text is not returned
+GET /api/v1/admin/users/{user_id}/presence 502 Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+GET /api/v1/admin/users/{user_id}/presence 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+GET /api/v1/admin/users/{user_id}/presence 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 200 Orphaned message assets of the token tenant that this pass deleted
+POST /api/v1/admin/medias/cleanup-orphaned-assets 400 dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting (ADMIN_MEDIA_DRY_RUN_UNSUPPORTED), or Media refused an argument (BAD_REQUEST). ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 401 Admin token is missing or invalid
+POST /api/v1/admin/medias/cleanup-orphaned-assets 403 Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 500 Media failed (ADMIN_MEDIA_CLEANUP_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 502 Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/medias/cleanup-orphaned-assets 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/medias/object-acl 200 ACL applied (`data: true`)
+POST /api/v1/admin/medias/object-acl 400 Media refused an argument (BAD_REQUEST). ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/medias/object-acl 401 Admin token is missing or invalid
+POST /api/v1/admin/medias/object-acl 403 Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)
+POST /api/v1/admin/medias/object-acl 404 No such file in the token tenant (NOT_FOUND)
+POST /api/v1/admin/medias/object-acl 500 ACL mutation is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_OBJECT_ACL_FAILED), never a successful no-op; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)
+POST /api/v1/admin/medias/object-acl 502 Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/medias/object-acl 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/medias/object-acl 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/messages/export 200 Admin message export task accepted
+POST /api/v1/admin/messages/export 400 Blank conversation_id (ADMIN_MESSAGE_EXPORT_CONVERSATION_REQUIRED), start_time or end_time missing (ADMIN_MESSAGE_EXPORT_TIME_RANGE_REQUIRED), end_time not after start_time (ADMIN_MESSAGE_EXPORT_TIME_RANGE_INVALID), or the storage reader refused an argument (BAD_REQUEST). ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/messages/export 401 Token is missing or invalid
+POST /api/v1/admin/messages/export 403 Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)
+POST /api/v1/admin/messages/export 500 Storage reader failed (ADMIN_MESSAGE_EXPORT_FAILED); its error text is not returned
+POST /api/v1/admin/messages/export 502 Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/messages/export 503 Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/messages/export 504 Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/messages/query 200 Admin message query result
+POST /api/v1/admin/messages/query 400 No indexed filter and no time range (ADMIN_MESSAGE_QUERY_FILTER_REQUIRED), or the storage reader refused an argument (BAD_REQUEST). ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/messages/query 401 Token is missing or invalid
+POST /api/v1/admin/messages/query 403 Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)
+POST /api/v1/admin/messages/query 500 Storage reader failed (ADMIN_MESSAGE_QUERY_FAILED); its error text is not returned
+POST /api/v1/admin/messages/query 502 Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/messages/query 503 Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/messages/query 504 Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/messages/write-ledger/query 200 Admin message write ledger query result
+POST /api/v1/admin/messages/write-ledger/query 400 No filter and no updated time range (ADMIN_MESSAGE_WRITE_LEDGER_FILTER_REQUIRED), updated_before earlier than updated_after (ADMIN_MESSAGE_WRITE_LEDGER_TIME_RANGE_INVALID), or the storage reader refused an argument (BAD_REQUEST). ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/messages/write-ledger/query 401 Token is missing or invalid
+POST /api/v1/admin/messages/write-ledger/query 403 Admin scope or admin context is missing (FORBIDDEN), or the storage reader refused the tenant scope (FORBIDDEN)
+POST /api/v1/admin/messages/write-ledger/query 500 Storage reader failed (ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED); its error text is not returned
+POST /api/v1/admin/messages/write-ledger/query 502 Storage reader refused the gateway as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/messages/write-ledger/query 503 Storage reader is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/messages/write-ledger/query 504 Storage reader did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/tenant/kick-all 200 Every connection of the token tenant was kicked; clients receive KICKED with TENANT_UNAVAILABLE
+POST /api/v1/admin/tenant/kick-all 400 Online refused the request (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/tenant/kick-all 401 Admin token is missing or invalid
+POST /api/v1/admin/tenant/kick-all 403 Tenant header mismatch, or audit reason / idempotency header missing (FORBIDDEN)
+POST /api/v1/admin/tenant/kick-all 500 Online service failed (ADMIN_TENANT_KICK_FAILED); its error text is not returned
+POST /api/v1/admin/tenant/kick-all 502 Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/tenant/kick-all 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/tenant/kick-all 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 200 Device was kicked
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 400 Online refused the user or device id (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 401 Admin token is missing or invalid
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 403 Tenant header mismatch, audit reason / idempotency header missing, or the device session belongs to another tenant (FORBIDDEN)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 404 Device is not online (NOT_FOUND)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 500 Online service failed (ADMIN_DEVICE_KICK_FAILED); its error text is not returned
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 502 Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
+POST /api/v1/admin/users/{user_id}/kick 200 Every device the user had online was kicked; devices that went offline in between are listed separately
+POST /api/v1/admin/users/{user_id}/kick 400 Online refused the user id (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)
+POST /api/v1/admin/users/{user_id}/kick 401 Admin token is missing or invalid
+POST /api/v1/admin/users/{user_id}/kick 403 Tenant header mismatch, or audit reason / idempotency header missing (FORBIDDEN)
+POST /api/v1/admin/users/{user_id}/kick 500 Online service failed (ADMIN_USER_KICK_FAILED); its error text is not returned
+POST /api/v1/admin/users/{user_id}/kick 502 Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
+POST /api/v1/admin/users/{user_id}/kick 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
+POST /api/v1/admin/users/{user_id}/kick 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)

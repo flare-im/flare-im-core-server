@@ -316,14 +316,26 @@ async fn cleanup_shape_and_request() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(reason(&body), "ADMIN_MEDIA_DRY_RUN_UNSUPPORTED");
-    // 空体或缺字段不会触发一次清理。
-    for invalid in ["{}", r#"{"limit":10}"#, "not json"] {
-        let (status, _) = send(
+    // 空体、缺字段、类型不对或不是 JSON 都不会触发一次清理：网关自己的 400 信封
+    // `ADMIN_INVALID_JSON_BODY`，不回显请求取值（原先是 axum 的纯文本 422/400）。
+    for invalid in [
+        "{}",
+        r#"{"limit":10}"#,
+        r#"{"limit":"leak-marker-77","dry_run":false}"#,
+        "not json leak-marker-77",
+    ] {
+        let (status, body) = send(
             &h.router,
             media_admin_request("POST", CLEANUP, &h.token, Some(invalid)),
         )
         .await;
-        assert!(status.is_client_error(), "{invalid}: {status}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}: {body}");
+        assert_eq!(
+            reason(&body),
+            "ADMIN_INVALID_JSON_BODY",
+            "{invalid}: {body}"
+        );
+        assert!(!body.to_string().contains("leak-marker-77"), "{body}");
     }
     assert!(h.media.calls().is_empty(), "{:?}", h.media.calls());
 }
@@ -399,12 +411,13 @@ async fn list_objects_shape_and_request() {
         "bucket=media prefix= pagination=false filters=0 sort=0"
     );
     h.media.clear();
-    let (status, _) = send(
+    let (status, body) = send(
         &h.router,
         media_admin_request("GET", OBJECTS, &h.token, None),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(reason(&body), "ADMIN_INVALID_QUERY", "{body}");
     assert!(h.media.calls().is_empty());
 }
 
@@ -433,14 +446,15 @@ async fn bucket_shape_and_request() {
     );
     assert_eq!(h.media.calls()[0].request, "bucket=media");
 
-    // bucket 缺失是 400，不调用 Media。
+    // bucket 缺失是 400 `ADMIN_INVALID_QUERY` 信封，不调用 Media。
     h.media.clear();
-    let (status, _) = send(
+    let (status, body) = send(
         &h.router,
         media_admin_request("GET", BUCKET, &h.token, None),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(reason(&body), "ADMIN_INVALID_QUERY", "{body}");
     assert!(h.media.calls().is_empty(), "{:?}", h.media.calls());
 }
 

@@ -240,6 +240,18 @@ async fn list_conversations_shape_and_paging() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reason(&body), "ADMIN_PAGE_LIMIT_INVALID");
     assert!(h.recorder.calls().is_empty());
+
+    // 类型不对的查询参数：网关自己的 400 信封 `ADMIN_INVALID_QUERY`，不回显取值，不调用下游
+    // （原先是 axum 的纯文本 400，带着解析器说明与取值）。
+    for query in ["limit=leak-marker-77", "include_deleted=leak-marker-77"] {
+        let path = format!("/api/v1/admin/conversations?{query}");
+        let (status, body) = send(&h.router, admin_request("GET", &path, &h.token)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body["code"], 400, "{query}: {body}");
+        assert_eq!(reason(&body), "ADMIN_INVALID_QUERY", "{query}: {body}");
+        assert!(!body.to_string().contains("leak-marker-77"), "{body}");
+    }
+    assert!(h.recorder.calls().is_empty());
 }
 
 #[tokio::test]

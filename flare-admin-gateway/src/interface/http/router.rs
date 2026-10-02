@@ -6,7 +6,14 @@ use axum::{
     routing::{get, post},
 };
 use std::sync::Arc;
-use utoipa::OpenApi;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::{
+        RefOr,
+        path::{Operation, ParameterIn},
+        response::ResponseBuilder,
+    },
+};
 
 use super::admin_auth_middleware::admin_auth_middleware;
 use super::admin_handler;
@@ -106,9 +113,68 @@ use flare_im_service_kit::clients::GrpcClients;
     ),
     tags(
         (name = "Admin", description = "内网管理面 API 认证、安全入口和 typed facade"),
-    )
+    ),
+    modifiers(&AdminRequestRejections)
 )]
 struct AdminApiDoc;
+
+/// 每条管理路由都可能在调用下游之前回的 400：中间件的审计头上限（读写都查），带请求体的
+/// 路由的请求体解析，带查询参数的路由的查询串解析。由文档生成时统一补进各操作的 400 说明，
+/// 新路由不会漏写；路由自己的 400 原因仍写在各自的 `responses` 里。
+struct AdminRequestRejections;
+
+const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)";
+const JSON_BODY_REJECTION: &str = "ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit";
+const QUERY_REJECTION: &str =
+    "ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type";
+
+impl Modify for AdminRequestRejections {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !path.starts_with("/api/v1/admin/") {
+                continue;
+            }
+            for operation in item.operations.values_mut() {
+                let mut reasons = Vec::new();
+                if operation.request_body.is_some() {
+                    reasons.push(JSON_BODY_REJECTION);
+                }
+                if has_query_parameters(operation) {
+                    reasons.push(QUERY_REJECTION);
+                }
+                reasons.push(AUDIT_HEADER_REJECTION);
+                add_bad_request_reasons(operation, &reasons);
+            }
+        }
+    }
+}
+
+fn has_query_parameters(operation: &Operation) -> bool {
+    operation.parameters.as_ref().is_some_and(|parameters| {
+        parameters
+            .iter()
+            .any(|parameter| matches!(parameter.parameter_in, ParameterIn::Query))
+    })
+}
+
+/// 把 `reasons` 接在操作已有的 400 说明之后；没有 400 时新建一条。
+fn add_bad_request_reasons(operation: &mut Operation, reasons: &[&str]) {
+    let added = reasons.join(". ");
+    let responses = &mut operation.responses.responses;
+    match responses.get_mut("400") {
+        Some(RefOr::T(response)) => {
+            let own = response.description.trim_end_matches('.');
+            response.description = format!("{own}. {added}");
+        }
+        Some(RefOr::Ref(_)) => {}
+        None => {
+            responses.insert(
+                "400".to_string(),
+                RefOr::T(ResponseBuilder::new().description(added).build()),
+            );
+        }
+    }
+}
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(AdminApiDoc::openapi())

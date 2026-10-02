@@ -6,7 +6,7 @@
 //! 在线状态三条敏感读也记一条审计日志。
 use axum::{
     Json,
-    extract::{Extension, Path, Query},
+    extract::{Extension, Path},
     http::HeaderMap,
 };
 use flare_core_base::context::keys;
@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER};
+use super::admin_extract::AdminQuery;
 use super::audit_target::AuditTarget;
 use crate::application::admin_ops::{
     AdminConversationDetailHttp, AdminConversationListQuery, AdminConversationPageHttp,
@@ -225,17 +226,19 @@ fn audit_sensitive_read(
     ),
     responses(
         (status = 200, description = "Conversations of the token tenant, newest update first", body = ApiResponse<AdminConversationPageHttp>),
-        (status = 400, description = "Limit or cursor is invalid"),
+        (status = 400, description = "Limit below 1 (ADMIN_PAGE_LIMIT_INVALID), or Conversation refused the cursor (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Conversation service is unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Conversation service failed (ADMIN_CONVERSATION_LIST_FAILED); its error text is not returned"),
+        (status = 502, description = "Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
 pub async fn list_conversations(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    Query(query): Query<AdminConversationListQuery>,
+    AdminQuery(query): AdminQuery<AdminConversationListQuery>,
 ) -> Result<Json<ApiResponse<AdminConversationPageHttp>>> {
     let limit = page_limit(
         query.limit,
@@ -267,10 +270,13 @@ pub async fn list_conversations(
     params(("conversation_id" = String, Path, description = "Conversation id")),
     responses(
         (status = 200, description = "Conversation detail without the member list", body = ApiResponse<AdminConversationDetailHttp>),
+        (status = 400, description = "Conversation refused the conversation id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 404, description = "No such conversation in the token tenant"),
-        (status = 503, description = "Conversation service is unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 404, description = "No such conversation in the token tenant (NOT_FOUND)"),
+        (status = 500, description = "Conversation service failed (ADMIN_CONVERSATION_DETAIL_FAILED); its error text is not returned"),
+        (status = 502, description = "Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -307,11 +313,13 @@ pub async fn get_conversation(
     ),
     responses(
         (status = 200, description = "Members of the conversation, oldest join first", body = ApiResponse<AdminParticipantPageHttp>),
-        (status = 400, description = "Limit or cursor is invalid"),
+        (status = 400, description = "Limit below 1 (ADMIN_PAGE_LIMIT_INVALID), or Conversation refused the cursor or conversation id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 404, description = "No such conversation in the token tenant"),
-        (status = 503, description = "Conversation service is unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 404, description = "No such conversation in the token tenant (NOT_FOUND)"),
+        (status = 500, description = "Conversation service failed (ADMIN_PARTICIPANT_LIST_FAILED); its error text is not returned"),
+        (status = 502, description = "Conversation service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Conversation service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Conversation service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -321,7 +329,7 @@ pub async fn list_participants(
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(conversation_id): Path<String>,
-    Query(query): Query<AdminParticipantListQuery>,
+    AdminQuery(query): AdminQuery<AdminParticipantListQuery>,
 ) -> Result<Json<ApiResponse<AdminParticipantPageHttp>>> {
     let limit = page_limit(query.limit, DEFAULT_PARTICIPANT_PAGE, MAX_PARTICIPANT_PAGE)
         .map_err(|err| bad_request(err.code, err.message))?;
@@ -356,10 +364,12 @@ pub async fn list_participants(
     params(("user_id" = String, Path, description = "User id in the token tenant")),
     responses(
         (status = 200, description = "Online devices of the user", body = ApiResponse<AdminUserDevicesHttp>),
-        (status = 400, description = "User id is invalid"),
+        (status = 400, description = "Online refused the user id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Online service is unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Online service failed (ADMIN_USER_DEVICES_FAILED); its error text is not returned"),
+        (status = 502, description = "Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -399,10 +409,12 @@ pub async fn list_user_devices(
     params(("user_id" = String, Path, description = "User id in the token tenant")),
     responses(
         (status = 200, description = "Presence of the user; a user never seen online reads as offline", body = ApiResponse<AdminUserPresenceHttp>),
-        (status = 400, description = "User id is invalid"),
+        (status = 400, description = "Online refused the user id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Online service is unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Online service failed (ADMIN_USER_PRESENCE_FAILED); its error text is not returned"),
+        (status = 502, description = "Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -447,10 +459,12 @@ pub async fn get_user_presence(
     ),
     responses(
         (status = 200, description = "Every device the user had online was kicked; devices that went offline in between are listed separately", body = ApiResponse<AdminUserKickHttp>),
-        (status = 400, description = "User id is invalid"),
+        (status = 400, description = "Online refused the user id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing"),
-        (status = 503, description = "Online service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing (FORBIDDEN)"),
+        (status = 500, description = "Online service failed (ADMIN_USER_KICK_FAILED); its error text is not returned"),
+        (status = 502, description = "Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -520,11 +534,13 @@ pub async fn kick_user(
     ),
     responses(
         (status = 200, description = "Device was kicked", body = ApiResponse<AdminDeviceKickHttp>),
-        (status = 400, description = "User or device id is invalid"),
+        (status = 400, description = "Online refused the user or device id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or the device session belongs to another tenant"),
-        (status = 404, description = "Device is not online"),
-        (status = 503, description = "Online service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or the device session belongs to another tenant (FORBIDDEN)"),
+        (status = 404, description = "Device is not online (NOT_FOUND)"),
+        (status = 500, description = "Online service failed (ADMIN_DEVICE_KICK_FAILED); its error text is not returned"),
+        (status = 502, description = "Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -571,9 +587,12 @@ pub async fn kick_device(
     ),
     responses(
         (status = 200, description = "Every connection of the token tenant was kicked; clients receive KICKED with TENANT_UNAVAILABLE", body = ApiResponse<AdminTenantKickHttp>),
+        (status = 400, description = "Online refused the request (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing"),
-        (status = 503, description = "Online service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, or audit reason / idempotency header missing (FORBIDDEN)"),
+        (status = 500, description = "Online service failed (ADMIN_TENANT_KICK_FAILED); its error text is not returned"),
+        (status = 502, description = "Online service refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -613,9 +632,12 @@ pub async fn kick_tenant(
     tag = "Admin",
     responses(
         (status = 200, description = "Tenant projection held by Capability (status, quota, settings, version)", body = ApiResponse<AdminTenantRuntimeHttp>),
+        (status = 400, description = "Capability refused the request (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Capability downstream failed (ADMIN_TENANT_RUNTIME_FAILED); its error text is not returned"),
+        (status = 502, description = "Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -637,9 +659,12 @@ pub async fn get_tenant_runtime(
     tag = "Admin",
     responses(
         (status = 200, description = "Capability switches set for the token tenant", body = ApiResponse<AdminTenantCapabilitiesHttp>),
+        (status = 400, description = "Capability refused the request (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Capability downstream failed (ADMIN_TENANT_CAPABILITIES_FAILED); its error text is not returned"),
+        (status = 502, description = "Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -664,9 +689,12 @@ pub async fn list_tenant_capabilities(
     params(("capability_id" = Option<String>, Query, description = "Only instances serving this capability")),
     responses(
         (status = 200, description = "Extension plugin instances registered for the token tenant", body = ApiResponse<AdminPluginsHttp>),
+        (status = 400, description = "Capability refused the capability_id (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header does not match the token"),
-        (status = 503, description = "Capability downstream is disabled or unavailable"),
+        (status = 403, description = "Tenant header does not match the token (FORBIDDEN)"),
+        (status = 500, description = "Capability downstream failed (ADMIN_PLUGIN_LIST_FAILED); its error text is not returned"),
+        (status = 502, description = "Capability downstream refused the forwarded admin assertion as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ),
 )]
@@ -674,7 +702,7 @@ pub async fn list_plugins(
     Extension(capability): Extension<AdminCapability>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Query(query): Query<AdminPluginListQuery>,
+    AdminQuery(query): AdminQuery<AdminPluginListQuery>,
 ) -> Result<Json<ApiResponse<AdminPluginsHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
     let mut client = capability.client().await?;

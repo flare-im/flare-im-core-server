@@ -473,3 +473,127 @@ async fn a_slow_storage_query_does_not_hold_up_other_admin_searches() {
     let (status, body) = slow.await.unwrap();
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+/// 带请求体的检索路由（检索、写入台账、导出）在请求体解析失败时的请求：`content_type` 为
+/// `None` 时不带这个头。导出是写操作，带齐审计头。
+fn raw_body_request(
+    route: usize,
+    content_type: Option<&str>,
+    body: &str,
+    token: &str,
+) -> Request<Body> {
+    let (path, write) = match route {
+        0 => ("/api/v1/admin/messages/query", false),
+        3 => ("/api/v1/admin/messages/write-ledger/query", false),
+        4 => ("/api/v1/admin/messages/export", true),
+        _ => unreachable!(),
+    };
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-tenant-id", TENANT);
+    if write {
+        for (name, value) in WRITE_HEADERS {
+            builder = builder.header(*name, *value);
+        }
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+/// 请求里的取值：网关答复里出现即算回显。
+const BODY_MARKER: &str = "leak-marker-77";
+
+/// 字段类型不对（W8-S2 F1：检索字段写成数字）、JSON 写坏、顶层是字符串、空请求体、没声明
+/// `application/json`：三条带请求体的路由都回网关自己的 400 信封 `ADMIN_INVALID_JSON_BODY`，
+/// 不回 axum 默认的纯文本 422/400/415，不回显请求里的取值与解析器的说明，也不调用 Storage
+/// Reader。修复前字段类型不对是 422，Control 只认 400/403/504，把它当成 Core 故障报 503。
+#[tokio::test]
+async fn malformed_message_bodies_are_typed_bad_requests_without_echo() {
+    let h = messages_harness().await;
+    let json = Some("application/json");
+    let cases = [
+        (json, r#"{"conversation_id":770077}"#.to_string()),
+        (json, format!(r#"{{"conversation_id":["{BODY_MARKER}"]}}"#)),
+        (json, format!(r#"{{"conversation_id":"{BODY_MARKER}""#)),
+        (json, format!(r#""{BODY_MARKER}""#)),
+        (json, String::new()),
+        (
+            Some("text/plain"),
+            format!(r#"{{"conversation_id":"{BODY_MARKER}"}}"#),
+        ),
+        (None, format!(r#"{{"conversation_id":"{BODY_MARKER}"}}"#)),
+    ];
+    for route in [0, 3, 4] {
+        for (content_type, body) in &cases {
+            let (status, answer) = send(
+                &h.router,
+                raw_body_request(route, *content_type, body, &h.token),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "route {route} {content_type:?} {body}: {answer}"
+            );
+            assert_eq!(answer["code"], 400, "route {route} {body}: {answer}");
+            assert_eq!(
+                answer["reason"], "ADMIN_INVALID_JSON_BODY",
+                "route {route} {body}: {answer}"
+            );
+            let rendered = answer.to_string();
+            for leaked in [BODY_MARKER, "770077", "invalid type", "line 1", "column"] {
+                assert!(
+                    !rendered.contains(leaked),
+                    "route {route} {body} echoed {leaked}: {rendered}"
+                );
+            }
+        }
+    }
+    assert!(h.fake.0.calls.lock().unwrap().is_empty());
+}
+
+/// 事件链的查询串类型不对：400 `ADMIN_INVALID_QUERY` 信封，不回显取值，不调用 Storage
+/// Reader。修复前是 axum 的纯文本 400，带着解析器说明与取值。
+#[tokio::test]
+async fn malformed_event_query_strings_are_typed_bad_requests_without_echo() {
+    let h = messages_harness().await;
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/v1/admin/messages/ok/events?limit={BODY_MARKER}"
+        ))
+        .header("authorization", format!("Bearer {}", h.token))
+        .header("x-tenant-id", TENANT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, answer) = send(&h.router, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["code"], 400, "{answer}");
+    assert_eq!(answer["reason"], "ADMIN_INVALID_QUERY", "{answer}");
+    assert!(!answer.to_string().contains(BODY_MARKER), "{answer}");
+    assert!(h.fake.0.calls.lock().unwrap().is_empty());
+}
+
+/// 请求体超过网关上限（`FLARE_ADMIN_GATEWAY_SERVER_MAX_BODY_SIZE`，即 `DefaultBodyLimit`）：
+/// 400 `ADMIN_REQUEST_BODY_TOO_LARGE` 信封，而不是 axum 的纯文本 413。
+#[tokio::test]
+async fn an_oversized_message_body_is_a_typed_bad_request() {
+    let h = messages_harness().await;
+    let router = h
+        .router
+        .clone()
+        .layer(axum::extract::DefaultBodyLimit::max(64));
+    let body = format!(r#"{{"conversation_id":"{}"}}"#, "c".repeat(128));
+    let (status, answer) = send(
+        &router,
+        raw_body_request(0, Some("application/json"), &body, &h.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["reason"], "ADMIN_REQUEST_BODY_TOO_LARGE", "{answer}");
+    assert!(h.fake.0.calls.lock().unwrap().is_empty());
+}

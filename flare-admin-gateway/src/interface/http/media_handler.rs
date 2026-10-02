@@ -4,7 +4,7 @@
 //! ([`admin_rpc_error`]): Media's own error text is never echoed.
 use axum::{
     Json,
-    extract::{Extension, FromRequestParts, Query},
+    extract::{Extension, FromRequestParts},
     http::{HeaderMap, request::Parts},
 };
 use flare_grpc_proto::media::*;
@@ -17,6 +17,7 @@ use flare_server_core::{
 };
 use std::sync::Arc;
 
+use super::admin_extract::{AdminJson, AdminQuery};
 use super::audit_target::AuditTarget;
 use super::ops_handler::{admin_rpc_error, audit_write, verified_tenant};
 
@@ -105,12 +106,12 @@ pub struct AdminMediaObjects {
     ),
     responses(
         (status = 200, description = "Orphaned message assets of the token tenant that this pass deleted", body = ApiResponse<CleanupOrphanedAssetsResponse>),
-        (status = 400, description = "dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting"),
+        (status = 400, description = "dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting (ADMIN_MEDIA_DRY_RUN_UNSUPPORTED), or Media refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin"),
-        (status = 422, description = "Body is not a JSON object with both limit and dry_run"),
-        (status = 500, description = "Media failed, or the internal identity signer is not configured"),
-        (status = 503, description = "Media service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)"),
+        (status = 500, description = "Media failed (ADMIN_MEDIA_CLEANUP_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn cleanup_orphaned_assets(
@@ -118,7 +119,7 @@ pub async fn cleanup_orphaned_assets(
     headers: HeaderMap,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(clients): Extension<Arc<GrpcClients>>,
-    Json(request): Json<CleanupOrphanedAssetsRequest>,
+    AdminJson(request): AdminJson<CleanupOrphanedAssetsRequest>,
 ) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
     // Media ignores dry_run and deletes as in a real run; a "preview" must not delete.
     if request.dry_run {
@@ -153,12 +154,13 @@ pub async fn cleanup_orphaned_assets(
     ),
     responses(
         (status = 200, description = "ACL applied (`data: true`)", body = ApiResponse<bool>),
+        (status = 400, description = "Media refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin"),
-        (status = 404, description = "No such file in the token tenant"),
-        (status = 422, description = "Body is not a valid SetObjectAclRequest"),
-        (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented); never reports a successful no-op"),
-        (status = 503, description = "Media service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)"),
+        (status = 404, description = "No such file in the token tenant (NOT_FOUND)"),
+        (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_OBJECT_ACL_FAILED), never a successful no-op; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn set_object_acl(
@@ -166,7 +168,7 @@ pub async fn set_object_acl(
     headers: HeaderMap,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(clients): Extension<Arc<GrpcClients>>,
-    Json(request): Json<SetObjectAclRequest>,
+    AdminJson(request): AdminJson<SetObjectAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
     audit_write(
         "medias.object_acl",
@@ -188,17 +190,18 @@ pub async fn set_object_acl(
     params(("bucket" = String, Query, description = "Configured bucket"), ("prefix" = Option<String>, Query, description = "Tenant-relative prefix")),
     responses(
         (status = 200, description = "Objects of the token tenant; only file_id, file_name, mime_type, size and object_key", body = ApiResponse<AdminMediaObjects>),
-        (status = 400, description = "bucket query parameter is missing"),
+        (status = 400, description = "Media refused the bucket or prefix (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or Media refused the tenant admin or the bucket"),
-        (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented); never returns a fabricated empty inventory"),
-        (status = 503, description = "Media service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, or Media refused the tenant admin or the bucket (FORBIDDEN)"),
+        (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_LIST_OBJECTS_FAILED), never a fabricated empty inventory; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn list_objects(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
-    Query(request): Query<ListObjectsQuery>,
+    AdminQuery(request): AdminQuery<ListObjectsQuery>,
 ) -> Result<Json<ApiResponse<AdminMediaObjects>>> {
     let response = clients
         .media
@@ -235,17 +238,18 @@ pub async fn list_objects(
     params(("bucket" = String, Query, description = "Configured bucket")),
     responses(
         (status = 200, description = "Configured media bucket with this tenant's object-key prefix; no global object statistics", body = ApiResponse<DescribeBucketResponse>),
-        (status = 400, description = "bucket query parameter is missing"),
+        (status = 400, description = "Media refused the bucket (BAD_REQUEST)"),
         (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or the bucket is not the one Media serves"),
-        (status = 500, description = "Media failed, or the internal identity signer is not configured"),
-        (status = 503, description = "Media service is unavailable"),
+        (status = 403, description = "Tenant header mismatch, or the bucket is not the one Media serves (FORBIDDEN)"),
+        (status = 500, description = "Media failed (ADMIN_MEDIA_BUCKET_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn describe_bucket(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     Extension(clients): Extension<Arc<GrpcClients>>,
-    Query(request): Query<DescribeBucketRequest>,
+    AdminQuery(request): AdminQuery<DescribeBucketRequest>,
 ) -> Result<Json<ApiResponse<DescribeBucketResponse>>> {
     let response = clients
         .media
