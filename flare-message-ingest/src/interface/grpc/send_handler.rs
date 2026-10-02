@@ -87,8 +87,11 @@ fn authorize_message_claims(
             "legacy internal send credential forbidden",
         ));
     }
+    // `tenant_id` 与 `x-tenant-id` 同样是租户声明：Storage Writer 曾按 `tenant_id` 选择落库租户，
+    // 只拦 `x-tenant-id` 时客户端换个键就能把消息写进别的租户（W11-T）。
     for (key, expected) in [
         ("x-tenant-id", claims.tenant_id.as_str()),
+        ("tenant_id", claims.tenant_id.as_str()),
         ("x-request-id", claims.request_id.as_str()),
     ] {
         if message
@@ -612,6 +615,54 @@ mod tests {
         msg.attributes.clear();
         msg.attributes.insert("x-user-id".into(), "bob".into());
         assert!(authorize_message_claims(&user, &msg, false).is_err());
+    }
+
+    /// Storage Writer 曾优先取消息 attributes 里的 `tenant_id` 作落库租户：这里只拦
+    /// `x-tenant-id` 时，客户端只放 `tenant_id` 就能把消息写进别的租户（W11-T）。
+    #[test]
+    fn tenant_attribute_of_another_tenant_is_rejected_for_every_sender() {
+        for (sender, source, kind, system_only, actor_type, actor_id) in [
+            (
+                "alice",
+                MessageSource::User,
+                MessageType::Text,
+                false,
+                SignedActorType::User,
+                "alice",
+            ),
+            (
+                "alice",
+                MessageSource::System,
+                MessageType::System,
+                true,
+                SignedActorType::Service,
+                "flare-social-bridge",
+            ),
+        ] {
+            let caller = claims(actor_type, actor_id);
+            for key in ["tenant_id", "x-tenant-id"] {
+                let mut msg = message(sender, source, kind);
+                msg.attributes.insert(key.into(), "tenant-b".into());
+                let status = authorize_message_claims(&caller, &msg, system_only)
+                    .expect_err("a foreign tenant attribute must not pass");
+                assert_eq!(status.code(), tonic::Code::PermissionDenied, "{key}");
+
+                // 与签名租户相同的声明照旧放行（含显式租户 0 的私有化部署）。
+                msg.attributes.insert(key.into(), "tenant-a".into());
+                assert!(
+                    authorize_message_claims(&caller, &msg, system_only).is_ok(),
+                    "{key}"
+                );
+            }
+        }
+
+        let mut tenant_zero = claims(SignedActorType::User, "alice");
+        tenant_zero.tenant_id = "0".into();
+        let mut msg = message("alice", MessageSource::User, MessageType::Text);
+        msg.attributes.insert("tenant_id".into(), "0".into());
+        assert!(authorize_message_claims(&tenant_zero, &msg, false).is_ok());
+        msg.attributes.insert("tenant_id".into(), "tenant-a".into());
+        assert!(authorize_message_claims(&tenant_zero, &msg, false).is_err());
     }
 
     #[test]

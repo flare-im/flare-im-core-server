@@ -342,7 +342,18 @@ impl MessageIngestHandler {
 
         // A revoked tenant must not bypass admission through idempotency replay.
         // Run the tenant gate before limiter, WAL, hooks and every dedup path.
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        // 租户只来自已验证的上下文；缺失即拒绝，不再按租户 "0" 处理（显式的 "0" 照常）。
+        let tenant_id = ctx
+            .tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "tenant required to send a message",
+                )
+                .build_error()
+            })?;
         let tenant_lookup = self.tenant_runtime.lookup(&tenant_id).await;
         Self::tenant_gate(&tenant_id, &tenant_lookup, self.tenant_policy)?;
         // 摄入边界幂等：按 client_msg_id 去重重发，闭合"首发成功但 ACK 丢失 → SDK 重试"导致的重复 echo + seq 空洞。
@@ -481,6 +492,10 @@ impl MessageIngestHandler {
                     .execute_pre_send(ctx, message, execute_user_pre_send),
             )
             .await?;
+
+        // PreSend Hook 可以整体改写 attributes：改出别的租户声明即拒绝。落库租户只认消息头，
+        // 但带着别的租户声明的消息不该再往下游走。
+        ensure_tenant_attributes_match(&hook_context.message, &tenant_id)?;
 
         // 3. 准备消息提交。此阶段只填充默认值/server_id/timeline，不分配 seq；
         // seq 在 ensure/decorate 成功后再分配，减少失败路径制造会话序列空洞。
@@ -689,6 +704,32 @@ impl MessageIngestHandler {
         let _ = (ctx, data);
         Ok(())
     }
+}
+
+/// 消息体 attributes 中声明租户的键（入口的签名校验同样检查这两个键）。
+const MESSAGE_TENANT_ATTRIBUTES: [&str; 2] = ["tenant_id", "x-tenant-id"];
+
+/// attributes 里的租户声明必须与发送上下文的租户一致：Storage Writer 曾按 `tenant_id`
+/// 选择落库租户，PreSend Hook 又能整体改写 attributes（W11-T）。
+fn ensure_tenant_attributes_match(
+    message: &flare_proto::common::Message,
+    tenant_id: &str,
+) -> Result<()> {
+    for key in MESSAGE_TENANT_ATTRIBUTES {
+        if message
+            .attributes
+            .get(key)
+            .is_some_and(|declared| declared != tenant_id)
+        {
+            return Err(ErrorBuilder::new(
+                ErrorCode::PermissionDenied,
+                "message attributes declare another tenant",
+            )
+            .param("attribute", key)
+            .build_error());
+        }
+    }
+    Ok(())
 }
 
 async fn remove_wal_after_broker_accept(
@@ -1062,6 +1103,23 @@ mod tests {
             "{}",
             err.reason()
         );
+    }
+
+    #[test]
+    fn tenant_attributes_must_match_the_send_tenant() {
+        let mut message = flare_proto::common::Message::default();
+        assert!(ensure_tenant_attributes_match(&message, "tenant-a").is_ok());
+        for key in MESSAGE_TENANT_ATTRIBUTES {
+            message.attributes.clear();
+            message.attributes.insert(key.into(), "tenant-a".into());
+            assert!(ensure_tenant_attributes_match(&message, "tenant-a").is_ok());
+            message.attributes.insert(key.into(), "tenant-b".into());
+            let err = ensure_tenant_attributes_match(&message, "tenant-a").unwrap_err();
+            assert_eq!(err.code(), Some(ErrorCode::PermissionDenied), "{key}");
+        }
+        message.attributes.clear();
+        message.attributes.insert("tenant_id".into(), "0".into());
+        assert!(ensure_tenant_attributes_match(&message, "0").is_ok());
     }
 
     #[test]

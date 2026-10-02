@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flare_im_contracts::Ctx;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
 use flare_server_core::error::Result;
 use prost::Message as _;
 use redis::{AsyncCommands, aio::ConnectionManager};
@@ -10,8 +11,6 @@ use tracing::instrument;
 
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::HotCacheRepository;
-
-const DEFAULT_TENANT_ID: &str = "0";
 
 pub struct RedisHotCacheRepository {
     client: Arc<redis::Client>,
@@ -36,11 +35,14 @@ impl RedisHotCacheRepository {
         Ok(ConnectionManager::new(self.client.as_ref().clone()).await?)
     }
 
-    fn tenant_id(ctx: &Ctx) -> String {
-        ctx.tenant_id()
-            .filter(|tenant_id| !tenant_id.trim().is_empty())
-            .unwrap_or(DEFAULT_TENANT_ID)
-            .to_string()
+    /// 热缓存键的租户：缺租户时报错（调用方把投影失败记为告警），不写进租户 "0" 的键。
+    fn tenant_id(ctx: &Ctx) -> Result<String> {
+        normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+            flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "tenant required for hot cache key"
+            )
+        })
     }
 
     fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
@@ -55,7 +57,7 @@ impl RedisHotCacheRepository {
 impl HotCacheRepository for RedisHotCacheRepository {
     #[instrument(skip(self, ctx, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
     async fn store_hot(&self, ctx: &Ctx, message: &crate::domain::model::Message) -> Result<()> {
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         let message = crate::convert::message_to_proto(message);
         let mut conn = self.get_connection().await?;
 
@@ -102,7 +104,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
         ctx: &Ctx,
         messages: &[crate::domain::model::Message],
     ) -> Result<()> {
-        let tenant_id = Self::tenant_id(ctx);
+        let tenant_id = Self::tenant_id(ctx)?;
         if messages.is_empty() {
             return Ok(());
         }
@@ -214,5 +216,18 @@ mod tests {
             RedisHotCacheRepository::tail_key("tenant-a", "conv-a"),
             "cache:tail:tenant-a:conv-a"
         );
+    }
+
+    /// 缺租户的上下文不写进租户 "0" 的缓存键（W11-T）；显式租户 "0" 照常。
+    #[test]
+    fn hot_cache_tenant_must_come_from_the_context() {
+        let missing: Ctx = std::sync::Arc::new(flare_im_contracts::utils::Context::default());
+        assert!(RedisHotCacheRepository::tenant_id(&missing).is_err());
+        let blank: Ctx =
+            std::sync::Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id(" "));
+        assert!(RedisHotCacheRepository::tenant_id(&blank).is_err());
+        let zero: Ctx =
+            std::sync::Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id("0"));
+        assert_eq!(RedisHotCacheRepository::tenant_id(&zero).unwrap(), "0");
     }
 }

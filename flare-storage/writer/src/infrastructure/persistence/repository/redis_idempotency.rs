@@ -84,7 +84,8 @@ mod tests {
             "client-1",
             Some("sender-1"),
             Some("conv-a"),
-        );
+        )
+        .unwrap();
         let key =
             RedisIdempotencyRepository::message_key(&ctx_with_tenant("tenant-a"), &scoped).unwrap();
 
@@ -104,6 +105,7 @@ mod tests {
                 Some("sender-1"),
                 Some("conv-b"),
             )
+            .unwrap()
         );
         assert_ne!(
             key,
@@ -118,6 +120,22 @@ mod tests {
                 Some("sender-1"),
                 Some("conv-a"),
             )
+            .unwrap()
+        );
+    }
+
+    /// 缺租户的上下文不再落到租户 "0" 的去重键空间（W11-T）；显式租户 "0" 照常。
+    #[test]
+    fn client_message_key_requires_a_tenant() {
+        for missing in [Ctx::default(), ctx_with_tenant(""), ctx_with_tenant("  ")] {
+            assert!(
+                scoped_client_idempotency_key(&missing, "client-1", Some("sender-1"), None)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            scoped_client_idempotency_key(&ctx_with_tenant("0"), "client-1", None, None).unwrap(),
+            "client:0:0:0:client-1"
         );
     }
 }

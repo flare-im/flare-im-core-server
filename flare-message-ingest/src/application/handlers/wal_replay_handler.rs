@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{TimelineMetadata, normalize_tenant_id};
+use flare_im_contracts::utils::{TimelineMetadata, normalize_optional_tenant_id};
 use flare_server_core::Context;
 use flare_server_core::error::Result;
 use tracing::instrument;
@@ -25,7 +25,9 @@ pub struct WalReplayReport {
 pub struct WalReplayHandler {
     wal_repository: Arc<dyn WalRepository>,
     publisher: Arc<dyn WalReplayPublisher>,
-    default_tenant_id: String,
+    /// 显式配置的部署级默认租户（`MESSAGE_INGEST_DEFAULT_TENANT_ID`），只给没记租户的旧 WAL
+    /// 条目用；没配置时这类条目不重放，不再按租户 "0" 发布。
+    default_tenant_id: Option<String>,
 }
 
 pub trait WalReplayPublisher: Send + Sync {
@@ -59,9 +61,7 @@ impl WalReplayHandler {
         Self {
             wal_repository,
             publisher,
-            default_tenant_id: default_tenant_id
-                .map(|tenant_id| normalize_tenant_id(&tenant_id))
-                .unwrap_or_else(|| "0".to_string()),
+            default_tenant_id: normalize_optional_tenant_id(default_tenant_id.as_deref()),
         }
     }
 
@@ -87,10 +87,16 @@ impl WalReplayHandler {
                 continue;
             }
 
-            let tenant_id = if pending.tenant_id.trim().is_empty() {
-                self.default_tenant_id.clone()
-            } else {
-                normalize_tenant_id(&pending.tenant_id)
+            let Some(tenant_id) = normalize_optional_tenant_id(Some(&pending.tenant_id))
+                .or_else(|| self.default_tenant_id.clone())
+            else {
+                report.failed += 1;
+                tracing::error!(
+                    message_id = %pending.message_id,
+                    "WAL entry has no tenant and no default tenant is configured; \
+                     keeping it unpublished instead of replaying it as tenant 0"
+                );
+                continue;
             };
             let ctx = replay_ctx(&tenant_id);
             let submission = MessageSubmission {
@@ -447,6 +453,46 @@ mod tests {
                 persistence_mode: PersistenceMode::Auto,
             }]
         );
+    }
+
+    /// 没记租户的 WAL 条目：没配置默认租户时不重放、不删，不再按租户 "0" 发布（W11-T）；
+    /// 显式配置的默认租户（含 "0"）照常使用。
+    #[tokio::test]
+    async fn replay_without_tenant_uses_only_an_explicit_default() {
+        for blank in ["", "  "] {
+            let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", blank)]);
+            let publisher = FakeReplayPublisher::new(false);
+            let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), None);
+
+            let report = handler.replay_once(10).await.unwrap();
+
+            assert_eq!(
+                report,
+                super::WalReplayReport {
+                    scanned: 1,
+                    replayed: 0,
+                    failed: 1,
+                    skipped: 0,
+                }
+            );
+            assert!(wal.contains("msg-1"), "entry stays for an operator");
+            assert!(
+                publisher.captured().is_empty(),
+                "nothing published as tenant 0"
+            );
+        }
+
+        for default in ["tenant-d", "0"] {
+            let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", "")]);
+            let publisher = FakeReplayPublisher::new(false);
+            let handler =
+                WalReplayHandler::new(wal.clone(), publisher.clone(), Some(default.to_string()));
+
+            let report = handler.replay_once(10).await.unwrap();
+
+            assert_eq!(report.replayed, 1);
+            assert_eq!(publisher.captured()[0].tenant_id, default);
+        }
     }
 
     #[tokio::test]

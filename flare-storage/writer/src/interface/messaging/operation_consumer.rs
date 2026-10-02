@@ -116,9 +116,17 @@ impl MessageHandler for MessageEventsHandler {
         }
         let ctx = context_from_mq_metadata(&merged_headers);
 
-        // 5. 转换为领域事件并补全上下文
+        // 5. 转换为领域事件并补全上下文：租户只取消息头，取不到首投即进死信，不按租户 "0" 写。
         let mut event = event_from_proto(proto_event);
-        enrich_operation_event_from_ctx(&mut event, &ctx);
+        if let Err(reason) = enrich_operation_event_from_ctx(&mut event, &ctx) {
+            tracing::error!(
+                envelope_id = %envelope.envelope_id,
+                conversation_id = %envelope.conversation_id,
+                reason,
+                "Rejecting operation event without a tenant header"
+            );
+            return Err(ConsumerError::DeadLetter(reason.to_string()));
+        }
 
         // 6. 调用 Application 层
         match self

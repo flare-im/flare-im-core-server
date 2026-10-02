@@ -5,29 +5,36 @@
 //! - 典型实现：Redis 等 KV 存储，key 为 message_id，TTL 与业务保留策略一致。
 
 use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_server_core::error::ErrorCode;
+use flare_server_core::flare_err;
 
-/// 客户端消息幂等 key 的**唯一**作用域规则（tenant/sender/conversation 归一化 + 兜底 "0"）。
-/// trait 默认实现与所有存储实现都必须经由此函数——任何一处 fork 都会静默分裂去重键空间，
-/// 造成跨实现的重复检测假阴性（生产不可见）。
+/// 客户端消息幂等 key 的**唯一**作用域规则（tenant/sender/conversation 归一化；sender 与
+/// conversation 缺省记作 "0"）。trait 默认实现与所有存储实现都必须经由此函数——任何一处 fork
+/// 都会静默分裂去重键空间，造成跨实现的重复检测假阴性（生产不可见）。
+///
+/// 租户必须由上下文给出：缺租户时报错，不落到租户 "0" 的键空间（显式的租户 "0" 照常）。
 pub fn scoped_client_idempotency_key(
     ctx: &Ctx,
     client_msg_id: &str,
     sender_id: Option<&str>,
     conversation_id: Option<&str>,
-) -> String {
-    let tenant_id = ctx
-        .tenant_id()
-        .filter(|tenant_id| !tenant_id.trim().is_empty())
-        .map(normalize_tenant_id)
-        .unwrap_or_else(|| "0".to_string());
+) -> flare_server_core::error::Result<String> {
+    let tenant_id = normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+        flare_err!(
+            ErrorCode::InvalidParameter,
+            "tenant required for client message idempotency key"
+        )
+    })?;
     let sender_id = sender_id
         .filter(|sender_id| !sender_id.trim().is_empty())
         .unwrap_or("0");
     let conversation_id = conversation_id
         .filter(|conversation_id| !conversation_id.trim().is_empty())
         .unwrap_or("0");
-    format!("client:{tenant_id}:{sender_id}:{conversation_id}:{client_msg_id}")
+    Ok(format!(
+        "client:{tenant_id}:{sender_id}:{conversation_id}:{client_msg_id}"
+    ))
 }
 
 pub trait MessageIdempotencyRepository: Send + Sync {
@@ -61,7 +68,7 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         }
         self.is_new(
             ctx,
-            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id),
+            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id)?,
         )
         .await
     }
@@ -79,7 +86,7 @@ pub trait MessageIdempotencyRepository: Send + Sync {
         }
         self.release(
             ctx,
-            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id),
+            &scoped_client_idempotency_key(ctx, client_msg_id, sender_id, conversation_id)?,
         )
         .await
     }

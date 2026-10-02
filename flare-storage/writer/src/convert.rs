@@ -7,7 +7,9 @@ use crate::domain::model::{
     RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
 };
 use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{millis_to_timestamp, normalize_tenant_id, timestamp_to_millis};
+use flare_im_contracts::utils::{
+    millis_to_timestamp, normalize_optional_tenant_id, normalize_tenant_id, timestamp_to_millis,
+};
 use flare_proto::common;
 use flare_proto::common::message_content::Content;
 use prost::Message as ProstMessage;
@@ -36,15 +38,17 @@ pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
     }
 }
 
-/// 为 JetStream 消费到的操作事件补全 `tenant_id` / `operator_id`（common::Event 无此字段；信封亦无 tenant）。
-pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) {
-    if event.tenant_id.is_empty() {
-        event.tenant_id = ctx
-            .tenant_id()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(normalize_tenant_id)
-            .unwrap_or_else(|| "0".to_string());
+/// 操作事件的消息头里没有租户：拒绝落库，由消费者投死信（不再按租户 `"0"` 写）。
+pub const OPERATION_EVENT_WITHOUT_TENANT: &str = "operation event without a tenant header";
+
+/// 为 JetStream 消费到的操作事件补全 `tenant_id` / `operator_id`（common::Event 无此字段）。
+///
+/// 租户只取生产方按已验证上下文写的消息头（`ctx`）；取不到返回
+/// [`OPERATION_EVENT_WITHOUT_TENANT`]。显式的租户 `"0"` 照常处理。
+pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) -> Result<(), &'static str> {
+    if event.tenant_id.trim().is_empty() {
+        event.tenant_id =
+            normalize_optional_tenant_id(ctx.tenant_id()).ok_or(OPERATION_EVENT_WITHOUT_TENANT)?;
     }
     if event.operator_id.is_empty() {
         event.operator_id = ctx
@@ -54,6 +58,7 @@ pub fn enrich_operation_event_from_ctx(event: &mut Event, ctx: &Ctx) {
             .map(str::to_string)
             .unwrap_or_default();
     }
+    Ok(())
 }
 
 /// 从领域 Event 转为 proto Event（用于持久化；common::Event 无 tenant_id/operator_id，operator 由 metadata 注入）
@@ -392,6 +397,10 @@ pub fn content_bytes_to_text(bytes: &[u8]) -> Option<String> {
 }
 
 /// 从 common.Message 构建应用层命令（envelope 在 extra：__sync、__tags、metadata）
+///
+/// 不从消息体确定租户：`attributes` 是发送方提交、PreSend Hook 可整体改写的数据，其中的
+/// `tenant_id`/`x-tenant-id` 不是租户来源。`tenant` 留空，由消费者按消息头填（见
+/// `MessageCreatedHandler`）。
 pub fn message_command_from_proto(
     msg: flare_proto::common::Message,
 ) -> crate::application::commands::ProcessStoreMessageCommand {
@@ -399,21 +408,71 @@ pub fn message_command_from_proto(
     let payload =
         flare_im_contracts::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
     let message = payload.message.as_ref().map(message_from_proto);
-    let tenant = payload
-        .metadata
-        .get("x-tenant-id")
-        .or_else(|| payload.metadata.get("tenant_id"))
-        .map(|t| TenantContext {
-            tenant_id: normalize_tenant_id(t),
-            user_id: None,
-        });
     ProcessStoreMessageCommand {
         conversation_id: payload.conversation_id,
         message,
         sync: payload.sync,
         context: None,
-        tenant,
+        tenant: None,
         tags: payload.tags,
         metadata: payload.metadata,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_im_contracts::utils::Context;
+    use std::sync::Arc;
+
+    fn operation_event() -> Event {
+        event_from_proto(&flare_proto::common::Event {
+            conversation_id: "conv-a".to_string(),
+            conversation_seq: 3,
+            r#type: common::EventType::EventMessageRecall as i32,
+            ..Default::default()
+        })
+    }
+
+    /// 操作事件的租户只取消息头；缺失时拒绝，不再记作租户 "0"（W11-T）。
+    #[test]
+    fn operation_event_tenant_comes_from_the_header_context_only() {
+        let mut event = operation_event();
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        enrich_operation_event_from_ctx(&mut event, &ctx).expect("tenant present");
+        assert_eq!(event.tenant_id, "tenant-a");
+
+        let mut zero = operation_event();
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("0"));
+        enrich_operation_event_from_ctx(&mut zero, &ctx).expect("explicit tenant 0");
+        assert_eq!(zero.tenant_id, "0");
+
+        for ctx in [
+            Arc::new(Context::with_request_id("req")),
+            Arc::new(Context::with_request_id("req").with_tenant_id(" ")),
+        ] {
+            let mut event = operation_event();
+            assert_eq!(
+                enrich_operation_event_from_ctx(&mut event, &ctx),
+                Err(OPERATION_EVENT_WITHOUT_TENANT)
+            );
+            assert!(event.tenant_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn message_attributes_never_set_the_command_tenant() {
+        let msg = flare_proto::common::Message {
+            server_id: "msg-a".to_string(),
+            conversation_id: "conv-a".to_string(),
+            attributes: [
+                ("tenant_id".to_string(), "tenant-b".to_string()),
+                ("x-tenant-id".to_string(), "tenant-c".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert!(message_command_from_proto(msg).tenant.is_none());
     }
 }

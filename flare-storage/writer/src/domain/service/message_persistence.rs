@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{current_millis, extract_timeline_from_extra, normalize_tenant_id};
+use flare_im_contracts::utils::{
+    current_millis, extract_timeline_from_extra, normalize_optional_tenant_id, normalize_tenant_id,
+};
 use flare_im_service_kit::metrics::StorageWriterMetrics;
 use flare_proto::common::RetentionMode;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
@@ -124,21 +126,22 @@ where
             .message
             .ok_or_else(|| flare_err!(ErrorCode::InvalidParameter, "missing message payload"))?;
 
+        // 落库租户只取命令上的租户（消费者按生产方写的消息头填）；消息体 attributes（即
+        // `extra`）里的租户字段是发送方提交的数据，不作租户来源，也不再兜底成 "0"。
         let tenant_id = request
             .tenant
             .as_ref()
-            .map(|tenant| tenant.tenant_id.as_str())
-            .or_else(|| request.metadata.get("x-tenant-id").map(String::as_str))
-            .or_else(|| request.metadata.get("tenant_id").map(String::as_str))
-            .map(normalize_tenant_id)
-            .unwrap_or_else(|| "0".to_string());
+            .and_then(|tenant| normalize_optional_tenant_id(Some(&tenant.tenant_id)))
+            .ok_or_else(|| {
+                flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "stored message has no tenant from its envelope headers"
+                )
+            })?;
         if message.conversation_id.is_empty() {
             message.conversation_id = conversation_id.clone();
         }
-        message
-            .extra
-            .entry("tenant_id".to_string())
-            .or_insert_with(|| tenant_id.clone());
+        pin_message_tenant(&mut message, &tenant_id);
         if message.server_id.is_empty() {
             return Err(flare_err!(
                 ErrorCode::InvalidParameter,
@@ -299,16 +302,8 @@ where
         }
     }
 
-    fn ledger_tenant_id(ctx: &Ctx, prepared: &PreparedMessage) -> String {
-        prepared
-            .message
-            .extra
-            .get("tenant_id")
-            .map(|tenant_id| tenant_id.as_str())
-            .filter(|tenant_id| !tenant_id.trim().is_empty())
-            .or_else(|| ctx.tenant_id())
-            .map(normalize_tenant_id)
-            .unwrap_or_else(|| "0".to_string())
+    fn ledger_tenant_id(prepared: &PreparedMessage) -> Result<String> {
+        prepared_tenant_id(&prepared.message)
     }
 
     async fn record_write_stage_owned(
@@ -392,7 +387,7 @@ where
                 "Event stream repository not configured"
             )
         })?;
-        let event = build_event_message(&prepared.message);
+        let event = build_event_message(&prepared.message)?;
         repo.append_event_to_stream(ctx, &event)
             .await
             .map_err(|e| {
@@ -443,7 +438,7 @@ where
         let events: Vec<Event> = prepared
             .iter()
             .map(|msg| build_event_message(&msg.message))
-            .collect();
+            .collect::<Result<_>>()?;
         repo.append_events_to_stream(ctx, &events)
             .await
             .map_err(|e| {
@@ -537,7 +532,7 @@ where
         ctx: &Ctx,
         prepared: PreparedMessage,
     ) -> Result<PersistenceResult> {
-        let tenant_id = Self::ledger_tenant_id(ctx, &prepared);
+        let tenant_id = Self::ledger_tenant_id(&prepared)?;
         let idempotency = self.reserve_idempotency(ctx, &prepared).await?;
         if !idempotency.is_new {
             let result = PersistenceResult {
@@ -614,7 +609,7 @@ where
         let mut results = Vec::new();
 
         for msg in prepared {
-            let tenant_id = Self::ledger_tenant_id(ctx, &msg);
+            let tenant_id = Self::ledger_tenant_id(&msg)?;
             let idempotency = self.reserve_idempotency(ctx, &msg).await?;
             if idempotency.is_new {
                 new_messages.push((msg, idempotency.reservation, tenant_id));
@@ -688,17 +683,45 @@ where
     }
 }
 
+/// 消息体 attributes 中声明租户的键：发送方可以提交它们，落库前一律改成命令租户。
+const MESSAGE_TENANT_ATTRIBUTES: [&str; 2] = ["tenant_id", "x-tenant-id"];
+
+/// 把消息体里的租户字段固定为落库租户（`prepare_message` 已从消息头取得）。归档行的
+/// `extra`、事件流与写入台账都读 `extra["tenant_id"]`，这里保证它们与消息头一致。
+fn pin_message_tenant(message: &mut crate::domain::model::Message, tenant_id: &str) {
+    for key in MESSAGE_TENANT_ATTRIBUTES {
+        let declared = message.extra.get(key).map(String::as_str);
+        if declared.is_some_and(|declared| normalize_tenant_id(declared) != tenant_id) {
+            warn!(
+                message_id = %message.server_id,
+                attribute = key,
+                tenant_id = %tenant_id,
+                "Message attribute declares another tenant; storing under the envelope tenant"
+            );
+        }
+        if key == "tenant_id" || declared.is_some() {
+            message.extra.insert(key.to_string(), tenant_id.to_string());
+        }
+    }
+}
+
+/// `prepare_message` 固定下来的落库租户；缺失说明消息没有经过它，拒绝而不是写进租户 "0"。
+fn prepared_tenant_id(message: &crate::domain::model::Message) -> Result<String> {
+    normalize_optional_tenant_id(message.extra.get("tenant_id").map(String::as_str)).ok_or_else(
+        || {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                "prepared message has no tenant"
+            )
+        },
+    )
+}
+
 /// 从已持久化消息构建 EVENT_MESSAGE，供事件流写入（Sync 按 last_seq 拉取）
-fn build_event_message(message: &crate::domain::model::Message) -> Event {
-    let tenant_id = message
-        .extra
-        .get("tenant_id")
-        .map(|s| s.as_str())
-        .filter(|s| !s.is_empty())
-        .map(normalize_tenant_id)
-        .unwrap_or_else(|| "0".to_string());
+fn build_event_message(message: &crate::domain::model::Message) -> Result<Event> {
+    let tenant_id = prepared_tenant_id(message)?;
     let now = chrono::Utc::now();
-    Event {
+    Ok(Event {
         tenant_id,
         conversation_id: message.conversation_id.clone(),
         seq: message.conversation_seq,
@@ -708,7 +731,7 @@ fn build_event_message(message: &crate::domain::model::Message) -> Event {
         event_seq: None,
         request_id: None,
         payload: Some(EventPayload::Message(Box::new(message.clone()))),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1061,6 +1084,79 @@ mod tests {
             },
             sync: true,
         }
+    }
+
+    fn store_command(
+        tenant: Option<&str>,
+        attributes: &[(&str, &str)],
+    ) -> crate::application::commands::ProcessStoreMessageCommand {
+        let extra = attributes
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        crate::application::commands::ProcessStoreMessageCommand {
+            conversation_id: "conversation-a".to_string(),
+            message: Some(Message {
+                server_id: "message-a".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                conversation_seq: 1,
+                extra,
+                ..Message::default()
+            }),
+            sync: false,
+            context: None,
+            tenant: tenant.map(|tenant_id| crate::domain::model::TenantContext {
+                tenant_id: tenant_id.to_string(),
+                user_id: None,
+            }),
+            tags: Default::default(),
+            // 消费者把消息体 attributes 与消息头一起并进 metadata；这里不该再从中取租户。
+            metadata: [("tenant_id".to_string(), "tenant-b".to_string())]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// 落库租户只取命令租户（消息头），缺失即拒绝，不再兜底成 "0"；消息体里声明的
+    /// 租户字段被改成命令租户，事件流与写入台账随之一致（W11-T）。
+    #[test]
+    fn prepare_message_requires_the_command_tenant_and_pins_tenant_attributes() {
+        let service = service_with_failing_event_stream();
+        for tenant in [None, Some(""), Some("  ")] {
+            let error = service
+                .prepare_message(store_command(tenant, &[("tenant_id", "tenant-b")]))
+                .expect_err("a message without a command tenant must not be prepared");
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::InvalidParameter),
+                "{tenant:?}"
+            );
+        }
+
+        let prepared = service
+            .prepare_message(store_command(
+                Some("tenant-a"),
+                &[("tenant_id", "tenant-b"), ("x-tenant-id", "tenant-c")],
+            ))
+            .expect("prepares");
+        assert_eq!(prepared.message.extra["tenant_id"], "tenant-a");
+        assert_eq!(prepared.message.extra["x-tenant-id"], "tenant-a");
+        let event = build_event_message(&prepared.message).expect("event");
+        assert_eq!(event.tenant_id, "tenant-a");
+        assert_eq!(
+            TestPersistenceService::ledger_tenant_id(&prepared).expect("ledger"),
+            "tenant-a"
+        );
+
+        let zero = service
+            .prepare_message(store_command(Some("0"), &[]))
+            .expect("explicit tenant 0");
+        assert_eq!(zero.message.extra["tenant_id"], "0");
+        assert!(!zero.message.extra.contains_key("x-tenant-id"));
+
+        let mut unprepared = prepared.message.clone();
+        unprepared.extra.remove("tenant_id");
+        assert!(build_event_message(&unprepared).is_err());
     }
 
     #[tokio::test]
