@@ -86,6 +86,24 @@ fn storage_failure_policy_for_backend(backend: &str) -> StorageFailurePolicy {
     }
 }
 
+/// storage-writer 消费者配置。
+///
+/// NATS 后端没有重试 topic，落库失败靠 JetStream 原生重投：数据库、归档存储暂时不可用时
+/// handler 报可重试错误，按 [`flare_im_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的
+/// 等待合计 135 s，之后仍失败才进 DLQ。默认的 3 次立即重投会在数据库重启的同一瞬间用完，已
+/// 受理的消息随即进 DLQ。Kafka 后端走重试 topic（`message_retry_delay_ms`），不变。
+pub(crate) fn storage_consumer_config(config: &StorageWriterConfig) -> ConsumerConfig {
+    let consumer = ConsumerConfig::default()
+        .with_concurrency(32)
+        .with_batch_size(config.max_poll_records.max(1))
+        .with_batch_timeout_ms(config.fetch_max_wait_ms.max(1));
+    if storage_failure_policy_for_backend(config.mq_backend.as_str()).retry_topic_enabled {
+        consumer
+    } else {
+        flare_im_service_kit::consumer_retry::with_downstream_outage_retry(consumer)
+    }
+}
+
 pub struct ApplicationContext {
     pub config: Arc<StorageWriterConfig>,
     pub consumer_config: ConsumerConfig,
@@ -176,10 +194,7 @@ pub async fn initialize(
     let operation_event_handler =
         MessageEventsConsumerFactory::create_handler(operation_command_handler);
 
-    let consumer_cfg = ConsumerConfig::default()
-        .with_concurrency(32)
-        .with_batch_size(config.max_poll_records.max(1))
-        .with_batch_timeout_ms(config.fetch_max_wait_ms.max(1));
+    let consumer_cfg = storage_consumer_config(&config);
 
     let mut dispatcher = TopicDispatcher::new();
     let message_adapter: Arc<dyn MessageHandler> = message_event_handler;
@@ -341,5 +356,67 @@ mod tests {
         assert!(!policy.retry_topic_enabled);
         assert!(!policy.dead_letter_enabled);
         assert!(!policy.retry_forwarder_enabled);
+    }
+
+    fn writer_config(mq_backend: &str) -> StorageWriterConfig {
+        StorageWriterConfig {
+            mq_backend: mq_backend.into(),
+            jetstream_url: "nats://127.0.0.1:1".into(),
+            jetstream_group: "storage-writer".into(),
+            jetstream_ack_topic: None,
+            jetstream_timeout_ms: 1_000,
+            jetstream_retries: 0,
+            jetstream_retry_backoff_ms: 0,
+            jetstream_stream_specs: flare_server_core::mq::nats::default_stream_specs(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+            kafka_options: Default::default(),
+            message_dlq_topic: String::new(),
+            message_retry_topic: String::new(),
+            message_retry_delay_ms: 5_000,
+            max_poll_records: 64,
+            fetch_min_bytes: 1,
+            fetch_max_wait_ms: 50,
+            redis_url: None,
+            redis_hot_ttl_seconds: 0,
+            redis_hot_tail_limit: 0,
+            redis_idempotency_ttl_seconds: 0,
+            wal_hash_key: None,
+            postgres_url: None,
+            postgres_max_connections: 1,
+            postgres_min_connections: 0,
+            postgres_acquire_timeout_seconds: 1,
+            postgres_idle_timeout_seconds: 1,
+            postgres_max_lifetime_seconds: 1,
+            media_service_endpoint: None,
+            metrics: flare_im_service_kit::metrics::MetricsEndpointConfig::new("127.0.0.1", 0),
+        }
+    }
+
+    /// 门禁：NATS 后端的落库消费者按退避重投，重试预算覆盖数据库停机与重启窗口，且首投加
+    /// 全部重试落在 storage-writer 自己的 JetStream 消费者的 `max_deliver` 之内。Kafka 后端走
+    /// 重试 topic，不变。
+    #[test]
+    fn nats_storage_retries_span_a_restart_window_inside_max_deliver() {
+        use flare_server_core::mq::nats::NatsConsumerConfig;
+
+        let config = writer_config("nats");
+        let consumer = storage_consumer_config(&config);
+        let max_deliver = config.max_deliver();
+        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+            &consumer,
+            max_deliver,
+        )
+        .unwrap_or_else(|error| panic!("storage-writer retry budget: {error}"));
+        println!(
+            "storage-writer retries {} over {window:?}, max_deliver {max_deliver}",
+            consumer.max_retries
+        );
+        assert_eq!(consumer.batch_size, 64);
+        assert!(consumer.enable_dlq);
+
+        let kafka = storage_consumer_config(&writer_config("kafka"));
+        assert!(kafka.retry_backoff.is_none());
+        assert_eq!(kafka.max_retries, ConsumerConfig::default().max_retries);
     }
 }

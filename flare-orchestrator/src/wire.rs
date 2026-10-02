@@ -158,9 +158,7 @@ pub async fn initialize(
         })?;
     let main_queue_dispatcher: Arc<dyn Dispatcher> = Arc::new(topic_dispatcher);
 
-    let consumer_config = ConsumerConfig::default()
-        .with_concurrency(32)
-        .with_ordered(true);
+    let consumer_config = main_queue_consumer_config(&config.mq_backend);
 
     Ok(ApplicationContext {
         message_action_grpc,
@@ -173,6 +171,24 @@ pub async fn initialize(
         config,
         user_sync_compensation_worker,
     })
+}
+
+/// `TOPIC_MESSAGE_MAIN` 消费者配置。
+///
+/// NATS 后端没有重试 topic，失败的消息靠 JetStream 原生重投：扇出或下游（storage-writer 的流、
+/// 会话服务、Redis）暂时不可用时 handler 报可重试错误，按
+/// [`flare_im_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的等待合计 135 s，之后仍
+/// 失败才进 DLQ。默认的 3 次立即重投会在下游停机的同一瞬间用完。Kafka 后端走重试 topic
+/// （`message_retry_delay_ms`），不变。
+pub(crate) fn main_queue_consumer_config(mq_backend: &str) -> ConsumerConfig {
+    let config = ConsumerConfig::default()
+        .with_concurrency(32)
+        .with_ordered(true);
+    if mq_backend == "nats" {
+        flare_im_service_kit::consumer_retry::with_downstream_outage_retry(config)
+    } else {
+        config
+    }
 }
 
 async fn build_redis_client(config: &MessageOrchestratorConfig) -> Result<Arc<redis::Client>> {
@@ -260,4 +276,33 @@ fn build_retry_forwarder_dispatcher(
             ))
         })?;
     Ok(Some(Arc::new(dispatcher)))
+}
+
+#[cfg(test)]
+mod consumer_retry_tests {
+    use super::*;
+    use flare_server_core::mq::nats::NatsConsumerConfig;
+
+    /// 门禁：NATS 后端的主队列消费者按退避重投，重试预算覆盖下游停机与重启窗口，且首投加
+    /// 全部重试落在编排服务 JetStream 消费者的 `max_deliver` 之内。Kafka 后端不变。
+    #[test]
+    fn nats_main_queue_retries_span_a_restart_window_inside_max_deliver() {
+        let consumer = main_queue_consumer_config("nats");
+        let max_deliver = MessageOrchestratorConfig::default().max_deliver();
+        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+            &consumer,
+            max_deliver,
+        )
+        .unwrap_or_else(|error| panic!("orchestrator retry budget: {error}"));
+        println!(
+            "orchestrator retries {} over {window:?}, max_deliver {max_deliver}",
+            consumer.max_retries
+        );
+        assert!(consumer.ordered);
+        assert!(consumer.enable_dlq);
+
+        let kafka = main_queue_consumer_config("kafka");
+        assert!(kafka.retry_backoff.is_none());
+        assert_eq!(kafka.max_retries, ConsumerConfig::default().max_retries);
+    }
 }

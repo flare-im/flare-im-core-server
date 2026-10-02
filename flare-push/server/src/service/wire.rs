@@ -48,9 +48,7 @@ pub async fn initialize(
     let event_handler = PushEventHandler::new(route_handler.clone(), publisher.clone());
     let push_handler = PushHandler::new(route_handler);
 
-    let consumer_cfg = ConsumerConfig::default()
-        .with_concurrency(64)
-        .with_ordered(true);
+    let consumer_cfg = push_server_consumer_config();
 
     let mut dispatcher = TopicDispatcher::new();
 
@@ -77,6 +75,20 @@ pub async fn initialize(
     })
 }
 
+/// push-server 消费者配置。
+///
+/// 路由失败（在线状态查不到、发布到 push-online/push-offline 失败）多是下游停机或重启引起的
+/// 暂时性失败，handler 报可重试错误，交给 JetStream 按
+/// [`flare_im_service_kit::consumer_retry`] 的退避延迟重投：12 次重试的等待合计 135 s，之后
+/// 仍失败才进 `flare.im.dlq.push-server`。默认的 3 次立即重投会在下游停机的同一瞬间用完。
+pub(crate) fn push_server_consumer_config() -> ConsumerConfig {
+    flare_im_service_kit::consumer_retry::with_downstream_outage_retry(
+        ConsumerConfig::default()
+            .with_concurrency(64)
+            .with_ordered(true),
+    )
+}
+
 fn register_handler(
     dispatcher: &mut TopicDispatcher,
     topic: String,
@@ -87,4 +99,55 @@ fn register_handler(
             "register push server consumer {topic}: {err}"
         ))
     })
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use flare_server_core::mq::nats::NatsConsumerConfig;
+
+    fn push_server_nats_config() -> PushServerConfig {
+        PushServerConfig {
+            mq_backend: "nats".into(),
+            jetstream_url: "nats://127.0.0.1:1".into(),
+            jetstream_timeout_ms: 1_000,
+            jetstream_retries: 0,
+            jetstream_retry_backoff_ms: 0,
+            jetstream_stream_specs: flare_server_core::mq::nats::default_stream_specs(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+            kafka_options: Default::default(),
+            consumer_group: "push-server".into(),
+            push_message_topic: String::new(),
+            push_event_topic: String::new(),
+            push_envelope_topic: String::new(),
+            push_online_topic: String::new(),
+            push_offline_topic: String::new(),
+            push_dlq_topic: String::new(),
+            redis_url: String::new(),
+            online_status_backend: "redis".into(),
+            online_service_endpoint: String::new(),
+            event_ping_coalesce_window_ms: 0,
+            default_tenant_id: "0".into(),
+        }
+    }
+
+    /// 门禁：push-server 的重试预算覆盖下游停机与重启窗口，且首投加全部重试落在它自己的
+    /// JetStream 消费者的 `max_deliver` 之内。
+    #[test]
+    fn push_server_retries_span_a_restart_window_inside_max_deliver() {
+        let consumer = push_server_consumer_config();
+        let max_deliver = push_server_nats_config().max_deliver();
+        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+            &consumer,
+            max_deliver,
+        )
+        .unwrap_or_else(|error| panic!("push-server retry budget: {error}"));
+        println!(
+            "push-server retries {} over {window:?}, max_deliver {max_deliver}",
+            consumer.max_retries
+        );
+        assert!(consumer.ordered);
+        assert!(consumer.enable_dlq);
+    }
 }

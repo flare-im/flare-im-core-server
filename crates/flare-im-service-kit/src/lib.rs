@@ -2,6 +2,7 @@
 
 pub mod clients;
 pub mod config;
+pub mod consumer_retry;
 pub mod control_auth;
 pub mod discovery;
 pub mod env_registry;
