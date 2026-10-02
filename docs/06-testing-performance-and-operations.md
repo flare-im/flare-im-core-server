@@ -386,6 +386,44 @@ exporter，目前不在面板和告警里。
 4. 如果只有 WAL/broker accepted，等待 retry 或检查 DLQ；不要在客户端盲目生成新的 `clientMsgId`。
 5. 如果是 auth/token 错误，先刷新 token，再重放 pending queue。
 
+### 重放死信（DLQ）
+
+`tools/flare-dlq-replay` 把导出的死信原样投回原 subject/topic（加 `x-flare-dlq-replayed` 等头），消费者按首投处理，
+不会识别「这是重放」。重放前先按死信 subject 确认消费者对重复投递是否幂等。会话服务的两个死信：
+
+| 死信 subject | 来源 | 重放是否幂等 |
+|--------------|------|--------------|
+| `flare.im.dlq.conversation-read-receipt` | 已读回执消费者；它同时订阅 `TOPIC_MESSAGE_EVENTS`（已读回执）与 `TOPIC_MESSAGE_CREATED`（消息本体） | 已读回执幂等（已读游标只前进）。**消息本体不幂等**：会话 `last_message_seq` 取较大值，重放无害；单聊与小群（成员数不超过 `CONVERSATION_LARGE_CONVERSATION_PRECISE_UNREAD_THRESHOLD`，默认 500）里已读游标低于该 seq 的成员，持久化未读会再加 1 |
+| `flare.im.dlq.conversation-ensure` | 会话确保事件 | 幂等：会话已存在时只补缺少的参与者 |
+
+重放已读回执死信中的消息本体：
+
+1. 每条只重放一次。进死信的消息（载荷解不开、没有可用租户，或约 135 s 的重投用完）最后一次处理没有计入未读，
+   重放一次正好补上；同一份导出重放两次，或重放已经被别人重放成功的记录，就会重复累加。
+2. 重放过的记录带 `x-flare-dlq-replayed=true`；再次进死信时先确认上次重放确实失败，再决定是否重放。
+3. 多加的未读不会自行回落，直到该成员把会话读到最新一条（`mark_as_read` 到会话最大 seq 时未读归零）；在此之前
+   会话列表的未读数多 1。超过上述阈值的大群不物化未读，不受影响。
+
+为什么没有加幂等键：消息事件唯一可用的键是（租户，会话，seq）。用会话 `last_message_seq` 作守卫（seq 不大于它就不再
+计未读）会在重投乱序时漏计——失败的消息经退避重投时，同会话后面的消息往往已经处理完，这正是重试与死信的路径。
+正确的去重要按（租户，会话，seq）记下已计入未读的消息（新表或新列、迁移与清理），发送热路径上每条消息多一次写，
+不是低成本改动，目前只按上面的规则人工控制重放。
+
+### Kafka 后端的消费失败
+
+Kafka 不是单机默认后端（默认 `nats`）。各消费者处理失败时的处置不同：
+
+| 消费者 | NATS JetStream | Kafka |
+|--------|----------------|-------|
+| push-server | 按退避原生重投，用完进 `flare.im.dlq.push-server` | 没有重试发布器与 DLQ（`build_kafka_consumer_tasks` 不带失败发布器）：失败的记录不重试、不进 DLQ，后面的偏移一提交就跳过它 |
+| 会话服务（已读回执、会话确保） | 按退避原生重投（12 次，1 s 起翻倍、封顶 15 s，合计约 135 s），用完或不可恢复时进上表的死信 | 同样没有：记一行 ERROR（`this backend cannot redeliver it and a later commit skips it`），不重试、不进 DLQ |
+| orchestrator、storage-writer | 原生重投，用完进 DLQ | 走重试 topic（默认每次 5 s、3 次，约 15 s）后进 DLQ |
+
+风险：在 Kafka 后端上，下游（PostgreSQL、Redis、推送通道）哪怕只短暂不可用，这段时间里 push-server 与会话服务
+处理失败的记录就直接丢失，DLQ 里也没有，无法重放——实时推送丢失（客户端靠同步补齐消息），会话 `last_message_seq`、
+成员未读与已读游标少推进一次，会话确保事件丢失时会话行可能缺失。生产使用 Kafka 前须先给这两个消费者接上重试
+topic 与 DLQ（与 orchestrator、storage-writer 相同的 `ConsumerFailurePublishers`）。
+
 ### seq gap 或 timeline 不连续
 
 1. 查客户端 gap 起点、conversation high-water mark 和本地 cursor。
@@ -420,7 +458,8 @@ exporter，目前不在面板和告警里。
 - 按机器规格核对容器内存预算：`scripts/check_memory_budget.sh` 校验现状（每容器都设 `mem_limit`、上限之和不超过物理内存），`scripts/plan_mem_budget.py` 按物理内存/核数计算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`、`effective_cache_size`、`work_mem`、`maintenance_work_mem` 等），结果经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值。
 - PostgreSQL 总连接池小于 `max_connections`，并为每个服务设置明确 pool size。
 - JetStream/Kafka durable、retry、DLQ 配置确认。
-- `flare-dlq-replay` dry-run 与受控重放演练通过，DLQ replay headers 可在链路追踪中检索。
+- `flare-dlq-replay` dry-run 与受控重放演练通过，DLQ replay headers 可在链路追踪中检索；运维知道会话服务已读回执死信里的消息本体重放不幂等（见「重放死信（DLQ）」）。
+- 使用 Kafka 后端时，push-server 与会话服务的消费者已接上重试 topic 与 DLQ（见「Kafka 后端的消费失败」）。
 - offline push backend 已配置，或 push-worker 对不可投递任务有 park/DLQ 策略。
 - `MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED` 泄压阀在预发验证过：关闭 inline 后客户端可通过 sync 收敛。
 - Push Server `online_status_backend=redis` 与 `grpc` fallback 均完成连通性验证。
