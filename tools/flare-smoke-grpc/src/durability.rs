@@ -1,5 +1,5 @@
 //! 只读回读：存储（messages 行）、归档（写账本 archive_persisted 及以后）、
-//! 会话（收发双方的参与者行与会话 seq）。
+//! 会话（收发双方在会话列表里看到的会话 seq，口径见 `CONVERSATION_ROWS`）。
 //!
 //! 只读有两层保证：建连的启动参数 `default_transaction_read_only=on`（建连后核对），
 //! 每轮查询再显式 `BEGIN TRANSACTION READ ONLY` 并核对 `transaction_read_only`，
@@ -34,11 +34,20 @@ pub const MESSAGE_ROWS: &str = "SELECT COUNT(*)::BIGINT FROM messages \
        AND sender_id = $4 AND seq = $5";
 pub const LEDGER_STATE: &str = "SELECT write_state FROM message_write_ledger \
      WHERE tenant_id = $1 AND server_id = $2";
-pub const CONVERSATION_ROWS: &str = "SELECT p.user_id, COALESCE(c.last_message_seq, 0)::BIGINT \
+/// 收发双方各自在会话列表里看到的会话 seq，与 Core 会话列表同口径
+/// （flare-conversation `postgres_repository.rs` 的用户会话查询）：会话未删除、成员未删除，
+/// seq 取 `GREATEST(conversations.last_message_seq, 该成员可见范围内 messages 的最大 seq)`。
+/// 不能只看 `conversations.last_message_seq`：会话服务的消息事件消费者只为租户 0 推进它，
+/// 其他租户恒为 NULL，Core 自己的会话列表也是靠消息尾补上的。
+pub const CONVERSATION_ROWS: &str = "SELECT p.user_id, GREATEST(COALESCE(c.last_message_seq, 0), \
+       COALESCE((SELECT MAX(m.seq) FROM messages m \
+                  WHERE m.tenant_id = p.tenant_id AND m.conversation_id = p.conversation_id \
+                    AND m.seq > COALESCE(p.visible_from_seq, 0)), 0))::BIGINT \
      FROM conversation_participants p \
      JOIN conversations c ON c.tenant_id = p.tenant_id AND c.conversation_id = p.conversation_id \
      WHERE p.tenant_id = $1 AND p.conversation_id = $2 AND p.user_id IN ($3, $4) \
-       AND NOT COALESCE(p.is_deleted, FALSE)";
+       AND NOT COALESCE(p.is_deleted, FALSE) \
+       AND c.lifecycle_state != 'deleted'";
 
 /// 本工具发给数据库的全部语句；测试据此核对只有只读语句。
 #[cfg(test)]

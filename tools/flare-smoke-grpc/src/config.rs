@@ -40,11 +40,13 @@ legacy identity metadata is sent.
 Read-back goes through a read-only PostgreSQL session (startup option
 default_transaction_read_only=on plus BEGIN TRANSACTION READ ONLY): the
 message row (storage), the write ledger at archive_persisted or later
-(archive), and both participants' conversation rows at the sent seq
-(conversation). The password comes only from --db-password-file (mode 600)
-and default or weak passwords are refused. Core's read RPCs
-(conversation, storage-reader) only take unsigned identity metadata, so they
-are not called.
+(archive), and both participants' conversation seq at least the sent seq,
+read the way Core's conversation list reads it: conversation and member not
+deleted, seq = GREATEST(conversations.last_message_seq, newest message the
+member may see) (conversation). The password comes only from
+--db-password-file (mode 600) and default or weak passwords are refused.
+Core's read RPCs (conversation, storage-reader) only take unsigned identity
+metadata, so they are not called.
 
 --dry-run validates every setting, loads and test-signs with the key, checks
 the password policy and prints the plan without opening any connection.

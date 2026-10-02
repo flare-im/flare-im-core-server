@@ -75,10 +75,12 @@ internal private key; no call is made without it and no legacy identity
 metadata is sent. Read-back and the archive check go through a read-only
 PostgreSQL session (default_transaction_read_only=on, BEGIN TRANSACTION READ
 ONLY): the messages row, message_write_ledger at archive_persisted or later,
-and both users' conversation rows at the sent seq. Core's read RPCs only take
-unsigned identity metadata, so they are not called. The gRPC port is only
-reachable inside the compose network; run this mode in a one-off in-network
-probe container (flare-deploy tests/stack/grpc_smoke_probe.py).
+and both users' conversation seq at least the sent seq, read the way Core's
+conversation list reads it (conversation and member not deleted, seq =
+GREATEST(conversations.last_message_seq, newest message the member may see)).
+Core's read RPCs only take unsigned identity metadata, so they are not called.
+The gRPC port is only reachable inside the compose network; run this mode in a
+one-off in-network probe container (flare-deploy tests/stack/grpc_smoke_probe.py).
 
 Required (gRPC mode):
   SMOKE_TENANT_ID              Isolated fixture tenant e2e-<20 lowercase hex>.

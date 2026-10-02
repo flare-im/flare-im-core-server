@@ -689,3 +689,131 @@ async fn live_postgres_read_back_is_read_only() {
     assert_eq!(seen.lock().unwrap().accepted, 1);
     assert!(!String::from_utf8_lossy(&out).contains(&password));
 }
+
+/// 会话回读与 Core 会话列表同口径（`durability::CONVERSATION_ROWS`）：
+/// 非 0 租户的 `conversations.last_message_seq` 在栈上恒为 NULL（会话服务只为租户 0 推进），
+/// 回读要靠成员可见范围内的消息尾；可见下限之前的消息、已删除的会话不算。
+/// 需要的一次性库同 `live_postgres_read_back_is_read_only`。
+#[tokio::test]
+#[ignore = "needs a throwaway PostgreSQL with Core migrations"]
+async fn live_postgres_conversation_seq_follows_the_conversation_list() {
+    use sqlx::Connection;
+    let port: u16 = std::env::var("FLARE_SMOKE_GRPC_LIVE_PG_PORT")
+        .expect("FLARE_SMOKE_GRPC_LIVE_PG_PORT")
+        .parse()
+        .unwrap();
+    let password_file = PathBuf::from(
+        std::env::var("FLARE_SMOKE_GRPC_LIVE_PG_PASSWORD_FILE")
+            .expect("FLARE_SMOKE_GRPC_LIVE_PG_PASSWORD_FILE"),
+    );
+    let password =
+        secret_file::read_db_password(&password_file, "flare_core_app", "flare_core").unwrap();
+    let conversation = cid::single_chat_conversation_id(SENDER, RECIPIENT);
+    let writable = sqlx::postgres::PgConnectOptions::new_without_pgpass()
+        .host("127.0.0.1")
+        .port(port)
+        .username("flare_core_app")
+        .password(&password)
+        .database("flare_core");
+    let target = config::DbTarget {
+        host: "127.0.0.1".into(),
+        port,
+        database: "flare_core".into(),
+        user: "flare_core_app".into(),
+        password_file: password_file.clone(),
+    };
+
+    // (会话生命周期, 接收方可见下限) → 期望 (发送方 seq, 接收方 seq)
+    let cases: [(&str, i64, Option<i64>, Option<i64>); 3] = [
+        ("active", 0, Some(7), Some(7)),
+        ("active", 7, Some(7), Some(0)),
+        ("deleted", 0, None, None),
+    ];
+    for (lifecycle, recipient_visible_from, sender_seq, recipient_seq) in cases {
+        let tenant = format!("e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let mut seed = sqlx::postgres::PgConnection::connect_with(&writable)
+            .await
+            .unwrap();
+        // 栈上发送后的真实形态：会话行的 last_message_seq 为 NULL，消息行与写账本已落库。
+        sqlx::query(
+            "INSERT INTO conversations (tenant_id, conversation_id, conversation_type, lifecycle_state) \
+             VALUES ($1, $2, 1, $3)",
+        )
+        .bind(&tenant)
+        .bind(&conversation)
+        .bind(lifecycle)
+        .execute(&mut seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_participants (tenant_id, conversation_id, user_id, visible_from_seq) \
+             VALUES ($1, $2, $3, 0), ($1, $2, $4, $5)",
+        )
+        .bind(&tenant)
+        .bind(&conversation)
+        .bind(SENDER)
+        .bind(RECIPIENT)
+        .bind(recipient_visible_from)
+        .execute(&mut seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, server_id, conversation_id, sender_id, seq) \
+             VALUES ($1, 'srv-smoke-grpc-tail', $2, $3, 7)",
+        )
+        .bind(&tenant)
+        .bind(&conversation)
+        .bind(SENDER)
+        .execute(&mut seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO message_write_ledger (tenant_id, server_id, conversation_id, seq, write_state) \
+             VALUES ($1, 'srv-smoke-grpc-tail', $2, 7, 'archive_persisted')",
+        )
+        .bind(&tenant)
+        .bind(&conversation)
+        .execute(&mut seed)
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+
+        let expected = Expectation {
+            tenant_id: tenant.clone(),
+            server_msg_id: "srv-smoke-grpc-tail".into(),
+            conversation_id: conversation.clone(),
+            sender_id: SENDER.into(),
+            recipient_id: RECIPIENT.into(),
+            seq: 7,
+        };
+        let mut reader = PgReader::connect(&target, &password).await.unwrap();
+        let observed = reader.observe(&expected).await.unwrap();
+        reader.close().await;
+        let case = format!("lifecycle={lifecycle} recipient_visible_from={recipient_visible_from}");
+        assert_eq!(observed.messages_row_count, 1, "{case}");
+        assert_eq!(
+            observed.ledger_write_state.as_deref(),
+            Some("archive_persisted"),
+            "{case}"
+        );
+        assert_eq!(observed.sender_conversation_seq, sender_seq, "{case}");
+        assert_eq!(observed.recipient_conversation_seq, recipient_seq, "{case}");
+        let problems = observed.problems(&expected);
+        match (lifecycle, recipient_visible_from) {
+            ("active", 0) => assert!(problems.is_empty(), "{case}: {problems:?}"),
+            ("active", _) => assert_eq!(
+                problems,
+                vec!["recipient conversation seq=0 (want >= 7)".to_owned()],
+                "{case}"
+            ),
+            _ => assert_eq!(
+                problems,
+                vec![
+                    "recipient conversation row missing".to_owned(),
+                    "sender conversation row missing".to_owned(),
+                ],
+                "{case}"
+            ),
+        }
+    }
+}
