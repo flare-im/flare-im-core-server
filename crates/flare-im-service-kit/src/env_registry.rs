@@ -467,6 +467,53 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::ApiGateway,
         EnvPurpose::ServiceEndpoint,
     ),
+    // gateway::GatewaySettings 按 `FLARE_API_GATEWAY_` 作用域拼出的下游地址与超时（不是字面量，
+    // env_registry_boundary 门禁扫不到；flare-api-gateway/.env.example 列的变量都要在这里）。
+    env(
+        "FLARE_API_GATEWAY_GRPC_MEDIA_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_CONVERSATION_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_ONLINE_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_ONLINE_STATIC_FALLBACK",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_STORAGE_READER_STATIC_FALLBACK",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_API_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS",
+        EnvOwner::ApiGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
     env(
         "FLARE_API_GATEWAY_SERVER_PORT",
         EnvOwner::ApiGateway,
