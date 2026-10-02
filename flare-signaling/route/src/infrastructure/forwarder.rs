@@ -87,19 +87,32 @@ impl BusinessGrpcClients {
     }
 }
 
-/// 下游拒绝消息（策略拒绝、参数或权限不符）：是业务结果而不是故障，按 INFO 记。
-fn is_business_rejection(code: tonic::Code) -> bool {
-    matches!(
-        code,
-        tonic::Code::FailedPrecondition
-            | tonic::Code::PermissionDenied
-            | tonic::Code::InvalidArgument
-            | tonic::Code::NotFound
-            | tonic::Code::AlreadyExists
-            | tonic::Code::ResourceExhausted
-            | tonic::Code::Unauthenticated
-            | tonic::Code::OutOfRange
-    )
+/// 下游回的失败按什么级别记日志。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendFailureLogLevel {
+    /// 可归因于调用方的业务结果（策略拒绝、参数不符、对象不存在），不是故障。
+    Info,
+    /// 可能是调用方造成，也可能掩盖本侧故障：`UNAUTHENTICATED`、`PERMISSION_DENIED` 可能是
+    /// 内部签名上下文或租户配置出错，限流、重复与越界需要留意。
+    Warn,
+    /// 下游或传输故障。
+    Error,
+}
+
+/// 只把 `FAILED_PRECONDITION`、`INVALID_ARGUMENT`、`NOT_FOUND` 降为 INFO；签名、权限类
+/// 状态码记 WARN，免得内部签名上下文或租户配置故障被当成业务拒绝埋掉。
+fn send_failure_log_level(code: tonic::Code) -> SendFailureLogLevel {
+    match code {
+        tonic::Code::FailedPrecondition | tonic::Code::InvalidArgument | tonic::Code::NotFound => {
+            SendFailureLogLevel::Info
+        }
+        tonic::Code::Unauthenticated
+        | tonic::Code::PermissionDenied
+        | tonic::Code::AlreadyExists
+        | tonic::Code::ResourceExhausted
+        | tonic::Code::OutOfRange => SendFailureLogLevel::Warn,
+        _ => SendFailureLogLevel::Error,
+    }
 }
 
 /// 缓存的客户端条目
@@ -642,8 +655,8 @@ impl MessageForwarder {
         let response = match business_clients.send.send_message(grpc_request).await {
             Ok(resp) => resp,
             Err(e) => {
-                if is_business_rejection(e.code()) {
-                    info!(
+                match send_failure_log_level(e.code()) {
+                    SendFailureLogLevel::Info => info!(
                         message_id = %message_id,
                         message_type = message_type,
                         conversation_id = %conversation_id_for_log,
@@ -652,26 +665,37 @@ impl MessageForwarder {
                         error_code = ?e.code(),
                         error_message = %e.message(),
                         "Business service rejected the message"
-                    );
-                } else {
-                    tracing::error!(
+                    ),
+                    SendFailureLogLevel::Warn => tracing::warn!(
                         message_id = %message_id,
                         message_type = message_type,
                         conversation_id = %conversation_id_for_log,
                         svid = %resolved_svid,
                         endpoint = %endpoint,
-                        error = %e,
                         error_code = ?e.code(),
                         error_message = %e.message(),
-                        "Failed to send message to business service"
-                    );
-                    self.forget_clients_after_failure(
-                        resolved_svid,
-                        &endpoint,
-                        &business_clients,
-                        &e,
-                    )
-                    .await;
+                        "Business service refused the message (check signing context and tenant configuration if unexpected)"
+                    ),
+                    SendFailureLogLevel::Error => {
+                        tracing::error!(
+                            message_id = %message_id,
+                            message_type = message_type,
+                            conversation_id = %conversation_id_for_log,
+                            svid = %resolved_svid,
+                            endpoint = %endpoint,
+                            error = %e,
+                            error_code = ?e.code(),
+                            error_message = %e.message(),
+                            "Failed to send message to business service"
+                        );
+                        self.forget_clients_after_failure(
+                            resolved_svid,
+                            &endpoint,
+                            &business_clients,
+                            &e,
+                        )
+                        .await;
+                    }
                 }
                 if let Ok(detail) = flare_proto::common::ErrorDetail::decode(e.details()) {
                     let code = ErrorCode::from_u32(detail.code.max(0) as u32)
@@ -996,7 +1020,10 @@ mod business_channel_tests {
         // 对端回的业务拒绝：不是传输层失败，缓存保留。
         let rejected = send(&mut clients).await.expect_err("fake ingest rejects");
         assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
-        assert!(is_business_rejection(rejected.code()));
+        assert_eq!(
+            send_failure_log_level(rejected.code()),
+            SendFailureLogLevel::Info
+        );
         assert!(
             !forwarder
                 .forget_clients_after_failure(svid, &authority, &clients, &rejected)
@@ -1016,7 +1043,11 @@ mod business_channel_tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
         let failed = send(&mut clients).await.expect_err("stopped ingest");
         assert!(is_transport_failure(&failed), "{failed:?}");
-        assert!(!is_business_rejection(failed.code()), "{failed:?}");
+        assert_eq!(
+            send_failure_log_level(failed.code()),
+            SendFailureLogLevel::Error,
+            "{failed:?}"
+        );
         assert!(
             forwarder
                 .forget_clients_after_failure(svid, &authority, &clients, &failed)
@@ -1036,10 +1067,14 @@ mod business_channel_tests {
     fn only_caller_attributable_statuses_count_as_business_rejections() {
         for code in [
             tonic::Code::FailedPrecondition,
-            tonic::Code::PermissionDenied,
             tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
         ] {
-            assert!(is_business_rejection(code), "{code:?}");
+            assert_eq!(
+                send_failure_log_level(code),
+                SendFailureLogLevel::Info,
+                "{code:?}"
+            );
         }
         for code in [
             tonic::Code::Unknown,
@@ -1047,7 +1082,30 @@ mod business_channel_tests {
             tonic::Code::Unavailable,
             tonic::Code::DeadlineExceeded,
         ] {
-            assert!(!is_business_rejection(code), "{code:?}");
+            assert_eq!(
+                send_failure_log_level(code),
+                SendFailureLogLevel::Error,
+                "{code:?}"
+            );
+        }
+    }
+
+    /// ingest 回的 `UNAUTHENTICATED`、`PERMISSION_DENIED` 可能是内部签名上下文或租户配置
+    /// 故障，不降为 INFO（W8-C 复审：以前与策略拒绝一起记 INFO）。
+    #[test]
+    fn auth_and_permission_statuses_stay_visible() {
+        for code in [
+            tonic::Code::Unauthenticated,
+            tonic::Code::PermissionDenied,
+            tonic::Code::AlreadyExists,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::OutOfRange,
+        ] {
+            assert_eq!(
+                send_failure_log_level(code),
+                SendFailureLogLevel::Warn,
+                "{code:?}"
+            );
         }
     }
 }
