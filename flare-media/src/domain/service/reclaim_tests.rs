@@ -1546,3 +1546,101 @@ async fn a_completion_overtaken_by_a_finished_one_answers_the_registered_file() 
     assert_eq!(f.bucket.merge_requests.lock().unwrap().len(), 1);
     assert!(f.stored_session(&state.upload_id).await.is_none());
 }
+
+/// 合并比领取租期还长（超大分片合并）：完成在合并期间按租期的五分之一续租，原租期过去
+/// 几倍之后另一次完成仍得到可重试的拒绝，不再合并、不再登记；会话的租期与有效期都被后推。
+/// 修复前租期固定、合并中不续，租期一过另一次完成就能再领取，两次都合并、都登记（第二次
+/// 合并时存储报 NoSuchUpload，接着按已在的对象再登记一遍）。
+#[tokio::test]
+async fn a_merge_outlasting_the_completion_lease_keeps_its_claim() {
+    let (mut f, metadata) = fixture_counting_saves();
+    let lease = Duration::milliseconds(300);
+    f.service.set_direct_completion_lease(lease);
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.bucket.merge_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+
+    let owner = owner();
+    let (first, (held, second)) = tokio::join!(
+        f.service.complete_direct_upload(&owner, &state.upload_id),
+        async {
+            entered.notified().await;
+            let claimed = f.stored_session(&state.upload_id).await.unwrap();
+            // 合并停在存储里，原租期过去三倍有余。
+            tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+            let held = f.stored_session(&state.upload_id).await.unwrap();
+            let second = f
+                .service
+                .complete_direct_upload(&owner, &state.upload_id)
+                .await;
+            release.notify_one();
+            ((claimed, held), second)
+        }
+    );
+    let (claimed, held) = held;
+    let err = second.unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable), "{err}");
+    let claimed_lease = claimed.completion.unwrap().lease_until;
+    let held_claim = held.completion.unwrap();
+    assert!(
+        held_claim.lease_until > claimed_lease + Duration::milliseconds(500),
+        "lease not renewed: {claimed_lease} -> {}",
+        held_claim.lease_until
+    );
+    assert!(
+        held.expires_at > claimed.expires_at,
+        "expiry not pushed back"
+    );
+    let saved = first.unwrap();
+    assert_eq!(saved.file_size, declared);
+    assert_eq!(*metadata.saves.lock().unwrap(), 1);
+    assert_eq!(f.bucket.merge_requests.lock().unwrap().len(), 1);
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+}
+
+/// 续租过的完成因调用方错误失败（合并被存储拒绝）：交还领取时连同续租后推的有效期一并
+/// 换回领取前的有效期，续租不能让反复失败的完成给会话续命。
+#[tokio::test]
+async fn a_renewed_completion_that_fails_still_returns_the_extension() {
+    let mut f = Fixture::new();
+    f.service
+        .set_direct_completion_lease(Duration::milliseconds(100));
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    let mut session = f.stored_session(&state.upload_id).await.unwrap();
+    session.expires_at = Utc::now() + Duration::seconds(60);
+    f.sessions.upsert_session(&session).await.unwrap();
+    let expires_at = session.expires_at;
+    // 分片上传已不在：合并被存储拒绝（参数错误），合并出的对象也不在。
+    f.bucket
+        .aborted
+        .lock()
+        .unwrap()
+        .push((state.object_key.clone(), STORAGE_UPLOAD_ID.to_string()));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.bucket.merge_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+
+    let owner = owner();
+    let (completed, renewed) = tokio::join!(
+        f.service.complete_direct_upload(&owner, &state.upload_id),
+        async {
+            entered.notified().await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let renewed = f.stored_session(&state.upload_id).await.unwrap();
+            release.notify_one();
+            renewed
+        }
+    );
+    let err = completed.unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert!(renewed.expires_at > expires_at);
+    let kept = f.stored_session(&state.upload_id).await.unwrap();
+    assert_eq!(kept.expires_at, expires_at);
+    assert!(kept.completion.is_none());
+}

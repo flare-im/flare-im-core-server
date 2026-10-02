@@ -454,27 +454,24 @@ impl MediaService {
         };
         let mut session = claim.session.clone();
 
-        let outcome = match transport_kind {
-            DirectUploadTransportKind::SinglePut => Ok(()),
-            DirectUploadTransportKind::MultipartPut => {
+        let work = async {
+            if transport_kind == DirectUploadTransportKind::MultipartPut {
                 self.merge_direct_parts(store.as_ref(), &mut session, &object_key, file_size)
-                    .await
+                    .await?;
             }
+            self.persist_direct_upload_metadata(
+                ctx,
+                &session,
+                &bucket,
+                &object_key,
+                &file_id,
+                file_size,
+            )
+            .await
         };
-        let outcome = match outcome {
-            Ok(()) => {
-                self.persist_direct_upload_metadata(
-                    ctx,
-                    &session,
-                    &bucket,
-                    &object_key,
-                    &file_id,
-                    file_size,
-                )
-                .await
-            }
-            Err(err) => Err(err),
-        };
+        let outcome = self
+            .hold_direct_completion(store.as_ref(), &claim, work)
+            .await;
         match outcome {
             Ok(metadata) => {
                 Self::finish_direct_session(store.as_ref(), &mut session).await;
@@ -522,9 +519,13 @@ impl MediaService {
 /// 把分片会话标为中止的写入次数上限（含第一次）。
 pub(super) const ABORT_MARK_ATTEMPTS: u32 = 3;
 
-/// 一次直传完成的领取租期：领取者中途退出时，这么久之后另一次完成才能领取。合并与登记
-/// 通常几秒内结束。
+/// 一次直传完成的领取租期：领取者中途退出（不再续租）时，这么久之后另一次完成才能领取。
+/// 合并与登记期间每过租期的五分之一续租一次，超大分片合并比租期长也不会被另一次完成
+/// 领走（见 [`MediaService::hold_direct_completion`]）。
 pub(super) const DIRECT_COMPLETION_LEASE_SECONDS: i64 = 300;
+
+/// 续租间隔的下限：测试把租期缩到毫秒级时也不忙等。
+const MIN_COMPLETION_RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// 领到的一次直传完成。
 pub(super) struct DirectCompletionClaim {
@@ -534,6 +535,25 @@ pub(super) struct DirectCompletionClaim {
     pub(super) token: String,
     /// 领取前的有效期：完成因调用方错误失败时交还续出的那段。
     pub(super) expires_before: DateTime<Utc>,
+    /// 这次完成最近一次写入的有效期（领取时写入，续租时后推）：交还时会话的有效期仍是它，
+    /// 才说明其间没有别人改过，可以换回 `expires_before`。
+    pub(super) renewed_until: std::sync::Mutex<DateTime<Utc>>,
+}
+
+impl DirectCompletionClaim {
+    fn renewed_until(&self) -> DateTime<Utc> {
+        *self
+            .renewed_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_renewed_until(&self, expires_at: DateTime<Utc>) {
+        *self
+            .renewed_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = expires_at;
+    }
 }
 
 impl MediaService {
@@ -570,8 +590,8 @@ impl MediaService {
         upload_id: &str,
     ) -> Result<DirectCompletionClaim> {
         let token = Uuid::new_v4().to_string();
-        let ttl = Duration::seconds(self.config.chunk_ttl_seconds.max(300));
-        let lease = Duration::seconds(DIRECT_COMPLETION_LEASE_SECONDS);
+        let ttl = self.direct_session_ttl();
+        let lease = self.direct_completion_lease;
         let expires_before = std::sync::Mutex::new(None);
         let session = store
             .update_session(upload_id, &|current| {
@@ -616,10 +636,104 @@ impl MediaService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .unwrap_or(session.expires_at);
         Ok(DirectCompletionClaim {
+            renewed_until: std::sync::Mutex::new(session.expires_at),
             session,
             token,
             expires_before,
         })
+    }
+
+    /// 完成领取与续租给会话的有效期：至少 5 分钟。
+    fn direct_session_ttl(&self) -> Duration {
+        Duration::seconds(self.config.chunk_ttl_seconds.max(300))
+    }
+
+    /// 在持有领取的情况下跑完 `work`（合并与登记），其间每过租期的五分之一续租一次。超大
+    /// 分片合并可能比租期还长：不续租时租期一过，另一次完成就能再领取、再合并、再登记一次。
+    /// 续租只在领取仍是这次的时写入；领取已不在（会话被删、被标为中止或已被取代）就不再续，
+    /// 只等 `work` 结束。
+    async fn hold_direct_completion<T>(
+        &self,
+        store: &dyn crate::domain::repository::UploadSessionStore,
+        claim: &DirectCompletionClaim,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let period = (self.direct_completion_lease / 5)
+            .to_std()
+            .unwrap_or(MIN_COMPLETION_RENEW_INTERVAL)
+            .max(MIN_COMPLETION_RENEW_INTERVAL);
+        let renew = async {
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if !self.renew_direct_completion(store, claim).await {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            outcome = work => outcome,
+            _ = renew => unreachable!("completion renewal never finishes on its own"),
+        }
+    }
+
+    /// 续租一次：领取仍是这次的、会话仍待完成时把租期与有效期往后推。返回是否还持有领取；
+    /// 写入失败（存储暂时不可用）按仍持有处理，下一次再试，租期内总有几次机会。
+    async fn renew_direct_completion(
+        &self,
+        store: &dyn crate::domain::repository::UploadSessionStore,
+        claim: &DirectCompletionClaim,
+    ) -> bool {
+        let lease = self.direct_completion_lease;
+        let ttl = self.direct_session_ttl();
+        let renewed = store
+            .update_session(&claim.session.upload_id, &|current| {
+                let ours = current.completion.as_ref().map(|c| c.token.as_str())
+                    == Some(claim.token.as_str());
+                if !ours || current.status != UploadSessionStatus::Pending {
+                    return Ok(false);
+                }
+                let now = Utc::now();
+                current.completion = Some(CompletionClaim {
+                    token: claim.token.clone(),
+                    lease_until: now + lease,
+                });
+                current.expires_at = current.expires_at.max(now + ttl);
+                current.updated_at = now;
+                Ok(true)
+            })
+            .await;
+        match renewed {
+            Ok(Some(session))
+                if session.status == UploadSessionStatus::Pending
+                    && session
+                        .completion
+                        .as_ref()
+                        .is_some_and(|c| c.token == claim.token) =>
+            {
+                claim.set_renewed_until(session.expires_at);
+                true
+            }
+            // 会话已被这次完成自己删掉（合并出的对象大小不符）：没什么可续的。
+            Ok(None) => false,
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    upload_id = %claim.session.upload_id,
+                    "direct upload completion no longer holds its claim; renewal stopped"
+                );
+                false
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    upload_id = %claim.session.upload_id,
+                    "failed to renew a direct upload completion; retrying at the next interval"
+                );
+                true
+            }
+        }
     }
 
     /// 完成失败后交还领取，另一次完成随即可以领取。失败是调用方错误（参数错误）时连这次
@@ -631,7 +745,7 @@ impl MediaService {
         err: &flare_server_core::error::FlareError,
     ) {
         let restore = err.code() == Some(ErrorCode::InvalidParameter);
-        let renewed_until = claim.session.expires_at;
+        let renewed_until = claim.renewed_until();
         let result = store
             .update_session(&claim.session.upload_id, &|current| {
                 if current.completion.as_ref().map(|c| c.token.as_str())

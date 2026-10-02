@@ -49,6 +49,8 @@ pub struct MediaService {
     upload_conversation_store: Option<UploadSessionStoreRef>,
     local_store: Option<LocalStoreRef>,
     config: MediaDomainConfig,
+    /// 直传完成的领取租期；合并与登记期间按它的五分之一续租。
+    direct_completion_lease: Duration,
 }
 
 impl MediaService {
@@ -77,7 +79,14 @@ impl MediaService {
             upload_conversation_store,
             local_store,
             config,
+            direct_completion_lease: Duration::seconds(direct::DIRECT_COMPLETION_LEASE_SECONDS),
         }
+    }
+
+    /// 测试用：缩短直传完成的领取租期，在毫秒级观察续租。
+    #[cfg(test)]
+    pub(crate) fn set_direct_completion_lease(&mut self, lease: Duration) {
+        self.direct_completion_lease = lease;
     }
 }
 
