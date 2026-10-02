@@ -2,7 +2,7 @@
 //!
 //! 提供Hook配置的数据库存储和查询能力
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -75,6 +75,43 @@ impl TryFrom<HookConfigRow> for HookConfigItem {
             metadata,
         })
     }
+}
+
+/// 按租户分桶的 Hook 配置行（见 [`PostgresHookConfigRepository::load_by_tenant`]）。
+#[derive(Debug, Clone, Default)]
+pub struct TenantHookRows {
+    /// `tenant_id IS NULL` 的行：对所有租户生效。
+    pub global: HookConfig,
+    /// 各租户自己登记的行，键为 `tenant_id`。
+    pub tenants: HashMap<String, HookConfig>,
+    /// 有行解析失败的租户：调用方沿用该租户上一版配置。
+    pub failed_tenants: HashSet<String>,
+}
+
+/// 把一行按 `hook_type` 放进对应列表；未知类型只告警。
+fn push_row(config: &mut HookConfig, row: HookConfigRow) -> Result<()> {
+    let hook_type = row.hook_type.clone();
+    let hook_item: HookConfigItem = row.try_into()?;
+    match hook_type.as_str() {
+        "pre_send" => config.pre_send.push(hook_item),
+        "post_send" => config.post_send.push(hook_item),
+        "delivery" => config.delivery.push(hook_item),
+        "recall" => config.recall.push(hook_item),
+        "session_create" => config.session_create.push(hook_item),
+        "session_update" => config.session_update.push(hook_item),
+        "session_delete" => config.session_delete.push(hook_item),
+        "user_login" => config.user_login.push(hook_item),
+        "user_logout" => config.user_logout.push(hook_item),
+        "user_online" => config.user_online.push(hook_item),
+        "user_offline" => config.user_offline.push(hook_item),
+        "push_pre_send" => config.push_pre_send.push(hook_item),
+        "push_post_send" => config.push_post_send.push(hook_item),
+        "push_delivery" => config.push_delivery.push(hook_item),
+        _ => {
+            tracing::warn!(hook_type = %hook_type, "Unknown hook type");
+        }
+    }
+    Ok(())
 }
 
 /// Hook配置数据库仓储
@@ -164,29 +201,84 @@ impl PostgresHookConfigRepository {
         let mut config = HookConfig::default();
 
         for row in query {
-            let hook_type = row.hook_type.clone();
-            let hook_item: HookConfigItem = row.try_into()?;
-            match hook_type.as_str() {
-                "pre_send" => config.pre_send.push(hook_item),
-                "post_send" => config.post_send.push(hook_item),
-                "delivery" => config.delivery.push(hook_item),
-                "recall" => config.recall.push(hook_item),
-                "session_create" => config.session_create.push(hook_item),
-                "session_update" => config.session_update.push(hook_item),
-                "session_delete" => config.session_delete.push(hook_item),
-                "user_login" => config.user_login.push(hook_item),
-                "user_logout" => config.user_logout.push(hook_item),
-                "user_online" => config.user_online.push(hook_item),
-                "user_offline" => config.user_offline.push(hook_item),
-                "push_pre_send" => config.push_pre_send.push(hook_item),
-                "push_post_send" => config.push_post_send.push(hook_item),
-                "push_delivery" => config.push_delivery.push(hook_item),
-                _ => {
-                    tracing::warn!(hook_type = %hook_type, "Unknown hook type");
+            push_row(&mut config, row)?;
+        }
+
+        Ok(config)
+    }
+
+    /// 按租户分桶加载所有启用的 Hook 配置（多租户进程，未设 `TENANT_ID` 时用）。
+    ///
+    /// `tenant_id IS NULL` 的行进全局桶，对所有租户生效；其余每个租户一个桶，只含该租户登记
+    /// 的行。全局行解析失败时整次加载失败（与 [`Self::load_all`] 相同）；某个租户的行解析失败
+    /// 只记入 [`TenantHookRows::failed_tenants`]，不影响其他租户。
+    pub async fn load_by_tenant(&self) -> Result<TenantHookRows> {
+        let rows = sqlx::query_as::<_, HookConfigRow>(
+            r#"
+            SELECT * FROM hook_configs
+            WHERE enabled = true
+            ORDER BY hook_type, priority ASC, id ASC
+            "#,
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to fetch hook configs: {}",
+                e
+            ))
+        })?;
+
+        let mut loaded = TenantHookRows::default();
+        for row in rows {
+            match row.tenant_id.clone() {
+                None => push_row(&mut loaded.global, row)?,
+                Some(tenant) => {
+                    if loaded.failed_tenants.contains(&tenant) {
+                        continue;
+                    }
+                    let row_id = row.id;
+                    let bucket = loaded.tenants.entry(tenant.clone()).or_default();
+                    if let Err(error) = push_row(bucket, row) {
+                        tracing::error!(
+                            tenant_id = %tenant,
+                            row_id,
+                            %error,
+                            "invalid tenant hook config row; keeping that tenant's previous hooks"
+                        );
+                        loaded.tenants.remove(&tenant);
+                        loaded.failed_tenants.insert(tenant);
+                    }
                 }
             }
         }
+        Ok(loaded)
+    }
 
+    /// 只加载一个租户自己登记的启用行（不含全局行），供 Administer 写入后按租户重载。
+    pub async fn load_tenant(&self, tenant_id: &str) -> Result<HookConfig> {
+        let rows = sqlx::query_as::<_, HookConfigRow>(
+            r#"
+            SELECT * FROM hook_configs
+            WHERE enabled = true
+              AND tenant_id = $1
+            ORDER BY hook_type, priority ASC, id ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "failed to fetch tenant hook configs: {}",
+                e
+            ))
+        })?;
+
+        let mut config = HookConfig::default();
+        for row in rows {
+            push_row(&mut config, row)?;
+        }
         Ok(config)
     }
 

@@ -116,6 +116,16 @@ That asymmetry is deliberate. A hook sits in the critical path of every message
 and can reject traffic; letting an arbitrary process insert itself there by
 announcing would be a way to take the system down from outside.
 
+The Capability service's hook engine also runs the hooks tenants register through
+`CapabilityService/Administer` (`hook_config.*`). Rows without a tenant (and the
+Capability configuration file) apply to every tenant; a tenant's rows apply only to
+that tenant's events, and override a global hook of the same name for that tenant
+only. A non-empty `selector.tenants` further limits a hook to the listed tenants. A
+write through Administer reloads that tenant's hooks at once; other changes arrive
+with the periodic refresh (60 s by default). A Capability process started with
+`TENANT_ID` keeps the single-tenant behaviour: it loads the global rows and that
+tenant's rows only.
+
 ## 7. Context
 
 ### HTTP Hook signature
@@ -155,6 +165,17 @@ side effects by message/event identity. TLS remains required outside local tests
 
 `HookInvocationContext` carries tenant, user and trace identity. Flare calls you
 out of process, so nothing restores this for you — read it from the request.
+
+### Calling the Capability service's HookPlugin
+
+The Capability service's `HookPlugin` accepts only Cell-signed callers: each `Call`
+must carry the `x-flare-ctx` token the caller received (verified with
+`FLARE_INTERNAL_CTX_PUBLIC_KEY`; the Message Ingest hook adapter forwards it
+unchanged). A missing or unverifiable token, or a service started without the public
+key, gets `UNAUTHENTICATED`. A `HookInvocationContext` whose `tenant_id` differs from
+the signed tenant, or whose `operator_user_id` differs from a signed user, gets
+`PERMISSION_DENIED`; `pre_send` accepts only a signed user. Hooks are selected by the
+signed tenant, and the hooks it runs see the signed identity, not the request body's.
 
 Do not trust the draft's author field as an identity assertion; use the context.
 

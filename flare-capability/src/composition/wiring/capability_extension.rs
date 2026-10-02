@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use flare_im_service_kit::control_auth::ConsoleControlVerifier;
-use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::Result;
 use sqlx::PgPool;
 
+use super::internal_ctx::internal_ctx_verifier_from_env;
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::infrastructure::capability::DispatchRateLimiter;
 use crate::infrastructure::capability::PluginRouteBook;
@@ -102,22 +102,7 @@ pub async fn init_capability_extension_stack(
 
     register_discovered_media_plugins(&registry, &plugin_routes, runtime.as_ref()).await?;
 
-    let dispatch_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
-        Ok(key) => Some(SignedContextVerifier::from_public_key(&key).map_err(|_| {
-            flare_server_core::error::FlareError::system(
-                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for Capability Dispatch",
-            )
-        })?),
-        Err(std::env::VarError::NotPresent) => {
-            tracing::warn!("Capability Dispatch disabled: FLARE_INTERNAL_CTX_PUBLIC_KEY missing");
-            None
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(flare_server_core::error::FlareError::system(
-                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
-            ));
-        }
-    };
+    let dispatch_verifier = internal_ctx_verifier_from_env("Capability Dispatch")?;
 
     let control_verifier = ConsoleControlVerifier::from_env().map_err(|_| {
         flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")

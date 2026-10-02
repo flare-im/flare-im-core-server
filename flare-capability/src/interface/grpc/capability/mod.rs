@@ -2,5 +2,7 @@
 
 mod administer;
 mod service;
+#[cfg(test)]
+mod tenant_hooks_pg_tests;
 
 pub use service::{CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot};

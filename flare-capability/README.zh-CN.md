@@ -207,19 +207,25 @@ backoff_strategy = "exponential"
 Hook 配置支持多租户场景：
 
 - **租户隔离**：每个租户可以有独立的Hook配置
-- **全局配置**：`tenant_id`为`NULL`的配置对所有租户生效
-- **租户配置**：特定租户的配置会覆盖全局配置
+- **全局配置**：`tenant_id`为`NULL`的配置（以及配置文件）对所有租户生效
+- **租户配置**：特定租户的配置覆盖同名的全局配置，只对该租户
+- **选择器**：`selector.tenants` 非空时，Hook 只作用于所列租户
 
-**查询逻辑**：
+**加载与执行**（未设 `TENANT_ID` 的进程，即多租户默认）：数据库加载器把全局行作为全局配置，
+各租户经 `CapabilityService/Administer` 登记的行按租户分桶。`HookPlugin.Call` 按调用方签名
+上下文里的租户选 Hook：全局配置加该租户的桶。某个租户的行无效时只让该租户停在上一版配置；
+某个配置源加载失败时沿用它上一次加载的结果。Administer 写入后立即重载该租户的桶。设了
+`TENANT_ID` 的进程保持单租户行为，加载下面这些行作为全局配置：
 ```sql
--- 查询租户配置时，会同时返回：
--- 1. 全局配置（tenant_id IS NULL）
--- 2. 租户特定配置（tenant_id = 'tenant-a'）
 SELECT * FROM hook_configs
 WHERE enabled = true
   AND (tenant_id IS NULL OR tenant_id = 'tenant-a')
 ORDER BY hook_type, priority ASC
 ```
+
+**调用方**：`HookPlugin.Call` 只认 Cell 签名的上下文（`x-flare-ctx`，用
+`FLARE_INTERNAL_CTX_PUBLIC_KEY` 验签）。没有或验不过签名回 `UNAUTHENTICATED`；请求体里的租户或
+用户与签名不一致回 `PERMISSION_DENIED`。没有配置公钥时所有调用都被拒绝。
 
 ## 配置刷新
 

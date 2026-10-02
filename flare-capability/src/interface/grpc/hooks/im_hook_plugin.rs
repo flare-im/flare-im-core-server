@@ -5,20 +5,21 @@ use flare_grpc_proto::capability::{
     ConversationLifecycleHookRequest, ConversationLifecycleHookResponse,
     ConversationMemberHookRequest, ConversationMemberHookResponse, CustomHookRequest,
     CustomHookResponse, DeliveryHookRequest, DeliveryHookResponse, GenericRequest, GenericResponse,
-    HookDeliveryEvent, HookInvocationContext, HookMessageRecord, HookRecallEvent,
-    MessageReactionHookRequest, MessageReactionHookResponse, MessageReadHookRequest,
-    MessageReadHookResponse, PostSendHookRequest, PostSendHookResponse, PreSendHookRequest,
-    PreSendHookResponse, PresenceHookRequest, PresenceHookResponse, PushDeliveryHookRequest,
-    PushDeliveryHookResponse, PushPostSendHookRequest, PushPostSendHookResponse,
-    PushPreSendHookRequest, PushPreSendHookResponse, RecallHookRequest, RecallHookResponse,
-    UserLoginHookRequest, UserLoginHookResponse, UserLogoutHookRequest, UserLogoutHookResponse,
-    UserOfflineHookRequest, UserOfflineHookResponse, UserOnlineHookRequest, UserOnlineHookResponse,
+    HookDeliveryEvent, HookMessageRecord, HookRecallEvent, MessageReactionHookRequest,
+    MessageReactionHookResponse, MessageReadHookRequest, MessageReadHookResponse,
+    PostSendHookRequest, PostSendHookResponse, PreSendHookRequest, PreSendHookResponse,
+    PresenceHookRequest, PresenceHookResponse, PushDeliveryHookRequest, PushDeliveryHookResponse,
+    PushPostSendHookRequest, PushPostSendHookResponse, PushPreSendHookRequest,
+    PushPreSendHookResponse, RecallHookRequest, RecallHookResponse, UserLoginHookRequest,
+    UserLoginHookResponse, UserLogoutHookRequest, UserLogoutHookResponse, UserOfflineHookRequest,
+    UserOfflineHookResponse, UserOnlineHookRequest, UserOnlineHookResponse,
 };
 use flare_server_core::error::Result as FlareResult;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use super::caller::{HookCaller, PRE_SEND_OPERATION};
 use crate::application::commands::materialize_hook_execution_plan;
 use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
@@ -30,7 +31,7 @@ use crate::infrastructure::adapters::conversion::{
 };
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, evaluate_pre_send_guards};
 use flare_im_hooks::{DeliveryEvent, MessageRecord, PreSendDecision, RecallEvent};
-use flare_server_core::context::Context;
+use flare_server_core::SignedContextVerifier;
 
 fn proto_conversation_type_wire_name(value: i32) -> Option<&'static str> {
     use flare_proto::common::ConversationType;
@@ -124,31 +125,33 @@ fn recall_response(decision: PreSendDecision) -> Result<RecallHookResponse, Stat
 }
 
 /// IM `HookPlugin` gRPC 适配器（接口层 → 应用命令 / 编排）。
+///
+/// 每个 `Call` 先验调用方的签名上下文（见 [`HookCaller`]）：没有验签公钥、没有或验不过签名都回
+/// `UNAUTHENTICATED`；执行哪些 Hook、Hook 看到的租户与用户都只按签名。
 pub struct ImHookPluginServer {
     command_handler: Arc<HookCommandHandler>,
     registry: Arc<CoreHookRegistry>,
     adapter_factory: Arc<HookAdapterFactory>,
     capability_registry: CapabilityExtensionRegistry,
+    verifier: Option<SignedContextVerifier>,
 }
 
 impl ImHookPluginServer {
+    /// `verifier` 验 Cell 签名的上下文（`FLARE_INTERNAL_CTX_PUBLIC_KEY`）；为 `None` 时所有调用都被拒绝。
     pub fn new(
         command_handler: Arc<HookCommandHandler>,
         registry: Arc<CoreHookRegistry>,
         adapter_factory: Arc<HookAdapterFactory>,
         capability_registry: CapabilityExtensionRegistry,
+        verifier: Option<SignedContextVerifier>,
     ) -> Self {
         Self {
             command_handler,
             registry,
             adapter_factory,
             capability_registry,
+            verifier,
         }
-    }
-
-    /// 将 protobuf HookInvocationContext 转换为 flare_server_core::Context
-    fn proto_to_context(proto: &HookInvocationContext) -> Context {
-        crate::infrastructure::adapters::conversion::proto_to_context(proto)
     }
 
     /// 将 protobuf HookMessageRecord 转换为 MessageRecord
@@ -227,8 +230,9 @@ impl ImHookPluginServer {
 }
 
 impl ImHookPluginServer {
-    pub async fn grpc_invoke_pre_send(
+    pub(crate) async fn grpc_invoke_pre_send(
         &self,
+        caller: &HookCaller,
         request: Request<PreSendHookRequest>,
     ) -> Result<Response<PreSendHookResponse>, Status> {
         let req = request.into_inner();
@@ -240,7 +244,8 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, PRE_SEND_OPERATION)?;
+        let context = caller.signed_invocation_context(&context);
         let mut message_draft = proto_to_message_draft(&draft);
 
         // PreSend Guard（好友关系等能力扩展校验）
@@ -273,7 +278,7 @@ impl ImHookPluginServer {
         // 获取PreSend Hook列表
         let hooks = self
             .registry
-            .get_pre_send_hooks()
+            .get_pre_send_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -305,8 +310,9 @@ impl ImHookPluginServer {
         pre_send_response(decision, draft).map(Response::new)
     }
 
-    pub async fn grpc_invoke_post_send(
+    pub(crate) async fn grpc_invoke_post_send(
         &self,
+        caller: &HookCaller,
         request: Request<PostSendHookRequest>,
     ) -> Result<Response<PostSendHookResponse>, Status> {
         let req = request.into_inner();
@@ -321,7 +327,7 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.post_send")?;
         let message_record = Self::proto_to_message_record(&record)
             .map_err(|e| Status::invalid_argument(format!("Invalid record: {}", e)))?;
         let message_draft = proto_to_message_draft(&draft);
@@ -329,7 +335,7 @@ impl ImHookPluginServer {
         // 获取PostSend Hook列表
         let hooks = self
             .registry
-            .get_post_send_hooks()
+            .get_post_send_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -363,8 +369,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_delivery(
+    pub(crate) async fn grpc_notify_delivery(
         &self,
+        caller: &HookCaller,
         request: Request<DeliveryHookRequest>,
     ) -> Result<Response<DeliveryHookResponse>, Status> {
         let req = request.into_inner();
@@ -376,14 +383,14 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.delivery")?;
         let delivery_event = Self::proto_to_delivery_event(&event)
             .map_err(|e| Status::invalid_argument(format!("Invalid event: {}", e)))?;
 
         // 获取Delivery Hook列表
         let hooks = self
             .registry
-            .get_delivery_hooks()
+            .get_delivery_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -414,8 +421,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_recall(
+    pub(crate) async fn grpc_notify_recall(
         &self,
+        caller: &HookCaller,
         request: Request<RecallHookRequest>,
     ) -> Result<Response<RecallHookResponse>, Status> {
         let req = request.into_inner();
@@ -427,14 +435,14 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.recall")?;
         let recall_event = Self::proto_to_recall_event(&event)
             .map_err(|e| Status::invalid_argument(format!("Invalid event: {}", e)))?;
 
         // 获取Recall Hook列表
         let hooks = self
             .registry
-            .get_recall_hooks()
+            .get_recall_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -463,8 +471,9 @@ impl ImHookPluginServer {
         recall_response(decision).map(Response::new)
     }
 
-    pub async fn grpc_notify_conversation_lifecycle(
+    pub(crate) async fn grpc_notify_conversation_lifecycle(
         &self,
+        caller: &HookCaller,
         request: Request<ConversationLifecycleHookRequest>,
     ) -> Result<Response<ConversationLifecycleHookResponse>, Status> {
         let req = request.into_inner();
@@ -476,12 +485,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.conversation_lifecycle")?;
 
         // 获取ConversationLifecycle Hook列表
         let hooks = self
             .registry
-            .get_conversation_lifecycle_hooks()
+            .get_conversation_lifecycle_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -521,8 +530,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_presence(
+    pub(crate) async fn grpc_notify_presence(
         &self,
+        caller: &HookCaller,
         request: Request<PresenceHookRequest>,
     ) -> Result<Response<PresenceHookResponse>, Status> {
         let req = request.into_inner();
@@ -534,7 +544,7 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.presence")?;
 
         // Presence Hook 目前没有专门的配置，记录日志
         use crate::infrastructure::adapters::hook_context_data::get_hook_context_data;
@@ -550,8 +560,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_invoke_custom(
+    pub(crate) async fn grpc_invoke_custom(
         &self,
+        caller: &HookCaller,
         request: Request<CustomHookRequest>,
     ) -> Result<Response<CustomHookResponse>, Status> {
         let req = request.into_inner();
@@ -562,7 +573,7 @@ impl ImHookPluginServer {
         let _payload = req.payload;
 
         // 转换为内部类型
-        let ctx = Self::proto_to_context(&context);
+        let ctx = caller.hook_context(&context, "flare.hook.v1.custom")?;
 
         // Custom Hook 目前没有专门的配置，记录日志
         tracing::trace!(
@@ -580,8 +591,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_invoke_push_pre_send(
+    pub(crate) async fn grpc_invoke_push_pre_send(
         &self,
+        caller: &HookCaller,
         request: Request<PushPreSendHookRequest>,
     ) -> Result<Response<PushPreSendHookResponse>, Status> {
         let req = request.into_inner();
@@ -593,12 +605,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&context);
+        let _ctx = caller.hook_context(&context, "flare.hook.v1.push_pre_send")?;
 
         // 获取PushPreSend Hook列表
         let hooks = self
             .registry
-            .get_push_pre_send_hooks()
+            .get_push_pre_send_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -640,8 +652,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_invoke_push_post_send(
+    pub(crate) async fn grpc_invoke_push_post_send(
         &self,
+        caller: &HookCaller,
         request: Request<PushPostSendHookRequest>,
     ) -> Result<Response<PushPostSendHookResponse>, Status> {
         let req = request.into_inner();
@@ -656,12 +669,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.push_post_send")?;
 
         // 获取PushPostSend Hook列表
         let hooks = self
             .registry
-            .get_push_post_send_hooks()
+            .get_push_post_send_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -697,8 +710,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_push_delivery(
+    pub(crate) async fn grpc_notify_push_delivery(
         &self,
+        caller: &HookCaller,
         request: Request<PushDeliveryHookRequest>,
     ) -> Result<Response<PushDeliveryHookResponse>, Status> {
         let req = request.into_inner();
@@ -710,12 +724,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.push_delivery")?;
 
         // 获取PushDelivery Hook列表
         let hooks = self
             .registry
-            .get_push_delivery_hooks()
+            .get_push_delivery_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -753,8 +767,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_user_login(
+    pub(crate) async fn grpc_notify_user_login(
         &self,
+        caller: &HookCaller,
         request: Request<UserLoginHookRequest>,
     ) -> Result<Response<UserLoginHookResponse>, Status> {
         let req = request.into_inner();
@@ -766,12 +781,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.user_login")?;
 
         // 获取UserLogin Hook列表
         let hooks = self
             .registry
-            .get_user_login_hooks()
+            .get_user_login_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -809,8 +824,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_user_logout(
+    pub(crate) async fn grpc_notify_user_logout(
         &self,
+        caller: &HookCaller,
         request: Request<UserLogoutHookRequest>,
     ) -> Result<Response<UserLogoutHookResponse>, Status> {
         let req = request.into_inner();
@@ -822,12 +838,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.user_logout")?;
 
         // 获取UserLogout Hook列表
         let hooks = self
             .registry
-            .get_user_logout_hooks()
+            .get_user_logout_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -861,8 +877,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_user_online(
+    pub(crate) async fn grpc_notify_user_online(
         &self,
+        caller: &HookCaller,
         request: Request<UserOnlineHookRequest>,
     ) -> Result<Response<UserOnlineHookResponse>, Status> {
         let req = request.into_inner();
@@ -874,12 +891,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.user_online")?;
 
         // 获取UserOnline Hook列表
         let hooks = self
             .registry
-            .get_user_online_hooks()
+            .get_user_online_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -913,8 +930,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_notify_user_offline(
+    pub(crate) async fn grpc_notify_user_offline(
         &self,
+        caller: &HookCaller,
         request: Request<UserOfflineHookRequest>,
     ) -> Result<Response<UserOfflineHookResponse>, Status> {
         let req = request.into_inner();
@@ -926,12 +944,12 @@ impl ImHookPluginServer {
             .ok_or_else(|| Status::invalid_argument("event is required"))?;
 
         // 转换为内部类型
-        let _ctx = Self::proto_to_context(&_context);
+        let _ctx = caller.hook_context(&_context, "flare.hook.v1.user_offline")?;
 
         // 获取UserOffline Hook列表
         let hooks = self
             .registry
-            .get_user_offline_hooks()
+            .get_user_offline_hooks(caller.tenant_id())
             .await
             .map_err(|e| Status::internal(format!("Failed to get hooks: {}", e)))?;
 
@@ -969,8 +987,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_on_message_read(
+    pub(crate) async fn grpc_on_message_read(
         &self,
+        _caller: &HookCaller,
         request: Request<MessageReadHookRequest>,
     ) -> Result<Response<MessageReadHookResponse>, Status> {
         let _ = request.into_inner();
@@ -980,8 +999,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_on_message_reaction(
+    pub(crate) async fn grpc_on_message_reaction(
         &self,
+        _caller: &HookCaller,
         request: Request<MessageReactionHookRequest>,
     ) -> Result<Response<MessageReactionHookResponse>, Status> {
         let _ = request.into_inner();
@@ -991,8 +1011,9 @@ impl ImHookPluginServer {
         }))
     }
 
-    pub async fn grpc_on_conversation_member(
+    pub(crate) async fn grpc_on_conversation_member(
         &self,
+        _caller: &HookCaller,
         request: Request<ConversationMemberHookRequest>,
     ) -> Result<Response<ConversationMemberHookResponse>, Status> {
         let _ = request.into_inner();
@@ -1011,6 +1032,7 @@ impl HookPlugin for ImHookPluginServer {
     ) -> Result<Response<GenericResponse>, Status> {
         use prost::Message;
 
+        let caller = HookCaller::verify(request.metadata(), self.verifier.as_ref())?;
         let outer = request.into_inner();
         let operation = outer.operation.clone();
         let request_id = outer.request_id.clone();
@@ -1040,7 +1062,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PreSendHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_invoke_pre_send(Request::new(inner))
+                .grpc_invoke_pre_send(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1053,7 +1075,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PostSendHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_invoke_post_send(Request::new(inner))
+                .grpc_invoke_post_send(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1066,7 +1088,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = DeliveryHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_delivery(Request::new(inner))
+                .grpc_notify_delivery(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1079,7 +1101,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = RecallHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_recall(Request::new(inner))
+                .grpc_notify_recall(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1092,7 +1114,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = MessageReadHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_on_message_read(Request::new(inner))
+                .grpc_on_message_read(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1105,7 +1127,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = MessageReactionHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_on_message_reaction(Request::new(inner))
+                .grpc_on_message_reaction(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1118,7 +1140,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = ConversationLifecycleHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_conversation_lifecycle(Request::new(inner))
+                .grpc_notify_conversation_lifecycle(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1131,7 +1153,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = ConversationMemberHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_on_conversation_member(Request::new(inner))
+                .grpc_on_conversation_member(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1144,7 +1166,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PresenceHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_presence(Request::new(inner))
+                .grpc_notify_presence(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1157,7 +1179,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = CustomHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_invoke_custom(Request::new(inner))
+                .grpc_invoke_custom(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1170,7 +1192,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PushPreSendHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_invoke_push_pre_send(Request::new(inner))
+                .grpc_invoke_push_pre_send(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1183,7 +1205,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PushPostSendHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_invoke_push_post_send(Request::new(inner))
+                .grpc_invoke_push_post_send(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1196,7 +1218,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = PushDeliveryHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_push_delivery(Request::new(inner))
+                .grpc_notify_push_delivery(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1209,7 +1231,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = UserLoginHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_user_login(Request::new(inner))
+                .grpc_notify_user_login(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1222,7 +1244,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = UserLogoutHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_user_logout(Request::new(inner))
+                .grpc_notify_user_logout(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1235,7 +1257,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = UserOnlineHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_user_online(Request::new(inner))
+                .grpc_notify_user_online(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1248,7 +1270,7 @@ impl HookPlugin for ImHookPluginServer {
             let inner = UserOfflineHookRequest::decode(payload.value.as_slice())
                 .map_err(|e| Status::invalid_argument(format!("decode request: {e}")))?;
             let rsp = self
-                .grpc_notify_user_offline(Request::new(inner))
+                .grpc_notify_user_offline(&caller, Request::new(inner))
                 .await?
                 .into_inner();
             return pack_response(
@@ -1281,15 +1303,15 @@ mod tests {
         };
         use crate::domain::service::HookOrchestrationService;
         use crate::infrastructure::config::ConfigWatcher;
-        use ed25519_dalek::SigningKey;
-        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use crate::interface::grpc::hooks::test_support::{
+            CellKeys, cell_keys, ingest_pre_send as ingest_pre_send_with, serve_hook_plugin,
+            signed_ctx,
+        };
         use flare_grpc_proto::capability::hook_plugin_server::HookPluginServer;
         use flare_grpc_proto::capability::{GenericResponse, HookMessageDraft};
-        use flare_im_hooks::hooks::adapters::GrpcHookFactory;
-        use flare_im_hooks::{MessageDraft, PreSendHook, is_pre_send_rejection};
-        use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
-        use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};
-        use flare_server_core::{SignedContextVerifier, error::FlareError};
+        use flare_im_hooks::is_pre_send_rejection;
+        use flare_server_core::SignedActorType;
+        use flare_server_core::error::FlareError;
         use prost::Message as _;
         use std::collections::HashMap;
         use tokio::net::TcpListener;
@@ -1429,7 +1451,11 @@ mod tests {
             }
         }
 
-        /// Capability 的 HookPlugin 服务，PreSend 只挂 `hook` 一条。
+        fn keys() -> CellKeys {
+            cell_keys(61)
+        }
+
+        /// Capability 的 HookPlugin 服务，PreSend 只挂 `hook` 一条；验 [`keys`] 的签名。
         async fn capability_with(hook: HookConfigItem) -> String {
             let watcher = Arc::new(ConfigWatcher::with_config(HookConfig {
                 pre_send: vec![hook],
@@ -1440,38 +1466,15 @@ mod tests {
                 Arc::new(CoreHookRegistry::new(watcher)),
                 Arc::new(HookAdapterFactory::new()),
                 CapabilityExtensionRegistry::new(),
+                Some(keys().verifier),
             );
-            serve(server).await
+            serve_hook_plugin(server).await
         }
 
-        /// Message Ingest 调 Hook 时的上下文：Cell 签名的用户身份（gRPC Hook 适配器要求）。
-        fn signed_user_ctx() -> flare_server_core::context::Ctx {
-            let key = SigningKey::from_bytes(&[61; 32]);
-            let private = key.to_pkcs8_pem(Default::default()).unwrap();
-            let public = key
-                .verifying_key()
-                .to_public_key_pem(Default::default())
-                .unwrap();
-            let signer = SignedContextSigner::from_private_key(&private).unwrap();
-            let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
-            let token = signer
-                .sign(&SignedContextIdentity::new(
-                    SignedActorType::User,
-                    "u1",
-                    "0",
-                    "req-hook-unavailable",
-                ))
-                .unwrap();
-            let mut metadata = tonic::metadata::MetadataMap::new();
-            metadata.insert("x-flare-ctx", token.parse().unwrap());
-            verify_signed_context_metadata(&metadata, &verifier).unwrap()
-        }
-
-        /// 以 Message Ingest 的 gRPC Hook 适配器调 Capability 的 PreSend。
+        /// 以 Message Ingest 的 gRPC Hook 适配器调 Capability 的 PreSend（Cell 签名的用户身份）。
         async fn ingest_pre_send(capability: &str) -> PreSendDecision {
-            let hook = GrpcHookFactory::new().build_pre_send(HashMap::new(), capability.into());
-            let mut draft = MessageDraft::new(b"hello".to_vec());
-            hook.handle(&signed_user_ctx(), &mut draft).await
+            let ctx = signed_ctx(&keys(), SignedActorType::User, "u1", "0");
+            ingest_pre_send_with(capability, &ctx, "m-hook-unavailable").await
         }
 
         /// 必需的下游 Hook 不可达：Message Ingest 得到的是不带策略拒绝标记的
@@ -1501,6 +1504,268 @@ mod tests {
                 }
                 PreSendDecision::Continue => panic!("a denying hook must not allow"),
             }
+        }
+    }
+
+    mod signed_caller_and_tenants {
+        //! HookPlugin 只认 Cell 签名的调用方（W10-S2 F3），并按签名租户选 Hook：租户登记的 Webhook
+        //! 只对本租户的事件触发，全局配置对所有租户生效（F1、F4）。
+        use super::super::*;
+        use crate::application::handler::HookCommandHandler;
+        use crate::domain::model::HookConfig;
+        use crate::domain::service::HookOrchestrationService;
+        use crate::infrastructure::config::{ConfigWatcher, HookConfigSnapshot};
+        use crate::interface::grpc::hooks::test_support::{
+            CellKeys, WebhookReceiver, cell_keys, ingest_pre_send, serve_hook_plugin, signed_ctx,
+            webhook_hook,
+        };
+        use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+        use flare_grpc_proto::capability::{HookInvocationContext, HookMessageDraft};
+        use flare_server_core::{SignedActorType, SignedContextIdentity};
+        use prost::Message as _;
+        use std::collections::HashMap;
+
+        fn keys() -> CellKeys {
+            cell_keys(81)
+        }
+
+        fn pre_send(hooks: Vec<crate::domain::model::HookConfigItem>) -> HookConfig {
+            HookConfig {
+                pre_send: hooks,
+                ..Default::default()
+            }
+        }
+
+        /// 全局一条 Webhook，租户 a、b 各登记一条，都投到同一个接收端的不同路径。
+        fn two_tenants(receiver: &WebhookReceiver) -> HookConfigSnapshot {
+            HookConfigSnapshot::new(
+                pre_send(vec![webhook_hook("global-audit", &receiver.url("/global"))]),
+                HashMap::from([
+                    (
+                        "tenant-a".to_string(),
+                        pre_send(vec![webhook_hook("wh-a", &receiver.url("/a"))]),
+                    ),
+                    (
+                        "tenant-b".to_string(),
+                        pre_send(vec![webhook_hook("wh-b", &receiver.url("/b"))]),
+                    ),
+                ]),
+            )
+        }
+
+        async fn capability(
+            snapshot: HookConfigSnapshot,
+            verifier: Option<SignedContextVerifier>,
+        ) -> String {
+            let server = ImHookPluginServer::new(
+                Arc::new(HookCommandHandler::new(Arc::new(HookOrchestrationService))),
+                Arc::new(CoreHookRegistry::new(Arc::new(
+                    ConfigWatcher::with_snapshot(snapshot),
+                ))),
+                Arc::new(HookAdapterFactory::new()),
+                CapabilityExtensionRegistry::new(),
+                verifier,
+            );
+            serve_hook_plugin(server).await
+        }
+
+        /// 与网内探针的触发请求同形：PreSend，请求体自报租户与用户。
+        fn pre_send_call(tenant: &str, user: &str, marker: &str) -> GenericRequest {
+            let inner = PreSendHookRequest {
+                context: Some(HookInvocationContext {
+                    conversation_id: "conv-1".into(),
+                    conversation_type: "single".into(),
+                    tenant_id: tenant.into(),
+                    operator_user_id: user.into(),
+                    request_id: "req-body".into(),
+                    ..Default::default()
+                }),
+                draft: Some(HookMessageDraft {
+                    client_message_id: marker.into(),
+                    conversation_id: "conv-1".into(),
+                    payload: b"hello".to_vec(),
+                    ..Default::default()
+                }),
+            };
+            GenericRequest {
+                operation: "flare.hook.v1.pre_send".into(),
+                metadata: HashMap::new(),
+                payload: Some(prost_types::Any {
+                    type_url: "type.googleapis.com/flare.capability.v1.PreSendHookRequest".into(),
+                    value: inner.encode_to_vec(),
+                }),
+                request_id: "req-body".into(),
+            }
+        }
+
+        fn token(keys: &CellKeys, actor: SignedActorType, id: &str, tenant: &str) -> String {
+            keys.signer
+                .sign(&SignedContextIdentity::new(actor, id, tenant, "req-signed"))
+                .unwrap()
+        }
+
+        async fn raw_call(
+            endpoint: &str,
+            body: GenericRequest,
+            token: Option<String>,
+        ) -> Result<GenericResponse, Status> {
+            let mut client = HookPluginClient::connect(endpoint.to_string())
+                .await
+                .unwrap();
+            let mut request = Request::new(body);
+            if let Some(token) = token {
+                request
+                    .metadata_mut()
+                    .insert("x-flare-ctx", token.parse().unwrap());
+            }
+            client.call(request).await.map(Response::into_inner)
+        }
+
+        fn allowed(response: &GenericResponse) -> bool {
+            let payload = response.payload.as_ref().unwrap();
+            response.ok
+                && PreSendHookResponse::decode(payload.value.as_slice())
+                    .unwrap()
+                    .allow
+        }
+
+        /// 无签名的调用不执行任何 Hook。修复前 HookPlugin 只套 `ContextLayer::allow_missing`，
+        /// 这里得到业务 `OK` 并按请求体的租户外发 Webhook。
+        #[tokio::test]
+        async fn unsigned_calls_are_unauthenticated_and_deliver_nothing() {
+            let receiver = WebhookReceiver::start().await;
+            let endpoint = capability(two_tenants(&receiver), Some(keys().verifier)).await;
+            let status = raw_call(
+                &endpoint,
+                pre_send_call("tenant-a", "u1", "m-unsigned"),
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(receiver.count(), 0);
+        }
+
+        #[tokio::test]
+        async fn other_keys_and_a_missing_verifier_are_unauthenticated() {
+            let receiver = WebhookReceiver::start().await;
+            let endpoint = capability(two_tenants(&receiver), Some(keys().verifier)).await;
+            let forged = token(&cell_keys(82), SignedActorType::User, "u1", "tenant-a");
+            let status = raw_call(
+                &endpoint,
+                pre_send_call("tenant-a", "u1", "m-forged"),
+                Some(forged),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+
+            let unconfigured = capability(two_tenants(&receiver), None).await;
+            let signed = token(&keys(), SignedActorType::User, "u1", "tenant-a");
+            let status = raw_call(
+                &unconfigured,
+                pre_send_call("tenant-a", "u1", "m-unconfigured"),
+                Some(signed),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(receiver.count(), 0);
+        }
+
+        /// 签名是租户 a 的用户 u1：请求体换成租户 b 或别的用户都被拒，PreSend 也不收服务身份。
+        #[tokio::test]
+        async fn a_body_that_disagrees_with_the_signature_is_denied() {
+            let receiver = WebhookReceiver::start().await;
+            let endpoint = capability(two_tenants(&receiver), Some(keys().verifier)).await;
+            let signed = || Some(token(&keys(), SignedActorType::User, "u1", "tenant-a"));
+            for body in [
+                pre_send_call("tenant-b", "u1", "m-other-tenant"),
+                pre_send_call("tenant-a", "u2", "m-other-user"),
+            ] {
+                let status = raw_call(&endpoint, body, signed()).await.unwrap_err();
+                assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+            }
+            let service = token(&keys(), SignedActorType::Service, "svc", "tenant-a");
+            let status = raw_call(
+                &endpoint,
+                pre_send_call("tenant-a", "u1", "m-svc"),
+                Some(service),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(receiver.count(), 0);
+        }
+
+        /// 正确签名的调用通过；空的请求体租户按签名租户执行（不落到 `"0"`）。
+        #[tokio::test]
+        async fn a_signed_call_runs_the_signed_tenants_hooks() {
+            let receiver = WebhookReceiver::start().await;
+            let endpoint = capability(two_tenants(&receiver), Some(keys().verifier)).await;
+            let response = raw_call(
+                &endpoint,
+                pre_send_call("", "", "m-signed"),
+                Some(token(&keys(), SignedActorType::User, "u1", "tenant-b")),
+            )
+            .await
+            .unwrap();
+            assert!(allowed(&response));
+            let mut paths: Vec<_> = receiver
+                .wait_for("m-signed", 2)
+                .await
+                .into_iter()
+                .map(|delivery| {
+                    assert_eq!(delivery.tenant(), Some("tenant-b"));
+                    delivery.path
+                })
+                .collect();
+            paths.sort();
+            assert_eq!(paths, ["/b", "/global"]);
+        }
+
+        /// 按 Message Ingest 的方式调用：每个租户的事件只投到本租户登记的 Webhook，外加全局的。
+        /// 修复前进程只有一份不分租户的配置，且多租户进程根本不加载租户登记的行。
+        #[tokio::test]
+        async fn each_tenant_runs_only_its_own_webhooks_and_the_global_ones() {
+            let receiver = WebhookReceiver::start().await;
+            let endpoint = capability(two_tenants(&receiver), Some(keys().verifier)).await;
+            for (tenant, own, other) in [("tenant-a", "/a", "/b"), ("tenant-b", "/b", "/a")] {
+                let marker = format!("m-{tenant}");
+                let ctx = signed_ctx(&keys(), SignedActorType::User, "u1", tenant);
+                assert!(matches!(
+                    ingest_pre_send(&endpoint, &ctx, &marker).await,
+                    PreSendDecision::Continue
+                ));
+                receiver.wait_for(&marker, 2).await;
+                // 多等一会儿，确认没有第三次（投到别的租户）的投递。
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let deliveries = receiver.with_marker(&marker);
+                assert_eq!(deliveries.len(), 2, "{deliveries:?}");
+                assert!(
+                    deliveries.iter().all(|d| d.tenant() == Some(tenant)),
+                    "{deliveries:?}"
+                );
+                assert!(deliveries.iter().any(|d| d.path == own), "{deliveries:?}");
+                assert!(
+                    deliveries.iter().any(|d| d.path == "/global"),
+                    "{deliveries:?}"
+                );
+                assert!(deliveries.iter().all(|d| d.path != other), "{deliveries:?}");
+            }
+            let ctx = signed_ctx(&keys(), SignedActorType::User, "u1", "tenant-c");
+            assert!(matches!(
+                ingest_pre_send(&endpoint, &ctx, "m-tenant-c").await,
+                PreSendDecision::Continue
+            ));
+            receiver.wait_for("m-tenant-c", 1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let deliveries = receiver.with_marker("m-tenant-c");
+            assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+            assert_eq!(deliveries[0].path, "/global");
         }
     }
 

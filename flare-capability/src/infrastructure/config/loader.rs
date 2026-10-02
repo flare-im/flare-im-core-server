@@ -2,6 +2,7 @@
 //!
 //! 提供从不同源加载Hook配置的能力
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,11 +32,58 @@ pub enum ConfigLoaderItem {
 }
 
 impl ConfigLoaderItem {
-    pub async fn load(&self) -> Result<HookConfig> {
+    /// 加载本源的配置。文件与配置中心只有全局配置；数据库在多租户进程中另按租户分桶。
+    pub async fn load(&self) -> Result<LoadedHookConfig> {
         match self {
-            ConfigLoaderItem::File(loader) => loader.load().await,
-            ConfigLoaderItem::Database(loader) => loader.load().await,
-            ConfigLoaderItem::ConfigCenter(loader) => loader.load().await,
+            ConfigLoaderItem::File(loader) => loader.load().await.map(LoadedHookConfig::global),
+            ConfigLoaderItem::Database(loader) => loader.load_buckets().await,
+            ConfigLoaderItem::ConfigCenter(loader) => {
+                loader.load().await.map(LoadedHookConfig::global)
+            }
+        }
+    }
+
+    /// 只重新加载一个租户的配置：只有按租户分桶的数据库源支持，其余返回 `None`
+    /// （调用方改为全量重载）。
+    pub async fn load_tenant(&self, tenant_id: &str) -> Option<Result<HookConfig>> {
+        match self {
+            ConfigLoaderItem::Database(loader) => loader.load_tenant(tenant_id).await,
+            ConfigLoaderItem::File(_) | ConfigLoaderItem::ConfigCenter(_) => None,
+        }
+    }
+}
+
+/// 一个配置源一次加载的结果。
+#[derive(Debug, Clone, Default)]
+pub struct LoadedHookConfig {
+    /// 对所有租户生效的配置。
+    pub global: HookConfig,
+    /// 各租户自己登记的配置（只含该租户的 Hook），键为租户 ID。
+    pub tenants: HashMap<String, HookConfig>,
+    /// 本次加载中有行解析失败的租户：沿用该源上一次成功加载的该租户配置。
+    pub failed_tenants: HashSet<String>,
+}
+
+impl LoadedHookConfig {
+    /// 只有全局配置的加载结果（文件、配置中心、固定租户的数据库）。
+    pub fn global(config: HookConfig) -> Self {
+        Self {
+            global: config,
+            ..Self::default()
+        }
+    }
+
+    /// 本次解析失败的租户沿用 `previous`（同一配置源上一次的结果）中该租户的配置。
+    pub fn inherit_failed_tenants(&mut self, previous: Option<&LoadedHookConfig>) {
+        for tenant in std::mem::take(&mut self.failed_tenants) {
+            match previous.and_then(|previous| previous.tenants.get(&tenant)) {
+                Some(config) => {
+                    self.tenants.insert(tenant, config.clone());
+                }
+                None => {
+                    self.tenants.remove(&tenant);
+                }
+            }
         }
     }
 }
@@ -120,7 +168,8 @@ impl ConfigValidator {
         Ok(())
     }
 
-    fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
+    /// 校验单条 Hook 配置（名称、优先级、超时与分组），规则同 [`Self::validate`]。
+    pub fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
         if hook.name.is_empty() {
             return Err(config_error("Hook name cannot be empty"));
         }
@@ -181,6 +230,11 @@ impl ConfigLoader for FileConfigLoader {
 }
 
 /// 数据库配置加载器（动态API配置）
+///
+/// - 进程设了 `TENANT_ID`（单租户 / 私有化部署）：加载全局行与该租户的行，都作为全局配置，
+///   行为同以前。
+/// - 未设（多租户进程）：全局行作为全局配置，各租户经 `CapabilityService/Administer` 登记的行
+///   按租户分桶；执行时只取消息所属租户的那一桶（见 [`super::HookConfigSnapshot`]）。
 #[derive(Debug)]
 pub struct DatabaseConfigLoader {
     repository: Arc<PostgresHookConfigRepository>,
@@ -194,23 +248,60 @@ impl DatabaseConfigLoader {
             tenant_id,
         }
     }
-}
 
-impl ConfigLoader for DatabaseConfigLoader {
-    async fn load(&self) -> Result<HookConfig> {
-        let config = self
-            .repository
-            .load_all(self.tenant_id.as_deref())
-            .await
-            .context("Failed to load hook config from database")?;
+    /// 按进程的租户模式加载（见类型说明）。
+    pub async fn load_buckets(&self) -> Result<LoadedHookConfig> {
+        let loaded = match self.tenant_id.as_deref() {
+            Some(tenant) => LoadedHookConfig::global(
+                self.repository
+                    .load_all(Some(tenant))
+                    .await
+                    .context("Failed to load hook config from database")?,
+            ),
+            None => {
+                let rows = self
+                    .repository
+                    .load_by_tenant()
+                    .await
+                    .context("Failed to load hook config from database")?;
+                LoadedHookConfig {
+                    global: rows.global,
+                    tenants: rows.tenants,
+                    failed_tenants: rows.failed_tenants,
+                }
+            }
+        };
 
         info!(
             tenant_id = ?self.tenant_id,
-            hooks_count = config.pre_send.len() + config.post_send.len() + config.delivery.len() + config.recall.len(),
+            hooks_count = loaded.global.hook_count(),
+            tenants = loaded.tenants.len(),
+            tenant_hooks_count = loaded.tenants.values().map(HookConfig::hook_count).sum::<usize>(),
+            failed_tenants = loaded.failed_tenants.len(),
             "Loaded hook config from database"
         );
 
-        Ok(config)
+        Ok(loaded)
+    }
+
+    /// 只加载一个租户自己登记的行；固定了租户的进程不分桶，返回 `None`。
+    pub async fn load_tenant(&self, tenant_id: &str) -> Option<Result<HookConfig>> {
+        if self.tenant_id.is_some() {
+            return None;
+        }
+        Some(
+            self.repository
+                .load_tenant(tenant_id)
+                .await
+                .context("Failed to load tenant hook config from database"),
+        )
+    }
+}
+
+impl ConfigLoader for DatabaseConfigLoader {
+    /// 全局配置（多租户进程不含各租户的行，租户配置见 [`DatabaseConfigLoader::load_buckets`]）。
+    async fn load(&self) -> Result<HookConfig> {
+        self.load_buckets().await.map(|loaded| loaded.global)
     }
 }
 

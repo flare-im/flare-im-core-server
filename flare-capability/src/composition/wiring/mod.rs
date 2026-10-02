@@ -5,6 +5,7 @@
 mod capability_extension;
 mod config_sources;
 mod hook_runtime;
+mod internal_ctx;
 
 use std::sync::Arc;
 
@@ -66,11 +67,14 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     );
 
     let extension_router = capability_registry.extension_router().await;
+    // HookPlugin 只收 Cell 签名的调用（Message Ingest 等原样转发的 `x-flare-ctx`）；没有公钥时全部拒绝。
+    let hook_plugin_verifier = internal_ctx::internal_ctx_verifier_from_env("HookPlugin")?;
     let im_hook_plugin = ImHookPluginServer::new(
         hook.command_handler,
         hook.registry,
         hook.adapter_factory,
         capability_registry.clone(),
+        hook_plugin_verifier,
     );
 
     Ok(ApplicationContext {

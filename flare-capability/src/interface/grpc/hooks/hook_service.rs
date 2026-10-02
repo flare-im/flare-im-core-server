@@ -16,6 +16,7 @@ use tonic::{Request, Response, Status};
 
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConfig};
+use crate::infrastructure::config::ConfigValidator;
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use chrono::Utc;
 use std::str::FromStr;
@@ -60,6 +61,15 @@ impl HookServiceServer {
         self.metrics_collector = Some(metrics_collector);
         self.execution_recorder = Some(execution_recorder);
         self
+    }
+
+    /// 写入后让配置立即生效：租户的行只重载该租户，全局行（`tenant_id IS NULL`）全量重载。
+    async fn reload_after_write(&self, tenant_id: Option<&str>) -> Result<(), Status> {
+        let reloaded = match tenant_id.filter(|tenant| !tenant.is_empty()) {
+            Some(tenant) => self.registry.reload_tenant(tenant).await,
+            None => self.registry.reload_config().await,
+        };
+        reloaded.map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))
     }
 
     pub async fn grpc_create_hook_config(
@@ -121,6 +131,9 @@ impl HookServiceServer {
         // 转换protobuf类型到内部类型
         let hook_item = protobuf_to_hook_config_item(&req, None)
             .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
+        // 与重载时的校验一致：存进去却加载不了的行会让该租户的配置停在旧版本。
+        ConfigValidator::validate_hook(&hook_item)
+            .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
 
         // 保存到数据库（优先从 Context 提取，其次从请求参数）
         let created_by = ctx.user_id().map(|s: &str| s).or(None);
@@ -136,11 +149,8 @@ impl HookServiceServer {
             .await
             .map_err(|e| Status::internal(format!("Failed to save hook config: {}", e)))?;
 
-        // 通知配置监听器重新加载配置
-        self.registry
-            .reload_config()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
+        // 通知配置监听器重新加载该租户的配置
+        self.reload_after_write(Some(tenant_id.as_str())).await?;
 
         // 构建响应
         let hook_config = hook_config_item_to_protobuf(
@@ -341,6 +351,9 @@ impl HookServiceServer {
             }
         }
 
+        ConfigValidator::validate_hook(&hook_item)
+            .map_err(|e| Status::invalid_argument(format!("Invalid hook config: {}", e)))?;
+
         // 更新数据库
         let updated = self
             .repository
@@ -352,11 +365,8 @@ impl HookServiceServer {
             return Err(Status::not_found("Hook config not found"));
         }
 
-        // 通知配置监听器重新加载配置
-        self.registry
-            .reload_config()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
+        // 通知配置监听器重新加载该行所属租户的配置
+        self.reload_after_write(row.tenant_id.as_deref()).await?;
 
         // 构建响应
         let hook_config = hook_config_item_to_protobuf(
@@ -463,9 +473,11 @@ impl HookServiceServer {
         // 解析hook_id（格式：hook_type:name 或 id）
         let hook_id_parsed = req.hook_id.parse::<i64>();
 
+        let mut deleted_tenant = tenant_id.clone();
         let deleted = if let Ok(id) = hook_id_parsed {
             // 作为数字ID查询并删除
             if let Ok(Some((row, _))) = self.repository.get_by_id(id).await {
+                deleted_tenant = row.tenant_id.clone();
                 self.repository
                     .delete(row.tenant_id.as_deref(), &row.hook_type, &row.name)
                     .await
@@ -496,11 +508,8 @@ impl HookServiceServer {
             return Err(Status::not_found("Hook config not found"));
         }
 
-        // 通知配置监听器重新加载配置
-        self.registry
-            .reload_config()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
+        // 通知配置监听器重新加载该行所属租户的配置
+        self.reload_after_write(deleted_tenant.as_deref()).await?;
 
         Ok(Response::new(DeleteHookConfigResponse { success: true }))
     }
@@ -520,8 +529,13 @@ impl HookServiceServer {
         // 解析hook_id（格式：hook_type:name 或 id）
         let hook_id_parsed = req.hook_id.parse::<i64>();
 
-        let hook_id = if let Ok(id) = hook_id_parsed {
-            id
+        let row = if let Ok(id) = hook_id_parsed {
+            self.repository
+                .get_by_id(id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get hook config: {}", e)))?
+                .ok_or_else(|| Status::not_found("Hook config not found"))?
+                .0
         } else {
             // 作为hook_type:name格式解析，需要先查询获取ID
             let parts: Vec<&str> = req.hook_id.splitn(2, ':').collect();
@@ -541,13 +555,13 @@ impl HookServiceServer {
                 .map_err(|e| Status::internal(format!("Failed to get hook config: {}", e)))?
                 .ok_or_else(|| Status::not_found("Hook config not found"))?;
 
-            row.id
+            row
         };
 
         // 更新数据库中的enabled字段
         let updated = self
             .repository
-            .update_enabled(hook_id, req.enabled)
+            .update_enabled(row.id, req.enabled)
             .await
             .map_err(|e| Status::internal(format!("Failed to update hook status: {}", e)))?;
 
@@ -555,11 +569,8 @@ impl HookServiceServer {
             return Err(Status::not_found("Hook config not found"));
         }
 
-        // 通知配置监听器重新加载配置
-        self.registry
-            .reload_config()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to reload config: {}", e)))?;
+        // 通知配置监听器重新加载该行所属租户的配置
+        self.reload_after_write(row.tenant_id.as_deref()).await?;
 
         Ok(Response::new(SetHookStatusResponse { success: true }))
     }

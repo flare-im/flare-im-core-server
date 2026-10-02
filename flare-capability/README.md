@@ -207,19 +207,29 @@ backoff_strategy = "exponential"
 Hook configuration supports multi-tenant scenarios:
 
 - **Tenant isolation**: each tenant can have its own independent hook configuration
-- **Global configuration**: a configuration with `tenant_id` = `NULL` applies to all tenants
-- **Tenant configuration**: a specific tenant's configuration overrides the global configuration
+- **Global configuration**: a configuration with `tenant_id` = `NULL` (and the configuration file) applies to all tenants
+- **Tenant configuration**: a specific tenant's configuration overrides the global configuration of the same name, for that tenant only
+- **Selector**: a non-empty `selector.tenants` limits a hook to the listed tenants
 
-**Query logic**:
+**Loading and execution** (process without `TENANT_ID`, the multi-tenant default):
+the database loader keeps global rows as the global configuration and puts each
+tenant's rows (registered through `CapabilityService/Administer`) into a bucket of
+that tenant. `HookPlugin.Call` selects the hooks by the tenant of the caller's
+signed context: global hooks plus that tenant's bucket. A tenant's invalid rows only
+keep that tenant on its previous hooks; a failed source keeps its last loaded hooks.
+An Administer write reloads that tenant's bucket immediately. A process started with
+`TENANT_ID` keeps the single-tenant behaviour and loads, as global configuration:
 ```sql
--- When querying a tenant's configuration, both of the following are returned:
--- 1. Global configuration (tenant_id IS NULL)
--- 2. Tenant-specific configuration (tenant_id = 'tenant-a')
 SELECT * FROM hook_configs
 WHERE enabled = true
   AND (tenant_id IS NULL OR tenant_id = 'tenant-a')
 ORDER BY hook_type, priority ASC
 ```
+
+**Callers**: `HookPlugin.Call` accepts only Cell-signed contexts (`x-flare-ctx`,
+verified with `FLARE_INTERNAL_CTX_PUBLIC_KEY`). Unsigned or unverifiable calls get
+`UNAUTHENTICATED`; a request body whose tenant or user disagrees with the signature
+gets `PERMISSION_DENIED`. Without the public key every call is rejected.
 
 ## Configuration refresh
 

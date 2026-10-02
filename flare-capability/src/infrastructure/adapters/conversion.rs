@@ -5,7 +5,7 @@
 use prost_types::Timestamp;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::infrastructure::adapters::hook_context_data::{HookContextData, set_hook_context_data};
+use crate::infrastructure::adapters::hook_context_data::HookContextData;
 use flare_grpc_proto::capability::{
     HookDeliveryEvent, HookInvocationContext, HookMessageDraft, HookMessageRecord, HookRecallEvent,
     PreSendHookResponse, RecallHookResponse,
@@ -226,30 +226,9 @@ pub fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
         + std::time::Duration::from_nanos(ts.nanos as u64)
 }
 
-/// 将 protobuf HookInvocationContext 转换为 flare_server_core::Context
-pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
-    let request_id = if proto.request_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        proto.request_id.clone()
-    };
-
-    let mut ctx = Context::with_request_id(request_id);
-
-    if !proto.tenant_id.is_empty() {
-        ctx = ctx.with_tenant_id(proto.tenant_id.clone());
-    }
-    if !proto.operator_user_id.is_empty() {
-        ctx = ctx.with_user_id(proto.operator_user_id.clone());
-    }
-
-    // 设置会话ID（从 conversation_id 中提取）
-    if !proto.conversation_id.is_empty() {
-        ctx = ctx.with_session_id(proto.conversation_id.clone());
-    }
-
-    // 创建 HookContextData 并存储到 Context
-    let hook_data = HookContextData {
+/// HookInvocationContext 中的 Hook 数据（会话、标签、属性）；不含身份字段。
+pub fn proto_to_hook_context_data(proto: &HookInvocationContext) -> HookContextData {
+    HookContextData {
         conversation_id: if proto.conversation_id.is_empty() {
             None
         } else {
@@ -266,9 +245,7 @@ pub fn proto_to_context(proto: &HookInvocationContext) -> Context {
         attributes: proto.attributes.clone(),
         request_metadata: std::collections::HashMap::new(),
         occurred_at: None,
-    };
-
-    set_hook_context_data(ctx, hook_data)
+    }
 }
 
 #[cfg(test)]

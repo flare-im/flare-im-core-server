@@ -157,6 +157,13 @@ pub struct HookSelectorConfig {
     pub tags: HashMap<String, String>,
 }
 
+impl HookSelectorConfig {
+    /// 这条 Hook 是否作用于 `tenant_id`：`tenants` 为空匹配所有租户，否则须列出该租户。
+    pub fn matches_tenant(&self, tenant_id: &str) -> bool {
+        self.tenants.is_empty() || self.tenants.iter().any(|tenant| tenant == tenant_id)
+    }
+}
+
 /// 负载均衡策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -285,6 +292,66 @@ pub struct HookConfig {
     /// GetConversationParticipants Hook配置列表
     #[serde(default)]
     pub get_conversation_participants: Vec<HookConfigItem>,
+}
+
+impl HookConfig {
+    /// 所有 Hook 列表（含 `get_conversation_participants`）。
+    fn lists(&self) -> [&Vec<HookConfigItem>; 15] {
+        [
+            &self.pre_send,
+            &self.post_send,
+            &self.delivery,
+            &self.recall,
+            &self.session_create,
+            &self.session_update,
+            &self.session_delete,
+            &self.user_login,
+            &self.user_logout,
+            &self.user_online,
+            &self.user_offline,
+            &self.push_pre_send,
+            &self.push_post_send,
+            &self.push_delivery,
+            &self.get_conversation_participants,
+        ]
+    }
+
+    fn lists_mut(&mut self) -> [&mut Vec<HookConfigItem>; 15] {
+        [
+            &mut self.pre_send,
+            &mut self.post_send,
+            &mut self.delivery,
+            &mut self.recall,
+            &mut self.session_create,
+            &mut self.session_update,
+            &mut self.session_delete,
+            &mut self.user_login,
+            &mut self.user_logout,
+            &mut self.user_online,
+            &mut self.user_offline,
+            &mut self.push_pre_send,
+            &mut self.push_post_send,
+            &mut self.push_delivery,
+            &mut self.get_conversation_participants,
+        ]
+    }
+
+    /// 各类型 Hook 的总条数。
+    pub fn hook_count(&self) -> usize {
+        self.lists().iter().map(|list| list.len()).sum()
+    }
+
+    /// 一条 Hook 都没有。
+    pub fn is_empty(&self) -> bool {
+        self.hook_count() == 0
+    }
+
+    /// 只保留选择器作用于 `tenant_id` 的 Hook（见 [`HookSelectorConfig::matches_tenant`]）。
+    pub fn retain_tenant(&mut self, tenant_id: &str) {
+        for list in self.lists_mut() {
+            list.retain(|hook| hook.selector.matches_tenant(tenant_id));
+        }
+    }
 }
 
 /// Hook执行计划

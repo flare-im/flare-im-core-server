@@ -79,12 +79,11 @@ impl ApplicationBootstrap {
             .add_spawn_with_shutdown("flare-capability-grpc", move |shutdown_rx| async move {
                 use flare_server_core::middleware::ContextLayer;
 
-                let hook_plugin_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(
-                        flare_grpc_proto::capability::hook_plugin_server::HookPluginServer::new(
-                            im_hook_plugin,
-                        ),
+                // HookPlugin 不经旧元数据上下文：每个 Call 在服务内验 `x-flare-ctx`，无签名或
+                // 验不过一律 UNAUTHENTICATED（见 ImHookPluginServer）。
+                let hook_plugin_service =
+                    flare_grpc_proto::capability::hook_plugin_server::HookPluginServer::new(
+                        im_hook_plugin,
                     );
 
                 let extension_plugin_service = ContextLayer::new()
