@@ -650,3 +650,75 @@ async fn capability_routes_answer_503_when_the_downstream_is_disabled() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(h.recorder.calls().len(), 1);
 }
+
+/// 进审计日志的三个请求头有长度上限：原因 512 字节，请求号与幂等键各 128 字节。超长回 400
+/// `ADMIN_AUDIT_HEADER_TOO_LONG`，写与敏感读都一样，请求到不了下游；恰好在上限上的照常执行。
+/// 修复前这些头不论多长都原样进审计日志。
+#[tokio::test]
+async fn over_long_audit_headers_are_400_and_never_reach_downstream() {
+    let h = harness(false).await;
+    let reason_at_limit = "r".repeat(512);
+    let id_at_limit = "i".repeat(128);
+    let cases = [
+        ("POST", "/api/v1/admin/users/u1/kick", "x-audit-reason", 512),
+        (
+            "POST",
+            "/api/v1/admin/users/u1/kick",
+            "idempotency-key",
+            128,
+        ),
+        ("POST", "/api/v1/admin/users/u1/kick", "x-request-id", 128),
+        (
+            "GET",
+            "/api/v1/admin/users/u1/devices",
+            "x-audit-reason",
+            512,
+        ),
+        ("GET", "/api/v1/admin/users/u1/devices", "x-request-id", 128),
+    ];
+    for (method, path, name, max) in cases {
+        let too_long = "x".repeat(max + 1);
+        let mut extra: Vec<(&str, &str)> = if method == "POST" {
+            WRITE_HEADERS
+                .iter()
+                .copied()
+                .filter(|(header, _)| *header != name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        extra.push((name, &too_long));
+        let (status, body) = send(
+            &h.router,
+            request(method, path, Some(&h.token), Some(TENANT), &extra),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path} {name}: {body}"
+        );
+        assert_eq!(reason(&body), "ADMIN_AUDIT_HEADER_TOO_LONG", "{name}");
+        assert!(h.recorder.calls().is_empty(), "{method} {path} {name}");
+    }
+
+    let at_limit = [
+        ("x-actor-id", EMPLOYEE),
+        ("x-audit-reason", reason_at_limit.as_str()),
+        ("idempotency-key", id_at_limit.as_str()),
+        ("x-request-id", id_at_limit.as_str()),
+    ];
+    let (status, body) = send(
+        &h.router,
+        request(
+            "POST",
+            "/api/v1/admin/users/u1/kick",
+            Some(&h.token),
+            Some(TENANT),
+            &at_limit,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!h.recorder.calls().is_empty());
+}

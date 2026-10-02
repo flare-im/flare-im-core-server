@@ -21,6 +21,7 @@ For the ADM-01 routes below, the gateway forwards the same admin assertion, unch
 | Missing, malformed, expired or foreign-signed token; wrong audience or `token_use` | 401 | `UNAUTHORIZED` |
 | Token subject is not an employee or its tenant is `*`; `x-tenant-id` is missing, duplicated, `*` or differs from the token tenant | 403 | `FORBIDDEN` |
 | Write request without `x-actor-id` equal to the token subject, without `x-audit-reason`, or without both `idempotency-key` and `x-request-id` | 403 | `FORBIDDEN` |
+| Any request whose `x-audit-reason` is longer than 512 bytes, or whose `x-request-id` or `idempotency-key` is longer than 128 bytes (these headers go into the audit log; they are not truncated) | 400 | `ADMIN_AUDIT_HEADER_TOO_LONG` |
 
 ## Write operations
 

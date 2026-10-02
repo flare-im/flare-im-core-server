@@ -4,6 +4,10 @@ use serde::Serialize;
 pub const APP_ID_HEADER: &str = "x-app-id";
 pub const AUDIT_REASON_HEADER: &str = "x-audit-reason";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+/// `x-audit-reason` 的长度上限（字节，按原始头值计）。
+pub const MAX_AUDIT_REASON_BYTES: usize = 512;
+/// `x-request-id` 与 `idempotency-key` 的长度上限（字节，按原始头值计）。
+pub const MAX_CORRELATION_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AdminCapabilitiesResponse {

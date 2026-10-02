@@ -2,7 +2,7 @@ use axum::{
     extract::Request,
     http::{HeaderMap, HeaderValue, Method},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use flare_core_base::context::keys;
 use flare_im_service_kit::control_auth::{
@@ -10,11 +10,17 @@ use flare_im_service_kit::control_auth::{
     bearer_token,
 };
 use flare_im_service_kit::gateway_auth::{auth_error_response, header_value};
-use flare_server_core::{AuthError, AuthenticatedPrincipal};
+use flare_server_core::{
+    AuthError, AuthenticatedPrincipal,
+    error::{ErrorBuilder, ErrorCode},
+    http::HttpApiError,
+};
 use std::sync::Arc;
 use tonic::Status;
 
-use super::admin_contract::{AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER};
+use super::admin_contract::{
+    AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER, MAX_AUDIT_REASON_BYTES, MAX_CORRELATION_ID_BYTES,
+};
 
 const GATEWAY_NAME: &str = "admin-gateway";
 
@@ -47,6 +53,14 @@ pub async fn admin_auth_middleware(
         Ok(verified) => verified,
         Err(status) => return control_status_response(status),
     };
+    if let Some((name, max)) = audit_header_too_long(request.headers()) {
+        return HttpApiError(
+            ErrorBuilder::new(ErrorCode::HttpBadRequest, "ADMIN_AUDIT_HEADER_TOO_LONG")
+                .details(format!("{name} must be at most {max} bytes"))
+                .build_error(),
+        )
+        .into_response();
+    }
     if let Err(status) = authorize_admin_request(
         request.method(),
         request.uri().path(),
@@ -120,6 +134,24 @@ fn verified_admin_actor(
     actor.require_kind(ControlActorKind::Employee)?;
     actor.require_tenant(&actor.tenant_id)?;
     Ok((actor, VerifiedAdminAssertion(Arc::from(token))))
+}
+
+/// 进审计日志的请求头（原因、请求号、幂等键）与各自的长度上限（字节）。
+const AUDIT_HEADER_LIMITS: [(&str, usize); 3] = [
+    (AUDIT_REASON_HEADER, MAX_AUDIT_REASON_BYTES),
+    (keys::REQUEST_ID, MAX_CORRELATION_ID_BYTES),
+    (IDEMPOTENCY_KEY_HEADER, MAX_CORRELATION_ID_BYTES),
+];
+
+/// 第一个超长的审计头及其上限。读写请求都查：敏感读也把这些头记进审计日志。超长不截断，
+/// 回 400：截断后的原因或关联号在审计里对不上调用方的记录。
+fn audit_header_too_long(headers: &HeaderMap) -> Option<(&'static str, usize)> {
+    AUDIT_HEADER_LIMITS.into_iter().find(|(name, max)| {
+        headers
+            .get_all(*name)
+            .iter()
+            .any(|value| value.len() > *max)
+    })
 }
 
 fn control_status_response(status: Status) -> Response {
@@ -241,6 +273,31 @@ mod tests {
             subject: "employee-1".into(),
             tenant_id: "tenant-a".into(),
             kind: ControlActorKind::Employee,
+        }
+    }
+
+    #[test]
+    fn audit_headers_are_bounded_in_bytes() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(audit_header_too_long(&headers), None);
+        let reason = "r".repeat(MAX_AUDIT_REASON_BYTES);
+        let id = "i".repeat(MAX_CORRELATION_ID_BYTES);
+        headers.insert(AUDIT_REASON_HEADER, reason.parse().unwrap());
+        headers.insert(keys::REQUEST_ID, id.parse().unwrap());
+        headers.insert(IDEMPOTENCY_KEY_HEADER, id.parse().unwrap());
+        assert_eq!(audit_header_too_long(&headers), None);
+        for (name, max) in AUDIT_HEADER_LIMITS {
+            let mut longer = headers.clone();
+            longer.insert(name, "x".repeat(max + 1).parse().unwrap());
+            assert_eq!(audit_header_too_long(&longer), Some((name, max)), "{name}");
+            // A second, over-long copy of the header is refused too.
+            let mut appended = headers.clone();
+            appended.append(name, "x".repeat(max + 1).parse().unwrap());
+            assert_eq!(
+                audit_header_too_long(&appended),
+                Some((name, max)),
+                "{name}"
+            );
         }
     }
 
