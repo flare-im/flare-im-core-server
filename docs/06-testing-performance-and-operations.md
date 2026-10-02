@@ -156,6 +156,7 @@ Edge + Core + Social 全栈起来、并用 `flare-social/scripts/prepare_e2e_fix
 - 收发双方经 Core `/api/v1/conversations` 回读到该会话且 `max_seq` 不低于发送序号。
 - 数据库容器内只读 SELECT：`messages` 落库，`message_write_ledger.write_state` 至少达到 `archive_persisted`。
 - 任何模式都不发送未签名的身份头，不接受默认租户 `0`；`scripts/test_smoke_message_flow.py` 以桩程序自检这些约束。
+- `--mode grpc`（DEP-06）：经 `tools/flare-smoke-grpc` 直连 Message Ingest 发送，`x-flare-ctx` 由 Cell 内部签名私钥在进程内签名；回读与落库确认走只读数据库会话（Core 读接口只认未签名身份，不调用）；私钥与口令只从 600 文件读取，默认/弱口令拒绝。须在 compose 内网的一次性探针容器里运行，见 `scripts/README.md` 与 flare-deploy `tests/stack/grpc_smoke_probe.py`。
 
 ## 消息发送压测入口状态
 

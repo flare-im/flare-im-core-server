@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-test for scripts/smoke_message_flow.sh (W1-06, DEP-06/SEC-07/S1).
+"""Self-test for scripts/smoke_message_flow.sh (W1-06, W9-G; DEP-06/SEC-07/S1).
 
 Runs the real script against recording stubs of curl, podman, docker, grpcurl
 and psql placed first on PATH; no network, container or database is touched.
@@ -7,14 +7,24 @@ The stub curl is a tiny fake of the Edge routes and enforces that Social calls
 carry the Social access token and Core calls carry the IM token.
 
 Main guarantees asserted:
-  * no mode ever sends unsigned identity headers (x-tenant-id, x-user-id,
+  * the HTTP mode never sends identity headers (x-tenant-id, x-user-id,
     x-flare-ctx, x-actor-*) and no gRPC client or host psql is ever invoked;
   * tokens and passwords never appear in any child's argv or in the output;
   * the default tenant and malformed tenants are refused before any request;
-  * the persistence check is a read-only SELECT executed inside the container.
+  * the persistence check is a read-only SELECT executed inside the container;
+  * --mode grpc only execs flare-smoke-grpc, handing it non-secret values and
+    the paths of two private (600) files; it refuses missing or open key and
+    password files, HTTP-mode settings, the legacy unsigned settings and the
+    default tenant before the client starts, and needs neither python3 nor curl.
+
+When a built flare-smoke-grpc is available ($FLARE_SMOKE_GRPC_BIN, or
+target/debug/flare-smoke-grpc of this workspace), the gRPC-mode dry run is
+also exercised end to end with a generated Ed25519 key: the plan is printed,
+and a default database password or a non-private key is refused.
 
 Run: python3 scripts/test_smoke_message_flow.py -v
 """
+import base64
 import hashlib
 import json
 import os
@@ -429,7 +439,8 @@ class SmokeMessageFlowTests(unittest.TestCase):
         self.assertEqual(docker.containers[0]["runtime"], "docker")
 
     def test_script_text_has_no_grpc_client_or_identity_headers(self):
-        code = "\n".join(line for line in SCRIPT.read_text().splitlines()
+        text = re.sub(r"(?s)cat <<'USAGE'\n.*?\nUSAGE\n", "", SCRIPT.read_text())
+        code = "\n".join(line for line in text.splitlines()
                          if not line.lstrip().startswith("#"))
         self.assertNotRegex(code, r"(?i)x-(tenant-id|user-id|flare-ctx|actor-)")
         self.assertNotRegex(code, r"\bgrpcurl\b")
@@ -518,6 +529,273 @@ class SmokeMessageFlowTests(unittest.TestCase):
             self.skipTest("shellcheck not installed")
         result = subprocess.run([shellcheck, str(SCRIPT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+# ---- gRPC mode -----------------------------------------------------------------
+
+DB_PASSWORD = "Qx7mV2pL9sKd4RtN8wYb3HjF"
+GRPC_SENDER = "7312345678901234567"
+GRPC_RECIPIENT = "7312345678901234568"
+
+FAKE_GRPC_CLIENT = r'''
+import json, os, stat, sys
+log_dir = os.environ["FAKE_LOG_DIR"]
+args = sys.argv[1:]
+files = {}
+for flag in ("--signing-key-file", "--db-password-file"):
+    if flag in args:
+        path = args[args.index(flag) + 1]
+        info = os.lstat(path)
+        files[flag] = {"mode": stat.S_IMODE(info.st_mode), "regular": stat.S_ISREG(info.st_mode)}
+env = {key: value for key, value in os.environ.items() if key.startswith(("SMOKE_", "PG", "DATABASE"))}
+with open(os.path.join(log_dir, "grpc-client.jsonl"), "a") as fh:
+    fh.write(json.dumps({"argv": args, "files": files, "env": env}) + "\n")
+if "--dry-run" in args:
+    print("flare_message_flow_smoke_plan")
+    print("mode=grpc")
+    print("status=dry-run")
+else:
+    print("flare_message_flow_smoke_report")
+    print("mode=grpc")
+    print("status=pass")
+sys.exit(int(os.environ.get("FAKE_GRPC_EXIT", "0")))
+'''
+
+
+def ed25519_pem(seed: int) -> str:
+    """PKCS#8 PEM of a fixed Ed25519 seed (RFC 8410 layout), stdlib only."""
+    der = bytes.fromhex("302e020100300506032b657004220420") + bytes([seed]) * 32
+    body = base64.b64encode(der).decode()
+    return f"-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n"
+
+
+def built_client():
+    candidate = os.environ.get("FLARE_SMOKE_GRPC_BIN")
+    if candidate:
+        return Path(candidate)
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or SCRIPT.resolve().parents[2] / "target")
+    path = target / "debug" / "flare-smoke-grpc"
+    return path if path.is_file() and os.access(path, os.X_OK) else None
+
+
+class GrpcHarness(unittest.TestCase):
+    """Stubs and helpers shared by the gRPC-mode tests; holds no test itself."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="smoke-grpc-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        # No python3, curl or container runtime is usable in gRPC mode: every one of
+        # them is a forbidden stub, and PATH holds nothing else besides find.
+        for name in ("curl", "podman", "docker", "grpcurl", "psql", "python3"):
+            stub = self.bin / name
+            stub.write_text(f"#!{sys.executable}\n" + textwrap.dedent(FAKE_FORBIDDEN))
+            stub.chmod(0o755)
+        (self.bin / "find").symlink_to(shutil.which("find"))
+        self.client = self.bin / "flare-smoke-grpc"
+        self.client.write_text(f"#!{sys.executable}\n" + textwrap.dedent(FAKE_GRPC_CLIENT))
+        self.client.chmod(0o755)
+        self.key_text = ed25519_pem(5)
+        self.key_file = self.private("signing.key", self.key_text)
+        self.password_file = self.private("db.password", DB_PASSWORD + "\n")
+        self.runs = 0
+
+    def private(self, name, text, mode=0o600):
+        path = self.tmp / name
+        path.write_text(text)
+        path.chmod(mode)
+        return path
+
+    def run_grpc(self, overrides=None, drop=(), args=("--mode", "grpc"), client=None):
+        self.runs += 1
+        log_dir = self.tmp / f"log-{self.runs}"
+        log_dir.mkdir()
+        env = {
+            "PATH": str(self.bin),
+            "HOME": str(self.tmp),
+            "TMPDIR": str(self.tmp),
+            "LC_ALL": "C",
+            "SMOKE_TENANT_ID": TENANT,
+            "SMOKE_GRPC_INGEST_ENDPOINT": "http://core:50182",
+            "SMOKE_GRPC_SENDER_ID": GRPC_SENDER,
+            "SMOKE_GRPC_RECIPIENT_ID": GRPC_RECIPIENT,
+            "SMOKE_GRPC_SIGNING_KEY_FILE": str(self.key_file),
+            "SMOKE_GRPC_DB_HOST": "postgres",
+            "SMOKE_GRPC_DB_USER": "flare_core_app",
+            "SMOKE_GRPC_DB_PASSWORD_FILE": str(self.password_file),
+            "SMOKE_GRPC_CLIENT": str(client or self.client),
+            "SMOKE_TIMEOUT_SECONDS": "5",
+            "FAKE_LOG_DIR": str(log_dir),
+        }
+        env.update(overrides or {})
+        for key in drop:
+            env.pop(key, None)
+        proc = subprocess.run([shutil.which("bash"), str(SCRIPT), *args], env=env,
+                              capture_output=True, text=True, timeout=60)
+        return Run(proc, log_dir)
+
+    def client_calls(self, run):
+        return run._records("grpc-client.jsonl")
+
+    def assert_no_secret(self, run):
+        exposed = [run.output] + [json.dumps(call) for call in self.client_calls(run)]
+        for text in exposed:
+            self.assertNotIn(DB_PASSWORD, text)
+            self.assertNotIn(self.key_text.splitlines()[1], text)
+
+    def assert_refused(self, run, message):
+        self.assertNotEqual(run.proc.returncode, 0)
+        self.assertIn(message, run.proc.stderr)
+        self.assertEqual(self.client_calls(run), [], "client must not start")
+        self.assertEqual(run.forbidden, [])
+        self.assert_no_secret(run)
+
+
+class GrpcModeTests(GrpcHarness):
+    def test_grpc_mode_execs_the_signed_client_with_file_paths_only(self):
+        run = self.run_grpc()
+        self.assertEqual(run.proc.returncode, 0, run.output)
+        self.assertIn("status=pass", run.proc.stdout)
+        self.assertEqual(run.forbidden, [], "no python3, curl, container runtime or gRPC CLI")
+        calls = self.client_calls(run)
+        self.assertEqual(len(calls), 1)
+        argv = calls[0]["argv"]
+        options = dict(zip(argv[::2], argv[1::2]))
+        self.assertEqual(options, {
+            "--ingest-endpoint": "http://core:50182",
+            "--tenant-id": TENANT,
+            "--sender-id": GRPC_SENDER,
+            "--recipient-id": GRPC_RECIPIENT,
+            "--signing-key-file": str(self.key_file),
+            "--db-host": "postgres",
+            "--db-port": "5432",
+            "--db-name": "flare_core",
+            "--db-user": "flare_core_app",
+            "--db-password-file": str(self.password_file),
+            "--timeout-seconds": "5",
+        })
+        self.assertNotIn("--dry-run", argv)
+        for flag in ("--signing-key-file", "--db-password-file"):
+            self.assertEqual(calls[0]["files"][flag], {"mode": 0o600, "regular": True})
+        self.assert_no_secret(run)
+
+        custom = self.run_grpc({"SMOKE_GRPC_DB_PORT": "15432", "SMOKE_GRPC_DB_NAME": "core_db"},
+                               args=("--mode=grpc",))
+        argv = self.client_calls(custom)[0]["argv"]
+        self.assertEqual(argv[argv.index("--db-port") + 1], "15432")
+        self.assertEqual(argv[argv.index("--db-name") + 1], "core_db")
+        via_env = self.run_grpc({"SMOKE_MODE": "grpc"}, args=())
+        self.assertEqual(via_env.proc.returncode, 0, via_env.output)
+        failing = self.run_grpc({"FAKE_GRPC_EXIT": "1"})
+        self.assertEqual(failing.proc.returncode, 1)
+
+    def test_dry_run_is_passed_through_and_is_grpc_only(self):
+        run = self.run_grpc(args=("--mode", "grpc", "--dry-run"))
+        self.assertEqual(run.proc.returncode, 0, run.output)
+        self.assertIn("status=dry-run", run.proc.stdout)
+        self.assertEqual(self.client_calls(run)[0]["argv"][-1], "--dry-run")
+        http = self.run_grpc(args=("--dry-run",))
+        self.assert_refused(http, "--dry-run is only supported with --mode grpc")
+
+    def test_missing_or_open_secret_files_are_refused_before_the_client(self):
+        self.assert_refused(self.run_grpc(drop=("SMOKE_GRPC_SIGNING_KEY_FILE",)),
+                            "SMOKE_GRPC_SIGNING_KEY_FILE is required")
+        self.assert_refused(self.run_grpc({"SMOKE_GRPC_SIGNING_KEY_FILE": str(self.tmp / "absent")}),
+                            "SMOKE_GRPC_SIGNING_KEY_FILE is not a readable regular file")
+        self.assert_refused(self.run_grpc(drop=("SMOKE_GRPC_DB_PASSWORD_FILE",)),
+                            "SMOKE_GRPC_DB_PASSWORD_FILE is required")
+        for mode in (0o640, 0o604, 0o644, 0o610, 0o601):
+            with self.subTest(mode=oct(mode)):
+                open_key = self.private(f"key-{mode:o}", self.key_text, mode)
+                self.assert_refused(self.run_grpc({"SMOKE_GRPC_SIGNING_KEY_FILE": str(open_key)}),
+                                    "chmod 600")
+                open_password = self.private(f"pw-{mode:o}", DB_PASSWORD, mode)
+                self.assert_refused(self.run_grpc({"SMOKE_GRPC_DB_PASSWORD_FILE": str(open_password)}),
+                                    "chmod 600")
+        link = self.tmp / "key-link"
+        link.symlink_to(self.key_file)
+        self.assert_refused(self.run_grpc({"SMOKE_GRPC_SIGNING_KEY_FILE": str(link)}),
+                            "must not be a symlink")
+        self.assert_refused(self.run_grpc({"SMOKE_GRPC_SIGNING_KEY_FILE": str(self.tmp)}),
+                            "not a readable regular file")
+
+    def test_required_settings_and_tenant_are_enforced(self):
+        for name in ("SMOKE_GRPC_INGEST_ENDPOINT", "SMOKE_GRPC_SENDER_ID", "SMOKE_GRPC_RECIPIENT_ID",
+                     "SMOKE_GRPC_DB_HOST", "SMOKE_GRPC_DB_USER"):
+            with self.subTest(name=name):
+                self.assert_refused(self.run_grpc(drop=(name,)), f"{name} is required")
+        for tenant in ("0", "default", "", "e2e-0123456789ABCDEF0123"):
+            with self.subTest(tenant=tenant):
+                self.assert_refused(self.run_grpc({"SMOKE_TENANT_ID": tenant}),
+                                    "isolated fixture tenant")
+        self.assert_refused(self.run_grpc({"SMOKE_TIMEOUT_SECONDS": "901"}), "between 1 and 900")
+        self.assert_refused(self.run_grpc({"SMOKE_GRPC_CLIENT": str(self.tmp / "absent")}),
+                            "not an executable file")
+        self.assert_refused(self.run_grpc({"SMOKE_GRPC_CLIENT": "no-such-client"}),
+                            "flare-smoke-grpc not found")
+
+    def test_http_and_legacy_unsigned_settings_are_refused(self):
+        for name, value in (("SMOKE_BASE_URL", BASE_URL), ("SMOKE_PG_CONTAINER", PG_CONTAINER),
+                            ("SMOKE_SKIP_DB_CHECK", "1"), ("SMOKE_PASSWORD_FILE", str(self.password_file))):
+            with self.subTest(name=name):
+                self.assert_refused(self.run_grpc({name: value}), f"{name} is an HTTP-mode setting")
+        for name, value in (("SMOKE_POSTGRES_URL", "postgres://flare:flare123@localhost:25432/flare2"),
+                            ("SMOKE_MESSAGE_INGEST_ENDPOINT", "127.0.0.1:50182"),
+                            ("SMOKE_STORAGE_READER_ENDPOINT", "127.0.0.1:60083"),
+                            ("SMOKE_SENDER_ID", GRPC_SENDER), ("SMOKE_GRPCURL", "grpcurl")):
+            with self.subTest(name=name):
+                run = self.run_grpc({name: value})
+                self.assert_refused(run, f"{name} belonged to the removed unsigned gRPC mode")
+                self.assertNotIn("flare123", run.output)
+        for mode in ("grpc-signed", "GRPC", "unsigned"):
+            with self.subTest(mode=mode):
+                self.assert_refused(self.run_grpc(args=("--mode", mode)), "mode must be http or grpc")
+
+    def test_script_is_shellcheck_clean_in_both_modes(self):
+        shellcheck = shutil.which("shellcheck")
+        if shellcheck is None:
+            self.skipTest("shellcheck not installed")
+        result = subprocess.run([shellcheck, str(SCRIPT)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+@unittest.skipIf(built_client() is None, "flare-smoke-grpc is not built (cargo build -p flare-smoke-grpc)")
+class GrpcModeRealClientTests(GrpcHarness):
+    """The real binary behind the script, dry run only: no connection is opened."""
+
+    def run_real(self, overrides=None):
+        return self.run_grpc(overrides, args=("--mode", "grpc", "--dry-run"), client=built_client())
+
+    def test_real_dry_run_loads_key_and_password_and_prints_the_plan(self):
+        run = self.run_real()
+        self.assertEqual(run.proc.returncode, 0, run.output)
+        plan = run.report()
+        self.assertEqual(plan["mode"], "grpc")
+        self.assertEqual(plan["status"], "dry-run")
+        self.assertEqual(plan["signing_key"], "loaded;test_signature=ok")
+        self.assertEqual(plan["db_password"], "loaded;policy=ok")
+        self.assertEqual(plan["connections_opened"], "0")
+        self.assertEqual(plan["conversation_id"], reference_cid(GRPC_SENDER, GRPC_RECIPIENT))
+        self.assertEqual(run.forbidden, [])
+        self.assert_no_secret(run)
+
+    def test_real_client_refuses_default_password_and_bad_keys(self):
+        default = self.private("default.password", "flare123\n")
+        run = self.run_real({"SMOKE_GRPC_DB_PASSWORD_FILE": str(default)})
+        self.assertEqual(run.proc.returncode, 2, run.output)
+        self.assertIn("known default", run.proc.stderr)
+        self.assertNotIn("flare123", run.output)
+        weak = self.private("weak.password", "short-pw\n")
+        self.assertEqual(self.run_real({"SMOKE_GRPC_DB_PASSWORD_FILE": str(weak)}).proc.returncode, 2)
+        garbage = self.private("garbage.key", "not a key\n")
+        run = self.run_real({"SMOKE_GRPC_SIGNING_KEY_FILE": str(garbage)})
+        self.assertEqual(run.proc.returncode, 2, run.output)
+        self.assertIn("Ed25519 private key", run.proc.stderr)
+        run = self.run_real({"PGPASSWORD": DB_PASSWORD})
+        self.assertEqual(run.proc.returncode, 2, run.output)
+        self.assertIn("PGPASSWORD is set", run.proc.stderr)
+        self.assert_no_secret(run)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,28 @@
+[package]
+name = "flare-smoke-grpc"
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "flare-smoke-grpc"
+path = "src/main.rs"
+
+[dependencies]
+flare-grpc-proto = { workspace = true }
+flare-proto = { workspace = true }
+flare-server-core = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
+[lints]
+workspace = true

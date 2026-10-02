@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# Flare IM Core 消息链路冒烟（DEP-06 / SEC-07 / S1）：只走对外入口的 HTTP 模式。
+# Flare IM Core 消息链路冒烟（DEP-06 / SEC-07 / S1），两种模式：
 #
-# 链路：经 Edge 调 Social 公共 API 注册并登录两个用户、互加好友（满足 social 档
-# PreSend 的好友判定）→ 用 Social 登录返回的 IM 令牌经 Edge 调 Core api-gateway
-# 发送单聊消息 → 经 Core 会话列表回读 → 在数据库容器内以只读事务 SELECT 核对
-# messages 与 message_write_ledger 已持久化。
+# http（默认）：只走对外入口。经 Edge 调 Social 公共 API 注册并登录两个用户、互加
+# 好友（满足 social 档 PreSend 的好友判定）→ 用 Social 登录返回的 IM 令牌经 Edge 调
+# Core api-gateway 发送单聊消息 → 经 Core 会话列表回读 → 在数据库容器内以只读事务
+# SELECT 核对 messages 与 message_write_ledger 已持久化。
 #
-# 旧的直连 gRPC 模式已删除：它向 message-ingest / storage-reader 直发未签名的
-# 身份头，而 Ingest 只接受 Cell 内网关签发的签名上下文，必然拒绝；它还依赖不对外
-# 发布的 50182/60083 端口和宿主机直连数据库。签名私钥只在 api-gateway 等入口进程
-# 内，冒烟脚本不持有、也不应持有它，所以不提供任何 gRPC 模式。
+# grpc（--mode grpc）：直连单容器 Core 的 Message Ingest gRPC 发送，交给
+# tools/flare-smoke-grpc 执行。每次调用都带 x-flare-ctx：用 Cell 内部签名私钥
+# （core.env 的 FLARE_INTERNAL_CTX_PRIVATE_KEY，经 600 文件给出）在该进程内签名，
+# 不存在未签名路径，也不发旧的身份元数据。Core 的 conversation/storage-reader
+# 读接口只认未签名的身份元数据，所以回读（存储行、会话行）与归档落库确认改走只读
+# 数据库会话，口令只从 600 文件读取，默认/弱口令一律拒绝。gRPC 端口只在 compose
+# 内网可达，该模式按设计在一次性网内探针容器里运行（见 flare-deploy
+# tests/stack/grpc_smoke_probe.py）；本脚本在 grpc 模式下只需要 bash、find 与该二进制。
 #
-# 口令只从文件读取（或在私有临时目录生成一次性口令），令牌与口令不进命令行参数、
+# 旧的直连 gRPC 模式（向 message-ingest / storage-reader 直发未签名的身份头、默认
+# 租户 0、带默认口令的宿主机数据库 URL）已删除，它的变量一律拒绝。
+#
+# 口令与令牌只从文件读取（或在私有临时目录生成一次性口令），不进命令行参数、
 # 不进 shell 变量、不回显；失败时只打印响应的 code/reason/message。
 set -euo pipefail
 set +x
@@ -19,9 +26,14 @@ umask 077
 
 usage() {
     cat <<'USAGE'
-Usage: smoke_message_flow.sh [-h|--help]
+Usage: smoke_message_flow.sh [--mode http|grpc] [--dry-run] [-h|--help]
 
-Message-flow smoke through the public Edge (HTTP mode only). Registers two
+  --mode http   (default; also SMOKE_MODE) through the public Edge, see below.
+  --mode grpc   signed direct gRPC to a single-container Core, see "gRPC mode".
+  --dry-run     grpc mode only: validate settings, key and password, print the
+                plan, open no connection.
+
+HTTP mode: message-flow smoke through the public Edge. Registers two
 fresh users in an isolated e2e- tenant via the Social public API, makes them
 friends, sends one single-chat message through Core's /api/v1/messages/send
 with the IM token returned by Social login, reads it back through Core's
@@ -55,6 +67,39 @@ Optional:
   SMOKE_TIMEOUT_SECONDS    Per-wait timeout, 1-900 (default: 60).
 
 Fixture users stay in the isolated tenant for diagnosis; nothing is deleted.
+
+gRPC mode (--mode grpc): runs flare-smoke-grpc (flare-im-core
+tools/flare-smoke-grpc). It sends one text message through Message Ingest's
+MessageSendService/SendMessage with x-flare-ctx signed in-process by the Cell
+internal private key; no call is made without it and no legacy identity
+metadata is sent. Read-back and the archive check go through a read-only
+PostgreSQL session (default_transaction_read_only=on, BEGIN TRANSACTION READ
+ONLY): the messages row, message_write_ledger at archive_persisted or later,
+and both users' conversation rows at the sent seq. Core's read RPCs only take
+unsigned identity metadata, so they are not called. The gRPC port is only
+reachable inside the compose network; run this mode in a one-off in-network
+probe container (flare-deploy tests/stack/grpc_smoke_probe.py).
+
+Required (gRPC mode):
+  SMOKE_TENANT_ID              Isolated fixture tenant e2e-<20 lowercase hex>.
+  SMOKE_GRPC_INGEST_ENDPOINT   http://HOST:PORT of Message Ingest, e.g. http://core:50182.
+  SMOKE_GRPC_SENDER_ID         Existing users of that tenant who are already
+  SMOKE_GRPC_RECIPIENT_ID      friends (e.g. the two users an HTTP-mode run reports).
+  SMOKE_GRPC_SIGNING_KEY_FILE  Mode-600 file holding the Cell internal private key
+                               (the value of FLARE_INTERNAL_CTX_PRIVATE_KEY).
+  SMOKE_GRPC_DB_HOST           PostgreSQL host reachable from where this runs.
+  SMOKE_GRPC_DB_USER           Database role (e.g. Core's runtime role).
+  SMOKE_GRPC_DB_PASSWORD_FILE  Mode-600 file holding that role's password; default
+                               or weak passwords are refused.
+
+Optional (gRPC mode):
+  SMOKE_GRPC_DB_PORT           Default 5432.
+  SMOKE_GRPC_DB_NAME           Default flare_core.
+  SMOKE_GRPC_CLIENT            flare-smoke-grpc binary (default: found on PATH).
+  SMOKE_TIMEOUT_SECONDS        Per-wait timeout, 1-900 (default: 60).
+
+HTTP-mode settings (SMOKE_BASE_URL, SMOKE_PG_CONTAINER, ...) are refused in
+gRPC mode, and SMOKE_GRPC_* settings are not read in HTTP mode.
 USAGE
 }
 
@@ -63,21 +108,40 @@ die() {
     exit 1
 }
 
-case "${1:-}" in
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    "")
-        ;;
-    *)
-        usage >&2
-        die "unknown argument"
-        ;;
-esac
+mode="${SMOKE_MODE:-http}"
+dry_run=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --mode)
+            [ "$#" -ge 2 ] || die "--mode needs a value (http or grpc)"
+            mode="$2"
+            shift 2
+            ;;
+        --mode=*)
+            mode="${1#--mode=}"
+            shift
+            ;;
+        --dry-run)
+            dry_run=1
+            shift
+            ;;
+        *)
+            usage >&2
+            die "unknown argument"
+            ;;
+    esac
+done
 
-if [ "${SMOKE_MODE:-http}" != "http" ]; then
-    die "SMOKE_MODE must be http; the direct gRPC mode was removed because Message Ingest only accepts identities signed inside the Cell"
+case "$mode" in
+    http|grpc) ;;
+    *) die "mode must be http or grpc; the unsigned direct gRPC mode was removed, --mode grpc signs every call inside the Cell" ;;
+esac
+if [ "$mode" = "http" ] && [ "$dry_run" = "1" ]; then
+    die "--dry-run is only supported with --mode grpc"
 fi
 
 # 旧 gRPC 模式的变量不再生效；静默忽略会让调用方以为还在测旧链路，直接拒绝。
@@ -86,9 +150,78 @@ for legacy in SMOKE_MESSAGE_INGEST_ENDPOINT SMOKE_STORAGE_READER_ENDPOINT \
     SMOKE_POSTGRES_URL SMOKE_GRPCURL SMOKE_PSQL SMOKE_PROTO_ROOT \
     SMOKE_SENDER_ID SMOKE_RECIPIENT_ID SMOKE_CONVERSATION_ID; do
     if [ -n "${!legacy:-}" ]; then
-        die "$legacy belonged to the removed gRPC mode; unset it and use the HTTP settings (see --help)"
+        die "$legacy belonged to the removed unsigned gRPC mode; unset it and use the HTTP or SMOKE_GRPC_* settings (see --help)"
     fi
 done
+
+# 私有文件：普通文件、非符号链接、可读，组和其他人没有任何权限（find 的 -perm 在
+# GNU 与 BSD 上都可用，探针容器里没有 python3）。只检查元数据，不读内容。
+require_private_file() {
+    local name="$1" path="${!1:-}"
+    [ -n "$path" ] || die "$name is required in grpc mode (see --help)"
+    [ ! -L "$path" ] || die "$name must not be a symlink"
+    { [ -f "$path" ] && [ -r "$path" ]; } || die "$name is not a readable regular file"
+    if [ -n "$(find "$path" -prune \( -perm -0040 -o -perm -0020 -o -perm -0010 \
+        -o -perm -0004 -o -perm -0002 -o -perm -0001 \) -print)" ]; then
+        die "$name must not be accessible by group or others (chmod 600)"
+    fi
+}
+
+# gRPC 模式：校验后 exec flare-smoke-grpc。只给它非秘密值与秘密文件的路径；
+# 私钥与口令由它在自己进程内读取、校验（含默认/弱口令拒绝）并使用。
+run_grpc_mode() {
+    local setting
+    for setting in SMOKE_BASE_URL SMOKE_CA_FILE SMOKE_SERVER_NAME SMOKE_HOST_HEADER \
+        SMOKE_CORE_API_PREFIX SMOKE_SOCIAL_API_PREFIX SMOKE_PASSWORD_FILE \
+        SMOKE_CONTAINER_RUNTIME SMOKE_PG_CONTAINER SMOKE_PG_DATABASE SMOKE_PG_USER \
+        SMOKE_SKIP_DB_CHECK; do
+        if [ -n "${!setting:-}" ]; then
+            die "$setting is an HTTP-mode setting; grpc mode sends through Message Ingest and reads back over a read-only database session (see --help)"
+        fi
+    done
+    local tenant="${SMOKE_TENANT_ID:-}" timeout="${SMOKE_TIMEOUT_SECONDS:-60}"
+    if ! [[ "$tenant" =~ ^e2e-[0-9a-f]{20}$ ]]; then
+        die "SMOKE_TENANT_ID must be an isolated fixture tenant e2e-<20 lowercase hex>; the default tenant is never used"
+    fi
+    if ! [[ "$timeout" =~ ^[0-9]{1,3}$ ]] || [ "$timeout" -lt 1 ] || [ "$timeout" -gt 900 ]; then
+        die "SMOKE_TIMEOUT_SECONDS must be an integer between 1 and 900"
+    fi
+    for setting in SMOKE_GRPC_INGEST_ENDPOINT SMOKE_GRPC_SENDER_ID SMOKE_GRPC_RECIPIENT_ID \
+        SMOKE_GRPC_DB_HOST SMOKE_GRPC_DB_USER; do
+        [ -n "${!setting:-}" ] || die "$setting is required in grpc mode (see --help)"
+    done
+    require_private_file SMOKE_GRPC_SIGNING_KEY_FILE
+    require_private_file SMOKE_GRPC_DB_PASSWORD_FILE
+
+    local client="${SMOKE_GRPC_CLIENT:-flare-smoke-grpc}"
+    if [[ "$client" != */* ]]; then
+        client="$(command -v "$client" 2>/dev/null)" \
+            || die "flare-smoke-grpc not found; build tools/flare-smoke-grpc or set SMOKE_GRPC_CLIENT"
+    fi
+    { [ -f "$client" ] && [ -x "$client" ]; } || die "SMOKE_GRPC_CLIENT is not an executable file"
+
+    local -a args=(
+        --ingest-endpoint "$SMOKE_GRPC_INGEST_ENDPOINT"
+        --tenant-id "$tenant"
+        --sender-id "$SMOKE_GRPC_SENDER_ID"
+        --recipient-id "$SMOKE_GRPC_RECIPIENT_ID"
+        --signing-key-file "$SMOKE_GRPC_SIGNING_KEY_FILE"
+        --db-host "$SMOKE_GRPC_DB_HOST"
+        --db-port "${SMOKE_GRPC_DB_PORT:-5432}"
+        --db-name "${SMOKE_GRPC_DB_NAME:-flare_core}"
+        --db-user "$SMOKE_GRPC_DB_USER"
+        --db-password-file "$SMOKE_GRPC_DB_PASSWORD_FILE"
+        --timeout-seconds "$timeout"
+    )
+    if [ "$dry_run" = "1" ]; then
+        args+=(--dry-run)
+    fi
+    exec "$client" "${args[@]}"
+}
+
+if [ "$mode" = "grpc" ]; then
+    run_grpc_mode
+fi
 
 base_url="${SMOKE_BASE_URL:-}"
 tenant_id="${SMOKE_TENANT_ID:-}"
