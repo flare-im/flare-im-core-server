@@ -199,6 +199,43 @@ mod tests {
         }
     }
 
+    struct MarkedPolicyDenial;
+
+    #[async_trait]
+    impl PreSendHook for MarkedPolicyDenial {
+        async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+            PreSendDecision::Reject {
+                error: flare_im_hooks::pre_send_rejection(
+                    ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+                        .details("allow=false"),
+                ),
+            }
+        }
+    }
+
+    /// 扩展的策略拒绝标记随错误原样到达摄入服务，摄入据此回 `FAILED_PRECONDITION`。
+    #[tokio::test]
+    async fn a_policy_rejection_keeps_its_marker_through_the_pipeline() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default().with_name("policy"),
+                HookSelector::default(),
+                Arc::new(MarkedPolicyDenial),
+            )
+            .await;
+        let service = HookExecutionService::new(Arc::new(HookDispatcher::new(registry)), None);
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        let error = match service
+            .execute_pre_send(&ctx, Message::default(), true)
+            .await
+        {
+            Ok(_) => panic!("denied message was accepted"),
+            Err(error) => error,
+        };
+        assert!(flare_im_hooks::is_pre_send_rejection(&error), "{error}");
+    }
+
     /// 放行的 Hook 改写的 metadata 原样成为消息 attributes：Hook 剥掉的客户端属性不能
     /// 留下来，Hook 写入的属性会随消息持久化。Social 的好友纪元围栏依赖这一点——
     /// PreSend 剥掉客户端自带的纪元、写入真实纪元，重新加好友时 Core 按它清除旧消息。

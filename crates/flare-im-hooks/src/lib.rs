@@ -12,6 +12,7 @@ pub use hooks::{
     HookConfigLoader, HookDecision, HookDefinition, HookDispatcher, HookErrorPolicy, HookGroup,
     HookKind, HookMetadata, HookOutcome, HookRegistry, HookRegistryBuilder, HookSelector,
     HookSelectorConfig, HookTransportConfig, MatchRule, MessageDraft, MessageReactionEvent,
-    MessageReactionHook, MessageReadEvent, MessageReadHook, MessageRecord, PostSendHook,
-    PreSendDecision, PreSendHook, PreSendPlan, RecallEvent, RecallHook,
+    MessageReactionHook, MessageReadEvent, MessageReadHook, MessageRecord,
+    PRE_SEND_REJECTION_PARAM, PostSendHook, PreSendDecision, PreSendHook, PreSendPlan, RecallEvent,
+    RecallHook, is_pre_send_rejection, pre_send_rejection,
 };

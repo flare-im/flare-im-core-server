@@ -23,6 +23,7 @@ pub use types::{
     ConversationMemberChangeKind, ConversationMemberEvent, ConversationMemberHook, DeliveryEvent,
     DeliveryHook, GetConversationParticipantsHook, HookDecision, HookErrorPolicy, HookGroup,
     HookKind, HookMetadata, HookOutcome, MessageDraft, MessageReactionEvent, MessageReactionHook,
-    MessageReadEvent, MessageReadHook, MessageRecord, PostSendHook, PreSendDecision, PreSendHook,
-    RecallEvent, RecallHook,
+    MessageReadEvent, MessageReadHook, MessageRecord, PRE_SEND_REJECTION_PARAM, PostSendHook,
+    PreSendDecision, PreSendHook, RecallEvent, RecallHook, is_pre_send_rejection,
+    pre_send_rejection,
 };

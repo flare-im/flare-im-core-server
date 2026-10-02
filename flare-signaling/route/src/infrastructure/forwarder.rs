@@ -23,6 +23,9 @@ use flare_im_contracts::service_names::{MESSAGE_INGEST, MESSAGE_ORCHESTRATOR};
 use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_service_kit::ServiceClient;
 use flare_im_service_kit::config::ServicesConfig;
+use flare_im_service_kit::discovery::{
+    invalidate_static_channel_on_transport_failure, is_transport_failure, resolve_grpc_channel,
+};
 use flare_server_core::error::Result;
 use flare_server_core::{SignedActorType, VerifiedContext, set_signed_context_token};
 
@@ -55,6 +58,8 @@ fn static_im_endpoint(services: &ServicesConfig, service_name: &str) -> Option<S
 struct BusinessGrpcClients {
     send: MessageSendServiceClient<Channel>,
     event: MessageEventServiceClient<Channel>,
+    /// 走静态地址时的地址（service-kit 静态通道缓存的键）；服务发现得到的通道为 `None`。
+    static_authority: Option<String>,
 }
 
 impl BusinessGrpcClients {
@@ -62,8 +67,39 @@ impl BusinessGrpcClients {
         Self {
             send: MessageSendServiceClient::new(channel.clone()),
             event: MessageEventServiceClient::new(channel),
+            static_authority: None,
         }
     }
+
+    /// 静态地址的客户端：通道取自 service-kit 的静态通道（建连上限 2 s、HTTP/2 探活，见
+    /// [`flare_im_service_kit::discovery::StaticChannelPolicy`]），构造时不连下游。
+    async fn from_static_authority(authority: &str) -> Result<Self> {
+        let channel = resolve_grpc_channel(authority).await.map_err(|e| {
+            map_infra_error(
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
+                ErrorCode::NetworkError,
+                "Invalid static business endpoint",
+            )
+        })?;
+        let mut clients = Self::from_channel(channel);
+        clients.static_authority = Some(authority.to_string());
+        Ok(clients)
+    }
+}
+
+/// 下游拒绝消息（策略拒绝、参数或权限不符）：是业务结果而不是故障，按 INFO 记。
+fn is_business_rejection(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::FailedPrecondition
+            | tonic::Code::PermissionDenied
+            | tonic::Code::InvalidArgument
+            | tonic::Code::NotFound
+            | tonic::Code::AlreadyExists
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Unauthenticated
+            | tonic::Code::OutOfRange
+    )
 }
 
 /// 缓存的客户端条目
@@ -268,6 +304,35 @@ impl MessageForwarder {
         }
     }
 
+    /// 对业务端点的调用失败后调用：失败出在传输层（连不上、连接被断、HTTP/2 ping 超时）时，
+    /// 丢弃该端点缓存的客户端，静态地址同时丢弃 service-kit 的静态通道，下一次调用重新解析、
+    /// 新建连接；对端回的 gRPC 状态（包括业务拒绝）不动缓存。返回是否丢弃了。
+    async fn forget_clients_after_failure(
+        &self,
+        svid: &str,
+        endpoint: &str,
+        clients: &BusinessGrpcClients,
+        status: &tonic::Status,
+    ) -> bool {
+        if !is_transport_failure(status) {
+            return false;
+        }
+        self.business_clients
+            .write()
+            .await
+            .remove(&Self::cache_key(svid, endpoint));
+        if let Some(authority) = clients.static_authority.as_deref() {
+            invalidate_static_channel_on_transport_failure(authority, status);
+        }
+        debug!(
+            svid,
+            endpoint,
+            code = ?status.code(),
+            "business service client dropped after transport failure"
+        );
+        true
+    }
+
     /// 创建业务系统客户端组（内部方法，不缓存）
     async fn create_business_clients(
         &self,
@@ -325,21 +390,7 @@ impl MessageForwarder {
                             ),
                         )
                     })?;
-                let channel = tonic::transport::Endpoint::from_shared(static_endpoint)
-                    .map_err(|e| {
-                        map_infra_error(e, ErrorCode::NetworkError, "Invalid static IM endpoint")
-                    })?
-                    .connect_timeout(Duration::from_secs(3))
-                    .connect()
-                    .await
-                    .map_err(|e| {
-                        map_infra_error(
-                            e,
-                            ErrorCode::NetworkError,
-                            format!("Failed to connect to static IM service {}", im_service),
-                        )
-                    })?;
-                return Ok(BusinessGrpcClients::from_channel(channel));
+                return BusinessGrpcClients::from_static_authority(&static_endpoint).await;
             };
 
             let mut service_client = ServiceClient::new(discover);
@@ -362,35 +413,10 @@ impl MessageForwarder {
         // 其他业务系统：判断 endpoint 是服务名还是 URL
         let channel = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
             // 直接 URL
-            tonic::transport::Endpoint::from_shared(endpoint.to_string())
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::NetworkError, "Invalid endpoint format")
-                })?
-                .connect()
-                .await
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::NetworkError,
-                        "Failed to connect to business service",
-                    )
-                })?
+            return BusinessGrpcClients::from_static_authority(endpoint).await;
         } else if endpoint.contains(':') && !endpoint.contains('.') {
             // host:port 格式
-            let endpoint_url = format!("http://{}", endpoint);
-            tonic::transport::Endpoint::from_shared(endpoint_url)
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::NetworkError, "Invalid endpoint format")
-                })?
-                .connect()
-                .await
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::NetworkError,
-                        "Failed to connect to business service",
-                    )
-                })?
+            return BusinessGrpcClients::from_static_authority(&format!("http://{endpoint}")).await;
         } else {
             // 服务名（通过服务发现，支持 SVID 过滤）
             use flare_im_service_kit::config::app_config;
@@ -616,18 +642,37 @@ impl MessageForwarder {
         let response = match business_clients.send.send_message(grpc_request).await {
             Ok(resp) => resp,
             Err(e) => {
-                use tracing::error;
-                error!(
-                    message_id = %message_id,
-                    message_type = message_type,
-                    conversation_id = %conversation_id_for_log,
-                    svid = %resolved_svid,
-                    endpoint = %endpoint,
-                    error = %e,
-                    error_code = ?e.code(),
-                    error_message = %e.message(),
-                    "❌ Failed to send message to business service"
-                );
+                if is_business_rejection(e.code()) {
+                    info!(
+                        message_id = %message_id,
+                        message_type = message_type,
+                        conversation_id = %conversation_id_for_log,
+                        svid = %resolved_svid,
+                        endpoint = %endpoint,
+                        error_code = ?e.code(),
+                        error_message = %e.message(),
+                        "Business service rejected the message"
+                    );
+                } else {
+                    tracing::error!(
+                        message_id = %message_id,
+                        message_type = message_type,
+                        conversation_id = %conversation_id_for_log,
+                        svid = %resolved_svid,
+                        endpoint = %endpoint,
+                        error = %e,
+                        error_code = ?e.code(),
+                        error_message = %e.message(),
+                        "Failed to send message to business service"
+                    );
+                    self.forget_clients_after_failure(
+                        resolved_svid,
+                        &endpoint,
+                        &business_clients,
+                        &e,
+                    )
+                    .await;
+                }
                 if let Ok(detail) = flare_proto::common::ErrorDetail::decode(e.details()) {
                     let code = ErrorCode::from_u32(detail.code.max(0) as u32)
                         .unwrap_or(ErrorCode::GeneralError);
@@ -665,8 +710,9 @@ impl MessageForwarder {
         })?;
 
         info!(
-            "✅ Message forwarded to business service successfully: SVID={}, Endpoint={}",
-            resolved_svid, endpoint
+            svid = %resolved_svid,
+            endpoint = %endpoint,
+            "Message forwarded to business service"
         );
         Ok((endpoint, response_bytes))
     }
@@ -745,12 +791,12 @@ impl MessageForwarder {
             &forwarding_ctx,
         );
 
-        let response = business_clients
-            .event
-            .execute_event(grpc_request)
-            .await
-            .map_err(|e| {
-                map_infra_error(
+        let response = match business_clients.event.execute_event(grpc_request).await {
+            Ok(response) => response,
+            Err(e) => {
+                self.forget_clients_after_failure(resolved_svid, &endpoint, &business_clients, &e)
+                    .await;
+                return Err(map_infra_error(
                     std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
                         e.message().to_string(),
@@ -762,13 +808,15 @@ impl MessageForwarder {
                         e.message(),
                         e.code()
                     ),
-                )
-            })?;
+                ));
+            }
+        };
         // ExecuteEvent returns google.protobuf.Empty, no response data to encode
         response.into_inner();
         info!(
-            "✅ Event forwarded to business service: SVID={}, Endpoint={}",
-            resolved_svid, endpoint
+            svid = %resolved_svid,
+            endpoint = %endpoint,
+            "Event forwarded to business service"
         );
         Ok((endpoint, Vec::new()))
     }
@@ -836,5 +884,170 @@ mod static_im_endpoint_tests {
             .unwrap()
             .port = Some(0);
         assert_eq!(static_im_endpoint(&services, MESSAGE_INGEST), None);
+    }
+}
+
+#[cfg(test)]
+mod business_channel_tests {
+    use super::*;
+    use flare_grpc_proto::message::message_send_service_server::{
+        MessageSendService, MessageSendServiceServer,
+    };
+    use flare_grpc_proto::message::{
+        BatchSendMessageRequest, BatchSendMessageResponse, SendAckRequest, SendAckResponse,
+        SendCustomDataRequest, SendCustomDataResponse, SendSystemMessageRequest,
+        SendSystemMessageResponse,
+    };
+    use flare_im_service_kit::discovery::is_static_channel_cached;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tonic::{Request, Response, Status};
+
+    struct FakeIngest;
+
+    #[tonic::async_trait]
+    impl MessageSendService for FakeIngest {
+        async fn send_message(
+            &self,
+            _request: Request<SendMessageRequest>,
+        ) -> std::result::Result<Response<SendMessageResponse>, Status> {
+            Err(Status::failed_precondition("pre-send hook rejected"))
+        }
+        async fn batch_send_message(
+            &self,
+            _request: Request<BatchSendMessageRequest>,
+        ) -> std::result::Result<Response<BatchSendMessageResponse>, Status> {
+            Err(Status::unimplemented("batch"))
+        }
+        async fn send_system_message(
+            &self,
+            _request: Request<SendSystemMessageRequest>,
+        ) -> std::result::Result<Response<SendSystemMessageResponse>, Status> {
+            Err(Status::unimplemented("system"))
+        }
+        async fn send_ack(
+            &self,
+            _request: Request<SendAckRequest>,
+        ) -> std::result::Result<Response<SendAckResponse>, Status> {
+            Err(Status::unimplemented("ack"))
+        }
+        async fn send_custom_data(
+            &self,
+            _request: Request<SendCustomDataRequest>,
+        ) -> std::result::Result<Response<SendCustomDataResponse>, Status> {
+            Err(Status::unimplemented("custom data"))
+        }
+    }
+
+    async fn start_fake_ingest() -> (
+        std::net::SocketAddr,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stop_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(MessageSendServiceServer::new(FakeIngest))
+                .serve_with_incoming_shutdown(
+                    tonic::transport::server::TcpIncoming::from(listener),
+                    async {
+                        let _ = stop_rx.await;
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        (addr, stop, task)
+    }
+
+    async fn send(clients: &mut BusinessGrpcClients) -> std::result::Result<(), Status> {
+        clients
+            .send
+            .send_message(Request::new(SendMessageRequest::default()))
+            .await
+            .map(|_| ())
+    }
+
+    /// 静态业务端点走 service-kit 的静态通道（建连上限、HTTP/2 探活），传输层失败后丢弃
+    /// 转发器缓存的客户端与静态通道；对端回的拒绝不丢。以前用没有探活的立即建连通道，缓存
+    /// 5 分钟，下游换地址后只能等缓存过期。
+    #[tokio::test]
+    async fn static_business_clients_are_dropped_after_transport_failure_only() {
+        let forwarder = MessageForwarder::new("0".to_string());
+        let (addr, stop, task) = start_fake_ingest().await;
+        let authority = format!("http://{addr}");
+        let svid = "svid.test";
+
+        let mut clients = forwarder
+            .get_or_create_cached_client(svid, &authority)
+            .await
+            .expect("static business clients");
+        assert_eq!(
+            clients.static_authority.as_deref(),
+            Some(authority.as_str())
+        );
+        assert!(
+            is_static_channel_cached(&authority),
+            "static business endpoint must use the service-kit static channel"
+        );
+
+        // 对端回的业务拒绝：不是传输层失败，缓存保留。
+        let rejected = send(&mut clients).await.expect_err("fake ingest rejects");
+        assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
+        assert!(is_business_rejection(rejected.code()));
+        assert!(
+            !forwarder
+                .forget_clients_after_failure(svid, &authority, &clients, &rejected)
+                .await
+        );
+        assert!(is_static_channel_cached(&authority));
+        assert!(
+            forwarder
+                .business_clients
+                .read()
+                .await
+                .contains_key(&MessageForwarder::cache_key(svid, &authority))
+        );
+
+        // 下游停止：传输层失败，转发器缓存与静态通道一起丢弃。
+        let _ = stop.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        let failed = send(&mut clients).await.expect_err("stopped ingest");
+        assert!(is_transport_failure(&failed), "{failed:?}");
+        assert!(!is_business_rejection(failed.code()), "{failed:?}");
+        assert!(
+            forwarder
+                .forget_clients_after_failure(svid, &authority, &clients, &failed)
+                .await
+        );
+        assert!(!is_static_channel_cached(&authority));
+        assert!(
+            !forwarder
+                .business_clients
+                .read()
+                .await
+                .contains_key(&MessageForwarder::cache_key(svid, &authority))
+        );
+    }
+
+    #[test]
+    fn only_caller_attributable_statuses_count_as_business_rejections() {
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::InvalidArgument,
+        ] {
+            assert!(is_business_rejection(code), "{code:?}");
+        }
+        for code in [
+            tonic::Code::Unknown,
+            tonic::Code::Internal,
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+        ] {
+            assert!(!is_business_rejection(code), "{code:?}");
+        }
     }
 }

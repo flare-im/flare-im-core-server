@@ -263,6 +263,28 @@ impl From<Result<()>> for PreSendDecision {
     }
 }
 
+/// 进程内标记：PreSend 扩展明确拒绝了这条消息（gRPC Hook 回 `allow=false`、WebHook 回
+/// `allow: false`），而不是扩展不可用、超时或出错。只放在错误的 `params` 里，不进
+/// `ErrorDetail`，客户端看到的错误码、原因与说明都不变；摄入服务据此把策略拒绝回成 gRPC
+/// `FAILED_PRECONDITION`，调用方不再把它当成下游故障。
+pub const PRE_SEND_REJECTION_PARAM: &str = "pre_send_rejection";
+
+/// 构建 PreSend 扩展的明确拒绝，并打上 [`PRE_SEND_REJECTION_PARAM`] 标记。
+pub fn pre_send_rejection(error: ErrorBuilder) -> FlareError {
+    error.param(PRE_SEND_REJECTION_PARAM, "true").build_error()
+}
+
+/// 这个错误是否为 PreSend 扩展的明确拒绝（见 [`PRE_SEND_REJECTION_PARAM`]）。
+pub fn is_pre_send_rejection(error: &FlareError) -> bool {
+    matches!(
+        error,
+        FlareError::Localized {
+            params: Some(params),
+            ..
+        } if params.get(PRE_SEND_REJECTION_PARAM).is_some_and(|value| value == "true")
+    )
+}
+
 impl fmt::Display for PreSendDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

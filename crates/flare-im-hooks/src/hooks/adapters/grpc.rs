@@ -24,7 +24,7 @@ use crate::discovery::{invalidate_static_channel_on_transport_failure, resolve_g
 
 use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
-    PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    PreSendDecision, PreSendHook, RecallEvent, RecallHook, pre_send_rejection,
 };
 
 #[derive(Clone)]
@@ -164,6 +164,15 @@ async fn hook_plugin_channel(endpoint: &str) -> Result<Channel> {
     })
 }
 
+/// gRPC PreSend Hook 回 `allow=false`：策略拒绝。错误码与原因同以前（客户端照旧看到
+/// `OPERATION_FAILED` / `pre-send hook rejected`），另带进程内的策略拒绝标记。
+fn pre_send_hook_rejection() -> flare_server_core::error::FlareError {
+    pre_send_rejection(
+        ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+            .details("allow=false"),
+    )
+}
+
 #[derive(Clone)]
 struct GrpcPreSendHook {
     grpc_endpoint: String,
@@ -195,11 +204,9 @@ impl PreSendHook for GrpcPreSendHook {
         match response {
             Ok(inner) => {
                 if !inner.allow {
-                    let err =
-                        ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
-                            .details("allow=false")
-                            .build_error();
-                    return PreSendDecision::Reject { error: err };
+                    return PreSendDecision::Reject {
+                        error: pre_send_hook_rejection(),
+                    };
                 }
                 if let Some(draft_resp) = inner.draft {
                     apply_draft(draft, draft_resp);
@@ -568,6 +575,39 @@ fn system_time_to_timestamp(time: SystemTime) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use super::{conversation_type_label_to_proto, message_type_label_to_proto};
+
+    /// `allow=false` 是策略拒绝：带进程内标记，错误码、原因与说明（客户端看到的）同以前；
+    /// 调用失败（扩展不可用）不带标记。
+    #[test]
+    fn allow_false_is_marked_as_a_policy_rejection_with_the_same_wire_error() {
+        use crate::hooks::is_pre_send_rejection;
+        use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
+
+        let rejection = super::pre_send_hook_rejection();
+        assert!(is_pre_send_rejection(&rejection));
+        match &rejection {
+            FlareError::Localized {
+                code,
+                reason,
+                details,
+                ..
+            } => {
+                assert_eq!(*code, ErrorCode::OperationFailed);
+                assert_eq!(reason, "pre-send hook rejected");
+                assert_eq!(details.as_deref(), Some("allow=false"));
+            }
+            other => panic!("unexpected rejection shape: {other}"),
+        }
+        let detail = flare_server_core::error::to_error_detail(&rejection, "");
+        assert_eq!(detail.code, ErrorCode::OperationFailed.as_u32() as i32);
+        assert_eq!(detail.reason, "pre-send hook rejected");
+        assert_eq!(detail.message, "allow=false");
+
+        let unavailable = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
+            .details("transport error")
+            .build_error();
+        assert!(!is_pre_send_rejection(&unavailable));
+    }
 
     #[test]
     fn conversation_type_label_to_proto_accepts_only_canonical_names() {

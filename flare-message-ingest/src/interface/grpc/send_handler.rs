@@ -12,6 +12,7 @@ use flare_grpc_proto::message::{
     SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_hooks::is_pre_send_rejection;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
 use flare_proto::common::{Message, MessageSource, MessageType};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
@@ -153,6 +154,25 @@ fn authorize_message_claims(
     Ok(())
 }
 
+/// 发送失败转成 gRPC `Status`，`details` 带结构化的 `ErrorDetail`。
+///
+/// PreSend 扩展明确拒绝（策略拒绝，见 [`is_pre_send_rejection`]）回 `FAILED_PRECONDITION`：它是
+/// 发送方可预期的业务结果，不是下游故障。以前按错误码 `OPERATION_FAILED` 映射为 `UNKNOWN`，
+/// signaling-route 把它当成故障记 ERROR。`ErrorDetail` 不变，网关与客户端看到的错误码、原因
+/// 与说明都照旧；扩展不可用、超时等其余失败仍按错误码映射。
+fn send_failure_status(err: flare_server_core::error::FlareError) -> Status {
+    let policy_rejection = is_pre_send_rejection(&err);
+    let status = Status::from(err);
+    if !policy_rejection {
+        return status;
+    }
+    Status::with_details(
+        tonic::Code::FailedPrecondition,
+        status.message().to_string(),
+        status.details().to_vec().into(),
+    )
+}
+
 #[tonic::async_trait]
 impl MessageSendService for MessageSendGrpcHandler {
     #[instrument(skip(self, request))]
@@ -206,10 +226,7 @@ impl MessageSendService for MessageSendGrpcHandler {
                 );
                 Ok(Response::new(response))
             }
-            Err(err) => {
-                // 使用 IntoGrpc trait 将 FlareError 转换为包含 ErrorDetail 的 Status
-                Err(Status::from(err))
-            }
+            Err(err) => Err(send_failure_status(err)),
         }
     }
 
@@ -417,6 +434,38 @@ fn send_response_from_outcome(outcome: SendMessageOutcome) -> SendMessageRespons
 mod tests {
     use super::*;
     use flare_proto::common::SendAckDurability;
+
+    /// PreSend 扩展的策略拒绝回 `FAILED_PRECONDITION`，`ErrorDetail`（网关据此给客户端的错误码、
+    /// 原因与说明）不变；扩展不可用仍是 `UNAVAILABLE`，其余未标记的 `OPERATION_FAILED` 仍是
+    /// `UNKNOWN`。
+    #[test]
+    fn pre_send_policy_rejection_is_failed_precondition_with_the_same_error_detail() {
+        use flare_server_core::error::{ErrorBuilder, ErrorCode};
+        use prost::Message as _;
+
+        let rejection = flare_im_hooks::pre_send_rejection(
+            ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
+                .details("allow=false"),
+        );
+        let status = send_failure_status(rejection);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let detail = flare_proto::common::ErrorDetail::decode(status.details()).expect("detail");
+        assert_eq!(detail.code, ErrorCode::OperationFailed.as_u32() as i32);
+        assert_eq!(detail.reason, "pre-send hook rejected");
+        assert_eq!(detail.message, "allow=false");
+
+        let unmarked =
+            ErrorBuilder::new(ErrorCode::OperationFailed, "pre_send hook timeout").build_error();
+        assert_eq!(send_failure_status(unmarked).code(), tonic::Code::Unknown);
+
+        let unavailable = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
+            .details("transport error")
+            .build_error();
+        assert_eq!(
+            send_failure_status(unavailable).code(),
+            tonic::Code::Unavailable
+        );
+    }
 
     fn claims(actor_type: SignedActorType, actor_id: &str) -> SignedContextClaims {
         SignedContextClaims {

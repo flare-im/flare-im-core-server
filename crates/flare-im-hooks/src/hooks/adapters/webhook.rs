@@ -15,7 +15,7 @@ use sha2::Sha256;
 use super::super::config::HookDefinition;
 use super::super::types::{
     DeliveryEvent, DeliveryHook, HookOutcome, MessageDraft, MessageRecord, PostSendHook,
-    PreSendDecision, PreSendHook, RecallEvent, RecallHook,
+    PreSendDecision, PreSendHook, RecallEvent, RecallHook, pre_send_rejection,
 };
 
 #[derive(Clone)]
@@ -397,16 +397,16 @@ impl PreSendHook for WebhookPreSendHook {
                                     .unwrap_or_else(|| "rejected by webhook".into());
                                 ErrorBuilder::new(ErrorCode::OperationFailed, &message)
                                     .details(code)
-                                    .build_error()
                             })
                             .unwrap_or_else(|| {
                                 ErrorBuilder::new(
                                     ErrorCode::OperationFailed,
                                     "webhook rejected message",
                                 )
-                                .build_error()
                             });
-                        PreSendDecision::Reject { error: err }
+                        PreSendDecision::Reject {
+                            error: pre_send_rejection(err),
+                        }
                     }
                 }
                 Err(err) => PreSendDecision::Reject {
