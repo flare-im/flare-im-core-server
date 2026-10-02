@@ -143,6 +143,116 @@ mod tests {
         assert_eq!(err.reason(), "decode Message event payload");
     }
 
+    fn decode_row(event_type: ProtoEventType, payload: &[u8]) -> Option<EventPayload> {
+        proto_event_from_events_row(
+            "c1",
+            7,
+            event_type as i32,
+            Utc::now(),
+            String::new(),
+            None,
+            None,
+            payload,
+        )
+        .expect("row decodes")
+        .payload
+    }
+
+    /// Writer 的行（`event_type` 为 proto 类型，`payload` 为内层消息的 prost 编码）按类型解回
+    /// 原内容。与 Writer `event_stream.rs` 的 `operation_rows_decode_as_their_declared_proto_type`
+    /// 写死同一组「类型 ↔ 内层消息」，两边合起来是一次往返。
+    #[test]
+    fn writer_rows_decode_into_the_matching_payload() {
+        let reaction = ReactionEvent {
+            server_msg_id: "m1".into(),
+            user_id: "u1".into(),
+            emoji: "thumbsup".into(),
+            action: 1,
+        };
+        assert_eq!(
+            decode_row(ProtoEventType::EventReaction, &reaction.encode_to_vec()),
+            Some(EventPayload::Reaction(reaction))
+        );
+        let pin = PinEvent {
+            server_msg_id: "m1".into(),
+            pinned_by: "u1".into(),
+            reason: Some("keep".into()),
+            expire_at: None,
+            scope: 1,
+        };
+        assert_eq!(
+            decode_row(ProtoEventType::EventPin, &pin.encode_to_vec()),
+            Some(EventPayload::Pin(pin))
+        );
+        let unpin = UnpinEvent {
+            server_msg_id: "m1".into(),
+            unpinned_by: "u1".into(),
+            scope: 1,
+        };
+        assert_eq!(
+            decode_row(ProtoEventType::EventUnpin, &unpin.encode_to_vec()),
+            Some(EventPayload::Unpin(unpin))
+        );
+        let mark = MarkEvent {
+            server_msg_id: "m1".into(),
+            user_id: "u1".into(),
+            mark_type: 2,
+            color: "#FF0000".into(),
+        };
+        assert_eq!(
+            decode_row(ProtoEventType::EventMark, &mark.encode_to_vec()),
+            Some(EventPayload::Mark(mark))
+        );
+        let unmark = UnmarkEvent {
+            server_msg_id: "m1".into(),
+            user_id: "u1".into(),
+            mark_type: 2,
+        };
+        assert_eq!(
+            decode_row(ProtoEventType::EventUnmark, &unmark.encode_to_vec()),
+            Some(EventPayload::Unmark(unmark))
+        );
+    }
+
+    /// 修复前的 Writer 把反应写成 `event_type = 11`（`EVENT_MARK`）：`emoji`（字段 3，字符串）与
+    /// `MarkEvent.mark_type`（字段 3，varint）线型不同，解码失败，正是 W10-S1 F1 每轮看到的
+    /// `decode Mark event payload`。置顶写成 12（`EVENT_UNMARK`）且不带 `reason` 时线型恰好兼容，
+    /// 被静默解成取消标记——这类存量行不能靠 Reader 自行纠正。
+    #[test]
+    fn legacy_rows_with_domain_discriminants_are_misread() {
+        let reaction = ReactionEvent {
+            server_msg_id: "m1".into(),
+            user_id: "u1".into(),
+            emoji: "thumbsup".into(),
+            action: 1,
+        };
+        let err = proto_event_from_events_row(
+            "c1",
+            7,
+            11,
+            Utc::now(),
+            String::new(),
+            None,
+            None,
+            &reaction.encode_to_vec(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::DeserializationError), "{err}");
+        assert_eq!(err.reason(), "decode Mark event payload");
+
+        let pin = PinEvent {
+            server_msg_id: "m1".into(),
+            pinned_by: "u1".into(),
+            reason: None,
+            expire_at: None,
+            scope: 1,
+        };
+        assert!(matches!(
+            decode_row(ProtoEventType::EventUnmark, &pin.encode_to_vec()),
+            Some(EventPayload::Unmark(_))
+        ));
+    }
+
     #[test]
     fn an_empty_or_unknown_payload_is_not_an_error() {
         let shell = proto_event_from_events_row(

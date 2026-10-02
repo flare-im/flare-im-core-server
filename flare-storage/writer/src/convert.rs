@@ -67,7 +67,7 @@ pub fn event_to_proto(e: &Event) -> flare_proto::common::Event {
     flare_proto::common::Event {
         conversation_id: e.conversation_id.clone(),
         conversation_seq: e.seq,
-        r#type: e.r#type as i32,
+        r#type: event_type_to_proto_i32(e.r#type),
         created_at: e
             .created_at
             .as_ref()
@@ -79,6 +79,39 @@ pub fn event_to_proto(e: &Event) -> flare_proto::common::Event {
     }
 }
 
+/// 领域事件类型 → `flare.common.v1.EventType` 的取值（`events.event_type` 列与 `Event.type` 存的都是它）。
+///
+/// 领域枚举的判别值与 proto 不同（领域多了 Typing/Presence/CallSignal，从 6 起错位），不能用
+/// `as i32`：以前这里直接 `e.r#type as i32`，反应事件（领域 11）落成 `EVENT_MARK`（11），置顶（12）
+/// 落成 `EVENT_UNMARK`，Reader 按 proto 类型解码内层载荷，反应解不开（W10-S1 F1 的
+/// `decode Mark event payload`），置顶则被静默解成取消标记。proto 没有的领域类型记为未指定。
+fn event_type_to_proto_i32(t: EventType) -> i32 {
+    use common::EventType as P;
+    let proto = match t {
+        EventType::Message => P::EventMessage,
+        EventType::MessageRecall => P::EventMessageRecall,
+        EventType::MessageEdit => P::EventMessageEdit,
+        EventType::MessageDelete => P::EventMessageDelete,
+        EventType::ReadReceipt => P::EventReadReceipt,
+        EventType::ConversationUpdate => P::EventConversationUpdate,
+        EventType::ConversationDelete => P::EventConversationDelete,
+        EventType::Reaction => P::EventReaction,
+        EventType::Pin => P::EventPin,
+        EventType::Unpin => P::EventUnpin,
+        EventType::Mark => P::EventMark,
+        EventType::Unmark => P::EventUnmark,
+        EventType::MessageBurnScheduled => P::EventMessageRetentionScheduled,
+        EventType::MessageBurned => P::EventMessageRetentionExpired,
+        EventType::MessageHardDeleted => P::EventMessageRetentionPurged,
+        EventType::Custom => P::EventCustom,
+        EventType::Typing
+        | EventType::Presence
+        | EventType::CallSignal
+        | EventType::Unspecified => P::Unspecified,
+    };
+    proto as i32
+}
+
 fn event_type_from_i32(v: i32) -> EventType {
     match common::EventType::try_from(v) {
         Ok(common::EventType::EventMessage) => EventType::Message,
@@ -86,6 +119,8 @@ fn event_type_from_i32(v: i32) -> EventType {
         Ok(common::EventType::EventMessageEdit) => EventType::MessageEdit,
         Ok(common::EventType::EventMessageDelete) => EventType::MessageDelete,
         Ok(common::EventType::EventReadReceipt) => EventType::ReadReceipt,
+        Ok(common::EventType::EventConversationUpdate) => EventType::ConversationUpdate,
+        Ok(common::EventType::EventConversationDelete) => EventType::ConversationDelete,
         Ok(common::EventType::EventReaction) => EventType::Reaction,
         Ok(common::EventType::EventPin) => EventType::Pin,
         Ok(common::EventType::EventUnpin) => EventType::Unpin,
@@ -94,7 +129,8 @@ fn event_type_from_i32(v: i32) -> EventType {
         Ok(common::EventType::EventMessageRetentionScheduled) => EventType::MessageBurnScheduled,
         Ok(common::EventType::EventMessageRetentionExpired) => EventType::MessageBurned,
         Ok(common::EventType::EventMessageRetentionPurged) => EventType::MessageHardDeleted,
-        _ => EventType::Unspecified,
+        Ok(common::EventType::EventCustom) => EventType::Custom,
+        Ok(common::EventType::Unspecified) | Err(_) => EventType::Unspecified,
     }
 }
 
@@ -474,5 +510,60 @@ mod tests {
             ..Default::default()
         };
         assert!(message_command_from_proto(msg).tenant.is_none());
+    }
+
+    fn typed_event(r#type: EventType) -> Event {
+        Event {
+            tenant_id: "tenant-a".to_string(),
+            conversation_id: "conv-a".to_string(),
+            seq: 9,
+            r#type,
+            created_at: None,
+            operator_id: String::new(),
+            event_seq: None,
+            request_id: None,
+            payload: None,
+        }
+    }
+
+    /// 落库的 `Event.type` 是 proto `EventType` 的取值，不是领域枚举的判别值（W10-S1 F1：反应
+    /// 曾落成 `EVENT_MARK`）。期望值照 `event.proto` 写死成数字，不用同一张映射表现算；proto 有的
+    /// 类型反向映射回原领域类型。
+    #[test]
+    fn persisted_event_type_is_the_proto_enum_value() {
+        let cases = [
+            (EventType::Message, 1),
+            (EventType::MessageRecall, 2),
+            (EventType::MessageEdit, 3),
+            (EventType::MessageDelete, 4),
+            (EventType::ReadReceipt, 5),
+            (EventType::ConversationUpdate, 6),
+            (EventType::ConversationDelete, 7),
+            (EventType::Reaction, 8),
+            (EventType::Pin, 9),
+            (EventType::Unpin, 10),
+            (EventType::Mark, 11),
+            (EventType::Unmark, 12),
+            (EventType::MessageBurnScheduled, 13),
+            (EventType::MessageBurned, 14),
+            (EventType::MessageHardDeleted, 15),
+            (EventType::Custom, 16),
+            (EventType::Typing, 0),
+            (EventType::Presence, 0),
+            (EventType::CallSignal, 0),
+            (EventType::Unspecified, 0),
+        ];
+        for (domain, proto) in cases {
+            assert_eq!(
+                event_to_proto(&typed_event(domain)).r#type,
+                proto,
+                "{domain:?}"
+            );
+            if proto != 0 {
+                assert_eq!(event_type_from_i32(proto), domain, "{proto}");
+            }
+        }
+        assert_eq!(event_type_from_i32(0), EventType::Unspecified);
+        assert_eq!(event_type_from_i32(99), EventType::Unspecified);
     }
 }

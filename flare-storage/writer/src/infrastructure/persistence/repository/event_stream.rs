@@ -336,6 +336,177 @@ impl EventStreamRepository for PostgresEventStreamStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::model::{
+        BurnScheduledPayload, Event, EventPayload, EventType, MarkPayload, PinPayload,
+        ReactionPayload, RecallPayload, UnmarkPayload, UnpinPayload,
+    };
+    use flare_proto::common;
+
+    fn operation_event(r#type: EventType, payload: EventPayload) -> Event {
+        Event {
+            tenant_id: "tenant-a".to_string(),
+            conversation_id: "conv-a".to_string(),
+            seq: 42,
+            r#type,
+            created_at: None,
+            operator_id: "u1".to_string(),
+            event_seq: Some(7),
+            request_id: None,
+            payload: Some(payload),
+        }
+    }
+
+    /// `events` 行的 `event_type` 必须是内层载荷对应的 proto 类型：Reader 按这个数字选择解码的
+    /// 消息类型（`event.proto` 中 `EVENT_REACTION = 8` 对 `ReactionEvent`，依此类推）。
+    fn assert_row<M>(event: &Event, event_type: i32, expected: M)
+    where
+        M: prost::Message + Default + PartialEq + std::fmt::Debug,
+    {
+        let row = event_to_insert_row(event)
+            .expect("encode")
+            .expect("row for a conversation event");
+        assert_eq!(row.event_type, event_type, "{:?}", event.r#type);
+        assert_eq!(
+            M::decode(row.payload.as_slice()).expect("payload decodes as the declared type"),
+            expected,
+            "{:?}",
+            event.r#type
+        );
+    }
+
+    /// 写入侧的行能按 proto 类型解回原内容（W10-S1 F1）。修复前 `event_type` 是领域枚举的判别值：
+    /// 反应落成 11（`EVENT_MARK`），Reader 解 `MarkEvent` 失败；置顶落成 12（`EVENT_UNMARK`），
+    /// 会被静默解成取消标记。撤回的数字两边本来一致，作对照。
+    #[test]
+    fn operation_rows_decode_as_their_declared_proto_type() {
+        assert_row(
+            &operation_event(
+                EventType::Reaction,
+                EventPayload::Reaction(ReactionPayload {
+                    server_msg_id: "m1".to_string(),
+                    user_id: "u1".to_string(),
+                    emoji: "thumbsup".to_string(),
+                    action: 1,
+                }),
+            ),
+            8,
+            common::ReactionEvent {
+                server_msg_id: "m1".to_string(),
+                user_id: "u1".to_string(),
+                emoji: "thumbsup".to_string(),
+                action: 1,
+            },
+        );
+        assert_row(
+            &operation_event(
+                EventType::Pin,
+                EventPayload::Pin(PinPayload {
+                    server_msg_id: "m1".to_string(),
+                    pinned_by: "u1".to_string(),
+                    reason: Some("keep".to_string()),
+                    expire_at: None,
+                    scope: 1,
+                }),
+            ),
+            9,
+            common::PinEvent {
+                server_msg_id: "m1".to_string(),
+                pinned_by: "u1".to_string(),
+                reason: Some("keep".to_string()),
+                expire_at: None,
+                scope: 1,
+            },
+        );
+        assert_row(
+            &operation_event(
+                EventType::Unpin,
+                EventPayload::Unpin(UnpinPayload {
+                    server_msg_id: "m1".to_string(),
+                    unpinned_by: "u1".to_string(),
+                    scope: 1,
+                }),
+            ),
+            10,
+            common::UnpinEvent {
+                server_msg_id: "m1".to_string(),
+                unpinned_by: "u1".to_string(),
+                scope: 1,
+            },
+        );
+        assert_row(
+            &operation_event(
+                EventType::Mark,
+                EventPayload::Mark(MarkPayload {
+                    server_msg_id: "m1".to_string(),
+                    user_id: "u1".to_string(),
+                    mark_type: 2,
+                    color: "#FF0000".to_string(),
+                }),
+            ),
+            11,
+            common::MarkEvent {
+                server_msg_id: "m1".to_string(),
+                user_id: "u1".to_string(),
+                mark_type: 2,
+                color: "#FF0000".to_string(),
+            },
+        );
+        assert_row(
+            &operation_event(
+                EventType::Unmark,
+                EventPayload::Unmark(UnmarkPayload {
+                    server_msg_id: "m1".to_string(),
+                    user_id: "u1".to_string(),
+                    mark_type: 2,
+                }),
+            ),
+            12,
+            common::UnmarkEvent {
+                server_msg_id: "m1".to_string(),
+                user_id: "u1".to_string(),
+                mark_type: 2,
+            },
+        );
+        assert_row(
+            &operation_event(
+                EventType::MessageRecall,
+                EventPayload::Recall(RecallPayload {
+                    server_msg_id: "m1".to_string(),
+                    reason: "typo".to_string(),
+                    time_limit_seconds: None,
+                    allow_admin_recall: None,
+                }),
+            ),
+            2,
+            common::MessageRecallEvent {
+                server_msg_id: "m1".to_string(),
+                reason: "typo".to_string(),
+                time_limit_seconds: None,
+                allow_admin_recall: None,
+            },
+        );
+
+        let scheduled = operation_event(
+            EventType::MessageBurnScheduled,
+            EventPayload::BurnScheduled(BurnScheduledPayload {
+                tenant_id: "tenant-a".to_string(),
+                conversation_id: "conv-a".to_string(),
+                message_id: "m1".to_string(),
+                server_id: "m1".to_string(),
+                seq: None,
+                reader_id: Some("u2".to_string()),
+                burn_at: 1_700_000_000_000,
+                event_time: 1_699_999_990_000,
+            }),
+        );
+        let Some(common::event::Payload::RetentionScheduled(expected)) =
+            crate::convert::event_to_proto(&scheduled).payload
+        else {
+            panic!("burn-scheduled payload converts to RetentionScheduled");
+        };
+        assert_eq!(expected.server_msg_id, "m1");
+        assert_row(&scheduled, 13, expected);
+    }
 
     #[test]
     fn event_conflict_matches_only_when_type_and_payload_match() {
