@@ -1,8 +1,4 @@
-use axum::{
-    Json,
-    extract::{Extension, Path},
-    http::HeaderMap,
-};
+use axum::{Json, extract::Extension, http::HeaderMap};
 use flare_core_base::context::keys;
 use flare_server_core::{
     AuthenticatedPrincipal,
@@ -13,7 +9,7 @@ use serde::Serialize;
 
 use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
-use super::admin_extract::{AdminJson, AdminQuery};
+use super::admin_extract::{AdminJson, AdminPath, AdminQuery};
 use super::ops_handler::{AdminCapability, admin_rpc_error};
 use crate::application::admin_messages::{
     AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
@@ -351,7 +347,7 @@ pub async fn admin_get_message(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    Path(message_id): Path<String>,
+    AdminPath(message_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminMessageDetailHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_get_message_request(&message_id)
@@ -393,7 +389,7 @@ pub async fn admin_query_message_events(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    Path(message_id): Path<String>,
+    AdminPath(message_id): AdminPath<String>,
     AdminQuery(query): AdminQuery<AdminMessageEventsQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageEventsHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);

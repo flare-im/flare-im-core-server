@@ -734,3 +734,37 @@ async fn over_long_audit_headers_are_400_and_never_reach_downstream() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!h.recorder.calls().is_empty());
 }
+
+/// 路径参数百分号解码后不是 UTF-8（`%FF`）：网关自己的 400 信封 `ADMIN_INVALID_PATH`，不回显取值，
+/// 不调用下游。修复前是 axum 的纯文本 400（`Invalid URL: ...`，带着解码后的取值）。读写、单参数
+/// 与双参数的路由都一样。
+#[tokio::test]
+async fn undecodable_path_parameters_are_typed_bad_requests_without_echo() {
+    let h = harness(true).await;
+    let cases = [
+        ("GET", "/api/v1/admin/conversations/leak-marker-77%FF"),
+        (
+            "GET",
+            "/api/v1/admin/conversations/leak-marker-77%FF/participants",
+        ),
+        ("GET", "/api/v1/admin/users/leak-marker-77%FF/devices"),
+        ("GET", "/api/v1/admin/users/leak-marker-77%FF/presence"),
+        ("POST", "/api/v1/admin/users/leak-marker-77%FF/kick"),
+        (
+            "POST",
+            "/api/v1/admin/users/u1/devices/leak-marker-77%FF/kick",
+        ),
+    ];
+    for (method, path) in cases {
+        let (status, body) = send(&h.router, admin_request(method, path, &h.token)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {body}");
+        assert_eq!(body["code"], 400, "{method} {path}: {body}");
+        assert_eq!(
+            reason(&body),
+            "ADMIN_INVALID_PATH",
+            "{method} {path}: {body}"
+        );
+        assert!(!body.to_string().contains("leak-marker-77"), "{body}");
+    }
+    assert!(h.recorder.calls().is_empty());
+}

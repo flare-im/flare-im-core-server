@@ -1,4 +1,4 @@
-//! 请求体与查询串的提取器：解析失败时回网关自己的类型化 400 信封（`code`、`reason`、
+//! 请求体、查询串与路径参数的提取器：解析失败时回网关自己的类型化 400 信封（`code`、`reason`、
 //! `message`，与其他错误同形），而不是 axum 默认的纯文本 400、415 或 422。
 //!
 //! 调用方 Control 按 HTTP 状态映射核心管理错误：axum 默认的 422 曾被它当成 Core 故障
@@ -7,8 +7,8 @@
 use axum::{
     Json,
     extract::{
-        FromRequest, FromRequestParts, Query, Request,
-        rejection::{JsonRejection, QueryRejection},
+        FromRequest, FromRequestParts, Path, Query, Request,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{StatusCode, request::Parts},
 };
@@ -21,6 +21,8 @@ pub const INVALID_JSON_BODY: &str = "ADMIN_INVALID_JSON_BODY";
 pub const REQUEST_BODY_TOO_LARGE: &str = "ADMIN_REQUEST_BODY_TOO_LARGE";
 /// 查询串的参数缺失或类型不对。
 pub const INVALID_QUERY: &str = "ADMIN_INVALID_QUERY";
+/// 路径参数解不开（百分号解码后不是 UTF-8，或类型不对）。
+pub const INVALID_PATH: &str = "ADMIN_INVALID_PATH";
 
 /// [`Json`] 的替身：拒绝时回 400 [`INVALID_JSON_BODY`]（超出大小上限为
 /// [`REQUEST_BODY_TOO_LARGE`]）。
@@ -59,6 +61,25 @@ where
     }
 }
 
+/// [`Path`] 的替身：路径参数解不开时回 400 [`INVALID_PATH`]。路由与提取器不匹配（缺参数，
+/// axum 的 500）是网关自身的缺陷，回固定原因的 500，同样不回显 axum 的纯文本。
+pub struct AdminPath<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for AdminPath<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = HttpApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Path::<T>::from_request_parts(parts, state).await {
+            Ok(Path(value)) => Ok(Self(value)),
+            Err(rejection) => Err(path_rejection(&rejection)),
+        }
+    }
+}
+
 fn json_rejection(rejection: &JsonRejection) -> HttpApiError {
     // 只记拒绝的种类与 axum 原本的状态码；body_text() 含请求取值，不记。
     let kind = match rejection {
@@ -93,5 +114,23 @@ fn query_rejection(rejection: &QueryRejection) -> HttpApiError {
     HttpApiError::bad_request(
         INVALID_QUERY,
         "query parameters must be present where required and of the documented type",
+    )
+}
+
+fn path_rejection(rejection: &PathRejection) -> HttpApiError {
+    // body_text() 含路径里的取值，不记。
+    tracing::debug!(
+        axum_status = rejection.status().as_u16(),
+        "admin path parameters rejected"
+    );
+    if rejection.status().is_server_error() {
+        return HttpApiError::internal(
+            "ADMIN_PATH_EXTRACTION_FAILED",
+            "the route does not provide the path parameters its handler expects",
+        );
+    }
+    HttpApiError::bad_request(
+        INVALID_PATH,
+        "path parameters must be valid percent-encoded UTF-8 of the documented type",
     )
 }

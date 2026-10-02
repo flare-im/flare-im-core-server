@@ -119,14 +119,17 @@ use flare_im_service_kit::clients::GrpcClients;
 struct AdminApiDoc;
 
 /// 每条管理路由都可能在调用下游之前回的 400：中间件的审计头上限（读写都查），带请求体的
-/// 路由的请求体解析，带查询参数的路由的查询串解析。由文档生成时统一补进各操作的 400 说明，
-/// 新路由不会漏写；路由自己的 400 原因仍写在各自的 `responses` 里。
+/// 路由的请求体解析，带查询参数的路由的查询串解析，带路径参数的路由的路径参数解析。由文档
+/// 生成时统一补进各操作的 400 说明，新路由不会漏写；路由自己的 400 原因仍写在各自的
+/// `responses` 里。
 struct AdminRequestRejections;
 
 const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)";
 const JSON_BODY_REJECTION: &str = "ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit";
 const QUERY_REJECTION: &str =
     "ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type";
+const PATH_REJECTION: &str =
+    "ADMIN_INVALID_PATH: a path parameter is not valid percent-encoded UTF-8";
 
 impl Modify for AdminRequestRejections {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
@@ -142,6 +145,9 @@ impl Modify for AdminRequestRejections {
                 if has_query_parameters(operation) {
                     reasons.push(QUERY_REJECTION);
                 }
+                if has_parameters_in(operation, ParameterIn::Path) {
+                    reasons.push(PATH_REJECTION);
+                }
                 reasons.push(AUDIT_HEADER_REJECTION);
                 add_bad_request_reasons(operation, &reasons);
             }
@@ -150,10 +156,14 @@ impl Modify for AdminRequestRejections {
 }
 
 fn has_query_parameters(operation: &Operation) -> bool {
+    has_parameters_in(operation, ParameterIn::Query)
+}
+
+fn has_parameters_in(operation: &Operation, location: ParameterIn) -> bool {
     operation.parameters.as_ref().is_some_and(|parameters| {
         parameters
             .iter()
-            .any(|parameter| matches!(parameter.parameter_in, ParameterIn::Query))
+            .any(|parameter| parameter.parameter_in == location)
     })
 }
 

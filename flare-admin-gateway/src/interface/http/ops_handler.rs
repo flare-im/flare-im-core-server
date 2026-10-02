@@ -4,11 +4,7 @@
 //! （[`VerifiedAdminAssertion`]），不带任何未签名的身份头；租户只取自令牌。写操作
 //! （三个踢线入口）的审计原因与幂等键已由中间件强制，这里只记审计日志；会话成员、用户设备、
 //! 在线状态三条敏感读也记一条审计日志。
-use axum::{
-    Json,
-    extract::{Extension, Path},
-    http::HeaderMap,
-};
+use axum::{Json, extract::Extension, http::HeaderMap};
 use flare_core_base::context::keys;
 use flare_grpc_proto::conversation::{
     AdminGetConversationRequest, AdminListConversationsRequest, AdminListParticipantsRequest,
@@ -28,7 +24,7 @@ use std::sync::Arc;
 
 use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER};
-use super::admin_extract::AdminQuery;
+use super::admin_extract::{AdminPath, AdminQuery};
 use super::audit_target::AuditTarget;
 use crate::application::admin_ops::{
     AdminConversationDetailHttp, AdminConversationListQuery, AdminConversationPageHttp,
@@ -283,7 +279,7 @@ pub async fn list_conversations(
 pub async fn get_conversation(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
-    Path(conversation_id): Path<String>,
+    AdminPath(conversation_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminConversationDetailHttp>>> {
     let mut conversation = clients.conversation_read.lock().await.clone();
     let response = conversation
@@ -328,7 +324,7 @@ pub async fn list_participants(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Path(conversation_id): Path<String>,
+    AdminPath(conversation_id): AdminPath<String>,
     AdminQuery(query): AdminQuery<AdminParticipantListQuery>,
 ) -> Result<Json<ApiResponse<AdminParticipantPageHttp>>> {
     let limit = page_limit(query.limit, DEFAULT_PARTICIPANT_PAGE, MAX_PARTICIPANT_PAGE)
@@ -378,7 +374,7 @@ pub async fn list_user_devices(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Path(user_id): Path<String>,
+    AdminPath(user_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminUserDevicesHttp>>> {
     audit_sensitive_read(
         "users.devices",
@@ -423,7 +419,7 @@ pub async fn get_user_presence(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Path(user_id): Path<String>,
+    AdminPath(user_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminUserPresenceHttp>>> {
     audit_sensitive_read(
         "users.presence",
@@ -473,7 +469,7 @@ pub async fn kick_user(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Path(user_id): Path<String>,
+    AdminPath(user_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminUserKickHttp>>> {
     let reason = audit_write(
         "users.kick",
@@ -549,7 +545,7 @@ pub async fn kick_device(
     Extension(clients): Extension<Arc<GrpcClients>>,
     Extension(assertion): Extension<VerifiedAdminAssertion>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Path((user_id, device_id)): Path<(String, String)>,
+    AdminPath((user_id, device_id)): AdminPath<(String, String)>,
 ) -> Result<Json<ApiResponse<AdminDeviceKickHttp>>> {
     let reason = audit_write(
         "devices.kick",

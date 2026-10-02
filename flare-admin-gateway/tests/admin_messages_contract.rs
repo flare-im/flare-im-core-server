@@ -578,6 +578,31 @@ async fn malformed_event_query_strings_are_typed_bad_requests_without_echo() {
     assert!(h.fake.0.calls.lock().unwrap().is_empty());
 }
 
+/// 消息 id 百分号解码后不是 UTF-8：400 `ADMIN_INVALID_PATH` 信封，不回显取值，不调用 Storage
+/// Reader。修复前是 axum 的纯文本 400，带着解码后的取值。
+#[tokio::test]
+async fn undecodable_message_ids_are_typed_bad_requests_without_echo() {
+    let h = messages_harness().await;
+    for uri in [
+        format!("/api/v1/admin/messages/{BODY_MARKER}%FF"),
+        format!("/api/v1/admin/messages/{BODY_MARKER}%FF/events"),
+    ] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("authorization", format!("Bearer {}", h.token))
+            .header("x-tenant-id", TENANT)
+            .body(Body::empty())
+            .unwrap();
+        let (status, answer) = send(&h.router, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {answer}");
+        assert_eq!(answer["code"], 400, "{uri}: {answer}");
+        assert_eq!(answer["reason"], "ADMIN_INVALID_PATH", "{uri}: {answer}");
+        assert!(!answer.to_string().contains(BODY_MARKER), "{answer}");
+    }
+    assert!(h.fake.0.calls.lock().unwrap().is_empty());
+}
+
 /// 请求体超过网关上限（`FLARE_ADMIN_GATEWAY_SERVER_MAX_BODY_SIZE`，即 `DefaultBodyLimit`）：
 /// 400 `ADMIN_REQUEST_BODY_TOO_LARGE` 信封，而不是 axum 的纯文本 413。
 #[tokio::test]

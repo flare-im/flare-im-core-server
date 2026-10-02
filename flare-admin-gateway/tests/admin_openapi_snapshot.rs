@@ -104,14 +104,14 @@ async fn openapi_responses_match_the_committed_snapshot() {
 }
 
 /// 在调用下游之前就会回的 400 逐条写进每个操作：审计头超长（中间件，读写都查）、请求体解析
-/// 失败（带请求体的 5 条）、查询串解析失败（带查询参数的 6 条）。网关不再回 422，文档里也
-/// 不再有 422。
+/// 失败（带请求体的 5 条）、查询串解析失败（带查询参数的 6 条）、路径参数解析失败（带路径参数
+/// 的 8 条）。网关不再回 422，文档里也不再有 422。
 #[tokio::test]
 async fn every_admin_operation_documents_its_request_rejections() {
     let doc = openapi_document().await;
     let operations = admin_operations(&doc);
     assert_eq!(operations.len(), 26);
-    let (mut with_body, mut with_query) = (0, 0);
+    let (mut with_body, mut with_query, mut with_path) = (0, 0, 0);
     for (operation_name, operation) in &operations {
         let bad_request = response_description(operation, "400")
             .unwrap_or_else(|| panic!("{operation_name} does not document 400"));
@@ -138,12 +138,22 @@ async fn every_admin_operation_documents_its_request_rejections() {
                 "{operation_name}: {bad_request}"
             );
         }
+        let path = operation["parameters"]
+            .as_array()
+            .is_some_and(|parameters| parameters.iter().any(|p| p["in"] == "path"));
+        if path {
+            with_path += 1;
+            assert!(
+                bad_request.contains("ADMIN_INVALID_PATH"),
+                "{operation_name}: {bad_request}"
+            );
+        }
         assert!(
             response_description(operation, "422").is_none(),
             "{operation_name} still documents 422"
         );
     }
-    assert_eq!((with_body, with_query), (5, 6));
+    assert_eq!((with_body, with_query, with_path), (5, 6, 8));
 }
 
 #[tokio::test]
