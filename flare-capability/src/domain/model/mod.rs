@@ -397,7 +397,11 @@ impl HookExecutionPlan {
         };
 
         match timeout(self.metadata.timeout, fut).await {
-            Ok(inner) => inner,
+            Ok(Ok(decision)) => Ok(decision),
+            // Hook 没能给出决定（连不上、对端报错、应答解码失败）与超时同样处理：必需的 Hook
+            // 拒绝，可选的放行。以前这里原样上抛，不可达的可选 Hook 与 business 组也让每次
+            // PreSend 失败。
+            Ok(Err(cause)) => Ok(self.unavailable_decision("pre-send", &cause)),
             Err(_) => {
                 let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
                     .details(format!("hook={}", self.name()))
@@ -409,6 +413,30 @@ impl HookExecutionPlan {
                     Ok(PreSendDecision::Continue)
                 }
             }
+        }
+    }
+
+    /// Hook 调用失败（非超时）时的决定，与超时分支一致：`require_success` 时拒绝，否则放行。
+    ///
+    /// 拒绝原因只带 Hook 名，不带下游错误原文（其中可能有内部地址），原文只进日志。
+    fn unavailable_decision(
+        &self,
+        stage: &'static str,
+        cause: &flare_server_core::error::FlareError,
+    ) -> PreSendDecision {
+        if self.require_success() {
+            tracing::warn!(hook = %self.name(), stage, error = %cause, "required hook unavailable, rejecting");
+            PreSendDecision::Reject {
+                error: ErrorBuilder::new(
+                    ErrorCode::ServiceUnavailable,
+                    format!("{stage} hook unavailable"),
+                )
+                .details(format!("hook={}", self.name()))
+                .build_error(),
+            }
+        } else {
+            tracing::warn!(hook = %self.name(), stage, error = %cause, "optional hook unavailable, ignored");
+            PreSendDecision::Continue
         }
     }
 
@@ -485,7 +513,8 @@ impl HookExecutionPlan {
         };
 
         match timeout(self.metadata.timeout, fut).await {
-            Ok(inner) => inner,
+            Ok(Ok(decision)) => Ok(decision),
+            Ok(Err(cause)) => Ok(self.unavailable_decision("recall", &cause)),
             Err(_) => {
                 let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "recall hook timed out")
                     .details(format!("hook={}", self.name()))
