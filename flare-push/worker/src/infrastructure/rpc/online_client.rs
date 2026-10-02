@@ -20,18 +20,6 @@ pub struct OnlineServiceClient {
 }
 
 impl OnlineServiceClient {
-    /// 直连 URI（测试或无注册中心）。
-    pub async fn new(endpoint: String) -> Result<Self> {
-        let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|err| {
-                FlareError::system(format!("invalid online grpc uri {endpoint}: {err}"))
-            })?
-            .connect()
-            .await
-            .map_err(|err| FlareError::system(format!("connect online grpc {endpoint}: {err}")))?;
-        Ok(Self::from_channel(channel))
-    }
-
     /// 由 [`flare_im_service_kit::discovery::connect_grpc_channel_from_app_config`] 等得到的共享 Channel。
     pub fn from_channel(channel: Channel) -> Self {
         Self {
