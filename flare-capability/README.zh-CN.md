@@ -332,6 +332,7 @@ flare-capability/
 |------|------|------|--------|
 | `name` | String | Hook名称（必填） | - |
 | `priority` | i32 | 优先级（0-1000，越小越高） | 100 |
+| `group` | String | 分组：`validation`、`critical` 或 `business`（不区分大小写），其他值报配置错误；不写时 priority >= 100 为 `validation`，否则为 `business`。`critical` 组的 Hook 不可达或超时一律拒绝，`business` 组从不中断主流程 | 按 priority |
 | `timeout_ms` | u64 | 超时时间（毫秒） | 1000 |
 | `enabled` | bool | 是否启用 | true |
 | `require_success` | bool | 是否要求成功 | true |

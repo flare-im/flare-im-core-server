@@ -74,13 +74,25 @@ an audit-log hook that is down should not stop people from sending messages.
 
 ## 5. Priority decides ordering and concurrency
 
-Hooks are grouped by priority, and the group decides how they run:
+Message Ingest runs the hooks of its own configuration serially in priority
+order (lower first); each one's `require_success` decides what a failure does.
 
-| Group | Execution |
-|---|---|
-| Validation | serial, fail fast |
-| Critical | serial, order preserved |
-| Business | concurrent, fault tolerant |
+The Capability service's hook engine (the `HookPlugin` it serves) also groups
+hooks. A hook's `group` (`validation`, `critical` or `business`, case-insensitive)
+places it; without one, priority 100 and above is `validation` and below is
+`business`. Any other `group` value is a configuration error. The group decides
+how the hook runs:
+
+| Group | Execution | Hook rejects | Hook unreachable or timed out |
+|---|---|---|---|
+| Validation | serial, first | stops the chain | rejects if `require_success`, else skipped |
+| Critical | serial, order preserved, after validation | stops the chain | always rejects |
+| Business | last, fault tolerant | logged, chain continues | logged, chain continues |
+
+A rejection caused by an unreachable or timed-out hook is answered as a gRPC
+`UNAVAILABLE` or `DEADLINE_EXCEEDED`, never as `allow=false`: the caller then
+reports a retryable `SERVICE_UNAVAILABLE` (HTTP 503) instead of a policy rejection
+(HTTP 422).
 
 A hook that must observe the *final* draft has to sort after every hook that
 rewrites it — put rewriting hooks in an earlier group, not merely a lower number

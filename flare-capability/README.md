@@ -332,6 +332,7 @@ flare-capability/
 |------|------|------|--------|
 | `name` | String | Hook name (required) | - |
 | `priority` | i32 | Priority (0-1000; the smaller, the higher) | 100 |
+| `group` | String | Group: `validation`, `critical` or `business` (case-insensitive); other values are rejected. Without it, priority >= 100 is `validation`, else `business`. A `critical` hook that is unreachable or times out always rejects; `business` hooks never stop the chain | by priority |
 | `timeout_ms` | u64 | Timeout (milliseconds) | 1000 |
 | `enabled` | bool | Whether enabled | true |
 | `require_success` | bool | Whether success is required | true |
