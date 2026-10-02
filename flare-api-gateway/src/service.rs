@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use crate::interface::http::MessageContextSigner;
 use crate::interface::http::create_public_router;
-use crate::interface::http::{PushTokenClient, push_proxy_url_from_env};
+use crate::interface::http::{PushTokenClient, push_proxy_url_from_env, with_request_rate_limit};
 
 pub struct ApplicationBootstrap;
 
@@ -199,7 +199,8 @@ impl ApplicationBootstrap {
             }
         };
 
-        let app = create_public_router(clients)
+        // 限流在指标层之内：被拒的请求也计入 HTTP 指标。
+        let app = with_request_rate_limit(create_public_router(clients), &settings.rate_limit)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 API_GATEWAY,
             ))

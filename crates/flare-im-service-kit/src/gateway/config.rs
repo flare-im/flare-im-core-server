@@ -723,6 +723,23 @@ mod tests {
         .collect()
     }
 
+    /// The env registry lists what a service reads. Admin Gateway ignores its `AUTH_*` and
+    /// `RATE_LIMIT_*` settings (it only logs that they are set), so none of them is listed;
+    /// API Gateway enforces its rate limit, so those three are.
+    #[test]
+    fn settings_the_admin_gateway_ignores_are_not_registered() {
+        use crate::env_registry::registered_env_var;
+        let ignored = ignored_admin_settings(|_| Some(String::new()));
+        assert_eq!(ignored.len(), ADMIN_IGNORED_SETTINGS.len());
+        for key in ignored {
+            assert!(registered_env_var(&key).is_none(), "{key}");
+        }
+        for name in ["RATE_LIMIT_ENABLED", "RATE_LIMIT_RPS", "RATE_LIMIT_BURST"] {
+            let key = env_key(GatewayEnvScope::Api, name);
+            assert!(registered_env_var(&key).is_some(), "{key}");
+        }
+    }
+
     #[test]
     fn admin_scope_ignores_auth_and_rate_limit_settings() {
         let env = misconfigured("FLARE_ADMIN_GATEWAY");

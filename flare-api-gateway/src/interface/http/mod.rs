@@ -5,8 +5,10 @@ mod media_handler;
 mod message_handler;
 mod presence_handler;
 mod push_token_handler;
+mod rate_limit;
 mod router;
 
 pub(crate) use message_handler::MessageContextSigner;
 pub(crate) use push_token_handler::{PushTokenClient, push_proxy_url_from_env};
+pub(crate) use rate_limit::with_request_rate_limit;
 pub use router::{create_public_router, create_router};

@@ -195,6 +195,8 @@ flowchart TD
 | 限流维度 | tenant、user、IP、route、app_id |
 | 大请求体 | 媒体走分片或预签名上传，普通 JSON 限制较小 |
 
+当前实现的限流只有网关进程一级：`FLARE_API_GATEWAY_RATE_LIMIT_ENABLED`（默认 `true`）、`FLARE_API_GATEWAY_RATE_LIMIT_RPS`（每秒补充的令牌数，默认 1000）、`FLARE_API_GATEWAY_RATE_LIMIT_BURST`（令牌桶容量，默认 2000）。拿不到令牌的请求回 `429`，`reason` 为 `RATE_LIMITED`，带 `Retry-After: 1`，不进入鉴权与下游；`/health` 不计入。按 tenant、user 等维度的限流尚未实现。
+
 消息发送接口重试必须依赖 `client_message_id` 或 `x-request-id` 去重，不能盲目重试造成重复消息。
 
 ## 9. 观测与审计

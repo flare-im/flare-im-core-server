@@ -383,26 +383,6 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
-        "FLARE_ADMIN_GATEWAY_AUTH_APP_CREDENTIALS",
-        EnvOwner::AdminGateway,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "FLARE_ADMIN_GATEWAY_AUTH_DEV_ISSUE",
-        EnvOwner::AdminGateway,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "FLARE_ADMIN_GATEWAY_AUTH_HOOK_ISSUE_URL",
-        EnvOwner::AdminGateway,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "FLARE_ADMIN_GATEWAY_AUTH_REFRESH_GRACE_SECS",
-        EnvOwner::AdminGateway,
-        EnvPurpose::Auth,
-    ),
-    env(
         "FLARE_API_GATEWAY_AUTH_HOOK_SECRET",
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,
@@ -446,6 +426,21 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "FLARE_API_GATEWAY_AUTH_MODE",
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_API_GATEWAY_RATE_LIMIT_ENABLED",
+        EnvOwner::ApiGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_API_GATEWAY_RATE_LIMIT_RPS",
+        EnvOwner::ApiGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_API_GATEWAY_RATE_LIMIT_BURST",
+        EnvOwner::ApiGateway,
+        EnvPurpose::GatewayRuntime,
     ),
     env(
         "FLARE_API_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK",
