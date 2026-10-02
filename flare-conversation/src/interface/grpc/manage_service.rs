@@ -9,9 +9,16 @@ use flare_grpc_proto::conversation::{
     UpdateConversationRequest, UpdateConversationResponse, UpdateConversationUserSettingsRequest,
     UpdateConversationUserSettingsResponse, UpdateCursorRequest, UpdatePresenceRequest,
 };
+use flare_im_contracts::utils::normalize_tenant_id;
 use flare_proto::common::DeviceState as ProtoDeviceState;
+use flare_server_core::auth::{SignedActorType, SignedContextVerifier};
+use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;
+use flare_server_core::grpc::middleware::signed_context::{
+    VerifiedContext, verify_signed_context_metadata,
+};
 use flare_server_core::utils::require_ctx_from_request;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::application::commands::{
@@ -32,6 +39,44 @@ use super::shared::{
     domain_to_proto_conversation, participant_domain_to_proto, participant_proto_to_domain,
     proto_summary,
 };
+
+/// `PurgeConversationHistory` 唯一允许的调用方：flare-social-bridge 的服务身份。
+pub(crate) const PURGE_HISTORY_SERVICE_ACTOR: &str = "flare-social-bridge";
+
+/// `PurgeConversationHistory` 的逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-social
+/// `docs/REL03-friendship-epoch.md`）。
+///
+/// 清除历史是破坏性操作，只有 Social 调用：验 `x-flare-ctx`（与 message ingest 同一把
+/// `FLARE_INTERNAL_CTX_PUBLIC_KEY`），只收服务身份 `flare-social-bridge`，租户只取签名里的，调用方
+/// 元数据里的 `x-tenant-id`、`x-user-id` 不起作用。没配验证器时 fail closed（UNAVAILABLE）。
+/// 以前这个 RPC 与其余会话管理 RPC 一样只看调用方自报的元数据，只靠网络隔离保护。其余 RPC
+/// 仍按元数据（第 ③④ 步）。
+pub(crate) fn authorize_purge_history(
+    metadata: &MetadataMap,
+    verifier: Option<&SignedContextVerifier>,
+) -> Result<Ctx, Status> {
+    let verifier = verifier.ok_or_else(|| {
+        Status::unavailable("conversation purge identity verifier not configured")
+    })?;
+    let ctx = verify_signed_context_metadata(metadata, verifier)?;
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(|verified| verified.claims())
+        .ok_or_else(|| Status::unauthenticated("signed purge identity required"))?;
+    if claims.actor_type != SignedActorType::Service
+        || claims.actor_id != PURGE_HISTORY_SERVICE_ACTOR
+    {
+        return Err(Status::permission_denied(
+            "actor not permitted to purge conversation history",
+        ));
+    }
+    if claims.tenant_id.trim().is_empty()
+        || claims.tenant_id != normalize_tenant_id(&claims.tenant_id)
+    {
+        return Err(Status::permission_denied("non-canonical tenant identity"));
+    }
+    Ok(ctx)
+}
 
 #[tonic::async_trait]
 impl ConversationManageService for ConversationGrpcHandler {
@@ -135,7 +180,7 @@ impl ConversationManageService for ConversationGrpcHandler {
         &self,
         request: Request<PurgeConversationHistoryRequest>,
     ) -> Result<Response<PurgeConversationHistoryResponse>, Status> {
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = authorize_purge_history(request.metadata(), self.purge_verifier.as_ref())?;
         let req = request.into_inner();
         let purged = self
             .command_handler
@@ -387,5 +432,141 @@ impl ConversationManageService for ConversationGrpcHandler {
         }
 
         Ok(Response::new(()))
+    }
+}
+
+#[cfg(test)]
+mod purge_authorization_tests {
+    //! `PurgeConversationHistory` 的验签与身份规则（REL-03 第 ② 步）。
+
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use flare_server_core::{SignedContextIdentity, SignedContextSigner};
+
+    fn keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        (
+            SignedContextSigner::from_private_key(&private).unwrap(),
+            SignedContextVerifier::from_public_key(&public).unwrap(),
+        )
+    }
+
+    fn metadata(token: Option<&str>) -> MetadataMap {
+        let mut metadata = MetadataMap::new();
+        // 调用方自报的元数据不起作用。
+        metadata.insert("x-tenant-id", "tenant-forged".parse().unwrap());
+        metadata.insert("x-user-id", "mallory".parse().unwrap());
+        if let Some(token) = token {
+            metadata.insert("x-flare-ctx", token.parse().unwrap());
+        }
+        metadata
+    }
+
+    fn token(
+        signer: &SignedContextSigner,
+        actor_type: SignedActorType,
+        actor: &str,
+        tenant: &str,
+    ) -> String {
+        signer
+            .sign(&SignedContextIdentity::new(
+                actor_type,
+                actor,
+                tenant,
+                "req-purge",
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_bridge_service_identity_is_accepted_with_the_signed_tenant() {
+        let (signer, verifier) = keys(51);
+        let bridge = token(
+            &signer,
+            SignedActorType::Service,
+            PURGE_HISTORY_SERVICE_ACTOR,
+            "tenant-a",
+        );
+        let ctx = authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier))
+            .expect("bridge identity");
+        assert_eq!(ctx.tenant_id(), Some("tenant-a"));
+        assert_eq!(ctx.user_id(), None);
+    }
+
+    #[test]
+    fn a_missing_token_is_unauthenticated() {
+        let (_, verifier) = keys(51);
+        let status = authorize_purge_history(&metadata(None), Some(&verifier)).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn a_token_from_another_key_is_unauthenticated() {
+        let (_, verifier) = keys(51);
+        let (other_signer, _) = keys(52);
+        let forged = token(
+            &other_signer,
+            SignedActorType::Service,
+            PURGE_HISTORY_SERVICE_ACTOR,
+            "tenant-a",
+        );
+        let status =
+            authorize_purge_history(&metadata(Some(&forged)), Some(&verifier)).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn users_and_other_services_are_denied() {
+        let (signer, verifier) = keys(51);
+        for (actor_type, actor) in [
+            (SignedActorType::User, "alice"),
+            (SignedActorType::User, PURGE_HISTORY_SERVICE_ACTOR),
+            (SignedActorType::Service, "flare-api-gateway"),
+            (SignedActorType::System, PURGE_HISTORY_SERVICE_ACTOR),
+            (SignedActorType::TenantAdmin, "admin-1"),
+        ] {
+            let other = token(&signer, actor_type, actor, "tenant-a");
+            let status =
+                authorize_purge_history(&metadata(Some(&other)), Some(&verifier)).unwrap_err();
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "{actor_type:?} {actor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_canonical_tenant_is_denied() {
+        let (signer, verifier) = keys(51);
+        let bridge = token(
+            &signer,
+            SignedActorType::Service,
+            PURGE_HISTORY_SERVICE_ACTOR,
+            "default",
+        );
+        let status =
+            authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier)).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// 没配验证器时 fail closed，带了合法令牌也一样。
+    #[test]
+    fn a_missing_verifier_fails_closed() {
+        let (signer, _) = keys(51);
+        let bridge = token(
+            &signer,
+            SignedActorType::Service,
+            PURGE_HISTORY_SERVICE_ACTOR,
+            "tenant-a",
+        );
+        let status = authorize_purge_history(&metadata(Some(&bridge)), None).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 }

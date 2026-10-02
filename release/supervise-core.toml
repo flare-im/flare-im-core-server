@@ -67,7 +67,10 @@ name = "conversation"
 command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
 # Verifies the admin assertion Admin Gateway forwards; without it every admin read fails closed.
-inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY"]
+# PurgeConversationHistory verifies the flare-social-bridge service context with the Cell public
+# key; without it that RPC fails closed.
+inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50090"
 # FLARE_REGISTRY_MODE=static has no discovery: reach this container's Storage
 # Reader directly instead of falling back, with a WARN, on every startup. A

@@ -854,6 +854,21 @@ required_env_unless = [
                 .any(|name| name == "FLARE_INTERNAL_CTX_PUBLIC_KEY")
         );
         assert!(!manifest.env_allowed(push_proxy, "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
+        // PurgeConversationHistory verifies the flare-social-bridge service context
+        // (REL-03 step 2) and fails closed without the key.
+        let conversation = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "conversation")
+            .unwrap();
+        assert!(manifest.env_allowed(conversation, "FLARE_INTERNAL_CTX_PUBLIC_KEY"));
+        assert!(
+            conversation
+                .required_env
+                .iter()
+                .any(|name| name == "FLARE_INTERNAL_CTX_PUBLIC_KEY")
+        );
+        assert!(!manifest.env_allowed(conversation, "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
         let gateway = manifest
             .services
             .iter()

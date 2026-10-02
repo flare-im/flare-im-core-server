@@ -178,6 +178,8 @@ services:
       SERVICE_ADVERTISE_HOST: conversation
       # 会话管理员只读接口校验 admin-gateway 转发的 admin 令牌；不给公钥时一律 UNAUTHENTICATED。
       FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      # PurgeConversationHistory 验 flare-social-bridge 的服务签名；不给公钥时该 RPC fail closed。
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-conversation"]
 
   sync-orchestrator:

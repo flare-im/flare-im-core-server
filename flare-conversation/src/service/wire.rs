@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use flare_server_core::auth::SignedContextVerifier;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use sqlx::postgres::PgPoolOptions;
 
@@ -182,7 +183,26 @@ pub async fn initialize(
     ));
 
     // 10. 构建 gRPC 处理器
-    let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler);
+    // PurgeConversationHistory 逐 RPC 验 flare-social-bridge 的签名；没配公钥时该 RPC fail closed。
+    let purge_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+        Ok(material) => Some(
+            SignedContextVerifier::from_public_key(&material).map_err(|_| {
+                ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for conversation",
+                )
+                .build_error()
+            })?,
+        ),
+        Err(_) => {
+            tracing::warn!(
+                "FLARE_INTERNAL_CTX_PUBLIC_KEY is missing; PurgeConversationHistory fails closed"
+            );
+            None
+        }
+    };
+    let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler)
+        .with_purge_verifier(purge_verifier);
     // 管理员只读只认 Console 公钥验签的 admin 令牌；没配公钥时 fail closed（UNAUTHENTICATED）。
     let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
         .map_err(|_| {

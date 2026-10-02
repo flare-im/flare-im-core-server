@@ -796,7 +796,7 @@ for service in "${CORE_SERVICES[@]}"; do
             [ -n "$CORE_API_APP_CREDENTIALS" ] && env_args+=("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS=$CORE_API_APP_CREDENTIALS") ;;
     esac
     case "$service" in
-        signaling-online|signaling-route|message-ingest|capability|push-proxy|media)
+        signaling-online|signaling-route|message-ingest|capability|push-proxy|media|conversation)
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         api-gateway|admin-gateway)
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
