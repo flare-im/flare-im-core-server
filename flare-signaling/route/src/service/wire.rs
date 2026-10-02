@@ -13,10 +13,7 @@ use crate::application::handlers::{
 };
 use crate::config::RouteConfig;
 use crate::domain::value_objects::DefaultFlowController;
-use crate::infrastructure::{
-    AckToPushProxyForwarder, GrpcConnectionPool, GrpcConnectionPoolConfig,
-    forwarder::MessageForwarder,
-};
+use crate::infrastructure::{AckToPushProxyForwarder, forwarder::MessageForwarder};
 use crate::interface::grpc::RouterUpstreamHandler;
 
 /// 应用上下文 - 包含所有已初始化的服务
@@ -39,8 +36,6 @@ pub async fn initialize(
         .map(normalize_tenant_id)
         .unwrap_or_else(|| "0".to_string());
     let message_forwarder = Arc::new(MessageForwarder::new(default_tenant_id));
-
-    let _connection_pool = Arc::new(GrpcConnectionPool::new(GrpcConnectionPoolConfig::default()));
 
     let flow_controller = Arc::new(DefaultFlowController::new());
     let ack_to_push_proxy = AckToPushProxyForwarder::new(message_forwarder.clone());
