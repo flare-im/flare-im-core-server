@@ -93,6 +93,24 @@ impl MessageSendService for FakeIngest {
                     .build_error(),
             )),
             "group:boom" => Err(tonic::Status::internal("database exploded at 10.0.0.7")),
+            // 摄入侧判消息不合法：领域校验的 InvalidParameter 经 `Status::from` 带结构化详情，
+            // 接口层的纯文本 `Status::invalid_argument` 不带。
+            "group:invalid" => Err(tonic::Status::from(
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "burn_after_read_seconds must be positive when burn is enabled",
+                )
+                .details("validator internals at 10.0.0.7")
+                .build_error(),
+            )),
+            "group:invalid-plain" => Err(tonic::Status::invalid_argument(
+                "message required (decoder at 10.0.0.7)",
+            )),
+            "group:missing" => Err(tonic::Status::from(
+                ErrorBuilder::new(ErrorCode::UserNotFound, "conversation not found")
+                    .details("lookup in shard 10.0.0.7")
+                    .build_error(),
+            )),
             _ => Ok(tonic::Response::new(SendMessageResponse {
                 server_msg_id: "srv-1".into(),
                 conversation_seq: 7,
@@ -258,8 +276,40 @@ async fn other_ingest_outcomes_keep_their_http_mapping() {
     let (status, body) = send_to(&router, "group:boom").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["reason"], json!("MESSAGE_SEND_FAILED"), "{body}");
+    assert!(!body.to_string().contains("10.0.0.7"), "{body}");
 
     let (status, body) = send_to(&router, "group:ok").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["data"]["server_msg_id"], json!("srv-1"), "{body}");
+}
+
+/// 摄入侧判消息不合法（INVALID_ARGUMENT）回 400 `INVALID_MESSAGE`，找不到发送依赖的对象（NOT_FOUND）
+/// 回 404 `NOT_FOUND`；说明只取结构化详情里的原因，`Status.message` 与详情的 `message` 不回显。
+/// 以前两者都回带原文的 500 `MESSAGE_SEND_FAILED`。
+#[tokio::test]
+async fn invalid_and_missing_ingest_outcomes_are_typed_4xx_not_500() {
+    let router = router().await;
+
+    let (status, body) = send_to(&router, "group:invalid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], json!(400), "{body}");
+    assert_eq!(body["reason"], json!("INVALID_MESSAGE"), "{body}");
+    assert_eq!(
+        body["message"],
+        json!("burn_after_read_seconds must be positive when burn is enabled"),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("10.0.0.7"), "{body}");
+
+    let (status, body) = send_to(&router, "group:invalid-plain").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["reason"], json!("INVALID_MESSAGE"), "{body}");
+    assert!(!body.to_string().contains("10.0.0.7"), "{body}");
+
+    let (status, body) = send_to(&router, "group:missing").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], json!(404), "{body}");
+    assert_eq!(body["reason"], json!("NOT_FOUND"), "{body}");
+    assert_eq!(body["message"], json!("conversation not found"), "{body}");
+    assert!(!body.to_string().contains("10.0.0.7"), "{body}");
 }

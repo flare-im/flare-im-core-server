@@ -25,6 +25,8 @@ use flare_server_core::{
 
 const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
 const MESSAGE_REJECTED: &str = "MESSAGE_REJECTED";
+const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
+const NOT_FOUND: &str = "NOT_FOUND";
 
 /// Present only to the API gateway ingress process; no downstream Core worker
 /// receives this private signing capability.
@@ -39,9 +41,11 @@ pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
     request_body = SendMessageHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<SendMessageHttpResponse>),
-        (status = 400, description = "参数错误"),
+        (status = 400, description = "参数错误，或摄入侧判消息不合法（INVALID_MESSAGE），改了请求再发"),
         (status = 403, description = "租户不可用（TENANT_UNAVAILABLE）或无权发送"),
+        (status = 404, description = "摄入侧找不到发送依赖的对象（NOT_FOUND）"),
         (status = 422, description = "PreSend 扩展按策略拒绝了这条消息（MESSAGE_REJECTED），不要原样重试"),
+        (status = 500, description = "发送失败（MESSAGE_SEND_FAILED），不带下游错误原文"),
         (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
@@ -154,29 +158,42 @@ pub async fn send_message(
 
 /// MessageIngest 回的 gRPC 状态映射为 HTTP。
 ///
-/// `FAILED_PRECONDITION` 是 PreSend 扩展的策略拒绝（摄入侧只对它回这个状态码，`ErrorDetail` 与以前
-/// 相同）：发送方可预期的业务结果，不是网关或下游故障。回 422 `MESSAGE_REJECTED`，说明取
-/// `ErrorDetail.reason`（扩展给出的拒绝原因，WS 路径上客户端看到的也是它）。以前它被并进未知
-/// 错误，回 500 `MESSAGE_SEND_FAILED`。其余状态照旧见 [`send_failure`]。
+/// 发送方自己可以纠正或预期的结果按类型回 4xx，说明只取摄入侧结构化 `ErrorDetail.reason`
+/// （摄入侧自己写的固定原因；`Status.message` 与 `details` 里可能带内部文本，不回显）：
+/// - `FAILED_PRECONDITION`：PreSend 扩展的策略拒绝（摄入侧只对它回这个状态码）→ 422
+///   `MESSAGE_REJECTED`，不要原样重试。
+/// - `INVALID_ARGUMENT`：摄入侧判消息本身不合法（缺消息体、校验不过、阅后即焚参数不对等）→ 400
+///   `INVALID_MESSAGE`，改了请求再发。
+/// - `NOT_FOUND`：摄入侧找不到发送依赖的对象 → 404 `NOT_FOUND`。
+///
+/// 以前这三种都被并进未知错误，回带原文的 500 `MESSAGE_SEND_FAILED`。其余状态见 [`send_failure`]。
 fn send_status_failure(status: tonic::Status) -> GatewayError {
-    if status.code() == tonic::Code::FailedPrecondition {
-        let reason = <flare_proto::common::ErrorDetail as prost::Message>::decode(status.details())
-            .ok()
-            .map(|detail| detail.reason)
-            .filter(|reason| !reason.trim().is_empty());
-        let mut error = ErrorBuilder::new(ErrorCode::HttpUnprocessableEntity, MESSAGE_REJECTED);
-        if let Some(reason) = reason {
-            error = error.details(reason);
-        }
-        return GatewayError(error.build_error());
+    let (code, reason) = match status.code() {
+        tonic::Code::FailedPrecondition => (ErrorCode::HttpUnprocessableEntity, MESSAGE_REJECTED),
+        tonic::Code::InvalidArgument => (ErrorCode::HttpBadRequest, INVALID_MESSAGE),
+        tonic::Code::NotFound => (ErrorCode::HttpNotFound, NOT_FOUND),
+        _ => return send_failure(FlareError::from(status)),
+    };
+    let mut error = ErrorBuilder::new(code, reason);
+    if let Some(detail) = ingest_detail_reason(&status) {
+        error = error.details(detail);
     }
-    send_failure(FlareError::from(status))
+    GatewayError(error.build_error())
+}
+
+/// 摄入侧结构化 `ErrorDetail` 里的原因；没有结构化详情（例如纯文本的 `Status`）时为 `None`。
+fn ingest_detail_reason(status: &tonic::Status) -> Option<String> {
+    <flare_proto::common::ErrorDetail as prost::Message>::decode(status.details())
+        .ok()
+        .map(|detail| detail.reason)
+        .filter(|reason| !reason.trim().is_empty())
 }
 
 /// MessageIngest 拒绝映射为 HTTP。摄入侧有自己的租户闸门：租户刚停用时它的缓存可能比本网关先看到，
 /// 答 `PERMISSION_DENIED TENANT_UNAVAILABLE`。那和网关自己的拒绝是同一回事，要回确定的 403，不能当 500。
 /// 摄入侧暂时放不了行（严格策略下租户投影读不到、同一条消息正在处理、摄入不可达）答
-/// `SERVICE_UNAVAILABLE`：回 503，调用方退避重试；不能回 403，否则会被当成租户被停用。内部文本不回显。
+/// `SERVICE_UNAVAILABLE`：回 503，调用方退避重试；不能回 403，否则会被当成租户被停用。
+/// 其余是 500 `MESSAGE_SEND_FAILED`。内部文本一律不回显：500 只带固定原因，原文只进本网关日志。
 fn send_failure(err: FlareError) -> GatewayError {
     if err.code() == Some(ErrorCode::ServiceUnavailable) {
         return GatewayError(
@@ -185,7 +202,11 @@ fn send_failure(err: FlareError) -> GatewayError {
         );
     }
     if err.code() != Some(ErrorCode::PermissionDenied) {
-        return GatewayError::internal("MESSAGE_SEND_FAILED", err.to_string());
+        tracing::warn!(error = %err, "message ingest failed the send");
+        return GatewayError(
+            ErrorBuilder::new(ErrorCode::HttpInternalServerError, "MESSAGE_SEND_FAILED")
+                .build_error(),
+        );
     }
     let error = if err.reason().contains(TENANT_UNAVAILABLE) {
         ErrorBuilder::new(ErrorCode::HttpForbidden, TENANT_UNAVAILABLE).build_error()
@@ -474,6 +495,8 @@ mod tests {
             failed.0.as_localized().unwrap().reason,
             "MESSAGE_SEND_FAILED"
         );
+        // 下游原文不回显（以前 500 的说明就是 `err.to_string()`）。
+        assert_eq!(failed.0.as_localized().unwrap().details, None);
         assert_eq!(
             failed.into_response().status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
