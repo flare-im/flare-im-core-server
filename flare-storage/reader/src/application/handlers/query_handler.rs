@@ -20,17 +20,18 @@ use crate::convert::{datetime_to_timestamp, event_to_proto_or_default};
 use crate::domain::model::{Event, MessageWriteLedgerEntry, MessageWriteLedgerQuery};
 use crate::domain::repository::MessageStorage;
 
-/// 存储失败的统一包装：数据库连不上（`ServiceUnavailable`，见
-/// `infrastructure::persistence::db_error`）原样上报，gRPC 层据此回可重试的 UNAVAILABLE；
-/// 其余包成 `DatabaseError`。
+/// 存储失败的统一包装：存储层已分类的错误（带错误码：数据库或缓存连不上、超时、解码失败、不支持、
+/// 参数错误、无权限等，见 `infrastructure::persistence::db_error`）原样上报，gRPC 层按错误码回对应
+/// 状态；未分类的系统错误包成 `DatabaseError`。以前只有 `ServiceUnavailable` 原样上报，其余都被
+/// 包成 `DatabaseError`，超时、解码失败与不支持一律成了 INTERNAL。
 fn storage_error(
     err: flare_server_core::error::FlareError,
     message: &str,
 ) -> flare_server_core::error::FlareError {
-    if err.code() == Some(ErrorCode::ServiceUnavailable) {
-        return err;
+    match err {
+        flare_server_core::error::FlareError::Localized { .. } => err,
+        unclassified => map_infra_error(unclassified, ErrorCode::DatabaseError, message),
     }
-    map_infra_error(err, ErrorCode::DatabaseError, message)
 }
 
 fn required_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String> {
@@ -740,6 +741,66 @@ mod tests {
         ) -> AnyhowResult<()> {
             unimplemented!()
         }
+    }
+
+    /// 已分类的存储错误原样上报（gRPC 层按错误码回 DEADLINE_EXCEEDED、UNIMPLEMENTED 等），只有
+    /// 未分类的系统错误包成数据库错误。修复前除「暂不可用」外都被包成数据库错误。
+    #[test]
+    fn classified_storage_errors_keep_their_code() {
+        use flare_server_core::error::FlareError;
+        use flare_server_core::flare_err;
+        for code in [
+            ErrorCode::ServiceUnavailable,
+            ErrorCode::OperationTimeout,
+            ErrorCode::DeserializationError,
+            ErrorCode::OperationNotSupported,
+            ErrorCode::InvalidParameter,
+            ErrorCode::PermissionDenied,
+            ErrorCode::DatabaseError,
+        ] {
+            let err = storage_error(flare_err!(code, "x"), "query");
+            assert_eq!(err.code(), Some(code), "{err}");
+        }
+        let wrapped = storage_error(FlareError::system("pool exploded at 10.0.0.7"), "query");
+        assert_eq!(wrapped.code(), Some(ErrorCode::DatabaseError), "{wrapped}");
+    }
+
+    /// 没有实现标记查询与导出任务的后端报「不支持」（gRPC UNIMPLEMENTED），不是未分类的系统错误
+    /// （修复前 gRPC 层只能回 INTERNAL）。
+    #[tokio::test]
+    async fn default_storage_capabilities_are_reported_as_unsupported() {
+        use crate::domain::model::MessageExportTaskDraft;
+        let storage = RecordingStorage::default();
+        let ctx: flare_im_contracts::Ctx =
+            Arc::new(Context::with_request_id("req-defaults").with_tenant_id("tenant-a"));
+        let marks = storage.query_message_marks(&ctx, "m1").await.unwrap_err();
+        assert_eq!(
+            marks.code(),
+            Some(ErrorCode::OperationNotSupported),
+            "{marks}"
+        );
+        let export = storage
+            .create_message_export_task(
+                &ctx,
+                MessageExportTaskDraft {
+                    task_id: "t1".into(),
+                    tenant_id: "tenant-a".into(),
+                    conversation_id: "c1".into(),
+                    start_time: 0,
+                    end_time: 0,
+                    filters: serde_json::Value::Null,
+                    requested_by: None,
+                    request_id: "req-defaults".into(),
+                    trace_id: String::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            export.code(),
+            Some(ErrorCode::OperationNotSupported),
+            "{export}"
+        );
     }
 
     #[tokio::test]

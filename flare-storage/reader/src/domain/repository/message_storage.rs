@@ -32,6 +32,15 @@ pub fn is_backfill_tail_page(after_seq: i64, before_seq: Option<i64>) -> bool {
     after_seq == 0 && before_seq.is_some()
 }
 
+/// 存储后端没有实现的可选能力：`OperationNotSupported`，gRPC 层据此回 UNIMPLEMENTED。
+fn unsupported_by_backend(operation: &str) -> flare_server_core::error::FlareError {
+    flare_server_core::error::ErrorBuilder::new(
+        flare_server_core::error::ErrorCode::OperationNotSupported,
+        format!("{operation} is not implemented for this storage backend"),
+    )
+    .build_error()
+}
+
 /// 使用 `async-trait` 保证返回的 Future 为 `Send`，满足 tonic gRPC 对 `async` 方法的线程间调度要求。
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -179,23 +188,19 @@ pub trait MessageStorage: Send + Sync {
         message_id: &str,
     ) -> Result<Vec<ReactionItem>>;
 
-    /// 查询消息标记
+    /// 查询消息标记。没有实现的后端报「不支持」（gRPC UNIMPLEMENTED），不是未分类的系统错误。
     async fn query_message_marks(&self, _ctx: &Ctx, _message_id: &str) -> Result<Vec<MarkEntry>> {
-        Err(flare_server_core::error::FlareError::system(
-            "message mark query is not implemented for this storage backend".to_string(),
-        ))
+        Err(unsupported_by_backend("message mark query"))
     }
 
-    /// 创建管理面消息导出任务。该方法只登记任务，不在请求线程内同步生成大文件。
+    /// 创建管理面消息导出任务。该方法只登记任务，不在请求线程内同步生成大文件。没有实现的后端
+    /// 报「不支持」。
     async fn create_message_export_task(
         &self,
         _ctx: &Ctx,
         _draft: MessageExportTaskDraft,
     ) -> Result<String> {
-        Err(flare_server_core::error::FlareError::system(
-            "message export task persistence is not implemented for this storage backend"
-                .to_string(),
-        ))
+        Err(unsupported_by_backend("message export task persistence"))
     }
 
     /// 管理面查询消息写链路账本，用于定位 storage/WAL/ACK 失败或卡住的消息。

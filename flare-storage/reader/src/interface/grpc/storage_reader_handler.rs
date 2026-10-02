@@ -95,11 +95,21 @@ fn admin_context(
     })
 }
 
-/// 存储失败 → gRPC 状态，只按错误码分类：数据库连不上回可重试的 UNAVAILABLE，超时回
-/// DEADLINE_EXCEEDED，参数错误、不存在、无权限、不支持各回对应的码，其余（数据库错误、解码
-/// 失败、未分类的系统错误）是 INTERNAL。状态里只有固定说明：错误的原因、details 与系统错误
-/// 的文本里可能有数据库报文、SQL 片段或请求里的取值，只进调用处的错误日志。
-fn storage_failure(err: &flare_server_core::error::FlareError) -> Status {
+/// 失败的是哪一类读：按 id 取一条消息（或某条消息的事件、编辑历史、已读、标记、反应）时，
+/// 「不存在」是对调用方有意义的答复；列表、检索、窗口、导出、账本、会话事件与会话头没有
+/// 「不存在」——没有数据就是空结果，存储层在这些读上报不存在只能是内部不一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageRead {
+    Lookup,
+    Listing,
+}
+
+/// 存储失败 → gRPC 状态，只按错误码分类：数据库或缓存连不上回可重试的 UNAVAILABLE，超时回
+/// DEADLINE_EXCEEDED，参数错误、无权限、不支持各回对应的码；不存在在按 id 取一条时回
+/// NOT_FOUND，在列表类读上是 INTERNAL（见 [`StorageRead`]）；其余（数据库错误、解码失败、未分类的
+/// 系统错误）是 INTERNAL。状态里只有固定说明：错误的原因、details 与系统错误的文本里可能有数据库
+/// 报文、SQL 片段或请求里的取值，只进调用处的错误日志。
+fn storage_failure(err: &flare_server_core::error::FlareError, read: StorageRead) -> Status {
     use flare_server_core::error::ErrorCode;
     match err.code() {
         Some(
@@ -118,7 +128,9 @@ fn storage_failure(err: &flare_server_core::error::FlareError) -> Status {
         Some(ErrorCode::InvalidParameter | ErrorCode::BadRequest) => {
             Status::invalid_argument("message storage refused the request arguments")
         }
-        Some(ErrorCode::MessageNotFound | ErrorCode::UserNotFound) => {
+        Some(ErrorCode::MessageNotFound | ErrorCode::UserNotFound)
+            if read == StorageRead::Lookup =>
+        {
             Status::not_found("not found in message storage")
         }
         Some(ErrorCode::PermissionDenied) => {
@@ -438,7 +450,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -523,7 +535,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages by seq");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -575,7 +587,7 @@ where
             })),
             Err(err) => {
                 error!(error = ?err, "Failed to query conversations message windows");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -633,7 +645,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to search messages");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -660,7 +672,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to get message");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -683,9 +695,10 @@ where
             .await
         {
             Ok(tags) => Ok(Response::new(ListMessageTagsResponse { tags })),
+            // 以前读失败时回空列表，调用方分不清「没有标签」与「存储故障」。
             Err(err) => {
                 error!(error = ?err, "Failed to list message tags");
-                Ok(Response::new(ListMessageTagsResponse { tags: vec![] }))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -706,7 +719,7 @@ where
             Ok(export_task_id) => Ok(Response::new(ExportMessagesResponse { export_task_id })),
             Err(err) => {
                 error!(error = ?err, "create message export task failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -757,7 +770,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_events failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -799,7 +812,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, tenant_id = %query.tenant_id, "query_message_write_ledger failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -849,7 +862,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_edit_history failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -899,7 +912,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_read_list failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -949,7 +962,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_marks failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -980,7 +993,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_reactions failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Lookup))
             }
         }
     }
@@ -1017,7 +1030,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "query_conversation_events failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -1051,7 +1064,7 @@ where
             })),
             Err(err) => {
                 error!(error = ?err, "get_conversation_message_head failed");
-                Err(storage_failure(&err))
+                Err(storage_failure(&err, StorageRead::Listing))
             }
         }
     }
@@ -1428,7 +1441,7 @@ mod tests {
             ),
         ];
         for (err, code) in cases {
-            let status = storage_failure(&err);
+            let status = storage_failure(&err, StorageRead::Lookup);
             assert_eq!(status.code(), code, "{err}");
             for leaked in ["leak-marker-77", "10.0.0.7", "relation", "系统错误"] {
                 assert!(
@@ -1437,6 +1450,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 列表类读（列表、检索、窗口、导出、账本、会话事件与会话头）没有「不存在」：存储层报不存在
+    /// 回 INTERNAL，而不是让调用方以为要找的东西不存在；其余分类与按 id 取一条相同。修复前所有读
+    /// 都把 MessageNotFound 回 NOT_FOUND。
+    #[test]
+    fn not_found_is_only_an_answer_for_lookups() {
+        use flare_server_core::error::ErrorCode;
+        use flare_server_core::flare_err;
+        let missing = flare_err!(ErrorCode::MessageNotFound, "message m1 at 10.0.0.7");
+        assert_eq!(
+            storage_failure(&missing, StorageRead::Lookup).code(),
+            tonic::Code::NotFound
+        );
+        let status = storage_failure(&missing, StorageRead::Listing);
+        assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+        assert!(!status.message().contains("10.0.0.7"), "{status:?}");
+        for (code, expected) in [
+            (ErrorCode::ServiceUnavailable, tonic::Code::Unavailable),
+            (ErrorCode::OperationTimeout, tonic::Code::DeadlineExceeded),
+            (ErrorCode::InvalidParameter, tonic::Code::InvalidArgument),
+            (ErrorCode::PermissionDenied, tonic::Code::PermissionDenied),
+            (ErrorCode::OperationNotSupported, tonic::Code::Unimplemented),
+            (ErrorCode::DeserializationError, tonic::Code::Internal),
+        ] {
+            let err = flare_err!(code, "x");
+            assert_eq!(
+                storage_failure(&err, StorageRead::Listing).code(),
+                expected,
+                "{code:?}"
+            );
+        }
+    }
+
+    /// 读标签失败时回分好类的错误，而不是空列表（调用方分不清「没有标签」与「存储故障」）。
+    #[tokio::test]
+    async fn listing_tags_reports_storage_failures_instead_of_an_empty_list() {
+        let (_, verifier) = console();
+        let handler = unreachable_store_handler(Some(verifier));
+        let status = handler
+            .list_message_tags(with_metadata(
+                ListMessageTagsRequest::default(),
+                &[("x-tenant-id", "tenant-a"), ("x-user-id", "u1")],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert!(!status.message().contains("127.0.0.1"), "{status:?}");
     }
 
     /// 数据库不可达是可重试的 UNAVAILABLE（管理检索与其他读一样），且不带数据库错误文本；

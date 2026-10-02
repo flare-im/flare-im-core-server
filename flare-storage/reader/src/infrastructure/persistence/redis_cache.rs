@@ -5,14 +5,78 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use flare_server_core::error::{AnyhowContext, Result};
+use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use prost::Message as ProstMessage;
-use redis::{AsyncCommands, aio::ConnectionManager};
+use redis::{AsyncCommands, RedisError, aio::ConnectionManager};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::StorageReaderConfig;
 use flare_proto::common::Message;
+
+/// Redis 错误分类：超时是 `OperationTimeout`；连不上、连接断开、其他 IO 失败与需要重连的错误，
+/// 以及 Redis 正在加载、集群不可用、主节点下线，是可重试的 `ServiceUnavailable`；其余（命令错误、
+/// 类型不符等）是 `InternalError`。错误文本只进 details，不进 gRPC 状态（见 Storage Reader 的
+/// `storage_failure`）。以前一律经 `From<RedisError>` 成为未分类的系统错误。
+fn redis_failure(err: RedisError, context: &'static str) -> FlareError {
+    let code = if err.is_timeout() {
+        ErrorCode::OperationTimeout
+    } else if err.is_io_error()
+        || err.is_unrecoverable_error()
+        || matches!(
+            err.kind(),
+            redis::ErrorKind::BusyLoadingError
+                | redis::ErrorKind::TryAgain
+                | redis::ErrorKind::ClusterDown
+                | redis::ErrorKind::MasterDown
+        )
+    {
+        ErrorCode::ServiceUnavailable
+    } else {
+        ErrorCode::InternalError
+    };
+    map_infra_error(err, code, context)
+}
+
+trait RedisResultExt<T> {
+    fn redis_context(self, context: &'static str) -> Result<T>;
+}
+
+impl<T> RedisResultExt<T> for std::result::Result<T, RedisError> {
+    fn redis_context(self, context: &'static str) -> Result<T> {
+        self.map_err(|err| redis_failure(err, context))
+    }
+}
+
+/// 缓存里的一条消息：base64 编码的 protobuf。解不开是反序列化错误（缓存内容坏了），不是
+/// 未分类的系统错误。
+fn decode_cached_message(encoded: &str) -> Result<Message> {
+    let bytes = BASE64.decode(encoded).map_err(|err| {
+        map_infra_error(
+            err,
+            ErrorCode::DeserializationError,
+            "cached message is not valid base64",
+        )
+    })?;
+    Message::decode(&bytes[..]).map_err(|err| {
+        map_infra_error(
+            err,
+            ErrorCode::DeserializationError,
+            "cached message is not a valid protobuf message",
+        )
+    })
+}
+
+/// TTL 配置换成 Redis 的秒数；超出 i64 是配置错误。
+fn ttl_seconds(ttl: u64) -> Result<i64> {
+    ttl.try_into().map_err(|err| {
+        map_infra_error(
+            err,
+            ErrorCode::ConfigurationError,
+            "Redis cache TTL is out of range",
+        )
+    })
+}
 
 /// Redis 缓存配置
 #[derive(Debug, Clone)]
@@ -59,7 +123,9 @@ impl RedisMessageCache {
 
     /// 获取 Redis 连接
     async fn get_connection(&self) -> Result<ConnectionManager> {
-        Ok(ConnectionManager::new(self.client.as_ref().clone()).await?)
+        ConnectionManager::new(self.client.as_ref().clone())
+            .await
+            .redis_context("Failed to connect to Redis")
     }
 
     fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
@@ -95,11 +161,17 @@ impl RedisMessageCache {
         message.encode(&mut buf)?;
         let encoded = BASE64.encode(&buf);
 
-        let _: () = conn.set(&message_key, encoded).await?;
+        let _: () = conn
+            .set(&message_key, encoded)
+            .await
+            .redis_context("Failed to cache message")?;
 
         if self.message_ttl_seconds > 0 {
-            let ttl: i64 = self.message_ttl_seconds.try_into()?;
-            let _: () = conn.expire(&message_key, ttl).await?;
+            let ttl = ttl_seconds(self.message_ttl_seconds)?;
+            let _: () = conn
+                .expire(&message_key, ttl)
+                .await
+                .redis_context("Failed to set message cache TTL")?;
         }
 
         Ok(())
@@ -118,7 +190,7 @@ impl RedisMessageCache {
         pipe.atomic();
 
         let ttl: i64 = if self.message_ttl_seconds > 0 {
-            self.message_ttl_seconds.try_into()?
+            ttl_seconds(self.message_ttl_seconds)?
         } else {
             0
         };
@@ -137,7 +209,10 @@ impl RedisMessageCache {
             }
         }
 
-        let _: Vec<redis::Value> = pipe.query_async(&mut conn).await?;
+        let _: Vec<redis::Value> = pipe
+            .query_async(&mut conn)
+            .await
+            .redis_context("Failed to cache message batch")?;
 
         tracing::trace!(
             batch_size = messages.len(),
@@ -159,20 +234,12 @@ impl RedisMessageCache {
 
         let message_key = Self::message_key(tenant_id, conversation_id, message_id);
 
-        let encoded: Option<String> = conn.get(&message_key).await?;
+        let encoded: Option<String> = conn
+            .get(&message_key)
+            .await
+            .redis_context("Failed to read cached message")?;
 
-        match encoded {
-            Some(encoded) => {
-                // 解码 base64，然后反序列化为 Message
-                let bytes = BASE64
-                    .decode(&encoded)
-                    .context("Failed to decode base64 message")?;
-                let message =
-                    Message::decode(&bytes[..]).context("Failed to decode protobuf message")?;
-                Ok(Some(message))
-            }
-            None => Ok(None),
-        }
+        encoded.as_deref().map(decode_cached_message).transpose()
     }
 
     /// 批量从缓存获取消息
@@ -195,7 +262,10 @@ impl RedisMessageCache {
             .collect();
 
         // 使用 MGET 批量获取
-        let encoded_list: Vec<Option<String>> = conn.get(keys).await?;
+        let encoded_list: Vec<Option<String>> = conn
+            .get(keys)
+            .await
+            .redis_context("Failed to read cached messages")?;
 
         let mut result = HashMap::new();
         for (i, encoded_opt) in encoded_list.into_iter().enumerate() {
@@ -233,7 +303,8 @@ impl RedisMessageCache {
             .arg(0)
             .arg("WITHSCORES")
             .query_async(&mut conn)
-            .await?;
+            .await
+            .redis_context("Failed to read conversation tail cache")?;
         let Some((_, oldest_seq)) = oldest_tail.first() else {
             return Ok(None);
         };
@@ -249,7 +320,8 @@ impl RedisMessageCache {
             .arg(0)
             .arg(limit)
             .query_async(&mut conn)
-            .await?;
+            .await
+            .redis_context("Failed to read conversation tail cache")?;
 
         if message_ids.is_empty() {
             return Ok(None);
@@ -309,11 +381,14 @@ impl RedisMessageCache {
         }
 
         if self.session_ttl_seconds > 0 {
-            let ttl: i64 = self.session_ttl_seconds.try_into()?;
+            let ttl = ttl_seconds(self.session_ttl_seconds)?;
             pipe.cmd("EXPIRE").arg(&index_key).arg(ttl);
         }
 
-        let _: Vec<redis::Value> = pipe.query_async(&mut conn).await?;
+        let _: Vec<redis::Value> = pipe
+            .query_async(&mut conn)
+            .await
+            .redis_context("Failed to cache conversation messages")?;
 
         Ok(())
     }
@@ -332,7 +407,10 @@ impl RedisMessageCache {
         let mut conn = self.get_connection().await?;
 
         // 从 Sorted Set 获取消息 ID 列表
-        let message_ids: Vec<String> = conn.zrange(&index_key, 0, (limit - 1) as isize).await?;
+        let message_ids: Vec<String> = conn
+            .zrange(&index_key, 0, (limit - 1) as isize)
+            .await
+            .redis_context("Failed to read conversation cache index")?;
 
         if message_ids.is_empty() {
             return Ok(None);
@@ -364,7 +442,10 @@ impl RedisMessageCache {
         let mut conn = self.get_connection().await?;
 
         let message_key = Self::message_key(tenant_id, conversation_id, message_id);
-        let _: () = conn.del(&message_key).await?;
+        let _: () = conn
+            .del(&message_key)
+            .await
+            .redis_context("Failed to invalidate cached message")?;
 
         Ok(())
     }
@@ -376,10 +457,16 @@ impl RedisMessageCache {
         // 使用 KEYS 命令查找所有相关的 key（注意：KEYS 在生产环境可能阻塞，但用于缓存失效场景可接受）
         // 更好的方案是维护一个会话 key 的 SET，但为了简化实现，这里使用 KEYS
         let pattern = format!("cache:session:{tenant_id}:{conversation_id}:*");
-        let keys: Vec<String> = conn.keys(&pattern).await?;
+        let keys: Vec<String> = conn
+            .keys(&pattern)
+            .await
+            .redis_context("Failed to list conversation cache keys")?;
 
         if !keys.is_empty() {
-            let _: () = conn.del(&keys).await?;
+            let _: () = conn
+                .del(&keys)
+                .await
+                .redis_context("Failed to invalidate conversation cache")?;
             tracing::trace!(
                 conversation_id = %conversation_id,
                 deleted_keys = keys.len(),
@@ -389,10 +476,16 @@ impl RedisMessageCache {
 
         // 同时清除消息缓存（使用消息 key 模式）
         let msg_pattern = format!("cache:msg:{tenant_id}:{conversation_id}:*");
-        let msg_keys: Vec<String> = conn.keys(&msg_pattern).await?;
+        let msg_keys: Vec<String> = conn
+            .keys(&msg_pattern)
+            .await
+            .redis_context("Failed to list cached message keys")?;
 
         if !msg_keys.is_empty() {
-            let _: () = conn.del(&msg_keys).await?;
+            let _: () = conn
+                .del(&msg_keys)
+                .await
+                .redis_context("Failed to invalidate cached messages")?;
             tracing::trace!(
                 conversation_id = %conversation_id,
                 deleted_msg_keys = msg_keys.len(),
@@ -407,6 +500,57 @@ impl RedisMessageCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Redis 失败按种类分类：超时、连不上与断开（可重试）、其余（内部错误），文本只进 details。
+    /// 修复前一律是 `From<RedisError>` 的未分类系统错误，gRPC 层只能回 INTERNAL。
+    #[test]
+    fn redis_failures_are_classified() {
+        let io = |kind| RedisError::from(std::io::Error::from(kind));
+        for (err, code) in [
+            (
+                io(std::io::ErrorKind::TimedOut),
+                ErrorCode::OperationTimeout,
+            ),
+            (
+                io(std::io::ErrorKind::ConnectionRefused),
+                ErrorCode::ServiceUnavailable,
+            ),
+            (
+                io(std::io::ErrorKind::ConnectionReset),
+                ErrorCode::ServiceUnavailable,
+            ),
+            (
+                RedisError::from((redis::ErrorKind::BusyLoadingError, "loading")),
+                ErrorCode::ServiceUnavailable,
+            ),
+            (
+                RedisError::from((redis::ErrorKind::TypeError, "WRONGTYPE leak-marker-77")),
+                ErrorCode::InternalError,
+            ),
+        ] {
+            let mapped = redis_failure(err, "read");
+            assert_eq!(mapped.code(), Some(code), "{mapped}");
+            assert_eq!(mapped.reason(), "read", "{mapped}");
+        }
+    }
+
+    /// 缓存内容解不开是反序列化错误，不是未分类的系统错误。
+    #[test]
+    fn undecodable_cache_entries_are_deserialization_errors() {
+        for encoded in [
+            "not base64 !!".to_string(),
+            BASE64.encode([0xff, 0xff, 0xff]),
+        ] {
+            let err = decode_cached_message(&encoded).unwrap_err();
+            assert_eq!(err.code(), Some(ErrorCode::DeserializationError), "{err}");
+        }
+        let message = Message {
+            server_id: "m1".into(),
+            ..Default::default()
+        };
+        let decoded = decode_cached_message(&BASE64.encode(message.encode_to_vec())).unwrap();
+        assert_eq!(decoded.server_id, "m1");
+    }
 
     #[test]
     fn tail_key_is_tenant_scoped() {
