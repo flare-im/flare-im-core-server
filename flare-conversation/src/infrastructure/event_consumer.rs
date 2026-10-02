@@ -14,9 +14,15 @@ use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
-use flare_server_core::mq::consumer::{Message as MqMessage, MessageFetcher};
+use flare_server_core::mq::consumer::{
+    ConsumerConfig, DeadLetterPublisher, FailureAction, FailureContext, FailureTopic,
+    Message as MqMessage, MessageAck, MessageFetcher, ProducerDeadLetterPublisher, RetryPolicy,
+};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaMessageFetcher, KafkaProducerConfig};
-use flare_server_core::mq::nats::{NatsConsumerConfig, NatsMessageFetcher, NatsStreamSpec};
+use flare_server_core::mq::nats::config::dlq_stream_spec;
+use flare_server_core::mq::nats::{
+    NatsConsumerConfig, NatsMessageFetcher, NatsProducer, NatsProducerConfig, NatsStreamSpec,
+};
 use prost::Message as _;
 use tracing::{debug, error, info, warn};
 
@@ -75,23 +81,231 @@ pub(crate) async fn consume_until<F, Fut>(
     info!(consumer, "consumer loop stopped on shutdown");
 }
 
-/// 处理一条消息后 ack，处理失败 nack。
-async fn settle_message<Fut>(kind: &str, message: MqMessage, process: impl FnOnce(Vec<u8>) -> Fut)
-where
+/// 已读回执消费者的死信 subject：落在死信流 `flare.im.dlq.>` 内，不与任何消费者订阅的 subject 重叠。
+const READ_RECEIPT_DLQ_SUBJECT: &str = "flare.im.dlq.conversation-read-receipt";
+/// 会话确保消费者的死信 subject。
+const CONVERSATION_ENSURE_DLQ_SUBJECT: &str = "flare.im.dlq.conversation-ensure";
+
+/// 两个消费者的重投预算：与 push-server、编排、落库相同（service-kit `consumer_retry`：12 次
+/// 重试，1 s 起翻倍、封顶 15 s，等待合计 135 s），首投加全部重试落在 JetStream 默认的
+/// `max_deliver`（16）之内。
+fn consumer_retry_config() -> ConsumerConfig {
+    flare_im_service_kit::consumer_retry::with_downstream_outage_retry(ConsumerConfig::default())
+}
+
+/// 处理失败后的处置（见 [`settle_message`]）。
+pub(crate) struct FailureSettlement {
+    policy: RetryPolicy,
+    dead_letter: Option<Arc<dyn DeadLetterPublisher>>,
+}
+
+impl FailureSettlement {
+    fn new(dead_letter: Option<Arc<dyn DeadLetterPublisher>>) -> Self {
+        Self {
+            policy: RetryPolicy::from(&consumer_retry_config()),
+            dead_letter,
+        }
+    }
+}
+
+/// 死信生产者的连接参数：地址沿用消费者的 NATS 地址，只确保死信流（`FLARE_DLQ`），不依赖服务
+/// 自身的拓扑是否包含它（与 server-core `build_nats_consumer_tasks_with_dlq` 相同）。超时与重试
+/// 取 `config/base.toml` 里 JetStream 档案的值。
+struct DeadLetterProducerConfig {
+    url: String,
+}
+
+impl NatsProducerConfig for DeadLetterProducerConfig {
+    fn nats_url(&self) -> &str {
+        &self.url
+    }
+    fn timeout_ms(&self) -> u64 {
+        5_000
+    }
+    fn retries(&self) -> u32 {
+        8
+    }
+    fn retry_backoff_ms(&self) -> u64 {
+        25
+    }
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        vec![dlq_stream_spec()]
+    }
+}
+
+/// NATS 后端的死信发布器。建不起来时消费者照常运行并记 ERROR：重试耗尽的消息退回 nack，
+/// JetStream 达到 `max_deliver` 后停投（以前的行为）。Kafka 后端没有死信发布器，见 [`settle_message`]。
+async fn dead_letter_publisher(
+    mq_backend: &str,
+    url: &str,
+    subject: &'static str,
+) -> Option<Arc<dyn DeadLetterPublisher>> {
+    if mq_backend != "nats" {
+        return None;
+    }
+    let config = DeadLetterProducerConfig {
+        url: url.to_string(),
+    };
+    match NatsProducer::new(&config).await {
+        Ok(producer) => Some(Arc::new(ProducerDeadLetterPublisher::new(
+            Arc::new(producer),
+            FailureTopic::fixed(subject),
+        ))),
+        Err(e) => {
+            error!(
+                dlq_subject = subject,
+                error = %e,
+                "Conversation DLQ producer unavailable; exhausted events stay unsettled"
+            );
+            None
+        }
+    }
+}
+
+/// 处理一条消息并结算。
+///
+/// - 成功：ack；这是一次重投（`retry_count > 0`）时记一行 INFO，说明此前失败的事件已经生效。
+/// - 失败：按 [`consumer_retry_config`] 的退避延迟 NAK，由 broker 重投；重试耗尽，或载荷解不开
+///   （重投也不会好）时投死信流再 term。死信投递失败时按退避再 NAK，不丢消息。
+///
+/// 以前失败时立即 nack：下游（Postgres、Redis）重启期间 16 次重投在同一瞬间用完，JetStream 随即
+/// 停投，事件既没有生效也不在 DLQ 里。
+///
+/// Kafka 后端的确认句柄不支持重投（`nack` 不提交也不重投，后面的偏移一提交就跳过它），这里只记
+/// ERROR，行为不变。
+async fn settle_message<Fut>(
+    kind: &str,
+    message: MqMessage,
+    failure: &FailureSettlement,
+    process: impl FnOnce(Vec<u8>) -> Fut,
+) where
     Fut: Future<Output = Result<()>>,
 {
-    let ack = message.ack_handle.clone();
-    if let Err(e) = process(message.payload).await {
-        error!(error = %e, "Process {kind} event failed");
-        if let Some(ack) = ack
-            && let Err(err) = ack.nack().await
-        {
-            warn!(error = %err, "JetStream nack failed");
+    let retry_count = message.context.retry_count;
+    let outcome = process(message.payload.clone()).await;
+    let Some(ack) = message.ack_handle.clone() else {
+        if let Err(e) = outcome {
+            error!(error = %e, "Process {kind} event failed");
         }
-    } else if let Some(ack) = ack
-        && let Err(err) = ack.ack().await
-    {
-        warn!(error = %err, "JetStream ack failed");
+        return;
+    };
+    let error = match outcome {
+        Ok(()) => {
+            if retry_count > 0 {
+                info!(
+                    kind,
+                    retry_count, "{kind} event processed after broker redelivery"
+                );
+            }
+            if let Err(err) = ack.ack().await {
+                warn!(error = %err, "JetStream ack failed");
+            }
+            return;
+        }
+        Err(error) => error,
+    };
+
+    if !ack.supports_native_retry() {
+        error!(
+            kind,
+            error = %error,
+            "Process {kind} event failed; this backend cannot redeliver it and a later commit skips it"
+        );
+        if let Err(err) = ack.nack().await {
+            debug!(error = %err, "nack without native redelivery");
+        }
+        return;
+    }
+
+    let undecodable = error.code() == Some(ErrorCode::DeserializationError);
+    let action = if undecodable {
+        failure.policy.action_for_dead_letter()
+    } else {
+        failure.policy.action_for_nack(retry_count)
+    };
+    match action {
+        FailureAction::Retry => {
+            let delay = failure.policy.retry_delay(retry_count);
+            warn!(
+                kind,
+                retry_count,
+                retry_in_ms = delay.map(|d| d.as_millis() as u64),
+                error = %error,
+                "Process {kind} event failed, redelivering after backoff"
+            );
+            redeliver(ack.as_ref(), delay).await;
+        }
+        FailureAction::DeadLetter => {
+            let reason = if undecodable {
+                "undecodable conversation event"
+            } else {
+                "conversation event retries exhausted"
+            };
+            dead_letter(
+                kind,
+                &message,
+                ack.as_ref(),
+                failure,
+                FailureContext::new(reason, Some(error.to_string()), retry_count),
+            )
+            .await;
+        }
+    }
+}
+
+/// 交给 broker 在 `delay` 之后重投；没有延迟时立即重投。
+async fn redeliver(ack: &dyn MessageAck, delay: Option<Duration>) {
+    let result = match delay {
+        Some(delay) if !delay.is_zero() => ack.nack_with_delay(delay).await,
+        _ => ack.nack().await,
+    };
+    if let Err(err) = result {
+        warn!(error = %err, "JetStream nack failed");
+    }
+}
+
+/// 投死信流后 term；没有死信发布器或投递失败时按退避 NAK，消息留在原流里。
+async fn dead_letter(
+    kind: &str,
+    message: &MqMessage,
+    ack: &dyn MessageAck,
+    failure: &FailureSettlement,
+    context: FailureContext,
+) {
+    let retry_count = context.retry_count;
+    let Some(publisher) = failure.dead_letter.as_ref() else {
+        error!(
+            kind,
+            retry_count,
+            reason = %context.reason,
+            "Process {kind} event failed and no DLQ is configured; nacking"
+        );
+        redeliver(ack, failure.policy.retry_delay(retry_count)).await;
+        return;
+    };
+    let reason = context.reason.clone();
+    match publisher.publish_dead_letter(message, context).await {
+        Ok(()) => {
+            error!(
+                kind,
+                retry_count,
+                reason = %reason,
+                topic = %message.context.topic,
+                "{kind} event moved to DLQ"
+            );
+            if let Err(err) = ack.term().await {
+                warn!(error = %err, "JetStream term failed");
+            }
+        }
+        Err(err) => {
+            error!(
+                kind,
+                retry_count,
+                error = %err,
+                "{kind} event DLQ publish failed; redelivering"
+            );
+            redeliver(ack, failure.policy.retry_delay(retry_count)).await;
+        }
     }
 }
 
@@ -161,6 +375,7 @@ pub struct ReadReceiptEventConsumer {
     fetcher: tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>,
     domain_service: Arc<DefaultConversationDomainService>,
     subject: String,
+    failure: FailureSettlement,
 }
 
 impl ReadReceiptEventConsumer {
@@ -232,11 +447,14 @@ impl ReadReceiptEventConsumer {
             group = %group,
             "Conversation event consumer subscribed"
         );
+        let dead_letter =
+            dead_letter_publisher(config.mq_backend.as_str(), url, READ_RECEIPT_DLQ_SUBJECT).await;
 
         Ok(Self {
             fetcher: tokio::sync::Mutex::new(fetcher),
             domain_service,
             subject: subject.to_string(),
+            failure: FailureSettlement::new(dead_letter),
         })
     }
 
@@ -244,9 +462,12 @@ impl ReadReceiptEventConsumer {
     pub async fn run_until(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         info!(subject = %self.subject, "ReadReceipt consumer loop started");
         consume_until("read-receipt", &self.fetcher, shutdown, |message| {
-            settle_message("ReadReceipt", message, |payload| async move {
-                self.process_payload(&payload).await
-            })
+            settle_message(
+                "ReadReceipt",
+                message,
+                &self.failure,
+                |payload| async move { self.process_payload(&payload).await },
+            )
         })
         .await;
         Ok(())
@@ -489,6 +710,7 @@ pub struct ConversationEnsureEventConsumer {
     fetcher: tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>,
     domain_service: Arc<DefaultConversationDomainService>,
     subject: String,
+    failure: FailureSettlement,
 }
 
 impl ConversationEnsureEventConsumer {
@@ -555,11 +777,18 @@ impl ConversationEnsureEventConsumer {
             group = %group,
             "ConversationEnsure event consumer subscribed"
         );
+        let dead_letter = dead_letter_publisher(
+            config.mq_backend.as_str(),
+            url,
+            CONVERSATION_ENSURE_DLQ_SUBJECT,
+        )
+        .await;
 
         Ok(Self {
             fetcher: tokio::sync::Mutex::new(fetcher),
             domain_service,
             subject: subject.to_string(),
+            failure: FailureSettlement::new(dead_letter),
         })
     }
 
@@ -567,9 +796,12 @@ impl ConversationEnsureEventConsumer {
     pub async fn run_until(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         info!(subject = %self.subject, "ConversationEnsure consumer loop started");
         consume_until("conversation-ensure", &self.fetcher, shutdown, |message| {
-            settle_message("ConversationEnsure", message, |payload| async move {
-                self.process_payload(&payload).await
-            })
+            settle_message(
+                "ConversationEnsure",
+                message,
+                &self.failure,
+                |payload| async move { self.process_payload(&payload).await },
+            )
         })
         .await;
         Ok(())
@@ -883,5 +1115,266 @@ mod tests {
             payload: Some(mq_envelope::Payload::Event(event)),
         }
         .encode_to_vec()
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    //! 处理失败的结算：退避重投、耗尽或解不开时进 DLQ（W9 ②，与 W8-C 的消费者一致）。
+
+    use std::io::Write;
+    use std::sync::Mutex as StdMutex;
+
+    use flare_server_core::mq::consumer::{ConsumerError, ContentType, MessageContext};
+
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Settled {
+        Ack,
+        Nack,
+        NackAfter(Duration),
+        Term,
+    }
+
+    #[derive(Default)]
+    struct RecordingAck(StdMutex<Vec<Settled>>);
+
+    #[async_trait::async_trait]
+    impl MessageAck for RecordingAck {
+        async fn ack(&self) -> std::result::Result<(), ConsumerError> {
+            self.0.lock().unwrap().push(Settled::Ack);
+            Ok(())
+        }
+        async fn nack(&self) -> std::result::Result<(), ConsumerError> {
+            self.0.lock().unwrap().push(Settled::Nack);
+            Ok(())
+        }
+        async fn term(&self) -> std::result::Result<(), ConsumerError> {
+            self.0.lock().unwrap().push(Settled::Term);
+            Ok(())
+        }
+        async fn nack_with_delay(&self, delay: Duration) -> std::result::Result<(), ConsumerError> {
+            self.0.lock().unwrap().push(Settled::NackAfter(delay));
+            Ok(())
+        }
+    }
+
+    /// 记下投递的死信（原 topic、失败原因、重试次数）；`fail` 时投递失败。
+    #[derive(Default)]
+    struct RecordingDeadLetters {
+        fail: bool,
+        published: StdMutex<Vec<(String, String, u32)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DeadLetterPublisher for RecordingDeadLetters {
+        async fn publish_dead_letter(
+            &self,
+            message: &MqMessage,
+            failure: FailureContext,
+        ) -> std::result::Result<(), ConsumerError> {
+            if self.fail {
+                return Err(ConsumerError::DeadLetter("dlq stream unavailable".into()));
+            }
+            self.published.lock().unwrap().push((
+                message.context.topic.clone(),
+                failure.reason,
+                failure.retry_count,
+            ));
+            Ok(())
+        }
+    }
+
+    fn delivery(retry_count: u32) -> (MqMessage, Arc<RecordingAck>) {
+        let ack = Arc::new(RecordingAck::default());
+        let mut context = MessageContext::new(
+            Arc::new(Context::with_request_id("req-settle")),
+            TOPIC_MESSAGE_EVENTS.to_string(),
+        );
+        context.retry_count = retry_count;
+        let message = MqMessage::new(b"payload".to_vec(), ContentType::Protobuf, context)
+            .with_ack_handle(ack.clone());
+        (message, ack)
+    }
+
+    fn settlement(dlq: Arc<RecordingDeadLetters>) -> FailureSettlement {
+        FailureSettlement::new(Some(dlq))
+    }
+
+    async fn settle(
+        retry_count: u32,
+        failure: &FailureSettlement,
+        outcome: fn() -> Result<()>,
+    ) -> Vec<Settled> {
+        let (message, ack) = delivery(retry_count);
+        settle_message(
+            "Test",
+            message,
+            failure,
+            |_payload| async move { outcome() },
+        )
+        .await;
+        ack.0.lock().unwrap().clone()
+    }
+
+    fn database_down() -> Result<()> {
+        Err(ErrorBuilder::new(ErrorCode::DatabaseError, "connection refused").build_error())
+    }
+
+    fn undecodable() -> Result<()> {
+        Err(ErrorBuilder::new(ErrorCode::DeserializationError, "decode MqEnvelope").build_error())
+    }
+
+    fn ok() -> Result<()> {
+        Ok(())
+    }
+
+    /// 下游暂时失败：按 1 s 起翻倍、封顶 15 s 的延迟 NAK，不立即重投、不进 DLQ。
+    #[tokio::test]
+    async fn a_failed_event_is_redelivered_after_backoff_not_immediately() {
+        let dlq = Arc::new(RecordingDeadLetters::default());
+        let failure = settlement(dlq.clone());
+        for (retry_count, delay) in [(0, 1), (1, 2), (3, 8), (4, 15), (11, 15)] {
+            assert_eq!(
+                settle(retry_count, &failure, database_down).await,
+                vec![Settled::NackAfter(Duration::from_secs(delay))],
+                "retry_count {retry_count}"
+            );
+        }
+        assert!(dlq.published.lock().unwrap().is_empty());
+    }
+
+    /// 12 次重试用完（第 13 次投递仍失败）：投死信流再 term，不再留在原流里等 JetStream 停投。
+    #[tokio::test]
+    async fn exhausted_retries_go_to_the_dlq_then_term() {
+        let dlq = Arc::new(RecordingDeadLetters::default());
+        let failure = settlement(dlq.clone());
+        assert_eq!(
+            settle(12, &failure, database_down).await,
+            vec![Settled::Term]
+        );
+        assert_eq!(
+            *dlq.published.lock().unwrap(),
+            vec![(
+                TOPIC_MESSAGE_EVENTS.to_string(),
+                "conversation event retries exhausted".to_string(),
+                12
+            )]
+        );
+    }
+
+    /// 载荷解不开，重投也不会好：首投失败就进 DLQ。
+    #[tokio::test]
+    async fn an_undecodable_event_goes_straight_to_the_dlq() {
+        let dlq = Arc::new(RecordingDeadLetters::default());
+        let failure = settlement(dlq.clone());
+        assert_eq!(settle(0, &failure, undecodable).await, vec![Settled::Term]);
+        assert_eq!(dlq.published.lock().unwrap().len(), 1);
+        assert_eq!(
+            dlq.published.lock().unwrap()[0].1,
+            "undecodable conversation event"
+        );
+    }
+
+    /// 死信投递失败：按退避 NAK，消息留在原流里，不 term（否则就丢了）。
+    #[tokio::test]
+    async fn a_failed_dlq_publish_keeps_the_event_in_the_stream() {
+        let dlq = Arc::new(RecordingDeadLetters {
+            fail: true,
+            ..Default::default()
+        });
+        let failure = settlement(dlq);
+        assert_eq!(
+            settle(12, &failure, database_down).await,
+            vec![Settled::NackAfter(Duration::from_secs(15))]
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 成功即 ack；重投后才成功的事件记一行 INFO（以前只看得出它没进 DLQ）。
+    #[tokio::test]
+    async fn success_acks_and_reports_a_redelivered_success() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let failure = settlement(Arc::new(RecordingDeadLetters::default()));
+        assert_eq!(settle(0, &failure, ok).await, vec![Settled::Ack]);
+        let first = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        assert!(!first.contains("after broker redelivery"), "{first}");
+
+        assert_eq!(settle(3, &failure, ok).await, vec![Settled::Ack]);
+        let logs = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("Test event processed after broker redelivery"),
+            "{logs}"
+        );
+        assert!(logs.contains("retry_count=3"), "{logs}");
+    }
+
+    /// 门禁：两个消费者的重试预算覆盖下游停机与重启窗口，首投加全部重试落在各自 JetStream
+    /// 消费者的 `max_deliver` 之内；死信 subject 在死信流内、不被任何消费者重新订阅。
+    #[test]
+    fn retry_budget_spans_a_restart_window_inside_max_deliver() {
+        let read_receipt = ReadReceiptConsumerConfig {
+            url: String::new(),
+            group: String::new(),
+            subject: String::new(),
+            stream_specs: Vec::new(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+        };
+        let ensure = ConversationEnsureConsumerConfig {
+            url: String::new(),
+            group: String::new(),
+            subject: String::new(),
+            stream_specs: Vec::new(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+        };
+        for max_deliver in [read_receipt.max_deliver(), ensure.max_deliver()] {
+            let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+                &consumer_retry_config(),
+                max_deliver,
+            )
+            .unwrap_or_else(|error| panic!("conversation retry budget: {error}"));
+            assert_eq!(window, Duration::from_secs(135));
+        }
+        assert!(consumer_retry_config().enable_dlq);
+
+        let dlq_stream = dlq_stream_spec();
+        for subject in [READ_RECEIPT_DLQ_SUBJECT, CONVERSATION_ENSURE_DLQ_SUBJECT] {
+            assert!(
+                dlq_stream.subjects.iter().any(|pattern| {
+                    flare_server_core::mq::nats::subject_matches(pattern, subject)
+                }),
+                "{subject} must land in the DLQ stream"
+            );
+            for consumed in [
+                TOPIC_MESSAGE_EVENTS,
+                TOPIC_MESSAGE_CREATED,
+                TOPIC_CONVERSATION_ENSURE,
+            ] {
+                assert_ne!(subject, consumed);
+            }
+        }
     }
 }
