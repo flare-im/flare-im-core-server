@@ -34,6 +34,20 @@ impl PushHandler {
         Self { route_handler }
     }
 
+    /// 被 NAK 过的信封（`retry_count > 0`）这次处理成功时记一行 INFO：broker 重投后下游已恢复。
+    /// 以前只看得出它没进 DLQ。
+    fn note_redelivered_success(message: &Message, envelope_id: &str) {
+        let retry_count = message.context.retry_count;
+        if retry_count > 0 {
+            tracing::info!(
+                retry_count,
+                envelope_id,
+                topic = %message.context.topic,
+                "PushEnvelope handled after broker redelivery"
+            );
+        }
+    }
+
     /// 解析 PushEnvelope
     fn parse_envelope(payload: &[u8]) -> std::result::Result<PushEnvelope, ConsumerError> {
         PushEnvelope::decode(payload).map_err(|e| {
@@ -73,12 +87,16 @@ impl MessageHandler for PushHandler {
             "Received PushEnvelope"
         );
 
+        let envelope_id = envelope.envelope_id.clone();
         match self
             .route_handler
             .handle_push_envelope(&message.context.ctx, envelope)
             .await
         {
-            Ok(()) => Ok(MessageResult::Ack),
+            Ok(()) => {
+                Self::note_redelivered_success(&message, &envelope_id);
+                Ok(MessageResult::Ack)
+            }
             Err(err) if err.is_retryable() => {
                 tracing::warn!(
                     error = %err,
@@ -108,6 +126,58 @@ impl MessageHandler for PushHandler {
 mod tests {
     use super::*;
     use flare_proto::{AckPayload, PushPayloadKind, PushTargetType};
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 被 NAK 过的信封重投后处理成功时记一行 INFO；首投成功不记。
+    #[test]
+    fn a_redelivered_envelope_that_succeeds_is_logged() {
+        use flare_server_core::mq::consumer::{ContentType, MessageContext};
+
+        let captured = CapturedLogs::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let text = || String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+
+        let mut message = Message::new(
+            Vec::new(),
+            ContentType::Protobuf,
+            MessageContext::new(
+                Arc::new(flare_server_core::context::Context::with_request_id(
+                    "req-1",
+                )),
+                "flare.im.push.envelope".to_string(),
+            ),
+        );
+        PushHandler::note_redelivered_success(&message, "env-first");
+        assert!(!text().contains("after broker redelivery"), "{}", text());
+
+        message.context.retry_count = 3;
+        PushHandler::note_redelivered_success(&message, "env-again");
+        let logs = text();
+        assert!(
+            logs.contains("PushEnvelope handled after broker redelivery"),
+            "{logs}"
+        );
+        assert!(logs.contains("retry_count=3"), "{logs}");
+        assert!(logs.contains("envelope_id=\"env-again\""), "{logs}");
+    }
 
     #[test]
     fn test_parse_envelope() {

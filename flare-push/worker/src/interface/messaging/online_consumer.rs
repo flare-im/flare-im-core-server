@@ -231,15 +231,33 @@ impl OnlinePushHandler {
         }
     }
 
+    /// 被 NAK 过的推送（`retry_count > 0`）这次送达时记一行 INFO：broker 重投到重启后的网关
+    /// 实例上成功了。以前只看得出它没进 DLQ。
+    fn note_redelivered_success(message: &Message, envelope: &PushTaskEnvelope) {
+        let retry_count = message.context.retry_count;
+        if retry_count > 0 {
+            tracing::info!(
+                retry_count,
+                user_id = %envelope.user_id,
+                message_id = %envelope.message_id,
+                "Push delivered after broker redelivery"
+            );
+        }
+    }
+
     async fn apply_route_result(
         &self,
-        ctx: &flare_server_core::context::Ctx,
+        message: &Message,
         envelope: &PushTaskEnvelope,
-        payload: &[u8],
         result: Result<(), FlareError>,
     ) -> std::result::Result<MessageResult, ConsumerError> {
+        let ctx = &message.context.ctx;
+        let payload = message.payload.as_slice();
         match result {
-            Ok(()) => Ok(MessageResult::Ack),
+            Ok(()) => {
+                Self::note_redelivered_success(message, envelope);
+                Ok(MessageResult::Ack)
+            }
             Err(e) => {
                 if e.is_retryable() {
                     tracing::warn!(
@@ -275,7 +293,12 @@ impl OnlinePushHandler {
         result: Result<(), FlareError>,
     ) -> std::result::Result<MessageResult, ConsumerError> {
         match result {
-            Ok(()) => Ok(MessageResult::Ack),
+            Ok(()) => {
+                for entry in entries {
+                    Self::note_redelivered_success(&entry.message, &entry.envelope);
+                }
+                Ok(MessageResult::Ack)
+            }
             Err(e) if e.is_retryable() => {
                 let first = &entries[0].envelope;
                 tracing::warn!(
@@ -343,8 +366,7 @@ impl MessageHandler for OnlinePushHandler {
             .route_by_payload_kind(ctx, &envelope, user_id, strategy)
             .await;
 
-        self.apply_route_result(ctx, &envelope, &message.payload, result)
-            .await
+        self.apply_route_result(&message, &envelope, result).await
     }
 
     async fn handle_batch(
@@ -414,12 +436,7 @@ impl MessageHandler for OnlinePushHandler {
                     )
                     .await;
                 let route_result = self
-                    .apply_route_result(
-                        &entry.message.context.ctx,
-                        &entry.envelope,
-                        &entry.message.payload,
-                        result,
-                    )
+                    .apply_route_result(&entry.message, &entry.envelope, result)
                     .await?;
                 Ok::<_, ConsumerError>((entry.index, route_result))
             })
@@ -447,12 +464,7 @@ impl MessageHandler for OnlinePushHandler {
                 )
                 .await;
             results[entry.index] = self
-                .apply_route_result(
-                    &entry.message.context.ctx,
-                    &entry.envelope,
-                    &entry.message.payload,
-                    result,
-                )
+                .apply_route_result(&entry.message, &entry.envelope, result)
                 .await?;
         }
 
@@ -738,15 +750,9 @@ mod tests {
             )),
         );
         let entry = batch_entry(0, "bob", "m1");
-        let ctx = entry.message.context.ctx.clone();
 
         let outcome = handler
-            .apply_route_result(
-                &ctx,
-                &entry.envelope,
-                &entry.message.payload,
-                Err(gateway_error),
-            )
+            .apply_route_result(&entry.message, &entry.envelope, Err(gateway_error))
             .await
             .unwrap();
         assert!(matches!(outcome, MessageResult::Nack), "{outcome:?}");
@@ -754,11 +760,94 @@ mod tests {
 
         let rejected = flare_err!(ErrorCode::InvalidParameter, "rejected by the gateway");
         let outcome = handler
-            .apply_route_result(&ctx, &entry.envelope, &entry.message.payload, Err(rejected))
+            .apply_route_result(&entry.message, &entry.envelope, Err(rejected))
             .await
             .unwrap();
         assert!(matches!(outcome, MessageResult::Ack), "{outcome:?}");
         assert_eq!(producer.sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// 被 NAK 过的推送重投后送达时记一行 INFO（W7-S2：以前只能证明它没进 DLQ）；首投送达不记。
+    /// 单条与按会话合并的批量两条路径都覆盖。
+    #[tokio::test]
+    async fn a_redelivered_push_that_succeeds_is_logged() {
+        let captured = CapturedLogs::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let unused = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let handler = OnlinePushHandler::new(
+            Arc::new(GatewayPushExecutor::new(
+                Arc::new(crate::infrastructure::rpc::OnlineServiceClient::from_channel(unused)),
+                flare_im_service_kit::gateway::GatewayRouter::new(Default::default()),
+            )),
+            Arc::new(DlqPublisher::from_producer(
+                Arc::new(CountingProducer::default()),
+                "flare.im.dlq.push",
+            )),
+        );
+
+        let first = batch_entry(0, "bob", "m-first");
+        let outcome = handler
+            .apply_route_result(&first.message, &first.envelope, Ok(()))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MessageResult::Ack), "{outcome:?}");
+        assert!(
+            !captured.text().contains("after broker redelivery"),
+            "{}",
+            captured.text()
+        );
+
+        let mut redelivered = batch_entry(1, "bob", "m-again");
+        redelivered.message.context.retry_count = 4;
+        let outcome = handler
+            .apply_route_result(&redelivered.message, &redelivered.envelope, Ok(()))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MessageResult::Ack), "{outcome:?}");
+        let logs = captured.text();
+        assert!(
+            logs.contains("Push delivered after broker redelivery"),
+            "{logs}"
+        );
+        assert!(logs.contains("retry_count=4"), "{logs}");
+        assert!(logs.contains("message_id=m-again"), "{logs}");
+
+        let mut grouped = batch_entry(2, "alice", "m-group");
+        grouped.message.context.retry_count = 2;
+        let outcome = handler
+            .apply_group_route_result(&[&first, &grouped], Ok(()))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MessageResult::Ack), "{outcome:?}");
+        let logs = captured.text();
+        assert!(logs.contains("message_id=m-group"), "{logs}");
+        assert!(!logs.contains("message_id=m-first"), "{logs}");
     }
 
     #[test]
