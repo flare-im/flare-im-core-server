@@ -148,6 +148,33 @@ pub(crate) fn admin_bearer_request<T>(payload: T, admin_token: &str) -> Result<t
     Ok(request)
 }
 
+/// 管理检索调用：admin 令牌原样转发（[`admin_bearer_request`]），外加请求号与追踪号。
+///
+/// 这两个号不是身份：Storage Reader 只用它们关联日志，并让同一请求号的导出落到同一个导出
+/// 任务；租户与操作人只取自令牌。
+pub(crate) fn admin_traced_request<T>(
+    payload: T,
+    admin_token: &str,
+    ctx: &Ctx,
+) -> Result<tonic::Request<T>> {
+    let mut request = admin_bearer_request(payload, admin_token)?;
+    for (key, value) in [
+        (
+            flare_server_core::context::keys::REQUEST_ID,
+            ctx.request_id(),
+        ),
+        (flare_server_core::context::keys::TRACE_ID, ctx.trace_id()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        if let Ok(value) = tonic::metadata::MetadataValue::try_from(value) {
+            request.metadata_mut().insert(key, value);
+        }
+    }
+    Ok(request)
+}
+
 fn optional_static_fallback(uri: &str) -> Option<String> {
     if uri.trim().is_empty() {
         None
@@ -158,7 +185,27 @@ fn optional_static_fallback(uri: &str) -> Option<String> {
 
 #[cfg(test)]
 mod admin_request_tests {
-    use super::admin_bearer_request;
+    use super::{admin_bearer_request, admin_traced_request};
+
+    #[test]
+    fn traced_admin_calls_add_only_the_request_and_trace_ids() {
+        let ctx = std::sync::Arc::new(
+            flare_server_core::context::Context::with_request_id("req-1")
+                .with_trace_id("trace-1")
+                .with_tenant_id("tenant-a")
+                .with_user_id("employee-1"),
+        );
+        let request = admin_traced_request((), "a.b.c", &ctx).unwrap();
+        let metadata = request.metadata();
+        assert_eq!(metadata.get("authorization").unwrap(), "Bearer a.b.c");
+        assert_eq!(metadata.get("x-request-id").unwrap(), "req-1");
+        assert_eq!(metadata.get("x-trace-id").unwrap(), "trace-1");
+        // 上下文里的租户与用户不随调用下发：下游只认令牌。
+        for key in ["x-tenant-id", "x-user-id", "x-actor-id", "x-flare-ctx"] {
+            assert!(metadata.get(key).is_none(), "{key}");
+        }
+        assert!(admin_traced_request((), "", &ctx).is_err());
+    }
 
     #[test]
     fn forwards_the_admin_token_as_the_only_identity() {

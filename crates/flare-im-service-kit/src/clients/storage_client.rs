@@ -1,7 +1,7 @@
 use flare_server_core::error::Result;
 use tonic::transport::Channel;
 
-use crate::clients::Ctx;
+use crate::clients::{Ctx, admin_traced_request};
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
     ExportMessagesRequest, ExportMessagesResponse, GetConversationMessageHeadRequest,
@@ -26,26 +26,30 @@ impl StorageReaderServiceClientWrapper {
         }
     }
 
-    pub async fn search_messages_with_ctx(
+    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    pub async fn search_messages_as_admin(
         &mut self,
+        admin_token: &str,
         ctx: &Ctx,
         request: SearchMessagesRequest,
     ) -> Result<SearchMessagesResponse> {
         let response = self
             .client
-            .search_messages(Self::request_with_ctx(ctx, request))
+            .search_messages(admin_traced_request(request, admin_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    pub async fn get_message_with_ctx(
+    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    pub async fn get_message_as_admin(
         &mut self,
+        admin_token: &str,
         ctx: &Ctx,
         request: GetMessageRequest,
     ) -> Result<GetMessageResponse> {
         let response = self
             .client
-            .get_message(Self::request_with_ctx(ctx, request))
+            .get_message(admin_traced_request(request, admin_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
@@ -63,38 +67,44 @@ impl StorageReaderServiceClientWrapper {
         Ok(response.into_inner())
     }
 
-    pub async fn query_message_events_with_ctx(
+    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    pub async fn query_message_events_as_admin(
         &mut self,
+        admin_token: &str,
         ctx: &Ctx,
         request: QueryMessageEventsRequest,
     ) -> Result<QueryMessageEventsResponse> {
         let response = self
             .client
-            .query_message_events(Self::request_with_ctx(ctx, request))
+            .query_message_events(admin_traced_request(request, admin_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    pub async fn query_message_write_ledger_with_ctx(
+    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    pub async fn query_message_write_ledger_as_admin(
         &mut self,
+        admin_token: &str,
         ctx: &Ctx,
         request: QueryMessageWriteLedgerRequest,
     ) -> Result<QueryMessageWriteLedgerResponse> {
         let response = self
             .client
-            .query_message_write_ledger(Self::request_with_ctx(ctx, request))
+            .query_message_write_ledger(admin_traced_request(request, admin_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    pub async fn export_messages_with_ctx(
+    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    pub async fn export_messages_as_admin(
         &mut self,
+        admin_token: &str,
         ctx: &Ctx,
         request: ExportMessagesRequest,
     ) -> Result<ExportMessagesResponse> {
         let response = self
             .client
-            .export_messages(Self::request_with_ctx(ctx, request))
+            .export_messages(admin_traced_request(request, admin_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }

@@ -11,6 +11,7 @@ use flare_server_core::{
 };
 use serde::Serialize;
 
+use super::admin_auth_middleware::VerifiedAdminAssertion;
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
 use super::ops_handler::{AdminCapability, admin_rpc_error};
 use crate::application::admin_messages::{
@@ -25,7 +26,7 @@ use crate::application::admin_messages::{
     build_storage_write_ledger_request,
 };
 use flare_im_service_kit::{
-    clients::{CapabilityDownstreamConfig, GrpcClients},
+    clients::{CapabilityDownstreamConfig, GrpcClients, StorageReaderServiceClientWrapper},
     gateway::GatewaySettings,
 };
 use std::sync::Arc;
@@ -302,6 +303,7 @@ pub async fn admin_gateway_config(
 pub async fn admin_query_messages(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(assertion): Extension<VerifiedAdminAssertion>,
     RequestJson(req): RequestJson<AdminMessageQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageQueryHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -313,9 +315,9 @@ pub async fn admin_query_messages(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = clients.storage_reader.lock().await;
+    let mut storage = storage_reader(&clients).await;
     let storage_response = storage
-        .search_messages_with_ctx(&ctx, storage_request)
+        .search_messages_as_admin(assertion.token(), &ctx, storage_request)
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_QUERY_FAILED"))?;
 
@@ -347,15 +349,16 @@ pub async fn admin_query_messages(
 pub async fn admin_get_message(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(assertion): Extension<VerifiedAdminAssertion>,
     Path(message_id): Path<String>,
 ) -> Result<Json<ApiResponse<AdminMessageDetailHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_get_message_request(&message_id)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
 
-    let mut storage = clients.storage_reader.lock().await;
+    let mut storage = storage_reader(&clients).await;
     let storage_response = storage
-        .get_message_with_ctx(&ctx, storage_request)
+        .get_message_as_admin(assertion.token(), &ctx, storage_request)
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_DETAIL_FAILED"))?;
     let response = admin_message_detail_response(storage_response)
@@ -388,6 +391,7 @@ pub async fn admin_get_message(
 pub async fn admin_query_message_events(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(assertion): Extension<VerifiedAdminAssertion>,
     Path(message_id): Path<String>,
     Query(query): Query<AdminMessageEventsQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageEventsHttpResponse>>> {
@@ -400,9 +404,9 @@ pub async fn admin_query_message_events(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = clients.storage_reader.lock().await;
+    let mut storage = storage_reader(&clients).await;
     let storage_response = storage
-        .query_message_events_with_ctx(&ctx, storage_request)
+        .query_message_events_as_admin(assertion.token(), &ctx, storage_request)
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EVENTS_FAILED"))?;
 
@@ -431,6 +435,7 @@ pub async fn admin_query_message_events(
 pub async fn admin_query_message_write_ledger(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(assertion): Extension<VerifiedAdminAssertion>,
     RequestJson(req): RequestJson<AdminMessageWriteLedgerQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageWriteLedgerHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
@@ -442,9 +447,9 @@ pub async fn admin_query_message_write_ledger(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = clients.storage_reader.lock().await;
+    let mut storage = storage_reader(&clients).await;
     let storage_response = storage
-        .query_message_write_ledger_with_ctx(&ctx, storage_request)
+        .query_message_write_ledger_as_admin(assertion.token(), &ctx, storage_request)
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED"))?;
 
@@ -472,21 +477,29 @@ pub async fn admin_query_message_write_ledger(
 pub async fn admin_export_messages(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(assertion): Extension<VerifiedAdminAssertion>,
     RequestJson(req): RequestJson<AdminMessageExportHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageExportHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_message_export_request(&req)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
 
-    let mut storage = clients.storage_reader.lock().await;
+    let mut storage = storage_reader(&clients).await;
     let storage_response = storage
-        .export_messages_with_ctx(&ctx, storage_request)
+        .export_messages_as_admin(assertion.token(), &ctx, storage_request)
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EXPORT_FAILED"))?;
 
     Ok(Json(ApiResponse::success(admin_message_export_response(
         storage_response,
     ))))
+}
+
+/// Storage Reader 客户端的一份克隆：只在取克隆时占锁，调用期间不占，一次慢检索不会让其他
+/// 管理检索排队等它。下游只认转发的 admin 令牌（Storage Reader 按令牌租户检索），不带未签名
+/// 的身份元数据。
+async fn storage_reader(clients: &GrpcClients) -> StorageReaderServiceClientWrapper {
+    clients.storage_reader.lock().await.clone()
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {

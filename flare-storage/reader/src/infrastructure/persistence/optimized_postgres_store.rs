@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_server_core::error::{AnyhowContext, Result};
+use flare_server_core::error::Result;
 use serde_json::Value;
 use sqlx::Row;
 use tokio::time::Instant;
@@ -22,6 +22,7 @@ use crate::domain::model::{
     PinnedMessageInfo, ReactionItem, ReadListEntry, VisibilityStatus,
 };
 use crate::domain::repository::message_storage::MessageStorage;
+use crate::infrastructure::persistence::DbResultExt;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
@@ -80,12 +81,12 @@ fn domain_event_from_events_row(
     row: &sqlx::postgres::PgRow,
     conversation_id: &str,
 ) -> Result<Event> {
-    let seq: i64 = row.try_get("seq").context("row seq")?;
-    let event_type: i32 = row.try_get("event_type").context("row event_type")?;
-    let created_at: DateTime<Utc> = row.try_get("created_at").context("row created_at")?;
+    let seq: i64 = row.try_get("seq").db_context("row seq")?;
+    let event_type: i32 = row.try_get("event_type").db_context("row event_type")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at").db_context("row created_at")?;
     let operator_id: String = row
         .try_get::<Option<String>, _>("operator_id")
-        .context("row operator_id")?
+        .db_context("row operator_id")?
         .unwrap_or_default();
     let request_id: Option<String> = row.try_get("request_id").ok();
     let event_seq: Option<i64> = row.try_get("event_seq").ok();
@@ -218,7 +219,7 @@ impl OptimizedPostgresMessageStorageImpl {
         .bind(user_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query current pin state for messages")?;
+        .db_context("query current pin state for messages")?;
 
         let pinned: HashSet<String> = rows
             .into_iter()
@@ -644,7 +645,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .fetch_all(&self.base.pool)
             .await
         }
-        .context("Failed to query messages");
+        .db_context("Failed to query messages");
 
         // 记录查询性能指标
         let duration = start.elapsed();
@@ -831,7 +832,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 .fetch_all(&self.base.pool)
                 .await
         }
-        .context("Failed to query messages by seq")?;
+        .db_context("Failed to query messages by seq")?;
 
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
@@ -906,7 +907,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .bind(uid)
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to query conversations message windows")?;
+            .db_context("Failed to query conversations message windows")?;
 
         let mut grouped: HashMap<String, Vec<Message>> = HashMap::with_capacity(ids.len());
         for row in rows {
@@ -974,7 +975,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("Failed to get message")?;
+        .db_context("Failed to get message")?;
 
         match row {
             Some(row) => {
@@ -1035,7 +1036,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("Failed to get message timestamp")?;
+        .db_context("Failed to get message timestamp")?;
 
         match row {
             Some(row) => {
@@ -1131,7 +1132,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .build()
             .execute(&self.base.pool)
             .await
-            .context("Failed to update message")?;
+            .db_context("Failed to update message")?;
 
         // 更新后清除缓存
         // 注意：需要 conversation_id 才能清除缓存，但这里只有 message_id
@@ -1178,7 +1179,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_ids)
         .execute(&self.base.pool)
         .await
-        .context("Failed to batch update visibility")?;
+        .db_context("Failed to batch update visibility")?;
 
         Ok(result.rows_affected() as usize)
     }
@@ -1225,7 +1226,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .fetch_one(&self.base.pool)
             .await
             .map(|row| row.get::<i64, _>(0))
-            .context("Failed to count messages")?;
+            .db_context("Failed to count messages")?;
 
         Ok(count)
     }
@@ -1386,7 +1387,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .build()
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to search messages")?;
+            .db_context("Failed to search messages")?;
 
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1459,7 +1460,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .execute(&self.base.pool)
         .await
-        .context("Failed to update message attributes")?;
+        .db_context("Failed to update message attributes")?;
 
         Ok(())
     }
@@ -1478,7 +1479,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(tenant_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("Failed to list tags")?;
+        .db_context("Failed to list tags")?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -1510,19 +1511,20 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query message operation history")?;
+        .db_context("query message operation history")?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: i64 = row.try_get("id").context("operation id")?;
-            let tenant_id: String = row.try_get("tenant_id").context("operation tenant_id")?;
-            let operation_type: String = row.try_get("operation_type").context("operation type")?;
+            let id: i64 = row.try_get("id").db_context("operation id")?;
+            let tenant_id: String = row.try_get("tenant_id").db_context("operation tenant_id")?;
+            let operation_type: String =
+                row.try_get("operation_type").db_context("operation type")?;
             let operator_id: String = row
                 .try_get::<Option<String>, _>("operator_id")
-                .context("operation operator_id")?
+                .db_context("operation operator_id")?
                 .unwrap_or_default();
             let timestamp: DateTime<Utc> =
-                row.try_get("timestamp").context("operation timestamp")?;
+                row.try_get("timestamp").db_context("operation timestamp")?;
             let operation_data: Option<Value> = row.try_get("operation_data").ok();
             let metadata: Option<Value> = row.try_get("metadata").ok();
             let payload = serde_json::json!({
@@ -1565,15 +1567,15 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query message edit history")?;
+        .db_context("query message edit history")?;
 
         rows.into_iter()
             .map(|row| {
                 Ok(crate::domain::model::EditHistoryEntry {
-                    edit_version: row.try_get("edit_version").context("edit_version")?,
-                    content_bytes: row.try_get("content").context("edit content")?,
+                    edit_version: row.try_get("edit_version").db_context("edit_version")?,
+                    content_bytes: row.try_get("content").db_context("edit content")?,
                     edited_at: row.try_get("edited_at").ok(),
-                    editor_id: row.try_get("editor_id").context("editor_id")?,
+                    editor_id: row.try_get("editor_id").db_context("editor_id")?,
                     reason: row.try_get("reason").ok(),
                     show_edited_mark: row.try_get("show_edited_mark").unwrap_or(true),
                 })
@@ -1600,12 +1602,12 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query message read records")?;
+        .db_context("query message read records")?;
 
         rows.into_iter()
             .map(|row| {
                 Ok(ReadListEntry {
-                    user_id: row.try_get("user_id").context("read user_id")?,
+                    user_id: row.try_get("user_id").db_context("read user_id")?,
                     read_at: row.try_get("read_at").ok(),
                     burned_at: row.try_get("burned_at").ok(),
                 })
@@ -1637,7 +1639,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(user_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("query message visibility")?;
+        .db_context("query message visibility")?;
 
         Ok(row.and_then(
             |row| match row.try_get::<i32, _>("visibility_status").ok()? {
@@ -1668,11 +1670,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("Failed to query message reactions")?;
+        .db_context("Failed to query message reactions")?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let emoji: String = row.try_get("emoji").context("reaction emoji")?;
+            let emoji: String = row.try_get("emoji").db_context("reaction emoji")?;
             let user_ids: Vec<String> = row.try_get("user_ids").unwrap_or_default();
             let count: i32 = row.try_get("count").unwrap_or(0);
             let last_updated: Option<DateTime<Utc>> = row.try_get("last_updated").ok();
@@ -1701,13 +1703,13 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query message marks")?;
+        .db_context("query message marks")?;
 
         rows.into_iter()
             .map(|row| {
                 Ok(MarkEntry {
-                    user_id: row.try_get("user_id").context("mark user_id")?,
-                    mark_type: row.try_get("mark_type").context("mark_type")?,
+                    user_id: row.try_get("user_id").db_context("mark user_id")?,
+                    mark_type: row.try_get("mark_type").db_context("mark_type")?,
                     color: row.try_get("color").ok(),
                     marked_at: row.try_get("marked_at").ok(),
                 })
@@ -1744,7 +1746,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(&draft.trace_id)
         .execute(&self.base.pool)
         .await
-        .context("create message export task")?;
+        .db_context("create message export task")?;
 
         Ok(draft.task_id)
     }
@@ -1785,15 +1787,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(user_id)
         .fetch_all(&self.base.pool)
         .await
-        .context("query pinned messages")?;
+        .db_context("query pinned messages")?;
 
         rows.into_iter()
             .map(|row| {
                 Ok(PinnedMessageInfo {
-                    message_id: row.try_get("message_id").context("pinned message_id")?,
-                    user_id: row.try_get("pinned_by").context("pinned_by")?,
-                    scope: row.try_get("scope").context("pin scope")?,
-                    owner_user_id: row.try_get("owner_user_id").context("pin owner_user_id")?,
+                    message_id: row.try_get("message_id").db_context("pinned message_id")?,
+                    user_id: row.try_get("pinned_by").db_context("pinned_by")?,
+                    scope: row.try_get("scope").db_context("pin scope")?,
+                    owner_user_id: row
+                        .try_get("owner_user_id")
+                        .db_context("pin owner_user_id")?,
                     pinned_at: row.try_get("pinned_at").ok(),
                     expire_at: row.try_get("expire_at").ok(),
                     reason: row.try_get("reason").ok(),
@@ -1828,18 +1832,18 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(message_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("query message coordinate for event chain")?;
+        .db_context("query message coordinate for event chain")?;
 
         let Some(message_row) = message_row else {
             return Ok((Vec::new(), false));
         };
         let message_tenant_id: String = message_row
             .try_get("tenant_id")
-            .context("message tenant_id")?;
+            .db_context("message tenant_id")?;
         let conversation_id: String = message_row
             .try_get("conversation_id")
-            .context("message conversation_id")?;
-        let message_seq: Option<i64> = message_row.try_get("seq").context("message seq")?;
+            .db_context("message conversation_id")?;
+        let message_seq: Option<i64> = message_row.try_get("seq").db_context("message seq")?;
         let Some(message_seq) = message_seq.filter(|seq| *seq > 0) else {
             return Ok((Vec::new(), false));
         };
@@ -1879,7 +1883,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .build()
             .fetch_all(&self.base.pool)
             .await
-            .context("query message event chain")?;
+            .db_context("query message event chain")?;
 
         let has_more = rows.len() as i32 > limit;
         let mut events = Vec::with_capacity(rows.len().min(limit as usize));
@@ -1947,16 +1951,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .build()
             .fetch_all(&self.base.pool)
             .await
-            .context("query events by conversation seq")?;
+            .db_context("query events by conversation seq")?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let seq: i64 = row.try_get("seq").context("row seq")?;
-            let event_type: i32 = row.try_get("event_type").context("row event_type")?;
-            let created_at: DateTime<Utc> = row.try_get("created_at").context("row created_at")?;
+            let seq: i64 = row.try_get("seq").db_context("row seq")?;
+            let event_type: i32 = row.try_get("event_type").db_context("row event_type")?;
+            let created_at: DateTime<Utc> =
+                row.try_get("created_at").db_context("row created_at")?;
             let operator_id: String = row
                 .try_get::<Option<String>, _>("operator_id")
-                .context("row operator_id")?
+                .db_context("row operator_id")?
                 .unwrap_or_default();
             let request_id: Option<String> = row.try_get("request_id").ok();
             let event_seq: Option<i64> = row.try_get("event_seq").ok();
@@ -2009,7 +2014,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .bind(conversation_id)
             .fetch_one(&self.base.pool)
             .await
-            .context("get_conversation_max_seq")?;
+            .db_context("get_conversation_max_seq")?;
         Ok(row)
     }
 
@@ -2049,7 +2054,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(conversation_id)
         .fetch_one(&self.base.pool)
         .await
-        .context("get_conversation_message_head")?;
+        .db_context("get_conversation_message_head")?;
 
         let msg_seq: Option<i64> = row.try_get("msg_seq").ok().flatten();
         let ev_max: Option<i64> = row.try_get("ev_max").ok().flatten();
@@ -2086,7 +2091,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(conversation_id)
         .fetch_optional(&self.base.pool)
         .await
-        .context("get sync cursor")?;
+        .db_context("get sync cursor")?;
 
         Ok(row.map(|row| crate::domain::model::SyncCursor {
             user_id: row
@@ -2131,7 +2136,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .bind(limit)
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to query recent conversations for sync snapshot")?;
+            .db_context("Failed to query recent conversations for sync snapshot")?;
 
             rows.into_iter()
                 .filter_map(|row| row.try_get::<String, _>("conversation_id").ok())
@@ -2178,7 +2183,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .bind(limit)
             .fetch_all(&self.base.pool)
             .await
-            .context("Failed to query sync snapshot messages")?;
+            .db_context("Failed to query sync snapshot messages")?;
 
             let mut messages = Vec::with_capacity(rows.len());
             let mut max_seq = 0;
@@ -2244,7 +2249,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(device_id)
         .execute(&self.base.pool)
         .await
-        .context("update sync cursor")?;
+        .db_context("update sync cursor")?;
         Ok(())
     }
 }

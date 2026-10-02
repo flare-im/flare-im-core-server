@@ -221,7 +221,8 @@ load_internal_context_keys() {
 
 # The Control Plane owns the EdDSA private key. Core receives only its public
 # key, and only the services that verify Control or forwarded admin assertions
-# need it: signaling-online, capability, conversation and admin-gateway.
+# need it: signaling-online, capability, conversation, storage-reader and
+# admin-gateway.
 load_console_control_public_key() {
     CORE_CONSOLE_PUBLIC_KEY="${FLARE_CONSOLE_PUBLIC_KEY:-}"
     if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
@@ -801,7 +802,7 @@ for service in "${CORE_SERVICES[@]}"; do
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
     esac
     case "$service" in
-        signaling-online|capability|conversation)
+        signaling-online|capability|conversation|storage-reader)
             [ -n "$CORE_CONSOLE_PUBLIC_KEY" ] && env_args+=("FLARE_CONSOLE_PUBLIC_KEY=$CORE_CONSOLE_PUBLIC_KEY") ;;
         admin-gateway)
             # This development launcher runs Control on the same host. Keep the

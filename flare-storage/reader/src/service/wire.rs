@@ -95,8 +95,16 @@ pub async fn initialize(
     // 4. 构建查询处理器（直接使用存储层）
     let query_handler: Arc<QueryHandlerType> = Arc::new(QueryHandlerType::new(storage));
 
-    // 5. 构建 gRPC 处理器
-    let grpc_handler: GrpcHandlerType = GrpcHandlerType::new(query_handler.clone()).await?;
+    // 5. 构建 gRPC 处理器。管理检索只认 admin-gateway 转发的 admin 令牌，用 Console 公钥验签；
+    //    没配公钥时这些 RPC 一律 UNAUTHENTICATED（其余 RPC 不受影响）。
+    let control_verifier =
+        flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
+            .with_context(|| "invalid FLARE_CONSOLE_PUBLIC_KEY for storage reader")?;
+    if control_verifier.is_none() {
+        tracing::warn!("FLARE_CONSOLE_PUBLIC_KEY is not set; admin message retrieval fails closed");
+    }
+    let grpc_handler: GrpcHandlerType =
+        GrpcHandlerType::new(query_handler.clone(), control_verifier).await?;
     Ok(ApplicationContext {
         handler: grpc_handler,
     })

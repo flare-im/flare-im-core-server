@@ -42,6 +42,7 @@ prometheus = { workspace = true }
 
 [dev-dependencies]
 tokio-stream = { workspace = true }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 
 [lints]
 workspace = true

@@ -206,6 +206,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: storage-reader
+      # 管理检索（admin-gateway 的 5 条 messages 路由）校验转发的 admin 令牌；不给公钥时一律 UNAUTHENTICATED。
+      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
     command: ["flare-storage-reader"]
 
   # ── Push / capability / media ──────────────────────────────────────────────

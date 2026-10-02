@@ -17,6 +17,7 @@ use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
 
 use crate::config::StorageReaderConfig;
 use crate::domain::model::{MessageWriteLedgerEntry, MessageWriteLedgerQuery};
+use crate::infrastructure::persistence::DbResultExt;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 
 const LEGACY_BURN_STATUS_BURN_PENDING: i32 = 3;
@@ -307,7 +308,7 @@ impl PostgresBaseStorage {
             .build()
             .fetch_all(&self.pool)
             .await
-            .context("Failed to query message write ledger")?;
+            .db_context("Failed to query message write ledger")?;
 
         let has_more = rows.len() as i64 > limit;
         let entries = rows
@@ -315,29 +316,29 @@ impl PostgresBaseStorage {
             .take(limit as usize)
             .map(|row| {
                 Ok(MessageWriteLedgerEntry {
-                    tenant_id: row.try_get("tenant_id").context("row tenant_id")?,
-                    server_id: row.try_get("server_id").context("row server_id")?,
+                    tenant_id: row.try_get("tenant_id").db_context("row tenant_id")?,
+                    server_id: row.try_get("server_id").db_context("row server_id")?,
                     conversation_id: row
                         .try_get("conversation_id")
-                        .context("row conversation_id")?,
-                    seq: row.try_get("seq").context("row seq")?,
-                    write_state: row.try_get("write_state").context("row write_state")?,
+                        .db_context("row conversation_id")?,
+                    seq: row.try_get("seq").db_context("row seq")?,
+                    write_state: row.try_get("write_state").db_context("row write_state")?,
                     archive_persisted_at: row
                         .try_get("archive_persisted_at")
-                        .context("row archive_persisted_at")?,
+                        .db_context("row archive_persisted_at")?,
                     storage_persisted_at: row
                         .try_get("storage_persisted_at")
-                        .context("row storage_persisted_at")?,
+                        .db_context("row storage_persisted_at")?,
                     wal_cleaned_at: row
                         .try_get("wal_cleaned_at")
-                        .context("row wal_cleaned_at")?,
+                        .db_context("row wal_cleaned_at")?,
                     ack_published_at: row
                         .try_get("ack_published_at")
-                        .context("row ack_published_at")?,
-                    failed_at: row.try_get("failed_at").context("row failed_at")?,
-                    last_error: row.try_get("last_error").context("row last_error")?,
-                    created_at: row.try_get("created_at").context("row created_at")?,
-                    updated_at: row.try_get("updated_at").context("row updated_at")?,
+                        .db_context("row ack_published_at")?,
+                    failed_at: row.try_get("failed_at").db_context("row failed_at")?,
+                    last_error: row.try_get("last_error").db_context("row last_error")?,
+                    created_at: row.try_get("created_at").db_context("row created_at")?,
+                    updated_at: row.try_get("updated_at").db_context("row updated_at")?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

@@ -131,8 +131,8 @@ fn start_server_console_key_services(start_server: &str) -> Vec<String> {
 #[test]
 fn console_public_key_reaches_every_admin_verifier_on_both_launch_paths() {
     // SEC-02 / ADM-01: Online and Capability verify Control assertions, and
-    // Online, Capability and Conversation verify the admin assertion Admin
-    // Gateway forwards. A verifier started without the key answers every
+    // Online, Capability, Conversation and Storage Reader verify the admin
+    // assertion Admin Gateway forwards. A verifier started without the key answers every
     // admin RPC with UNAUTHENTICATED; the supervise manifest has its own
     // test in flare-supervise.
     let mut compose = compose_console_key_services(&script("deploy/docker-compose.stack.yml"));
@@ -143,7 +143,8 @@ fn console_public_key_reaches_every_admin_verifier_on_both_launch_paths() {
             "admin-gateway",
             "capability",
             "conversation",
-            "signaling-online"
+            "signaling-online",
+            "storage-reader"
         ],
         "deploy/docker-compose.stack.yml must pass FLARE_CONSOLE_PUBLIC_KEY to exactly these services"
     );
@@ -156,7 +157,8 @@ fn console_public_key_reaches_every_admin_verifier_on_both_launch_paths() {
             "admin-gateway",
             "capability",
             "conversation",
-            "signaling-online"
+            "signaling-online",
+            "storage-reader"
         ],
         "scripts/start_server.sh must pass FLARE_CONSOLE_PUBLIC_KEY to exactly these services"
     );

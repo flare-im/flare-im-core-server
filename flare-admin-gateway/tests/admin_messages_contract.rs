@@ -77,8 +77,48 @@ fn failure_for(summary: &str) -> Option<Status> {
         .map(|(_, code, ..)| Status::new(*code, format!("downstream {DOWNSTREAM_DETAIL}")))
 }
 
+/// 请求里带这个键的检索停在替身里，直到测试放行（模拟一次慢查询）。
+const HOLD_KEY: &str = "k-hold";
+
+/// 替身收到的调用（`authorization` 与全部 `x-*` 元数据键）与慢查询的闸门。
+#[derive(Default)]
+struct FakeState {
+    calls: std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 #[derive(Clone, Default)]
-struct FakeStorageReader;
+struct FakeStorageReader(Arc<FakeState>);
+
+impl FakeStorageReader {
+    async fn observe<T>(&self, request: &GrpcRequest<T>, key: &str) {
+        let metadata = request.metadata();
+        let authorization = metadata
+            .get_all("authorization")
+            .iter()
+            .map(|value| value.to_str().unwrap_or("<non-ascii>").to_string())
+            .collect();
+        let mut x_metadata: Vec<String> = metadata
+            .keys()
+            .map(|key| match key {
+                tonic::metadata::KeyRef::Ascii(key) => key.as_str().to_string(),
+                tonic::metadata::KeyRef::Binary(key) => key.as_str().to_string(),
+            })
+            .filter(|key| key.starts_with("x-"))
+            .collect();
+        x_metadata.sort();
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push((authorization, x_metadata));
+        if key.contains(HOLD_KEY) {
+            self.0.entered.notify_one();
+            self.0.release.notified().await;
+        }
+    }
+}
 
 fn unused<T>() -> Result<GrpcResponse<T>, Status> {
     Err(Status::unimplemented("not used by admin-gateway"))
@@ -90,7 +130,9 @@ impl StorageReaderService for FakeStorageReader {
         &self,
         request: GrpcRequest<SearchMessagesRequest>,
     ) -> Result<GrpcResponse<SearchMessagesResponse>, Status> {
-        if let Some(status) = failure_for(&format!("{:?}", request.get_ref())) {
+        let summary = format!("{:?}", request.get_ref());
+        self.observe(&request, &summary).await;
+        if let Some(status) = failure_for(&summary) {
             return Err(status);
         }
         Ok(GrpcResponse::new(SearchMessagesResponse::default()))
@@ -100,6 +142,7 @@ impl StorageReaderService for FakeStorageReader {
         &self,
         request: GrpcRequest<GetMessageRequest>,
     ) -> Result<GrpcResponse<GetMessageResponse>, Status> {
+        self.observe(&request, &request.get_ref().message_id).await;
         if let Some(status) = failure_for(&request.get_ref().message_id) {
             return Err(status);
         }
@@ -115,6 +158,7 @@ impl StorageReaderService for FakeStorageReader {
         &self,
         request: GrpcRequest<QueryMessageEventsRequest>,
     ) -> Result<GrpcResponse<QueryMessageEventsResponse>, Status> {
+        self.observe(&request, &request.get_ref().message_id).await;
         if let Some(status) = failure_for(&request.get_ref().message_id) {
             return Err(status);
         }
@@ -125,6 +169,8 @@ impl StorageReaderService for FakeStorageReader {
         &self,
         request: GrpcRequest<QueryMessageWriteLedgerRequest>,
     ) -> Result<GrpcResponse<QueryMessageWriteLedgerResponse>, Status> {
+        self.observe(&request, &request.get_ref().conversation_id)
+            .await;
         if let Some(status) = failure_for(&request.get_ref().conversation_id) {
             return Err(status);
         }
@@ -135,6 +181,8 @@ impl StorageReaderService for FakeStorageReader {
         &self,
         request: GrpcRequest<ExportMessagesRequest>,
     ) -> Result<GrpcResponse<ExportMessagesResponse>, Status> {
+        self.observe(&request, &request.get_ref().conversation_id)
+            .await;
         if let Some(status) = failure_for(&request.get_ref().conversation_id) {
             return Err(status);
         }
@@ -208,15 +256,17 @@ impl StorageReaderService for FakeStorageReader {
 struct MessagesHarness {
     router: axum::Router,
     token: String,
+    fake: FakeStorageReader,
 }
 
 async fn messages_harness() -> MessagesHarness {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     assert!(address.ip().is_loopback());
+    let fake = FakeStorageReader::default();
     tokio::spawn(
         tonic::transport::Server::builder()
-            .add_service(StorageReaderServiceServer::new(FakeStorageReader))
+            .add_service(StorageReaderServiceServer::new(fake.clone()))
             .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
     );
     let storage = Channel::from_shared(format!("http://{address}"))
@@ -254,7 +304,11 @@ async fn messages_harness() -> MessagesHarness {
     let router = create_admin_router(Arc::new(clients), None)
         .layer(axum::Extension(Arc::new(console.verifier.clone())));
     let token = console.admin_token(EMPLOYEE, TENANT);
-    MessagesHarness { router, token }
+    MessagesHarness {
+        router,
+        token,
+        fake,
+    }
 }
 
 /// 5 条路由各自的请求：键放在替身据以判定失败的字段里。导出是写操作，带齐审计头。
@@ -355,4 +409,67 @@ async fn storage_reader_failures_are_typed_and_never_echoed() {
             }
         }
     }
+}
+
+/// Storage Reader 只认转发的 admin 令牌：5 条路由都只带这个令牌，外加请求号与追踪号，不带
+/// 未签名的租户、用户或操作人元数据。修复前带的是 `x-tenant-id`、`x-user-id` 等元数据，
+/// 没有令牌。
+#[tokio::test]
+async fn message_routes_forward_only_the_admin_assertion_and_correlation_ids() {
+    let h = messages_harness().await;
+    for route in 0..INTERNAL_REASONS.len() {
+        let (status, body) = send(&h.router, message_request(route, "ok", &h.token)).await;
+        assert_eq!(status, StatusCode::OK, "route {route}: {body}");
+    }
+    let calls = h.fake.0.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), INTERNAL_REASONS.len());
+    for (route, (authorization, x_metadata)) in calls.iter().enumerate() {
+        assert_eq!(
+            authorization,
+            &vec![format!("Bearer {}", h.token)],
+            "route {route}"
+        );
+        assert!(
+            x_metadata
+                .iter()
+                .all(|key| key == "x-request-id" || key == "x-trace-id"),
+            "route {route} sent unsigned metadata {x_metadata:?}"
+        );
+        assert!(
+            x_metadata.contains(&"x-request-id".to_string()),
+            "route {route}"
+        );
+    }
+}
+
+/// 一次慢检索不会挡住其他管理检索：客户端在锁里只取一份克隆，调用期间不占锁。修复前网关在
+/// 锁里等整个 RPC，第二条检索要排在慢查询之后。
+#[tokio::test]
+async fn a_slow_storage_query_does_not_hold_up_other_admin_searches() {
+    let h = messages_harness().await;
+    let slow = tokio::spawn({
+        let router = h.router.clone();
+        let request = message_request(0, HOLD_KEY, &h.token);
+        async move { send(&router, request).await }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        h.fake.0.entered.notified(),
+    )
+    .await
+    .expect("the slow search reached the storage reader");
+
+    for route in 1..INTERNAL_REASONS.len() {
+        let (status, body) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send(&h.router, message_request(route, "ok", &h.token)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("route {route} waited for the slow search"));
+        assert_eq!(status, StatusCode::OK, "route {route}: {body}");
+    }
+    assert!(!slow.is_finished());
+    h.fake.0.release.notify_one();
+    let (status, body) = slow.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

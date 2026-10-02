@@ -105,7 +105,8 @@ inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
 name = "storage-reader"
 command = "/usr/local/bin/flare-storage-reader"
 inherit_env_prefixes = ["STORAGE_"]
-inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
+# Verifies the admin assertion Admin Gateway forwards on message retrieval; without it those reads fail closed.
+inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT", "FLARE_CONSOLE_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60083"
 
 [[services]]

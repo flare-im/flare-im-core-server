@@ -23,6 +23,10 @@ use crate::domain::model::{
 };
 use crate::domain::repository::MessageStorage;
 use flare_im_contracts::utils::extract_seq_from_message;
+use flare_im_service_kit::control_auth::{
+    ConsoleControlVerifier, VerifiedControlActor, require_grpc_admin,
+};
+use flare_server_core::context::keys;
 use flare_server_core::utils::extract_ctx_from_request_opt;
 
 #[derive(Clone)]
@@ -31,6 +35,9 @@ where
     M: MessageStorage + Send + Sync + Clone + 'static,
 {
     query_handler: Arc<MessageStorageQueryHandler<M>>,
+    /// 验 admin-gateway 原样转发的 admin 令牌（`FLARE_CONSOLE_PUBLIC_KEY`）。没有配置时管理
+    /// 检索一律 UNAUTHENTICATED。
+    control_verifier: Option<ConsoleControlVerifier>,
 }
 
 impl<M> StorageReaderGrpcHandler<M>
@@ -39,9 +46,62 @@ where
 {
     pub async fn new(
         query_handler: Arc<MessageStorageQueryHandler<M>>,
+        control_verifier: Option<ConsoleControlVerifier>,
     ) -> flare_server_core::error::Result<Self> {
-        Ok(Self { query_handler })
+        Ok(Self {
+            query_handler,
+            control_verifier,
+        })
     }
+
+    /// 管理检索（search、get、事件链、写入台账、导出，只供 admin-gateway）的上下文：验过
+    /// admin-gateway 原样转发的 admin 令牌（受众 `flare-core-admin`、员工、具体租户）后，租户
+    /// 与操作人只取自令牌，与其他 Core 服务的 admin 读一致。未签名的 `x-tenant-id`、
+    /// `x-user-id` 等元数据一概不认。
+    fn admin_ctx<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<flare_server_core::context::Ctx, Status> {
+        let actor = require_grpc_admin(request, self.control_verifier.as_ref())?;
+        Ok(admin_context(request.metadata(), &actor))
+    }
+}
+
+/// 请求号与追踪号的长度上限：更长的值不用（请求号另生成），只为关联日志，不是身份。
+const MAX_CORRELATION_ID_BYTES: usize = 128;
+
+/// 由已验证的 admin 令牌建上下文：租户与操作人来自令牌；请求号与追踪号取自元数据（导出任务
+/// 按请求号去重，没有时新生成一个）。
+fn admin_context(
+    metadata: &tonic::metadata::MetadataMap,
+    actor: &VerifiedControlActor,
+) -> flare_server_core::context::Ctx {
+    let correlation = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_CORRELATION_ID_BYTES)
+            .map(str::to_string)
+    };
+    let request_id =
+        correlation(keys::REQUEST_ID).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let ctx = flare_server_core::context::Context::with_request_id(request_id)
+        .with_tenant_id(&actor.tenant_id)
+        .with_user_id(&actor.subject);
+    Arc::new(match correlation(keys::TRACE_ID) {
+        Some(trace_id) => ctx.with_trace_id(trace_id),
+        None => ctx,
+    })
+}
+
+/// 存储失败 → gRPC 状态：数据库连不上（`ServiceUnavailable`）回可重试的 UNAVAILABLE，不带
+/// 错误文本；其余仍是 INTERNAL。
+fn storage_failure(err: &flare_server_core::error::FlareError) -> Status {
+    if err.code() == Some(flare_server_core::error::ErrorCode::ServiceUnavailable) {
+        return Status::unavailable("message storage is temporarily unavailable");
+    }
+    Status::internal(err.to_string())
 }
 
 fn message_event_limit(pagination: Option<&flare_proto::common::Pagination>) -> i32 {
@@ -351,7 +411,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -436,7 +496,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to query messages by seq");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -488,7 +548,7 @@ where
             })),
             Err(err) => {
                 error!(error = ?err, "Failed to query conversations message windows");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -497,9 +557,7 @@ where
         &self,
         request: Request<SearchMessagesRequest>,
     ) -> Result<Response<SearchMessagesResponse>, Status> {
-        // 从请求中提取上下文
-        let ctx = extract_ctx_from_request_opt(&request)
-            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let ctx = self.admin_ctx(&request)?;
 
         let req = request.into_inner();
 
@@ -548,7 +606,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to search messages");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -557,9 +615,7 @@ where
         &self,
         request: Request<GetMessageRequest>,
     ) -> Result<Response<GetMessageResponse>, Status> {
-        // 从请求中提取上下文
-        let ctx = extract_ctx_from_request_opt(&request)
-            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let ctx = self.admin_ctx(&request)?;
 
         let req = request.into_inner();
 
@@ -577,7 +633,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "Failed to get message");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -611,8 +667,7 @@ where
         &self,
         request: Request<ExportMessagesRequest>,
     ) -> Result<Response<ExportMessagesResponse>, Status> {
-        let ctx = extract_ctx_from_request_opt(&request)
-            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let ctx = self.admin_ctx(&request)?;
         let draft = message_export_task_draft(&ctx, request.into_inner())?;
 
         match self
@@ -624,7 +679,7 @@ where
             Ok(export_task_id) => Ok(Response::new(ExportMessagesResponse { export_task_id })),
             Err(err) => {
                 error!(error = ?err, "create message export task failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -633,8 +688,7 @@ where
         &self,
         request: Request<QueryMessageEventsRequest>,
     ) -> Result<Response<QueryMessageEventsResponse>, Status> {
-        let ctx = extract_ctx_from_request_opt(&request)
-            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let ctx = self.admin_ctx(&request)?;
         let req = request.into_inner();
         if req.message_id.trim().is_empty() {
             return Err(Status::invalid_argument("message_id is required"));
@@ -676,7 +730,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_events failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -685,8 +739,7 @@ where
         &self,
         request: Request<QueryMessageWriteLedgerRequest>,
     ) -> Result<Response<QueryMessageWriteLedgerResponse>, Status> {
-        let ctx = extract_ctx_from_request_opt(&request)
-            .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
+        let ctx = self.admin_ctx(&request)?;
         let req = request.into_inner();
         let offset = message_write_ledger_offset(req.pagination.as_ref());
         let query = message_write_ledger_query(&ctx, req)?;
@@ -719,7 +772,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, tenant_id = %query.tenant_id, "query_message_write_ledger failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -769,7 +822,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_edit_history failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -819,7 +872,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_read_list failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -869,7 +922,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_marks failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -900,7 +953,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, message_id = %req.message_id, "query_message_reactions failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -937,7 +990,7 @@ where
             }
             Err(err) => {
                 error!(error = ?err, "query_conversation_events failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -971,7 +1024,7 @@ where
             })),
             Err(err) => {
                 error!(error = ?err, "get_conversation_message_head failed");
-                Err(Status::internal(err.to_string()))
+                Err(storage_failure(&err))
             }
         }
     }
@@ -1082,5 +1135,271 @@ mod tests {
         let status = message_write_ledger_query(&ctx, request).expect_err("tenant mismatch");
 
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    // ---- 管理检索的验签与数据库不可用 ----
+
+    use crate::infrastructure::persistence::optimized_postgres_store::OptimizedPostgresMessageStorageImpl;
+    use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use flare_im_service_kit::control_auth::{
+        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, CORE_CONTROL_AUDIENCE, ControlActorKind,
+    };
+
+    /// Console 的测试密钥对：签令牌的一方与验签器。
+    fn console() -> (flare_server_core::TokenService, ConsoleControlVerifier) {
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        (
+            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
+                .unwrap(),
+            ConsoleControlVerifier::from_public_key(&public).unwrap(),
+        )
+    }
+
+    fn token(
+        signer: &flare_server_core::TokenService,
+        tenant: &str,
+        token_use: &str,
+        audience: &str,
+    ) -> String {
+        signer
+            .generate_with_ed25519("employee-1", Some(tenant), token_use, audience)
+            .unwrap()
+    }
+
+    /// 连一个不监听的回环端口：取连接立即失败，模拟数据库不可达（不需要真库）。
+    fn unreachable_store_handler(
+        verifier: Option<ConsoleControlVerifier>,
+    ) -> StorageReaderGrpcHandler<OptimizedPostgresMessageStorageImpl> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://reader@127.0.0.1:1/flare")
+            .unwrap();
+        let storage = Arc::new(OptimizedPostgresMessageStorageImpl::new(
+            PostgresBaseStorage { pool, cache: None },
+            None,
+            None,
+        ));
+        StorageReaderGrpcHandler {
+            query_handler: Arc::new(MessageStorageQueryHandler::new(storage)),
+            control_verifier: verifier,
+        }
+    }
+
+    fn with_metadata<T>(payload: T, entries: &[(&'static str, &str)]) -> Request<T> {
+        let mut request = Request::new(payload);
+        for (key, value) in entries {
+            request.metadata_mut().append(*key, value.parse().unwrap());
+        }
+        request
+    }
+
+    /// 管理检索只认 admin-gateway 转发的 admin 令牌：没有令牌、控制面令牌、错误受众都是
+    /// UNAUTHENTICATED，没配 Console 公钥时同样拒绝；只带 `x-tenant-id` / `x-user-id` 元数据
+    /// 的调用不再能读任何租户。修复前这 5 个 RPC 直接取未签名的 `x-*` 元数据（缺租户时读租户
+    /// "0"）。
+    #[tokio::test]
+    async fn admin_retrieval_requires_the_forwarded_admin_assertion() {
+        let (signer, verifier) = console();
+        let handler = unreachable_store_handler(Some(verifier));
+        let unsigned = [("x-tenant-id", "tenant-a"), ("x-user-id", "employee-1")];
+        let control = format!(
+            "Bearer {}",
+            token(&signer, "tenant-a", "control", CORE_CONTROL_AUDIENCE)
+        );
+        let wrong_audience = format!(
+            "Bearer {}",
+            token(&signer, "tenant-a", "admin", CORE_CONTROL_AUDIENCE)
+        );
+        let mut refused: Vec<Vec<(&'static str, &str)>> = vec![unsigned.to_vec()];
+        for bearer in [control.as_str(), wrong_audience.as_str()] {
+            let mut entries = unsigned.to_vec();
+            entries.push(("authorization", bearer));
+            refused.push(entries);
+        }
+        for entries in &refused {
+            let codes = [
+                handler
+                    .search_messages(with_metadata(SearchMessagesRequest::default(), entries))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                handler
+                    .get_message(with_metadata(
+                        GetMessageRequest {
+                            message_id: "m1".into(),
+                        },
+                        entries,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                handler
+                    .query_message_events(with_metadata(
+                        QueryMessageEventsRequest {
+                            message_id: "m1".into(),
+                            ..Default::default()
+                        },
+                        entries,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                handler
+                    .query_message_write_ledger(with_metadata(
+                        QueryMessageWriteLedgerRequest {
+                            conversation_id: "c1".into(),
+                            ..Default::default()
+                        },
+                        entries,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                handler
+                    .export_messages(with_metadata(
+                        ExportMessagesRequest {
+                            conversation_id: "c1".into(),
+                            ..Default::default()
+                        },
+                        entries,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+            ];
+            assert_eq!(codes, [tonic::Code::Unauthenticated; 5], "{entries:?}");
+        }
+
+        // 没配 Console 公钥：有效令牌也拒绝。
+        let admin = format!(
+            "Bearer {}",
+            token(&signer, "tenant-a", "admin", CORE_ADMIN_AUDIENCE)
+        );
+        let status = unreachable_store_handler(None)
+            .get_message(with_metadata(
+                GetMessageRequest {
+                    message_id: "m1".into(),
+                },
+                &[("authorization", admin.as_str())],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// 租户只取自令牌：台账查询指名别的租户回 PERMISSION_DENIED，`x-tenant-id` 元数据改不了
+    /// 令牌租户。
+    #[tokio::test]
+    async fn the_admin_tenant_comes_from_the_token_only() {
+        let (signer, verifier) = console();
+        let handler = unreachable_store_handler(Some(verifier));
+        let admin = format!(
+            "Bearer {}",
+            token(&signer, "tenant-a", "admin", CORE_ADMIN_AUDIENCE)
+        );
+        let status = handler
+            .query_message_write_ledger(with_metadata(
+                QueryMessageWriteLedgerRequest {
+                    tenant_id: "tenant-b".into(),
+                    conversation_id: "c1".into(),
+                    ..Default::default()
+                },
+                &[
+                    ("authorization", admin.as_str()),
+                    ("x-tenant-id", "tenant-b"),
+                ],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let actor = VerifiedControlActor {
+            subject: "employee-1".into(),
+            tenant_id: "tenant-a".into(),
+            kind: ControlActorKind::Employee,
+        };
+        let metadata = with_metadata(
+            (),
+            &[
+                ("x-tenant-id", "tenant-b"),
+                ("x-user-id", "intruder"),
+                ("x-request-id", "req-7"),
+                ("x-trace-id", "trace-7"),
+            ],
+        );
+        let ctx = admin_context(metadata.metadata(), &actor);
+        assert_eq!(ctx.tenant_id(), Some("tenant-a"));
+        assert_eq!(ctx.user_id(), Some("employee-1"));
+        assert_eq!(ctx.request_id(), "req-7");
+        assert_eq!(ctx.trace_id(), "trace-7");
+        // 过长或缺失的请求号不用，另生成一个。
+        let long = "r".repeat(MAX_CORRELATION_ID_BYTES + 1);
+        let metadata = with_metadata((), &[("x-request-id", long.as_str())]);
+        let ctx = admin_context(metadata.metadata(), &actor);
+        assert!(!ctx.request_id().is_empty() && ctx.request_id() != long);
+    }
+
+    /// 数据库不可达是可重试的 UNAVAILABLE（管理检索与其他读一样），且不带数据库错误文本；
+    /// 修复前一律 INTERNAL，Admin Gateway 只能回 500。
+    #[tokio::test]
+    async fn an_unreachable_database_is_unavailable_not_internal() {
+        let (signer, verifier) = console();
+        let handler = unreachable_store_handler(Some(verifier));
+        let admin = format!(
+            "Bearer {}",
+            token(&signer, "tenant-a", "admin", CORE_ADMIN_AUDIENCE)
+        );
+        let status = handler
+            .get_message(with_metadata(
+                GetMessageRequest {
+                    message_id: "m1".into(),
+                },
+                &[("authorization", admin.as_str())],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert!(!status.message().contains("127.0.0.1"), "{status:?}");
+
+        let status = handler
+            .search_messages(with_metadata(
+                SearchMessagesRequest::default(),
+                &[("authorization", admin.as_str())],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+
+        let status = handler
+            .query_message_write_ledger(with_metadata(
+                QueryMessageWriteLedgerRequest {
+                    conversation_id: "c1".into(),
+                    updated_after: 1_700_000_000,
+                    ..Default::default()
+                },
+                &[("authorization", admin.as_str())],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+
+        let status = handler
+            .query_messages_by_seq(with_metadata(
+                QueryMessagesBySeqRequest {
+                    conversation_id: "c1".into(),
+                    ..Default::default()
+                },
+                &[("x-tenant-id", "tenant-a"), ("x-user-id", "u1")],
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
     }
 }

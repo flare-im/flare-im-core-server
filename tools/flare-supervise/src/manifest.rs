@@ -759,9 +759,9 @@ required_env_unless = [
             toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
         // Children start from an empty environment and only receive what
         // `env_allowed` admits. Online and Capability verify Control assertions;
-        // Online, Capability and Conversation also verify the admin assertion
-        // Admin Gateway forwards (SEC-02, ADM-01). A verifier started without
-        // the key answers every admin RPC with UNAUTHENTICATED.
+        // Online, Capability, Conversation and Storage Reader also verify the
+        // admin assertion Admin Gateway forwards (SEC-02, ADM-01). A verifier
+        // started without the key answers every admin RPC with UNAUTHENTICATED.
         let key_users: Vec<_> = manifest
             .services
             .iter()
@@ -774,6 +774,7 @@ required_env_unless = [
                 "signaling-online",
                 "capability",
                 "conversation",
+                "storage-reader",
                 "admin-gateway"
             ]
         );

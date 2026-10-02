@@ -2452,6 +2452,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
  "flare-im-contracts",

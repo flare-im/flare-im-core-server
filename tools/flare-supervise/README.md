@@ -115,8 +115,9 @@ Cell context signing private key. Signed-context consumers require the public
 key (including Push Proxy; it never receives the private key). Media requires
 the S3 endpoint and credentials. Message Ingest requires
 its Hook configuration path. Admin Gateway joins `all` only when
-`FLARE_CONSOLE_PUBLIC_KEY` is provided; Online, Capability and Conversation
-inherit the same public key to verify Control and forwarded admin assertions.
+`FLARE_CONSOLE_PUBLIC_KEY` is provided; Online, Capability, Conversation and
+Storage Reader inherit the same public key to verify Control and forwarded admin
+assertions.
 
 Push Server and Push Worker are also excluded from default `all` until the
 deployment enforces broker provenance. The manifest's
