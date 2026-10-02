@@ -383,6 +383,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_REQUIRE_SIGNED_READ_CTX",
+        EnvOwner::Shared,
+        EnvPurpose::Auth,
+    ),
+    env(
         "FLARE_API_GATEWAY_AUTH_HOOK_SECRET",
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,

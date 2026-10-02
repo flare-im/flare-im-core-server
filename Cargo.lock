@@ -2055,6 +2055,7 @@ name = "flare-im-message-pipeline"
 version = "1.0.3"
 dependencies = [
  "async-trait",
+ "ed25519-dalek",
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-hooks",
@@ -2358,6 +2359,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "ed25519-dalek",
  "flare-call",
  "flare-core",
  "flare-core-runtime",

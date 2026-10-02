@@ -103,7 +103,20 @@ pub async fn initialize(
                 "lazy conversation channel ({conversation_service_type}) failed: {e}"
             ))
         })?;
-    let conversation_repository = Arc::new(ConversationClient::new(conversation_channel));
+    // 事件收件人要读单聊成员：orchestrator 的入口（MQ 与动作 RPC）都没有可转发的签名，
+    // 以本服务身份签读请求（会话服务按租户读成员，不要求是成员）。
+    let read_signer = flare_im_service_kit::signed_read::service_signer_from_env(
+        flare_im_contracts::service_names::ORCHESTRATOR,
+    )?;
+    if read_signer.is_none() {
+        tracing::warn!(
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: conversation member reads go unsigned"
+        );
+    }
+    let conversation_repository = Arc::new(
+        ConversationClient::new(conversation_channel)
+            .with_service_read_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
+    );
 
     let recipient_repository: Arc<dyn crate::domain::repository::RecipientRepository> = Arc::new(
         RecipientRepositoryImpl::new(conversation_repository.clone()),

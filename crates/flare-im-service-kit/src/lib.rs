@@ -14,6 +14,7 @@ pub mod push_delivery;
 pub mod push_provenance;
 pub mod runtime;
 pub mod service_helper;
+pub mod signed_read;
 pub mod tenant_runtime;
 pub mod tracing;
 

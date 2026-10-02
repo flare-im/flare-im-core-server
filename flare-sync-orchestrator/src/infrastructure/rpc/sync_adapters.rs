@@ -19,7 +19,6 @@ use flare_grpc_proto::storage::{
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
 use flare_proto::Message;
-use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
 use redis::aio::ConnectionManager;
 use std::collections::{BTreeMap, HashMap};
@@ -36,6 +35,17 @@ use crate::application::ports::{
 };
 
 const DEFAULT_TENANT_ID: &str = "0";
+
+/// 下游请求：调用方元数据，另把入站验过签的 `x-flare-ctx` 原样转发。会话与 Storage Reader 的
+/// 读接口以签名为准；两者一致，所以元数据不会被判为冲突。入站没有签名时只带元数据，由下游的
+/// `FLARE_REQUIRE_SIGNED_READ_CTX` 决定收不收。
+fn request_with_context<T>(payload: T, ctx: &Ctx) -> tonic::Request<T> {
+    let mut request = flare_server_core::client::request_with_context(payload, ctx);
+    if let Err(status) = flare_server_core::client::forward_signed_context(&mut request, ctx) {
+        warn!(code = ?status.code(), "signed context could not be forwarded");
+    }
+    request
+}
 
 /// gRPC 同步适配器（基于 tonic）
 ///

@@ -11,8 +11,9 @@ use flare_grpc_proto::conversation::{
     GetConversationDetailRequest, ListConversationParticipantsRequest, ManageParticipantsRequest,
     MarkConversationAsReadRequest,
 };
-use flare_server_core::client::set_context_metadata;
-use flare_server_core::context::{Context, ContextExt};
+use flare_server_core::SignedContextSigner;
+use flare_server_core::client::{forward_signed_context, set_context_metadata};
+use flare_server_core::context::{ActorContext, ActorType, Context, ContextExt};
 use flare_server_core::error::{FlareError, Result};
 use std::future::Future;
 use std::pin::Pin;
@@ -24,10 +25,22 @@ use tracing::{debug, info, instrument, warn};
 ///
 /// 使用 tonic 框架实现的会话服务客户端，
 /// 通过 gRPC 调用下游的 Conversation 服务。
-#[derive(Debug)]
 pub struct ConversationClient {
     manage_client: Arc<tokio::sync::Mutex<ConversationManageServiceClient<Channel>>>,
     read_client: Arc<tokio::sync::Mutex<ConversationReadServiceClient<Channel>>>,
+    /// 读成员时没有入站签名可转发（orchestrator 处理 MQ 与未签名的动作）就以本服务身份签名。
+    read_signer: Option<(SignedContextSigner, &'static str)>,
+}
+
+impl std::fmt::Debug for ConversationClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConversationClient")
+            .field(
+                "read_signer",
+                &self.read_signer.as_ref().map(|(_, actor)| *actor),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConversationClient {
@@ -43,7 +56,63 @@ impl ConversationClient {
             read_client: Arc::new(tokio::sync::Mutex::new(ConversationReadServiceClient::new(
                 channel,
             ))),
+            read_signer: None,
         }
+    }
+
+    /// 读成员时，入站上下文不是验过签的就以 `actor_id` 的服务身份签名（Cell 私钥）。没有私钥时
+    /// 只带调用方元数据，会话服务打开 `FLARE_REQUIRE_SIGNED_READ_CTX` 后会拒绝。
+    pub fn with_service_read_signer(
+        mut self,
+        signer: Option<SignedContextSigner>,
+        actor_id: &'static str,
+    ) -> Self {
+        self.read_signer = signer.map(|signer| (signer, actor_id));
+        self
+    }
+
+    /// 读会话成员的请求身份，按顺序：
+    /// 1. 入站验过签（ingest 收到的发送者或 Social 服务）：元数据 + 原样转发那份签名；
+    /// 2. 配了服务签名：以本服务的 Service 身份签该租户，元数据也只写这个服务身份——服务不是
+    ///    哪个用户，元数据里不能再带发送者，否则会话服务按冲突拒绝；
+    /// 3. 都没有：只带调用方元数据（未迁移的部署）。
+    fn member_read_request<T>(&self, payload: T, ctx: &Context) -> Result<tonic::Request<T>> {
+        let mut request = tonic::Request::new(payload);
+        if ctx
+            .get_data::<flare_server_core::VerifiedContext>()
+            .and_then(flare_server_core::VerifiedContext::token)
+            .is_some()
+        {
+            set_context_metadata(&mut request, ctx);
+            forward_signed_context(&mut request, ctx)
+                .map_err(|status| FlareError::system(status.message().to_string()))?;
+            return Ok(request);
+        }
+        let Some((signer, actor_id)) = self.read_signer.as_ref() else {
+            set_context_metadata(&mut request, ctx);
+            return Ok(request);
+        };
+        let Some(tenant_id) = ctx.tenant_id().filter(|tenant| !tenant.trim().is_empty()) else {
+            warn!("conversation member read without a tenant cannot be signed");
+            set_context_metadata(&mut request, ctx);
+            return Ok(request);
+        };
+        let token = flare_im_service_kit::signed_read::sign_service_read(
+            signer,
+            actor_id,
+            tenant_id,
+            ctx.request_id(),
+        )?;
+        let mut service_ctx = Context::with_request_id(ctx.request_id())
+            .with_tenant_id(tenant_id)
+            .with_actor(ActorContext::new(*actor_id).with_type(ActorType::Service));
+        if !ctx.trace_id().is_empty() {
+            service_ctx = service_ctx.with_trace_id(ctx.trace_id());
+        }
+        set_context_metadata(&mut request, &service_ctx);
+        flare_server_core::set_signed_context_token(&mut request, &token)
+            .map_err(|status| FlareError::system(status.message().to_string()))?;
+        Ok(request)
     }
 }
 
@@ -182,23 +251,25 @@ impl ConversationRpcClient for ConversationClient {
             let mut member_ids = Vec::new();
             let mut cursor = String::new();
             loop {
-                let mut grpc_request = tonic::Request::new(ListConversationParticipantsRequest {
-                    conversation_id: conversation_id.clone(),
-                    cursor: cursor.clone(),
-                    // 这里是**串行**游标循环：页大小直接决定往返次数。
-                    // 500 时十万人群要 200 次往返，实测一条已读回执因此耗时 47 秒。
-                    // 服务端每页代价由固定开销主导（5000 行 61ms vs 500 行 68ms），
-                    // 所以放大页大小几乎是纯收益。服务端 clamp 同步放到 5000。
-                    limit: 5000,
-                    include_removed: false,
-                    // 扇出只取 user_id,不看 total/version → 让服务端跳过首页两次 O(成员) 聚合
-                    // (COUNT(*) + MAX(updated_at)),十万群每条消息省两次全表聚合。
-                    ext: std::collections::HashMap::from([(
-                        "skip_meta".to_string(),
-                        "1".to_string(),
-                    )]),
-                });
-                set_context_metadata(&mut grpc_request, ctx);
+                let grpc_request = self.member_read_request(
+                    ListConversationParticipantsRequest {
+                        conversation_id: conversation_id.clone(),
+                        cursor: cursor.clone(),
+                        // 这里是**串行**游标循环：页大小直接决定往返次数。
+                        // 500 时十万人群要 200 次往返，实测一条已读回执因此耗时 47 秒。
+                        // 服务端每页代价由固定开销主导（5000 行 61ms vs 500 行 68ms），
+                        // 所以放大页大小几乎是纯收益。服务端 clamp 同步放到 5000。
+                        limit: 5000,
+                        include_removed: false,
+                        // 扇出只取 user_id,不看 total/version → 让服务端跳过首页两次 O(成员) 聚合
+                        // (COUNT(*) + MAX(updated_at)),十万群每条消息省两次全表聚合。
+                        ext: std::collections::HashMap::from([(
+                            "skip_meta".to_string(),
+                            "1".to_string(),
+                        )]),
+                    },
+                    ctx,
+                )?;
 
                 // 锁内只做 clone，调用在锁外。
                 //
@@ -247,6 +318,9 @@ impl ConversationRpcClient for ConversationClient {
                 conversation_id: conversation_id.clone(),
             });
             set_context_metadata(&mut grpc_request, ctx);
+            // 会话详情只给成员看，服务签名读不到；只转发入站验过签的用户身份。
+            forward_signed_context(&mut grpc_request, ctx)
+                .map_err(|status| FlareError::system(status.message().to_string()))?;
 
             // 锁内只做 clone，调用在锁外。
             //
@@ -312,5 +386,106 @@ impl ConversationRpcClient for ConversationClient {
             );
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use flare_server_core::grpc::middleware::signed_context::{
+        VerifiedContext, verify_signed_context_metadata,
+    };
+    use flare_server_core::{
+        SignedActorType, SignedContextIdentity, SignedContextVerifier, set_signed_context_token,
+    };
+
+    use super::*;
+
+    fn keys() -> (SignedContextSigner, SignedContextVerifier) {
+        let key = SigningKey::from_bytes(&[35; 32]);
+        (
+            SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())
+                .unwrap(),
+            SignedContextVerifier::from_public_key(
+                &key.verifying_key()
+                    .to_public_key_pem(Default::default())
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn client(signer: Option<SignedContextSigner>) -> ConversationClient {
+        ConversationClient::new(Channel::from_static("http://127.0.0.1:9").connect_lazy())
+            .with_service_read_signer(signer, "flare-orchestrator")
+    }
+
+    fn claims(
+        request: &tonic::Request<()>,
+        verifier: &SignedContextVerifier,
+    ) -> flare_server_core::SignedContextClaims {
+        verify_signed_context_metadata(request.metadata(), verifier)
+            .unwrap()
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .cloned()
+            .unwrap()
+    }
+
+    /// 入站验过签（ingest 收到的发送者）：原样转发那份签名，元数据是同一身份。
+    #[tokio::test]
+    async fn a_verified_inbound_identity_is_forwarded() {
+        let (signer, verifier) = keys();
+        let token = signer
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::User,
+                "alice",
+                "tenant-a",
+                "req-1",
+            ))
+            .unwrap();
+        let mut inbound = tonic::Request::new(());
+        set_signed_context_token(&mut inbound, &token).unwrap();
+        let verified = verify_signed_context_metadata(inbound.metadata(), &verifier).unwrap();
+        let (service_signer, _) = keys();
+        let request = client(Some(service_signer))
+            .member_read_request((), &verified)
+            .unwrap();
+        assert_eq!(
+            request.metadata().get("x-flare-ctx").unwrap(),
+            token.as_str()
+        );
+        assert_eq!(request.metadata().get("x-user-id").unwrap(), "alice");
+        assert_eq!(request.metadata().get("x-tenant-id").unwrap(), "tenant-a");
+    }
+
+    /// 没有可转发的签名（orchestrator 的 MQ 与动作入口）：以本服务身份签该租户，元数据不带
+    /// 发送者——服务不是用户，带了会被会话服务判为与签名冲突。
+    #[tokio::test]
+    async fn without_an_inbound_signature_the_service_signs_for_itself() {
+        let (signer, verifier) = keys();
+        let legacy = Context::with_request_id("req-2")
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice")
+            .with_actor(ActorContext::new("alice").with_type(ActorType::User));
+        let request = client(Some(signer))
+            .member_read_request((), &legacy)
+            .unwrap();
+        let claims = claims(&request, &verifier);
+        assert_eq!(claims.actor_type, SignedActorType::Service);
+        assert_eq!(claims.actor_id, "flare-orchestrator");
+        assert_eq!(claims.tenant_id, "tenant-a");
+        assert_eq!(claims.request_id, "req-2");
+        let metadata = request.metadata();
+        assert!(metadata.get("x-user-id").is_none());
+        assert_eq!(metadata.get("x-actor-id").unwrap(), "flare-orchestrator");
+        assert_eq!(metadata.get("x-actor-type").unwrap(), "2");
+        assert_eq!(metadata.get("x-tenant-id").unwrap(), "tenant-a");
+
+        // 没有私钥（未迁移的部署）：只带调用方元数据。
+        let request = client(None).member_read_request((), &legacy).unwrap();
+        assert!(request.metadata().get("x-flare-ctx").is_none());
+        assert_eq!(request.metadata().get("x-user-id").unwrap(), "alice");
     }
 }

@@ -7,15 +7,75 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
+use super::MessageContextSigner;
 use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListConversationsRequest, ManageParticipantsRequest,
     ParticipantRoleUpdate,
 };
 use flare_im_service_kit::clients::GrpcClients;
 use flare_server_core::{
-    context::Ctx,
+    AuthenticatedPrincipal, SignedActorType, SignedContextIdentity,
+    context::{ActorContext, ActorType, Context, Ctx},
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
+
+/// 已认证用户读会话的身份（与发送、在线接口的写路径一致）：调用方元数据与 `x-flare-ctx`
+/// 都只取自令牌验出的用户与规范化的租户，请求头里的其他身份字段（如 `x-actor-*`）不带下去；
+/// 只沿用请求号与追踪号。会话服务以签名为准，元数据与签名同一身份。网关没配签名私钥时只带
+/// 元数据，由会话服务的 `FLARE_REQUIRE_SIGNED_READ_CTX` 决定收不收。
+fn conversation_reader(
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+) -> Result<(Ctx, Option<String>)> {
+    let user_id = principal.user_id.trim();
+    let tenant_id = principal
+        .tenant_id
+        .as_deref()
+        .map(flare_im_contracts::utils::normalize_tenant_id)
+        .ok_or_else(|| {
+            GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
+        })?;
+    if user_id.is_empty()
+        || principal.has_gateway_admin_scope()
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
+    {
+        return Err(GatewayError::bad_request(
+            "USER_REQUIRED",
+            "authenticated user and tenant required",
+        ));
+    }
+    let from_headers = Ctx::from_headers(headers);
+    let mut ctx = Context::with_request_id(from_headers.request_id())
+        .with_tenant_id(&tenant_id)
+        .with_user_id(user_id)
+        .with_actor(ActorContext::new(user_id).with_type(ActorType::User));
+    if !from_headers.trace_id().is_empty() {
+        ctx = ctx.with_trace_id(from_headers.trace_id());
+    }
+    let token = signer
+        .0
+        .as_ref()
+        .map(|signer| {
+            signer.sign(
+                &SignedContextIdentity::new(
+                    SignedActorType::User,
+                    user_id,
+                    &tenant_id,
+                    ctx.request_id(),
+                )
+                .with_credential_id("api-gateway"),
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            GatewayError::internal(
+                "CONVERSATION_SIGNING_FAILED",
+                "internal identity signing failed",
+            )
+        })?;
+    Ok((Arc::new(ctx), token))
+}
 
 /// 获取会话列表请求
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -157,13 +217,15 @@ pub struct ManageParticipantsHttpResponse {
         (status = 400, description = "参数错误"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn list_conversations(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     axum::extract::Query(req): axum::extract::Query<ListConversationsHttpRequest>,
 ) -> Result<Json<ApiResponse<ListConversationsHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let (ctx, token) = conversation_reader(&headers, &principal, &signer)?;
     debug!(
         trace_id = %ctx.trace_id(),
         user_id = %ctx.user_id().unwrap_or(""),
@@ -191,7 +253,7 @@ pub async fn list_conversations(
     };
     let mut read_client = clients.conversation_read.lock().await;
     let grpc_res = read_client
-        .list_conversations_with_ctx(&ctx, grpc_req)
+        .list_conversations_with_ctx(&ctx, token.as_deref(), grpc_req)
         .await
         .map_err(|err| GatewayError::internal("CONVERSATION_LIST_FAILED", err.to_string()))?;
     let response = ListConversationsHttpResponse {
@@ -229,13 +291,15 @@ pub async fn list_conversations(
     ),
     responses((status = 200, description = "成功", body = ApiResponse<ListConversationParticipantsHttpResponse>)),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn list_conversation_participants(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     axum::extract::Query(req): axum::extract::Query<ListConversationParticipantsHttpRequest>,
 ) -> Result<Json<ApiResponse<ListConversationParticipantsHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let (ctx, token) = conversation_reader(&headers, &principal, &signer)?;
     let grpc_req = ListConversationParticipantsRequest {
         conversation_id: req.conversation_id,
         cursor: req.cursor,
@@ -245,7 +309,7 @@ pub async fn list_conversation_participants(
     };
     let mut read_client = clients.conversation_read.lock().await;
     let grpc_res = read_client
-        .list_conversation_participants_with_ctx(&ctx, grpc_req)
+        .list_conversation_participants_with_ctx(&ctx, token.as_deref(), grpc_req)
         .await
         .map_err(|err| {
             GatewayError::internal("CONVERSATION_PARTICIPANTS_FAILED", err.to_string())

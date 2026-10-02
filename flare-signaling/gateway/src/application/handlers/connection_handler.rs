@@ -138,14 +138,20 @@ impl ConnectionHandler {
         let mut cursor = String::new();
         let mut total = 0usize;
         loop {
-            let request = flare_server_core::client::request_with_context(
+            let request = match conversation_read.user_read_request(
                 flare_grpc_proto::conversation::ListConversationsRequest {
                     cursor: cursor.clone(),
                     limit: EAGER_PAGE_LIMIT,
                     order: 0,
                 },
                 &ctx,
-            );
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    warn!(%user_id, %connection_id, ?error, "eager subscribe: read identity unavailable");
+                    break;
+                }
+            };
             match client.list_conversations(request).await {
                 Ok(response) => {
                     let page = response.into_inner();

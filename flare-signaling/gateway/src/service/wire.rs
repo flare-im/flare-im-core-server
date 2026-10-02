@@ -150,8 +150,10 @@ pub async fn initialize(
     let conversation_subscriptions =
         Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
     // Conversation 读客户端池：登录 eager 订阅用户会话列表。
-    let conversation_read_pool =
-        Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new());
+    let conversation_read_pool = Arc::new(
+        crate::infrastructure::ports::ConversationReadGrpcPool::new()
+            .with_signer(message_signer.clone()),
+    );
 
     let connection_handler_app = Arc::new(ConnectionHandler::new(
         session_domain_service.clone(),

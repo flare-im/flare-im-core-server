@@ -11,7 +11,6 @@ use flare_grpc_proto::conversation::ListConversationParticipantsRequest;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, get_service_name};
-use flare_server_core::client::request_with_context;
 use flare_server_core::error::FlareError;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -20,6 +19,17 @@ use crate::domain::repository::{NotifyPolicyRepository, NotifyPreference};
 
 /// 单次拉取的参与者页大小。
 const PAGE_LIMIT: i32 = 200;
+
+/// 调用方元数据，另把记录的签名身份（broker-isolated 下每条记录都以本服务身份重新签过）原样
+/// 转发：会话服务的读接口以签名为准，服务身份按租户读成员。记录没有签名时只带元数据，由会话
+/// 服务的 `FLARE_REQUIRE_SIGNED_READ_CTX` 决定收不收。
+fn request_with_context<T>(payload: T, ctx: &Ctx) -> tonic::Request<T> {
+    let mut request = flare_server_core::client::request_with_context(payload, ctx);
+    if let Err(status) = flare_server_core::client::forward_signed_context(&mut request, ctx) {
+        tracing::warn!(code = ?status.code(), "signed context could not be forwarded");
+    }
+    request
+}
 
 /// 最多翻多少页。群聊现在也有离线推送了，成员数可以远超一页——只看第一页会让
 /// 靠后的成员即使设了免打扰照样被推。加个上限是防止超大会话把这条本该轻量的

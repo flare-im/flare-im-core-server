@@ -16,8 +16,12 @@ pub struct StorageReaderServiceClientWrapper {
 }
 
 impl StorageReaderServiceClientWrapper {
-    fn request_with_ctx<T>(ctx: &Ctx, payload: T) -> tonic::Request<T> {
-        flare_server_core::request_with_context(payload, ctx)
+    /// 调用方元数据，另把 `ctx` 里入站验过签的 `x-flare-ctx` 原样转发（Storage Reader 的读接口
+    /// 以签名为准，两者一致）。入站没有签名时只带元数据。
+    fn request_with_ctx<T>(ctx: &Ctx, payload: T) -> Result<tonic::Request<T>> {
+        let mut request = flare_server_core::request_with_context(payload, ctx);
+        flare_server_core::forward_signed_context(&mut request, ctx)?;
+        Ok(request)
     }
 
     pub fn from_channel(channel: Channel) -> Self {
@@ -62,7 +66,7 @@ impl StorageReaderServiceClientWrapper {
     ) -> Result<GetConversationMessageHeadResponse> {
         let response = self
             .client
-            .get_conversation_message_head(Self::request_with_ctx(ctx, request))
+            .get_conversation_message_head(Self::request_with_ctx(ctx, request)?)
             .await?;
         Ok(response.into_inner())
     }

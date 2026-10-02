@@ -384,6 +384,10 @@ mod push_token_tests;
 mod message_send_tests;
 
 #[cfg(test)]
+#[path = "router_conversation_read_tests.rs"]
+mod conversation_read_tests;
+
+#[cfg(test)]
 mod api_docs_tests {
     use super::*;
     use axum::body::{Body, to_bytes};

@@ -7,7 +7,6 @@ use crate::domain::repository::MessageProvider;
 use flare_grpc_proto::storage::QueryMessagesRequest;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_im_service_kit::ServiceClient;
-use flare_server_core::client::set_context_metadata;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use std::collections::HashMap;
@@ -41,6 +40,16 @@ enum StorageReaderTarget {
         service_name: String,
         client: Arc<Mutex<ServiceClient>>,
     },
+}
+
+/// 调用方元数据，另把入站验过签的 `x-flare-ctx` 原样转发：Storage Reader 的读接口以签名为准，
+/// 两者一致不算冲突。入站没有签名（如未迁移的调用方）时只带元数据，由 Storage Reader 的
+/// `FLARE_REQUIRE_SIGNED_READ_CTX` 决定收不收。
+fn set_context_metadata<T>(request: &mut Request<T>, ctx: &Context) {
+    flare_server_core::client::set_context_metadata(request, ctx);
+    if let Err(status) = flare_server_core::client::forward_signed_context(request, ctx) {
+        tracing::warn!(code = ?status.code(), "signed context could not be forwarded");
+    }
 }
 
 fn grpc_call_failed(op: &str, status: tonic::Status) -> flare_server_core::error::FlareError {
