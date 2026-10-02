@@ -16,6 +16,35 @@ pub struct EvictedConnection {
     pub conversation_id: String,
     pub device_id: String,
     pub connection_id: String,
+    /// 为什么被挤掉，决定下发给旧连接的踢线原因（[`EvictionCause::kick_reason`]）。
+    #[serde(default)]
+    pub cause: EvictionCause,
+}
+
+/// 登录准入挤掉一条旧连接的原因（准入脚本按记录给出）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionCause {
+    /// 同一设备 ID 的新连接接替了旧连接。
+    #[default]
+    Replaced,
+    /// 冲突策略挤掉了同一用户的另一台设备：互斥策略下的任何其他设备，或平台互斥策略下同平台的
+    /// 其他设备。
+    DeviceConflict,
+    /// 设备数超过上限，挤掉了最早登录的设备。
+    DeviceCap,
+}
+
+impl EvictionCause {
+    /// 下发给被挤掉的连接的踢线原因。设备冲突是 [`kick_reason::DEVICE_CONFLICT`]：客户端据此结束
+    /// 会话、不再自动重连（否则它连回去又把新设备挤掉，两台设备来回互踢）；同设备接替与超出设备数
+    /// 上限仍是 [`kick_reason::SESSION_REPLACED`]。
+    pub fn kick_reason(self) -> &'static str {
+        match self {
+            Self::DeviceConflict => kick_reason::DEVICE_CONFLICT,
+            Self::Replaced | Self::DeviceCap => kick_reason::SESSION_REPLACED,
+        }
+    }
 }
 
 pub trait ConversationRepository: Send + Sync {
@@ -182,6 +211,57 @@ pub mod kick_reason {
     pub const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
     /// 运维按设备踢下线。
     pub const DEVICE_KICKED: &str = "DEVICE_KICKED";
+    /// 同一用户的另一台设备登录，冲突策略（互斥，或平台互斥下的同平台）把这台设备挤下线
+    /// （「已在别处登录」）。与 flare-core `common::kick::DEVICE_CONFLICT_REASON` 是同一个值：
+    /// 客户端收到后结束会话、不再自动重连。
+    pub const DEVICE_CONFLICT: &str = "DEVICE_CONFLICT";
     /// 同设备的新连接接替了旧连接，或设备数超限挤掉了旧设备。
     pub const SESSION_REPLACED: &str = "SESSION_REPLACED";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 冲突策略挤掉的其他设备下发 DEVICE_CONFLICT（客户端结束会话、不再重连）；同设备接替与超出
+    /// 设备数上限仍是 SESSION_REPLACED。
+    #[test]
+    fn only_device_conflict_evictions_end_the_kicked_session() {
+        assert_eq!(
+            EvictionCause::DeviceConflict.kick_reason(),
+            kick_reason::DEVICE_CONFLICT
+        );
+        assert_eq!(
+            EvictionCause::Replaced.kick_reason(),
+            kick_reason::SESSION_REPLACED
+        );
+        assert_eq!(
+            EvictionCause::DeviceCap.kick_reason(),
+            kick_reason::SESSION_REPLACED
+        );
+    }
+
+    /// 准入脚本的输出：每条带 `cause`；没带的按同设备接替处理。
+    #[test]
+    fn admission_results_carry_the_eviction_cause() {
+        let evicted: Vec<EvictedConnection> = serde_json::from_str(
+            r#"[
+              {"conversation_id":"c1","device_id":"d1","connection_id":"p1","cause":"device_conflict"},
+              {"conversation_id":"c2","device_id":"d2","connection_id":"p2","cause":"replaced"},
+              {"conversation_id":"c3","device_id":"d3","connection_id":"p3","cause":"device_cap"},
+              {"conversation_id":"c4","device_id":"d4","connection_id":"p4"}
+            ]"#,
+        )
+        .unwrap();
+        let causes: Vec<EvictionCause> = evicted.iter().map(|e| e.cause).collect();
+        assert_eq!(
+            causes,
+            vec![
+                EvictionCause::DeviceConflict,
+                EvictionCause::Replaced,
+                EvictionCause::DeviceCap,
+                EvictionCause::Replaced,
+            ]
+        );
+    }
 }

@@ -229,6 +229,9 @@ where
             })?;
         self.remove_memory_evicted(&evicted).await;
         for old in &evicted {
+            // 原因随挤掉的缘由：冲突策略挤掉的其他设备收到 DEVICE_CONFLICT，结束会话、不再重连。
+            // 多网关时新设备所在网关的设备管理器不认识旧设备，旧设备只会收到这一条踢线；若报成
+            // SESSION_REPLACED，它会自动重连回来再把新设备挤掉，两台设备来回互踢。
             if let Err(error) = self
                 .repository
                 .broadcast_user_kick(
@@ -236,7 +239,7 @@ where
                     user_id,
                     Some(&old.device_id),
                     Some(&old.connection_id),
-                    kick_reason::SESSION_REPLACED,
+                    old.cause.kick_reason(),
                 )
                 .await
             {
@@ -577,6 +580,7 @@ pub type DefaultOnlineStatusService =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::repository::EvictionCause;
     use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
     use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
 
@@ -695,6 +699,195 @@ mod tests {
         login_alice(&lenient)
             .await
             .expect("lenient policy admits an unprojected tenant");
+    }
+
+    /// 一次踢线广播：`(device_id, connection_id, reason)`。
+    type Kick = (Option<String>, Option<String>, String);
+
+    /// 准入挤掉的连接各按缘由收到踢线；其余操作与 [`NoopConversationRepository`] 相同。
+    struct EvictingRepository {
+        evicted: Vec<EvictedConnection>,
+        kicks: std::sync::Mutex<Vec<Kick>>,
+    }
+
+    impl ConversationRepository for EvictingRepository {
+        async fn save_connection(&self, connection: &Connection) -> Result<()> {
+            NoopConversationRepository.save_connection(connection).await
+        }
+        async fn admit_connection(
+            &self,
+            _connection: &Connection,
+            _gateway_connection_id: &str,
+            _strategy: DeviceConflictStrategy,
+            _max_devices: u32,
+        ) -> Result<Vec<EvictedConnection>> {
+            Ok(self.evicted.clone())
+        }
+        async fn remove_connection(
+            &self,
+            tenant_id: &str,
+            conversation_id: &ConnectionId,
+            user_id: &UserId,
+        ) -> Result<()> {
+            NoopConversationRepository
+                .remove_connection(tenant_id, conversation_id, user_id)
+                .await
+        }
+        async fn touch_connection(
+            &self,
+            tenant_id: &str,
+            conversation_id: &ConnectionId,
+            user_id: &UserId,
+        ) -> Result<()> {
+            NoopConversationRepository
+                .touch_connection(tenant_id, conversation_id, user_id)
+                .await
+        }
+        async fn fetch_statuses(
+            &self,
+            tenant_id: &str,
+            user_ids: &[String],
+        ) -> Result<HashMap<String, OnlineStatusRecord>> {
+            NoopConversationRepository
+                .fetch_statuses(tenant_id, user_ids)
+                .await
+        }
+        async fn get_user_connections(
+            &self,
+            tenant_id: &str,
+            user_id: &UserId,
+        ) -> Result<Vec<Connection>> {
+            NoopConversationRepository
+                .get_user_connections(tenant_id, user_id)
+                .await
+        }
+        async fn remove_user_connections(
+            &self,
+            tenant_id: &str,
+            user_id: &UserId,
+            device_ids: Option<&[DeviceId]>,
+        ) -> Result<()> {
+            NoopConversationRepository
+                .remove_user_connections(tenant_id, user_id, device_ids)
+                .await
+        }
+        async fn get_connection_by_device(
+            &self,
+            tenant_id: &str,
+            user_id: &UserId,
+            device_id: &DeviceId,
+        ) -> Result<Option<Connection>> {
+            NoopConversationRepository
+                .get_connection_by_device(tenant_id, user_id, device_id)
+                .await
+        }
+        async fn list_user_connections(&self, ctx: &Context) -> Result<Vec<Connection>> {
+            NoopConversationRepository.list_user_connections(ctx).await
+        }
+        async fn scan_tenant_sessions(
+            &self,
+            tenant_id: &str,
+            cursor: u64,
+            count: usize,
+        ) -> Result<(u64, Vec<String>)> {
+            NoopConversationRepository
+                .scan_tenant_sessions(tenant_id, cursor, count)
+                .await
+        }
+        async fn unindex_tenant_session(&self, tenant_id: &str, member: &str) -> Result<()> {
+            NoopConversationRepository
+                .unindex_tenant_session(tenant_id, member)
+                .await
+        }
+        async fn broadcast_user_kick(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+            device_id: Option<&str>,
+            connection_id: Option<&str>,
+            reason: &str,
+        ) -> Result<()> {
+            self.kicks.lock().unwrap().push((
+                device_id.map(str::to_owned),
+                connection_id.map(str::to_owned),
+                reason.to_owned(),
+            ));
+            Ok(())
+        }
+    }
+
+    fn evicted(device: &str, physical: &str, cause: EvictionCause) -> EvictedConnection {
+        EvictedConnection {
+            conversation_id: format!("session-{physical}"),
+            device_id: device.to_string(),
+            connection_id: physical.to_string(),
+            cause,
+        }
+    }
+
+    /// 冲突策略挤掉的其他设备收到 DEVICE_CONFLICT（结束会话、不再重连），同设备接替与超出设备数
+    /// 上限收到 SESSION_REPLACED。多网关时新设备所在网关不认识旧设备，旧设备只收到这一条踢线：
+    /// 报成 SESSION_REPLACED 的话它会重连回来再挤掉新设备，两台设备来回互踢。
+    #[tokio::test]
+    async fn evicted_connections_are_kicked_with_the_reason_for_their_eviction() {
+        let repository = Arc::new(EvictingRepository {
+            evicted: vec![
+                evicted("pc-old", "conn-pc-old", EvictionCause::DeviceConflict),
+                evicted("device-a", "conn-a-old", EvictionCause::Replaced),
+                evicted("web-oldest", "conn-web-oldest", EvictionCause::DeviceCap),
+            ],
+            kicks: std::sync::Mutex::new(Vec::new()),
+        });
+        let service = OnlineStatusService::<_, NoopConnectionEventPublisher>::new(
+            Arc::clone(&repository),
+            "gateway-test".to_string(),
+        )
+        .with_tenant_runtime(
+            TenantRuntimeCache::with_source(
+                Arc::new(NoProjection),
+                TenantRuntimeCacheOptions::default(),
+            ),
+            TenantAccessPolicy::Lenient,
+            0,
+        );
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+
+        service
+            .login(
+                &ctx,
+                LoginRequest {
+                    user_id: "alice".to_string(),
+                    device_id: "device-a".to_string(),
+                    device_platform: "pc".to_string(),
+                    desired_conflict_strategy: DeviceConflictStrategy::PlatformExclusive as i32,
+                    metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("login admits the new device");
+
+        let kick = |device: &str, physical: &str, reason: &str| {
+            (
+                Some(device.to_string()),
+                Some(physical.to_string()),
+                reason.to_string(),
+            )
+        };
+        assert_eq!(
+            *repository.kicks.lock().unwrap(),
+            vec![
+                kick("pc-old", "conn-pc-old", kick_reason::DEVICE_CONFLICT),
+                kick("device-a", "conn-a-old", kick_reason::SESSION_REPLACED),
+                kick(
+                    "web-oldest",
+                    "conn-web-oldest",
+                    kick_reason::SESSION_REPLACED
+                ),
+            ]
+        );
     }
 
     /// 投影库读不到时仍然拒绝登记（两种策略都是），但报的是暂时故障，不是 `TENANT_UNAVAILABLE`：

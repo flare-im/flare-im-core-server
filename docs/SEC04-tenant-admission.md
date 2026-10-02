@@ -19,7 +19,7 @@ API Gateway 使用 `services.api_gateway.postgres` 指向 `[postgres.tenant_runt
 
 Online 登记会话时，`TENANT_UNAVAILABLE` 只用于确定的租户结论：已知的 `suspended` / `deleting`，或严格策略下没有投影的租户。读不到投影（如数据库抖动）时不论策略都拒绝登记，但按服务不可用上报，ACK 之后的 KICKED 原因是 `SERVICE_UNAVAILABLE`，客户端照常退避重连；若也报 `TENANT_UNAVAILABLE`，客户端会终止会话、不再重连，一次抖动就会让这段时间里连进来的客户端一直离线。这与 HTTP 租户门对投影不可用回 503 而不是 403 一致。
 
-已接纳的长连接不会被重新检查，由 Control 踢掉：状态写入后 Control 立即投递该租户的投影（在独立任务里执行，请求被取消也会跑完，不会让已领取的 outbox 行空占 30 秒租约），核确认非 active 的快照后调 Online `KickTenant`，当即一次、2 秒后再一次。第二次踢掉的是缓存过期前重连进来的连接；第二次之前 Control 会重读租户状态，这 2 秒内已恢复为 active 就不再踢。网关对每个踢线信号并发下发 KICKED，每条连接最多等 1 秒，慢连接不会拖住其他连接和后续信号。网关关连接前下发 KICKED 帧，message 与 metadata `reason` 都是类型化原因：租户踢线为 `TENANT_UNAVAILABLE`（请求里的原因只进 Online 日志），运维按设备踢为 `DEVICE_KICKED`，同设备新连接接替旧连接为 `SESSION_REPLACED`，令牌撤销为 `TOKEN_REVOKED`，不带原因的旧信号为 `KICKED`。
+已接纳的长连接不会被重新检查，由 Control 踢掉：状态写入后 Control 立即投递该租户的投影（在独立任务里执行，请求被取消也会跑完，不会让已领取的 outbox 行空占 30 秒租约），核确认非 active 的快照后调 Online `KickTenant`，当即一次、2 秒后再一次。第二次踢掉的是缓存过期前重连进来的连接；第二次之前 Control 会重读租户状态，这 2 秒内已恢复为 active 就不再踢。网关对每个踢线信号并发下发 KICKED，每条连接最多等 1 秒，慢连接不会拖住其他连接和后续信号。网关关连接前下发 KICKED 帧，message 与 metadata `reason` 都是类型化原因：租户踢线为 `TENANT_UNAVAILABLE`（请求里的原因只进 Online 日志），运维按设备踢为 `DEVICE_KICKED`，同设备新连接接替旧连接、超出设备数上限挤掉最早登录的设备为 `SESSION_REPLACED`，冲突策略（互斥，或平台互斥下的同平台）挤掉同一用户的其他设备为 `DEVICE_CONFLICT`（与 flare-core 设备管理器的设备冲突踢线同一个原因，客户端结束会话、不再自动重连；多网关时新设备所在网关不认识旧设备，旧设备只收到 Online 的这一条），令牌撤销为 `TOKEN_REVOKED`，不带原因的旧信号为 `KICKED`。
 
 Core 自签的普通 HTTP/WS 接入令牌只允许 `token_use` 缺省（历史 access）或显式 `access`。`refresh`/`control`/`admin` 令牌不能当普通接入令牌，也不能经旧 access 刷新宽限路径换新。
 

@@ -24,7 +24,10 @@ const TENANT_SESSIONS_KEY_PREFIX: &str = "tenant:sessions";
 // Both the user hash and the tenant device index are changed by one Redis
 // script. A competing login cannot observe a partial eviction/admission or
 // let two devices exceed the cap. The script returns only old physical
-// connection IDs; publishing the resulting kick is deliberately outside the
+// connection IDs, each with why it was evicted (`replaced`: same device ID,
+// `device_conflict`: another device removed by the Exclusive /
+// PlatformExclusive rule, `device_cap`: over the device cap), which selects
+// the kick reason; publishing the resulting kick is deliberately outside the
 // session Redis transaction because the kick store may be a separate Redis.
 const ADMIT_CONNECTION_SCRIPT: &str = r#"
 local new = cjson.decode(ARGV[2])
@@ -51,12 +54,15 @@ for i = 1, #current, 2 do
   end
 end
 
+local strategy = tonumber(ARGV[4])
 local removed_devices = {}
 for _, item in ipairs(records) do
   local rec = item.value
-  if rec.device_id == new.device_id or tonumber(ARGV[4]) == 1
-      or (tonumber(ARGV[4]) == 2 and rec.device_platform == new.device_platform) then
-    removed_devices[rec.device_id] = true
+  if rec.device_id == new.device_id then
+    removed_devices[rec.device_id] = 'replaced'
+  elseif strategy == 1
+      or (strategy == 2 and rec.device_platform == new.device_platform) then
+    removed_devices[rec.device_id] = 'device_conflict'
   end
 end
 
@@ -78,7 +84,7 @@ if cap > 0 then
       end
     end
     if not oldest_device then break end
-    removed_devices[oldest_device] = true
+    removed_devices[oldest_device] = 'device_cap'
     remaining = remaining - 1
   end
 end
@@ -88,7 +94,7 @@ for _, item in ipairs(records) do
   local rec = item.value
   if removed_devices[rec.device_id] then
     redis.call('HDEL', KEYS[1], item.field)
-    table.insert(evicted, { conversation_id = rec.conversation_id, device_id = rec.device_id, connection_id = rec.connection_id })
+    table.insert(evicted, { conversation_id = rec.conversation_id, device_id = rec.device_id, connection_id = rec.connection_id, cause = removed_devices[rec.device_id] })
   end
 end
 for device, _ in pairs(removed_devices) do
@@ -623,10 +629,21 @@ impl ConversationRepository for RedisConversationRepository {
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    use crate::domain::repository::EvictionCause;
 
     fn record(
         tenant: &str,
         device: &str,
+        physical: &str,
+        created_at: i64,
+    ) -> RedisConnectionRecord {
+        record_on(tenant, device, "ios", physical, created_at)
+    }
+
+    fn record_on(
+        tenant: &str,
+        device: &str,
+        platform: &str,
         physical: &str,
         created_at: i64,
     ) -> RedisConnectionRecord {
@@ -635,7 +652,7 @@ mod admission_tests {
             gateway_id: "test-gateway".into(),
             server_id: "test-server".into(),
             device_id: device.into(),
-            device_platform: "ios".into(),
+            device_platform: platform.into(),
             connection_id: physical.into(),
             created_at,
             last_seen: created_at,
@@ -651,19 +668,145 @@ mod admission_tests {
         index: &str,
         item: &RedisConnectionRecord,
     ) -> Vec<EvictedConnection> {
+        admit_with(conn, key, index, item, DeviceConflictStrategy::Coexist, 1).await
+    }
+
+    async fn admit_with(
+        conn: &mut ConnectionManager,
+        key: &str,
+        index: &str,
+        item: &RedisConnectionRecord,
+        strategy: DeviceConflictStrategy,
+        max_devices: u32,
+    ) -> Vec<EvictedConnection> {
         let encoded: String = redis::Script::new(ADMIT_CONNECTION_SCRIPT)
             .key(key)
             .key(index)
             .arg(&item.conversation_id)
             .arg(serde_json::to_string(item).unwrap())
             .arg(60)
-            .arg(DeviceConflictStrategy::Coexist as i32)
-            .arg(1)
+            .arg(strategy as i32)
+            .arg(max_devices)
             .arg(tenant_session_member_prefix("shared-user"))
             .invoke_async(conn)
             .await
             .unwrap();
         serde_json::from_str(&encoded).unwrap()
+    }
+
+    /// `(device_id, connection_id, cause)`，按连接 ID 排序（脚本遍历 HGETALL，顺序不定）。
+    fn causes(evicted: Vec<EvictedConnection>) -> Vec<(String, String, EvictionCause)> {
+        let mut causes: Vec<_> = evicted
+            .into_iter()
+            .map(|e| (e.device_id, e.connection_id, e.cause))
+            .collect();
+        causes.sort_by(|a, b| a.1.cmp(&b.1));
+        causes
+    }
+
+    fn cause(
+        device: &str,
+        physical: &str,
+        cause: EvictionCause,
+    ) -> (String, String, EvictionCause) {
+        (device.to_string(), physical.to_string(), cause)
+    }
+
+    /// 准入脚本按记录报出挤掉的缘由：冲突策略挤掉的其他设备是 `device_conflict`（踢线原因
+    /// DEVICE_CONFLICT，客户端结束会话），同设备接替是 `replaced`，超出设备数上限是 `device_cap`。
+    /// Run with `FLARE_TEST_REDIS_URL` pointing at an isolated Redis instance.
+    #[tokio::test]
+    #[ignore = "requires FLARE_TEST_REDIS_URL"]
+    async fn admission_reports_why_each_connection_was_evicted() {
+        use DeviceConflictStrategy::{Coexist, Exclusive, PlatformExclusive};
+        use EvictionCause::{DeviceCap, DeviceConflict, Replaced};
+
+        let url = std::env::var("FLARE_TEST_REDIS_URL").expect("FLARE_TEST_REDIS_URL");
+        let client = redis::Client::open(url).unwrap();
+        let mut conn = ConnectionManager::new(client).await.unwrap();
+        let tenant = format!("w9k1-{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let key = RedisConversationRepository::connection_key(&tenant, "shared-user");
+        let index = RedisConversationRepository::tenant_sessions_key(&tenant);
+        let mut admit =
+            async |item: RedisConnectionRecord, strategy: DeviceConflictStrategy, cap: u32| {
+                causes(admit_with(&mut conn, &key, &index, &item, strategy, cap).await)
+            };
+
+        assert!(
+            admit(
+                record_on(&tenant, "pc-1", "pc", "p1", 1),
+                PlatformExclusive,
+                0
+            )
+            .await
+            .is_empty()
+        );
+        assert!(
+            admit(
+                record_on(&tenant, "ios-1", "ios", "i1", 2),
+                PlatformExclusive,
+                0
+            )
+            .await
+            .is_empty()
+        );
+        // 同平台的另一台设备：旧 PC 是设备冲突，iOS 不受影响。
+        assert_eq!(
+            admit(
+                record_on(&tenant, "pc-2", "pc", "p2", 3),
+                PlatformExclusive,
+                0
+            )
+            .await,
+            vec![cause("pc-1", "p1", DeviceConflict)]
+        );
+        // 同一设备重连：接替，不是设备冲突。
+        assert_eq!(
+            admit(
+                record_on(&tenant, "pc-2", "pc", "p2b", 4),
+                PlatformExclusive,
+                0
+            )
+            .await,
+            vec![cause("pc-2", "p2", Replaced)]
+        );
+        // 互斥：其他设备一律是设备冲突，同设备仍是接替。
+        assert_eq!(
+            admit(record_on(&tenant, "pc-2", "pc", "p2c", 5), Exclusive, 0).await,
+            vec![
+                cause("ios-1", "i1", DeviceConflict),
+                cause("pc-2", "p2b", Replaced),
+            ]
+        );
+        // 共存 + 上限 2：第三台设备挤掉最早的一台，是超出上限，不是设备冲突。
+        assert!(
+            admit(record_on(&tenant, "web-1", "web", "w1", 6), Coexist, 2)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            admit(record_on(&tenant, "ios-2", "ios", "i2", 7), Coexist, 2).await,
+            vec![cause("pc-2", "p2c", DeviceCap)]
+        );
+        // 平台互斥 + 上限：同平台的旧设备是设备冲突，腾出名额后不再按上限挤别的设备。
+        assert_eq!(
+            admit(
+                record_on(&tenant, "web-2", "web", "w2", 8),
+                PlatformExclusive,
+                2
+            )
+            .await,
+            vec![cause("web-1", "w1", DeviceConflict)]
+        );
+
+        let _: () = redis::pipe()
+            .del(&key)
+            .ignore()
+            .del(&index)
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .unwrap();
     }
 
     /// Run with `FLARE_TEST_REDIS_URL` pointing at an isolated Redis instance.

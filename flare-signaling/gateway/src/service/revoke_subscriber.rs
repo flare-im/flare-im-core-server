@@ -534,6 +534,35 @@ mod tests {
         );
     }
 
+    /// Online 把冲突策略挤掉的同一用户其他设备报成 `DEVICE_CONFLICT`：网关原样下发给那条旧连接，
+    /// flare-core 客户端认出它是结束会话的踢线（不再自动重连），新连接不受影响。多网关时新设备
+    /// 所在网关的设备管理器不认识旧设备，旧设备只收到这一条。
+    #[tokio::test]
+    async fn device_conflict_kicks_reach_the_old_device_as_session_ending() {
+        let manager = flare_core::server::connection::ConnectionManager::new();
+        let old_device = authenticated(&manager, "old-pc", "tenant-a").await;
+        let new_device = authenticated(&manager, "new-pc", "tenant-a").await;
+        let signal = KickSignal {
+            tenant_id: "tenant-a".into(),
+            user_id: "u1".into(),
+            device_id: None,
+            connection_id: Some("old-pc".into()),
+            reason: Some(flare_core::common::kick::DEVICE_CONFLICT_REASON.into()),
+        };
+
+        let kicker = Kicker::new(KICKED_SEND_TIMEOUT);
+        assert_eq!(kicker.close_matching(&manager, &signal).await, 1);
+
+        let frames = old_device.lock().unwrap().clone();
+        assert_eq!(frames.len(), 1);
+        let reason = kicked_message(&frames[0]);
+        assert_eq!(reason, flare_core::common::kick::DEVICE_CONFLICT_REASON);
+        assert!(flare_core::common::kick::ends_session(&reason));
+        assert!(manager.get_connection("old-pc").is_none());
+        assert!(new_device.lock().unwrap().is_empty());
+        assert!(manager.get_connection("new-pc").is_some());
+    }
+
     /// 同一信号命中的连接并发下发 KICKED：几条不读的连接一共只拖一个超时，
     /// 正常连接照样收到 KICKED，所有连接都被移除。
     #[tokio::test]
