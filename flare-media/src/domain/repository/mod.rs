@@ -262,6 +262,26 @@ pub trait UploadSessionStore: Send + Sync {
         self.get_session(upload_id).await
     }
     async fn upsert_session(&self, session: &UploadSession) -> Result<()>;
+    /// 在最新记录上改几个字段：读出记录（不论是否过期）交给 `apply`，`apply` 返回
+    /// `Ok(true)` 才写回；读出之后记录被别人改过就按新记录重来，不会盖掉其间的写入（例如
+    /// 刚提交的分片）。记录不存在时为 `Ok(None)`；`apply` 拒绝时原样返回它的错误、不写入。
+    /// 返回 `apply` 处理过的记录。
+    ///
+    /// 默认实现只是读改写，不防并发，供测试替身使用；Redis、内存与兜底存储都覆盖为原子
+    /// 操作。
+    async fn update_session(
+        &self,
+        upload_id: &str,
+        apply: &SessionUpdate<'_>,
+    ) -> Result<Option<UploadSession>> {
+        let Some(mut session) = self.get_session_record(upload_id).await? else {
+            return Ok(None);
+        };
+        if apply(&mut session)? {
+            self.upsert_session(&session).await?;
+        }
+        Ok(Some(session))
+    }
     async fn delete_session(&self, upload_id: &str) -> Result<()>;
     /// 领取 `expires_at` 早于 `expired_before` 的会话，至多 `limit` 个，并把它们租给调用方到
     /// `lease_until`：租期内其他回收者（含其他副本）领不到同一会话。资源释放成功后调用方
@@ -273,6 +293,10 @@ pub trait UploadSessionStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<UploadSession>>;
 }
+
+/// [`UploadSessionStore::update_session`] 的改写函数：返回是否写回。可能对同一会话的
+/// 较新记录再调用一次，所以只能根据传入的记录做决定。
+pub type SessionUpdate<'a> = dyn Fn(&mut UploadSession) -> Result<bool> + Send + Sync + 'a;
 
 pub type MetadataStoreRef = Arc<dyn MediaMetadataStore>;
 pub type MetadataCacheRef = Arc<dyn MediaMetadataCache>;

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use crate::domain::model::UploadSession;
-use crate::domain::repository::UploadSessionStore;
+use crate::domain::repository::{SessionUpdate, UploadSessionStore};
 use flare_server_core::error::Result;
 
 /// 进程内上传会话存储（开发/单机兜底）。
@@ -81,6 +81,23 @@ impl UploadSessionStore for MemoryUploadSessionStore {
         Ok(())
     }
 
+    /// 读、改、写都在同一把写锁里，其间没有别的写入。
+    async fn update_session(
+        &self,
+        upload_id: &str,
+        apply: &SessionUpdate<'_>,
+    ) -> Result<Option<UploadSession>> {
+        let mut guard = self.sessions.write().await;
+        let Some(entry) = guard.get(upload_id) else {
+            return Ok(None);
+        };
+        let mut session = entry.session.clone();
+        if apply(&mut session)? {
+            guard.insert(session.upload_id.clone(), Entry::new(&session));
+        }
+        Ok(Some(session))
+    }
+
     async fn delete_session(&self, upload_id: &str) -> Result<()> {
         let mut guard = self.sessions.write().await;
         guard.remove(upload_id);
@@ -145,6 +162,7 @@ mod tests {
             expires_at,
             created_at: expires_at,
             updated_at: expires_at,
+            completion: None,
         }
     }
 

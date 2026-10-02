@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::domain::model::UploadSession;
-use crate::domain::repository::UploadSessionStore;
+use crate::domain::repository::{SessionUpdate, UploadSessionStore};
 use flare_server_core::error::Result;
 
 /// Redis 优先、内存兜底的上传会话存储。
@@ -65,6 +65,38 @@ impl UploadSessionStore for FallbackUploadSessionStore {
             return self.fallback.upsert_session(session).await;
         }
         Ok(())
+    }
+
+    /// 与 get 相同：记录在 primary 就在 primary 上改，primary 没有或出错时改 fallback 里的。
+    /// `apply` 的拒绝不是存储故障，原样返回，不再去 fallback 改一遍。
+    async fn update_session(
+        &self,
+        upload_id: &str,
+        apply: &SessionUpdate<'_>,
+    ) -> Result<Option<UploadSession>> {
+        let rejected = std::sync::atomic::AtomicBool::new(false);
+        let tracked = |session: &mut UploadSession| {
+            apply(session).inspect_err(|_| {
+                rejected.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+        match self.primary.update_session(upload_id, &tracked).await {
+            Ok(Some(session)) => Ok(Some(session)),
+            Ok(None) => self.fallback.update_session(upload_id, apply).await,
+            Err(err) if rejected.load(std::sync::atomic::Ordering::Relaxed) => Err(err),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    upload_id = upload_id,
+                    "primary upload session store update failed, fallback to secondary store"
+                );
+                // fallback 里也没有这条记录时报 primary 的错误，而不是「会话不存在」。
+                match self.fallback.update_session(upload_id, apply).await? {
+                    Some(session) => Ok(Some(session)),
+                    None => Err(err),
+                }
+            }
+        }
     }
 
     async fn delete_session(&self, upload_id: &str) -> Result<()> {

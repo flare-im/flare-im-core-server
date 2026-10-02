@@ -22,6 +22,8 @@ struct RecordingBucket {
     presigned_parts: Mutex<Vec<(u32, i64)>>,
     /// 每次合并分片的对象 key。
     completed: Mutex<Vec<String>>,
+    /// 每次合并请求提交给存储的分片（含被拒的）。
+    merge_requests: Mutex<Vec<Vec<UploadedPartRecord>>>,
     /// 为真时删除对象失败（存储暂时不可用）。
     fail_deletes: Mutex<bool>,
     /// 设了就在合并里停住：先通知第一个，等第二个通知了才合并（模拟耗时的大文件合并）。
@@ -104,8 +106,9 @@ impl MediaObjectRepository for RecordingBucket {
         &self,
         object_path: &str,
         _upload_id: &str,
-        _parts: &[UploadedPartRecord],
+        parts: &[UploadedPartRecord],
     ) -> Result<()> {
+        self.merge_requests.lock().unwrap().push(parts.to_vec());
         let gate = self.merge_gate.lock().unwrap().take();
         if let Some((entered, release)) = gate {
             entered.notify_one();
@@ -774,20 +777,27 @@ async fn stale_chunk_directories_without_a_live_session_are_swept_locally() {
     assert!(f.service.session_dir(&live.upload_id).unwrap().exists());
 }
 
-/// 元数据端口：前 `fail_saves` 次登记失败（数据库暂时不可用），其余照常。
+/// 元数据端口：前 `fail_saves` 次登记失败（数据库暂时不可用），其余照常；`saves` 计成功
+/// 登记的次数；接下来 `hidden_loads` 次查询登记答「没有」（模拟查询早于另一次登记）。
 struct FlakyMetadata {
     inner: Arc<Metadata>,
     fail_saves: Mutex<u32>,
+    saves: Mutex<u32>,
+    hidden_loads: Mutex<u32>,
 }
 
 impl FlakyMetadata {
-    fn port(fail_saves: u32) -> impl FnOnce(Arc<Metadata>) -> Arc<dyn MediaMetadataStore> {
-        move |inner| {
-            Arc::new(Self {
-                inner,
-                fail_saves: Mutex::new(fail_saves),
-            })
+    fn new(inner: Arc<Metadata>, fail_saves: u32) -> Self {
+        Self {
+            inner,
+            fail_saves: Mutex::new(fail_saves),
+            saves: Mutex::new(0),
+            hidden_loads: Mutex::new(0),
         }
+    }
+
+    fn port(fail_saves: u32) -> impl FnOnce(Arc<Metadata>) -> Arc<dyn MediaMetadataStore> {
+        move |inner| Arc::new(Self::new(inner, fail_saves))
     }
 }
 
@@ -804,9 +814,18 @@ impl MediaMetadataStore for FlakyMetadata {
                 ));
             }
         }
-        self.inner.save_metadata(ctx, metadata).await
+        self.inner.save_metadata(ctx, metadata).await?;
+        *self.saves.lock().unwrap() += 1;
+        Ok(())
     }
     async fn load_metadata(&self, ctx: &Context, id: &str) -> Result<Option<MediaFileMetadata>> {
+        {
+            let mut hidden = self.hidden_loads.lock().unwrap();
+            if *hidden > 0 {
+                *hidden -= 1;
+                return Ok(None);
+            }
+        }
         self.inner.load_metadata(ctx, id).await
     }
     async fn load_by_hash(&self, ctx: &Context, hash: &str) -> Result<Option<MediaFileMetadata>> {
@@ -1253,4 +1272,277 @@ async fn reclaim_skips_a_session_renewed_after_it_was_claimed() {
         .await
         .unwrap();
     assert_eq!(saved.file_size, declared);
+}
+
+/// 用计数登记次数的元数据端口作夹具，同时交回这个端口。
+fn fixture_counting_saves() -> (Fixture, Arc<FlakyMetadata>) {
+    let mut port = None;
+    let f = Fixture::with(
+        |inner| {
+            let counting = Arc::new(FlakyMetadata::new(inner, 0));
+            port = Some(counting.clone());
+            counting
+        },
+        |sessions| sessions as Arc<dyn UploadSessionStore>,
+    );
+    (f, port.unwrap())
+}
+
+/// 同一分片会话的两次完成同时到达：第一次领取完成后在合并里停住，第二次得到可重试的
+/// 拒绝，不合并、不登记；第一次照常完成，文件只登记一次。修复前两次都合并、都登记（第二次
+/// 合并时存储报 NoSuchUpload，接着按已在的对象再登记一遍，盖掉第一次的登记）。
+#[tokio::test]
+async fn concurrent_completions_of_one_multipart_session_register_once() {
+    let (f, metadata) = fixture_counting_saves();
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.bucket.merge_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+
+    let owner = owner();
+    let (first, second) = tokio::join!(
+        f.service.complete_direct_upload(&owner, &state.upload_id),
+        async {
+            entered.notified().await;
+            let second = f
+                .service
+                .complete_direct_upload(&owner, &state.upload_id)
+                .await;
+            release.notify_one();
+            second
+        }
+    );
+    let err = second.unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable), "{err}");
+    let saved = first.unwrap();
+    assert_eq!(saved.file_size, declared);
+    assert_eq!(*metadata.saves.lock().unwrap(), 1);
+    assert_eq!(f.bucket.merge_requests.lock().unwrap().len(), 1);
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+}
+
+/// 会话端口：`race` 设了就在下一次读会话之后、把一次分片提交写进存储（模拟在完成读出会话
+/// 之后紧接着落地的一次提交）；`stale` 设了就让下一次读会话读到它（模拟读在另一次完成删除
+/// 会话之前）。
+struct RacingSessions {
+    inner: Arc<MemoryUploadSessionStore>,
+    race: Mutex<Option<UploadedPartRecord>>,
+    stale: Mutex<Option<UploadSession>>,
+}
+
+impl RacingSessions {
+    fn new(inner: Arc<MemoryUploadSessionStore>) -> Self {
+        Self {
+            inner,
+            race: Mutex::new(None),
+            stale: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UploadSessionStore for RacingSessions {
+    async fn create_session(&self, session: &UploadSession) -> Result<()> {
+        self.inner.create_session(session).await
+    }
+    async fn get_session(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        let stale = self.stale.lock().unwrap().take();
+        if stale.is_some() {
+            return Ok(stale);
+        }
+        let read = self.inner.get_session(upload_id).await?;
+        let race = self.race.lock().unwrap().take();
+        if let Some(part) = race {
+            self.inner
+                .update_session(upload_id, &|current| {
+                    current.merge_uploaded_part(part.clone());
+                    Ok(true)
+                })
+                .await?;
+        }
+        Ok(read)
+    }
+    async fn get_session_record(&self, upload_id: &str) -> Result<Option<UploadSession>> {
+        self.inner.get_session_record(upload_id).await
+    }
+    async fn upsert_session(&self, session: &UploadSession) -> Result<()> {
+        self.inner.upsert_session(session).await
+    }
+    async fn update_session(
+        &self,
+        upload_id: &str,
+        apply: &crate::domain::repository::SessionUpdate<'_>,
+    ) -> Result<Option<UploadSession>> {
+        self.inner.update_session(upload_id, apply).await
+    }
+    async fn delete_session(&self, upload_id: &str) -> Result<()> {
+        self.inner.delete_session(upload_id).await
+    }
+    async fn claim_expired_sessions(
+        &self,
+        expired_before: chrono::DateTime<Utc>,
+        lease_until: chrono::DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<UploadSession>> {
+        self.inner
+            .claim_expired_sessions(expired_before, lease_until, limit)
+            .await
+    }
+}
+
+/// 完成读出会话之后，客户端重传的第 2 片恰好提交（新 ETag）：完成只在最新记录上领取并
+/// 续期，合并用的是新 ETag。修复前完成先把读出的整份快照写回续期，盖掉刚提交的分片，
+/// 再用旧 ETag 合并。
+#[tokio::test]
+async fn a_part_committed_while_completing_is_not_overwritten() {
+    let mut port = None;
+    let f = Fixture::with(
+        |metadata| metadata as Arc<dyn MediaMetadataStore>,
+        |inner| {
+            let racing = Arc::new(RacingSessions::new(inner));
+            port = Some(racing.clone());
+            racing
+        },
+    );
+    let port = port.unwrap();
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    *port.race.lock().unwrap() = Some(UploadedPartRecord {
+        part_number: 2,
+        etag: "etag-2-reuploaded".to_string(),
+        size: state.part_size,
+        sha256: None,
+    });
+
+    f.service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    let merges = f.bucket.merge_requests.lock().unwrap().clone();
+    assert_eq!(merges.len(), 1);
+    let part_two = merges[0].iter().find(|part| part.part_number == 2).unwrap();
+    assert_eq!(part_two.etag, "etag-2-reuploaded");
+}
+
+/// 失败的完成不让会话续命：分片没提交齐、单次 PUT 的对象还没写入时不续期；领取之后合并被
+/// 存储拒绝（参数错误）时把续出的有效期交还，领取也一并交还，下一次完成可以立即领取。
+/// 修复前每次完成都先把会话续到 `now + 有效期`，反复调用 complete 可让会话一直不过期。
+#[tokio::test]
+async fn failed_completions_do_not_extend_the_session() {
+    /// 把会话改成 60 秒后过期，返回这个时刻。
+    async fn near(f: &Fixture, upload_id: String) -> chrono::DateTime<Utc> {
+        let mut session = f.stored_session(&upload_id).await.unwrap();
+        session.expires_at = Utc::now() + Duration::seconds(60);
+        f.sessions.upsert_session(&session).await.unwrap();
+        session.expires_at
+    }
+
+    let f = Fixture::new();
+
+    // 分片没提交齐。
+    let declared = 20 * 1024 * 1024;
+    let partial = f.initiate(declared).await;
+    let expires_at = near(&f, partial.upload_id.clone()).await;
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &partial.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    let kept = f.stored_session(&partial.upload_id).await.unwrap();
+    assert_eq!(kept.expires_at, expires_at);
+    assert!(kept.completion.is_none());
+
+    // 单次 PUT 的对象还没写入。
+    let single = f.initiate(5).await;
+    let expires_at = near(&f, single.upload_id.clone()).await;
+    let err = f
+        .service
+        .complete_direct_upload(&owner(), &single.upload_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some(ErrorCode::InvalidParameter), "{err}");
+    assert_eq!(
+        f.stored_session(&single.upload_id)
+            .await
+            .unwrap()
+            .expires_at,
+        expires_at
+    );
+
+    // 分片齐了、存储拒绝合并（分片上传已不在）：连续两次都是 400，有效期不变、领取已交还。
+    let merged = f.initiate(declared).await;
+    commit_all_parts(&f, &merged).await;
+    f.bucket
+        .aborted
+        .lock()
+        .unwrap()
+        .push((merged.object_key.clone(), STORAGE_UPLOAD_ID.to_string()));
+    let expires_at = near(&f, merged.upload_id.clone()).await;
+    for round in 1..=2 {
+        let err = f
+            .service
+            .complete_direct_upload(&owner(), &merged.upload_id)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            Some(ErrorCode::InvalidParameter),
+            "round {round}: {err}"
+        );
+        let kept = f.stored_session(&merged.upload_id).await.unwrap();
+        assert_eq!(kept.expires_at, expires_at, "round {round}");
+        assert!(kept.completion.is_none(), "round {round}");
+    }
+    assert_eq!(f.bucket.merge_requests.lock().unwrap().len(), 2);
+}
+
+/// 另一次完成在这次的登记查询之后登记完、删掉了会话：这次领取时会话已不在，按已登记的
+/// 文件答复，不再合并、不再登记。修复前这次完成回会话不存在（404）。
+#[tokio::test]
+async fn a_completion_overtaken_by_a_finished_one_answers_the_registered_file() {
+    let mut metadata_port = None;
+    let mut sessions_port = None;
+    let f = Fixture::with(
+        |inner| {
+            let counting = Arc::new(FlakyMetadata::new(inner, 0));
+            metadata_port = Some(counting.clone());
+            counting
+        },
+        |inner| {
+            let racing = Arc::new(RacingSessions::new(inner));
+            sessions_port = Some(racing.clone());
+            racing
+        },
+    );
+    let (metadata, sessions) = (metadata_port.unwrap(), sessions_port.unwrap());
+    let declared = 20 * 1024 * 1024;
+    let state = f.initiate(declared).await;
+    commit_all_parts(&f, &state).await;
+    f.bucket.client_wrote(&state.object_key, declared);
+    let before = f.stored_session(&state.upload_id).await.unwrap();
+    let first = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert!(f.stored_session(&state.upload_id).await.is_none());
+
+    // 这次完成读到的会话与登记查询都早于上一次完成的收尾。
+    *sessions.stale.lock().unwrap() = Some(before);
+    *metadata.hidden_loads.lock().unwrap() = 1;
+    let second = f
+        .service
+        .complete_direct_upload(&owner(), &state.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(second.file_id, first.file_id);
+    assert_eq!(*metadata.saves.lock().unwrap(), 1);
+    assert_eq!(f.bucket.merge_requests.lock().unwrap().len(), 1);
+    assert!(f.stored_session(&state.upload_id).await.is_none());
 }

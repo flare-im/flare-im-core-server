@@ -7,7 +7,7 @@ use redis::aio::ConnectionManager;
 use tokio::sync::Mutex;
 
 use crate::domain::model::{UploadSession, UploadSessionStatus};
-use crate::domain::repository::UploadSessionStore;
+use crate::domain::repository::{SessionUpdate, UploadSessionStore};
 
 /// 会话过期后记录在 Redis 里再留这么久，供回收任务读出对象 key、分片上传 id 释放资源。
 /// 回收失败按租期重试，这段时间覆盖存储短时故障；超过后记录自然过期，残留交给存储侧
@@ -30,6 +30,26 @@ end
 redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
 return payload
 "#;
+
+/// 比较后写入：记录仍是读出时的原文才写入新记录并更新回收索引，否则不动、返回 0。
+/// 两个键都经 KEYS 声明。
+const COMPARE_AND_SET_SCRIPT: &str = r#"
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+return 1
+"#;
+
+/// [`UploadSessionStore::update_session`] 遇到其他副本并发写入时的重读次数上限（含第一次）。
+const UPDATE_ATTEMPTS: u32 = 10;
+
+/// 比较失败后的退避：随次数增长，并加随机抖动，错开各副本的下一次读改写。
+fn update_backoff(attempt: u32) -> std::time::Duration {
+    let jitter = (uuid::Uuid::new_v4().as_u128() % 5) as u64;
+    std::time::Duration::from_millis(u64::from(attempt) * 2 + jitter)
+}
 
 #[derive(Clone)]
 pub struct RedisUploadSessionStore {
@@ -87,12 +107,18 @@ impl RedisUploadSessionStore {
         (clamped + RECLAIM_RETENTION_SECONDS) as u64
     }
 
-    async fn write_session(&self, session: &UploadSession, action: &'static str) -> Result<()> {
+    /// 写入前的记录：补默认字段后序列化。
+    fn prepared(&self, session: &UploadSession) -> Result<(UploadSession, String)> {
         let mut session = session.clone();
         Self::ensure_session_defaults(&mut session);
         let payload = serde_json::to_string(&session).map_err(|e| {
             map_infra_error(e, ErrorCode::SerializationError, "serialize upload session")
         })?;
+        Ok((session, payload))
+    }
+
+    async fn write_session(&self, session: &UploadSession, action: &'static str) -> Result<()> {
+        let (session, payload) = self.prepared(session)?;
         let mut conn = self.connection.lock().await;
         // 记录与索引同一事务写入：有记录就一定在索引里，回收任务不会漏掉它。
         let _: () = redis::pipe()
@@ -156,6 +182,70 @@ impl UploadSessionStore for RedisUploadSessionStore {
     async fn upsert_session(&self, session: &UploadSession) -> Result<()> {
         self.write_session(session, "failed to upsert upload session in redis")
             .await
+    }
+
+    /// 乐观并发：读出原文、改写，再用脚本比较原文后写入；其间被别人写过就重读重来。
+    /// 读、改、写期间一直持有本副本的连接锁，本副本内的改写因此依次进行、互不冲突；
+    /// 只有其他副本的写入会让比较失败，失败后短暂随机退避再重来。
+    async fn update_session(
+        &self,
+        upload_id: &str,
+        apply: &SessionUpdate<'_>,
+    ) -> Result<Option<UploadSession>> {
+        let key = self.key(upload_id);
+        let script = redis::Script::new(COMPARE_AND_SET_SCRIPT);
+        for attempt in 1..=UPDATE_ATTEMPTS {
+            let mut conn = self.connection.lock().await;
+            let current: Option<String> = conn.get(&key).await.map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::NetworkError,
+                    "failed to fetch upload session from redis",
+                )
+            })?;
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            let mut session: UploadSession = serde_json::from_str(&current).map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::DeserializationError,
+                    "failed to deserialize upload session",
+                )
+            })?;
+            if !apply(&mut session)? {
+                return Ok(Some(session));
+            }
+            let (session, payload) = self.prepared(&session)?;
+            let written: i64 = script
+                .key(&key)
+                .key(self.reclaim_index_key())
+                .arg(&current)
+                .arg(&payload)
+                .arg(self.ttl_for_session(&session))
+                .arg(session.expires_at.timestamp_millis())
+                .arg(upload_id)
+                .invoke_async(&mut *conn)
+                .await
+                .map_err(|e| {
+                    map_infra_error(
+                        e,
+                        ErrorCode::NetworkError,
+                        "failed to update upload session in redis",
+                    )
+                })?;
+            drop(conn);
+            if written == 1 {
+                return Ok(Some(session));
+            }
+            if attempt < UPDATE_ATTEMPTS {
+                tokio::time::sleep(update_backoff(attempt)).await;
+            }
+        }
+        Err(flare_server_core::flare_err!(
+            ErrorCode::ServiceUnavailable,
+            "upload session is being updated concurrently; retry"
+        ))
     }
 
     async fn delete_session(&self, upload_id: &str) -> Result<()> {
@@ -287,6 +377,7 @@ mod tests {
             expires_at,
             created_at: expires_at - Duration::hours(1),
             updated_at: expires_at - Duration::hours(1),
+            completion: None,
         }
     }
 
@@ -466,6 +557,97 @@ mod tests {
         store.delete_session(&renewed.upload_id).await.unwrap();
         let mut conn = store.connection.lock().await;
         let remaining: usize = conn.zcard(store.reclaim_index_key()).await.unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// 多个副本同时在同一会话上改字段（并发提交分片）：每次改写都落在最新记录上，谁也
+    /// 盖不掉谁；改写函数拒绝时不写入；记录不存在时答 `None`。修复前提交分片是读出整份
+    /// 记录后写回，并发提交会互相覆盖。
+    #[tokio::test]
+    #[ignore = "requires FLARE_TEST_REDIS_URL"]
+    async fn concurrent_field_updates_do_not_overwrite_each_other() {
+        use crate::domain::model::UploadedPartRecord;
+
+        let url = std::env::var("FLARE_TEST_REDIS_URL").expect("FLARE_TEST_REDIS_URL");
+        let namespace = format!("media-upload-update-test-{}", uuid::Uuid::new_v4());
+        let mut replicas = Vec::new();
+        for _ in 0..4 {
+            replicas.push(Arc::new(
+                RedisUploadSessionStore::new(&url, namespace.clone(), 3600)
+                    .await
+                    .unwrap(),
+            ));
+        }
+        let base = session(
+            &uuid::Uuid::new_v4().to_string(),
+            Utc::now() + Duration::minutes(10),
+        );
+        replicas[0].create_session(&base).await.unwrap();
+
+        const PARTS: u32 = 16;
+        let mut tasks = Vec::new();
+        for part_number in 1..=PARTS {
+            let store = replicas[part_number as usize % replicas.len()].clone();
+            let upload_id = base.upload_id.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .update_session(&upload_id, &|current| {
+                        current.merge_uploaded_part(UploadedPartRecord {
+                            part_number,
+                            etag: format!("etag-{part_number}"),
+                            size: 1,
+                            sha256: None,
+                        });
+                        Ok(true)
+                    })
+                    .await
+            }));
+        }
+        for task in tasks {
+            assert!(task.await.unwrap().unwrap().is_some());
+        }
+        let stored = replicas[0]
+            .get_session_record(&base.upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut parts: Vec<u32> = stored
+            .uploaded_parts
+            .iter()
+            .map(|part| part.part_number)
+            .collect();
+        parts.sort_unstable();
+        assert_eq!(parts, (1..=PARTS).collect::<Vec<_>>());
+
+        // 改写函数拒绝：原样返回它的错误，记录不变。
+        let err = replicas[1]
+            .update_session(&base.upload_id, &|current| {
+                current.uploaded_parts.clear();
+                Err(flare_server_core::flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "rejected"
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::InvalidParameter));
+        let kept = replicas[1]
+            .get_session_record(&base.upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.uploaded_parts.len(), PARTS as usize);
+        assert!(
+            replicas[1]
+                .update_session(&uuid::Uuid::new_v4().to_string(), &|_| Ok(true))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        replicas[0].delete_session(&base.upload_id).await.unwrap();
+        let mut conn = replicas[0].connection.lock().await;
+        let remaining: usize = conn.zcard(replicas[0].reclaim_index_key()).await.unwrap();
         assert_eq!(remaining, 0);
     }
 }

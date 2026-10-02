@@ -1,4 +1,6 @@
 use super::*;
+use crate::domain::model::CompletionClaim;
+use chrono::DateTime;
 
 impl MediaService {
     #[instrument(skip(self, ctx, metadata), fields(
@@ -148,6 +150,7 @@ impl MediaService {
             expires_at,
             created_at: now,
             updated_at: now,
+            completion: None,
         };
 
         store.create_session(&session).await?;
@@ -288,7 +291,7 @@ impl MediaService {
                 "direct upload is not configured"
             ));
         };
-        let mut session = store.get_session(upload_id).await?.ok_or_else(|| {
+        let session = store.get_session(upload_id).await?.ok_or_else(|| {
             flare_server_core::flare_err_details!(
                 ErrorCode::MessageNotFound,
                 "upload session not found",
@@ -315,11 +318,24 @@ impl MediaService {
                     "etag is required when committing uploaded part"
                 ));
             }
-            session.merge_uploaded_part(part.clone());
         }
-        session.updated_at = Utc::now();
-        session.expires_at = Utc::now() + Duration::seconds(self.config.chunk_ttl_seconds.max(300));
-        store.upsert_session(&session).await?;
+        // 在最新记录上合并分片并续期：同时到达的其他提交与完成的领取都不会被这次写入盖掉。
+        let ttl = Duration::seconds(self.config.chunk_ttl_seconds.max(300));
+        let session = store
+            .update_session(upload_id, &|current| {
+                let now = Utc::now();
+                if current.expires_at < now {
+                    return Err(Self::session_not_found(upload_id));
+                }
+                for part in parts {
+                    current.merge_uploaded_part(part.clone());
+                }
+                current.updated_at = now;
+                current.expires_at = now + ttl;
+                Ok(true)
+            })
+            .await?
+            .ok_or_else(|| Self::session_not_found(upload_id))?;
         Ok(self.direct_state_from_session(&session))
     }
 
@@ -382,124 +398,93 @@ impl MediaService {
             return Ok(registered);
         }
 
-        // 续期：合并与登记期间会话不会过期，回收任务领不到它，不会删掉正在合并的对象。
-        session.expires_at = Utc::now() + Duration::seconds(self.config.chunk_ttl_seconds.max(300));
-        session.updated_at = Utc::now();
-        store.upsert_session(&session).await?;
-
-        match session
+        let transport_kind = session
             .transport_kind
-            .unwrap_or(DirectUploadTransportKind::SinglePut)
-        {
-            DirectUploadTransportKind::SinglePut => {
-                // 对象不存在：调用方还没按地址 PUT 就来完成，是调用方错误。声明大小为 0 的上传
-                // 写入 0 字节对象即可完成，与经 Media 中转的上传一致；其余大小由下面核对。
-                let stat = object_repo.stat_object(&object_key).await?.ok_or_else(|| {
-                    flare_server_core::flare_err!(
-                        ErrorCode::InvalidParameter,
-                        "single put object is missing; upload it before completing"
-                    )
-                })?;
-                // 地址已签了长度；存储不校验 signed headers 时这里兜底。删掉写错的对象，
-                // 会话保留，调用方可以在地址有效期内按声明大小重传。删除失败不改变答复：
-                // 会话未完成、文件未登记，对象由回收任务在会话过期后删除。
-                if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
-                    if let Err(delete_err) = object_repo.delete_object(&object_key).await {
-                        tracing::warn!(
-                            error = %delete_err,
-                            "failed to delete a single put object of the wrong size; reclaim will retry"
-                        );
-                    }
-                    return Err(err);
+            .unwrap_or(DirectUploadTransportKind::SinglePut);
+        // 先做不写会话的校验：单次 PUT 的对象已写入且大小与声明一致，分片会话已提交齐全部
+        // 分片。通不过的完成不领取、不续期，反复调用也不能让会话一直续命。
+        if transport_kind == DirectUploadTransportKind::SinglePut {
+            // 对象不存在：调用方还没按地址 PUT 就来完成，是调用方错误。声明大小为 0 的上传
+            // 写入 0 字节对象即可完成，与经 Media 中转的上传一致；其余大小由下面核对。
+            let stat = object_repo.stat_object(&object_key).await?.ok_or_else(|| {
+                flare_server_core::flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "single put object is missing; upload it before completing"
+                )
+            })?;
+            // 地址已签了长度；存储不校验 signed headers 时这里兜底。删掉写错的对象，
+            // 会话保留，调用方可以在地址有效期内按声明大小重传。删除失败不改变答复：
+            // 会话未完成、文件未登记，对象由回收任务在会话过期后删除。
+            if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
+                if let Err(delete_err) = object_repo.delete_object(&object_key).await {
+                    tracing::warn!(
+                        error = %delete_err,
+                        "failed to delete a single put object of the wrong size; reclaim will retry"
+                    );
                 }
+                return Err(err);
             }
-            DirectUploadTransportKind::MultipartPut => {
-                let total_parts = session.total_parts.unwrap_or_default();
-                if total_parts == 0 || session.uploaded_parts.len() != total_parts as usize {
-                    return Err(flare_server_core::flare_err_details!(
-                        ErrorCode::InvalidParameter,
-                        "not all multipart parts are committed",
-                        format!(
-                            "committed_parts={} total_parts={}",
-                            session.uploaded_parts.len(),
-                            total_parts
-                        )
-                    ));
-                }
-                let storage_upload_id = session.storage_upload_id.clone().ok_or_else(|| {
-                    flare_server_core::flare_err!(
-                        ErrorCode::InternalError,
-                        "storage_upload_id missing in session"
-                    )
-                })?;
-                let merged = match object_repo
-                    .complete_multipart_upload(
-                        &object_key,
-                        &storage_upload_id,
-                        &session.uploaded_parts,
-                    )
-                    .await
-                {
-                    Ok(()) => None,
-                    // 上一次完成已合并、却没登记上（或合并的答复丢了）：存储里已没有这个分片
-                    // 上传（NoSuchUpload），合并出的对象却在。对象 key 只属于这个会话，存在
-                    // 即说明已合并过，接着核对大小并登记。对象也不在时报原来的错误。
-                    Err(err) => match object_repo.stat_object(&object_key).await {
-                        Ok(Some(stat)) => {
-                            tracing::info!(
-                                error = %err,
-                                "merge failed but the merged object exists; registering it"
-                            );
-                            Some(stat)
-                        }
-                        _ => return Err(err),
-                    },
-                };
-                // 每片地址已签了长度；存储不校验 signed headers 时，合并后的对象在这里按声明
-                // 大小兜底核对。分片上传已合并、无法重来，不符时删除对象并结束会话。
-                let stat = match merged {
-                    Some(stat) => stat,
-                    None => object_repo.stat_object(&object_key).await?.ok_or_else(|| {
-                        flare_server_core::flare_err!(
-                            ErrorCode::InternalError,
-                            "merged multipart object is missing"
-                        )
-                    })?,
-                };
-                if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
-                    match object_repo.delete_object(&object_key).await {
-                        Ok(()) => {
-                            store.delete_session(upload_id).await.ok();
-                        }
-                        Err(delete_err) => {
-                            // 删除失败不改变答复。会话标为中止并保留，到期后由回收任务删对象。
-                            tracing::warn!(
-                                error = %delete_err,
-                                "failed to delete a merged object of the wrong size; reclaim will retry"
-                            );
-                            session.status = UploadSessionStatus::Aborted;
-                            session.updated_at = Utc::now();
-                            Self::mark_session_aborted(store.as_ref(), &session).await;
-                        }
-                    }
-                    return Err(err);
-                }
-            }
+        } else {
+            Self::ensure_all_parts_committed(&session)?;
         }
 
-        let metadata = self
-            .persist_direct_upload_metadata(
-                ctx,
-                &session,
-                &bucket,
-                &object_key,
-                &file_id,
-                file_size,
-            )
-            .await?;
+        // 领取完成并续期：合并与登记期间会话不会过期，回收任务领不到它，不会删掉正在合并的
+        // 对象；同一会话的另一次完成在租期内得到可重试的拒绝，不会再合并、再登记一次。
+        let claim = match self
+            .claim_direct_completion(store.as_ref(), upload_id)
+            .await
+        {
+            Ok(claim) => claim,
+            // 另一次完成恰好在上面的检查之后登记完并结束了会话（会话已删除或已标为完成）：
+            // 按已登记的文件答复，而不是报会话不存在。
+            Err(err)
+                if matches!(
+                    err.code(),
+                    Some(ErrorCode::MessageNotFound | ErrorCode::InvalidParameter)
+                ) =>
+            {
+                if let Some(metadata_store) = &self.metadata_store
+                    && let Some(registered) = metadata_store.load_metadata(ctx, &file_id).await?
+                {
+                    return Ok(registered);
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        let mut session = claim.session.clone();
 
-        Self::finish_direct_session(store.as_ref(), &mut session).await;
-        Ok(metadata)
+        let outcome = match transport_kind {
+            DirectUploadTransportKind::SinglePut => Ok(()),
+            DirectUploadTransportKind::MultipartPut => {
+                self.merge_direct_parts(store.as_ref(), &mut session, &object_key, file_size)
+                    .await
+            }
+        };
+        let outcome = match outcome {
+            Ok(()) => {
+                self.persist_direct_upload_metadata(
+                    ctx,
+                    &session,
+                    &bucket,
+                    &object_key,
+                    &file_id,
+                    file_size,
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(metadata) => {
+                Self::finish_direct_session(store.as_ref(), &mut session).await;
+                Ok(metadata)
+            }
+            Err(err) => {
+                Self::release_direct_completion(store.as_ref(), &claim, &err).await;
+                Err(err)
+            }
+        }
     }
 
     #[instrument(skip(self, ctx), fields(
@@ -537,7 +522,210 @@ impl MediaService {
 /// 把分片会话标为中止的写入次数上限（含第一次）。
 pub(super) const ABORT_MARK_ATTEMPTS: u32 = 3;
 
+/// 一次直传完成的领取租期：领取者中途退出时，这么久之后另一次完成才能领取。合并与登记
+/// 通常几秒内结束。
+pub(super) const DIRECT_COMPLETION_LEASE_SECONDS: i64 = 300;
+
+/// 领到的一次直传完成。
+pub(super) struct DirectCompletionClaim {
+    /// 领取写入后的会话记录（含其间提交的分片）。
+    pub(super) session: UploadSession,
+    /// 这次完成的幂等键，交还领取时凭它认出自己的领取。
+    pub(super) token: String,
+    /// 领取前的有效期：完成因调用方错误失败时交还续出的那段。
+    pub(super) expires_before: DateTime<Utc>,
+}
+
 impl MediaService {
+    fn session_not_found(upload_id: &str) -> flare_server_core::error::FlareError {
+        flare_server_core::flare_err_details!(
+            ErrorCode::MessageNotFound,
+            "upload session not found",
+            format!("upload_id={upload_id}")
+        )
+    }
+
+    /// 分片会话必须先提交齐全部分片才能完成。
+    fn ensure_all_parts_committed(session: &UploadSession) -> Result<()> {
+        let total_parts = session.total_parts.unwrap_or_default();
+        if total_parts == 0 || session.uploaded_parts.len() != total_parts as usize {
+            return Err(flare_server_core::flare_err_details!(
+                ErrorCode::InvalidParameter,
+                "not all multipart parts are committed",
+                format!(
+                    "committed_parts={} total_parts={}",
+                    session.uploaded_parts.len(),
+                    total_parts
+                )
+            ));
+        }
+        Ok(())
+    }
+
+    /// 在最新会话记录上领取这次完成并续期，只改领取与有效期两个字段。会话已过期、已结束、
+    /// 分片没提交齐，或另一次完成的领取仍在租期内时拒绝，不写入。
+    async fn claim_direct_completion(
+        &self,
+        store: &dyn crate::domain::repository::UploadSessionStore,
+        upload_id: &str,
+    ) -> Result<DirectCompletionClaim> {
+        let token = Uuid::new_v4().to_string();
+        let ttl = Duration::seconds(self.config.chunk_ttl_seconds.max(300));
+        let lease = Duration::seconds(DIRECT_COMPLETION_LEASE_SECONDS);
+        let expires_before = std::sync::Mutex::new(None);
+        let session = store
+            .update_session(upload_id, &|current| {
+                let now = Utc::now();
+                if current.expires_at < now {
+                    return Err(Self::session_not_found(upload_id));
+                }
+                if current.status != UploadSessionStatus::Pending {
+                    return Err(flare_server_core::flare_err!(
+                        ErrorCode::InvalidParameter,
+                        "upload session is no longer active; start a new upload"
+                    ));
+                }
+                if current
+                    .completion
+                    .as_ref()
+                    .is_some_and(|claim| claim.lease_until > now)
+                {
+                    return Err(flare_server_core::flare_err!(
+                        ErrorCode::ServiceUnavailable,
+                        "completion of this upload is already in progress; retry later"
+                    ));
+                }
+                if current.transport_kind == Some(DirectUploadTransportKind::MultipartPut) {
+                    Self::ensure_all_parts_committed(current)?;
+                }
+                *expires_before
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(current.expires_at);
+                current.completion = Some(CompletionClaim {
+                    token: token.clone(),
+                    lease_until: now + lease,
+                });
+                current.expires_at = current.expires_at.max(now + ttl);
+                current.updated_at = now;
+                Ok(true)
+            })
+            .await?
+            .ok_or_else(|| Self::session_not_found(upload_id))?;
+        let expires_before = expires_before
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or(session.expires_at);
+        Ok(DirectCompletionClaim {
+            session,
+            token,
+            expires_before,
+        })
+    }
+
+    /// 完成失败后交还领取，另一次完成随即可以领取。失败是调用方错误（参数错误）时连这次
+    /// 续出的有效期一并交还，反复失败的完成不能让会话续命；存储或数据库暂时不可用时保留
+    /// 续期，客户端在有效期内重试。会话已被删除、标为中止或已被别的领取取代时不动。
+    async fn release_direct_completion(
+        store: &dyn crate::domain::repository::UploadSessionStore,
+        claim: &DirectCompletionClaim,
+        err: &flare_server_core::error::FlareError,
+    ) {
+        let restore = err.code() == Some(ErrorCode::InvalidParameter);
+        let renewed_until = claim.session.expires_at;
+        let result = store
+            .update_session(&claim.session.upload_id, &|current| {
+                if current.completion.as_ref().map(|c| c.token.as_str())
+                    != Some(claim.token.as_str())
+                {
+                    return Ok(false);
+                }
+                current.completion = None;
+                if restore && current.expires_at == renewed_until {
+                    current.expires_at = claim.expires_before;
+                }
+                current.updated_at = Utc::now();
+                Ok(true)
+            })
+            .await;
+        if let Err(release_err) = result {
+            tracing::warn!(
+                error = %release_err,
+                upload_id = %claim.session.upload_id,
+                "failed to release a direct upload completion; it expires with its lease"
+            );
+        }
+    }
+
+    /// 合并分片并核对合并出的对象大小。不符时删除对象并结束会话；删除失败则把会话标为中止。
+    async fn merge_direct_parts(
+        &self,
+        store: &dyn crate::domain::repository::UploadSessionStore,
+        session: &mut UploadSession,
+        object_key: &str,
+        file_size: i64,
+    ) -> Result<()> {
+        let Some(object_repo) = &self.object_repo else {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                "object storage is required for direct upload"
+            ));
+        };
+        let storage_upload_id = session.storage_upload_id.clone().ok_or_else(|| {
+            flare_server_core::flare_err!(
+                ErrorCode::InternalError,
+                "storage_upload_id missing in session"
+            )
+        })?;
+        let merged = match object_repo
+            .complete_multipart_upload(object_key, &storage_upload_id, &session.uploaded_parts)
+            .await
+        {
+            Ok(()) => None,
+            // 上一次完成已合并、却没登记上（或合并的答复丢了）：存储里已没有这个分片
+            // 上传（NoSuchUpload），合并出的对象却在。对象 key 只属于这个会话，存在
+            // 即说明已合并过，接着核对大小并登记。对象也不在时报原来的错误。
+            Err(err) => match object_repo.stat_object(object_key).await {
+                Ok(Some(stat)) => {
+                    tracing::info!(
+                        error = %err,
+                        "merge failed but the merged object exists; registering it"
+                    );
+                    Some(stat)
+                }
+                _ => return Err(err),
+            },
+        };
+        // 每片地址已签了长度；存储不校验 signed headers 时，合并后的对象在这里按声明
+        // 大小兜底核对。分片上传已合并、无法重来，不符时删除对象并结束会话。
+        let stat = match merged {
+            Some(stat) => stat,
+            None => object_repo.stat_object(object_key).await?.ok_or_else(|| {
+                flare_server_core::flare_err!(
+                    ErrorCode::InternalError,
+                    "merged multipart object is missing"
+                )
+            })?,
+        };
+        if let Err(err) = Self::ensure_declared_size(&stat, file_size) {
+            match object_repo.delete_object(object_key).await {
+                Ok(()) => {
+                    store.delete_session(&session.upload_id).await.ok();
+                }
+                Err(delete_err) => {
+                    // 删除失败不改变答复。会话标为中止并保留，到期后由回收任务删对象。
+                    tracing::warn!(
+                        error = %delete_err,
+                        "failed to delete a merged object of the wrong size; reclaim will retry"
+                    );
+                    session.status = UploadSessionStatus::Aborted;
+                    session.updated_at = Utc::now();
+                    Self::mark_session_aborted(store, session).await;
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
     /// 完成收尾：标为已完成并删除会话记录。两步都尽力而为：记录残留时，重试完成按已登记的
     /// 文件答复，回收任务也不删已登记文件的对象。
     async fn finish_direct_session(
@@ -546,7 +734,16 @@ impl MediaService {
     ) {
         session.status = UploadSessionStatus::Completed;
         session.updated_at = Utc::now();
-        if let Err(err) = store.upsert_session(session).await {
+        // 只改状态：记录已被另一次完成删掉时不重建它，也不拿手里的快照盖掉其间的写入。
+        let marked = store
+            .update_session(&session.upload_id, &|current| {
+                current.status = UploadSessionStatus::Completed;
+                current.completion = None;
+                current.updated_at = Utc::now();
+                Ok(true)
+            })
+            .await;
+        if let Err(err) = marked {
             tracing::warn!(
                 error = %err,
                 upload_id = %session.upload_id,
@@ -570,8 +767,17 @@ impl MediaService {
         session: &UploadSession,
     ) {
         for attempt in 1..=ABORT_MARK_ATTEMPTS {
-            match store.upsert_session(session).await {
-                Ok(()) => return,
+            // 只改状态与领取两个字段：不拿完成开始时的快照盖掉其间的写入。
+            let marked = store
+                .update_session(&session.upload_id, &|current| {
+                    current.status = UploadSessionStatus::Aborted;
+                    current.completion = None;
+                    current.updated_at = Utc::now();
+                    Ok(true)
+                })
+                .await;
+            match marked {
+                Ok(_) => return,
                 Err(err) if attempt == ABORT_MARK_ATTEMPTS => tracing::warn!(
                     error = %err,
                     upload_id = %session.upload_id,

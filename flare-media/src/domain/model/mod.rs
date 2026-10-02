@@ -340,6 +340,18 @@ pub struct UploadSession {
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 正在进行的一次直传完成（合并与登记）。同一会话同时只有一个完成能领到它，其余的
+    /// 在租期内得到可重试的拒绝，所以并发的两次完成只登记一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<CompletionClaim>,
+}
+
+/// 直传完成的领取记录：完成用的幂等键与租期。完成失败时由领取者凭幂等键交还；领取者
+/// 中途退出时租期过后自然失效。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompletionClaim {
+    pub token: String,
+    pub lease_until: DateTime<Utc>,
 }
 
 impl UploadSession {

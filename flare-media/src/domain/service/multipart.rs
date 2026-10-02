@@ -63,6 +63,7 @@ impl MediaService {
             expires_at,
             created_at: now,
             updated_at: now,
+            completion: None,
         };
 
         self.ensure_session_dir(&upload_id).await?;
