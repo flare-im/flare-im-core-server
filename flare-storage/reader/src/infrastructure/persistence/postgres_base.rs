@@ -10,7 +10,7 @@ use flare_im_contracts::utils::datetime_to_timestamp;
 use flare_proto::common::{
     ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionState,
 };
-use flare_server_core::error::{AnyhowContext, Result};
+use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use prost::Message as ProstMessage;
 use serde_json::{Value, from_value};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
@@ -38,10 +38,8 @@ impl PostgresBaseStorage {
         cache: Option<std::sync::Arc<RedisMessageCache>>,
     ) -> Result<Self> {
         let storage = Self { pool, cache };
-        storage
-            .verify_schema()
-            .await
-            .context("Failed to verify PostgreSQL schema")?;
+        // 不再包一层：校验里的数据库错误已按连接类与否分类，schema 不符是配置错误。
+        storage.verify_schema().await?;
         Ok(storage)
     }
 
@@ -68,11 +66,16 @@ impl PostgresBaseStorage {
             .test_before_acquire(true)
             .connect(url)
             .await
-            .context("Failed to connect to PostgreSQL")?;
+            .db_context("Failed to connect to PostgreSQL")?;
 
         let cache = if let Some(redis_url) = &config.redis_url {
-            let client =
-                redis::Client::open(redis_url.as_str()).context("Failed to create Redis client")?;
+            let client = redis::Client::open(redis_url.as_str()).map_err(|err| {
+                map_infra_error(
+                    err,
+                    ErrorCode::ConfigurationError,
+                    "Failed to create Redis client",
+                )
+            })?;
             Some(std::sync::Arc::new(RedisMessageCache::new(
                 std::sync::Arc::new(client),
                 config,
@@ -180,12 +183,15 @@ impl PostgresBaseStorage {
         .bind(table_name)
         .fetch_one(&self.pool)
         .await
-        .context("Failed to verify required PostgreSQL table")?;
+        .db_context("Failed to verify required PostgreSQL table")?;
 
         if !exists {
-            return Err(flare_server_core::error::FlareError::system(format!(
-                "PostgreSQL schema mismatch: required table `{table_name}` is missing; re-run flare-im-core/deploy/init.sql"
-            )));
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                format!(
+                    "PostgreSQL schema mismatch: required table `{table_name}` is missing; re-run flare-im-core/deploy/init.sql"
+                )
+            ));
         }
         Ok(())
     }
@@ -205,7 +211,7 @@ impl PostgresBaseStorage {
         .bind(&expected)
         .fetch_all(&self.pool)
         .await
-        .context("Failed to verify required PostgreSQL columns")?
+        .db_context("Failed to verify required PostgreSQL columns")?
         .into_iter()
         .collect();
 
@@ -215,10 +221,13 @@ impl PostgresBaseStorage {
             .filter(|column| !actual.contains(*column))
             .collect();
         if !missing.is_empty() {
-            return Err(flare_server_core::error::FlareError::system(format!(
-                "PostgreSQL schema mismatch: table `{table_name}` missing columns [{}]; re-run flare-im-core/deploy/init.sql",
-                missing.join(", ")
-            )));
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ConfigurationError,
+                format!(
+                    "PostgreSQL schema mismatch: table `{table_name}` missing columns [{}]; re-run flare-im-core/deploy/init.sql",
+                    missing.join(", ")
+                )
+            ));
         }
         Ok(())
     }
@@ -229,7 +238,7 @@ impl PostgresBaseStorage {
         let _: i64 = sqlx::query_scalar("SELECT 1")
             .fetch_one(&self.pool)
             .await
-            .context("Health check failed: database connection error")?;
+            .db_context("Health check failed: database connection error")?;
 
         // 检查连接池状态
         let pool_size = self.pool.size();
@@ -502,4 +511,46 @@ fn legacy_retention_state(
         },
         triggered_by_user_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 连一个不监听的回环端口：取连接立即失败，模拟数据库不可达（不需要真库）。
+    fn unreachable_storage() -> PostgresBaseStorage {
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://reader@127.0.0.1:1/flare")
+            .unwrap();
+        PostgresBaseStorage { pool, cache: None }
+    }
+
+    /// 健康检查、启动时的 schema 校验与建存储时连不上数据库，是分好类的「暂不可用」，不是
+    /// 带原文的系统错误；修复前这几处 `.context()` 一律包成 `FlareError::System`（无错误码，
+    /// 文本里带着数据库报文）。
+    #[tokio::test]
+    async fn an_unreachable_database_is_unavailable_outside_queries_too() {
+        let storage = unreachable_storage();
+        let health = storage.health_check().await.unwrap_err();
+        assert_eq!(
+            health.code(),
+            Some(ErrorCode::ServiceUnavailable),
+            "{health}"
+        );
+        let schema = storage.verify_schema().await.unwrap_err();
+        assert_eq!(
+            schema.code(),
+            Some(ErrorCode::ServiceUnavailable),
+            "{schema}"
+        );
+        let pool = unreachable_storage().pool;
+        let Err(built) = PostgresBaseStorage::from_pool_and_cache(pool, None).await else {
+            panic!("an unreachable database cannot pass the schema check");
+        };
+        assert_eq!(built.code(), Some(ErrorCode::ServiceUnavailable), "{built}");
+        for error in [&health, &schema, &built] {
+            assert!(!error.to_string().contains("127.0.0.1"), "{error}");
+        }
+    }
 }

@@ -95,13 +95,40 @@ fn admin_context(
     })
 }
 
-/// 存储失败 → gRPC 状态：数据库连不上（`ServiceUnavailable`）回可重试的 UNAVAILABLE，不带
-/// 错误文本；其余仍是 INTERNAL。
+/// 存储失败 → gRPC 状态，只按错误码分类：数据库连不上回可重试的 UNAVAILABLE，超时回
+/// DEADLINE_EXCEEDED，参数错误、不存在、无权限、不支持各回对应的码，其余（数据库错误、解码
+/// 失败、未分类的系统错误）是 INTERNAL。状态里只有固定说明：错误的原因、details 与系统错误
+/// 的文本里可能有数据库报文、SQL 片段或请求里的取值，只进调用处的错误日志。
 fn storage_failure(err: &flare_server_core::error::FlareError) -> Status {
-    if err.code() == Some(flare_server_core::error::ErrorCode::ServiceUnavailable) {
-        return Status::unavailable("message storage is temporarily unavailable");
+    use flare_server_core::error::ErrorCode;
+    match err.code() {
+        Some(
+            ErrorCode::ServiceUnavailable
+            | ErrorCode::NetworkError
+            | ErrorCode::NetworkUnreachable
+            | ErrorCode::NetworkConnectionLost
+            | ErrorCode::ConnectionFailed
+            | ErrorCode::ConnectionRefused
+            | ErrorCode::ConnectionClosed
+            | ErrorCode::NotConnected,
+        ) => Status::unavailable("message storage is temporarily unavailable"),
+        Some(
+            ErrorCode::OperationTimeout | ErrorCode::NetworkTimeout | ErrorCode::ConnectionTimeout,
+        ) => Status::deadline_exceeded("message storage did not answer in time"),
+        Some(ErrorCode::InvalidParameter | ErrorCode::BadRequest) => {
+            Status::invalid_argument("message storage refused the request arguments")
+        }
+        Some(ErrorCode::MessageNotFound | ErrorCode::UserNotFound) => {
+            Status::not_found("not found in message storage")
+        }
+        Some(ErrorCode::PermissionDenied) => {
+            Status::permission_denied("message storage refused the tenant scope")
+        }
+        Some(ErrorCode::OperationNotSupported) => {
+            Status::unimplemented("not supported by this message storage backend")
+        }
+        _ => Status::internal("message storage failed"),
     }
-    Status::internal(err.to_string())
 }
 
 fn message_event_limit(pagination: Option<&flare_proto::common::Pagination>) -> i32 {
@@ -1344,6 +1371,72 @@ mod tests {
         let metadata = with_metadata((), &[("x-request-id", long.as_str())]);
         let ctx = admin_context(metadata.metadata(), &actor);
         assert!(!ctx.request_id().is_empty() && ctx.request_id() != long);
+    }
+
+    /// 非 UNAVAILABLE 的存储失败也按错误码分类，状态里只有固定说明：数据库报文、SQL 片段、
+    /// 请求里的取值与系统错误文本都不出现。修复前这些都是带 `err.to_string()` 原文的
+    /// INTERNAL（系统错误的原文里就是数据库报文）。
+    #[test]
+    fn storage_failures_are_classified_and_never_carry_their_text() {
+        use flare_server_core::error::{ErrorCode, FlareError, map_infra_error};
+        use flare_server_core::flare_err;
+        const RAW: &str = "relation \"messages\" leak-marker-77 at 10.0.0.7:5432";
+        let cases: Vec<(FlareError, tonic::Code)> = vec![
+            (
+                FlareError::system(format!("Failed to query: {RAW}")),
+                tonic::Code::Internal,
+            ),
+            (
+                map_infra_error(RAW, ErrorCode::DatabaseError, format!("query {RAW}")),
+                tonic::Code::Internal,
+            ),
+            (
+                flare_err!(ErrorCode::DeserializationError, RAW),
+                tonic::Code::Internal,
+            ),
+            (
+                flare_err!(ErrorCode::InvalidParameter, format!("tenant {RAW}")),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                flare_err!(ErrorCode::BadRequest, RAW),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                flare_err!(ErrorCode::OperationTimeout, RAW),
+                tonic::Code::DeadlineExceeded,
+            ),
+            (
+                flare_err!(ErrorCode::MessageNotFound, RAW),
+                tonic::Code::NotFound,
+            ),
+            (
+                flare_err!(ErrorCode::PermissionDenied, RAW),
+                tonic::Code::PermissionDenied,
+            ),
+            (
+                flare_err!(ErrorCode::OperationNotSupported, RAW),
+                tonic::Code::Unimplemented,
+            ),
+            (
+                flare_err!(ErrorCode::ServiceUnavailable, RAW),
+                tonic::Code::Unavailable,
+            ),
+            (
+                flare_err!(ErrorCode::NetworkConnectionLost, RAW),
+                tonic::Code::Unavailable,
+            ),
+        ];
+        for (err, code) in cases {
+            let status = storage_failure(&err);
+            assert_eq!(status.code(), code, "{err}");
+            for leaked in ["leak-marker-77", "10.0.0.7", "relation", "系统错误"] {
+                assert!(
+                    !status.message().contains(leaked),
+                    "{err} leaked {leaked}: {status:?}"
+                );
+            }
+        }
     }
 
     /// 数据库不可达是可重试的 UNAVAILABLE（管理检索与其他读一样），且不带数据库错误文本；

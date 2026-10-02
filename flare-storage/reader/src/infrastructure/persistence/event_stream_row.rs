@@ -10,7 +10,7 @@ use flare_proto::common::{
     MessageRetentionScheduledEvent, PinEvent, ReactionEvent, ReadReceiptEvent, UnmarkEvent,
     UnpinEvent,
 };
-use flare_server_core::error::AnyhowContext;
+use flare_server_core::error::{ErrorCode, FlareError, map_infra_error};
 use prost::Message as ProstMessage;
 
 /// 由 `events` 表一行组装完整 `Event`（`event_id` = `{conversation_id}:{seq}`）。
@@ -39,6 +39,18 @@ pub fn proto_event_from_events_row(
     })
 }
 
+/// 事件行的 payload 解不开（损坏、或写入侧换了 oneof 的内层类型）：分类为反序列化错误。
+/// prost 的报文只进 `details`，原因只写解的是哪一种事件。
+fn decode_failure(kind: &'static str) -> impl Fn(prost::DecodeError) -> FlareError {
+    move |err| {
+        map_infra_error(
+            err,
+            ErrorCode::DeserializationError,
+            format!("decode {kind} event payload"),
+        )
+    }
+}
+
 fn decode_payload_oneof(
     event_type: i32,
     payload: &[u8],
@@ -51,54 +63,100 @@ fn decode_payload_oneof(
     };
     let p = match ty {
         ProtoEventType::EventMessage => {
-            EventPayload::Message(Message::decode(payload).context("decode Message")?)
+            EventPayload::Message(Message::decode(payload).map_err(decode_failure("Message"))?)
         }
-        ProtoEventType::EventMessageRecall => {
-            EventPayload::Recall(MessageRecallEvent::decode(payload).context("decode Recall")?)
-        }
+        ProtoEventType::EventMessageRecall => EventPayload::Recall(
+            MessageRecallEvent::decode(payload).map_err(decode_failure("Recall"))?,
+        ),
         ProtoEventType::EventMessageEdit => {
-            EventPayload::Edit(MessageEditEvent::decode(payload).context("decode Edit")?)
+            EventPayload::Edit(MessageEditEvent::decode(payload).map_err(decode_failure("Edit"))?)
         }
-        ProtoEventType::EventMessageDelete => {
-            EventPayload::Delete(MessageDeleteEvent::decode(payload).context("decode Delete")?)
-        }
+        ProtoEventType::EventMessageDelete => EventPayload::Delete(
+            MessageDeleteEvent::decode(payload).map_err(decode_failure("Delete"))?,
+        ),
         ProtoEventType::EventReadReceipt => {
-            EventPayload::Read(ReadReceiptEvent::decode(payload).context("decode Read")?)
+            EventPayload::Read(ReadReceiptEvent::decode(payload).map_err(decode_failure("Read"))?)
         }
         ProtoEventType::EventConversationUpdate => EventPayload::Conversation(
-            ConversationUpdateEvent::decode(payload).context("decode ConversationUpdate")?,
+            ConversationUpdateEvent::decode(payload)
+                .map_err(decode_failure("ConversationUpdate"))?,
         ),
         ProtoEventType::EventConversationDelete => EventPayload::ConversationDelete(
-            ConversationDeleteEvent::decode(payload).context("decode ConversationDelete")?,
+            ConversationDeleteEvent::decode(payload)
+                .map_err(decode_failure("ConversationDelete"))?,
         ),
-        ProtoEventType::EventReaction => {
-            EventPayload::Reaction(ReactionEvent::decode(payload).context("decode Reaction")?)
-        }
+        ProtoEventType::EventReaction => EventPayload::Reaction(
+            ReactionEvent::decode(payload).map_err(decode_failure("Reaction"))?,
+        ),
         ProtoEventType::EventPin => {
-            EventPayload::Pin(PinEvent::decode(payload).context("decode Pin")?)
+            EventPayload::Pin(PinEvent::decode(payload).map_err(decode_failure("Pin"))?)
         }
         ProtoEventType::EventUnpin => {
-            EventPayload::Unpin(UnpinEvent::decode(payload).context("decode Unpin")?)
+            EventPayload::Unpin(UnpinEvent::decode(payload).map_err(decode_failure("Unpin"))?)
         }
         ProtoEventType::EventMark => {
-            EventPayload::Mark(MarkEvent::decode(payload).context("decode Mark")?)
+            EventPayload::Mark(MarkEvent::decode(payload).map_err(decode_failure("Mark"))?)
         }
         ProtoEventType::EventUnmark => {
-            EventPayload::Unmark(UnmarkEvent::decode(payload).context("decode Unmark")?)
+            EventPayload::Unmark(UnmarkEvent::decode(payload).map_err(decode_failure("Unmark"))?)
         }
         ProtoEventType::EventMessageRetentionScheduled => EventPayload::RetentionScheduled(
-            MessageRetentionScheduledEvent::decode(payload).context("decode RetentionScheduled")?,
+            MessageRetentionScheduledEvent::decode(payload)
+                .map_err(decode_failure("RetentionScheduled"))?,
         ),
         ProtoEventType::EventMessageRetentionExpired => EventPayload::RetentionExpired(
-            MessageRetentionExpiredEvent::decode(payload).context("decode RetentionExpired")?,
+            MessageRetentionExpiredEvent::decode(payload)
+                .map_err(decode_failure("RetentionExpired"))?,
         ),
         ProtoEventType::EventMessageRetentionPurged => EventPayload::RetentionPurged(
-            MessageRetentionPurgedEvent::decode(payload).context("decode RetentionPurged")?,
+            MessageRetentionPurgedEvent::decode(payload)
+                .map_err(decode_failure("RetentionPurged"))?,
         ),
         ProtoEventType::EventCustom => {
-            EventPayload::Custom(CustomEvent::decode(payload).context("decode Custom")?)
+            EventPayload::Custom(CustomEvent::decode(payload).map_err(decode_failure("Custom"))?)
         }
         ProtoEventType::Unspecified => return Ok(None),
     };
     Ok(Some(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// payload 解不开的事件行是分好类的反序列化错误（调用方据此记日志并回空壳事件）；修复前
+    /// 是 `.context()` 包成的系统错误，没有错误码，文本里带着 prost 的报文。
+    #[test]
+    fn an_undecodable_payload_is_a_classified_deserialization_error() {
+        let err = proto_event_from_events_row(
+            "c1",
+            7,
+            ProtoEventType::EventMessage as i32,
+            Utc::now(),
+            String::new(),
+            None,
+            None,
+            &[0xff, 0xff, 0xff, 0xff],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Some(ErrorCode::DeserializationError), "{err}");
+        assert_eq!(err.reason(), "decode Message event payload");
+    }
+
+    #[test]
+    fn an_empty_or_unknown_payload_is_not_an_error() {
+        let shell = proto_event_from_events_row(
+            "c1",
+            7,
+            ProtoEventType::EventMessage as i32,
+            Utc::now(),
+            String::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(shell.event_id, "c1:7");
+        assert!(shell.payload.is_none());
+    }
 }
