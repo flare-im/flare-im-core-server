@@ -91,8 +91,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
 ];
 
 /// W11-T 改成缺租户即报错或进死信的文件：必须保持零兜底，也不得进入 `ALLOWED`。
+/// （W11-T 也改过的 `crates/flare-im-ack/src/ack/archiver.rs` 从不在模块树里，已删除。）
 const FIXED_BY_W11_T: &[&str] = &[
-    "crates/flare-im-ack/src/ack/archiver.rs",
     "crates/flare-im-message-pipeline/src/hook/builder.rs",
     "crates/flare-im-message-pipeline/src/hook/execution_service.rs",
     "crates/flare-im-message-pipeline/src/messaging/push_repository.rs",
