@@ -20,7 +20,13 @@ pub struct WalReplayReport {
     pub replayed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// 没记租户、也没配置默认租户而被隔离的条目：不重放、不删除，不算失败（见
+    /// [`WalReplayHandler::replay_once`]）。
+    pub quarantined: usize,
 }
+
+/// 记住已报告过的隔离条目的上限（只影响日志去重：被挤出的条目下次被领取时再记一次）。
+const QUARANTINE_REPORTED_CAPACITY: u64 = 10_000;
 
 pub struct WalReplayHandler {
     wal_repository: Arc<dyn WalRepository>,
@@ -28,6 +34,9 @@ pub struct WalReplayHandler {
     /// 显式配置的部署级默认租户（`MESSAGE_INGEST_DEFAULT_TENANT_ID`），只给没记租户的旧 WAL
     /// 条目用；没配置时这类条目不重放，不再按租户 "0" 发布。
     default_tenant_id: Option<String>,
+    /// 本进程已报告过的隔离条目（消息 id）。条目每个领取租约到期都会被再领一次，只有第一次记
+    /// ERROR，之后只计数。
+    quarantine_reported: moka::future::Cache<String, ()>,
 }
 
 pub trait WalReplayPublisher: Send + Sync {
@@ -62,9 +71,16 @@ impl WalReplayHandler {
             wal_repository,
             publisher,
             default_tenant_id: normalize_optional_tenant_id(default_tenant_id.as_deref()),
+            quarantine_reported: moka::future::Cache::new(QUARANTINE_REPORTED_CAPACITY),
         }
     }
 
+    /// 重放一批待恢复的 WAL 条目。
+    ///
+    /// 没记租户、也没配置默认租户的条目被隔离：不重放（不按租户 "0" 发布）、不删除（留给运维
+    /// 配置默认租户或人工处理，配置后重启即按默认租户重放），计入 `quarantined` 而不是 `failed`。
+    /// 每个条目在本进程只记一次 ERROR（只含消息 id）；以前它每个领取租约都被再领一次、每次记
+    /// ERROR 并计为失败。
     #[instrument(skip(self), fields(limit))]
     pub async fn replay_once(&self, limit: usize) -> Result<WalReplayReport> {
         let pending = self.wal_repository.list_pending(limit).await?;
@@ -90,12 +106,26 @@ impl WalReplayHandler {
             let Some(tenant_id) = normalize_optional_tenant_id(Some(&pending.tenant_id))
                 .or_else(|| self.default_tenant_id.clone())
             else {
-                report.failed += 1;
-                tracing::error!(
-                    message_id = %pending.message_id,
-                    "WAL entry has no tenant and no default tenant is configured; \
-                     keeping it unpublished instead of replaying it as tenant 0"
-                );
+                report.quarantined += 1;
+                let first_report = self
+                    .quarantine_reported
+                    .entry(pending.message_id.clone())
+                    .or_insert(())
+                    .await
+                    .is_fresh();
+                if first_report {
+                    tracing::error!(
+                        message_id = %pending.message_id,
+                        "WAL entry has no tenant and no default tenant is configured; \
+                         quarantining it (kept unpublished instead of replaying it as tenant 0, \
+                         reported once)"
+                    );
+                } else {
+                    tracing::debug!(
+                        message_id = %pending.message_id,
+                        "WAL entry without a tenant is still quarantined"
+                    );
+                }
                 continue;
             };
             let ctx = replay_ctx(&tenant_id);
@@ -440,6 +470,7 @@ mod tests {
                 replayed: 1,
                 failed: 0,
                 skipped: 0,
+                quarantined: 0,
             }
         );
         assert!(!wal.contains("msg-1"));
@@ -455,8 +486,8 @@ mod tests {
         );
     }
 
-    /// 没记租户的 WAL 条目：没配置默认租户时不重放、不删，不再按租户 "0" 发布（W11-T）；
-    /// 显式配置的默认租户（含 "0"）照常使用。
+    /// 没记租户的 WAL 条目：没配置默认租户时隔离——不重放、不删，不再按租户 "0" 发布（W11-T），
+    /// 计入 `quarantined` 而不是 `failed`（W13-R2）；显式配置的默认租户（含 "0"）照常使用。
     #[tokio::test]
     async fn replay_without_tenant_uses_only_an_explicit_default() {
         for blank in ["", "  "] {
@@ -471,8 +502,9 @@ mod tests {
                 super::WalReplayReport {
                     scanned: 1,
                     replayed: 0,
-                    failed: 1,
+                    failed: 0,
                     skipped: 0,
+                    quarantined: 1,
                 }
             );
             assert!(wal.contains("msg-1"), "entry stays for an operator");
@@ -495,6 +527,56 @@ mod tests {
         }
     }
 
+    /// 隔离的无租户条目每个领取租约都会被再领一次：每轮只计入 `quarantined`、不算失败，条目留在
+    /// WAL、不发布，同批有租户的条目照常重放（W13-R2）。修复前每轮计为失败（ERROR 只记一次见
+    /// `tests/wal_replay_quarantine.rs`，日志断言须独占一个测试二进制）。
+    #[tokio::test]
+    async fn tenantless_entries_are_quarantined_every_round_without_failing() {
+        let wal = MemoryWalRepository::with_entries(vec![
+            pending_text("msg-orphan-1", ""),
+            pending_text("msg-orphan-2", " "),
+        ]);
+        let publisher = FakeReplayPublisher::new(false);
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), None);
+
+        for round in 1..=3 {
+            if round == 2 {
+                wal.append(
+                    &MessageSubmission {
+                        message: pending_text("msg-ok", "tenant-a").message,
+                        message_id: "msg-ok".to_string(),
+                        timeline: Default::default(),
+                    },
+                    "tenant-a",
+                )
+                .await
+                .unwrap();
+            }
+            let report = handler.replay_once(10).await.unwrap();
+            assert_eq!(report.quarantined, 2, "round {round}: {report:?}");
+            assert_eq!(report.failed, 0, "round {round}: {report:?}");
+            assert_eq!(
+                report.replayed,
+                usize::from(round == 2),
+                "round {round}: {report:?}"
+            );
+        }
+
+        for orphan in ["msg-orphan-1", "msg-orphan-2"] {
+            assert!(wal.contains(orphan), "{orphan} stays for an operator");
+        }
+        assert!(!wal.contains("msg-ok"));
+        assert_eq!(
+            publisher
+                .captured()
+                .iter()
+                .map(|replay| replay.tenant_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tenant-a"],
+            "nothing published as tenant 0"
+        );
+    }
+
     #[tokio::test]
     async fn replay_failure_keeps_wal_entry_for_later_retry() {
         let wal = MemoryWalRepository::with_entries(vec![pending_text("msg-1", "tenant-a")]);
@@ -510,6 +592,7 @@ mod tests {
                 replayed: 0,
                 failed: 1,
                 skipped: 0,
+                quarantined: 0,
             }
         );
         assert!(wal.contains("msg-1"));
@@ -533,6 +616,7 @@ mod tests {
                 replayed: 0,
                 failed: 0,
                 skipped: 1,
+                quarantined: 0,
             }
         );
         assert!(!wal.contains("msg-ephemeral"));

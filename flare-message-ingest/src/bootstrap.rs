@@ -129,13 +129,20 @@ impl ApplicationBootstrap {
                             _ = ticker.tick() => {
                                 match wal_replay_handler.replay_once(wal_replay_batch_limit).await {
                                     Ok(report) => {
-                                        if report.scanned > 0 {
+                                        // 只领到隔离条目（每个已记过一次 ERROR）的轮次不再每轮记 INFO。
+                                        if report.scanned > report.quarantined {
                                             tracing::info!(
                                                 scanned = report.scanned,
                                                 replayed = report.replayed,
                                                 failed = report.failed,
                                                 skipped = report.skipped,
+                                                quarantined = report.quarantined,
                                                 "WAL replay cycle completed"
+                                            );
+                                        } else if report.quarantined > 0 {
+                                            tracing::debug!(
+                                                quarantined = report.quarantined,
+                                                "WAL replay cycle found only quarantined entries"
                                             );
                                         } else {
                                             tracing::trace!("WAL replay cycle completed with no pending messages");
