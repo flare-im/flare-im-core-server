@@ -113,32 +113,23 @@ impl MqPushRepository {
             .or_insert_with(|| mq.seq.to_string());
     }
 
-    /// 推送信封的租户：信封自带的 `tenant_id`，或上下文与信封头里的 `x-tenant-id`；一处都没有、
-    /// 或两处不一致时拒绝发布。
+    /// 推送信封的租户有三个来源：信封自带的 `tenant_id`、信封头里的 `x-tenant-id`、上下文的租户。
+    /// 取其中出现的那个；一处都没有、或出现的几处不一致时拒绝发布（fail closed）。以前信封头的
+    /// `x-tenant-id` 合并进头时直接盖掉了上下文的租户，再只与信封的 `tenant_id` 比较，上下文与
+    /// 信封头不一致时按信封头发布（W11-T 复审）。
     fn envelope_headers(ctx: &Ctx, envelope: &mut PushEnvelope) -> Result<HashMap<String, String>> {
         if envelope.envelope_id.trim().is_empty() {
             envelope.envelope_id = uuid::Uuid::new_v4().to_string();
         }
+        let tenant_id = Self::agreed_tenant([
+            normalize_optional_tenant_id(Some(envelope.tenant_id.as_str())),
+            normalize_optional_tenant_id(envelope.headers.get("x-tenant-id").map(String::as_str)),
+            normalize_optional_tenant_id(ctx.tenant_id()),
+        ])?;
         let mut headers = context_to_mq_metadata(ctx);
         for (key, value) in envelope.headers.drain() {
             headers.insert(key, value);
         }
-        let header_tenant =
-            normalize_optional_tenant_id(headers.get("x-tenant-id").map(String::as_str));
-        let tenant_id = match (
-            normalize_optional_tenant_id(Some(envelope.tenant_id.as_str())),
-            header_tenant,
-        ) {
-            (Some(envelope_tenant), Some(header_tenant)) if envelope_tenant != header_tenant => {
-                return Err(ErrorBuilder::new(
-                    ErrorCode::InvalidParameter,
-                    "push envelope tenant differs from its context tenant",
-                )
-                .build_error());
-            }
-            (Some(tenant_id), _) | (None, Some(tenant_id)) => tenant_id,
-            (None, None) => return Err(Self::missing_tenant_error()),
-        };
         envelope.tenant_id = tenant_id.clone();
         headers.insert("x-tenant-id".to_string(), tenant_id);
         if envelope.trace_id.trim().is_empty()
@@ -154,6 +145,20 @@ impl MqPushRepository {
             .or_insert_with(|| envelope.created_at.to_string());
         envelope.headers = headers.clone();
         Ok(headers)
+    }
+
+    /// 各来源（已归一化，缺的为 `None`）给出的租户必须相同；一个都没有时报缺租户。
+    fn agreed_tenant<const N: usize>(sources: [Option<String>; N]) -> Result<String> {
+        let mut present = sources.into_iter().flatten();
+        let tenant_id = present.next().ok_or_else(Self::missing_tenant_error)?;
+        if present.any(|other| other != tenant_id) {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "push envelope tenant differs from its context tenant",
+            )
+            .build_error());
+        }
+        Ok(tenant_id)
     }
 
     fn message_event(message: &Message, include_payload: bool) -> Event {
@@ -1184,6 +1189,74 @@ mod tests {
         let envelope = PushEnvelope::decode(captured(&producer).expect("sent").payload.as_slice())
             .expect("envelope");
         assert_eq!(envelope.tenant_id, "tenant-a");
+    }
+
+    /// 信封头里的 `x-tenant-id` 是第三个租户来源：与上下文或信封的 `tenant_id` 不一致时拒绝发布，
+    /// 不再静默盖掉上下文的租户（W11-T 复审）；一致或只有它时照常发布。
+    #[tokio::test]
+    async fn push_envelope_header_tenant_must_agree_with_the_context_tenant() {
+        fn with_header_tenant(tenant: &str) -> PushEnvelope {
+            PushEnvelope {
+                headers: HashMap::from([("x-tenant-id".to_string(), tenant.to_string())]),
+                ..PushEnvelope::default()
+            }
+        }
+        let tenant_a: Ctx =
+            Arc::new(Context::with_request_id("req-envelope").with_tenant_id("tenant-a"));
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("req-envelope"));
+
+        let producer = Arc::new(CapturingProducer::default());
+        let repo = MqPushRepository::new(producer.clone());
+        let error = repo
+            .publish_push_envelope(&tenant_a, with_header_tenant("tenant-b"))
+            .await
+            .expect_err("envelope header names another tenant than the context");
+        assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+        assert!(captured(&producer).is_none(), "nothing reached the broker");
+
+        let error = repo
+            .publish_push_envelope(
+                &no_tenant,
+                PushEnvelope {
+                    tenant_id: "tenant-e".to_string(),
+                    ..with_header_tenant("tenant-b")
+                },
+            )
+            .await
+            .expect_err("envelope header names another tenant than the envelope");
+        assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+        assert!(captured(&producer).is_none(), "nothing reached the broker");
+
+        for (ctx, envelope) in [
+            (&tenant_a, with_header_tenant("tenant-a")),
+            (&tenant_a, with_header_tenant(" tenant-a ")),
+            (&no_tenant, with_header_tenant("tenant-a")),
+            (
+                &tenant_a,
+                PushEnvelope {
+                    tenant_id: "tenant-a".to_string(),
+                    ..with_header_tenant("tenant-a")
+                },
+            ),
+        ] {
+            repo.publish_push_envelope(ctx, envelope)
+                .await
+                .expect("all tenant sources agree");
+            let sent = captured(&producer).expect("sent");
+            assert_eq!(
+                sent.headers
+                    .expect("headers")
+                    .get("x-tenant-id")
+                    .map(String::as_str),
+                Some("tenant-a")
+            );
+            let envelope = PushEnvelope::decode(sent.payload.as_slice()).expect("envelope");
+            assert_eq!(envelope.tenant_id, "tenant-a");
+            assert_eq!(
+                envelope.headers.get("x-tenant-id").map(String::as_str),
+                Some("tenant-a")
+            );
+        }
     }
 
     #[test]
