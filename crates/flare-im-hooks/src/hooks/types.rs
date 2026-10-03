@@ -32,7 +32,12 @@ pub enum HookKind {
 }
 
 /// Hook 执行策略
+///
+/// 配置里的取值不区分大小写、忽略下划线：`FailFast`、`fail_fast`、`failfast` 等价，`Retry`、
+/// `Ignore` 同理（Message Ingest 的配置写 `FailFast`，Capability 的配置与库里写 `fail_fast`）。
+/// 其他取值是配置错误，在加载时拒绝，不按 `FailFast` 处理。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub enum HookErrorPolicy {
     /// 失败时终止主流程（快速失败）
     #[default]
@@ -41,6 +46,53 @@ pub enum HookErrorPolicy {
     Retry,
     /// 失败时忽略（记录告警）
     Ignore,
+}
+
+impl HookErrorPolicy {
+    /// 配置里的 `error_policy`：不区分大小写、忽略下划线；不认识的取值返回 `None`。
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized: String = value
+            .chars()
+            .filter(|c| *c != '_')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match normalized.as_str() {
+            "failfast" => Some(Self::FailFast),
+            "retry" => Some(Self::Retry),
+            "ignore" => Some(Self::Ignore),
+            _ => None,
+        }
+    }
+}
+
+/// 不认识的 `error_policy` 取值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownHookErrorPolicy;
+
+impl fmt::Display for UnknownHookErrorPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "error_policy must be fail_fast, retry or ignore (case and underscores do not matter)",
+        )
+    }
+}
+
+impl std::error::Error for UnknownHookErrorPolicy {}
+
+impl std::str::FromStr for HookErrorPolicy {
+    type Err = UnknownHookErrorPolicy;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(UnknownHookErrorPolicy)
+    }
+}
+
+impl TryFrom<String> for HookErrorPolicy {
+    type Error = UnknownHookErrorPolicy;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        value.parse()
+    }
 }
 
 /// Hook分组

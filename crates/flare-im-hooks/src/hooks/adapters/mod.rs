@@ -13,7 +13,8 @@ use super::types::{DeliveryHook, PostSendHook, PreSendHook, RecallHook};
 pub use grpc::GrpcHookFactory;
 pub use webhook::{
     WEBHOOK_SIGNATURE_HEADER, WEBHOOK_SIGNATURE_TOLERANCE_SECS, WebhookHookFactory,
-    WebhookSignatureError, sign_webhook_request, verify_webhook_signature, webhook_signature,
+    WebhookSignatureError, is_reserved_webhook_header, sign_webhook_request,
+    verify_webhook_signature, webhook_signature,
 };
 
 /// 默认的 Hook 工厂，支持 gRPC / WebHook / 本地实现

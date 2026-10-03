@@ -25,7 +25,13 @@ pub struct WebhookHookFactory {
 
 impl WebhookHookFactory {
     pub fn new() -> Result<Self> {
-        let client = Client::builder().use_rustls_tls().build().map_err(|err| {
+        let builder = Client::builder().use_rustls_tls();
+        // Unit tests deliver to receivers on the loopback interface: in test builds the client
+        // ignores HTTP(S)_PROXY / ALL_PROXY and the system proxy settings, which would otherwise
+        // route loopback deliveries through a developer's proxy. Release builds are unchanged.
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let client = builder.build().map_err(|err| {
             ErrorBuilder::new(ErrorCode::ConfigurationError, "failed to build http client")
                 .details(err.to_string())
                 .build_error()
@@ -197,6 +203,15 @@ const RESERVED_WEBHOOK_HEADERS: [&str; 4] = [
     "content-type",
 ];
 
+/// Whether a custom webhook header `name` is reserved (one of the signature headers or
+/// Content-Type, compared case-insensitively). Configuration loaders reject such headers when
+/// the configuration is loaded or written; [`sign_webhook_request`] refuses them as well.
+pub fn is_reserved_webhook_header(name: &str) -> bool {
+    RESERVED_WEBHOOK_HEADERS
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
 fn signed_request<T: Serialize>(
     request_builder: reqwest::RequestBuilder,
     secret: &Option<String>,
@@ -230,10 +245,7 @@ pub fn sign_webhook_request(
 ) -> Result<reqwest::RequestBuilder> {
     let mut builder = request_builder;
     for (key, value) in headers {
-        if RESERVED_WEBHOOK_HEADERS
-            .iter()
-            .any(|reserved| key.eq_ignore_ascii_case(reserved))
-        {
+        if is_reserved_webhook_header(key) {
             return Err(ErrorBuilder::new(
                 ErrorCode::ConfigurationError,
                 "hook transport headers cannot override signature or content type",

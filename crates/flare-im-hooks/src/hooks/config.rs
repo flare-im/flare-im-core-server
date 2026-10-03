@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
+use super::adapters::is_reserved_webhook_header;
 use super::registry::HookRegistry;
 use super::selector::{HookSelector, MatchRule};
 use super::types::{
@@ -184,6 +185,7 @@ impl HookConfigLoader {
                 )
                 .build_error()
             })?;
+            config.validate()?;
             Self::log_loaded(&config, "embedded:hooks.core.toml", "core");
             return Ok(config);
         }
@@ -230,7 +232,7 @@ impl HookConfigLoader {
                 .details(format!("path={}, err={err}", path.display()))
                 .build_error()
         })?;
-        toml::from_str(&content).map_err(|err| {
+        let config: HookConfig = toml::from_str(&content).map_err(|err| {
             ErrorBuilder::new(ErrorCode::ConfigurationError, "invalid hook config format")
                 // TOML errors include source lines, potentially containing secrets.
                 .details(format!(
@@ -239,7 +241,9 @@ impl HookConfigLoader {
                     err.span()
                 ))
                 .build_error()
-        })
+        })?;
+        config.validate_from(Some(path))?;
+        Ok(config)
     }
 
     fn load_from_directory(&self, dir: &Path) -> Result<HookConfig> {
@@ -292,6 +296,46 @@ impl HookConfigLoader {
 }
 
 impl HookConfig {
+    /// Rejects, when the configuration is loaded, what would otherwise only fail on every
+    /// delivery: a webhook custom header named like a reserved header (the signature headers
+    /// or Content-Type, case-insensitively). The error names the hook and the header, never a
+    /// header value.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_from(None)
+    }
+
+    /// [`Self::validate`]; `path` (the profile the configuration came from) goes into the error.
+    fn validate_from(&self, path: Option<&Path>) -> Result<()> {
+        for def in self
+            .pre_send
+            .iter()
+            .chain(&self.post_send)
+            .chain(&self.delivery)
+            .chain(&self.recall)
+        {
+            if let HookTransportConfig::Webhook { headers, .. } = &def.transport
+                && let Some(header) = headers
+                    .keys()
+                    .find(|header| is_reserved_webhook_header(header))
+            {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::ConfigurationError,
+                    "webhook header name is reserved: custom headers cannot set a signature header or Content-Type",
+                )
+                .details(match path {
+                    Some(path) => format!(
+                        "path={}, hook={}, header={header}",
+                        path.display(),
+                        def.name
+                    ),
+                    None => format!("hook={}, header={header}", def.name),
+                })
+                .build_error());
+            }
+        }
+        Ok(())
+    }
+
     fn merge(&mut self, other: HookConfig) {
         self.pre_send.extend(other.pre_send);
         self.post_send.extend(other.post_send);
@@ -432,5 +476,98 @@ target = "noop"
                 def.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod load_time_validation_tests {
+    use super::*;
+
+    fn definition(transport: &str) -> String {
+        format!("[[pre_send]]\nname = \"h\"\n[pre_send.transport]\n{transport}\n")
+    }
+
+    /// `error_policy` ignores case and underscores, so profiles written for either engine load
+    /// in Message Ingest (before, only `FailFast`, `Retry` and `Ignore` did); an unknown value
+    /// is still a load error.
+    #[test]
+    fn error_policy_spellings_are_equivalent_and_unknown_values_are_rejected() {
+        let cases = [
+            ("FailFast", HookErrorPolicy::FailFast),
+            ("fail_fast", HookErrorPolicy::FailFast),
+            ("failfast", HookErrorPolicy::FailFast),
+            ("FAIL_FAST", HookErrorPolicy::FailFast),
+            ("Retry", HookErrorPolicy::Retry),
+            ("retry", HookErrorPolicy::Retry),
+            ("RETRY", HookErrorPolicy::Retry),
+            ("Ignore", HookErrorPolicy::Ignore),
+            ("ignore", HookErrorPolicy::Ignore),
+            ("_IGNORE_", HookErrorPolicy::Ignore),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(HookErrorPolicy::parse(value), Some(expected), "{value}");
+            let config: HookConfig = toml::from_str(&format!(
+                "{}error_policy = \"{value}\"\n",
+                "[[pre_send]]\nname = \"h\"\n"
+            ))
+            .unwrap_or_else(|error| panic!("{value}: {error}"));
+            assert_eq!(config.pre_send[0].error_policy, expected, "{value}");
+        }
+        for value in ["", "abort", "fail-fast", "fail fast", "ignored", "retries"] {
+            assert_eq!(HookErrorPolicy::parse(value), None, "{value:?}");
+            assert!(
+                toml::from_str::<HookConfig>(&format!(
+                    "[[pre_send]]\nname = \"h\"\nerror_policy = \"{value}\"\n"
+                ))
+                .is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// A reserved webhook header fails when the profile is loaded, case-insensitively, instead
+    /// of on every delivery; the error names the hook and the header but not its value.
+    #[test]
+    fn reserved_webhook_headers_are_rejected_when_the_profile_is_loaded() {
+        let dir = std::env::temp_dir().join(format!("flare-hooks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("hooks.toml");
+        let value = "w14h-header-value-not-for-errors";
+        for header in [
+            "Content-Type",
+            "content-type",
+            "Flare-Signature",
+            "FLARE-SIGNATURE",
+            "x-flare-signature",
+            "X-Hook-Signature",
+            "x-hook-signature",
+        ] {
+            let profile = definition(&format!(
+                "type = \"webhook\"\nendpoint = \"http://127.0.0.1:9/hook\"\n[pre_send.transport.headers]\n\"{header}\" = \"{value}\""
+            ));
+            let config: HookConfig = toml::from_str(&profile).unwrap();
+            let error = config.validate().unwrap_err();
+            let printed = format!("{error} {error:?}");
+            assert!(printed.contains(header), "{printed}");
+            assert!(!printed.contains(value), "{printed}");
+
+            std::fs::write(&path, &profile).unwrap();
+            let error = HookConfigLoader::new()
+                .add_candidate(&path)
+                .load()
+                .unwrap_err();
+            let printed = format!("{error} {error:?}");
+            assert!(printed.contains("reserved"), "{printed}");
+            assert!(printed.contains(header), "{printed}");
+            assert!(!printed.contains(value), "{printed}");
+        }
+
+        // Ordinary custom headers still load.
+        let profile = definition(
+            "type = \"webhook\"\nendpoint = \"http://127.0.0.1:9/hook\"\n[pre_send.transport.headers]\nAuthorization = \"Bearer t\"\nX-Signature-Version = \"2\"",
+        );
+        std::fs::write(&path, &profile).unwrap();
+        assert!(HookConfigLoader::new().add_candidate(&path).load().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
