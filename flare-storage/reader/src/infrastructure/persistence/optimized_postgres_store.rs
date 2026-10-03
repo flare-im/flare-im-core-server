@@ -69,7 +69,16 @@ fn timestamp_from_datetime(dt: Option<DateTime<Utc>>) -> Option<prost_types::Tim
     })
 }
 
-fn event_type_from_operation_type(operation_type: &str) -> EventType {
+/// `message_operation_history.operation_type` → 领域事件类型。
+///
+/// Storage Writer 写的是 proto `flare.common.v1.EventType` 的取值名（`EVENT_MESSAGE_RECALL` 等，见
+/// Writer `operation_store::operation_type_name`），按 proto 名解析再走与 `events.event_type` 相同的
+/// proto → 领域映射。以前这里只认下面的旧名，Writer 写的 `EVENT_*` 全部读成 Custom。
+/// `OPERATION_TYPE_*` 是 2026-03（`c1a0804`）之前的 Writer 写的串，小写名是更早的写法，存量行仍按原义读。
+pub fn event_type_from_operation_type(operation_type: &str) -> EventType {
+    if let Some(proto) = flare_proto::common::EventType::from_str_name(operation_type) {
+        return crate::convert::event_type_from_proto_i32(proto as i32);
+    }
     match operation_type {
         "OPERATION_TYPE_RECALL" | "recall" => EventType::MessageRecall,
         "OPERATION_TYPE_EDIT" | "edit" => EventType::MessageEdit,
@@ -2357,6 +2366,54 @@ mod tests {
                 let error = result.expect_err("no database behind the lazy pool");
                 assert!(!is_tenant_required(&error), "{tenant} {read}: {error}");
             }
+        }
+    }
+
+    /// 操作历史的类型串按 Writer 写的 proto 取值名解析（W12-R）。修复前只认 `OPERATION_TYPE_*`
+    /// 与小写名，Writer 写的 `EVENT_*` 全部读成 Custom。期望值照 `event.proto` 写死，不用同一张映射现算。
+    #[test]
+    fn operation_type_names_written_by_the_writer_map_to_their_event_types() {
+        use super::event_type_from_operation_type;
+        use crate::domain::model::EventType;
+
+        let cases = [
+            ("EVENT_TYPE_UNSPECIFIED", EventType::Unspecified),
+            ("EVENT_MESSAGE", EventType::Message),
+            ("EVENT_MESSAGE_RECALL", EventType::MessageRecall),
+            ("EVENT_MESSAGE_EDIT", EventType::MessageEdit),
+            ("EVENT_MESSAGE_DELETE", EventType::MessageDelete),
+            ("EVENT_READ_RECEIPT", EventType::ReadReceipt),
+            ("EVENT_CONVERSATION_UPDATE", EventType::ConversationUpdate),
+            ("EVENT_CONVERSATION_DELETE", EventType::ConversationDelete),
+            ("EVENT_REACTION", EventType::Reaction),
+            ("EVENT_PIN", EventType::Pin),
+            ("EVENT_UNPIN", EventType::Unpin),
+            ("EVENT_MARK", EventType::Mark),
+            ("EVENT_UNMARK", EventType::Unmark),
+            (
+                "EVENT_MESSAGE_RETENTION_SCHEDULED",
+                EventType::MessageBurnScheduled,
+            ),
+            ("EVENT_MESSAGE_RETENTION_EXPIRED", EventType::MessageBurned),
+            (
+                "EVENT_MESSAGE_RETENTION_PURGED",
+                EventType::MessageHardDeleted,
+            ),
+            ("EVENT_CUSTOM", EventType::Custom),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(event_type_from_operation_type(name), expected, "{name}");
+        }
+
+        // 2026-03 之前的 Writer 写的旧串照原义读；认不出的串仍归 Custom。
+        for (name, expected) in [
+            ("OPERATION_TYPE_RECALL", EventType::MessageRecall),
+            ("OPERATION_TYPE_REACTION_REMOVE", EventType::Reaction),
+            ("unpin", EventType::Unpin),
+            ("EVENT_SOMETHING_NEW", EventType::Custom),
+            ("", EventType::Custom),
+        ] {
+            assert_eq!(event_type_from_operation_type(name), expected, "{name}");
         }
     }
 }

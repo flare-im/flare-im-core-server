@@ -37,6 +37,8 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+# 只用于 tests/event_codec_contract.rs：Writer 编码、Reader 解码的往返契约。
+flare-storage-reader = { path = "../reader" }
 tokio-stream = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

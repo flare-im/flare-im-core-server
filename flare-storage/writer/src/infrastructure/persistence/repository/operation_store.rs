@@ -51,19 +51,16 @@ fn mark_type_to_int(s: &str) -> i32 {
     }
 }
 
-fn event_type_to_db_string(v: i32) -> &'static str {
-    match EventType::try_from(v) {
-        Ok(EventType::EventMessageRecall) => "EVENT_MESSAGE_RECALL",
-        Ok(EventType::EventMessageEdit) => "EVENT_MESSAGE_EDIT",
-        Ok(EventType::EventMessageDelete) => "EVENT_MESSAGE_DELETE",
-        Ok(EventType::EventReadReceipt) => "EVENT_READ_RECEIPT",
-        Ok(EventType::EventReaction) => "EVENT_REACTION",
-        Ok(EventType::EventPin) => "EVENT_PIN",
-        Ok(EventType::EventUnpin) => "EVENT_UNPIN",
-        Ok(EventType::EventMark) => "EVENT_MARK",
-        Ok(EventType::EventUnmark) => "EVENT_UNMARK",
-        _ => "EVENT_TYPE_UNSPECIFIED",
-    }
+/// `message_operation_history.operation_type`：proto `flare.common.v1.EventType` 的取值名
+/// （`Event.type` 是 proto 取值，见 `convert::event_to_proto`）。
+///
+/// Reader `event_type_from_operation_type` 按同一组名字解回（两侧的往返由
+/// `tests/event_codec_contract.rs` 钉住）。以前这里只列 9 种，阅后即焚三类等记成
+/// `EVENT_TYPE_UNSPECIFIED`，分不出来；认不出的取值仍记 `EVENT_TYPE_UNSPECIFIED`。
+pub fn operation_type_name(event_type: i32) -> &'static str {
+    EventType::try_from(event_type)
+        .unwrap_or(EventType::Unspecified)
+        .as_str_name()
 }
 
 pub struct OperationStore {
@@ -470,7 +467,7 @@ impl OperationStore {
         )
         .bind(tenant_id)
         .bind(message_id)
-        .bind(event_type_to_db_string(event.r#type))
+        .bind(operation_type_name(event.r#type))
         .bind(operator_id)
         .bind("")
         .bind(operation_data_json)
@@ -546,5 +543,35 @@ mod tests {
                 "{state} 映射成了 proto 枚举之外的 {mapped}"
             );
         }
+    }
+
+    /// 操作历史的类型串是 proto `EventType` 的取值名，覆盖全部取值（W12-R）。期望串照 `event.proto`
+    /// 写死；以前只列 9 种，阅后即焚三类等都记成 `EVENT_TYPE_UNSPECIFIED`。
+    #[test]
+    fn operation_type_name_is_the_proto_value_name_for_every_event_type() {
+        let cases = [
+            (0, "EVENT_TYPE_UNSPECIFIED"),
+            (1, "EVENT_MESSAGE"),
+            (2, "EVENT_MESSAGE_RECALL"),
+            (3, "EVENT_MESSAGE_EDIT"),
+            (4, "EVENT_MESSAGE_DELETE"),
+            (5, "EVENT_READ_RECEIPT"),
+            (6, "EVENT_CONVERSATION_UPDATE"),
+            (7, "EVENT_CONVERSATION_DELETE"),
+            (8, "EVENT_REACTION"),
+            (9, "EVENT_PIN"),
+            (10, "EVENT_UNPIN"),
+            (11, "EVENT_MARK"),
+            (12, "EVENT_UNMARK"),
+            (13, "EVENT_MESSAGE_RETENTION_SCHEDULED"),
+            (14, "EVENT_MESSAGE_RETENTION_EXPIRED"),
+            (15, "EVENT_MESSAGE_RETENTION_PURGED"),
+            (16, "EVENT_CUSTOM"),
+        ];
+        for (value, name) in cases {
+            assert_eq!(operation_type_name(value), name, "{value}");
+        }
+        assert_eq!(operation_type_name(-1), "EVENT_TYPE_UNSPECIFIED");
+        assert_eq!(operation_type_name(99), "EVENT_TYPE_UNSPECIFIED");
     }
 }

@@ -2510,6 +2510,7 @@ dependencies = [
  "flare-im-service-kit",
  "flare-proto",
  "flare-server-core",
+ "flare-storage-reader",
  "futures",
  "prost",
  "prost-types",
