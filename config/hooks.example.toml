@@ -2,10 +2,18 @@
 #
 # 将本文件复制为 config/hooks.toml 后按需启用。
 # 除 Hook 外，也可在同一个文件配置 capability 远程扩展插件发现与健康检查（见文件尾部）。
+#
+# 本文件同时能被 Message Ingest（flare-im-hooks）与 Capability 服务的加载器解析，两边的字段
+# 都写全（enabled、priority、timeout_ms）。Capability 的 Hook 引擎按 priority 分组：priority
+# >= 100 为 validation 组，拒绝会中断主链；< 100 为 business 组，拒绝与不可达都只记日志、
+# 主链照常继续。所以要拒绝消息或撤回的 Hook（pre_send、recall 且 require_success = true）
+# 用 priority >= 100；旁路观测的 Hook 用 < 100 且 require_success = false。
 
 [[pre_send]]
 name = "compliance-text-check"
-priority = 10
+enabled = true
+# >= 100：在 Capability 引擎里归 validation 组，拒绝才会中断发送。
+priority = 100
 timeout_ms = 200
 require_success = true
 
@@ -23,6 +31,7 @@ risk_level = "strict"
 
 [[post_send]]
 name = "audit-log-sink"
+enabled = true
 priority = 0
 timeout_ms = 1000
 require_success = false
@@ -33,6 +42,7 @@ tenants = ["0"]
 [post_send.transport]
 type = "webhook"
 endpoint = "https://audit.example.com/hooks/post_send"
+# 签名密钥：不签名就整行删掉；写成空串在加载时报错。
 secret = "replace-me"
 
 [post_send.transport.headers]
@@ -40,7 +50,10 @@ X-Service = "flare-im-core"
 
 [[delivery]]
 name = "delivery-metrics"
+enabled = true
 priority = 0
+timeout_ms = 200
+require_success = false
 
 [delivery.selector]
 tenants = ["0"]
@@ -51,7 +64,11 @@ target = "builtin_delivery_metrics"
 
 [[recall]]
 name = "recall-audit"
-priority = 0
+enabled = true
+# recall Hook 可以拒绝撤回：>= 100 归 validation 组，拒绝才生效。
+priority = 100
+timeout_ms = 300
+require_success = true
 
 [recall.selector]
 tenants = ["0"]

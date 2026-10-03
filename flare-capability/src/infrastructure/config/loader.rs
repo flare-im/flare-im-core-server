@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose};
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::{debug, error, info, warn};
 
-use crate::domain::model::HookConfig;
+use crate::domain::model::{HookConfig, HookTransportConfig};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use flare_server_core::KvStore;
 
@@ -106,42 +106,18 @@ impl ConfigMerger {
     ///
     /// 优先级：动态API（数据库） > 配置中心 > 配置文件
     /// 同名Hook高优先级覆盖低优先级
+    ///
+    /// 逐类型合并全部 15 类 Hook（[`HookConfig::merge_overriding`]）。以前这里逐个列字段、漏了
+    /// `get_conversation_participants`，该类 Hook 合并后永远为空。
     pub fn merge(configs: Vec<HookConfig>) -> HookConfig {
         let mut merged = HookConfig::default();
 
         // 按顺序合并，后面的配置会覆盖前面的同名配置
         for config in configs {
-            Self::merge_hook_list(&mut merged.pre_send, config.pre_send);
-            Self::merge_hook_list(&mut merged.post_send, config.post_send);
-            Self::merge_hook_list(&mut merged.delivery, config.delivery);
-            Self::merge_hook_list(&mut merged.recall, config.recall);
-            Self::merge_hook_list(&mut merged.session_create, config.session_create);
-            Self::merge_hook_list(&mut merged.session_update, config.session_update);
-            Self::merge_hook_list(&mut merged.session_delete, config.session_delete);
-            Self::merge_hook_list(&mut merged.user_login, config.user_login);
-            Self::merge_hook_list(&mut merged.user_logout, config.user_logout);
-            Self::merge_hook_list(&mut merged.user_online, config.user_online);
-            Self::merge_hook_list(&mut merged.user_offline, config.user_offline);
-            Self::merge_hook_list(&mut merged.push_pre_send, config.push_pre_send);
-            Self::merge_hook_list(&mut merged.push_post_send, config.push_post_send);
-            Self::merge_hook_list(&mut merged.push_delivery, config.push_delivery);
+            merged.merge_overriding(config);
         }
 
         merged
-    }
-
-    fn merge_hook_list(
-        target: &mut Vec<crate::domain::model::HookConfigItem>,
-        source: Vec<crate::domain::model::HookConfigItem>,
-    ) {
-        for hook in source {
-            if let Some(existing) = target.iter_mut().find(|h| h.name == hook.name) {
-                // 高优先级覆盖
-                *existing = hook;
-            } else {
-                target.push(hook);
-            }
-        }
     }
 }
 
@@ -149,35 +125,34 @@ impl ConfigMerger {
 pub struct ConfigValidator;
 
 impl ConfigValidator {
-    /// 验证Hook配置
+    /// 验证Hook配置（全部 15 类 Hook，见 [`HookConfig::all_hooks`]）
     pub fn validate(config: &HookConfig) -> Result<()> {
-        // 验证所有Hook类型
-        let all_hooks = config
-            .pre_send
-            .iter()
-            .chain(config.post_send.iter())
-            .chain(config.delivery.iter())
-            .chain(config.recall.iter())
-            .chain(config.session_create.iter())
-            .chain(config.session_update.iter())
-            .chain(config.session_delete.iter())
-            .chain(config.user_login.iter())
-            .chain(config.user_logout.iter())
-            .chain(config.user_online.iter())
-            .chain(config.user_offline.iter())
-            .chain(config.push_pre_send.iter())
-            .chain(config.push_post_send.iter())
-            .chain(config.push_delivery.iter());
-
-        for hook in all_hooks {
+        for hook in config.all_hooks() {
             Self::validate_hook(hook)?;
         }
 
         Ok(())
     }
 
-    /// 校验单条 Hook 配置（名称、优先级、超时与分组），规则同 [`Self::validate`]。
+    /// 校验单条 Hook 配置（名称、优先级、超时、分组与 Webhook 签名密钥），规则同 [`Self::validate`]。
+    ///
+    /// Webhook 写了 `secret = ""`（文件、配置中心或直接写库）在加载时就拒绝：签名函数对空密钥
+    /// 报 `ConfigurationError`，以前要到每次投递才失败。不签名就不写 `secret`。错误只带 Hook 名。
     pub fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
+        if let HookTransportConfig::Webhook {
+            secret: Some(secret),
+            ..
+        } = &hook.transport
+            && secret.is_empty()
+        {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::ConfigurationError,
+                "Webhook signing secret is empty: omit `secret` to send unsigned, or set a non-empty value",
+            )
+            .details(format!("hook={}", hook.name))
+            .build_error());
+        }
+
         if hook.name.is_empty() {
             return Err(config_error("Hook name cannot be empty"));
         }
@@ -632,4 +607,201 @@ fn config_error(reason: impl Into<String>) -> flare_server_core::error::FlareErr
         reason,
     )
     .build_error()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::model::HookConfigItem;
+    use crate::infrastructure::config::HookConfigSnapshot;
+    use flare_im_hooks::HookGroup;
+
+    /// 与 `hook_configs.hook_type`、[`HookConfig`] 字段名相同的 15 类 Hook。
+    const ALL_TYPES: [&str; 15] = [
+        "pre_send",
+        "post_send",
+        "delivery",
+        "recall",
+        "session_create",
+        "session_update",
+        "session_delete",
+        "user_login",
+        "user_logout",
+        "user_online",
+        "user_offline",
+        "push_pre_send",
+        "push_post_send",
+        "push_delivery",
+        "get_conversation_participants",
+    ];
+
+    fn parse(toml_src: &str) -> HookConfig {
+        toml::from_str(toml_src).expect("hook config toml")
+    }
+
+    /// 每类一条名为 `{type}-{tag}`、超时为 `timeout_ms` 的 Hook。
+    fn one_of_each(tag: &str, timeout_ms: u64) -> HookConfig {
+        let mut toml_src = String::new();
+        for ty in ALL_TYPES {
+            toml_src.push_str(&format!(
+                "[[{ty}]]\nname = \"{ty}-{tag}\"\nenabled = true\npriority = 100\ntimeout_ms = {timeout_ms}\n[{ty}.selector]\n[{ty}.transport]\ntype = \"local\"\ntarget = \"noop\"\n\n"
+            ));
+        }
+        parse(&toml_src)
+    }
+
+    fn participants(config: &HookConfig) -> Vec<(String, u64)> {
+        config
+            .get_conversation_participants
+            .iter()
+            .map(|hook| (hook.name.clone(), hook.timeout_ms))
+            .collect()
+    }
+
+    /// 修复前 `merge` 逐个列字段、漏了 `get_conversation_participants`：合并后该类为空，
+    /// 经快照查询（`CoreHookRegistry::get_conversation_participants_hooks` 的来源）同样为空。
+    #[test]
+    fn merge_keeps_every_hook_type_including_conversation_participants() {
+        let file = one_of_each("file", 100);
+        let mut database = one_of_each("file", 200);
+        database
+            .get_conversation_participants
+            .extend(one_of_each("db", 300).get_conversation_participants);
+
+        let merged = ConfigMerger::merge(vec![file.clone(), database.clone()]);
+        assert_eq!(merged.hook_count(), ALL_TYPES.len() + 1);
+        // 同名由高优先级（后面的）覆盖，新名字追加。
+        assert_eq!(
+            participants(&merged),
+            [
+                ("get_conversation_participants-file".to_string(), 200),
+                ("get_conversation_participants-db".to_string(), 300),
+            ]
+        );
+        assert!(merged.all_hooks().all(|hook| hook.timeout_ms != 100));
+
+        let snapshot = HookConfigSnapshot::build(
+            &[
+                Some(LoadedHookConfig::global(file)),
+                Some(LoadedHookConfig::global(database)),
+            ],
+            &HookConfigSnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            participants(&snapshot.for_tenant("tenant-a")),
+            participants(&merged)
+        );
+    }
+
+    /// 校验同样覆盖 `get_conversation_participants`（修复前跳过这一类）。
+    #[test]
+    fn validation_covers_conversation_participants_hooks() {
+        let mut config = one_of_each("v", 100);
+        assert!(ConfigValidator::validate(&config).is_ok());
+        config.get_conversation_participants[0].priority = 2000;
+        assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    const EMPTY_SECRET_PROFILE: &str = r#"
+[[post_send]]
+name = "audit-empty-secret"
+enabled = true
+priority = 0
+timeout_ms = 500
+[post_send.selector]
+[post_send.transport]
+type = "webhook"
+endpoint = "https://audit.example.com/hook"
+secret = ""
+[post_send.transport.headers]
+Authorization = "Bearer w13h-header-value-not-for-errors"
+"#;
+
+    /// 文件或配置中心里 `secret = ""` 的 Webhook 在加载（合成快照）时就被拒绝，错误说明原因与
+    /// Hook 名、不带任何取值；修复前加载通过，之后每次投递都报 `ConfigurationError`。
+    #[test]
+    fn an_empty_webhook_secret_is_rejected_when_the_config_is_loaded() {
+        let config = parse(EMPTY_SECRET_PROFILE);
+        let error = ConfigValidator::validate(&config).unwrap_err();
+        let printed = format!("{error} {error:?}");
+        assert!(printed.contains("signing secret is empty"), "{printed}");
+        assert!(printed.contains("audit-empty-secret"), "{printed}");
+        assert!(!printed.contains("w13h-header-value"), "{printed}");
+
+        // 加载路径（启动与定时刷新都经 `HookConfigSnapshot::build`）拒绝整份全局配置。
+        assert!(
+            HookConfigSnapshot::build(
+                &[Some(LoadedHookConfig::global(config))],
+                &HookConfigSnapshot::default(),
+            )
+            .is_err()
+        );
+
+        // 不写 `secret`（不签名）与非空密钥照常通过。
+        for replacement in ["", "secret = \"w13h-non-empty\""] {
+            let config = parse(&EMPTY_SECRET_PROFILE.replace("secret = \"\"", replacement));
+            assert!(
+                ConfigValidator::validate(&config).is_ok(),
+                "{replacement:?}"
+            );
+        }
+    }
+
+    fn shipped_profile(name: &str) -> HookConfig {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../config")
+            .join(name);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        toml::from_str(&content).unwrap_or_else(|error| {
+            panic!("{name} does not parse as a Capability hook config: {error}")
+        })
+    }
+
+    /// 仓库里的 Hook 配置样例也能被 Capability 的加载器解析与校验（Ingest 的加载器另有
+    /// `flare-im-hooks` 的 `config_fail_closed` 用例）。
+    #[test]
+    fn shipped_hook_profiles_load_in_the_capability_engine() {
+        for name in [
+            "hooks.core.toml",
+            "hooks.social.toml",
+            "hooks.toml",
+            "hooks.example.toml",
+            "hooks.social.example.toml",
+            "hooks.business.example.toml",
+        ] {
+            let config = shipped_profile(name);
+            ConfigValidator::validate(&config)
+                .unwrap_or_else(|error| panic!("{name} fails validation: {error}"));
+        }
+    }
+
+    /// 样例里意在影响主链决策的 Hook（要求成功的 pre_send 与 recall）不能落进 business 组：
+    /// Capability 引擎对 business 组的拒绝只记日志、主链照常继续。
+    #[test]
+    fn example_decision_hooks_are_not_in_the_business_group() {
+        for name in [
+            "hooks.social.toml",
+            "hooks.example.toml",
+            "hooks.social.example.toml",
+            "hooks.business.example.toml",
+        ] {
+            let config = shipped_profile(name);
+            let decisions: Vec<&HookConfigItem> = config
+                .pre_send
+                .iter()
+                .chain(config.recall.iter())
+                .filter(|hook| hook.require_success)
+                .collect();
+            for hook in decisions {
+                assert_ne!(
+                    hook.resolved_group().unwrap(),
+                    HookGroup::Business,
+                    "{name}: {} would only be logged when it rejects",
+                    hook.name
+                );
+            }
+        }
+    }
 }

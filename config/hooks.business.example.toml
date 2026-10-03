@@ -1,8 +1,10 @@
 # Core 业务 Hook / 埋点接入示例。
 #
 # 复制到 config/hooks.d/business.toml 后按需启用。建议：
-# - 会影响主链决策的 Hook 使用 require_success = true + fail_fast。
-# - 旁路观测 Hook 使用 require_success = false + ignore。
+# - 会影响主链决策的 Hook 使用 require_success = true + fail_fast，并且 priority >= 100：
+#   Capability 服务的 Hook 引擎按 priority 分组，< 100 归 business 组，拒绝与不可达都只记
+#   日志、主链照常继续；>= 100 归 validation 组，拒绝才会中断发送或撤回。
+# - 旁路观测 Hook 使用 require_success = false + ignore，priority < 100。
 # - 高 QPS Hook 必须短超时、幂等、可降级。
 
 [[pre_send]]
@@ -70,7 +72,8 @@ delivery = "best_effort"
 name = "audit-message-recall"
 description = "消息撤回权限补充检查与审计"
 enabled = true
-priority = 80
+# 要能拒绝撤回：>= 100，在 Capability 引擎里归 validation 组。
+priority = 100
 timeout_ms = 500
 require_success = true
 error_policy = "FailFast"

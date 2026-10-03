@@ -88,26 +88,14 @@ pub struct TenantHookRows {
     pub failed_tenants: HashSet<String>,
 }
 
-/// 把一行按 `hook_type` 放进对应列表；未知类型只告警。
+/// 把一行按 `hook_type` 放进对应列表（[`HookConfig::list_mut`]，与字段名同一张类型表）；
+/// 未知类型只告警。以前这里逐个列类型、漏了 `get_conversation_participants`，该类行被当成未知类型丢掉。
 fn push_row(config: &mut HookConfig, row: HookConfigRow) -> Result<()> {
     let hook_type = row.hook_type.clone();
     let hook_item: HookConfigItem = row.try_into()?;
-    match hook_type.as_str() {
-        "pre_send" => config.pre_send.push(hook_item),
-        "post_send" => config.post_send.push(hook_item),
-        "delivery" => config.delivery.push(hook_item),
-        "recall" => config.recall.push(hook_item),
-        "session_create" => config.session_create.push(hook_item),
-        "session_update" => config.session_update.push(hook_item),
-        "session_delete" => config.session_delete.push(hook_item),
-        "user_login" => config.user_login.push(hook_item),
-        "user_logout" => config.user_logout.push(hook_item),
-        "user_online" => config.user_online.push(hook_item),
-        "user_offline" => config.user_offline.push(hook_item),
-        "push_pre_send" => config.push_pre_send.push(hook_item),
-        "push_post_send" => config.push_post_send.push(hook_item),
-        "push_delivery" => config.push_delivery.push(hook_item),
-        _ => {
+    match config.list_mut(&hook_type) {
+        Some(list) => list.push(hook_item),
+        None => {
             tracing::warn!(hook_type = %hook_type, "Unknown hook type");
         }
     }
@@ -647,5 +635,54 @@ impl PostgresHookConfigRepository {
         };
 
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(hook_type: &str, name: &str) -> HookConfigRow {
+        HookConfigRow {
+            id: 1,
+            hook_id: None,
+            tenant_id: Some("tenant-a".into()),
+            hook_type: hook_type.into(),
+            name: name.into(),
+            version: None,
+            description: None,
+            enabled: true,
+            priority: 100,
+            group_name: None,
+            timeout_ms: 500,
+            max_retries: 0,
+            error_policy: "fail_fast".into(),
+            require_success: true,
+            selector_config: serde_json::json!({}),
+            transport_config: serde_json::json!({"type": "local", "target": "noop"}),
+            metadata: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by: None,
+        }
+    }
+
+    /// 修复前 `push_row` 逐个列类型、漏了 `get_conversation_participants`：这类行被当成未知类型
+    /// 丢掉，库里登记的该类 Hook 永远加载不到。
+    #[test]
+    fn conversation_participants_rows_are_loaded() {
+        let mut config = HookConfig::default();
+        push_row(
+            &mut config,
+            row("get_conversation_participants", "participants"),
+        )
+        .unwrap();
+        push_row(&mut config, row("pre_send", "gate")).unwrap();
+        push_row(&mut config, row("message_read", "not-a-config-list")).unwrap();
+        assert_eq!(config.get_conversation_participants.len(), 1);
+        assert_eq!(config.get_conversation_participants[0].name, "participants");
+        assert_eq!(config.pre_send.len(), 1);
+        // 没有对应列表的类型仍只告警、不装。
+        assert_eq!(config.hook_count(), 2);
     }
 }

@@ -375,6 +375,51 @@ impl HookConfig {
         ]
     }
 
+    /// 所有类型的全部 Hook（含 `get_conversation_participants`）。
+    pub fn all_hooks(&self) -> impl Iterator<Item = &HookConfigItem> {
+        self.lists().into_iter().flatten()
+    }
+
+    /// `hook_type` 类型（与字段名、`hook_configs.hook_type` 相同）的列表；未知类型返回 `None`。
+    pub fn list_mut(&mut self, hook_type: &str) -> Option<&mut Vec<HookConfigItem>> {
+        HOOK_TYPES
+            .iter()
+            .zip(self.lists_mut())
+            .find_map(|(ty, list)| (*ty == hook_type).then_some(list))
+    }
+
+    /// 把 `other` 的 Hook 并入同类型列表，同名的由 `other` 覆盖（高优先级配置源覆盖低优先级）。
+    pub fn merge_overriding(&mut self, other: HookConfig) {
+        for (list, extra) in self.lists_mut().into_iter().zip(other.into_lists()) {
+            for hook in extra {
+                match list.iter_mut().find(|kept| kept.name == hook.name) {
+                    Some(kept) => *kept = hook,
+                    None => list.push(hook),
+                }
+            }
+        }
+    }
+
+    fn into_lists(self) -> [Vec<HookConfigItem>; 15] {
+        [
+            self.pre_send,
+            self.post_send,
+            self.delivery,
+            self.recall,
+            self.session_create,
+            self.session_update,
+            self.session_delete,
+            self.user_login,
+            self.user_logout,
+            self.user_online,
+            self.user_offline,
+            self.push_pre_send,
+            self.push_post_send,
+            self.push_delivery,
+            self.get_conversation_participants,
+        ]
+    }
+
     /// 各类型 Hook 的总条数。
     pub fn hook_count(&self) -> usize {
         self.lists().iter().map(|list| list.len()).sum()
