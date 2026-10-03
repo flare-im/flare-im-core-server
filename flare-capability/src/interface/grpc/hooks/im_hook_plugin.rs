@@ -60,6 +60,21 @@ fn hook_unavailable_status(error: flare_server_core::error::FlareError) -> Statu
     Status::from(error)
 }
 
+/// PostSend、Delivery、Recall 的 Hook 编排返回错误时回的 gRPC 状态：Hook 不可用（必需的 Hook
+/// 超时，带 [`crate::domain::model::HOOK_UNAVAILABLE_PARAM`] 标记）回可重试的状态（见
+/// [`hook_unavailable_status`]：`UNAVAILABLE` 或 `DEADLINE_EXCEEDED`）；其余错误仍是 `INTERNAL`，
+/// 说明照旧。
+///
+/// 以前一律 `INTERNAL`：必需的事件类 Hook 超时在 Capability 侧与内部故障分不开（W13-D 复审）。
+/// Hook 的明确决定不经这里：Recall 被拒仍是 `allow=false`（见 [`recall_response`]）。
+fn hook_execution_status(error: flare_server_core::error::FlareError) -> Status {
+    if is_hook_unavailable(&error) {
+        hook_unavailable_status(error)
+    } else {
+        Status::internal(format!("Failed to execute hooks: {error}"))
+    }
+}
+
 /// PreSend 编排结果 → 应答：放行带（可能被改写的）草稿；Hook 明确拒绝回 `allow=false` 与拒绝
 /// 原因；Hook 不可用造成的拒绝回可重试的 gRPC 状态（见 [`hook_unavailable_status`]）。
 fn pre_send_response(
@@ -358,7 +373,7 @@ impl ImHookPluginServer {
         self.command_handler
             .handle_post_send(&ctx_arc, &message_record, &message_draft, execution_plans)
             .await
-            .map_err(|e| Status::internal(format!("Failed to execute hooks: {}", e)))?;
+            .map_err(hook_execution_status)?;
 
         Ok(Response::new(PostSendHookResponse {
             success: true,
@@ -413,7 +428,7 @@ impl ImHookPluginServer {
         self.command_handler
             .handle_delivery(&ctx_arc, &delivery_event, execution_plans)
             .await
-            .map_err(|e| Status::internal(format!("Failed to execute hooks: {}", e)))?;
+            .map_err(hook_execution_status)?;
 
         Ok(Response::new(DeliveryHookResponse {
             success: true,
@@ -466,7 +481,7 @@ impl ImHookPluginServer {
             .command_handler
             .handle_recall(&ctx_arc, &recall_event, execution_plans)
             .await
-            .map_err(|e| Status::internal(format!("Failed to execute hooks: {}", e)))?;
+            .map_err(hook_execution_status)?;
 
         recall_response(decision).map(Response::new)
     }
@@ -1504,6 +1519,419 @@ mod tests {
                 }
                 PreSendDecision::Continue => panic!("a denying hook must not allow"),
             }
+        }
+    }
+
+    mod event_hook_timeouts {
+        //! 必需的事件类 Hook（PostSend、Delivery、Recall）在 Capability 里超时，经 `flare-im-hooks`
+        //! 的 gRPC Hook 适配器（Message Ingest 等调 Capability `HookPlugin` 用的那一个）端到端：
+        //! Capability 回可重试的 gRPC 状态（PostSend、Delivery 为 `UNAVAILABLE`，Recall 同 PreSend
+        //! 为 `DEADLINE_EXCEEDED`），适配器交给调用方的是可重试的 `ServiceUnavailable`。下游明确
+        //! 报失败仍是 `INTERNAL`，撤回被拒仍是 `allow=false`，可选 Hook 超时照常放行。
+        //!
+        //! 适配器把 `HookPlugin` 的任何失败状态都记成 `ServiceUnavailable`（`flare-im-hooks`
+        //! `adapters/grpc.rs` 的 `Err(status)` 分支），所以适配器一侧的断言修复前后都成立；Capability
+        //! 回的状态码用同一个签名令牌直接调 `HookPlugin` 看。
+        use super::super::*;
+        use crate::application::handler::HookCommandHandler;
+        use crate::domain::model::{
+            HookConfig, HookConfigItem, HookSelectorConfig, HookTransportConfig,
+        };
+        use crate::domain::service::HookOrchestrationService;
+        use crate::infrastructure::config::ConfigWatcher;
+        use crate::interface::grpc::hooks::test_support::{
+            CellKeys, cell_keys, serve_hook_plugin, signed_ctx,
+        };
+        use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+        use flare_grpc_proto::capability::hook_plugin_server::HookPluginServer;
+        use flare_grpc_proto::capability::{HookInvocationContext, HookMessageDraft};
+        use flare_im_hooks::hooks::adapters::GrpcHookFactory;
+        use flare_im_hooks::{HookOutcome, MessageDraft};
+        use flare_server_core::SignedActorType;
+        use flare_server_core::context::Ctx;
+        use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
+        use prost::Message as _;
+        use std::collections::HashMap;
+        use std::time::{Duration, SystemTime};
+        use tokio::net::TcpListener;
+
+        const POST_SEND: &str = "flare.hook.v1.post_send";
+        const DELIVERY: &str = "flare.hook.v1.delivery";
+        const RECALL: &str = "flare.hook.v1.recall";
+
+        fn keys() -> CellKeys {
+            cell_keys(93)
+        }
+
+        /// 下游 Hook：永不回应答（被暂停、只收连接不回应答的扩展）。
+        struct Hanging;
+
+        #[tonic::async_trait]
+        impl HookPlugin for Hanging {
+            async fn call(
+                &self,
+                _request: Request<GenericRequest>,
+            ) -> Result<Response<GenericResponse>, Status> {
+                std::future::pending().await
+            }
+        }
+
+        /// 下游 Hook：PostSend、Delivery 回 `success=false`，Recall 回 `allow=false`（明确的决定）。
+        struct Refusing;
+
+        #[tonic::async_trait]
+        impl HookPlugin for Refusing {
+            async fn call(
+                &self,
+                request: Request<GenericRequest>,
+            ) -> Result<Response<GenericResponse>, Status> {
+                let request = request.into_inner();
+                let (type_url, value) = match request.operation.as_str() {
+                    POST_SEND => (
+                        "type.googleapis.com/flare.capability.v1.PostSendHookResponse",
+                        PostSendHookResponse::default().encode_to_vec(),
+                    ),
+                    DELIVERY => (
+                        "type.googleapis.com/flare.capability.v1.DeliveryHookResponse",
+                        DeliveryHookResponse::default().encode_to_vec(),
+                    ),
+                    RECALL => (
+                        "type.googleapis.com/flare.capability.v1.RecallHookResponse",
+                        RecallHookResponse::default().encode_to_vec(),
+                    ),
+                    other => return Err(Status::unimplemented(other.to_string())),
+                };
+                Ok(Response::new(GenericResponse {
+                    ok: true,
+                    request_id: request.request_id,
+                    payload: Some(prost_types::Any {
+                        type_url: type_url.into(),
+                        value,
+                    }),
+                    error_code: String::new(),
+                    error_message: String::new(),
+                }))
+            }
+        }
+
+        async fn serve<S: HookPlugin>(service: S) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(HookPluginServer::new(service))
+                    .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+            );
+            format!("http://{address}")
+        }
+
+        fn event_hook(endpoint: &str, require_success: bool) -> HookConfigItem {
+            HookConfigItem {
+                name: "event-hook".into(),
+                version: None,
+                description: None,
+                enabled: true,
+                priority: 110,
+                group: None,
+                timeout_ms: 200,
+                max_retries: 0,
+                error_policy: "fail_fast".into(),
+                require_success,
+                selector: HookSelectorConfig::default(),
+                transport: HookTransportConfig::Grpc {
+                    endpoint: Some(endpoint.into()),
+                    service_name: None,
+                    registry_type: None,
+                    namespace: None,
+                    load_balance: None,
+                    metadata: HashMap::new(),
+                },
+                metadata: HashMap::new(),
+            }
+        }
+
+        /// Capability 的 HookPlugin 服务，PostSend、Delivery、Recall 各挂一条指向 `downstream` 的
+        /// Hook（validation 组，200 ms 超时）。
+        async fn capability(downstream: &str, require_success: bool) -> String {
+            let hook = event_hook(downstream, require_success);
+            let watcher = Arc::new(ConfigWatcher::with_config(HookConfig {
+                post_send: vec![hook.clone()],
+                delivery: vec![hook.clone()],
+                recall: vec![hook],
+                ..Default::default()
+            }));
+            let server = ImHookPluginServer::new(
+                Arc::new(HookCommandHandler::new(Arc::new(HookOrchestrationService))),
+                Arc::new(CoreHookRegistry::new(watcher)),
+                Arc::new(HookAdapterFactory::new()),
+                CapabilityExtensionRegistry::new(),
+                Some(keys().verifier),
+            );
+            serve_hook_plugin(server).await
+        }
+
+        /// 服务身份（事件类 Hook 由服务代用户调用）的签名上下文。
+        fn service_ctx() -> Ctx {
+            signed_ctx(
+                &keys(),
+                SignedActorType::Service,
+                "flare-orchestrator",
+                "tenant-a",
+            )
+        }
+
+        const GUARD: Duration = Duration::from_secs(10);
+
+        /// 以 `flare-im-hooks` 的 gRPC Hook 适配器依次调 `capability` 的三类事件 Hook。
+        async fn via_adapter(capability: &str, ctx: &Ctx) -> Vec<(&'static str, HookOutcome)> {
+            let factory = GrpcHookFactory::new();
+            let now = SystemTime::now();
+            let record = MessageRecord {
+                message_id: "m1".into(),
+                client_message_id: None,
+                conversation_id: "conv-1".into(),
+                sender_id: "u1".into(),
+                conversation_type: Some("single".into()),
+                message_type: None,
+                persisted_at: now,
+                metadata: HashMap::new(),
+            };
+            let draft = MessageDraft::new(b"hello".to_vec());
+            let delivery = DeliveryEvent {
+                message_id: "m1".into(),
+                user_id: "u2".into(),
+                channel: "ws".into(),
+                delivered_at: now,
+                metadata: HashMap::new(),
+            };
+            let recall = RecallEvent {
+                message_id: "m1".into(),
+                conversation_id: Some("conv-1".into()),
+                operator_id: "u1".into(),
+                recalled_at: now,
+                metadata: HashMap::new(),
+            };
+            let post_send = factory.build_post_send(HashMap::new(), capability.into());
+            let delivery_hook = factory.build_delivery(HashMap::new(), capability.into());
+            let recall_hook = factory.build_recall(HashMap::new(), capability.into());
+            vec![
+                (
+                    "post_send",
+                    tokio::time::timeout(GUARD, post_send.handle(ctx, &record, &draft))
+                        .await
+                        .expect("post_send: the adapter call returns"),
+                ),
+                (
+                    "delivery",
+                    tokio::time::timeout(GUARD, delivery_hook.handle(ctx, &delivery))
+                        .await
+                        .expect("delivery: the adapter call returns"),
+                ),
+                (
+                    "recall",
+                    tokio::time::timeout(GUARD, recall_hook.handle(ctx, &recall))
+                        .await
+                        .expect("recall: the adapter call returns"),
+                ),
+            ]
+        }
+
+        /// 与适配器同一个签名令牌、同样的 `GenericRequest` 直接调 HookPlugin，返回 Capability 的
+        /// 应答或状态。
+        async fn raw_call(
+            capability: &str,
+            ctx: &Ctx,
+            operation: &'static str,
+        ) -> Result<GenericResponse, Status> {
+            let verified = ctx.get_data::<VerifiedContext>().unwrap();
+            let claims = verified.claims().unwrap();
+            let context = Some(HookInvocationContext {
+                conversation_id: "conv-1".into(),
+                conversation_type: "single".into(),
+                tenant_id: claims.tenant_id.clone(),
+                request_id: claims.request_id.clone(),
+                ..Default::default()
+            });
+            let (type_url, value) = match operation {
+                POST_SEND => (
+                    "type.googleapis.com/flare.capability.v1.PostSendHookRequest",
+                    PostSendHookRequest {
+                        context,
+                        record: Some(HookMessageRecord {
+                            message: Some(flare_proto::common::Message {
+                                server_id: "m1".into(),
+                                conversation_id: "conv-1".into(),
+                                sender_id: "u1".into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        draft: Some(HookMessageDraft::default()),
+                    }
+                    .encode_to_vec(),
+                ),
+                DELIVERY => (
+                    "type.googleapis.com/flare.capability.v1.DeliveryHookRequest",
+                    DeliveryHookRequest {
+                        context,
+                        event: Some(HookDeliveryEvent {
+                            message_id: "m1".into(),
+                            user_id: "u2".into(),
+                            channel: "ws".into(),
+                            ..Default::default()
+                        }),
+                    }
+                    .encode_to_vec(),
+                ),
+                RECALL => (
+                    "type.googleapis.com/flare.capability.v1.RecallHookRequest",
+                    RecallHookRequest {
+                        context,
+                        event: Some(HookRecallEvent {
+                            message_id: "m1".into(),
+                            operator_id: "u1".into(),
+                            ..Default::default()
+                        }),
+                    }
+                    .encode_to_vec(),
+                ),
+                other => panic!("not an event hook operation: {other}"),
+            };
+            let mut client = HookPluginClient::connect(capability.to_string())
+                .await
+                .unwrap();
+            let mut request = Request::new(GenericRequest {
+                operation: operation.into(),
+                metadata: HashMap::new(),
+                payload: Some(prost_types::Any {
+                    type_url: type_url.into(),
+                    value,
+                }),
+                request_id: claims.request_id.clone(),
+            });
+            request
+                .metadata_mut()
+                .insert("x-flare-ctx", verified.token().unwrap().parse().unwrap());
+            tokio::time::timeout(GUARD, client.call(request))
+                .await
+                .expect("the HookPlugin call returns")
+                .map(Response::into_inner)
+        }
+
+        /// 必需的事件类 Hook 在 Capability 里超时：Capability 回可重试的 gRPC 状态，适配器的调用方
+        /// 得到可重试的 `ServiceUnavailable`。修复前 PostSend 与 Delivery 回 `INTERNAL`。
+        #[tokio::test]
+        async fn required_event_hook_timeouts_are_retryable_through_the_adapter() {
+            let downstream = serve(Hanging).await;
+            let capability = capability(&downstream, true).await;
+            let ctx = service_ctx();
+
+            for (operation, expected) in [
+                (POST_SEND, tonic::Code::Unavailable),
+                (DELIVERY, tonic::Code::Unavailable),
+                (RECALL, tonic::Code::DeadlineExceeded),
+            ] {
+                let status = raw_call(&capability, &ctx, operation)
+                    .await
+                    .expect_err(operation);
+                assert_eq!(status.code(), expected, "{operation}: {status:?}");
+                assert!(
+                    !status.message().contains("Failed to execute hooks"),
+                    "{operation}: {status:?}"
+                );
+            }
+
+            for (phase, outcome) in via_adapter(&capability, &ctx).await {
+                match outcome {
+                    HookOutcome::Failed(error) => {
+                        assert_eq!(
+                            error.code(),
+                            Some(ErrorCode::ServiceUnavailable),
+                            "{phase}: {error}"
+                        );
+                        assert!(error.is_retryable(), "{phase}: {error}");
+                    }
+                    HookOutcome::Completed => {
+                        panic!("{phase}: a timed-out required hook must not complete")
+                    }
+                }
+            }
+        }
+
+        /// 对照：下游明确报失败时 PostSend 与 Delivery 仍是 `INTERNAL`，撤回被拒仍是 `allow=false`
+        /// （适配器得到策略拒绝 `OPERATION_FAILED`）；可选 Hook 超时照常放行。
+        #[tokio::test]
+        async fn refusals_keep_their_answers_and_optional_timeouts_complete() {
+            let ctx = service_ctx();
+            let refusing = capability(&serve(Refusing).await, true).await;
+            for operation in [POST_SEND, DELIVERY] {
+                let status = raw_call(&refusing, &ctx, operation)
+                    .await
+                    .expect_err(operation);
+                assert_eq!(
+                    status.code(),
+                    tonic::Code::Internal,
+                    "{operation}: {status:?}"
+                );
+                assert!(
+                    status.message().starts_with("Failed to execute hooks"),
+                    "{operation}: {status:?}"
+                );
+            }
+            let response = raw_call(&refusing, &ctx, RECALL).await.unwrap();
+            let recall =
+                RecallHookResponse::decode(response.payload.unwrap().value.as_slice()).unwrap();
+            assert!(!recall.allow);
+            let outcomes = via_adapter(&refusing, &ctx).await;
+            match &outcomes[2] {
+                ("recall", HookOutcome::Failed(error)) => {
+                    assert_eq!(error.code(), Some(ErrorCode::OperationFailed), "{error}");
+                    assert!(!error.is_retryable(), "{error}");
+                }
+                other => panic!("recall refusal: {other:?}"),
+            }
+
+            let optional = capability(&serve(Hanging).await, false).await;
+            for operation in [POST_SEND, DELIVERY, RECALL] {
+                let response = raw_call(&optional, &ctx, operation).await;
+                assert!(response.is_ok_and(|r| r.ok), "{operation}");
+            }
+            for (phase, outcome) in via_adapter(&optional, &ctx).await {
+                assert!(outcome.is_completed(), "{phase}: {outcome:?}");
+            }
+        }
+
+        /// 编排错误的状态映射本身：带 Hook 不可用标记的回可重试状态，其余仍是 `INTERNAL`。
+        #[test]
+        fn hook_execution_errors_map_to_retryable_statuses_only_when_unavailable() {
+            let unavailable =
+                ErrorBuilder::new(ErrorCode::ServiceUnavailable, "post-send hook timed out")
+                    .details("hook=h")
+                    .param(crate::domain::model::HOOK_UNAVAILABLE_PARAM, "true")
+                    .build_error();
+            assert_eq!(
+                hook_execution_status(unavailable).code(),
+                tonic::Code::Unavailable
+            );
+            let internal = ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "remote PostSend hook reported failure",
+            )
+            .build_error();
+            let status = hook_execution_status(internal);
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert!(
+                status.message().starts_with("Failed to execute hooks"),
+                "{status:?}"
+            );
+            let unmarked =
+                ErrorBuilder::new(ErrorCode::ServiceUnavailable, "downstream unavailable")
+                    .build_error();
+            assert_eq!(
+                hook_execution_status(unmarked).code(),
+                tonic::Code::Internal,
+                "only the hook-unavailable marker selects a retryable status"
+            );
         }
     }
 

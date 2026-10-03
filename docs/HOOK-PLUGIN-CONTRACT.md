@@ -106,6 +106,12 @@ A rejection caused by an unreachable or timed-out hook is answered as a gRPC
 reports a retryable `SERVICE_UNAVAILABLE` (HTTP 503) instead of a policy rejection
 (HTTP 422).
 
+Post-send and delivery hooks have no allow/deny answer. When a required one (critical
+group, or `require_success`) times out in the Capability engine, the call is answered
+`UNAVAILABLE`, which a caller may retry; any other failure (the hook reporting failure,
+or its call failing before the timeout) is still answered `INTERNAL`. An optional one
+that times out is skipped. A recall the hook refuses is answered `allow=false`.
+
 A hook that must observe the *final* draft has to sort after every hook that
 rewrites it — put rewriting hooks in an earlier group, not merely a lower number
 inside the same one.

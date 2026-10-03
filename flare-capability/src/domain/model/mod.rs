@@ -800,18 +800,26 @@ impl HookExecutionPlan {
 
         match timeout(self.metadata.timeout, fut).await {
             Ok(inner) => inner,
-            Err(_) => {
-                let err =
-                    ErrorBuilder::new(ErrorCode::OperationTimeout, "post-send hook timed out")
-                        .details(format!("hook={}", self.name()))
-                        .build_error();
-                if self.must_succeed() {
-                    Err(err)
-                } else {
-                    tracing::warn!(hook = %self.name(), "post-send hook timeout ignored");
-                    Ok(())
-                }
-            }
+            Err(_) => self.event_timeout_outcome("post-send"),
+        }
+    }
+
+    /// 事件类 Hook（PostSend、Delivery）超时：[`Self::must_succeed`] 时回带
+    /// [`HOOK_UNAVAILABLE_PARAM`] 标记的 `ServiceUnavailable`（可重试），HookPlugin 据此回 gRPC
+    /// `UNAVAILABLE`，与 `flare-im-hooks` 注册表对必需事件类 Hook 超时的口径相同（W13-D）；以前回
+    /// 不带标记的 `OperationTimeout`，HookPlugin 一律映射为 `INTERNAL`，调用方无从判断能否重试。
+    /// 可选的只记 WARN 放行，文案不变。下游调用本身失败（非超时）的错误仍原样返回。
+    fn event_timeout_outcome(&self, stage: &'static str) -> FlareResult<()> {
+        if self.must_succeed() {
+            tracing::warn!(hook = %self.name(), stage, group = ?self.group, "required hook timed out, failing");
+            Err(unavailable_rejection(
+                ErrorCode::ServiceUnavailable,
+                format!("{stage} hook timed out"),
+                self.name(),
+            ))
+        } else {
+            tracing::warn!(hook = %self.name(), "{stage} hook timeout ignored");
+            Ok(())
         }
     }
 
@@ -827,17 +835,7 @@ impl HookExecutionPlan {
 
         match timeout(self.metadata.timeout, fut).await {
             Ok(inner) => inner,
-            Err(_) => {
-                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "delivery hook timed out")
-                    .details(format!("hook={}", self.name()))
-                    .build_error();
-                if self.must_succeed() {
-                    Err(err)
-                } else {
-                    tracing::warn!(hook = %self.name(), "delivery hook timeout ignored");
-                    Ok(())
-                }
-            }
+            Err(_) => self.event_timeout_outcome("delivery"),
         }
     }
 
@@ -1102,6 +1100,180 @@ mod tests {
         assert!(plan.must_succeed());
         let plan = HookExecutionPlan::from_hook_config(config_item(150, None), "pre_send");
         assert!(!plan.must_succeed());
+    }
+
+    /// 下游 Hook：PostSend 与 Delivery 永不返回（被暂停、只收连接不回应答的扩展），PreSend 与
+    /// Recall 本组用例不涉及。
+    struct HangingEventAdapter;
+
+    #[async_trait::async_trait]
+    impl crate::infrastructure::adapters::HookAdapter for HangingEventAdapter {
+        async fn pre_send(
+            &self,
+            _ctx: &Context,
+            _draft: &mut MessageDraft,
+        ) -> FlareResult<PreSendDecision> {
+            Ok(PreSendDecision::Continue)
+        }
+        async fn post_send(
+            &self,
+            _ctx: &Context,
+            _record: &MessageRecord,
+            _draft: &MessageDraft,
+        ) -> FlareResult<()> {
+            std::future::pending().await
+        }
+        async fn delivery(&self, _ctx: &Context, _event: &DeliveryEvent) -> FlareResult<()> {
+            std::future::pending().await
+        }
+        async fn recall(
+            &self,
+            _ctx: &Context,
+            _event: &RecallEvent,
+        ) -> FlareResult<PreSendDecision> {
+            Ok(PreSendDecision::Continue)
+        }
+    }
+
+    /// 下游 Hook：PostSend 与 Delivery 立即回一个内部错误（对端报失败）。
+    struct FailingEventAdapter;
+
+    #[async_trait::async_trait]
+    impl crate::infrastructure::adapters::HookAdapter for FailingEventAdapter {
+        async fn pre_send(
+            &self,
+            _ctx: &Context,
+            _draft: &mut MessageDraft,
+        ) -> FlareResult<PreSendDecision> {
+            Ok(PreSendDecision::Continue)
+        }
+        async fn post_send(
+            &self,
+            _ctx: &Context,
+            _record: &MessageRecord,
+            _draft: &MessageDraft,
+        ) -> FlareResult<()> {
+            Err(ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "remote PostSend hook reported failure",
+            )
+            .build_error())
+        }
+        async fn delivery(&self, _ctx: &Context, _event: &DeliveryEvent) -> FlareResult<()> {
+            Err(ErrorBuilder::new(
+                ErrorCode::InternalError,
+                "remote Delivery hook reported failure",
+            )
+            .build_error())
+        }
+        async fn recall(
+            &self,
+            _ctx: &Context,
+            _event: &RecallEvent,
+        ) -> FlareResult<PreSendDecision> {
+            Ok(PreSendDecision::Continue)
+        }
+    }
+
+    fn event_plan(
+        hook_type: &str,
+        require_success: bool,
+        adapter: Arc<dyn crate::infrastructure::adapters::HookAdapter>,
+    ) -> HookExecutionPlan {
+        let mut item = config_item(150, None);
+        item.timeout_ms = 5;
+        item.require_success = require_success;
+        HookExecutionPlan::from_hook_config(item, hook_type).with_adapter(adapter)
+    }
+
+    /// 两类事件 Hook 各跑一次，返回（阶段名，结果）。
+    async fn run_event_hooks(
+        require_success: bool,
+        adapter: Arc<dyn crate::infrastructure::adapters::HookAdapter>,
+    ) -> Vec<(&'static str, FlareResult<()>)> {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req-event").with_tenant_id("t1"));
+        let record = MessageRecord {
+            message_id: "m1".into(),
+            client_message_id: None,
+            conversation_id: "c1".into(),
+            sender_id: "u1".into(),
+            conversation_type: None,
+            message_type: None,
+            persisted_at: SystemTime::now(),
+            metadata: HashMap::new(),
+        };
+        let draft = MessageDraft::new(b"hello".to_vec());
+        let delivery = DeliveryEvent {
+            message_id: "m1".into(),
+            user_id: "u2".into(),
+            channel: "ws".into(),
+            delivered_at: SystemTime::now(),
+            metadata: HashMap::new(),
+        };
+        let guard = Duration::from_secs(10);
+        let post_send = event_plan("post_send", require_success, Arc::clone(&adapter));
+        let delivery_plan = event_plan("delivery", require_success, adapter);
+        vec![
+            (
+                "post-send",
+                tokio::time::timeout(guard, post_send.execute_post_send(&ctx, &record, &draft))
+                    .await
+                    .expect("the hook's own timeout fires"),
+            ),
+            (
+                "delivery",
+                tokio::time::timeout(guard, delivery_plan.execute_delivery(&ctx, &delivery))
+                    .await
+                    .expect("the hook's own timeout fires"),
+            ),
+        ]
+    }
+
+    /// 必需的事件类 Hook 超时：可重试的 `ServiceUnavailable`、带 Hook 不可用标记（HookPlugin 据此回
+    /// gRPC `UNAVAILABLE`），原因 `"<阶段> hook timed out"`、说明只有 Hook 名。修复前是不带标记的
+    /// `OperationTimeout`（不可重试，HookPlugin 回 `INTERNAL`）。可选的超时照常放行。
+    #[tokio::test]
+    async fn required_event_hook_timeouts_are_retryable_and_marked_unavailable() {
+        for (stage, result) in run_event_hooks(true, Arc::new(HangingEventAdapter)).await {
+            let error = result.expect_err(stage);
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::ServiceUnavailable),
+                "{stage}: {error}"
+            );
+            assert!(error.is_retryable(), "{stage}: {error}");
+            assert!(is_hook_unavailable(&error), "{stage}: {error}");
+            match &error {
+                FlareError::Localized {
+                    reason, details, ..
+                } => {
+                    assert_eq!(reason, &format!("{stage} hook timed out"));
+                    assert_eq!(details.as_deref(), Some("hook=grouped"));
+                }
+                other => panic!("{stage}: unexpected error shape: {other}"),
+            }
+        }
+        for (stage, result) in run_event_hooks(false, Arc::new(HangingEventAdapter)).await {
+            assert!(
+                result.is_ok(),
+                "{stage}: an optional hook timeout is ignored"
+            );
+        }
+    }
+
+    /// 下游明确报失败（非超时）不是「Hook 不可用」：错误原样返回、不带标记（HookPlugin 仍回
+    /// `INTERNAL`）。
+    #[tokio::test]
+    async fn event_hook_failures_other_than_timeouts_are_returned_unchanged() {
+        for (stage, result) in run_event_hooks(true, Arc::new(FailingEventAdapter)).await {
+            let error = result.expect_err(stage);
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::InternalError),
+                "{stage}: {error}"
+            );
+            assert!(!is_hook_unavailable(&error), "{stage}: {error}");
+        }
     }
 
     #[test]
