@@ -16,8 +16,13 @@ use flare_conversation::domain::model::{
     ConversationParticipant, ConversationPolicy, ConversationSort, ConversationType,
     ConversationVisibility, HistoryPurgeBoundary, UpdateConversationUserSettingsPatch,
 };
-use flare_conversation::domain::repository::ConversationRepository;
-use flare_conversation::infrastructure::persistence::PostgresConversationRepository;
+use flare_conversation::domain::model::{ConversationDomainConfig, ThreadSortOrder};
+use flare_conversation::domain::repository::{ConversationRepository, ThreadRepository};
+use flare_conversation::domain::service::DefaultConversationDomainService;
+use flare_conversation::infrastructure::persistence::redis_presence::RedisPresenceRepository;
+use flare_conversation::infrastructure::persistence::{
+    PostgresConversationRepository, PostgresThreadRepository,
+};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, FlareError};
 use sqlx::postgres::PgPoolOptions;
@@ -58,13 +63,28 @@ fn test_config() -> Arc<ConversationConfig> {
     })
 }
 
-fn repository() -> PostgresConversationRepository {
+fn lazy_pool() -> sqlx::PgPool {
     // 端口 1 不监听：任何真正发出的查询都会是连接错误，不会是参数错误。
-    let pool = PgPoolOptions::new()
+    PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_secs(1))
         .connect_lazy("postgres://flare@127.0.0.1:1/none")
-        .expect("lazy pool");
-    PostgresConversationRepository::new(Arc::new(pool), test_config())
+        .expect("lazy pool")
+}
+
+fn repository() -> PostgresConversationRepository {
+    PostgresConversationRepository::new(Arc::new(lazy_pool()), test_config())
+}
+
+fn tenantless_contexts() -> [Context; 3] {
+    [
+        Context::with_request_id("req").with_user_id("alice"),
+        Context::with_request_id("req")
+            .with_user_id("alice")
+            .with_tenant_id(""),
+        Context::with_request_id("req")
+            .with_user_id("alice")
+            .with_tenant_id("  "),
+    ]
 }
 
 const CID: &str = "1AW11T0000000000AB";
@@ -228,4 +248,107 @@ async fn a_present_tenant_passes_the_check_and_reaches_the_database() {
             error.reason()
         );
     }
+}
+
+/// 领域服务建会话只认上下文租户（W12-T）：缺租户在读写仓储之前就以 `InvalidParameter` 拒绝，
+/// 不再生成租户为 "0" 的会话、不再用 "0" 作系统会话的 system_id。以前缺租户时建出 `tenant_id`
+/// 为 "0" 的会话，只靠仓储的租户检查（"tenant required for conversation storage"）挡住。
+#[tokio::test]
+async fn domain_service_requires_a_context_tenant_to_create_a_conversation() {
+    let presence = RedisPresenceRepository::new(
+        Arc::new(redis::Client::open("redis://127.0.0.1:9/").expect("redis url")),
+        test_config(),
+    );
+    let service = DefaultConversationDomainService::new(
+        Arc::new(repository()),
+        Arc::new(presence),
+        None,
+        ConversationDomainConfig::default(),
+    );
+    let requested = HashMap::from([("conversation_id".to_string(), CID.to_string())]);
+    let cases = [
+        (ConversationType::System, HashMap::new()),
+        (ConversationType::Group, HashMap::new()),
+        (ConversationType::Single, requested),
+    ];
+    for ctx in tenantless_contexts() {
+        for (conversation_type, attributes) in cases.clone() {
+            let error = service
+                .create_conversation(
+                    &ctx,
+                    conversation_type,
+                    "im".to_string(),
+                    vec![participant()],
+                    attributes,
+                    ConversationVisibility::Private,
+                    String::new(),
+                )
+                .await
+                .expect_err("no tenant, no conversation");
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::InvalidParameter),
+                "{conversation_type:?}: {error}"
+            );
+            assert!(
+                error
+                    .reason()
+                    .contains("tenant required to create a conversation"),
+                "{conversation_type:?}: {}",
+                error.reason()
+            );
+        }
+    }
+}
+
+/// 话题仓储同样只认上下文租户（W12-T）：缺租户即 `InvalidParameter`，在发出 SQL 之前返回；
+/// 以前借 `normalize_tenant_id` 把空租户变成 "0"，去读写租户 0 的话题。
+#[tokio::test]
+async fn every_thread_repository_method_requires_a_context_tenant() {
+    let repo = PostgresThreadRepository::new(Arc::new(lazy_pool()));
+    let thread = "root-1";
+    for ctx in tenantless_contexts() {
+        assert_tenant_required(
+            "create_thread",
+            repo.create_thread(&ctx, CID, thread, Some("t"), "alice")
+                .await,
+        );
+        assert_tenant_required(
+            "list_threads",
+            repo.list_threads(&ctx, CID, 10, 0, false, ThreadSortOrder::UpdatedDesc)
+                .await,
+        );
+        assert_tenant_required("get_thread", repo.get_thread(&ctx, thread).await);
+        assert_tenant_required(
+            "update_thread",
+            repo.update_thread(&ctx, thread, Some("t"), None, None, None)
+                .await,
+        );
+        assert_tenant_required("delete_thread", repo.delete_thread(&ctx, thread).await);
+        assert_tenant_required(
+            "increment_reply_count",
+            repo.increment_reply_count(&ctx, thread, "reply-1", "bob")
+                .await,
+        );
+        assert_tenant_required(
+            "add_participant",
+            repo.add_participant(&ctx, thread, "bob").await,
+        );
+        assert_tenant_required(
+            "get_participants",
+            repo.get_participants(&ctx, thread).await,
+        );
+    }
+
+    // 对照：显式的租户 "0" 越过租户检查去查库，得到的是连接错误。
+    let ctx = Context::with_request_id("req").with_tenant_id("0");
+    let error = repo
+        .get_thread(&ctx, thread)
+        .await
+        .expect_err("no database behind the lazy pool");
+    assert!(
+        !error.reason().contains("tenant required"),
+        "{}",
+        error.reason()
+    );
 }

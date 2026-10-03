@@ -33,7 +33,9 @@ async fn threads_are_isolated_per_tenant() {
     let tenant_b = format!("tb{suffix}");
     let ctx_a = Context::with_request_id("req-a").with_tenant_id(&tenant_a);
     let ctx_b = Context::with_request_id("req-b").with_tenant_id(&tenant_b);
-    let ctx_default = Context::with_request_id("req-0");
+    // 显式的租户 "0"（单租户私有化的默认租户）；缺租户的上下文直接报错，见
+    // `conversation_repository_tenant.rs`。
+    let ctx_zero = Context::with_request_id("req-0").with_tenant_id("0");
 
     // 同一 thread_id 在两个租户各建一条。
     let id_a = repo
@@ -60,11 +62,8 @@ async fn threads_are_isolated_per_tenant() {
     assert_eq!(a.title.as_deref(), Some("a"));
     assert_eq!(b.title.as_deref(), Some("b"));
     assert!(
-        repo.get_thread(&ctx_default, &root)
-            .await
-            .unwrap()
-            .is_none(),
-        "default tenant \"0\" must not see other tenants' threads"
+        repo.get_thread(&ctx_zero, &root).await.unwrap().is_none(),
+        "tenant \"0\" must not see other tenants' threads"
     );
 
     // 回复与参与者只落在自己的租户。

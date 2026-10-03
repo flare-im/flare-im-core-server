@@ -370,3 +370,26 @@ fn handler_without_the_signed_layer_rejects_instead_of_trusting_metadata() {
         Code::Unauthenticated
     );
 }
+
+/// 上传的租户只取签名上下文（W12-T）：缺租户、空白或通配的租户回 `PERMISSION_DENIED`，不再按
+/// 租户 "0" 写进上传元数据；显式的 "0" 照常。签名身份本身要求非空租户，这是入口的第二道防线。
+#[test]
+fn upload_tenant_never_defaults_to_tenant_zero() {
+    let no_tenant: Ctx = Arc::new(Context::with_request_id("req").with_user_id("alice"));
+    assert_eq!(
+        upload_tenant(&no_tenant).unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    for tenant in ["", "  ", "*"] {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
+        assert_eq!(
+            upload_tenant(&ctx).unwrap_err().code(),
+            Code::PermissionDenied,
+            "{tenant:?}"
+        );
+    }
+    for tenant in ["0", "tenant-a"] {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
+        assert_eq!(upload_tenant(&ctx).unwrap(), tenant);
+    }
+}

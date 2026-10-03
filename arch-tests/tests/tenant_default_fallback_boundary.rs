@@ -29,24 +29,9 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "Hook 外发 Webhook 的租户，随 Capability Hook/Webhook 条目处理（W10-S2 F2）",
     ),
     (
-        "crates/flare-im-hooks/src/hooks/selector.rs",
-        1,
-        "Hook 选择器按租户匹配，随 Capability Hook 条目处理（W10-S2 F4）",
-    ),
-    (
-        "crates/flare-im-message-pipeline/src/extension/orchestrator.rs",
-        3,
-        "只是扩展编排日志的 tenant_id 字段，不读写数据",
-    ),
-    (
-        "crates/flare-im-message-pipeline/src/extension/routing.rs",
-        1,
-        "租户白名单判定；ingest 在 Hook 之前已拒绝缺租户的发送（W11-T）",
-    ),
-    (
         "crates/flare-im-service-kit/src/gateway_auth.rs",
         1,
-        "宽松策略下未绑定租户的连接按部署默认租户查准入，严格策略已拒绝；部署级默认租户待定",
+        "宽松策略下未绑定租户的连接按部署默认租户 0 查准入（单租户私有化的旧令牌不带租户），严格策略已拒绝；改为一律拒绝属部署级默认租户的取舍（第 36 条），待用户决定",
     ),
     (
         "flare-capability/src/application/handler/capability_dispatch.rs",
@@ -89,64 +74,29 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "只是日志字段 tenant_for_log",
     ),
     (
-        "flare-conversation/src/domain/service/conversation_domain_service.rs",
-        2,
-        "建会话的租户与系统会话 ID：仓储写入已要求上下文租户（W11-T），本身待改",
-    ),
-    (
-        "flare-conversation/src/infrastructure/persistence/thread_repository.rs",
-        1,
-        "话题仓储借 normalize_tenant_id 把空租户变成 0，待改",
-    ),
-    (
-        "flare-media/src/interface/grpc/media_handler.rs",
-        1,
-        "媒资 gRPC 入口的租户，待改",
-    ),
-    (
-        "flare-orchestrator/src/application/commands/message_action_commands.rs",
-        9,
-        "消息操作命令上的租户字段；随后的 handle_event 在上下文缺租户时拒绝（W11-T）",
-    ),
-    (
         "flare-push/server/src/config/settings.rs",
         1,
-        "推送服务的部署级默认租户配置项，待用户决定",
+        "推送服务的部署级默认租户配置项（PUSH_SERVER_DEFAULT_TENANT_ID 未设时为 0，单租户私有化默认），去留属第 36 条，待用户决定",
     ),
     (
         "flare-signaling/gateway/src/application/handlers/auth_handler.rs",
         1,
-        "令牌不带租户时的部署级默认租户（单租户私有化），待用户决定",
+        "令牌不带租户时的部署级默认租户（ACCESS_GATEWAY_DEFAULT_TENANT_ID 未设时为 0，单租户私有化默认）；改为拒绝会让不带租户的令牌都登录失败，属第 36 条，待用户决定",
     ),
     (
         "flare-signaling/gateway/src/config/settings.rs",
         1,
-        "网关的部署级默认租户配置项，待用户决定",
+        "网关的部署级默认租户配置项（未设时为 0，单租户私有化默认），属第 36 条，待用户决定",
     ),
     (
         "flare-signaling/gateway/src/constants.rs",
         1,
-        "网关默认租户常量，同上",
-    ),
-    (
-        "flare-signaling/gateway/src/domain/service/push_domain_service.rs",
-        1,
-        "网关连接上下文的租户（认证时已绑定），待改为报错",
-    ),
-    (
-        "flare-signaling/gateway/src/domain/service/sync_service.rs",
-        1,
-        "网关连接上下文的租户（认证时已绑定），待改为报错",
+        "网关部署级默认租户常量（上两项的取值），属第 36 条，待用户决定",
     ),
     (
         "flare-signaling/route/src/service/wire.rs",
         1,
-        "路由服务的部署级默认租户配置项，待用户决定",
-    ),
-    (
-        "flare-storage/reader/src/infrastructure/persistence/optimized_postgres_store.rs",
-        4,
-        "Storage Reader 读路径（签名读已落地），待与请求用户绑定一并改（W11 ⑤）",
+        "路由服务的部署级默认租户配置项（未设时为 0，单租户私有化默认），属第 36 条，待用户决定",
     ),
     (
         "tools/flare-dlq-replay/src/main.rs",
@@ -176,6 +126,20 @@ const FIXED_BY_W11_T: &[&str] = &[
     "flare-storage/writer/src/interface/messaging/operation_consumer.rs",
     "flare-sync-orchestrator/src/application/handlers/sync_orchestration_handler.rs",
     "flare-sync-orchestrator/src/infrastructure/rpc/sync_adapters.rs",
+];
+
+/// W12-T 改成缺租户即报错的文件：必须保持零兜底，也不得进入 `ALLOWED`。
+const FIXED_BY_W12_T: &[&str] = &[
+    "crates/flare-im-hooks/src/hooks/selector.rs",
+    "crates/flare-im-message-pipeline/src/extension/orchestrator.rs",
+    "crates/flare-im-message-pipeline/src/extension/routing.rs",
+    "flare-conversation/src/domain/service/conversation_domain_service.rs",
+    "flare-conversation/src/infrastructure/persistence/thread_repository.rs",
+    "flare-media/src/interface/grpc/media_handler.rs",
+    "flare-orchestrator/src/application/commands/message_action_commands.rs",
+    "flare-signaling/gateway/src/domain/service/push_domain_service.rs",
+    "flare-signaling/gateway/src/domain/service/sync_service.rs",
+    "flare-storage/reader/src/infrastructure/persistence/optimized_postgres_store.rs",
 ];
 
 /// 兜底写法（已去掉空白）。语句里同时提到租户才算。
@@ -242,6 +206,27 @@ fn files_fixed_by_w11_t_stay_free_of_tenant_zero_fallbacks() {
     let root = workspace_root();
     let found = tenant_fallbacks(&root);
     for file in FIXED_BY_W11_T {
+        assert!(
+            root.join(file).is_file(),
+            "{file} moved; update this guard together with the code"
+        );
+        assert!(
+            !ALLOWED.iter().any(|(allowed, _, _)| allowed == file),
+            "{file} must not be allowlisted"
+        );
+        assert!(
+            !found.contains_key(*file),
+            "{file} defaults a missing tenant to \"0\" again:\n{}",
+            found[*file].join("\n")
+        );
+    }
+}
+
+#[test]
+fn files_fixed_by_w12_t_stay_free_of_tenant_zero_fallbacks() {
+    let root = workspace_root();
+    let found = tenant_fallbacks(&root);
+    for file in FIXED_BY_W12_T {
         assert!(
             root.join(file).is_file(),
             "{file} moved; update this guard together with the code"

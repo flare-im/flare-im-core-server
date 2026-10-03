@@ -40,8 +40,17 @@ impl PerformanceMetrics {
     pub fn record_query(&self, _query_type: &str, _duration_ms: u64) {}
 }
 
-fn tenant_id_from_ctx(ctx: &Ctx) -> &str {
-    ctx.tenant_id().unwrap_or("0")
+/// 读路径的租户只取上下文（签名读由签名上下文带来）。缺租户即 `InvalidParameter`，在发出 SQL
+/// 之前返回，不再按租户 "0" 去读租户 0 的数据（W12-T）；显式的 "0" 照常。
+fn tenant_id_from_ctx(ctx: &Ctx) -> Result<&str> {
+    ctx.tenant_id()
+        .filter(|tenant_id| !tenant_id.trim().is_empty())
+        .ok_or_else(|| {
+            flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "tenant required to read messages"
+            )
+        })
 }
 
 const MESSAGE_PIN_SCOPE_CONVERSATION: i32 = 0;
@@ -436,7 +445,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
-        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let tenant_id = tenant_id_from_ctx(ctx)?.to_string();
         let start = Instant::now();
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
@@ -716,7 +725,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         include_burned_placeholder: bool,
     ) -> Result<Vec<Message>> {
-        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let tenant_id = tenant_id_from_ctx(ctx)?.to_string();
         let limit = limit.clamp(1, 1000);
         let backfill_tail_page =
             crate::domain::repository::is_backfill_tail_page(after_seq, before_seq);
@@ -870,7 +879,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         include_burned_placeholder: bool,
     ) -> Result<Vec<(String, Vec<Message>)>> {
         const MAX_WINDOW_CONVERSATIONS: usize = 200;
-        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let tenant_id = tenant_id_from_ctx(ctx)?.to_string();
         let limit = per_conversation_limit.clamp(1, 500);
         let targets: Vec<(String, i64)> = targets
             .iter()
@@ -939,7 +948,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
     #[instrument(skip(self), fields(message_id))]
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
-        let tenant_id = tenant_id_from_ctx(ctx).to_string();
+        let tenant_id = tenant_id_from_ctx(ctx)?.to_string();
         // 1. Query Database
         // Support querying by server_id or client_msg_id
         let row = sqlx::query(
@@ -1022,7 +1031,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Option<DateTime<Utc>>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         // 直接查询消息的时间戳，避免加载完整的消息内容
         let row = sqlx::query(
             r#"
@@ -1054,7 +1063,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         message_id: &str,
         updates: MessageUpdate,
     ) -> Result<()> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         // 使用 QueryBuilder 构建动态 UPDATE 语句
         let mut query = sqlx::QueryBuilder::new("UPDATE messages SET ");
         let mut has_updates = false;
@@ -1156,7 +1165,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         user_id: &str,
         visibility: VisibilityStatus,
     ) -> Result<usize> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         if message_ids.is_empty() {
             return Ok(0);
         }
@@ -1193,7 +1202,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<i64> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
 
@@ -1240,7 +1249,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         end_time: Option<DateTime<Utc>>,
         limit: i32,
     ) -> Result<Vec<Message>> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let start_ts = start_time.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
         let end_ts = end_time.unwrap_or(Utc::now());
         let limit = limit.clamp(1, 1000);
@@ -1428,7 +1437,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         attributes: HashMap<String, String>,
         tags: Vec<String>,
     ) -> Result<()> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         // 更新 extra JSONB 中的 attributes 和 tags
         let mut extra_updates = serde_json::Map::new();
 
@@ -1467,7 +1476,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
     #[instrument(skip(self))]
     async fn list_all_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         // 从 extra JSONB 中提取所有 tags
         let rows = sqlx::query(
             r#"
@@ -1497,7 +1506,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<crate::domain::model::Event>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT id, tenant_id, operation_type, operator_id, target_user_id,
@@ -1554,7 +1563,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<crate::domain::model::EditHistoryEntry>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT edit_version, content, editor_id, edited_at, reason, show_edited_mark
@@ -1589,7 +1598,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReadListEntry>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT user_id, read_at, burned_at
@@ -1622,7 +1631,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         message_id: &str,
         user_id: &str,
     ) -> Result<Option<crate::domain::model::VisibilityStatus>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let row = sqlx::query(
             r#"
             SELECT visibility_status
@@ -1657,7 +1666,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         message_id: &str,
     ) -> Result<Vec<crate::domain::model::ReactionItem>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT emoji, user_ids, count, last_updated
@@ -1690,7 +1699,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
     #[instrument(skip(self), fields(message_id))]
     async fn query_message_marks(&self, ctx: &Ctx, message_id: &str) -> Result<Vec<MarkEntry>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT user_id, mark_type, color, marked_at
@@ -1767,7 +1776,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         conversation_id: &str,
     ) -> Result<Vec<crate::domain::model::PinnedMessageInfo>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let user_id = user_id_from_ctx(ctx);
         let rows = sqlx::query(
             r#"
@@ -1815,7 +1824,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         limit: i32,
         offset: i64,
     ) -> Result<(Vec<Event>, bool)> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         let limit = limit.clamp(1, 500);
         let offset = offset.max(0);
 
@@ -2024,7 +2033,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         conversation_id: &str,
     ) -> Result<Option<ConversationMessageHead>> {
-        let tenant_id = tenant_id_from_ctx(ctx);
+        let tenant_id = tenant_id_from_ctx(ctx)?;
         // 消息与事件共用同一会话 seq 计数器，max_seq 必须取两表 GREATEST，
         // 否则事件占据高位时（如已读回执晚于最后一条消息）水位偏低撞号。
         let row = sqlx::query(
@@ -2256,11 +2265,98 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
 
 #[cfg(test)]
 mod tests {
-    use super::CONVERSATION_EVENT_HIGH_WATER_SQL;
+    use std::sync::Arc;
+
+    use super::{CONVERSATION_EVENT_HIGH_WATER_SQL, OptimizedPostgresMessageStorageImpl};
+    use crate::domain::repository::message_storage::MessageStorage;
+    use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
+    use flare_im_contracts::Ctx;
+    use flare_server_core::context::Context;
+    use flare_server_core::error::{ErrorCode, FlareError, Result};
 
     #[test]
     fn conversation_high_water_uses_durable_event_stream() {
         assert!(CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM events"));
         assert!(!CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM messages"));
+    }
+
+    fn storage() -> OptimizedPostgresMessageStorageImpl {
+        // 端口 1 不监听：真正发出的查询会是连接错误，不会是参数错误。
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://flare@127.0.0.1:1/none")
+            .expect("lazy pool");
+        OptimizedPostgresMessageStorageImpl::new(
+            PostgresBaseStorage { pool, cache: None },
+            None,
+            None,
+        )
+    }
+
+    /// 读接口的几种代表：经 `tenant_id_from_ctx` 的、以及以前各自写 `unwrap_or("0")` 的三处。
+    async fn reads(
+        storage: &OptimizedPostgresMessageStorageImpl,
+        ctx: &Ctx,
+    ) -> Vec<(&'static str, Result<()>)> {
+        vec![
+            (
+                "get_message",
+                storage.get_message(ctx, "m1").await.map(drop),
+            ),
+            ("list_all_tags", storage.list_all_tags(ctx).await.map(drop)),
+            (
+                "count_messages",
+                storage
+                    .count_messages(ctx, "c1", None, None, None)
+                    .await
+                    .map(drop),
+            ),
+            (
+                "search_messages",
+                storage
+                    .search_messages(ctx, &[], None, None, 10)
+                    .await
+                    .map(drop),
+            ),
+            (
+                "query_message_events",
+                storage
+                    .query_message_events(ctx, "m1", None, 10, 0)
+                    .await
+                    .map(drop),
+            ),
+        ]
+    }
+
+    fn is_tenant_required(error: &FlareError) -> bool {
+        error.code() == Some(ErrorCode::InvalidParameter)
+            && error.reason().contains("tenant required")
+    }
+
+    /// 读路径缺租户（含空白）即 `InvalidParameter`，在发出 SQL 之前返回，不再按租户 "0" 去读
+    /// （W12-T）；显式的租户（含 "0"）越过检查去查库，这里得到的是连接错误。
+    #[tokio::test]
+    async fn reads_require_a_context_tenant_instead_of_reading_tenant_zero() {
+        let storage = storage();
+        for ctx in [
+            Context::with_request_id("req").with_user_id("alice"),
+            Context::with_request_id("req")
+                .with_user_id("alice")
+                .with_tenant_id("  "),
+        ] {
+            let ctx: Ctx = Arc::new(ctx);
+            for (read, result) in reads(&storage, &ctx).await {
+                let error = result.expect_err(read);
+                assert!(is_tenant_required(&error), "{read}: {error}");
+            }
+        }
+
+        for tenant in ["0", "tenant-a"] {
+            let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
+            for (read, result) in reads(&storage, &ctx).await {
+                let error = result.expect_err("no database behind the lazy pool");
+                assert!(!is_tenant_required(&error), "{tenant} {read}: {error}");
+            }
+        }
     }
 }

@@ -247,7 +247,7 @@ impl ExtensionOrchestrator {
             elapsed_ms = started_at.elapsed().as_millis(),
             trace_id = %ctx.trace_id(),
             request_id = %ctx.request_id(),
-            tenant_id = %ctx.tenant_id().unwrap_or("0"),
+            tenant_id = ctx.tenant_id().unwrap_or_default(),
             message_type = ?message_type,
             event_type = ?event_type,
             "extension execution completed"
@@ -272,7 +272,7 @@ impl ExtensionOrchestrator {
             reason,
             trace_id = %ctx.trace_id(),
             request_id = %ctx.request_id(),
-            tenant_id = %ctx.tenant_id().unwrap_or("0"),
+            tenant_id = ctx.tenant_id().unwrap_or_default(),
             message_type = ?message_type,
             event_type = ?event_type,
             "extension execution skipped"
@@ -299,7 +299,7 @@ impl ExtensionOrchestrator {
             reason,
             trace_id = %ctx.trace_id(),
             request_id = %ctx.request_id(),
-            tenant_id = %ctx.tenant_id().unwrap_or("0"),
+            tenant_id = ctx.tenant_id().unwrap_or_default(),
             "extension execution will retry"
         );
     }

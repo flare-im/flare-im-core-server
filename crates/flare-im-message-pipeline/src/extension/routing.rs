@@ -32,12 +32,19 @@ impl ExtensionRouting {
                 || self.hook_message_type_allowlist.contains(&message_type))
     }
 
+    /// 租户白名单。上下文缺租户时放行到 Hook 执行，由 `HookExecutionService` 以「缺租户」拒绝发送：
+    /// 既不按租户 "0" 查白名单，也不能因此跳过必需的 Hook（W12-T）。
     fn allows_tenant(&self, ctx: &Ctx) -> bool {
         if self.tenant_allowlist.is_empty() {
             return true;
         }
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
-        self.tenant_allowlist.contains(tenant_id)
+        match ctx
+            .tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+        {
+            Some(tenant_id) => self.tenant_allowlist.contains(tenant_id),
+            None => true,
+        }
     }
 }
 
@@ -80,6 +87,29 @@ mod tests {
         };
         assert!(!routing.allows_hook_for_message(&ctx, &msg));
         assert!(!routing.allows_hook_for_message_type(&ctx, 100));
+    }
+
+    /// 缺租户不按租户 "0" 查白名单：白名单里有 "0" 也不因此放行，白名单里没有也不因此跳过
+    /// 必需的 Hook；交给 Hook 执行以「缺租户」拒绝。显式的租户 "0" 照常按白名单判定。
+    #[test]
+    fn missing_tenant_is_not_matched_as_tenant_zero() {
+        let msg = Message {
+            message_type: 100,
+            ..Default::default()
+        };
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("trace-routing-test"));
+        let blank_tenant = test_ctx("  ");
+
+        let zero_only = ExtensionRouting::new(vec!["0".to_string()], vec![]);
+        assert!(zero_only.allows_hook_for_message(&test_ctx("0"), &msg));
+        assert!(!zero_only.allows_hook_for_message(&test_ctx("tenant-a"), &msg));
+
+        let other_only = ExtensionRouting::new(vec!["tenant-b".to_string()], vec![]);
+        assert!(!other_only.allows_hook_for_message(&test_ctx("0"), &msg));
+        for ctx in [&no_tenant, &blank_tenant] {
+            assert!(other_only.allows_hook_for_message(ctx, &msg));
+            assert!(other_only.allows_hook_for_message_type(ctx, 100));
+        }
     }
 
     #[test]

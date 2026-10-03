@@ -741,7 +741,19 @@ impl PushDomainService {
         log_kind: &'static str,
     ) -> Result<(String, i32, i32, i32)> {
         let started = std::time::Instant::now();
-        let tenant_id = tx.tenant_id().unwrap_or("0").to_string();
+        // 连接上下文的租户在认证时已绑定；缺租户即拒绝，不按租户 "0" 查连接、记指标（W12-T）。
+        // 与推送端口的 `target_user` 同一判定，在查连接之前就拒绝。
+        let tenant_id = tx
+            .tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::PermissionDenied,
+                    "tenant required to push to a user",
+                )
+                .build_error()
+            })?;
         let connections = self.get_filtered_connections(tx, &user_id, options).await?;
         if connections.is_empty() {
             info!(user_id = %user_id, "push: user has no matching online connection");
@@ -1120,7 +1132,7 @@ mod tests {
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
         );
-        let ctx: Ctx = Arc::new(flare_server_core::Context::root());
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
         let user_ids = vec!["u1".to_string()];
         let event = Event {
             conversation_id: "c1".to_string(),
@@ -1163,6 +1175,66 @@ mod tests {
             EventEnvelopeDeliveryMode::PingWithInline as i32
         );
         assert!(!envelope.inline_events_truncated);
+    }
+
+    /// 按用户推送时上下文缺租户（含空白）即 `PERMISSION_DENIED`，不查连接、不投递，也不再按
+    /// 租户 "0" 记推送指标（W12-T）；以前这里照常投递，指标记在租户 "0" 名下。
+    #[tokio::test]
+    async fn push_to_users_without_a_context_tenant_is_rejected_not_counted_as_tenant_zero() {
+        let push_port = Arc::new(CapturingPushPort::default());
+        let connection_query = Arc::new(StaticConnectionQuery {
+            live: None,
+            connections: vec![ConnectionInfo::new(
+                "conn-1".to_string(),
+                "u1".to_string(),
+                "t1".to_string(),
+                "dev-1".to_string(),
+            )],
+        });
+        let service = PushDomainService::new(
+            push_port.clone(),
+            connection_query,
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+        );
+        let user_ids = vec!["u1".to_string()];
+        for ctx in [
+            flare_server_core::Context::root(),
+            flare_server_core::Context::root().with_tenant_id("  "),
+        ] {
+            let ctx: Ctx = Arc::new(ctx);
+            let error = service
+                .push_event_envelope_to_users(
+                    &ctx,
+                    EventEnvelopePushRequest {
+                        user_ids: &user_ids,
+                        events: vec![Event {
+                            conversation_id: "c1".to_string(),
+                            conversation_seq: 1,
+                            ..Default::default()
+                        }],
+                        options: &PushOptions::default(),
+                        window_id: "window-1",
+                        conversation_id: "",
+                        max_conversation_seq: 0,
+                        delivery_mode: 0,
+                        inline_events_truncated: false,
+                    },
+                )
+                .await
+                .expect_err("no tenant, no push");
+            assert_eq!(error.code(), Some(ErrorCode::PermissionDenied), "{error}");
+            assert!(error.reason().contains("tenant required"), "{error}");
+        }
+        assert!(
+            push_port
+                .payloads
+                .lock()
+                .expect("payload mutex poisoned")
+                .is_empty(),
+            "nothing may be delivered without a tenant"
+        );
     }
 
     #[tokio::test]

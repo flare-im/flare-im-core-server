@@ -406,7 +406,18 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         visibility: ConversationVisibility,
         stored_channel_id: String,
     ) -> Result<Conversation> {
-        let tenant_id = ctx.tenant_id().unwrap_or("0");
+        // 新会话的租户只取上下文：缺租户即拒绝，不再按租户 "0" 建会话、生成系统会话 ID（W12-T）。
+        // 仓储写入同样要求上下文租户，这里在读写仓储之前就拒绝。显式的租户 "0" 照常。
+        let tenant_id = ctx
+            .tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::InvalidParameter,
+                    "tenant required to create a conversation",
+                )
+                .build_error()
+            })?;
         let stored_channel_id = stored_channel_id.trim().to_string();
         let resolved_channel_route_id = match conversation_type {
             ConversationType::Channel => Some(required_route_id(
@@ -558,8 +569,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     let system_id = attributes
                         .get("system_id")
                         .cloned()
-                        .or_else(|| ctx.tenant_id().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "0".to_string());
+                        .unwrap_or_else(|| tenant_id.to_string());
                     let scope = attributes.get("scope").cloned();
                     generate_system_conversation_id(&system_id, scope)
                 }

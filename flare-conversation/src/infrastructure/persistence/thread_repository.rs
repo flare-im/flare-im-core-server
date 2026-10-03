@@ -2,14 +2,15 @@
 //!
 //! PostgreSQL持久化层实现，用于话题（Thread）管理
 //!
-//! `threads` / `thread_participants` 主键含 `tenant_id`：每条查询都从 `ctx` 取租户
-//! （缺省按 `normalize_tenant_id` 归一到 `"0"`），跨租户的同名 thread_id 互不可见。
+//! `threads` / `thread_participants` 主键含 `tenant_id`：每条查询都从 `ctx` 取租户，跨租户的
+//! 同名 thread_id 互不可见。上下文缺租户即报错，不再按租户 `"0"` 读写（W12-T）；显式的
+//! `"0"` 与别名 `"default"` 经 `normalize_tenant_id` 归一为 `"0"`。
 
 use std::sync::Arc;
 
 use chrono::Utc;
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_server_core::error::{ErrorCode, Result, map_infra_error};
+use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use sqlx::{PgPool, Row};
 use tracing::instrument;
 
@@ -27,8 +28,14 @@ impl PostgresThreadRepository {
         Self { pool }
     }
 
-    fn tenant_of(ctx: &flare_server_core::context::Context) -> String {
-        normalize_tenant_id(ctx.tenant_id().unwrap_or_default())
+    fn tenant_of(ctx: &flare_server_core::context::Context) -> Result<String> {
+        normalize_optional_tenant_id(ctx.tenant_id()).ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "tenant required for thread storage",
+            )
+            .build_error()
+        })
     }
 
     fn thread_from_row(row: &sqlx::postgres::PgRow) -> Thread {
@@ -67,7 +74,7 @@ impl ThreadRepository for PostgresThreadRepository {
         title: Option<&str>,
         creator_id: &str,
     ) -> Result<String> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let thread_id = root_message_id.to_string(); // 话题ID通常等于根消息ID
         let now = Utc::now();
 
@@ -110,7 +117,7 @@ impl ThreadRepository for PostgresThreadRepository {
         include_archived: bool,
         sort_order: ThreadSortOrder,
     ) -> Result<(Vec<Thread>, i32)> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
 
         // 构建排序子句
         let order_by = match sort_order {
@@ -173,7 +180,7 @@ impl ThreadRepository for PostgresThreadRepository {
         ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<Option<Thread>> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let row = sqlx::query(
             r#"
             SELECT
@@ -206,7 +213,7 @@ impl ThreadRepository for PostgresThreadRepository {
     ) -> Result<()> {
         use sqlx::QueryBuilder;
 
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let mut query = QueryBuilder::new("UPDATE threads SET ");
         let mut has_updates = false;
         let mut separated = query.separated(", ");
@@ -261,7 +268,7 @@ impl ThreadRepository for PostgresThreadRepository {
         ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<()> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         sqlx::query("DELETE FROM threads WHERE tenant_id = $1 AND id = $2")
             .bind(&tenant_id)
             .bind(thread_id)
@@ -280,7 +287,7 @@ impl ThreadRepository for PostgresThreadRepository {
         reply_message_id: &str,
         reply_user_id: &str,
     ) -> Result<()> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let now = Utc::now();
 
         sqlx::query(
@@ -323,7 +330,7 @@ impl ThreadRepository for PostgresThreadRepository {
         thread_id: &str,
         user_id: &str,
     ) -> Result<()> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let now = Utc::now();
 
         // 插入或更新参与者
@@ -378,7 +385,7 @@ impl ThreadRepository for PostgresThreadRepository {
         ctx: &flare_server_core::context::Context,
         thread_id: &str,
     ) -> Result<Vec<String>> {
-        let tenant_id = Self::tenant_of(ctx);
+        let tenant_id = Self::tenant_of(ctx)?;
         let rows = sqlx::query(
             r#"
             SELECT user_id

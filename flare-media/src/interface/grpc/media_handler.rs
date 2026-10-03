@@ -65,7 +65,7 @@ impl MediaService for MediaGrpcHandler {
         request: Request<tonic::Streaming<UploadFileRequest>>,
     ) -> Result<Response<UploadFileResponse>, Status> {
         let ctx = verified_ctx(&request)?;
-        let tenant_id = ctx.tenant_id().unwrap_or("0").to_string();
+        let tenant_id = upload_tenant(&ctx)?;
 
         let mut stream = request.into_inner();
         let first = stream
@@ -80,7 +80,7 @@ impl MediaService for MediaGrpcHandler {
         };
 
         // 将 tenant_id 添加到 metadata 中（如果未设置）
-        if !tenant_id.is_empty() && !upload_metadata.metadata.contains_key("tenant_id") {
+        if !upload_metadata.metadata.contains_key("tenant_id") {
             upload_metadata
                 .metadata
                 .insert("tenant_id".to_string(), tenant_id);
@@ -685,6 +685,14 @@ fn verified_ctx<T>(request: &Request<T>) -> Result<Ctx, Status> {
         })
         .cloned()
         .ok_or_else(|| Status::unauthenticated("signed context required"))
+}
+
+/// 上传的租户只取签名上下文：缺租户即 `PERMISSION_DENIED`，在读上传流之前拒绝，不再按租户
+/// "0" 写进上传元数据（W12-T）。与媒资仓储的 `require_tenant` 同一判定，显式的 "0" 照常。
+fn upload_tenant(ctx: &Ctx) -> Result<String, Status> {
+    crate::domain::service::require_tenant(ctx)
+        .map(str::to_string)
+        .into_grpc()
 }
 
 /// 孤儿清理、对象清单、ACL、桶描述是租户管理操作，普通用户身份即便签名有效也不能调用。

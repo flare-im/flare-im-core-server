@@ -5,6 +5,7 @@
 use chrono::{DateTime, Utc};
 use flare_proto::common::Pagination as ProtoPagination;
 use flare_proto::message_content_ext::MessageContentExt;
+use flare_server_core::error::Result;
 use serde::{Deserialize, Serialize};
 
 pub const MESSAGE_PIN_SCOPE_CONVERSATION: i32 = 0;
@@ -16,6 +17,20 @@ fn normalize_message_pin_scope(scope: i32) -> i32 {
     } else {
         MESSAGE_PIN_SCOPE_CONVERSATION
     }
+}
+
+/// 消息操作命令的租户只取调用上下文：缺租户即 `InvalidParameter`，不再按租户 "0" 构造命令
+/// （W12-T）。之后的 `handle_event` 也拒绝缺租户的上下文，这里在入口就拒绝。显式的 "0" 照常。
+fn tenant_from_ctx(ctx: &flare_server_core::context::Ctx) -> Result<String> {
+    ctx.tenant_id()
+        .filter(|tenant_id| !tenant_id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "tenant required for a message action"
+            )
+        })
 }
 
 fn operator_id_from_ctx(ctx: &flare_server_core::context::Ctx) -> String {
@@ -102,15 +117,15 @@ impl RecallMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::RecallMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = operator_id_from_ctx(ctx);
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: request.conversation_id.clone(),
             },
             reason: if request.reason.is_empty() {
@@ -124,7 +139,7 @@ impl RecallMessageCommand {
                 None
             },
             allow_admin_override: false,
-        }
+        })
     }
 }
 
@@ -147,7 +162,7 @@ impl EditMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::EditMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = operator_id_from_ctx(ctx);
 
         let new_content = request
@@ -156,12 +171,12 @@ impl EditMessageCommand {
             .and_then(|content| content.encode_to_bytes().ok())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             new_content,
@@ -171,7 +186,7 @@ impl EditMessageCommand {
                 Some(request.reason.clone())
             },
             allow_admin_override: false,
-        }
+        })
     }
 }
 
@@ -203,7 +218,7 @@ impl DeleteMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::DeleteMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = operator_id_from_ctx(ctx);
         let target_user_id = operator_id.clone();
 
@@ -217,12 +232,12 @@ impl DeleteMessageCommand {
             .and_then(DeleteScope::from_proto_value)
             .unwrap_or_else(|| DeleteScope::default_for_type(delete_type));
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: String::new(), // 批量删除不需要特定消息ID
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: request.conversation_id.clone(),
             },
             delete_type,
@@ -236,7 +251,7 @@ impl DeleteMessageCommand {
             notify_others: request.notify_others,
             target_user_id: Some(target_user_id),
             allow_admin_override: false,
-        }
+        })
     }
 }
 
@@ -323,22 +338,22 @@ impl AddReactionCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::AddReactionRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = ctx
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             emoji: request.emoji.clone(),
-        }
+        })
     }
 }
 
@@ -357,22 +372,22 @@ impl RemoveReactionCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::RemoveReactionRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = ctx
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             emoji: request.emoji.clone(),
-        }
+        })
     }
 }
 
@@ -395,15 +410,15 @@ impl PinMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::PinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = operator_id_from_ctx(ctx);
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             scope: normalize_message_pin_scope(request.scope),
@@ -416,7 +431,7 @@ impl PinMessageCommand {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .unwrap_or_else(chrono::Utc::now)
             }),
-        }
+        })
     }
 }
 
@@ -435,19 +450,19 @@ impl UnpinMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::UnpinMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = operator_id_from_ctx(ctx);
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             scope: normalize_message_pin_scope(request.scope),
-        }
+        })
     }
 }
 
@@ -466,22 +481,22 @@ impl MarkMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::MarkMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = ctx
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             mark_type: request.mark_type,
-        }
+        })
     }
 }
 
@@ -502,18 +517,18 @@ impl UnmarkMessageCommand {
     pub fn from_request(
         request: &flare_grpc_proto::message::UnmarkMessageRequest,
         ctx: &flare_server_core::context::Ctx,
-    ) -> Self {
+    ) -> Result<Self> {
         let operator_id = ctx
             .actor()
             .map(|a| a.actor_id().to_string())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             base: MessageOperationCommand {
                 message_id: request.message_id.clone(),
                 operator_id,
                 timestamp: chrono::Utc::now(),
-                tenant_id: ctx.tenant_id().unwrap_or("0").to_string(),
+                tenant_id: tenant_from_ctx(ctx)?,
                 conversation_id: String::new(), // 会在后续填充
             },
             mark_type: if request.mark_type < 0 {
@@ -522,7 +537,7 @@ impl UnmarkMessageCommand {
                 Some(request.mark_type)
             },
             user_id: String::new(), // 由 handler 从 context 填充
-        }
+        })
     }
 }
 
@@ -845,6 +860,111 @@ impl From<&flare_grpc_proto::message::UnmarkMessageRequest> for AppUnmarkMessage
             mark_type: request.mark_type,
             tenant_id: String::new(),       // 从context填充
             conversation_id: String::new(), // 从查询获取
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use flare_grpc_proto::message::{
+        AddReactionRequest, DeleteMessageRequest, EditMessageRequest, MarkMessageRequest,
+        PinMessageRequest, RecallMessageRequest, RemoveReactionRequest, UnmarkMessageRequest,
+        UnpinMessageRequest,
+    };
+    use flare_server_core::context::{Context, Ctx};
+    use flare_server_core::error::ErrorCode;
+
+    use super::*;
+
+    /// 九种消息操作命令各自从请求与上下文构造后的租户。
+    fn tenants(ctx: &Ctx) -> Vec<(&'static str, Result<String>)> {
+        vec![
+            (
+                "recall",
+                RecallMessageCommand::from_request(&RecallMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "edit",
+                EditMessageCommand::from_request(&EditMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "delete",
+                DeleteMessageCommand::from_request(&DeleteMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "add_reaction",
+                AddReactionCommand::from_request(&AddReactionRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "remove_reaction",
+                RemoveReactionCommand::from_request(&RemoveReactionRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "pin",
+                PinMessageCommand::from_request(&PinMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "unpin",
+                UnpinMessageCommand::from_request(&UnpinMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "mark",
+                MarkMessageCommand::from_request(&MarkMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+            (
+                "unmark",
+                UnmarkMessageCommand::from_request(&UnmarkMessageRequest::default(), ctx)
+                    .map(|cmd| cmd.base.tenant_id),
+            ),
+        ]
+    }
+
+    /// 缺租户（含空白）时九种命令都以 `InvalidParameter` 拒绝，不再构造出租户为 "0" 的命令；
+    /// 显式的租户（含 "0"）原样带上（W12-T）。
+    #[test]
+    fn message_action_commands_require_a_context_tenant() {
+        for ctx in [
+            Arc::new(Context::with_request_id("req").with_user_id("alice")),
+            Arc::new(
+                Context::with_request_id("req")
+                    .with_user_id("alice")
+                    .with_tenant_id("  "),
+            ),
+        ] {
+            for (command, tenant) in tenants(&ctx) {
+                let error = tenant.expect_err(command);
+                assert_eq!(
+                    error.code(),
+                    Some(ErrorCode::InvalidParameter),
+                    "{command}: {error}"
+                );
+                assert!(
+                    error.reason().contains("tenant required"),
+                    "{command}: {}",
+                    error.reason()
+                );
+            }
+        }
+
+        for expected in ["0", "tenant-a"] {
+            let ctx: Ctx = Arc::new(
+                Context::with_request_id("req")
+                    .with_user_id("alice")
+                    .with_tenant_id(expected),
+            );
+            for (command, tenant) in tenants(&ctx) {
+                assert_eq!(tenant.expect(command), expected, "{command}");
+            }
         }
     }
 }

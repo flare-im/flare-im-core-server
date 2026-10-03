@@ -58,7 +58,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = RecallMessageCommand::from_request(&req, &ctx);
+        let cmd = RecallMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -86,7 +86,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = EditMessageCommand::from_request(&req, &ctx);
+        let cmd = EditMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -115,7 +115,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = DeleteMessageCommand::from_request(&req, &ctx);
+        let cmd = DeleteMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         let deleted_count = self
@@ -139,7 +139,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = AddReactionCommand::from_request(&req, &ctx);
+        let cmd = AddReactionCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -162,7 +162,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = RemoveReactionCommand::from_request(&req, &ctx);
+        let cmd = RemoveReactionCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -185,7 +185,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = PinMessageCommand::from_request(&req, &ctx);
+        let cmd = PinMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -209,7 +209,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = UnpinMessageCommand::from_request(&req, &ctx);
+        let cmd = UnpinMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -232,7 +232,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = MarkMessageCommand::from_request(&req, &ctx);
+        let cmd = MarkMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler
@@ -256,7 +256,7 @@ impl MessageActionService for MessageActionGrpcHandler {
         let req = request.into_inner();
 
         // 使用命令的 from_request 方法构建命令
-        let cmd = UnmarkMessageCommand::from_request(&req, &ctx);
+        let cmd = UnmarkMessageCommand::from_request(&req, &ctx).into_grpc()?;
 
         // 调用应用层处理，使用 into_grpc 转换错误
         self.action_handler

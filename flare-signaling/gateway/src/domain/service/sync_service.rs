@@ -48,7 +48,14 @@ impl SyncService {
         if is_pull_sync(&sync)
             && let Some(limiter) = &self.pull_limiter
         {
-            let tenant_id = tx.tenant_id().unwrap_or("0");
+            // 拉取限流按连接上下文的租户计配额（认证时已绑定）。缺租户即拒绝，不再记在租户 "0"
+            // 的配额上（W12-T）；下游 sync-orchestrator 同样拒绝缺租户的同步。
+            let tenant_id = tx
+                .tenant_id()
+                .filter(|tenant_id| !tenant_id.trim().is_empty())
+                .ok_or_else(|| {
+                    FlareError::localized(ErrorCode::InvalidParameter, "tenant required to sync")
+                })?;
             let user_id = tx.user_id().unwrap_or(connection_id);
             let tenant_sync_pull_qps = self
                 .tenant_runtime
@@ -155,6 +162,49 @@ mod tests {
             .expect_err("second pull should be rate limited");
 
         assert!(error.to_string().contains("sync pull rate limit"));
+        assert_eq!(port.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// 拉取同步在上下文缺租户（含空白）时拒绝，不转发、也不占租户 "0" 的配额（W12-T）。
+    /// 以前按租户 "0" 计限流后照常转发。
+    #[tokio::test]
+    async fn pull_sync_without_a_context_tenant_is_rejected_not_counted_as_tenant_zero() {
+        let port = Arc::new(CountingSyncPort::default());
+        let sync_port: Arc<dyn ISyncPort> = port.clone();
+        let service = SyncService::new(sync_port).with_pull_limiter(Arc::new(
+            SyncPullLimiter::new(SyncPullRateLimitConfig {
+                enabled: true,
+                user_requests_per_second: 100,
+                user_burst: 100,
+                tenant_requests_per_second: 100,
+                tenant_burst: 100,
+            }),
+        ));
+        let sync = Sync {
+            device_id: String::new(),
+            payload: Some(SyncPayload::SingleConversation(
+                SingleConversationSync::default(),
+            )),
+        };
+        for ctx in [
+            flare_server_core::Context::root().with_user_id("u1"),
+            flare_server_core::Context::root()
+                .with_user_id("u1")
+                .with_tenant_id("  "),
+        ] {
+            let ctx: Ctx = Arc::new(ctx);
+            let error = service
+                .execute(&ctx, "conn-1", sync.clone())
+                .await
+                .expect_err("no tenant, no pull");
+            assert!(error.to_string().contains("tenant required"), "{error}");
+        }
+        assert_eq!(port.calls.load(Ordering::Relaxed), 0);
+
+        service
+            .execute(&context(), "conn-1", sync)
+            .await
+            .expect("a pull with a tenant passes");
         assert_eq!(port.calls.load(Ordering::Relaxed), 1);
     }
 
