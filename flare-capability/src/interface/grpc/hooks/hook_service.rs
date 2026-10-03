@@ -15,7 +15,9 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::composition::hook_registry::CoreHookRegistry;
-use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConfig};
+use crate::domain::model::{
+    HookConfigItem, HookSelectorConfig, HookTransportConfig, administrable_hook_type,
+};
 use crate::infrastructure::config::{ConfigValidator, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use chrono::Utc;
@@ -139,32 +141,9 @@ impl HookServiceServer {
             return Err(Status::invalid_argument("hook_type is required"));
         }
 
-        // 验证hook_type有效性
-        let valid_hook_types = [
-            "pre_send",
-            "post_send",
-            "delivery",
-            "recall",
-            "message_read",
-            "message_reaction",
-            "conversation_lifecycle",
-            "conversation_member",
-            "presence",
-            "push_pre_send",
-            "push_post_send",
-            "push_delivery",
-            "user_login",
-            "user_logout",
-            "user_online",
-            "user_offline",
-            "custom",
-        ];
-        if !valid_hook_types.contains(&req.hook_type.as_str()) {
-            return Err(Status::invalid_argument(format!(
-                "Invalid hook_type: {}. Valid types: {:?}",
-                req.hook_type, valid_hook_types
-            )));
-        }
+        // 只登记 Capability 真正执行的类型：配置里没有的类型加载时被丢弃，配置里有、但 Capability
+        // 不调用的类型登记了也不会执行（见 `administrable_hook_type`）。
+        administrable_hook_type(&req.hook_type).map_err(Status::invalid_argument)?;
 
         if req.transport.is_none() {
             return Err(Status::invalid_argument("transport is required"));
@@ -315,85 +294,8 @@ impl HookServiceServer {
             hook_item.priority = req.priority;
         }
         if let Some(ref transport) = req.transport {
-            hook_item.transport = match transport.r#type.as_str() {
-                "grpc" => {
-                    // 优先级：service_name > endpoint（直接地址）
-                    let endpoint = if transport.service_name.is_empty() {
-                        Some(transport.endpoint.clone())
-                    } else {
-                        None
-                    };
-                    let service_name = if !transport.service_name.is_empty() {
-                        Some(transport.service_name.clone())
-                    } else {
-                        None
-                    };
-
-                    // 解析负载均衡策略
-                    let load_balance = if !transport.load_balance.is_empty() {
-                        crate::domain::model::LoadBalanceStrategy::from_str(&transport.load_balance)
-                            .ok()
-                    } else {
-                        None
-                    };
-
-                    HookTransportConfig::Grpc {
-                        endpoint,
-                        service_name,
-                        registry_type: if !transport.registry_type.is_empty() {
-                            Some(transport.registry_type.clone())
-                        } else {
-                            None
-                        },
-                        namespace: if !transport.namespace.is_empty() {
-                            Some(transport.namespace.clone())
-                        } else {
-                            None
-                        },
-                        load_balance,
-                        // 读回只给键名与掩码：值为空或等于掩码的键沿用已存的值。
-                        metadata: keep_stored_values(
-                            "metadata",
-                            &transport.metadata,
-                            stored_grpc_metadata(&hook_item.transport),
-                        )
-                        .map_err(Status::invalid_argument)?,
-                    }
-                }
-                "webhook" => HookTransportConfig::Webhook {
-                    endpoint: transport.endpoint.clone(),
-                    // 签名密钥只写不读（读回为空），空串表示沿用已存的密钥：照读回的配置
-                    // 原样写回不会把签名关掉。换密钥就传新的非空值；回到不签名要显式
-                    // `metadata["clear_signing_secret"] = "true"`（读回从不带这个键）。
-                    secret: match (
-                        transport.secret.is_empty(),
-                        clear_signing_secret_requested(transport)
-                            .map_err(Status::invalid_argument)?,
-                    ) {
-                        (false, false) => Some(transport.secret.clone()),
-                        (true, true) => None,
-                        (true, false) => stored_webhook_secret(&hook_item.transport),
-                        (false, true) => {
-                            return Err(Status::invalid_argument(CLEAR_WITH_NEW_SECRET));
-                        }
-                    },
-                    headers: keep_stored_values(
-                        "header",
-                        &transport.headers,
-                        stored_webhook_headers(&hook_item.transport),
-                    )
-                    .map_err(Status::invalid_argument)?,
-                },
-                "local" => HookTransportConfig::Local {
-                    target: transport.target.clone(),
-                },
-                _ => {
-                    return Err(Status::invalid_argument(format!(
-                        "Unsupported transport type: {}",
-                        transport.r#type
-                    )));
-                }
-            };
+            hook_item.transport = updated_transport(transport, &hook_item.transport)
+                .map_err(Status::invalid_argument)?;
             hook_item.timeout_ms = transport.timeout_ms as u64;
         }
         if let Some(ref selector) = req.selector {
@@ -996,6 +898,165 @@ fn invalid_parameter(reason: String) -> flare_server_core::error::FlareError {
     ErrorBuilder::new(ErrorCode::InvalidParameter, reason).build_error()
 }
 
+/// update 时投递目标变了而请求没有重新给出只写不读的取值：错误以此开头（`INVALID_ARGUMENT`）。
+pub(crate) const TARGET_CHANGED: &str = "delivery target changed";
+
+/// 一条 Hook 的投递目标：Webhook 的 URL，gRPC 的地址、服务名、注册中心与命名空间，本地插件名。
+/// 负载均衡、超时等不改变发往哪里，不算在内；空串与未设视为相同。
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryTarget<'a> {
+    Grpc {
+        endpoint: Option<&'a str>,
+        service_name: Option<&'a str>,
+        registry_type: Option<&'a str>,
+        namespace: Option<&'a str>,
+    },
+    Webhook(&'a str),
+    Local(&'a str),
+}
+
+fn delivery_target(transport: &HookTransportConfig) -> DeliveryTarget<'_> {
+    fn set(value: &Option<String>) -> Option<&str> {
+        value.as_deref().filter(|value| !value.is_empty())
+    }
+    match transport {
+        HookTransportConfig::Grpc {
+            endpoint,
+            service_name,
+            registry_type,
+            namespace,
+            ..
+        } => DeliveryTarget::Grpc {
+            endpoint: set(endpoint),
+            service_name: set(service_name),
+            registry_type: set(registry_type),
+            namespace: set(namespace),
+        },
+        HookTransportConfig::Webhook { endpoint, .. } => DeliveryTarget::Webhook(endpoint),
+        HookTransportConfig::Local { target } => DeliveryTarget::Local(target),
+    }
+}
+
+/// 请求里为空或等于掩码的取值能沿用什么。
+#[derive(Clone, Copy)]
+enum Keep<'a> {
+    /// 投递目标没变：沿用库里同名键的值（没有就报错）。
+    Stored(Option<&'a HashMap<String, String>>),
+    /// 投递目标变了：什么都不沿用，空值或掩码报错。否则有更新权限的人只要把端点改成自己的，
+    /// 库里隐藏的 `Authorization`、`x-api-key` 或签名密钥就会随下一次投递发过去。
+    Nothing,
+}
+
+/// `update` 要写入的传输配置：由请求与库里已存的配置得出。
+///
+/// 只写不读的取值（Webhook 自定义头、gRPC metadata、签名密钥）在请求里为空或为掩码时，投递
+/// 目标不变才沿用库里的值；目标变了（见 [`DeliveryTarget`]，含换传输类型）就必须重新给出，
+/// 签名密钥也可以显式 `clear_signing_secret`，否则报错（以 [`TARGET_CHANGED`] 开头，只带键名）。
+fn updated_transport(
+    transport: &HookTransport,
+    stored: &HookTransportConfig,
+) -> Result<HookTransportConfig, String> {
+    let mut updated = match transport.r#type.as_str() {
+        "grpc" => {
+            // 优先级：service_name > endpoint（直接地址）
+            let endpoint = if transport.service_name.is_empty() {
+                Some(transport.endpoint.clone())
+            } else {
+                None
+            };
+            let service_name = if !transport.service_name.is_empty() {
+                Some(transport.service_name.clone())
+            } else {
+                None
+            };
+
+            // 解析负载均衡策略
+            let load_balance = if !transport.load_balance.is_empty() {
+                crate::domain::model::LoadBalanceStrategy::from_str(&transport.load_balance).ok()
+            } else {
+                None
+            };
+
+            HookTransportConfig::Grpc {
+                endpoint,
+                service_name,
+                registry_type: if !transport.registry_type.is_empty() {
+                    Some(transport.registry_type.clone())
+                } else {
+                    None
+                },
+                namespace: if !transport.namespace.is_empty() {
+                    Some(transport.namespace.clone())
+                } else {
+                    None
+                },
+                load_balance,
+                metadata: HashMap::new(),
+            }
+        }
+        "webhook" => HookTransportConfig::Webhook {
+            endpoint: transport.endpoint.clone(),
+            secret: None,
+            headers: HashMap::new(),
+        },
+        "local" => HookTransportConfig::Local {
+            target: transport.target.clone(),
+        },
+        other => return Err(format!("Unsupported transport type: {other}")),
+    };
+    let same_target = delivery_target(&updated) == delivery_target(stored);
+
+    match &mut updated {
+        HookTransportConfig::Grpc { metadata, .. } => {
+            // 读回只给键名与掩码：值为空或等于掩码的键沿用已存的值（目标不变时）。
+            *metadata = keep_stored_values(
+                "metadata",
+                &transport.metadata,
+                if same_target {
+                    Keep::Stored(stored_grpc_metadata(stored))
+                } else {
+                    Keep::Nothing
+                },
+            )?;
+        }
+        HookTransportConfig::Webhook {
+            secret, headers, ..
+        } => {
+            *headers = keep_stored_values(
+                "header",
+                &transport.headers,
+                if same_target {
+                    Keep::Stored(stored_webhook_headers(stored))
+                } else {
+                    Keep::Nothing
+                },
+            )?;
+            // 签名密钥只写不读（读回为空），空串表示沿用已存的密钥：照读回的配置原样写回不会
+            // 把签名关掉。换密钥就传新的非空值；回到不签名要显式
+            // `metadata["clear_signing_secret"] = "true"`（读回从不带这个键）。端点变了时空串
+            // 不沿用：重新给出密钥或显式清除。
+            *secret = match (
+                transport.secret.is_empty(),
+                clear_signing_secret_requested(transport)?,
+            ) {
+                (false, false) => Some(transport.secret.clone()),
+                (true, true) => None,
+                (true, false) => match stored_webhook_secret(stored) {
+                    Some(_) if !same_target => {
+                        return Err(format!(
+                            "{TARGET_CHANGED}: send the signing secret again, or set metadata {WEBHOOK_CLEAR_SECRET_KEY}=\"true\" to deliver unsigned (an empty secret keeps the stored one only while the endpoint stays the same)"
+                        ));
+                    }
+                    kept => kept,
+                },
+                (false, true) => return Err(CLEAR_WITH_NEW_SECRET.to_string()),
+            };
+        }
+        HookTransportConfig::Local { .. } => {}
+    }
+    Ok(updated)
+}
+
 /// 已存配置是 Webhook 时它的签名密钥（更新时请求留空即沿用）。
 fn stored_webhook_secret(transport: &HookTransportConfig) -> Option<String> {
     match transport {
@@ -1058,12 +1119,12 @@ fn stored_value<'a>(stored: Option<&'a HashMap<String, String>>, key: &str) -> O
 }
 
 /// `update`：请求里的头或 metadata 整组替换已存的，但值为空或等于读回掩码的键沿用已存的值
-/// （照读回的配置写回不改任何取值）；这样的键没有已存的值时报错。请求里没有的键被删除。
-/// 错误只带键名，不带任何取值。
+/// （照读回的配置写回不改任何取值）；这样的键没有已存的值、或投递目标变了（[`Keep::Nothing`]）
+/// 时报错。请求里没有的键被删除。错误只带键名，不带任何取值。
 fn keep_stored_values(
     what: &str,
     requested: &HashMap<String, String>,
-    stored: Option<&HashMap<String, String>>,
+    keep: Keep<'_>,
 ) -> Result<HashMap<String, String>, String> {
     requested
         .iter()
@@ -1071,6 +1132,14 @@ fn keep_stored_values(
             if !value.is_empty() && value != READ_BACK_VALUE_MASK {
                 return Ok((key.clone(), value.clone()));
             }
+            let stored = match keep {
+                Keep::Stored(stored) => stored,
+                Keep::Nothing => {
+                    return Err(format!(
+                        "{TARGET_CHANGED}: {what} '{key}' must be sent with its value (an empty value or {READ_BACK_VALUE_MASK} keeps the stored one only while the delivery target stays the same)"
+                    ));
+                }
+            };
             stored_value(stored, key)
                 .map(|kept| (key.clone(), kept.clone()))
                 .ok_or_else(|| {
@@ -1356,7 +1425,7 @@ mod secret_tests {
             ("X-API-KEY".to_string(), String::new()),
             ("x-new".to_string(), "w13h-new".to_string()),
         ]);
-        let kept = keep_stored_values("header", &requested, Some(&stored)).unwrap();
+        let kept = keep_stored_values("header", &requested, Keep::Stored(Some(&stored))).unwrap();
         assert_eq!(
             kept,
             HashMap::from([
@@ -1370,7 +1439,7 @@ mod secret_tests {
             let error = keep_stored_values(
                 "metadata",
                 &HashMap::from([("x-unknown".to_string(), READ_BACK_VALUE_MASK.to_string())]),
-                stored,
+                Keep::Stored(stored),
             )
             .unwrap_err();
             assert!(error.contains("x-unknown"), "{error}");
@@ -1467,6 +1536,210 @@ mod secret_tests {
             Ok(true)
         );
         assert!(clear_signing_secret_requested(&transport(Some("1"))).is_err());
+    }
+
+    const NEW_ENDPOINT: &str = "http://127.0.0.1:10/elsewhere";
+
+    fn stored_webhook(secret: Option<&str>) -> HookTransportConfig {
+        HookTransportConfig::Webhook {
+            endpoint: "http://127.0.0.1:9/hook".into(),
+            secret: secret.map(str::to_string),
+            headers: HashMap::from([
+                ("Authorization".to_string(), HEADER_VALUE.to_string()),
+                ("X-Note".to_string(), "w14h-note".to_string()),
+            ]),
+        }
+    }
+
+    fn webhook_update(endpoint: &str, secret: &str, headers: &[(&str, &str)]) -> HookTransport {
+        HookTransport {
+            r#type: "webhook".into(),
+            endpoint: endpoint.into(),
+            secret: secret.into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            timeout_ms: 1000,
+            ..Default::default()
+        }
+    }
+
+    fn assert_target_changed(error: &str, names: &[&str]) {
+        assert!(error.starts_with(TARGET_CHANGED), "{error}");
+        for name in names {
+            assert!(error.contains(name), "{error}");
+        }
+        for value in [HEADER_VALUE, METADATA_VALUE, SECRET, "w14h-note"] {
+            assert!(!error.contains(value), "{error}");
+        }
+    }
+
+    /// 端点不变：掩码与空值沿用库里的头与密钥（W13-H 的契约不变）。
+    #[test]
+    fn the_same_endpoint_keeps_the_stored_values() {
+        let stored = stored_webhook(Some(SECRET));
+        let request = webhook_update(
+            "http://127.0.0.1:9/hook",
+            "",
+            &[("Authorization", READ_BACK_VALUE_MASK), ("X-Note", "")],
+        );
+        let updated = updated_transport(&request, &stored).unwrap();
+        assert!(matches!(
+            updated,
+            HookTransportConfig::Webhook { secret: Some(ref secret), ref headers, .. }
+                if secret == SECRET
+                    && headers.get("Authorization").map(String::as_str) == Some(HEADER_VALUE)
+                    && headers.get("X-Note").map(String::as_str) == Some("w14h-note")
+        ));
+    }
+
+    /// 端点变了：头的掩码或空值、空密钥都不沿用库里的值（否则改端点即可取回隐藏的
+    /// `Authorization` 与签名密钥）；报错以「delivery target changed」开头、只带键名。重新给出取值、
+    /// 新密钥或显式清除才放行。
+    #[test]
+    fn a_new_webhook_endpoint_does_not_inherit_header_values_or_the_secret() {
+        let stored = stored_webhook(Some(SECRET));
+        for value in [READ_BACK_VALUE_MASK, ""] {
+            let request = webhook_update(
+                NEW_ENDPOINT,
+                "w14h-new-secret",
+                &[("Authorization", value), ("X-Note", "w14h-new-note")],
+            );
+            let error = updated_transport(&request, &stored).unwrap_err();
+            assert_target_changed(&error, &["header 'Authorization'"]);
+        }
+
+        let resupplied = [
+            ("Authorization", "Bearer w14h-new"),
+            ("X-Note", "w14h-new-note"),
+        ];
+        let error =
+            updated_transport(&webhook_update(NEW_ENDPOINT, "", &resupplied), &stored).unwrap_err();
+        assert_target_changed(&error, &["signing secret", WEBHOOK_CLEAR_SECRET_KEY]);
+
+        let updated = updated_transport(
+            &webhook_update(NEW_ENDPOINT, "w14h-new-secret", &resupplied),
+            &stored,
+        )
+        .unwrap();
+        assert!(matches!(
+            updated,
+            HookTransportConfig::Webhook { ref endpoint, secret: Some(ref secret), ref headers }
+                if endpoint == NEW_ENDPOINT
+                    && secret == "w14h-new-secret"
+                    && headers.get("Authorization").map(String::as_str) == Some("Bearer w14h-new")
+        ));
+
+        let mut clear = webhook_update(NEW_ENDPOINT, "", &resupplied);
+        clear
+            .metadata
+            .insert(WEBHOOK_CLEAR_SECRET_KEY.into(), "true".into());
+        assert!(matches!(
+            updated_transport(&clear, &stored).unwrap(),
+            HookTransportConfig::Webhook { secret: None, .. }
+        ));
+
+        // 库里本来就没有密钥：新端点空密钥即不签名，没有可泄露的东西。
+        assert!(matches!(
+            updated_transport(
+                &webhook_update(NEW_ENDPOINT, "", &resupplied),
+                &stored_webhook(None)
+            )
+            .unwrap(),
+            HookTransportConfig::Webhook { secret: None, .. }
+        ));
+        // 没有带取值的头也不需要重新给。
+        assert!(updated_transport(&webhook_update(NEW_ENDPOINT, "w14h-s", &[]), &stored).is_ok());
+    }
+
+    fn stored_grpc() -> HookTransportConfig {
+        HookTransportConfig::Grpc {
+            endpoint: Some("http://127.0.0.1:9".into()),
+            service_name: None,
+            registry_type: None,
+            namespace: None,
+            load_balance: None,
+            metadata: HashMap::from([("x-api-key".to_string(), METADATA_VALUE.to_string())]),
+        }
+    }
+
+    fn grpc_update(change: impl FnOnce(&mut HookTransport)) -> HookTransport {
+        let mut transport = HookTransport {
+            r#type: "grpc".into(),
+            endpoint: "http://127.0.0.1:9".into(),
+            metadata: HashMap::from([("x-api-key".to_string(), READ_BACK_VALUE_MASK.to_string())]),
+            timeout_ms: 1000,
+            ..Default::default()
+        };
+        change(&mut transport);
+        transport
+    }
+
+    /// gRPC：地址、服务名、注册中心、命名空间任一变化都算换了投递目标，metadata 的掩码不沿用；
+    /// 只改负载均衡或超时不算。换传输类型同样不沿用。
+    #[test]
+    fn a_new_grpc_target_does_not_inherit_metadata_values() {
+        let stored = stored_grpc();
+        let kept = updated_transport(
+            &grpc_update(|t| {
+                t.load_balance = "random".into();
+                t.timeout_ms = 2000;
+            }),
+            &stored,
+        )
+        .unwrap();
+        assert!(matches!(
+            kept,
+            HookTransportConfig::Grpc { ref metadata, .. }
+                if metadata.get("x-api-key").map(String::as_str) == Some(METADATA_VALUE)
+        ));
+
+        for change in [
+            (|t: &mut HookTransport| t.endpoint = "http://127.0.0.1:10".into())
+                as fn(&mut HookTransport),
+            |t| t.service_name = "attacker-hook".into(),
+            |t| t.registry_type = "consul".into(),
+            |t| t.namespace = "other".into(),
+        ] {
+            let error = updated_transport(&grpc_update(change), &stored).unwrap_err();
+            assert_target_changed(&error, &["metadata 'x-api-key'"]);
+        }
+
+        // 新目标上重新给出取值即可。
+        let resupplied = updated_transport(
+            &grpc_update(|t| {
+                t.endpoint = "http://127.0.0.1:10".into();
+                t.metadata.insert("x-api-key".into(), "w14h-new-key".into());
+            }),
+            &stored,
+        )
+        .unwrap();
+        assert!(matches!(
+            resupplied,
+            HookTransportConfig::Grpc { ref metadata, .. }
+                if metadata.get("x-api-key").map(String::as_str) == Some("w14h-new-key")
+        ));
+
+        // Webhook 改成 gRPC（或反过来）也是换目标。
+        let error = updated_transport(
+            &grpc_update(|t| {
+                t.metadata = HashMap::from([("Authorization".into(), READ_BACK_VALUE_MASK.into())])
+            }),
+            &stored_webhook(Some(SECRET)),
+        )
+        .unwrap_err();
+        assert_target_changed(&error, &["metadata 'Authorization'"]);
+        let error = updated_transport(
+            &webhook_update(
+                "http://127.0.0.1:9",
+                "",
+                &[("x-api-key", READ_BACK_VALUE_MASK)],
+            ),
+            &stored,
+        )
+        .unwrap_err();
+        assert_target_changed(&error, &["header 'x-api-key'"]);
     }
 
     #[test]

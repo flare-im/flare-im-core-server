@@ -479,8 +479,47 @@ impl HookConfig {
     }
 }
 
+/// Capability `HookPlugin` 真正调用的 Hook 类型：这四类事件会按配置调 Hook 并按结果决策。
+pub const EXECUTED_HOOK_TYPES: [&str; 4] = ["pre_send", "post_send", "delivery", "recall"];
+
+/// `CapabilityService/Administer` 的 `hook_config.create` 能否登记 `hook_type`；不能时返回原因
+/// （只含类型名，不含任何配置取值）。
+///
+/// 只接受 [`EXECUTED_HOOK_TYPES`]。配置里的其余类型（会话、推送、用户上下线、
+/// `get_conversation_participants`）能加载，但 Capability 不调用它们：会话、推送、用户事件的处理
+/// 只记日志，`get_conversation_participants` 没有调用方；登记了也不会执行，所以拒绝并说明。
+/// 配置里没有的类型（如 `message_read`、`presence`、`custom`）加载时会被丢弃，同样拒绝。
+pub fn administrable_hook_type(hook_type: &str) -> Result<(), String> {
+    if EXECUTED_HOOK_TYPES.contains(&hook_type) {
+        return Ok(());
+    }
+    let why = match hook_type {
+        "session_create" | "session_update" | "session_delete" => Some(
+            "the Capability HookPlugin only logs conversation lifecycle events and does not call these hooks",
+        ),
+        "push_pre_send" | "push_post_send" | "push_delivery" => {
+            Some("the Capability HookPlugin only logs push events and does not call these hooks")
+        }
+        "user_login" | "user_logout" | "user_online" | "user_offline" => Some(
+            "the Capability HookPlugin only logs user login and presence events and does not call these hooks",
+        ),
+        "get_conversation_participants" => {
+            Some("nothing in the Capability service calls get_conversation_participants hooks")
+        }
+        _ => None,
+    };
+    Err(match why {
+        Some(why) => format!(
+            "hook_type {hook_type} is not executed by the Capability service ({why}); hooks that run: {EXECUTED_HOOK_TYPES:?}"
+        ),
+        None => format!(
+            "unknown hook_type {hook_type:?}: the hook configuration has no such type; hooks that run: {EXECUTED_HOOK_TYPES:?}"
+        ),
+    })
+}
+
 /// Hook 类型名，顺序同 [`HookConfig::lists`]；与 `hook_configs.hook_type` 的取值相同。
-const HOOK_TYPES: [&str; 15] = [
+pub(crate) const HOOK_TYPES: [&str; 15] = [
     "pre_send",
     "post_send",
     "delivery",
@@ -590,12 +629,15 @@ impl HookExecutionPlan {
     /// * `hook_type` - Hook类型（pre_send, post_send, delivery, recall等），用于设置HookKind
     pub fn from_hook_config(config: HookConfigItem, hook_type: &str) -> Self {
         use flare_im_hooks::HookErrorPolicy;
-        let error_policy = match config.error_policy.as_str() {
-            "fail_fast" => HookErrorPolicy::FailFast,
-            "retry" => HookErrorPolicy::Retry,
-            "ignore" => HookErrorPolicy::Ignore,
-            _ => HookErrorPolicy::FailFast,
-        };
+        // 与 Message Ingest 同一套解析（不区分大小写、忽略下划线）。加载与写入时已拒绝不认识的
+        // 取值（`ConfigValidator::validate_hook`）；直接构造的非法取值按 fail_fast 并告警。
+        let error_policy = HookErrorPolicy::parse(&config.error_policy).unwrap_or_else(|| {
+            tracing::warn!(
+                hook = %config.name,
+                "invalid hook error_policy, falling back to fail_fast"
+            );
+            HookErrorPolicy::FailFast
+        });
         use flare_im_hooks::HookKind;
         // 根据hook_type字符串设置HookKind（只支持核心的4种类型，其他类型使用默认值）
         let kind = match hook_type {
@@ -1065,5 +1107,62 @@ mod tests {
     #[test]
     fn test_execution_mode_default() {
         assert_eq!(ExecutionMode::default(), ExecutionMode::Sequential);
+    }
+
+    /// `error_policy` 与 Message Ingest 同一套解析：不区分大小写、忽略下划线。修复前 Capability
+    /// 只认小写，共用样例里的 `Ignore`、`Retry` 都被读成 fail_fast。
+    #[test]
+    fn error_policy_is_read_like_message_ingest_reads_it() {
+        use flare_im_hooks::HookErrorPolicy;
+        for (value, expected) in [
+            ("fail_fast", HookErrorPolicy::FailFast),
+            ("FailFast", HookErrorPolicy::FailFast),
+            ("failfast", HookErrorPolicy::FailFast),
+            ("retry", HookErrorPolicy::Retry),
+            ("Retry", HookErrorPolicy::Retry),
+            ("ignore", HookErrorPolicy::Ignore),
+            ("Ignore", HookErrorPolicy::Ignore),
+            ("IGNORE", HookErrorPolicy::Ignore),
+        ] {
+            let mut item = config_item(150, None);
+            item.error_policy = value.to_string();
+            let plan = HookExecutionPlan::from_hook_config(item, "pre_send");
+            assert_eq!(plan.metadata().error_policy, expected, "{value}");
+        }
+    }
+
+    /// Administer 只接受 Capability 真正执行的四类；配置里有、但 Capability 不调用的类型报错并
+    /// 说明原因；配置里没有的类型（加载时会被丢弃）报未知类型。
+    #[test]
+    fn only_executed_hook_types_are_administrable() {
+        for hook_type in EXECUTED_HOOK_TYPES {
+            assert_eq!(administrable_hook_type(hook_type), Ok(()), "{hook_type}");
+        }
+        for hook_type in HOOK_TYPES {
+            if EXECUTED_HOOK_TYPES.contains(&hook_type) {
+                continue;
+            }
+            let reason = administrable_hook_type(hook_type).unwrap_err();
+            assert!(
+                reason.contains("not executed by the Capability service"),
+                "{hook_type}: {reason}"
+            );
+        }
+        for hook_type in [
+            "message_read",
+            "message_reaction",
+            "conversation_lifecycle",
+            "conversation_member",
+            "presence",
+            "custom",
+            "PRE_SEND",
+            "",
+        ] {
+            let reason = administrable_hook_type(hook_type).unwrap_err();
+            assert!(
+                reason.contains("unknown hook_type"),
+                "{hook_type}: {reason}"
+            );
+        }
     }
 }

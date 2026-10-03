@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose};
+use flare_im_hooks::HookErrorPolicy;
+use flare_im_hooks::hooks::adapters::is_reserved_webhook_header;
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::{debug, error, info, warn};
 
@@ -134,10 +136,16 @@ impl ConfigValidator {
         Ok(())
     }
 
-    /// 校验单条 Hook 配置（名称、优先级、超时、分组与 Webhook 签名密钥），规则同 [`Self::validate`]。
+    /// 校验单条 Hook 配置（名称、优先级、超时、分组、错误策略与 Webhook 的签名密钥和自定义头），
+    /// 规则同 [`Self::validate`]。
     ///
-    /// Webhook 写了 `secret = ""`（文件、配置中心或直接写库）在加载时就拒绝：签名函数对空密钥
-    /// 报 `ConfigurationError`，以前要到每次投递才失败。不签名就不写 `secret`。错误只带 Hook 名。
+    /// 以下几项以前要到每次投递才失败（或被静默改写），现在加载（文件、配置中心、库里的行）与
+    /// Administer 写入时就拒绝，错误只带 Hook 名与头名、不带任何取值：
+    /// - Webhook 写了 `secret = ""`：签名函数对空密钥报 `ConfigurationError`。不签名就不写 `secret`。
+    /// - Webhook 自定义头用了保留头名（`Content-Type`、`Flare-Signature`、`x-flare-signature`、
+    ///   `X-Hook-Signature`，不区分大小写）：签名函数拒绝。
+    /// - `error_policy` 不认识（解析不区分大小写、忽略下划线，见 `HookErrorPolicy::parse`）：
+    ///   以前按 fail_fast 处理。
     pub fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
         if let HookTransportConfig::Webhook {
             secret: Some(secret),
@@ -148,6 +156,30 @@ impl ConfigValidator {
             return Err(flare_server_core::error::ErrorBuilder::new(
                 flare_server_core::error::ErrorCode::ConfigurationError,
                 "Webhook signing secret is empty: omit `secret` to send unsigned, or set a non-empty value",
+            )
+            .details(format!("hook={}", hook.name))
+            .build_error());
+        }
+
+        if let HookTransportConfig::Webhook { headers, .. } = &hook.transport
+            && let Some(header) = headers
+                .keys()
+                .find(|header| is_reserved_webhook_header(header))
+        {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::ConfigurationError,
+                format!(
+                    "Webhook header {header} is reserved: custom headers cannot set Content-Type, Flare-Signature, x-flare-signature or X-Hook-Signature"
+                ),
+            )
+            .details(format!("hook={}", hook.name))
+            .build_error());
+        }
+
+        if HookErrorPolicy::parse(&hook.error_policy).is_none() {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::ConfigurationError,
+                "Hook error_policy must be fail_fast, retry or ignore (case and underscores do not matter)",
             )
             .details(format!("hook={}", hook.name))
             .build_error());
@@ -748,6 +780,92 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
         }
     }
 
+    /// 保留的 Webhook 头（不区分大小写）在加载时就拒绝（修复前加载通过、每次投递报
+    /// `ConfigurationError`）；错误带头名与 Hook 名、不带取值；普通自定义头照常通过。
+    #[test]
+    fn reserved_webhook_headers_are_rejected_when_the_config_is_loaded() {
+        let value = "w14h-header-value-not-for-errors";
+        for header in [
+            "Content-Type",
+            "content-type",
+            "Flare-Signature",
+            "flare-signature",
+            "x-flare-signature",
+            "X-Flare-Signature",
+            "X-Hook-Signature",
+            "x-hook-signature",
+        ] {
+            let profile = EMPTY_SECRET_PROFILE
+                .replace("secret = \"\"", "secret = \"w14h-non-empty\"")
+                .replace(
+                    "Authorization = \"Bearer w13h-header-value-not-for-errors\"",
+                    &format!("\"{header}\" = \"{value}\""),
+                );
+            let config = parse(&profile);
+            let error = ConfigValidator::validate(&config).unwrap_err();
+            let printed = format!("{error} {error:?}");
+            assert!(printed.contains("reserved"), "{printed}");
+            assert!(printed.contains(header), "{printed}");
+            assert!(printed.contains("audit-empty-secret"), "{printed}");
+            assert!(!printed.contains(value), "{printed}");
+            assert!(
+                HookConfigSnapshot::build(
+                    &[Some(LoadedHookConfig::global(config))],
+                    &HookConfigSnapshot::default(),
+                )
+                .is_err(),
+                "{header}"
+            );
+        }
+        let profile = EMPTY_SECRET_PROFILE.replace("secret = \"\"", "secret = \"w14h-non-empty\"");
+        assert!(ConfigValidator::validate(&parse(&profile)).is_ok());
+    }
+
+    /// `error_policy` 不区分大小写、忽略下划线（与 Message Ingest 同一套解析）；不认识的取值在
+    /// 加载时拒绝（修复前静默按 fail_fast）。
+    #[test]
+    fn unknown_error_policies_are_rejected_when_the_config_is_loaded() {
+        let profile = |policy: &str| {
+            EMPTY_SECRET_PROFILE
+                .replace("secret = \"\"", "secret = \"w14h-non-empty\"")
+                .replace(
+                    "timeout_ms = 500",
+                    &format!("timeout_ms = 500\nerror_policy = \"{policy}\""),
+                )
+        };
+        for policy in [
+            "fail_fast",
+            "FailFast",
+            "failfast",
+            "retry",
+            "Retry",
+            "ignore",
+            "Ignore",
+            "IGNORE",
+        ] {
+            assert!(
+                ConfigValidator::validate(&parse(&profile(policy))).is_ok(),
+                "{policy}"
+            );
+        }
+        for policy in ["abort", "fail-fast", "", "ignored"] {
+            let config = parse(&profile(policy));
+            let error = ConfigValidator::validate(&config).unwrap_err();
+            assert!(
+                format!("{error} {error:?}").contains("error_policy"),
+                "{policy:?}: {error:?}"
+            );
+            assert!(
+                HookConfigSnapshot::build(
+                    &[Some(LoadedHookConfig::global(config))],
+                    &HookConfigSnapshot::default(),
+                )
+                .is_err(),
+                "{policy:?}"
+            );
+        }
+    }
+
     fn shipped_profile(name: &str) -> HookConfig {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../config")
@@ -775,6 +893,31 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
             ConfigValidator::validate(&config)
                 .unwrap_or_else(|error| panic!("{name} fails validation: {error}"));
         }
+    }
+
+    /// 共用样例里 Message Ingest 写法的 `Ignore` 在 Capability 中也是 ignore（修复前成了 fail_fast）。
+    #[test]
+    fn shipped_error_policies_mean_the_same_in_both_engines() {
+        use crate::domain::model::HookExecutionPlan;
+        use flare_im_hooks::HookErrorPolicy;
+        let config = shipped_profile("hooks.business.example.toml");
+        let policies: Vec<HookErrorPolicy> = config
+            .pre_send
+            .iter()
+            .chain(&config.post_send)
+            .chain(&config.delivery)
+            .chain(&config.recall)
+            .map(|hook| {
+                HookExecutionPlan::from_hook_config(hook.clone(), "pre_send")
+                    .metadata()
+                    .error_policy
+            })
+            .collect();
+        assert!(policies.contains(&HookErrorPolicy::Ignore), "{policies:?}");
+        assert!(
+            policies.contains(&HookErrorPolicy::FailFast),
+            "{policies:?}"
+        );
     }
 
     /// 样例里意在影响主链决策的 Hook（要求成功的 pre_send 与 recall）不能落进 business 组：

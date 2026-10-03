@@ -12,6 +12,11 @@
 //!   沿用已存的值；`clear_signing_secret` 显式清除签名密钥、回到不签名（W13-H）。
 //! - `LISTEN` 用独立连接：仓储连接池只有一条连接（`CAPABILITY_POSTGRES_MAX_CONNECTIONS=1`）时
 //!   仓储查询、`pg_notify` 与收到通知后的重载都不用等取连接超时；停机后监听连接关闭（W13-H）。
+//! - update 改了投递目标（Webhook 端点、gRPC 地址或服务名等）时，掩码或空的头、metadata 与空的
+//!   签名密钥不沿用库里的值，要求重新给出（W14-H）；Administer 只登记 Capability 真正执行的
+//!   Hook 类型（W14-H）。
+//!
+//! 写库的用例都带 [`TenantRowCleanup`]：中途失败（含断言失败的 unwind）也删掉本用例租户的行。
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -63,6 +68,58 @@ fn database_url() -> String {
 
 fn suffix() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// 用例结束时（正常结束或断言失败的 unwind）删掉租户 `tenant`（每个用例随机生成、只写它的行）
+/// 在 `hook_configs` 里的全部行，做法同 `tenant_hooks_pg_tests` 的 `RowCleanup`：`Drop` 里不能
+/// await、测试的运行时里也不能 `block_on`，所以另起线程，用自己的运行时与单连接删完再返回。
+struct TenantRowCleanup {
+    url: String,
+    tenant: String,
+}
+
+impl Drop for TenantRowCleanup {
+    fn drop(&mut self) {
+        let url = self.url.clone();
+        let tenant = self.tenant.clone();
+        let outcome = std::thread::spawn(move || -> Result<u64, String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async move {
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let deleted = sqlx::query("DELETE FROM hook_configs WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .rows_affected();
+                pool.close().await;
+                Ok(deleted)
+            })
+        })
+        .join();
+        match outcome {
+            Ok(Ok(deleted)) if deleted > 0 => {
+                eprintln!("TenantRowCleanup: removed {deleted} leftover hook_configs row(s)");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => eprintln!("TenantRowCleanup failed: {error}"),
+            Err(_) => eprintln!("TenantRowCleanup thread panicked"),
+        }
+    }
+}
+
+fn cleanup(tenant: &str) -> TenantRowCleanup {
+    TenantRowCleanup {
+        url: database_url(),
+        tenant: tenant.to_string(),
+    }
 }
 
 fn employee(tenant: &str) -> VerifiedControlActor {
@@ -613,6 +670,7 @@ async fn header_and_metadata_values_are_write_only_and_the_signing_secret_can_be
     );
     let run = suffix();
     let tenant = format!("th{run}");
+    let _cleanup = cleanup(&tenant);
     let secret = format!("w13h-secret-{run}");
     let authorization = format!("Bearer w13h-authorization-{run}");
     let note = format!("w13h-note-{run}");
@@ -823,6 +881,362 @@ async fn header_and_metadata_values_are_write_only_and_the_signing_secret_can_be
             if metadata.get("x-api-key") == Some(&api_key)
     ));
     call(&governance, delete(&grpc_id), &tenant).await;
+}
+
+/// update 返回的错误：`INVALID_ARGUMENT`，以 `delivery target changed` 开头，不带任何取值。
+async fn target_changed_rejection(
+    governance: &HookServiceServer,
+    request: GenericRequest,
+    tenant: &str,
+    values: &[&str],
+) -> String {
+    let status = dispatch_hook_administer(governance, request, &employee(tenant))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert!(
+        status.message().starts_with("delivery target changed"),
+        "{status:?}"
+    );
+    for value in values {
+        assert!(!status.message().contains(value), "a value is in the error");
+    }
+    status.message().to_string()
+}
+
+#[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
+async fn a_changed_delivery_target_needs_the_header_values_and_the_signing_secret_again() {
+    let repository = Arc::new(
+        PostgresHookConfigRepository::new(&database_url())
+            .await
+            .unwrap(),
+    );
+    let run = suffix();
+    let tenant = format!("tt{run}");
+    let _cleanup = cleanup(&tenant);
+    let secret = format!("w14h-secret-{run}");
+    let authorization = format!("Bearer w14h-authorization-{run}");
+    let note = format!("w14h-note-{run}");
+    let api_key = format!("w14h-api-key-{run}");
+    let values = [
+        secret.as_str(),
+        authorization.as_str(),
+        note.as_str(),
+        api_key.as_str(),
+    ];
+    // 同一个接收端的两个路径：端点 URL 不同即是不同的投递目标（「攻击者」的端点是 /new）。
+    let receiver = WebhookReceiver::start().await;
+    let old_endpoint = receiver.url("/old");
+    let new_endpoint = receiver.url("/new");
+
+    let watcher = watcher(&repository);
+    watcher.start().await.unwrap();
+    let registry = Arc::new(CoreHookRegistry::new(Arc::clone(&watcher)));
+    let governance = HookServiceServer::new(Arc::clone(&repository), Arc::clone(&registry));
+    let keys = cell_keys(98);
+    let endpoint = serve_hook_plugin(ImHookPluginServer::new(
+        Arc::new(HookCommandHandler::new(Arc::new(HookOrchestrationService))),
+        Arc::clone(&registry),
+        Arc::new(HookAdapterFactory::new()),
+        CapabilityExtensionRegistry::new(),
+        Some(keys.verifier.clone()),
+    ))
+    .await;
+
+    let mut transport = webhook_transport(&old_endpoint, &secret);
+    transport.headers = HashMap::from([
+        ("Authorization".to_string(), authorization.clone()),
+        ("X-Tenant-Note".to_string(), note.clone()),
+    ]);
+    let created = call(
+        &governance,
+        create_with(&tenant, &format!("w14h-t-{run}"), transport),
+        &tenant,
+    )
+    .await;
+    let config = decoded_config(&created);
+    let hook_id = config.hook_id.clone();
+    let read_back = config.transport.unwrap();
+
+    // 只改端点、头照读回（掩码）或留空：拒绝，库里不变，投递仍去旧端点、带原值、按原密钥签名。
+    for value in [MASK, ""] {
+        let mut moved = read_back.clone();
+        moved.endpoint = new_endpoint.clone();
+        for header in moved.headers.values_mut() {
+            *header = value.to_string();
+        }
+        let message = target_changed_rejection(
+            &governance,
+            update_transport(&hook_id, moved),
+            &tenant,
+            &values,
+        )
+        .await;
+        assert!(message.contains("header '"), "{message}");
+    }
+    // 头重新给出、密钥留空：同样拒绝（要求重新给出密钥或显式清除）。
+    let resupplied_authorization = format!("Bearer w14h-new-authorization-{run}");
+    let mut moved = read_back.clone();
+    moved.endpoint = new_endpoint.clone();
+    moved.headers = HashMap::from([
+        (
+            "Authorization".to_string(),
+            resupplied_authorization.clone(),
+        ),
+        ("X-Tenant-Note".to_string(), "w14h-new-note".to_string()),
+    ]);
+    let message = target_changed_rejection(
+        &governance,
+        update_transport(&hook_id, moved.clone()),
+        &tenant,
+        &values,
+    )
+    .await;
+    assert!(message.contains(CLEAR_KEY), "{message}");
+
+    let (_, stored) = repository
+        .get_by_id(hook_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stored.transport,
+        HookTransportConfig::Webhook { ref endpoint, secret: Some(ref kept), ref headers }
+            if endpoint == &old_endpoint
+                && kept == &secret
+                && headers.get("Authorization") == Some(&authorization)
+                && headers.get("X-Tenant-Note") == Some(&note)
+    ));
+    let delivered = deliver_once(&endpoint, &keys, &receiver, &tenant, &format!("{run}-1")).await;
+    assert_eq!(delivered.path, "/old");
+    assert_eq!(
+        delivered.header_values("authorization"),
+        [authorization.as_str()]
+    );
+    assert!(verify(&delivered, &secret).is_ok());
+
+    // 新端点：头重新给出、显式清除密钥 → 放行；投递去新端点，只带新给的取值、不签名，旧的头值
+    // 与密钥都不出现在请求里。
+    let mut cleared = moved.clone();
+    cleared.metadata.insert(CLEAR_KEY.into(), "true".into());
+    call(&governance, update_transport(&hook_id, cleared), &tenant).await;
+    let moved_delivery =
+        deliver_once(&endpoint, &keys, &receiver, &tenant, &format!("{run}-2")).await;
+    assert_eq!(moved_delivery.path, "/new");
+    assert!(moved_delivery.header_values("flare-signature").is_empty());
+    assert_eq!(
+        moved_delivery.header_values("authorization"),
+        [resupplied_authorization.as_str()]
+    );
+    for value in &values {
+        assert!(!contains(&moved_delivery.raw, value));
+        assert!(
+            moved_delivery
+                .headers
+                .iter()
+                .all(|(_, header)| !header.contains(value)),
+            "an old value went to the new endpoint"
+        );
+    }
+
+    // 目标不再变化时照读回写回仍沿用（含新给的密钥）。
+    let new_secret = format!("w14h-new-secret-{run}");
+    let mut resigned = moved.clone();
+    resigned.secret = new_secret.clone();
+    let updated = call(&governance, update_transport(&hook_id, resigned), &tenant).await;
+    let mut written_back = decoded_config(&updated).transport.unwrap();
+    written_back.metadata.clear();
+    call(
+        &governance,
+        update_transport(&hook_id, written_back),
+        &tenant,
+    )
+    .await;
+    let kept = deliver_once(&endpoint, &keys, &receiver, &tenant, &format!("{run}-3")).await;
+    assert_eq!(kept.path, "/new");
+    assert_eq!(
+        kept.header_values("authorization"),
+        [resupplied_authorization.as_str()]
+    );
+    assert!(verify(&kept, &new_secret).is_ok());
+    call(&governance, delete(&hook_id), &tenant).await;
+
+    // gRPC：换地址时 metadata 的掩码不沿用，库里不变（这条 Hook 停用、不执行）。
+    let grpc = HookTransport {
+        r#type: "grpc".into(),
+        endpoint: "http://127.0.0.1:9".into(),
+        metadata: HashMap::from([("x-api-key".to_string(), api_key.clone())]),
+        timeout_ms: 2000,
+        ..Default::default()
+    };
+    let created = call(
+        &governance,
+        create_with(&tenant, &format!("w14h-g-{run}"), grpc),
+        &tenant,
+    )
+    .await;
+    let config = decoded_config(&created);
+    let grpc_id = config.hook_id.clone();
+    call(&governance, set_status(&grpc_id, false), &tenant).await;
+    for change in [
+        (|t: &mut HookTransport| t.endpoint = "http://127.0.0.1:10".into())
+            as fn(&mut HookTransport),
+        |t| t.service_name = "w14h-other-hook".into(),
+    ] {
+        let mut moved = config.transport.clone().unwrap();
+        change(&mut moved);
+        let message = target_changed_rejection(
+            &governance,
+            update_transport(&grpc_id, moved),
+            &tenant,
+            &values,
+        )
+        .await;
+        assert!(message.contains("metadata 'x-api-key'"), "{message}");
+    }
+    let (_, stored) = repository
+        .get_by_id(grpc_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stored.transport,
+        HookTransportConfig::Grpc { ref endpoint, ref metadata, .. }
+            if endpoint.as_deref() == Some("http://127.0.0.1:9")
+                && metadata.get("x-api-key") == Some(&api_key)
+    ));
+    call(&governance, delete(&grpc_id), &tenant).await;
+}
+
+/// Administer 的 create 只登记 Capability 真正执行的四类 Hook：加载器会丢弃的类型报未知类型，
+/// 加载器认、但 Capability 不调用的类型报「not executed」并说明，都不写库。用了保留头名的
+/// Webhook 在 create 与 update 时就拒绝（不再等到投递）。
+#[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
+async fn administer_rejects_unexecuted_hook_types_and_reserved_headers() {
+    let repository = Arc::new(
+        PostgresHookConfigRepository::new(&database_url())
+            .await
+            .unwrap(),
+    );
+    let run = suffix();
+    let tenant = format!("ty{run}");
+    let _cleanup = cleanup(&tenant);
+    let watcher = watcher(&repository);
+    watcher.start().await.unwrap();
+    let registry = Arc::new(CoreHookRegistry::new(Arc::clone(&watcher)));
+    let governance = HookServiceServer::new(Arc::clone(&repository), Arc::clone(&registry));
+    let create_typed = |hook_type: &str| {
+        administer(
+            "create",
+            "CreateHookConfigRequest",
+            CreateHookConfigRequest {
+                name: format!("w14h-{hook_type}-{run}"),
+                hook_type: hook_type.into(),
+                tenant_id: tenant.clone(),
+                priority: 900,
+                transport: Some(webhook_transport("http://127.0.0.1:9/hook", "")),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        )
+    };
+
+    for (hook_type, reason) in [
+        ("message_read", "unknown hook_type"),
+        ("presence", "unknown hook_type"),
+        ("custom", "unknown hook_type"),
+        ("session_create", "not executed by the Capability service"),
+        ("push_pre_send", "not executed by the Capability service"),
+        ("user_login", "not executed by the Capability service"),
+        (
+            "get_conversation_participants",
+            "not executed by the Capability service",
+        ),
+    ] {
+        let status =
+            dispatch_hook_administer(&governance, create_typed(hook_type), &employee(&tenant))
+                .await
+                .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+        assert!(status.message().contains(reason), "{hook_type}: {status:?}");
+    }
+    let rows = repository
+        .query(Some(tenant.as_str()), None, false)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row.tenant_id.as_deref() != Some(tenant.as_str())),
+        "a rejected hook type was written"
+    );
+
+    for hook_type in ["pre_send", "post_send", "delivery", "recall"] {
+        let created = call(&governance, create_typed(hook_type), &tenant).await;
+        let hook_id = decoded_config(&created).hook_id;
+        call(&governance, delete(&hook_id), &tenant).await;
+    }
+
+    // 保留头名（不区分大小写）：create 与 update 都 INVALID_ARGUMENT，错误带头名、不带取值，
+    // 库里不变。
+    let value = format!("w14h-reserved-{run}");
+    for header in [
+        "Content-Type",
+        "flare-signature",
+        "X-Flare-Signature",
+        "x-hook-signature",
+    ] {
+        let mut transport = webhook_transport("http://127.0.0.1:9/hook", "");
+        transport.headers = HashMap::from([(header.to_string(), value.clone())]);
+        let status = dispatch_hook_administer(
+            &governance,
+            create_with(&tenant, &format!("w14h-r-{run}"), transport),
+            &employee(&tenant),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+        assert!(status.message().contains("reserved"), "{status:?}");
+        assert!(status.message().contains(header), "{status:?}");
+        assert!(
+            !status.message().contains(&value),
+            "a value is in the error"
+        );
+    }
+    let mut plain = webhook_transport("http://127.0.0.1:9/hook", "");
+    plain.headers = HashMap::from([("X-Plain".to_string(), value.clone())]);
+    let created = call(
+        &governance,
+        create_with(&tenant, &format!("w14h-r-{run}"), plain.clone()),
+        &tenant,
+    )
+    .await;
+    let hook_id = decoded_config(&created).hook_id;
+    let mut reserved = plain;
+    reserved
+        .headers
+        .insert("Flare-Signature".into(), "t=1,v1=00".into());
+    let status = dispatch_hook_administer(
+        &governance,
+        update_transport(&hook_id, reserved),
+        &employee(&tenant),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert!(status.message().contains("Flare-Signature"), "{status:?}");
+    let (_, stored) = repository
+        .get_by_id(hook_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stored.transport,
+        HookTransportConfig::Webhook { ref headers, .. }
+            if headers.len() == 1 && headers.get("X-Plain") == Some(&value)
+    ));
+    call(&governance, delete(&hook_id), &tenant).await;
 }
 
 /// `url` 加上 `application_name`，用来在 `pg_stat_activity` 里认出本用例的连接。

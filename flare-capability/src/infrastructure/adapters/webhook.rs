@@ -35,16 +35,18 @@ impl WebhookHookAdapter {
         secret: Option<String>,
         headers: HashMap<String, String>,
     ) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::InternalError,
-                    "failed to build HTTP client for webhook hook",
-                )
-            })?;
+        let builder = Client::builder().timeout(std::time::Duration::from_secs(30));
+        // 单测的接收端都在本机回环上：单测构建里不读 HTTP(S)_PROXY、ALL_PROXY 与系统代理设置，
+        // 否则开发机导出的代理会截走回环投递（以前须 `env -u HTTPS_PROXY …` 才能跑）。正式构建不变。
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let client = builder.build().map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::InternalError,
+                "failed to build HTTP client for webhook hook",
+            )
+        })?;
 
         Ok(Self {
             client,

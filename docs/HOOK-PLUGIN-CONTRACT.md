@@ -72,6 +72,13 @@ Choose `fail_fast` for anything whose absence would be a correctness or
 compliance problem (moderation, quota). Choose `ignore` for observational hooks:
 an audit-log hook that is down should not stop people from sending messages.
 
+Case and underscores do not matter: `fail_fast`, `FailFast` and `failfast` are the same
+policy, as are `retry`/`Retry` and `ignore`/`Ignore`, so a profile reads the same in Message
+Ingest and in the Capability service. Any other value is a configuration error when the
+configuration is loaded or written through Administer; it is not read as `fail_fast`. The
+Capability service's engine records the policy but decides by group and `require_success`
+(§5).
+
 ## 5. Priority decides ordering and concurrency
 
 Message Ingest runs the hooks of its own configuration serially in priority
@@ -167,9 +174,11 @@ Core's webhook adapter and the Capability service's webhook transport (hooks a t
 registers through `CapabilityService/Administer`) sign the same way. The signing secret
 is never sent. The old `x-flare-signature` plaintext header and the Capability
 service's old `X-Hook-Signature` (an HMAC of the body alone, without a timestamp) are
-removed; custom headers cannot use any of these names or Content-Type. Unsigned
-endpoints remain possible only when no secret was configured. A delivery whose context
-has no tenant is not sent.
+removed; custom headers cannot use any of these names or Content-Type (compared
+case-insensitively). A hook with such a header is rejected when the configuration is loaded
+(file, config center or database row, in either engine) or written through Administer
+(`INVALID_ARGUMENT`), not on every delivery. Unsigned endpoints remain possible only when no
+secret was configured. A delivery whose context has no tenant is not sent.
 
 A secret registered through Administer is write-only: `hook_config.create`, `get`,
 `list` and `update` return an empty `transport.secret`, and
@@ -188,6 +197,27 @@ empty or `<redacted>` value keeps the stored value of that key (matched exactly,
 case-insensitively), a new value replaces it, and a key left out is removed; an empty or
 `<redacted>` value for a key that has no stored value is `INVALID_ARGUMENT`. `create`
 rejects `<redacted>` values. Errors name the key, never a value.
+
+Stored values never follow a hook to a new delivery target. When an `update` changes where
+the hook delivers — the webhook `endpoint`; for gRPC the `endpoint`, `service_name`,
+`registry_type` or `namespace`; or the transport type — an empty or `<redacted>` header or
+metadata value is not kept, and neither is a stored signing secret behind an empty
+`transport.secret`. Such an `update` is rejected with `INVALID_ARGUMENT` and a message that
+starts with `delivery target changed` and names the key (or the signing secret), never a
+value; nothing is written. Send the values again for the new target, and for the secret send
+a new one or set `clear_signing_secret` to `"true"`. Otherwise anyone allowed to update the
+hook could point it at an endpoint of their own and receive the hidden `Authorization`
+header, API key or signing secret with the next delivery. Changing only the load balancing
+or the timeout keeps the stored values.
+
+`hook_config.create` registers only the hook types the Capability service calls:
+`pre_send`, `post_send`, `delivery` and `recall`. The other types its configuration knows
+(`session_*`, `push_*`, `user_login`/`logout`/`online`/`offline`,
+`get_conversation_participants`) are `INVALID_ARGUMENT` with a message saying the Capability
+service does not execute them (it only logs those events, and nothing calls
+`get_conversation_participants`); types the configuration does not know at all (for example
+`message_read`, `presence`, `custom`), which a reload would drop, are `INVALID_ARGUMENT` as
+unknown.
 
 A webhook in the hook configuration file or config center with `secret = ""` is rejected
 when the configuration is loaded (the error names the hook; at startup the service does
