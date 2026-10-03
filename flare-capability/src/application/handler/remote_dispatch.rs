@@ -503,7 +503,7 @@ mod declaration_tests {
             .await
             .unwrap_err();
             assert!(
-                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED),
                 "{tenant_id:?}: {err:?}"
             );
         }
@@ -533,7 +533,7 @@ mod declaration_tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED),
                 "{tenant_id:?}: {err:?}"
             );
         }

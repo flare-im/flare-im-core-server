@@ -361,7 +361,7 @@ mod tests {
             .await
             .expect_err("a dispatch without a tenant must be denied");
             assert!(
-                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED),
                 "{tenant_id:?}: {error:?}"
             );
         }

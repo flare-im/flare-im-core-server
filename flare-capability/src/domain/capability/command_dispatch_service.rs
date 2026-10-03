@@ -605,7 +605,7 @@ mod tests {
     }
 
     fn is_missing_tenant(error: &CapabilityError) -> bool {
-        matches!(error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required")
+        matches!(error, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED)
     }
 
     /// 缺租户（含空白）的 RTC 调度在查授权、建呼叫之前就以 `PolicyDenied` 拒绝，不再按租户 "0"

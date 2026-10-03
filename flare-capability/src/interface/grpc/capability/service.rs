@@ -379,7 +379,6 @@ impl CapabilityService for CapabilityGrpcServer {
             tenant_id = %normalized_tenant_id,
             "capability.dispatch"
         );
-        let tenant_id = Some(normalized_tenant_id);
 
         let payload_raw = r.payload_json.as_str();
         if payload_raw.len() > self.runtime.max_payload_json_bytes {
@@ -397,9 +396,9 @@ impl CapabilityService for CapabilityGrpcServer {
         };
 
         if let Some(ref lim) = self.rate_limiter {
-            let t = tenant_id.as_deref().unwrap_or("_");
+            // 限流键的租户就是已通过规范写法检查的租户（必然非空），不再有 "_" 占位（W14-D）。
             let u = user_id.unwrap_or("_");
-            if !lim.check_and_record(t, u) {
+            if !lim.check_and_record(&normalized_tenant_id, u) {
                 self.metrics
                     .dispatch_rate_limited
                     .fetch_add(1, Ordering::Relaxed);
@@ -417,7 +416,7 @@ impl CapabilityService for CapabilityGrpcServer {
         };
         let cmd = CapabilityDispatchCommand {
             capability_id: r.capability_id,
-            tenant_id,
+            tenant_id: Some(normalized_tenant_id),
             user_id: user_id.map(str::to_string),
             conversation_id: if r.conversation_id.is_empty() {
                 None

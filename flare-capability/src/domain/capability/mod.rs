@@ -16,7 +16,10 @@ pub mod rtc;
 pub use command_dispatch_service::{dispatch_rtc_by_capability_id, execute_capability_dispatch};
 pub use context::{CapabilityInvokeMeta, ConversationKind, PreSendEvaluateInput, ResolveTrigger};
 pub use descriptor::CapabilityDescriptor;
-pub use dispatch::{CapabilityDispatchCommand, CapabilityDispatchResult, require_dispatch_tenant};
+pub use dispatch::{
+    CapabilityDispatchCommand, CapabilityDispatchResult, DISPATCH_TENANT_REQUIRED,
+    require_dispatch_tenant, trimmed_dispatch_tenant,
+};
 pub use error::{CapabilityError, GuardDecision, GuardRejection, Result};
 pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHandler};
 pub use grant::{TenantCapabilitySwitch, UserCapabilityGrant};

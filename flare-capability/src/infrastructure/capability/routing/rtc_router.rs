@@ -17,8 +17,11 @@ use crate::domain::capability::{
     MediaJoinTransportResponse, MediaLeaveTransportRequest, MediaLeaveTransportResponse,
     MediaSetPublisherMuteRequest, MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest,
     MediaSetSimulcastLayerResponse, MediaSetSubscriptionRequest, MediaSetSubscriptionResponse,
-    RejectCallRequest, RejectCallResponse, Result, RtcCapability,
+    RejectCallRequest, RejectCallResponse, Result, RtcCapability, trimmed_dispatch_tenant,
 };
+
+/// 选 RTC 后端时上下文缺租户的拒绝原因（`tenant required …` 口径，W12-T）。
+pub const RTC_BACKEND_TENANT_REQUIRED: &str = "tenant required to select an RTC backend";
 
 #[derive(Clone)]
 pub struct RtcCapabilityRouter {
@@ -77,12 +80,12 @@ impl RtcCapabilityRouter {
     }
 
     /// 上下文缺租户（含空白）时以 `PolicyDenied` 拒绝（W13-D）：丢了租户的调用不能被全局默认
-    /// 后端接走（该租户可能有专属后端），报错里也不再写租户 "0"。
+    /// 后端接走（该租户可能有专属后端），报错里也不再写租户 "0"。租户先去掉首尾空白再判空、再查
+    /// 专属后端（与登记、[`has_backend_for_tenant`](Self::has_backend_for_tenant) 和调度路径的
+    /// [`trimmed_dispatch_tenant`] 一致）；以前按原值查，带空白的租户查不到专属后端，落到默认后端。
     async fn require(&self, ctx: &Ctx) -> Result<Arc<dyn RtcCapability>> {
-        let tenant = ctx
-            .tenant_id()
-            .filter(|tenant| !tenant.trim().is_empty())
-            .ok_or_else(|| CapabilityError::PolicyDenied("tenant_id required".into()))?;
+        let tenant = trimmed_dispatch_tenant(ctx.tenant_id())
+            .ok_or_else(|| CapabilityError::PolicyDenied(RTC_BACKEND_TENANT_REQUIRED.into()))?;
         if let Some(b) = self.tenant_backends.read().await.get(tenant) {
             return Ok(Arc::clone(b));
         }
@@ -229,7 +232,7 @@ impl RtcCapability for RtcCapabilityRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::RtcCapabilityRouter;
+    use super::{RTC_BACKEND_TENANT_REQUIRED, RtcCapabilityRouter};
     use crate::domain::capability::{
         AcceptCallRequest, AcceptCallResponse, CapabilityError, CreateCallRequest,
         CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse, HangupCallRequest,
@@ -456,10 +459,45 @@ mod tests {
                 .map(|out| out.call_id)
                 .expect_err("a call without a tenant must be denied");
             assert!(
-                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == RTC_BACKEND_TENANT_REQUIRED),
                 "{:?}: {error:?}",
                 ctx.tenant_id()
             );
+        }
+    }
+
+    /// 上下文租户带首尾空白时按去掉空白后的租户选专属后端，与登记和 `has_backend_for_tenant`
+    /// 一致；以前按原值查不到，落到全局默认后端。拒绝原因是 `tenant required …` 口径。
+    #[tokio::test]
+    async fn a_padded_context_tenant_selects_the_tenants_own_backend() {
+        assert_eq!(
+            RTC_BACKEND_TENANT_REQUIRED,
+            "tenant required to select an RTC backend"
+        );
+        let router = RtcCapabilityRouter::new();
+        router
+            .set_backend(Some(Arc::new(StubRtc { id: "default" })))
+            .await;
+        router
+            .set_backend_for_tenant(" tenant-a ", Some(Arc::new(StubRtc { id: "tenant-a" })))
+            .await;
+        assert!(router.has_backend_for_tenant(" tenant-a ").await);
+        for tenant in ["tenant-a", " tenant-a ", "\ttenant-a"] {
+            let out = router
+                .create_call(
+                    &ctx(tenant),
+                    &CreateCallRequest {
+                        tenant_id: String::new(),
+                        request_id: "r".into(),
+                        conversation_id: "c".into(),
+                        initiator_user_id: "u".into(),
+                        media: None,
+                        ext: Value::Null,
+                    },
+                )
+                .await
+                .expect("a call with a tenant is served");
+            assert_eq!(out.call_id, "tenant-a", "{tenant:?}");
         }
     }
 }

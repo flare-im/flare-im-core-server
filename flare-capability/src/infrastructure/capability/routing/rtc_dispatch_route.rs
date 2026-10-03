@@ -11,7 +11,7 @@ use flare_core_base::context::{Context, Ctx};
 
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityDispatchRoute, Result,
-    dispatch_rtc_by_capability_id, require_dispatch_tenant,
+    dispatch_rtc_by_capability_id, require_dispatch_tenant, trimmed_dispatch_tenant,
 };
 use crate::infrastructure::capability::routing::RtcCapabilityRouter;
 
@@ -44,13 +44,16 @@ impl RtcDispatchRoute {
 ///
 /// 上下文没有租户时取 `Dispatch` 请求体的租户，[`RtcCapabilityRouter`] 才能命中该租户注册的
 /// 媒体后端。两者都缺（含空白）时以 `PolicyDenied` 拒绝，不再按租户 "0" 选后端（W13-D）。
+/// 上下文与请求体的租户都先去掉首尾空白再判空、再取用（[`trimmed_dispatch_tenant`]，与
+/// [`require_dispatch_tenant`] 同一判定）：上下文租户带空白时换成去掉空白的取值。
 fn ctx_for_rtc_dispatch(ctx: &Ctx, req: &CapabilityDispatchCommand) -> Result<Ctx> {
-    if ctx.tenant_id().is_some_and(|t| !t.trim().is_empty()) {
-        return Ok(Arc::clone(ctx));
-    }
-    let tenant_id = require_dispatch_tenant(req)?;
+    let tenant_id = match trimmed_dispatch_tenant(ctx.tenant_id()) {
+        Some(tenant_id) if ctx.tenant_id() == Some(tenant_id) => return Ok(Arc::clone(ctx)),
+        Some(tenant_id) => tenant_id.to_string(),
+        None => require_dispatch_tenant(req)?,
+    };
     let base: Context = (**ctx).clone();
-    Ok(Arc::new(base.with_tenant_id(tenant_id.trim())))
+    Ok(Arc::new(base.with_tenant_id(tenant_id)))
 }
 
 #[async_trait]
@@ -84,9 +87,10 @@ mod tests {
     use super::{RtcDispatchRoute, ctx_for_rtc_dispatch};
     use crate::domain::capability::{
         AcceptCallRequest, AcceptCallResponse, CapabilityDispatchCommand, CapabilityDispatchRoute,
-        CapabilityError, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest,
-        GetJoinTokenResponse, HangupCallRequest, HangupCallResponse, ListParticipantsRequest,
-        ListParticipantsResponse, RejectCallRequest, RejectCallResponse, Result, RtcCapability,
+        CapabilityError, CreateCallRequest, CreateCallResponse, DISPATCH_TENANT_REQUIRED,
+        GetJoinTokenRequest, GetJoinTokenResponse, HangupCallRequest, HangupCallResponse,
+        ListParticipantsRequest, ListParticipantsResponse, RejectCallRequest, RejectCallResponse,
+        Result, RtcCapability,
     };
     use crate::infrastructure::capability::routing::RtcCapabilityRouter;
 
@@ -190,7 +194,7 @@ mod tests {
                     .await
                     .expect_err("an RTC dispatch without any tenant must be denied");
                 assert!(
-                    matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                    matches!(&error, CapabilityError::PolicyDenied(reason) if reason == DISPATCH_TENANT_REQUIRED),
                     "{:?}/{tenant_id:?}: {error:?}",
                     ctx.tenant_id()
                 );
@@ -223,7 +227,7 @@ mod tests {
                     .map(|ctx| ctx.tenant_id().map(str::to_string))
                     .expect_err("no tenant anywhere must be denied");
                 assert!(
-                    matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                    matches!(&error, CapabilityError::PolicyDenied(reason) if reason == DISPATCH_TENANT_REQUIRED),
                     "{:?}/{tenant_id:?}: {error:?}",
                     ctx.tenant_id()
                 );
@@ -234,5 +238,29 @@ mod tests {
         let tenant_b: Ctx = Arc::new(Context::with_request_id("req-1").with_tenant_id("tenant-b"));
         let routed = ctx_for_rtc_dispatch(&tenant_b, &video_call(None)).unwrap();
         assert_eq!(routed.tenant_id(), Some("tenant-b"));
+    }
+
+    /// 上下文与请求体的租户都先去掉首尾空白再判空、再取用，与 `require_dispatch_tenant` 一致
+    /// （W14-D）：以前上下文租户带空白时原样沿用，请求体租户却被修剪，同一个取值在两处是不同的
+    /// 租户。
+    #[test]
+    fn the_rtc_routing_context_trims_the_tenant_like_the_dispatch_check() {
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("req-1"));
+        for body in [" tenant-a ", "\ttenant-a", "tenant-a"] {
+            let routed = ctx_for_rtc_dispatch(&no_tenant, &video_call(Some(body))).unwrap();
+            assert_eq!(routed.tenant_id(), Some("tenant-a"), "body {body:?}");
+        }
+        for context in [" tenant-b ", "tenant-b\n"] {
+            let padded: Ctx = Arc::new(Context::with_request_id("req-1").with_tenant_id(context));
+            for body in [None, Some("tenant-a")] {
+                let routed = ctx_for_rtc_dispatch(&padded, &video_call(body)).unwrap();
+                assert_eq!(
+                    routed.tenant_id(),
+                    Some("tenant-b"),
+                    "context {context:?}, body {body:?}"
+                );
+                assert_eq!(routed.request_id(), "req-1");
+            }
+        }
     }
 }
