@@ -1,6 +1,7 @@
 use axum::{
     extract::{Extension, Json},
-    http::HeaderMap,
+    http::{HeaderMap, HeaderValue},
+    response::{IntoResponse, Response},
 };
 use std::sync::Arc;
 use tracing::{debug, instrument};
@@ -28,6 +29,12 @@ const MESSAGE_REJECTED: &str = "MESSAGE_REJECTED";
 const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
 const NOT_FOUND: &str = "NOT_FOUND";
 
+/// HTTP 发送把这次实际使用的 `client_msg_id` 放进这个响应头，成功与失败都带。
+pub(crate) const CLIENT_MSG_ID_HEADER: &str = "x-client-msg-id";
+/// 超过这个长度（或含非可见 ASCII 字符）的 `client_msg_id` 不进响应头、只在响应体里返回：
+/// 过长的响应头会被 Edge 当成上游错误。
+const CLIENT_MSG_ID_HEADER_MAX_LEN: usize = 256;
+
 /// Present only to the API gateway ingress process; no downstream Core worker
 /// receives this private signing capability.
 #[derive(Clone)]
@@ -40,13 +47,20 @@ pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
     tag = "Message",
     request_body = SendMessageHttpRequest,
     responses(
-        (status = 200, description = "成功", body = ApiResponse<SendMessageHttpResponse>),
-        (status = 400, description = "参数错误，或摄入侧判消息不合法（INVALID_MESSAGE），改了请求再发"),
-        (status = 403, description = "租户不可用（TENANT_UNAVAILABLE）或无权发送"),
-        (status = 404, description = "摄入侧找不到发送依赖的对象（NOT_FOUND）"),
-        (status = 422, description = "PreSend 扩展按策略拒绝了这条消息（MESSAGE_REJECTED），不要原样重试"),
-        (status = 500, description = "发送失败（MESSAGE_SEND_FAILED），不带下游错误原文"),
-        (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE；含必需 PreSend Hook 不可达或超时、摄入超时），带同一 client_msg_id 退避重试"),
+        (status = 200, description = "成功；data.client_msg_id 是这次实际使用的 client_msg_id", body = ApiResponse<SendMessageHttpResponse>,
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 400, description = "参数错误，或摄入侧判消息不合法（INVALID_MESSAGE），改了请求再发；顶层 client_msg_id 同响应头",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 403, description = "租户不可用（TENANT_UNAVAILABLE）或无权发送；顶层 client_msg_id 同响应头",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 404, description = "摄入侧找不到发送依赖的对象（NOT_FOUND）；顶层 client_msg_id 同响应头",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 422, description = "PreSend 扩展按策略拒绝了这条消息（MESSAGE_REJECTED），不要原样重试；顶层 client_msg_id 同响应头",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 500, description = "发送失败（MESSAGE_SEND_FAILED），不带下游错误原文；顶层 client_msg_id 同响应头",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
+        (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE；含必需 PreSend Hook 不可达或超时、摄入超时），带同一 client_msg_id（请求里没带时取应答里的）退避重试",
+            headers(("x-client-msg-id" = String, description = "这次实际使用的 client_msg_id"))),
     ),
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -56,8 +70,75 @@ pub async fn send_message(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<SendMessageHttpRequest>,
-) -> Result<Json<ApiResponse<SendMessageHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+) -> Response {
+    // 调用方没带 client_msg_id 时网关生成一个。不论成败都把它回给调用方：以前只有成功路径看得到，
+    // 503 之后的盲重试只能再生成一个新 id，摄入侧无从去重。调用方应自带 client_msg_id；没带的，
+    // 重试时带回应答里的这个。
+    let client_msg_id = effective_client_msg_id(&req.client_msg_id);
+    let outcome = send_message_with_id(
+        &headers,
+        &clients,
+        &principal,
+        &signer,
+        req,
+        client_msg_id.clone(),
+    )
+    .await;
+    let mut response = match outcome {
+        Ok(response) => Json(ApiResponse::success(response)).into_response(),
+        Err(error) => error_with_client_msg_id(error, &client_msg_id),
+    };
+    if let Some(value) = client_msg_id_header(&client_msg_id) {
+        response.headers_mut().insert(CLIENT_MSG_ID_HEADER, value);
+    }
+    response
+}
+
+/// 请求里的 `client_msg_id`（原样）；空白时生成 `http_<uuid>`。
+fn effective_client_msg_id(requested: &str) -> String {
+    if requested.trim().is_empty() {
+        format!("http_{}", uuid::Uuid::new_v4())
+    } else {
+        requested.to_string()
+    }
+}
+
+/// 只有不太长、全是可见 ASCII 的 id 才进响应头；其余只在响应体里返回。
+fn client_msg_id_header(client_msg_id: &str) -> Option<HeaderValue> {
+    if client_msg_id.len() > CLIENT_MSG_ID_HEADER_MAX_LEN
+        || !client_msg_id.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return None;
+    }
+    HeaderValue::from_str(client_msg_id).ok()
+}
+
+/// 错误应答沿用统一错误体（`code`、`reason`、`message`、`track`），顶层加可选字段
+/// `client_msg_id`；状态码与不带它时相同。
+fn error_with_client_msg_id(error: GatewayError, client_msg_id: &str) -> Response {
+    let body = serde_json::to_value(ApiResponse::<()>::from(error.0.clone()));
+    let status = error.clone().into_response().status();
+    match body {
+        Ok(serde_json::Value::Object(mut fields)) => {
+            fields.insert(
+                "client_msg_id".to_string(),
+                serde_json::Value::String(client_msg_id.to_string()),
+            );
+            (status, Json(serde_json::Value::Object(fields))).into_response()
+        }
+        _ => error.into_response(),
+    }
+}
+
+async fn send_message_with_id(
+    headers: &HeaderMap,
+    clients: &GrpcClients,
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+    req: SendMessageHttpRequest,
+    client_msg_id: String,
+) -> Result<SendMessageHttpResponse> {
+    let ctx = Ctx::from_headers(headers);
     debug!(
         trace_id = %ctx.trace_id(),
         conversation_id = %req.conversation_id,
@@ -99,15 +180,10 @@ pub async fn send_message(
         GatewayError::internal("MESSAGE_SIGNING_FAILED", "internal identity signing failed")
     })?;
     let content = serde_json::to_vec(&req.content)?;
-    let client_msg_id = if req.client_msg_id.trim().is_empty() {
-        format!("http_{}", uuid::Uuid::new_v4())
-    } else {
-        req.client_msg_id.clone()
-    };
     let message = Message {
         server_id: String::new(),
         conversation_id: req.conversation_id.clone(),
-        client_msg_id,
+        client_msg_id: client_msg_id.clone(),
         sender_id,
         source: MessageSource::User as i32,
         conversation_seq: 0,
@@ -147,13 +223,12 @@ pub async fn send_message(
         .send_message_with_signed_context(grpc_req, &signed_token)
         .await
         .map_err(send_status_failure)?;
-    let response = SendMessageHttpResponse {
+    Ok(SendMessageHttpResponse {
         server_msg_id: grpc_res.server_msg_id,
         seq: grpc_res.conversation_seq,
         success: grpc_res.success,
-    };
-
-    Ok(Json(ApiResponse::success(response)))
+        client_msg_id,
+    })
 }
 
 /// MessageIngest 回的 gRPC 状态映射为 HTTP。
@@ -506,6 +581,34 @@ mod tests {
             failed.into_response().status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    /// 空白的 client_msg_id 由网关生成；只有不太长的可见 ASCII 才进响应头（响应体总是带）。
+    #[test]
+    fn client_msg_id_is_generated_when_blank_and_header_safe_only_when_short_ascii() {
+        assert_eq!(effective_client_msg_id("biz-1"), "biz-1");
+        for blank in ["", "  "] {
+            let generated = effective_client_msg_id(blank);
+            assert!(generated.starts_with("http_"), "{generated}");
+            assert_ne!(generated, effective_client_msg_id(blank));
+        }
+
+        assert_eq!(
+            client_msg_id_header("biz-1")
+                .as_ref()
+                .map(HeaderValue::as_bytes),
+            Some(&b"biz-1"[..])
+        );
+        let longest = "a".repeat(CLIENT_MSG_ID_HEADER_MAX_LEN);
+        assert!(client_msg_id_header(&longest).is_some());
+        for unsafe_id in [
+            "a".repeat(CLIENT_MSG_ID_HEADER_MAX_LEN + 1),
+            "订单-1".to_string(),
+            "biz 1".to_string(),
+            "biz-1\r\nx-injected: 1".to_string(),
+        ] {
+            assert!(client_msg_id_header(&unsafe_id).is_none(), "{unsafe_id:?}");
+        }
     }
 
     #[test]

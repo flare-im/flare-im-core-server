@@ -904,6 +904,9 @@ pub struct SendMessageHttpResponse {
     pub server_msg_id: String,
     pub seq: u64,
     pub success: bool,
+    /// 这次发送实际使用的 `client_msg_id`：调用方带了就是原值，没带就是网关生成的
+    /// `http_<uuid>`。失败应答在顶层同名字段里返回它，响应头 `x-client-msg-id` 也带。
+    pub client_msg_id: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

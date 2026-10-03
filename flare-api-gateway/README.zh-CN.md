@@ -302,10 +302,13 @@ Authorization: Bearer <token>
 
 {
   "conversation_id": "private:user1:user2",
+  "client_msg_id": "biz-10001",
   "content": {"text": "Hello"},
   "message_type": 1
 }
 ```
+
+请求应自带稳定的 `client_msg_id`，重试时沿用，摄入侧按它去重。没带时网关生成一个，并在发送处理的每个应答里返回实际使用的值：响应头 `x-client-msg-id`，成功在 `data.client_msg_id`，失败在错误体顶层的 `client_msg_id`。503 之后带这个值重试。详见 `docs/04-third-party-integration.md`。
 
 #### 撤回消息
 ```http

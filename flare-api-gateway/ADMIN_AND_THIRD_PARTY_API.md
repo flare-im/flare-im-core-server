@@ -170,7 +170,7 @@ Gateway 访问下游 gRPC 时必须透传：
 第三方 HTTP 写请求要求：
 
 - `Idempotency-Key` 或 `x-request-id` 必须稳定。
-- 发消息必须有 `client_msg_id`，用于重复请求收敛。
+- 发消息应自带 `client_msg_id`，用于重复请求收敛。没带时网关生成一个，并在发送处理的每个应答里返回（响应头 `x-client-msg-id`；成功在 `data.client_msg_id`，失败在错误体顶层的 `client_msg_id`），重试必须带回该值，否则会被当成新消息（见 `docs/04-third-party-integration.md`「幂等要求」）。
 - 不允许客户端传入 `sender_id` 覆盖认证主体。
 - 媒体“消息附件”由消息路径创建引用；非消息媒体不由 core 自动归档或删除。
 

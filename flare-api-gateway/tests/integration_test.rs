@@ -78,7 +78,11 @@ fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {
 
 #[test]
 fn message_send_event_and_action_paths_keep_single_owners() {
-    let send_message = function_body(MESSAGE_HANDLER_RS, "pub async fn send_message");
+    // 入口只负责把实际使用的 client_msg_id 放进每个应答，发送本身在 send_message_with_id。
+    let send_entry = function_body(MESSAGE_HANDLER_RS, "pub async fn send_message(");
+    assert!(send_entry.contains("send_message_with_id("));
+    assert!(!send_entry.contains("clients."));
+    let send_message = function_body(MESSAGE_HANDLER_RS, "async fn send_message_with_id(");
     assert!(send_message.contains("clients.message_ingest_send"));
     assert!(!send_message.contains("clients.message_event"));
     assert!(!send_message.contains("clients.message_action"));

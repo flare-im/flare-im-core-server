@@ -58,6 +58,14 @@ x-app-id: app-1
 
 重试时不要生成新的 `client_msg_id`，否则 Core 会认为是新业务消息。
 
+HTTP 发送（`POST /api/v1/messages/send`）的调用方应在请求体里自带 `client_msg_id`。没带时网关生成一个 `http_<uuid>`，并在发送处理的每个应答里返回这次实际使用的值：
+
+- 响应头 `x-client-msg-id`（值超过 256 字节或含非可见 ASCII 字符时不带此头，只在响应体里返回）。
+- 成功应答的 `data.client_msg_id`。
+- 失败应答（400、403、404、422、500、503）在统一错误体顶层多一个可选字段 `client_msg_id`，其余字段不变。
+
+收到 503 `SERVICE_UNAVAILABLE` 这类可重试的失败后，带这个值退避重试，摄入侧按它去重。重试时请求体仍不带 `client_msg_id`，网关会再生成一个新值，Core 会把它当成另一条消息。在进入发送处理之前就被网关拒绝的请求（未认证 401、网关租户准入的 403、限流 429、请求体不是合法 JSON 的 400）没有到达摄入侧，应答不带该字段，换新值重发也不会重复。
+
 ## HTTP API
 
 `flare-api-gateway` 当前暴露公共 API 前缀 `/api/v1`。
@@ -112,11 +120,23 @@ curl -X POST "http://127.0.0.1:50050/api/v1/messages/send" \
   "data": {
     "server_msg_id": "server-id",
     "seq": 42,
-    "success": true
+    "success": true,
+    "client_msg_id": "biz-10001"
   },
   "reason": null,
   "message": null,
   "track": "trace-id"
+}
+```
+
+暂时无法受理时（响应头同样带 `x-client-msg-id: biz-10001`），带同一 `client_msg_id` 退避重试：
+
+```json
+{
+  "code": 503,
+  "reason": "SERVICE_UNAVAILABLE",
+  "message": "",
+  "client_msg_id": "biz-10001"
 }
 ```
 

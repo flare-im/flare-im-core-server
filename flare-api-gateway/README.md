@@ -302,10 +302,13 @@ Authorization: Bearer <token>
 
 {
   "conversation_id": "private:user1:user2",
+  "client_msg_id": "biz-10001",
   "content": {"text": "Hello"},
   "message_type": 1
 }
 ```
+
+Send a stable `client_msg_id` and reuse it on retries; ingest deduplicates on it. If the request has none, the gateway generates one and returns the value it used on every send response: in the `x-client-msg-id` header, in `data.client_msg_id` on success and in a top-level `client_msg_id` field of the error body on failure. Retry a 503 with that value. See `docs/04-third-party-integration.md`.
 
 #### Recall message
 ```http
