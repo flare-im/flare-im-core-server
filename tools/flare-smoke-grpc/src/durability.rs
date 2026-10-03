@@ -37,8 +37,8 @@ pub const LEDGER_STATE: &str = "SELECT write_state FROM message_write_ledger \
 /// 收发双方各自在会话列表里看到的会话 seq，与 Core 会话列表同口径
 /// （flare-conversation `postgres_repository.rs` 的用户会话查询）：会话未删除、成员未删除，
 /// seq 取 `GREATEST(conversations.last_message_seq, 该成员可见范围内 messages 的最大 seq)`。
-/// 不能只看 `conversations.last_message_seq`：会话服务的消息事件消费者只为租户 0 推进它，
-/// 其他租户恒为 NULL，Core 自己的会话列表也是靠消息尾补上的。
+/// 不能只看 `conversations.last_message_seq`：它由会话服务的消息事件消费者按事件声明的租户
+/// 异步推进，刚写入的消息可能还没反映进去，Core 自己的会话列表也同样以消息尾补齐。
 pub const CONVERSATION_ROWS: &str = "SELECT p.user_id, GREATEST(COALESCE(c.last_message_seq, 0), \
        COALESCE((SELECT MAX(m.seq) FROM messages m \
                   WHERE m.tenant_id = p.tenant_id AND m.conversation_id = p.conversation_id \
