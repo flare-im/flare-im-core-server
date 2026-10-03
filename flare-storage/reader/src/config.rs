@@ -1,4 +1,5 @@
 use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_service_kit::redis_connection::RedisConnectionLimits;
 use flare_server_core::error::Result;
 use std::env;
 
@@ -17,6 +18,8 @@ pub struct StorageReaderConfig {
     // Redis 缓存配置（仅消息与查询索引 TTL）
     pub redis_message_cache_ttl_seconds: u64,
     pub redis_session_cache_ttl_seconds: u64,
+    /// 进程共享的 Redis 连接的建连、应答与重试上限。
+    pub redis_limits: RedisConnectionLimits,
 }
 
 impl StorageReaderConfig {
@@ -110,6 +113,24 @@ impl StorageReaderConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1800); // 30 minutes
 
+        // Redis 不可达时一次调用在几秒内失败（读路径随即回落到 PostgreSQL）；取值无效时启动即失败。
+        let redis_limits = RedisConnectionLimits::from_env_values(
+            (
+                "STORAGE_REDIS_CONNECT_TIMEOUT_MS",
+                env::var("STORAGE_REDIS_CONNECT_TIMEOUT_MS").ok().as_deref(),
+            ),
+            (
+                "STORAGE_REDIS_RESPONSE_TIMEOUT_MS",
+                env::var("STORAGE_REDIS_RESPONSE_TIMEOUT_MS")
+                    .ok()
+                    .as_deref(),
+            ),
+            (
+                "STORAGE_REDIS_CONNECT_RETRIES",
+                env::var("STORAGE_REDIS_CONNECT_RETRIES").ok().as_deref(),
+            ),
+        )?;
+
         Ok(Self {
             redis_url,
             postgres_url,
@@ -122,6 +143,7 @@ impl StorageReaderConfig {
             postgres_max_lifetime_seconds,
             redis_message_cache_ttl_seconds,
             redis_session_cache_ttl_seconds,
+            redis_limits,
         })
     }
 }

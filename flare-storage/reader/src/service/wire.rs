@@ -12,6 +12,7 @@ use crate::infrastructure::persistence::optimized_postgres_store::OptimizedPostg
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use crate::interface::grpc::StorageReaderGrpcHandler;
+use flare_im_service_kit::redis_connection::SharedRedisConnection;
 
 // 类型别名，简化泛型参数
 pub type MessageStorageType = OptimizedPostgresMessageStorageImpl;
@@ -73,8 +74,9 @@ pub async fn initialize(
         Some(redis_url) => {
             let client =
                 redis::Client::open(redis_url.as_str()).with_context(|| "Invalid Redis URL")?;
+            // 一个进程一条共享的 Redis 连接（有界建连、应答与重建）。
             Some(Arc::new(RedisMessageCache::new(
-                Arc::new(client),
+                Arc::new(SharedRedisConnection::new(client, config.redis_limits)),
                 config.as_ref(),
             )))
         }

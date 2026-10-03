@@ -3,6 +3,7 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flare_im_contracts::Ctx;
 use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use prost::Message as _;
 use redis::{AsyncCommands, RedisError, aio::ConnectionManager};
@@ -12,28 +13,13 @@ use tracing::instrument;
 use crate::config::StorageWriterConfig;
 use crate::domain::repository::HotCacheRepository;
 
-/// Redis 失败按是否暂时分类，口径同 Storage Reader 的 Redis 缓存（W10-E）：超时，以及连不上、
-/// 连接断开、其他 IO 失败、需要重连的错误、Redis 正在加载、集群不可用、主节点下线，都是暂时的、
-/// 可重试（超时 `NetworkTimeout`，其余 `ServiceUnavailable`，`is_retryable()` 为真）；命令错误、
-/// 类型不符等其余错误是 `InternalError`，不可重试。Redis 的原文只进 details。以前一律经
-/// `From<RedisError>` 成为未分类的系统错误，看不出该等 Redis 恢复还是该查数据与配置。
+/// Redis 失败按是否暂时分类，口径同 Storage Reader 的 Redis 缓存（`redis_error_code`）：超时，以及
+/// 连不上、连接断开、其他 IO 失败、需要重连的错误、Redis 正在加载、集群不可用、主节点下线，都是
+/// 暂时的、可重试（超时 `NetworkTimeout`，其余 `ServiceUnavailable`，`is_retryable()` 为真）；认证或
+/// 权限被拒、应答解析失败是 `ConfigurationError`；命令错误、类型不符等其余错误是 `InternalError`。
+/// 后两类不可重试。Redis 的原文只进 details。
 fn redis_failure(err: RedisError, context: &'static str) -> FlareError {
-    let code = if err.is_timeout() {
-        ErrorCode::NetworkTimeout
-    } else if err.is_io_error()
-        || err.is_unrecoverable_error()
-        || matches!(
-            err.kind(),
-            redis::ErrorKind::BusyLoadingError
-                | redis::ErrorKind::TryAgain
-                | redis::ErrorKind::ClusterDown
-                | redis::ErrorKind::MasterDown
-        )
-    {
-        ErrorCode::ServiceUnavailable
-    } else {
-        ErrorCode::InternalError
-    };
+    let code = redis_error_code(&err, ErrorCode::NetworkTimeout);
     map_infra_error(err, code, context)
 }
 
@@ -65,26 +51,38 @@ fn encode_cached_message(message: &flare_proto::common::Message) -> String {
 }
 
 pub struct RedisHotCacheRepository {
-    client: Arc<redis::Client>,
+    /// 进程共享的连接（与去重、WAL 清理共用）。以前每次写都 `ConnectionManager::new` 新建，用的是
+    /// redis 的默认退避，Redis 不可达时一次写可阻塞数分钟，卡住持久写之后的确认。
+    redis: Arc<SharedRedisConnection>,
     ttl_seconds: u64,
     tail_limit: usize,
-    // 注意：redis-rs 的 ConnectionManager 内部已实现连接池，无需手动管理
 }
 
 impl RedisHotCacheRepository {
-    pub fn new(client: Arc<redis::Client>, config: &StorageWriterConfig) -> Self {
+    pub fn new(redis: Arc<SharedRedisConnection>, config: &StorageWriterConfig) -> Self {
+        Self::from_parts(
+            redis,
+            config.redis_hot_ttl_seconds,
+            config.redis_hot_tail_limit,
+        )
+    }
+
+    pub fn from_parts(
+        redis: Arc<SharedRedisConnection>,
+        ttl_seconds: u64,
+        tail_limit: usize,
+    ) -> Self {
         Self {
-            client,
-            ttl_seconds: config.redis_hot_ttl_seconds,
-            tail_limit: config.redis_hot_tail_limit.max(1),
+            redis,
+            ttl_seconds,
+            tail_limit: tail_limit.max(1),
         }
     }
 
-    /// 获取连接（redis-rs 内部已实现连接池，自动复用）
+    /// 共享连接：建连、应答与重试都有上限（`StorageWriterConfig::redis_limits`）。
     async fn get_connection(&self) -> Result<ConnectionManager> {
-        // redis-rs 的 ConnectionManager 内部已经实现了连接池
-        // 直接创建即可，底层会自动复用连接
-        ConnectionManager::new(self.client.as_ref().clone())
+        self.redis
+            .get()
             .await
             .redis_context("Redis hot cache connection failed")
     }
@@ -272,6 +270,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flare_im_service_kit::redis_connection::RedisConnectionLimits;
 
     #[test]
     fn hot_cache_keys_are_tenant_scoped() {
@@ -324,6 +323,18 @@ mod tests {
                 RedisError::from((redis::ErrorKind::BusyLoadingError, "loading")),
                 ErrorCode::ServiceUnavailable,
                 true,
+            ),
+            // 认证被拒与应答解析失败等 Redis 恢复也不会好（W14-R (b)）：修复前经 redis 的「要重连」
+            // 判成了可重试的 ServiceUnavailable。
+            (
+                RedisError::from((redis::ErrorKind::AuthenticationFailed, "leak-marker-43")),
+                ErrorCode::ConfigurationError,
+                false,
+            ),
+            (
+                RedisError::from((redis::ErrorKind::ParseError, "leak-marker-44")),
+                ErrorCode::ConfigurationError,
+                false,
             ),
             (
                 RedisError::from((redis::ErrorKind::TypeError, "WRONGTYPE leak-marker-41")),
@@ -412,8 +423,20 @@ mod tests {
         Some((name, at))
     }
 
+    fn repository(url: &str, limits: RedisConnectionLimits) -> RedisHotCacheRepository {
+        RedisHotCacheRepository::from_parts(
+            Arc::new(SharedRedisConnection::new(
+                redis::Client::open(url).unwrap(),
+                limits,
+            )),
+            60,
+            10,
+        )
+    }
+
     /// 热缓存写经真实的 Redis 客户端拿到的失败也按是否暂时分类：Redis 正在加载是可重试的
-    /// ServiceUnavailable，类型错误是不可重试的 InternalError。修复前两者都是没有错误码的系统错误。
+    /// ServiceUnavailable，类型错误是不可重试的 InternalError，未认证与无权限是不可重试的
+    /// ConfigurationError（W14-R (b)，修复前是 InternalError）。
     #[tokio::test]
     async fn hot_cache_writes_classify_redis_replies() {
         let ctx: Ctx =
@@ -434,12 +457,18 @@ mod tests {
                 ErrorCode::InternalError,
                 false,
             ),
+            (
+                "NOAUTH Authentication required.",
+                ErrorCode::ConfigurationError,
+                false,
+            ),
+            (
+                "NOPERM User has no permissions to run the 'set' command",
+                ErrorCode::ConfigurationError,
+                false,
+            ),
         ] {
-            let repository = RedisHotCacheRepository {
-                client: Arc::new(redis::Client::open(fake_redis(error_line).await).unwrap()),
-                ttl_seconds: 60,
-                tail_limit: 10,
-            };
+            let repository = repository(&fake_redis(error_line).await, Default::default());
             let error = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 repository.store_hot(&ctx, &message),
@@ -450,6 +479,37 @@ mod tests {
             assert_eq!(error.code(), Some(code), "{error_line}: {error}");
             assert_eq!(error.is_retryable(), retryable, "{error_line}: {error}");
             assert_eq!(error.reason(), "Redis hot cache SET failed", "{error}");
+        }
+    }
+
+    /// Redis 不可达（关闭的端口）时热缓存写在连接上限内失败，是可重试的暂时错误（W14-R (a)）。
+    /// 修复前每次写都 `ConnectionManager::new`，用 redis 的默认退避（6 次重试、每次至多 60 s），
+    /// 60 s 仍未返回；持久写之后同一消费处理内的这一步因此卡住 Writer 消费者。
+    #[tokio::test]
+    async fn a_hot_cache_write_to_an_unreachable_redis_fails_within_the_bound() {
+        let ctx: Ctx =
+            Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id("tenant-a"));
+        let message = crate::domain::model::Message {
+            server_id: "m1".into(),
+            conversation_id: "conv-a".into(),
+            ..Default::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let limits = RedisConnectionLimits::default();
+        let repository = repository(&format!("redis://{closed}/"), limits);
+        for attempt in 0..2 {
+            let error = tokio::time::timeout(
+                limits.connect_budget() + std::time::Duration::from_secs(2),
+                repository.store_hot(&ctx, &message),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("attempt {attempt}: the write must fail within the bound"))
+            .expect_err("nothing listens on the port");
+            assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+            assert!(error.is_retryable(), "{error}");
+            assert_eq!(error.reason(), "Redis hot cache connection failed");
         }
     }
 

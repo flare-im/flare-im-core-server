@@ -77,7 +77,12 @@ impl PostgresBaseStorage {
                 )
             })?;
             Some(std::sync::Arc::new(RedisMessageCache::new(
-                std::sync::Arc::new(client),
+                std::sync::Arc::new(
+                    flare_im_service_kit::redis_connection::SharedRedisConnection::new(
+                        client,
+                        config.redis_limits,
+                    ),
+                ),
                 config,
             )))
         } else {

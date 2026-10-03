@@ -371,6 +371,12 @@ where
         }
     }
 
+    fn record_hot_cache_failure(&self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_storage_persist("hot_cache", "error");
+        }
+    }
+
     /// 持久化单条：归档 + 事件流(供 Sync) + 热缓存投影(可选)
     #[instrument(skip(self, ctx, prepared), fields(message_id = %prepared.message_id))]
     pub async fn persist_message(&self, ctx: &Ctx, prepared: PreparedMessage) -> Result<()> {
@@ -397,9 +403,12 @@ where
                     "Failed to append message event to durable event stream",
                 )
             })?;
+        // 热缓存只是投影：写失败只记 WARN 与计数（`storage_writer_persist_total{path="hot_cache",
+        // result="error"}`），不影响确认；Redis 不可达时连接上限让这一步在几秒内结束。
         if let Some(repo) = &self.hot_cache_repo
             && let Err(e) = repo.store_hot(ctx, &prepared.message).await
         {
+            self.record_hot_cache_failure();
             warn!(
                 error = ?e,
                 message_id = %prepared.message_id,
@@ -451,6 +460,7 @@ where
         if let Some(repo) = &self.hot_cache_repo
             && let Err(e) = repo.store_hot_batch(ctx, &messages).await
         {
+            self.record_hot_cache_failure();
             warn!(
                 error = ?e,
                 batch_size = messages.len(),
@@ -1271,6 +1281,65 @@ mod tests {
 
         assert_eq!(archive_writes.load(Ordering::SeqCst), 1);
         assert_eq!(stream_writes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Redis 不可达时持久写之后的确认不被热缓存卡住（W14-R (a)）：用真实的热缓存仓储指向关闭的
+    /// 端口，`persist_message` 在连接上限内返回成功，失败计入
+    /// `storage_writer_persist_total{path="hot_cache",result="error"}`。修复前每次写都新建连接、用
+    /// redis 的默认退避，这一步 60 s 仍未返回。
+    #[tokio::test]
+    async fn an_unreachable_redis_does_not_hold_the_ack_after_the_durable_write() {
+        use crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
+        use flare_im_service_kit::redis_connection::{
+            RedisConnectionLimits, SharedRedisConnection,
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let closed = listener.local_addr().expect("address");
+        drop(listener);
+        let limits = RedisConnectionLimits::default();
+        let redis = Arc::new(SharedRedisConnection::new(
+            redis::Client::open(format!("redis://{closed}/")).expect("client"),
+            limits,
+        ));
+        let metrics = Arc::new(StorageWriterMetrics::new());
+        let failures = || {
+            metrics
+                .storage_persist_total
+                .with_label_values(&["hot_cache", "error"])
+                .get()
+        };
+        let before = failures();
+        let stream_writes = Arc::new(AtomicUsize::new(0));
+        let service: MessagePersistenceDomainService<
+            NoopRepository,
+            RedisHotCacheRepository,
+            NoopRepository,
+            CountingEventStreamRepository,
+            NoopRepository,
+            NoopRepository,
+        > = MessagePersistenceDomainService::new(
+            None,
+            Some(Arc::new(RedisHotCacheRepository::from_parts(redis, 60, 10))),
+            Some(Arc::new(NoopRepository)),
+            Some(Arc::new(CountingEventStreamRepository {
+                writes: stream_writes.clone(),
+            })),
+            None,
+            None,
+        )
+        .with_metrics(Some(metrics.clone()));
+
+        tokio::time::timeout(
+            limits.connect_budget() + std::time::Duration::from_secs(2),
+            service.persist_message(&test_ctx(), prepared_message("message-a", 1)),
+        )
+        .await
+        .expect("the hot cache projection must not hold the ack when Redis is unreachable")
+        .expect("hot cache failures must not fail the durable write path");
+
+        assert_eq!(stream_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(failures(), before + 1);
     }
 
     #[tokio::test]

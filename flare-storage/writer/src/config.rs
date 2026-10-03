@@ -9,6 +9,7 @@ use flare_im_contracts::constants::topics::{
 };
 use flare_im_service_kit::config::FlareAppConfig;
 use flare_im_service_kit::metrics::MetricsEndpointConfig;
+use flare_im_service_kit::redis_connection::RedisConnectionLimits;
 use flare_server_core::error::Result;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
@@ -41,6 +42,8 @@ pub struct StorageWriterConfig {
     pub redis_hot_ttl_seconds: u64,
     pub redis_hot_tail_limit: usize,
     pub redis_idempotency_ttl_seconds: u64,
+    /// 进程共享的 Redis 连接的建连、应答与重试上限（热缓存、去重、WAL 清理共用）。
+    pub redis_limits: RedisConnectionLimits,
     pub wal_hash_key: Option<String>,
     pub postgres_url: Option<String>,
     // PostgreSQL 连接池配置
@@ -201,6 +204,24 @@ impl StorageWriterConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(24 * 3600);
 
+        // Redis 不可达时一次调用在几秒内失败，不卡住消费者；取值无效时启动即失败。
+        let redis_limits = RedisConnectionLimits::from_env_values(
+            (
+                "STORAGE_REDIS_CONNECT_TIMEOUT_MS",
+                env::var("STORAGE_REDIS_CONNECT_TIMEOUT_MS").ok().as_deref(),
+            ),
+            (
+                "STORAGE_REDIS_RESPONSE_TIMEOUT_MS",
+                env::var("STORAGE_REDIS_RESPONSE_TIMEOUT_MS")
+                    .ok()
+                    .as_deref(),
+            ),
+            (
+                "STORAGE_REDIS_CONNECT_RETRIES",
+                env::var("STORAGE_REDIS_CONNECT_RETRIES").ok().as_deref(),
+            ),
+        )?;
+
         let wal_hash_key = env::var("STORAGE_WAL_HASH_KEY")
             .ok()
             .or_else(|| service_config.wal_hash_key.clone())
@@ -292,6 +313,7 @@ impl StorageWriterConfig {
             redis_hot_ttl_seconds,
             redis_hot_tail_limit,
             redis_idempotency_ttl_seconds,
+            redis_limits,
             wal_hash_key,
             postgres_url,
             postgres_max_connections,

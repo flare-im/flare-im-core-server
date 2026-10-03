@@ -21,6 +21,7 @@ use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalC
 use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
 use flare_im_service_kit::metrics::StorageWriterMetrics;
+use flare_im_service_kit::redis_connection::SharedRedisConnection;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
 use flare_server_core::mq::consumer::{
@@ -124,22 +125,24 @@ pub async fn initialize(
     let ack_publisher = build_ack_publisher(&config, mq_producer.clone())?;
     let failure_publishers = build_failure_publishers(&config, mq_producer.clone());
     let retry_forwarder_dispatcher = build_retry_forwarder_dispatcher(&config, mq_producer)?;
-    let redis_client = build_redis_client(&config);
+    // 一个进程一条共享的 Redis 连接，去重、热缓存与 WAL 清理共用（有界建连、应答与重建）。
+    let redis = build_redis_client(&config)
+        .map(|client| Arc::new(SharedRedisConnection::new(client, config.redis_limits)));
 
-    let idempotency_repo = redis_client
+    let idempotency_repo = redis
         .as_ref()
-        .map(|client| Arc::new(RedisIdempotencyRepository::new(client.clone(), &config)));
+        .map(|redis| Arc::new(RedisIdempotencyRepository::new(redis.clone(), &config)));
 
-    let hot_cache_repo = redis_client
+    let hot_cache_repo = redis
         .as_ref()
-        .map(|client| Arc::new(RedisHotCacheRepository::new(client.clone(), &config)));
+        .map(|redis| Arc::new(RedisHotCacheRepository::new(redis.clone(), &config)));
 
     // metrics 要早于第一个使用者构造：WAL 清理仓储也要记 Redis 更新耗时。
     let metrics = Arc::new(StorageWriterMetrics::new());
 
-    let wal_cleanup_repo = match (&redis_client, &config.wal_hash_key) {
-        (Some(client), Some(key)) => Some(Arc::new(
-            RedisWalCleanupRepository::new(client.clone(), key.clone())
+    let wal_cleanup_repo = match (&redis, &config.wal_hash_key) {
+        (Some(redis), Some(key)) => Some(Arc::new(
+            RedisWalCleanupRepository::new(redis.clone(), key.clone())
                 .with_metrics(Some(metrics.clone())),
         )),
         _ => None,
@@ -319,12 +322,12 @@ fn build_retry_forwarder_dispatcher(
     Ok(Some(Arc::new(dispatcher)))
 }
 
-fn build_redis_client(config: &Arc<StorageWriterConfig>) -> Option<Arc<redis::Client>> {
+fn build_redis_client(config: &Arc<StorageWriterConfig>) -> Option<redis::Client> {
     config
         .redis_url
         .as_ref()
         .and_then(|url| match redis::Client::open(url.as_str()) {
-            Ok(client) => Some(Arc::new(client)),
+            Ok(client) => Some(client),
             Err(err) => {
                 warn!(error = ?err, "Redis init failed; Redis-backed features disabled");
                 None
@@ -381,6 +384,7 @@ mod tests {
             redis_hot_ttl_seconds: 0,
             redis_hot_tail_limit: 0,
             redis_idempotency_ttl_seconds: 0,
+            redis_limits: Default::default(),
             wal_hash_key: None,
             postgres_url: None,
             postgres_max_connections: 1,

@@ -12,6 +12,7 @@ pub mod health;
 pub mod metrics;
 pub mod push_delivery;
 pub mod push_provenance;
+pub mod redis_connection;
 pub mod runtime;
 pub mod service_helper;
 pub mod signed_read;

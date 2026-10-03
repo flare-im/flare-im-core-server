@@ -5,6 +5,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
+use flare_im_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use prost::Message as ProstMessage;
 use redis::{AsyncCommands, RedisError, aio::ConnectionManager};
@@ -14,27 +15,13 @@ use std::sync::Arc;
 use crate::config::StorageReaderConfig;
 use flare_proto::common::Message;
 
-/// Redis 错误分类：超时是 `OperationTimeout`；连不上、连接断开、其他 IO 失败与需要重连的错误，
-/// 以及 Redis 正在加载、集群不可用、主节点下线，是可重试的 `ServiceUnavailable`；其余（命令错误、
-/// 类型不符等）是 `InternalError`。错误文本只进 details，不进 gRPC 状态（见 Storage Reader 的
-/// `storage_failure`）。以前一律经 `From<RedisError>` 成为未分类的系统错误。
+/// Redis 错误分类（`redis_error_code`）：超时是 `OperationTimeout`；连不上、连接断开、其他 IO 失败与
+/// 需要重连的错误，以及 Redis 正在加载、集群不可用、主节点下线，是可重试的 `ServiceUnavailable`；
+/// 认证或权限被拒、应答解析失败是 `ConfigurationError`（以前经 redis 的「要重连」判成了暂时错误）；
+/// 其余（命令错误、类型不符等）是 `InternalError`。错误文本只进 details，不进 gRPC 状态（见 Storage
+/// Reader 的 `storage_failure`）。
 fn redis_failure(err: RedisError, context: &'static str) -> FlareError {
-    let code = if err.is_timeout() {
-        ErrorCode::OperationTimeout
-    } else if err.is_io_error()
-        || err.is_unrecoverable_error()
-        || matches!(
-            err.kind(),
-            redis::ErrorKind::BusyLoadingError
-                | redis::ErrorKind::TryAgain
-                | redis::ErrorKind::ClusterDown
-                | redis::ErrorKind::MasterDown
-        )
-    {
-        ErrorCode::ServiceUnavailable
-    } else {
-        ErrorCode::InternalError
-    };
+    let code = redis_error_code(&err, ErrorCode::OperationTimeout);
     map_infra_error(err, code, context)
 }
 
@@ -98,32 +85,38 @@ impl Default for RedisCacheConfig {
 
 /// Redis 消息缓存仓储
 pub struct RedisMessageCache {
-    client: Arc<redis::Client>,
+    /// 进程共享的连接（有界建连、应答与重建）。以前每次读写都 `ConnectionManager::new` 新建、用
+    /// redis 的默认退避，Redis 不可达时一次读可阻塞数分钟，读路径迟迟回落不到 PostgreSQL。
+    redis: Arc<SharedRedisConnection>,
     message_ttl_seconds: u64,
     session_ttl_seconds: u64,
 }
 
 impl RedisMessageCache {
-    pub fn new(client: Arc<redis::Client>, config: &StorageReaderConfig) -> Self {
+    pub fn new(redis: Arc<SharedRedisConnection>, config: &StorageReaderConfig) -> Self {
         Self {
-            client,
+            redis,
             message_ttl_seconds: config.redis_message_cache_ttl_seconds,
             session_ttl_seconds: config.redis_session_cache_ttl_seconds,
         }
     }
 
     /// 使用 RedisCacheConfig 创建实例
-    pub fn new_with_config(client: Arc<redis::Client>, cache_config: &RedisCacheConfig) -> Self {
+    pub fn new_with_config(
+        redis: Arc<SharedRedisConnection>,
+        cache_config: &RedisCacheConfig,
+    ) -> Self {
         Self {
-            client,
+            redis,
             message_ttl_seconds: cache_config.message_ttl_seconds,
             session_ttl_seconds: cache_config.session_ttl_seconds,
         }
     }
 
-    /// 获取 Redis 连接
+    /// 共享的 Redis 连接（建连、应答与重试都有上限，见 `StorageReaderConfig::redis_limits`）。
     async fn get_connection(&self) -> Result<ConnectionManager> {
-        ConnectionManager::new(self.client.as_ref().clone())
+        self.redis
+            .get()
             .await
             .redis_context("Failed to connect to Redis")
     }
@@ -523,6 +516,20 @@ mod tests {
                 RedisError::from((redis::ErrorKind::BusyLoadingError, "loading")),
                 ErrorCode::ServiceUnavailable,
             ),
+            // 认证与权限被拒、应答解析失败是配置错误（W14-R (b)）：修复前前两类经 redis 的「要重连」
+            // 判成了 ServiceUnavailable，服务端的 NOAUTH 是 InternalError。
+            (
+                RedisError::from((redis::ErrorKind::AuthenticationFailed, "leak-marker-78")),
+                ErrorCode::ConfigurationError,
+            ),
+            (
+                RedisError::from((redis::ErrorKind::ParseError, "leak-marker-79")),
+                ErrorCode::ConfigurationError,
+            ),
+            (
+                redis::make_extension_error("NOAUTH".into(), Some("leak-marker-80".into())),
+                ErrorCode::ConfigurationError,
+            ),
             (
                 RedisError::from((redis::ErrorKind::TypeError, "WRONGTYPE leak-marker-77")),
                 ErrorCode::InternalError,
@@ -550,6 +557,33 @@ mod tests {
         };
         let decoded = decode_cached_message(&BASE64.encode(message.encode_to_vec())).unwrap();
         assert_eq!(decoded.server_id, "m1");
+    }
+
+    /// Redis 不可达（关闭的端口）时缓存读在连接上限内失败（W14-R (a)），读路径随即回落到
+    /// PostgreSQL。修复前每次读都 `ConnectionManager::new`、用 redis 的默认退避，60 s 仍未返回。
+    #[tokio::test]
+    async fn a_cache_read_from_an_unreachable_redis_fails_within_the_bound() {
+        use flare_im_service_kit::redis_connection::RedisConnectionLimits;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let limits = RedisConnectionLimits::default();
+        let cache = RedisMessageCache::new_with_config(
+            Arc::new(SharedRedisConnection::new(
+                redis::Client::open(format!("redis://{closed}/")).unwrap(),
+                limits,
+            )),
+            &RedisCacheConfig::default(),
+        );
+        let err = tokio::time::timeout(
+            limits.connect_budget() + std::time::Duration::from_secs(2),
+            cache.get_tail_messages_by_seq("tenant-a", "conv-a", 0, None, 10),
+        )
+        .await
+        .expect("the cache read must fail within the bound")
+        .expect_err("nothing listens on the port");
+        assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable), "{err}");
     }
 
     #[test]

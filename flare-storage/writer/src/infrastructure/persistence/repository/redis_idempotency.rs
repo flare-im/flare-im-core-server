@@ -3,8 +3,9 @@ use std::sync::Arc;
 use flare_im_contracts::Ctx;
 use flare_im_contracts::domain::tenant::is_valid_tenant_id;
 use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::redis_connection::SharedRedisConnection;
 use flare_server_core::error::Result;
-use redis::{AsyncCommands, aio::ConnectionManager};
+use redis::AsyncCommands;
 use std::convert::TryInto;
 use tracing::instrument;
 
@@ -12,14 +13,15 @@ use crate::config::StorageWriterConfig;
 use crate::domain::repository::MessageIdempotencyRepository;
 
 pub struct RedisIdempotencyRepository {
-    client: Arc<redis::Client>,
+    /// 进程共享的连接（有界建连与应答），与热缓存、WAL 清理共用。
+    redis: Arc<SharedRedisConnection>,
     ttl_seconds: u64,
 }
 
 impl RedisIdempotencyRepository {
-    pub fn new(client: Arc<redis::Client>, config: &StorageWriterConfig) -> Self {
+    pub fn new(redis: Arc<SharedRedisConnection>, config: &StorageWriterConfig) -> Self {
         Self {
-            client,
+            redis,
             ttl_seconds: config.redis_idempotency_ttl_seconds,
         }
     }
@@ -41,7 +43,7 @@ impl MessageIdempotencyRepository for RedisIdempotencyRepository {
     #[instrument(skip(self), fields(message_id))]
     async fn is_new(&self, ctx: &Ctx, message_id: &str) -> Result<bool> {
         let key = Self::message_key(ctx, message_id)?;
-        let mut conn = ConnectionManager::new(self.client.as_ref().clone()).await?;
+        let mut conn = self.redis.get().await?;
         let is_new: bool = conn.set_nx(&key, 1).await?;
         if is_new && self.ttl_seconds > 0 {
             let ttl: i64 = self.ttl_seconds.try_into()?;
@@ -57,7 +59,7 @@ impl MessageIdempotencyRepository for RedisIdempotencyRepository {
             return Ok(());
         }
         let key = Self::message_key(ctx, message_id)?;
-        let mut conn = ConnectionManager::new(self.client.as_ref().clone()).await?;
+        let mut conn = self.redis.get().await?;
         let _: () = conn.del(key).await?;
         Ok(())
     }
