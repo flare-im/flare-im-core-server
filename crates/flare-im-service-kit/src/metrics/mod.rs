@@ -649,6 +649,30 @@ impl Default for MessageOrchestratorMetrics {
     }
 }
 
+/// Message Ingest 首触 seq floor 自愈被 Storage Reader 以「元数据与签名冲突」拒绝的次数：floor 查询
+/// 按会话租户派生子上下文、原样转发入站签名，签名租户与会话租户不同就会这样，存储恢复也不会好。
+/// 不带标签，租户与会话只进 WARN 日志。
+static INGEST_SEQ_FLOOR_TENANT_CONFLICTS: Lazy<IntCounter> = Lazy::new(|| {
+    let counter = IntCounter::new(
+        "message_ingest_seq_floor_tenant_conflict_total",
+        "Seq floor self-heal lookups refused because the conversation tenant differs from the signed tenant",
+    )
+    .expect("message_ingest_seq_floor_tenant_conflict_total metric definition is static");
+    let _ = REGISTRY.register(Box::new(counter.clone()));
+    counter
+});
+
+/// 记一次 seq floor 自愈的租户冲突（指标 `message_ingest_seq_floor_tenant_conflict_total`）。
+pub fn record_ingest_seq_floor_tenant_conflict() {
+    INGEST_SEQ_FLOOR_TENANT_CONFLICTS.inc();
+}
+
+/// 本进程累计的 seq floor 自愈租户冲突次数；首次调用即注册指标，摄入服务启动时调一次，
+/// 没有冲突时 `/metrics` 里也有这条 0。
+pub fn ingest_seq_floor_tenant_conflicts() -> u64 {
+    INGEST_SEQ_FLOOR_TENANT_CONFLICTS.get()
+}
+
 /// Access Gateway 指标
 pub struct AccessGatewayMetrics {
     /// 活跃连接数

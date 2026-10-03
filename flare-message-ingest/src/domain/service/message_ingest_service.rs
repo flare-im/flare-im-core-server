@@ -32,7 +32,8 @@ use flare_im_message_pipeline::MqPushRepository;
 use flare_im_message_pipeline::{
     CompositeMessageValidationStrategy, MessageValidationStrategy, ValidationContext,
 };
-use flare_server_core::error::{ErrorCode, Result};
+use flare_server_core::error::{ErrorCode, FlareError, Result};
+use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 
 /// 消息摄入服务。
 pub struct MessageIngestService {
@@ -103,6 +104,25 @@ pub(crate) enum SeqAllocPlan {
     FirstTouchFloor,
 }
 
+/// 入站验过签的租户；没有签名时为 `None`。
+fn signed_tenant(ctx: &Ctx) -> Option<&str> {
+    ctx.get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .map(|claims| claims.tenant_id.as_str())
+}
+
+/// floor 查询失败是不是租户冲突：provider 按会话租户派生子上下文、原样转发入站签名，签名租户与
+/// 会话租户不同时 Storage Reader 判为元数据与签名冲突（PERMISSION_DENIED）。这类失败等存储恢复
+/// 也不会好，要与「存储读不可用」分开记。没有签名或租户相同，PERMISSION_DENIED 就不是这一类。
+pub(crate) fn is_seq_floor_tenant_conflict(
+    signed_tenant: Option<&str>,
+    tenant_id: &str,
+    error: &FlareError,
+) -> bool {
+    error.code() == Some(ErrorCode::PermissionDenied)
+        && signed_tenant.is_some_and(|signed| signed != tenant_id)
+}
+
 /// 决定本次 seq 分配走哪条路径。
 ///
 /// - 未配置 provider → 永远 `PlainIncr`（保持既有行为，绝不比现状更差）。
@@ -125,6 +145,8 @@ impl MessageIngestService {
         defaults: MessageDefaults,
         options: MessageIngestServiceOptions,
     ) -> Self {
+        // 先注册 seq floor 租户冲突计数，没有冲突时 `/metrics` 里也有这条 0。
+        let _ = flare_im_service_kit::metrics::ingest_seq_floor_tenant_conflicts();
         Self {
             push_repository,
             recipient_repository,
@@ -304,13 +326,25 @@ impl MessageIngestService {
         let floor = match lookup {
             Ok(Ok(floor)) => floor,
             Ok(Err(error)) => {
-                // 存储读不可用：降级普通 INCR + 退避，存储恢复后自愈。
-                tracing::warn!(
-                    conversation_id = %conversation_id,
-                    tenant_id = %tenant_id,
-                    error = %error,
-                    "persisted max_seq lookup failed; falling back to plain INCR (backoff before retry)"
-                );
+                let signed_tenant_id = signed_tenant(ctx);
+                if is_seq_floor_tenant_conflict(signed_tenant_id, tenant_id, &error) {
+                    // 租户冲突：自愈被拒，以前混在下面的通用告警里、没有计数。只记租户与会话。
+                    flare_im_service_kit::metrics::record_ingest_seq_floor_tenant_conflict();
+                    tracing::warn!(
+                        conversation_id = %conversation_id,
+                        tenant_id = %tenant_id,
+                        signed_tenant_id = signed_tenant_id.unwrap_or_default(),
+                        "seq floor self-heal refused: the conversation tenant differs from the signed tenant; falling back to plain INCR (backoff before retry)"
+                    );
+                } else {
+                    // 存储读不可用：降级普通 INCR + 退避，存储恢复后自愈。
+                    tracing::warn!(
+                        conversation_id = %conversation_id,
+                        tenant_id = %tenant_id,
+                        error = %error,
+                        "persisted max_seq lookup failed; falling back to plain INCR (backoff before retry)"
+                    );
+                }
                 self.seq_floor_state
                     .insert(cache_key, SeqFloorState::FailedAt(Instant::now()))
                     .await;
@@ -792,7 +826,8 @@ fn recipient_hints_from_message_attributes(message: &Message) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SeqAllocPlan, plan_seq_alloc, recipient_hints_from_message_attributes, should_write_wal,
+        SeqAllocPlan, is_seq_floor_tenant_conflict, plan_seq_alloc,
+        recipient_hints_from_message_attributes, should_write_wal,
     };
     use crate::domain::PersistenceMode;
     use crate::domain::model::{MessageProfile, notification_persistent};
@@ -812,6 +847,35 @@ mod tests {
         assert_eq!(plan_seq_alloc(true, false), SeqAllocPlan::FirstTouchFloor);
         // 已校验过（温路径）→ 快 INCR，不再查存储。
         assert_eq!(plan_seq_alloc(true, true), SeqAllocPlan::PlainIncr);
+    }
+
+    /// floor 查询失败只有在「有入站签名、签名租户与会话租户不同、Storage Reader 回
+    /// PERMISSION_DENIED」时才按租户冲突记 WARN 与计数（W13-R2）；其余失败仍是存储读不可用。
+    #[test]
+    fn only_a_refused_read_under_another_signed_tenant_is_a_tenant_conflict() {
+        use flare_server_core::error::{ErrorCode, FlareError};
+        let denied = FlareError::localized(
+            ErrorCode::PermissionDenied,
+            "unsigned identity metadata conflicts with the signed context",
+        );
+        let unavailable = FlareError::localized(ErrorCode::ServiceUnavailable, "down");
+
+        assert!(is_seq_floor_tenant_conflict(
+            Some("tenant-a"),
+            "tenant-b",
+            &denied
+        ));
+        assert!(!is_seq_floor_tenant_conflict(
+            Some("tenant-a"),
+            "tenant-a",
+            &denied
+        ));
+        assert!(!is_seq_floor_tenant_conflict(None, "tenant-b", &denied));
+        assert!(!is_seq_floor_tenant_conflict(
+            Some("tenant-a"),
+            "tenant-b",
+            &unavailable
+        ));
     }
 
     fn text_profile() -> MessageProfile {
