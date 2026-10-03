@@ -118,6 +118,8 @@ impl ConversationEnsureService {
         // 命中缓存即跳过 + **单飞(single-flight)**:同一会话的并发 ensure(大群冷启动时 N 个发送者的
         // 首条消息同时触发建群)合并为一次 CreateConversation,否则 N×O(成员) 的并发建群会击穿管线(万级群实测雪崩)。
         // try_get_with 对同 key 的并发调用只跑一次 init,成功结果按 TTL 缓存;失败不缓存(后续可重试)。
+        // 失败原样交回(单飞的各等待方共享同一个 Arc,取出或克隆):错误码决定网关回的状态,
+        // 以前包成 system 错误,会话服务的 NOT_FOUND/PERMISSION_DENIED/UNAVAILABLE 都成了 500。
         if let (Some(cache), Some(key)) = (&self.ensure_cache, self.cache_key(request)) {
             return cache
                 .try_get_with(key, async {
@@ -132,7 +134,7 @@ impl ConversationEnsureService {
                     .map(|_ensured| ())
                 })
                 .await
-                .map_err(|err: std::sync::Arc<FlareError>| FlareError::system(err.to_string()));
+                .map_err(Arc::<FlareError>::unwrap_or_clone);
         }
 
         match self.session_creation_mode {
@@ -352,5 +354,96 @@ fn persisted_conversation_channel_id(conversation_type: i32, message_channel_id:
     match flare_proto::common::ConversationType::try_from(conversation_type) {
         Ok(flare_proto::common::ConversationType::Single) => String::new(),
         _ => message_channel_id.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_server_core::error::ErrorCode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 每次都返回同一个预置错误、并记下调用次数的会话事件发布器。
+    struct ScriptedPublisher {
+        failure: FlareError,
+        calls: AtomicUsize,
+    }
+
+    impl ConversationEventPublisher for ScriptedPublisher {
+        fn publish_conversation_ensure<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _tenant_id: &'a str,
+            _conversation_type: i32,
+            _business_type: &'a str,
+            _participants: Vec<String>,
+            _stored_channel_id: String,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let failure = self.failure.clone();
+            Box::pin(async move { Err(failure) })
+        }
+    }
+
+    fn service(
+        failure: FlareError,
+        cache_capacity: u64,
+    ) -> (ConversationEnsureService, Arc<ScriptedPublisher>) {
+        let publisher = Arc::new(ScriptedPublisher {
+            failure,
+            calls: AtomicUsize::new(0),
+        });
+        let service = ConversationEnsureService::with_cache(
+            None,
+            SessionCreationMode::Async,
+            Some(publisher.clone()),
+            cache_capacity,
+            Duration::from_secs(30),
+        );
+        (service, publisher)
+    }
+
+    fn group_request() -> ConversationEnsureRequest {
+        ConversationEnsureRequest {
+            conversation_id: "grp-1".to_string(),
+            conversation_type: flare_proto::common::ConversationType::Group as i32,
+            business_type: String::new(),
+            participants: vec!["u1".to_string(), "u2".to_string()],
+            stored_channel_id: "grp-1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+        }
+    }
+
+    /// 经单飞缓存的会话确保失败时保留原错误分类（W12-R）：修复前包成 system 错误，错误码丢失，
+    /// 网关只能回 500。与不走缓存的路径结果一致；失败不缓存，下一次照常重试。
+    #[tokio::test]
+    async fn cached_ensure_failures_keep_their_error_code() {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        for code in [
+            ErrorCode::ServiceUnavailable,
+            ErrorCode::PermissionDenied,
+            ErrorCode::InvalidParameter,
+        ] {
+            for cache_capacity in [100, 0] {
+                let (service, publisher) =
+                    service(FlareError::localized(code, "ensure failed"), cache_capacity);
+                for attempt in 1..=2 {
+                    let error = service
+                        .ensure_conversation(&ctx, &group_request())
+                        .await
+                        .expect_err("publisher fails");
+                    assert_eq!(error.code(), Some(code), "cache {cache_capacity}: {error}");
+                    assert_eq!(error.reason(), "ensure failed");
+                    assert_eq!(publisher.calls.load(Ordering::SeqCst), attempt);
+                }
+            }
+        }
+
+        let (service, _) = service(FlareError::system("broker closed"), 100);
+        let error = service
+            .ensure_conversation(&ctx, &group_request())
+            .await
+            .expect_err("publisher fails");
+        assert!(matches!(error, FlareError::System(ref reason) if reason == "broker closed"));
     }
 }
