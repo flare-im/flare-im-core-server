@@ -10,7 +10,7 @@ use flare_core::common::error::Result as CoreResult;
 use flare_core::server::connection::ConnectionManagerTrait;
 use flare_core::server::handle::ServerHandle;
 use tokio::sync::Mutex;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::application::handlers::{ConnectionHandler, SendHandler};
 use crate::infrastructure::error::server_error_to_core;
@@ -92,6 +92,11 @@ impl LongConnectionHandler {
     #[instrument(skip(self))]
     pub async fn on_connect(&self, connection_id: &str) -> CoreResult<()> {
         if let Err(err) = self.connection_handler.handle_connect(connection_id).await {
+            // 连接在登记途中已断开，登记已自行注销：没有可拒绝的连接，不算连接失败。
+            if err.code() == Some(flare_server_core::error::ErrorCode::ConnectionClosed) {
+                debug!(?err, connection_id = %connection_id, "connection closed before registration completed");
+                return Ok(());
+            }
             warn!(?err, connection_id = %connection_id, "Failed to handle connection");
             return Err(server_error_to_core(err));
         }

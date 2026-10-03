@@ -36,8 +36,11 @@ pub struct ConnectionHandler {
     /// `handle_connect`；在 `register_connection` 的 await 窗口内 `online_sessions` 尚未写入 →
     /// 双重注册 → 双 login + `platform_exclusive` 自我清理 → 会话订阅抖动 → 接收方在线连接漏订阅
     /// → 实时投递 fanout `success=1`（对端实时收不到，仅重登录 history-sync 才补回）。
-    /// 用该集合序列化同一 connection 的注册，保证幂等。
-    connecting: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    /// 用该表序列化同一 connection 的注册，保证幂等。
+    ///
+    /// 值表示「登记途中已收到断开」：断开处理在该窗口里找不到会话，只能在这里留标记，由登记
+    /// 完成后自己注销（见 `handle_connect_inner`）。锁顺序固定为先本表、后 `online_sessions`。
+    connecting: Arc<tokio::sync::Mutex<HashMap<String, bool>>>,
     /// 会话级在线订阅注册表（统一读扩散地基）：断线时清扫该连接的全部会话订阅。
     conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
     /// Conversation 读服务客户端池：登录时拉取用户会话列表用于 eager 订阅。
@@ -59,7 +62,7 @@ impl ConnectionHandler {
             state_notifier,
             connection_port,
             online_sessions: Arc::new(RwLock::new(HashMap::new())),
-            connecting: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            connecting: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             conversation_subscriptions,
             conversation_read,
         }
@@ -208,13 +211,12 @@ impl ConnectionHandler {
             if let Some(session) = self.online_sessions.read().await.get(connection_id) {
                 return Ok(session.conversation_id.clone());
             }
-            if self
-                .connecting
-                .lock()
-                .await
-                .insert(connection_id.to_string())
             {
-                break;
+                let mut connecting = self.connecting.lock().await;
+                if !connecting.contains_key(connection_id) {
+                    connecting.insert(connection_id.to_string(), false);
+                    break;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -253,15 +255,61 @@ impl ConnectionHandler {
                 connection_info.metadata.as_ref(),
             )
             .await?;
-        self.online_sessions.write().await.insert(
-            connection_id.to_string(),
-            OnlineSession {
-                user_id: user_id.clone(),
-                tenant_id: connection_info.tenant_id.clone(),
-                conversation_id: conversation_id.clone(),
-                authenticated_ctx,
-            },
-        );
+
+        // 登记的 await 窗口里连接可能已经断开：断开处理那时找不到会话，什么都没清。登记完成后
+        // 复查两件事再写会话——断开处理留下的标记（断开发生在登记途中），以及底层连接表里是否
+        // 还有这条连接（断开处理跑在本次注册占位之前，底层随后移除了连接）。任一成立都不写
+        // `online_sessions`、立即注销刚登记的 Online 会话；否则会话与 Online 登录一直留到 TTL。
+        // 写会话与读标记在同一把 `connecting` 锁里：之后到达的断开一定能找到会话。
+        let still_connected = self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await
+            .is_ok();
+        let registered = {
+            let connecting = self.connecting.lock().await;
+            let closed_while_registering = connecting.get(connection_id).copied().unwrap_or(false);
+            if still_connected && !closed_while_registering {
+                self.online_sessions.write().await.insert(
+                    connection_id.to_string(),
+                    OnlineSession {
+                        user_id: user_id.clone(),
+                        tenant_id: connection_info.tenant_id.clone(),
+                        conversation_id: conversation_id.clone(),
+                        authenticated_ctx: authenticated_ctx.clone(),
+                    },
+                );
+                true
+            } else {
+                false
+            }
+        };
+        if !registered {
+            debug!(
+                user_id = %user_id,
+                connection_id = %connection_id,
+                conversation_id = %conversation_id,
+                "connection closed during online registration; unregistering the late login"
+            );
+            if let Err(err) = self
+                .session_domain_service
+                .unregister_connection(&authenticated_ctx, &user_id, &conversation_id)
+                .await
+            {
+                // 注销失败时这条 Online 会话只能等 TTL 回收，与断开处理注销失败相同。
+                warn!(
+                    ?err,
+                    user_id = %user_id,
+                    connection_id = %connection_id,
+                    "Failed to unregister online status of a connection closed during registration"
+                );
+            }
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::ConnectionClosed,
+                "connection closed during online registration",
+            )
+            .build_error());
+        }
 
         // 统一读扩散：登录即订阅用户全部会话（race-free 收会话 publish）；best-effort。
         // **不阻塞 CONNECT_ACK**：后台执行，避免连接风暴下 list_conversations 慢拖垮连接建立
@@ -318,7 +366,25 @@ impl ConnectionHandler {
         // 底层仍会回调断开），或同一连接先 `on_error` 再 `on_disconnect`、第二次清理时会话已被
         // 第一次取走。以前这里报 InvalidParameter，调用方每次记一条 WARN，租户停用演练期间成百
         // 上千行（W10-S2 593、W12-S2 292）。
-        let Some(session) = self.online_sessions.write().await.remove(connection_id) else {
+        //
+        // 注册正在途中（`register_connection` 还没返回）时同样找不到会话：在 `connecting` 里留下
+        // 断开标记，由登记完成后自己注销。取会话与留标记在同一把 `connecting` 锁里，与登记一侧
+        // 「读标记、写会话」互斥，不会两边都落空。
+        let session = {
+            let mut connecting = self.connecting.lock().await;
+            let session = self.online_sessions.write().await.remove(connection_id);
+            if session.is_none()
+                && let Some(closed_while_registering) = connecting.get_mut(connection_id)
+            {
+                *closed_while_registering = true;
+                debug!(
+                    connection_id = %connection_id,
+                    "connection closed while its online registration is in flight; the registration unregisters itself"
+                );
+            }
+            session
+        };
+        let Some(session) = session else {
             debug!(
                 connection_id = %connection_id,
                 "online session not found for connection; nothing to unregister"
@@ -531,8 +597,7 @@ mod disconnect_tests {
         }
     }
 
-    fn handler(port: Arc<CountingPort>) -> ConnectionHandler {
-        let port: Arc<dyn IConnectionPort> = port;
+    fn handler(port: Arc<dyn IConnectionPort>) -> ConnectionHandler {
         ConnectionHandler::new(
             Arc::new(ConnectionDomainService::new(
                 port.clone(),
@@ -585,5 +650,199 @@ mod disconnect_tests {
         handler.handle_disconnect("conn-1").await.expect("first");
         handler.handle_disconnect("conn-1").await.expect("second");
         assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+    }
+
+    /// 连接表里有一条已认证连接、Online 登录要等测试放行的端口：用来在 `register_connection`
+    /// 的 await 窗口里断开连接。
+    struct GatedLoginPort {
+        /// 连接是否还在底层连接表里（底层在业务断开处理之后才移除连接）。
+        connected: std::sync::atomic::AtomicBool,
+        login_entered: tokio::sync::Notify,
+        release_login: tokio::sync::Notify,
+        logins: AtomicUsize,
+        logouts: AtomicUsize,
+    }
+
+    impl GatedLoginPort {
+        fn new() -> Self {
+            Self {
+                connected: std::sync::atomic::AtomicBool::new(true),
+                login_entered: tokio::sync::Notify::new(),
+                release_login: tokio::sync::Notify::new(),
+                logins: AtomicUsize::new(0),
+                logouts: AtomicUsize::new(0),
+            }
+        }
+
+        fn connection_info(&self, connection_id: &str) -> Result<ConnectionInfo> {
+            if !self.connected.load(Ordering::SeqCst) {
+                return Err(flare_server_core::error::ErrorBuilder::new(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    "connection not found",
+                )
+                .build_error());
+            }
+            let mut info = ConnectionInfo::new(
+                connection_id.to_string(),
+                "u1".to_string(),
+                "tenant-a".to_string(),
+                "d1".to_string(),
+            );
+            info.platform = Some("web".to_string());
+            Ok(info)
+        }
+    }
+
+    #[async_trait]
+    impl IConnectionPort for GatedLoginPort {
+        async fn login(&self, _ctx: &Ctx, _request: LoginRequest) -> Result<LoginResponse> {
+            self.logins.fetch_add(1, Ordering::SeqCst);
+            // notify_one 在没有等待者时留一个许可，测试晚一步等待也不会错过。
+            self.login_entered.notify_one();
+            self.release_login.notified().await;
+            Ok(LoginResponse {
+                success: true,
+                conversation_id: "presence-1".to_string(),
+                ..Default::default()
+            })
+        }
+
+        async fn logout(&self, _ctx: &Ctx, request: LogoutRequest) -> Result<LogoutResponse> {
+            assert_eq!(request.conversation_id, "presence-1");
+            self.logouts.fetch_add(1, Ordering::SeqCst);
+            Ok(LogoutResponse::default())
+        }
+
+        async fn heartbeat(
+            &self,
+            _ctx: &Ctx,
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            unreachable!("registration never sends heartbeats")
+        }
+
+        async fn get_online_status(
+            &self,
+            _ctx: &Ctx,
+            _request: GetOnlineStatusRequest,
+        ) -> Result<GetOnlineStatusResponse> {
+            unreachable!("registration never reads presence")
+        }
+
+        async fn list_user_connections(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_connection_info(&self, connection_id: &str) -> Result<ConnectionInfo> {
+            self.connection_info(connection_id)
+        }
+
+        async fn get_connection_metadata(
+            &self,
+            _connection_id: &str,
+        ) -> Result<HashMap<String, String>> {
+            Ok(HashMap::new())
+        }
+
+        async fn build_ctx(&self, connection_id: &str) -> Result<Ctx> {
+            self.connection_info(connection_id)?;
+            Ok(Arc::new(
+                flare_server_core::Context::with_request_id("req")
+                    .with_tenant_id("tenant-a")
+                    .with_user_id("u1"),
+            ))
+        }
+    }
+
+    /// 在 Online 登录途中开始注册，返回注册任务；返回时登录已进入等待。
+    async fn connect_until_login_waits(
+        handler: &Arc<ConnectionHandler>,
+        port: &Arc<GatedLoginPort>,
+    ) -> tokio::task::JoinHandle<Result<String>> {
+        let connect = tokio::spawn({
+            let handler = handler.clone();
+            async move { handler.handle_connect("conn-1").await }
+        });
+        port.login_entered.notified().await;
+        connect
+    }
+
+    fn assert_closed_during_registration(result: Result<String>) {
+        let err = result.expect_err("registration of a closed connection must not succeed");
+        assert_eq!(
+            err.code(),
+            Some(flare_server_core::error::ErrorCode::ConnectionClosed),
+            "{err}"
+        );
+    }
+
+    /// 断开发生在 `register_connection` 的 await 窗口里：断开处理找不到会话，随后完成的登记
+    /// 不能再写进 `online_sessions`（否则会话与 Online 登录一直留到 TTL），而要立即注销一次。
+    #[tokio::test]
+    async fn a_disconnect_during_registration_unregisters_the_late_login() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect while registering is not an error");
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 0);
+        port.release_login.notify_one();
+
+        assert_closed_during_registration(connect.await.expect("connect task"));
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+        assert!(!handler.online_sessions.read().await.contains_key("conn-1"));
+        assert!(handler.connecting.lock().await.is_empty());
+
+        // 底层随后照常再报一次断开（on_error 之后的 on_disconnect）：不再注销。
+        handler.handle_disconnect("conn-1").await.expect("second");
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+        assert_eq!(port.logins.load(Ordering::SeqCst), 1);
+    }
+
+    /// 断开处理在注册占位之前就跑完了（什么都没清），底层随后把连接移出连接表：登记完成时
+    /// 连接已不在，同样不写会话、立即注销。
+    #[tokio::test]
+    async fn a_connection_gone_when_registration_completes_is_unregistered() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+
+        port.connected.store(false, Ordering::SeqCst);
+        port.release_login.notify_one();
+
+        assert_closed_during_registration(connect.await.expect("connect task"));
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+        assert!(!handler.online_sessions.read().await.contains_key("conn-1"));
+    }
+
+    /// 没有断开时照常登记：会话写入、不注销；之后的断开注销一次。
+    #[tokio::test]
+    async fn a_connection_still_open_after_registration_keeps_its_session() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+
+        assert_eq!(
+            connect.await.expect("connect task").expect("registered"),
+            "presence-1"
+        );
+        assert!(handler.online_sessions.read().await.contains_key("conn-1"));
+        assert!(handler.connecting.lock().await.is_empty());
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 0);
+
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect");
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+        assert!(!handler.online_sessions.read().await.contains_key("conn-1"));
     }
 }
