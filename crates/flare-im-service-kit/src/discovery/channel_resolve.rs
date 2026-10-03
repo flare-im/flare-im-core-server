@@ -251,6 +251,20 @@ async fn discovery_channel_with_timeout(
     }
 }
 
+/// 同 [`resolve_grpc_channel`]，但静态地址按给定 [`StaticChannelPolicy`] 新建懒连接通道，不进
+/// 共享缓存：供启动时一次建好、自己持有通道的调用方（网关的下游客户端）按配置的建连上限连接。
+/// `discovery://` 路由照常走服务发现，建连由发现客户端决定，不受该策略影响。
+pub async fn resolve_grpc_channel_with_policy(
+    grpc_authority: &str,
+    policy: StaticChannelPolicy,
+) -> Result<Channel, String> {
+    if is_discovery_route_authority(grpc_authority) {
+        return resolve_grpc_channel(grpc_authority).await;
+    }
+    let endpoint = normalize_static_authority(grpc_authority)?;
+    connect_static_channel_lazy_with(&endpoint, policy, static_http_connector(policy))
+}
+
 /// 按 endpoint / authority 解析 gRPC 通道（静态或 `discovery://`）。
 pub async fn resolve_grpc_channel(grpc_authority: &str) -> Result<Channel, String> {
     if is_discovery_route_authority(grpc_authority) {
@@ -311,6 +325,27 @@ pub async fn connect_grpc_channel_with_fallback(
 #[cfg(test)]
 mod static_route_tests {
     use super::*;
+
+    /// 按策略解析的静态通道由调用方自己持有，不进共享缓存（缓存里的通道按缺省策略建）；
+    /// 不带 scheme 的地址同样补成 `http://`。
+    #[tokio::test]
+    async fn policy_channels_are_built_fresh_and_not_cached() {
+        let policy = StaticChannelPolicy {
+            connect_timeout: Duration::from_secs(7),
+            ..StaticChannelPolicy::DEFAULT
+        };
+        for authority in ["http://127.0.0.1:59871", "127.0.0.1:59872"] {
+            resolve_grpc_channel_with_policy(authority, policy)
+                .await
+                .expect("lazy static channel");
+            assert!(!is_static_channel_cached(authority), "{authority}");
+        }
+        assert!(
+            resolve_grpc_channel_with_policy("http://bad host", policy)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn access_gateway_fallback_is_its_grpc_listener_not_public_edge() {

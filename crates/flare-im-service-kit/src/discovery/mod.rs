@@ -41,8 +41,8 @@ pub use channel_resolve::{
     discovery_route_authority, get_discovered_channel_with_timeout, invalidate_discovered_service,
     invalidate_static_channel, invalidate_static_channel_on_transport_failure,
     is_discovery_route_authority, is_static_channel_cached, is_transport_failure,
-    resolve_discovered_service_channel, resolve_grpc_channel, service_name_from_discovery_route,
-    static_grpc_endpoint,
+    resolve_discovered_service_channel, resolve_grpc_channel, resolve_grpc_channel_with_policy,
+    service_name_from_discovery_route, static_grpc_endpoint,
 };
 pub use grpc_connect::{
     build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,

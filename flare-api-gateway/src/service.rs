@@ -204,7 +204,8 @@ impl ApplicationBootstrap {
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 API_GATEWAY,
             ))
-            .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+            // FLARE_API_GATEWAY_SERVER_MAX_BODY_SIZE，缺省 16 MiB（与以前写死的值相同）。
+            .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(tenant_guard))
             .layer(axum::Extension(auth_validator))

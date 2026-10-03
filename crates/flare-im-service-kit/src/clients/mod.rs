@@ -9,8 +9,10 @@ mod storage_client;
 use flare_server_core::error::Result;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::FlareAppConfig;
+use crate::discovery::StaticChannelPolicy;
 
 pub use capability_client::{CapabilityAdminClientWrapper, CapabilityDownstreamConfig};
 pub use conversation_client::{
@@ -57,10 +59,22 @@ pub struct DownstreamGrpcConfig {
     pub online_static_fallback: String,
     #[serde(default)]
     pub storage_reader_static_fallback: String,
-    /// 连接超时(秒)
+    /// 静态地址（`http(s)://` 覆盖与静态回退）一次建连的上限（秒），见
+    /// [`Self::static_channel_policy`]；`discovery://` 通道的建连由发现客户端决定。
     pub connect_timeout_secs: u64,
     /// 请求超时(秒)
     pub request_timeout_secs: u64,
+}
+
+impl DownstreamGrpcConfig {
+    /// 静态地址通道的建连策略：建连上限取 [`Self::connect_timeout_secs`]，探活等其余设置同
+    /// [`StaticChannelPolicy::DEFAULT`]。
+    pub fn static_channel_policy(&self) -> StaticChannelPolicy {
+        StaticChannelPolicy {
+            connect_timeout: Duration::from_secs(self.connect_timeout_secs),
+            ..StaticChannelPolicy::DEFAULT
+        }
+    }
 }
 
 /// gRPC 客户端管理器。

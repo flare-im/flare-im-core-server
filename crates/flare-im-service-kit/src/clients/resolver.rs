@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::clients::DownstreamGrpcConfig;
 use crate::config::FlareAppConfig;
 use crate::discovery::{
-    connect_grpc_channel_from_app_config, invalidate_discovered_service,
-    is_discovery_route_authority, resolve_grpc_channel,
+    StaticChannelPolicy, connect_grpc_channel_from_app_config, invalidate_discovered_service,
+    is_discovery_route_authority, resolve_grpc_channel, resolve_grpc_channel_with_policy,
 };
 use crate::service_names::{
     CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE, STORAGE_READER,
@@ -91,7 +91,13 @@ impl DownstreamGrpcResolver {
                     Ok(channel)
                 }
                 Err(discover_err) => {
-                    Self::try_static_fallback(label, static_fallback, discover_err).await
+                    Self::try_static_fallback(
+                        label,
+                        static_fallback,
+                        discover_err,
+                        self.static_channel_policy(),
+                    )
+                    .await
                 }
             }
         } else if route.starts_with("http://") || route.starts_with("https://") {
@@ -99,7 +105,7 @@ impl DownstreamGrpcResolver {
                 service = label,
                 route, "resolving downstream gRPC via static URI override"
             );
-            resolve_grpc_channel(route)
+            resolve_grpc_channel_with_policy(route, self.static_channel_policy())
                 .await
                 .map_err(|e| flare_server_core::error::FlareError::system((e).to_string()))
                 .with_context(|| format!("connect static override for {label} at {route}"))
@@ -150,10 +156,17 @@ impl DownstreamGrpcResolver {
         }
     }
 
+    /// 静态地址（`http(s)://` 覆盖与静态回退）的建连策略，建连上限取配置的
+    /// `GRPC_CONNECT_TIMEOUT_SECS`。
+    pub fn static_channel_policy(&self) -> StaticChannelPolicy {
+        self.grpc.static_channel_policy()
+    }
+
     async fn try_static_fallback(
         label: &str,
         static_fallback: &str,
         discover_err: String,
+        policy: StaticChannelPolicy,
     ) -> Result<Channel> {
         if static_fallback.trim().is_empty() {
             return Err(flare_server_core::error::FlareError::system(discover_err));
@@ -164,11 +177,13 @@ impl DownstreamGrpcResolver {
             error = %discover_err,
             "service discovery failed, falling back to static gRPC URI"
         );
-        resolve_grpc_channel(static_fallback).await.map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "discovery failed ({discover_err}); static fallback also failed: {e}"
-            ))
-        })
+        resolve_grpc_channel_with_policy(static_fallback, policy)
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "discovery failed ({discover_err}); static fallback also failed: {e}"
+                ))
+            })
     }
 
     /// 连接错误后清除发现缓存，便于下次 RPC 重新选实例（Pod 漂移 / 滚动发布）。

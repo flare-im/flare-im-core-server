@@ -519,8 +519,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::ApiGateway,
         EnvPurpose::GatewayRuntime,
     ),
+    // 静态下游通道（http(s):// 覆盖与静态回退）一次建连的上限。
     env(
-        "FLARE_API_GATEWAY_SERVER_PORT",
+        "FLARE_API_GATEWAY_GRPC_CONNECT_TIMEOUT_SECS",
+        EnvOwner::ApiGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    // 请求体上限（缺省 16 MiB）。API 作用域不读 SERVER_BIND/PORT/TIMEOUT_SECS 与 TRACING_*
+    // （监听地址取 api-gateway.toml），它们不在此登记，出现时启动日志 WARN。
+    env(
+        "FLARE_API_GATEWAY_SERVER_MAX_BODY_SIZE",
         EnvOwner::ApiGateway,
         EnvPurpose::GatewayRuntime,
     ),
@@ -533,6 +541,117 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "FLARE_ADMIN_GATEWAY_BIND_ADDRESS",
         EnvOwner::AdminGateway,
         EnvPurpose::GatewayRuntime,
+    ),
+    // gateway::GatewaySettings 按 `FLARE_ADMIN_GATEWAY_` 作用域拼出的变量（不是字面量，
+    // env_registry_boundary 门禁扫不到；gateway::config 的单测逐个核对已登记）。
+    // 生效的：SERVER_MAX_BODY_SIZE（请求体上限）、GRPC_*_SERVICE_URL 与 *_STATIC_FALLBACK（下游路由）、
+    // GRPC_CONNECT_TIMEOUT_SECS（静态下游的建连上限）。SERVER_BIND/PORT/TIMEOUT_SECS、
+    // GRPC_REQUEST_TIMEOUT_SECS 与 TRACING_* 只在 /gateway/config 快照里回报；监听地址取
+    // admin-gateway.toml 或 FLARE_ADMIN_GATEWAY_BIND_ADDRESS。
+    env(
+        "FLARE_ADMIN_GATEWAY_SERVER_BIND",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_SERVER_PORT",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_SERVER_TIMEOUT_SECS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_SERVER_MAX_BODY_SIZE",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MEDIA_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MEDIA_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_ONLINE_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_CONNECT_TIMEOUT_SECS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_TRACING_ENABLED",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_TRACING_SERVICE_NAME",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_TRACING_SAMPLE_RATE",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Observability,
     ),
     // Admin Gateway 专用的可选下游；api-gateway 不读取（gateway::capability_downstream_from_env）。
     env(
