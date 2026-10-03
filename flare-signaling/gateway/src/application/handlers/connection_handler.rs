@@ -314,18 +314,17 @@ impl ConnectionHandler {
         // 统一读扩散地基：断线先清扫该连接的全部会话订阅（幂等，O(该连接订阅的会话数)）。
         self.conversation_subscriptions
             .remove_connection(connection_id);
-        let session = self
-            .online_sessions
-            .write()
-            .await
-            .remove(connection_id)
-            .ok_or_else(|| {
-                flare_server_core::error::ErrorBuilder::new(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    "online session not found for connection",
-                )
-                .build_error()
-            })?;
+        // 没有 Online 会话是预期路径，不是错误：连接在注册会话之前就被拒（租户停用、鉴权失败，
+        // 底层仍会回调断开），或同一连接先 `on_error` 再 `on_disconnect`、第二次清理时会话已被
+        // 第一次取走。以前这里报 InvalidParameter，调用方每次记一条 WARN，租户停用演练期间成百
+        // 上千行（W10-S2 593、W12-S2 292）。
+        let Some(session) = self.online_sessions.write().await.remove(connection_id) else {
+            debug!(
+                connection_id = %connection_id,
+                "online session not found for connection; nothing to unregister"
+            );
+            return Ok(());
+        };
         let user_id = session.user_id;
         let tenant_id = session.tenant_id;
         let conversation_id = session.conversation_id;
@@ -461,4 +460,130 @@ impl ConnectionHandler {
     //         }
     //     });
     // }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use crate::domain::model::{ConnectionDomainServiceConfig, ConnectionInfo};
+    use crate::domain::service::{ConnectionQualityService, ConversationSubscriptionRegistry};
+    use async_trait::async_trait;
+    use flare_grpc_proto::signaling::{
+        GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
+        LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 只数 Online 注销次数的连接端口；其余调用不应在断开清理中出现。
+    #[derive(Default)]
+    struct CountingPort {
+        logouts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl IConnectionPort for CountingPort {
+        async fn login(&self, _ctx: &Ctx, _request: LoginRequest) -> Result<LoginResponse> {
+            unreachable!("disconnect never logs in")
+        }
+
+        async fn logout(&self, _ctx: &Ctx, _request: LogoutRequest) -> Result<LogoutResponse> {
+            self.logouts.fetch_add(1, Ordering::SeqCst);
+            Ok(LogoutResponse::default())
+        }
+
+        async fn heartbeat(
+            &self,
+            _ctx: &Ctx,
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            unreachable!("disconnect never sends heartbeats")
+        }
+
+        async fn get_online_status(
+            &self,
+            _ctx: &Ctx,
+            _request: GetOnlineStatusRequest,
+        ) -> Result<GetOnlineStatusResponse> {
+            unreachable!("disconnect never reads presence")
+        }
+
+        async fn list_user_connections(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_connection_info(&self, _connection_id: &str) -> Result<ConnectionInfo> {
+            unreachable!("disconnect works from the online session cache")
+        }
+
+        async fn get_connection_metadata(
+            &self,
+            _connection_id: &str,
+        ) -> Result<HashMap<String, String>> {
+            Ok(HashMap::new())
+        }
+
+        async fn build_ctx(&self, _connection_id: &str) -> Result<Ctx> {
+            unreachable!("disconnect works from the online session cache")
+        }
+    }
+
+    fn handler(port: Arc<CountingPort>) -> ConnectionHandler {
+        let port: Arc<dyn IConnectionPort> = port;
+        ConnectionHandler::new(
+            Arc::new(ConnectionDomainService::new(
+                port.clone(),
+                Arc::new(ConnectionQualityService::new()),
+                ConnectionDomainServiceConfig {
+                    gateway_id: "gateway-test".to_string(),
+                },
+            )),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
+            port,
+            Arc::new(ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+        )
+    }
+
+    /// 连接在注册 Online 会话之前就被拒（租户停用、鉴权失败），或同一连接先报错再断开时，
+    /// 断开清理找不到会话：这是预期路径，不报错（调用方据此不再记 WARN），也不去注销 Online。
+    #[tokio::test]
+    async fn disconnecting_a_connection_without_an_online_session_is_a_quiet_no_op() {
+        let port = Arc::new(CountingPort::default());
+        let handler = handler(port.clone());
+
+        handler
+            .handle_disconnect("conn-rejected-before-registration")
+            .await
+            .expect("a connection that never registered has nothing to clean up");
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 0);
+    }
+
+    /// 已注册的连接只注销一次：`on_error` 之后的 `on_disconnect` 再清理一次时什么都不做。
+    #[tokio::test]
+    async fn a_registered_connection_is_unregistered_once() {
+        let port = Arc::new(CountingPort::default());
+        let handler = handler(port.clone());
+        handler.online_sessions.write().await.insert(
+            "conn-1".to_string(),
+            OnlineSession {
+                user_id: "u1".to_string(),
+                tenant_id: "tenant-a".to_string(),
+                conversation_id: "presence-1".to_string(),
+                authenticated_ctx: Arc::new(
+                    flare_server_core::Context::with_request_id("req")
+                        .with_tenant_id("tenant-a")
+                        .with_user_id("u1"),
+                ),
+            },
+        );
+
+        handler.handle_disconnect("conn-1").await.expect("first");
+        handler.handle_disconnect("conn-1").await.expect("second");
+        assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
+    }
 }
