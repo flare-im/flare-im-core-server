@@ -21,7 +21,8 @@ use std::time::Duration;
 use flare_core_base::context::Ctx;
 
 use crate::domain::capability::{
-    CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result, SeatModel,
+    CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result,
+    SeatModel, require_dispatch_tenant,
 };
 use flare_grpc_proto::capability::RegisteredPluginInstance;
 
@@ -60,7 +61,7 @@ pub async fn dispatch_capability_command(
     plugin_health_stale: Duration,
     req: &CapabilityDispatchCommand,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant = req.tenant_id.clone().unwrap_or_else(|| "0".into());
+    let tenant = require_dispatch_tenant(req)?;
     let user = req.user_id.clone().ok_or_else(|| {
         crate::domain::capability::CapabilityError::PolicyDenied("user_id required".into())
     })?;
@@ -118,8 +119,8 @@ pub async fn dispatch_capability_command(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -130,7 +131,7 @@ mod tests {
     use super::dispatch_capability_command;
     use crate::domain::capability::{
         CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityDispatchRoute,
-        CapabilityPolicyBackend, Result, UserCapabilityGrant,
+        CapabilityError, CapabilityPolicyBackend, Result, UserCapabilityGrant,
     };
 
     use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
@@ -295,5 +296,79 @@ mod tests {
         let registry = CapabilityExtensionRegistry::new();
         assert!(registry.dispatch_routes().await.is_empty());
         assert!(dispatch(&registry, "rtc.call.video").await.is_err());
+    }
+
+    /// 记下被问到的租户、一律放行的策略后端。
+    #[derive(Default)]
+    struct RecordingPolicy {
+        tenants: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CapabilityPolicyBackend for RecordingPolicy {
+        async fn ensure_dispatch_allowed(&self, tenant: &str, _u: &str, _c: &str) -> Result<()> {
+            self.tenants.lock().unwrap().push(tenant.to_string());
+            Ok(())
+        }
+        async fn ensure_tenant_capability_enabled(&self, tenant: &str, _c: &str) -> Result<()> {
+            self.tenants.lock().unwrap().push(tenant.to_string());
+            Ok(())
+        }
+        async fn list_user_grants(&self, _t: &str, _u: &str) -> Result<Vec<UserCapabilityGrant>> {
+            Ok(vec![])
+        }
+        async fn grant_user_capability(
+            &self,
+            _t: &str,
+            _u: &str,
+            _c: &str,
+            _expires_at: Option<DateTime<Utc>>,
+            _plan_code: Option<String>,
+            _source: Option<String>,
+        ) -> Result<()> {
+            unimplemented!("本用例不涉及授权变更")
+        }
+        async fn revoke_user_capability(&self, _t: &str, _u: &str, _c: &str) -> Result<()> {
+            unimplemented!("本用例不涉及授权变更")
+        }
+        async fn set_tenant_capability(&self, _t: &str, _c: &str, _e: bool) -> Result<()> {
+            unimplemented!("本用例不涉及租户开关")
+        }
+    }
+
+    /// 缺租户（含空白）的调度在查路由簿、查授权、交给任何路由之前就以 `PolicyDenied` 拒绝，
+    /// 不再按租户 "0" 授权并分发（W13-D）。显式的租户 "0" 照常，上面的用例都用它。
+    #[tokio::test]
+    async fn a_dispatch_without_a_tenant_is_denied_not_routed_as_tenant_zero() {
+        let (registry, called) = with_spy("vendorx.", "spy").await;
+        let recording = Arc::new(RecordingPolicy::default());
+        let policy: Arc<dyn CapabilityPolicyBackend> = recording.clone();
+        let routes = Arc::new(PluginRouteBook::new());
+        let ctx: Ctx = Arc::new(Context::default());
+
+        for tenant_id in [None, Some(""), Some("  ")] {
+            let mut req = cmd("vendorx.thing.do");
+            req.tenant_id = tenant_id.map(str::to_string);
+            let error = dispatch_capability_command(
+                &ctx,
+                &registry,
+                &routes,
+                &policy,
+                Duration::from_millis(50),
+                Duration::from_secs(30),
+                &req,
+            )
+            .await
+            .expect_err("a dispatch without a tenant must be denied");
+            assert!(
+                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                "{tenant_id:?}: {error:?}"
+            );
+        }
+        assert!(!called.load(Ordering::SeqCst), "缺租户的调度不该交给路由");
+        assert!(
+            recording.tenants.lock().unwrap().is_empty(),
+            "缺租户的调度不该去查授权"
+        );
     }
 }

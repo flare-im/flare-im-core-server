@@ -11,7 +11,7 @@ use super::{
     HandleSdpAnswerRequest, HandleSdpOfferRequest, HangupCallRequest,
     MediaGetNetworkQualityRequest, MediaGetRoomStateRequest, MediaJoinTransportRequest,
     MediaLeaveTransportRequest, MediaSetPublisherMuteRequest, MediaSetSimulcastLayerRequest,
-    MediaSetSubscriptionRequest, RejectCallRequest, Result, RtcCapability,
+    MediaSetSubscriptionRequest, RejectCallRequest, Result, RtcCapability, require_dispatch_tenant,
 };
 
 fn payload_str(payload: &Value, key: &str) -> Result<String> {
@@ -67,7 +67,7 @@ pub async fn dispatch_rtc_by_capability_id<R: RtcCapability + ?Sized>(
     rtc: &R,
     req: &CapabilityDispatchCommand,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant = req.tenant_id.clone().unwrap_or_else(|| "0".into());
+    let tenant = require_dispatch_tenant(req)?;
     let user = req
         .user_id
         .clone()
@@ -452,7 +452,7 @@ pub async fn execute_capability_dispatch<R: RtcCapability + ?Sized>(
     policy: &dyn CapabilityPolicyBackend,
     req: &CapabilityDispatchCommand,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant = req.tenant_id.clone().unwrap_or_else(|| "0".into());
+    let tenant = require_dispatch_tenant(req)?;
     let user = req
         .user_id
         .clone()
@@ -474,4 +474,171 @@ fn extract_call_id(payload: &Value) -> Result<String> {
         return Err(CapabilityError::System("payload.call_id empty".into()));
     }
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use flare_core_base::context::Ctx;
+    use flare_server_core::Context;
+    use serde_json::Value;
+
+    use super::{dispatch_rtc_by_capability_id, execute_capability_dispatch};
+    use crate::domain::capability::{
+        AcceptCallRequest, AcceptCallResponse, CapabilityDispatchCommand, CapabilityError,
+        CapabilityPolicyBackend, CreateCallRequest, CreateCallResponse, GetJoinTokenRequest,
+        GetJoinTokenResponse, HangupCallRequest, HangupCallResponse, ListParticipantsRequest,
+        ListParticipantsResponse, RejectCallRequest, RejectCallResponse, Result, RtcCapability,
+        UserCapabilityGrant,
+    };
+
+    /// 记下被问到的租户、一律放行的策略后端。
+    #[derive(Default)]
+    struct RecordingPolicy {
+        tenants: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CapabilityPolicyBackend for RecordingPolicy {
+        async fn ensure_dispatch_allowed(&self, tenant: &str, _u: &str, _c: &str) -> Result<()> {
+            self.tenants.lock().unwrap().push(tenant.to_string());
+            Ok(())
+        }
+        async fn list_user_grants(&self, _t: &str, _u: &str) -> Result<Vec<UserCapabilityGrant>> {
+            Ok(vec![])
+        }
+        async fn grant_user_capability(
+            &self,
+            _t: &str,
+            _u: &str,
+            _c: &str,
+            _expires_at: Option<DateTime<Utc>>,
+            _plan_code: Option<String>,
+            _source: Option<String>,
+        ) -> Result<()> {
+            unimplemented!("本用例不涉及授权变更")
+        }
+        async fn revoke_user_capability(&self, _t: &str, _u: &str, _c: &str) -> Result<()> {
+            unimplemented!("本用例不涉及授权变更")
+        }
+        async fn set_tenant_capability(&self, _t: &str, _c: &str, _e: bool) -> Result<()> {
+            unimplemented!("本用例不涉及租户开关")
+        }
+    }
+
+    /// 记下建呼叫请求里的租户；其余动作本用例不涉及。
+    #[derive(Default)]
+    struct RecordingRtc {
+        tenants: Mutex<Vec<String>>,
+    }
+
+    fn not_used<T>(action: &str) -> Result<T> {
+        Err(CapabilityError::NotSupported(format!("{action} test-only")))
+    }
+
+    #[async_trait]
+    impl RtcCapability for RecordingRtc {
+        fn id(&self) -> &str {
+            "recording"
+        }
+        async fn create_call(
+            &self,
+            _ctx: &Ctx,
+            req: &CreateCallRequest,
+        ) -> Result<CreateCallResponse> {
+            self.tenants.lock().unwrap().push(req.tenant_id.clone());
+            Ok(CreateCallResponse {
+                call_id: "call-1".into(),
+                room_id: "room-1".into(),
+                ext: Value::Null,
+            })
+        }
+        async fn accept_call(
+            &self,
+            _ctx: &Ctx,
+            _req: &AcceptCallRequest,
+        ) -> Result<AcceptCallResponse> {
+            not_used("accept_call")
+        }
+        async fn reject_call(
+            &self,
+            _ctx: &Ctx,
+            _req: &RejectCallRequest,
+        ) -> Result<RejectCallResponse> {
+            not_used("reject_call")
+        }
+        async fn hangup_call(
+            &self,
+            _ctx: &Ctx,
+            _req: &HangupCallRequest,
+        ) -> Result<HangupCallResponse> {
+            not_used("hangup_call")
+        }
+        async fn get_join_token(
+            &self,
+            _ctx: &Ctx,
+            _req: &GetJoinTokenRequest,
+        ) -> Result<GetJoinTokenResponse> {
+            not_used("get_join_token")
+        }
+        async fn list_participants(
+            &self,
+            _ctx: &Ctx,
+            _req: &ListParticipantsRequest,
+        ) -> Result<ListParticipantsResponse> {
+            not_used("list_participants")
+        }
+    }
+
+    fn video_call(tenant_id: Option<&str>) -> CapabilityDispatchCommand {
+        CapabilityDispatchCommand {
+            capability_id: "rtc.call.video".into(),
+            tenant_id: tenant_id.map(str::to_string),
+            user_id: Some("u1".into()),
+            conversation_id: Some("conv-1".into()),
+            payload: None,
+            request_id: Some("req-1".into()),
+        }
+    }
+
+    fn is_missing_tenant(error: &CapabilityError) -> bool {
+        matches!(error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required")
+    }
+
+    /// 缺租户（含空白）的 RTC 调度在查授权、建呼叫之前就以 `PolicyDenied` 拒绝，不再按租户 "0"
+    /// 授权、建呼叫（W13-D）；显式的租户照常带进建呼叫请求。
+    #[tokio::test]
+    async fn rtc_dispatch_without_a_tenant_is_denied_not_run_as_tenant_zero() {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req-1").with_tenant_id("tenant-a"));
+        let policy = RecordingPolicy::default();
+        let rtc = RecordingRtc::default();
+
+        for tenant_id in [None, Some(""), Some("  ")] {
+            let req = video_call(tenant_id);
+            let error = execute_capability_dispatch(&ctx, &rtc, &policy, &req)
+                .await
+                .expect_err("a dispatch without a tenant must be denied");
+            assert!(is_missing_tenant(&error), "{tenant_id:?}: {error:?}");
+            let error = dispatch_rtc_by_capability_id(&ctx, &rtc, &req)
+                .await
+                .expect_err("an RTC action without a tenant must be denied");
+            assert!(is_missing_tenant(&error), "{tenant_id:?}: {error:?}");
+        }
+        assert!(
+            policy.tenants.lock().unwrap().is_empty(),
+            "缺租户不该去查授权"
+        );
+        assert!(rtc.tenants.lock().unwrap().is_empty(), "缺租户不该建呼叫");
+
+        for tenant_id in ["0", "tenant-a"] {
+            execute_capability_dispatch(&ctx, &rtc, &policy, &video_call(Some(tenant_id)))
+                .await
+                .expect("an explicit tenant dispatches as before");
+        }
+        assert_eq!(*policy.tenants.lock().unwrap(), ["0", "tenant-a"]);
+        assert_eq!(*rtc.tenants.lock().unwrap(), ["0", "tenant-a"]);
+    }
 }

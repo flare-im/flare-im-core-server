@@ -19,6 +19,7 @@ use tonic::{Request, Status};
 
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityError, Result,
+    require_dispatch_tenant,
 };
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
@@ -121,7 +122,7 @@ async fn invoke_once(
     endpoint: &RegisteredPluginInstance,
     timeout: Duration,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());
+    let tenant_id = require_dispatch_tenant(req)?;
     let user_id = req.user_id.clone().unwrap_or_default();
     let request_id = req
         .request_id
@@ -202,7 +203,7 @@ pub async fn dispatch_remote_with_candidates(
     plugin_timeout: Duration,
     health_stale: Duration,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant_id = req.tenant_id.clone().unwrap_or_else(|| "0".to_string());
+    let tenant_id = require_dispatch_tenant(req)?;
     let mut candidates = candidates;
     if candidates.is_empty() {
         return Err(CapabilityError::NotRegistered(format!(
@@ -274,7 +275,7 @@ mod declaration_tests {
     };
     use tonic::metadata::MetadataMap;
 
-    use super::{VerifiedDispatchOrigin, dispatch_remote_with_candidates};
+    use super::{VerifiedDispatchOrigin, dispatch_remote_with_candidates, invoke_once};
     use crate::domain::capability::{CapabilityDispatchCommand, CapabilityError};
     use crate::infrastructure::capability::PluginRouteBook;
 
@@ -470,5 +471,71 @@ mod declaration_tests {
             !matches!(err, CapabilityError::PolicyDenied(_)),
             "还有合法实例时不该整体被拒，实际: {err:?}"
         );
+    }
+
+    /// 缺租户（含空白）的远程调度在挑实例、对签名身份、连插件之前就以 `PolicyDenied` 拒绝，
+    /// 不再按租户 "0" 处理（W13-D）。签名身份恰好是租户 "0" 时，以前会一路连到租户 0 的插件，
+    /// 连接失败还会把该实例记成不健康。
+    #[tokio::test]
+    async fn remote_dispatch_without_a_tenant_is_denied_not_sent_as_tenant_zero() {
+        let book = PluginRouteBook::new();
+        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.do"]));
+        let book = Arc::new(book);
+
+        for tenant_id in [None, Some(""), Some("  ")] {
+            let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
+            let req = CapabilityDispatchCommand {
+                capability_id: "vendorx.do".into(),
+                tenant_id: tenant_id.map(str::to_string),
+                user_id: Some("u1".into()),
+                conversation_id: None,
+                payload: None,
+                request_id: Some("r1".into()),
+            };
+            let err = dispatch_remote_with_candidates(
+                &ctx,
+                &req,
+                &book,
+                book.list_filtered("0", "vendorx.do"),
+                Duration::from_millis(30),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                "{tenant_id:?}: {err:?}"
+            );
+        }
+        assert_eq!(
+            book.last_error("0", "p1"),
+            None,
+            "缺租户的调度不该以租户 0 去调插件"
+        );
+    }
+
+    /// 单个实例的调用自己也要求租户（纵深防御）：缺租户时在对签名身份、连插件之前拒绝，
+    /// 不再按租户 "0" 对上签名身份后去连插件（W13-D）。
+    #[tokio::test]
+    async fn invoke_once_without_a_tenant_is_denied_before_calling_the_plugin() {
+        let endpoint = instance("p1", "vendorx.do", &["vendorx.do"]);
+        for tenant_id in [None, Some(""), Some("  ")] {
+            let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
+            let req = CapabilityDispatchCommand {
+                capability_id: "vendorx.do".into(),
+                tenant_id: tenant_id.map(str::to_string),
+                user_id: Some("u1".into()),
+                conversation_id: None,
+                payload: None,
+                request_id: Some("r1".into()),
+            };
+            let err = invoke_once(&ctx, &req, &endpoint, Duration::from_millis(30))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                "{tenant_id:?}: {err:?}"
+            );
+        }
     }
 }

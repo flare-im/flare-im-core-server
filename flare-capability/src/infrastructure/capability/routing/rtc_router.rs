@@ -76,15 +76,17 @@ impl RtcCapabilityRouter {
         self.backend.read().await.is_some()
     }
 
+    /// 上下文缺租户（含空白）时以 `PolicyDenied` 拒绝（W13-D）：丢了租户的调用不能被全局默认
+    /// 后端接走（该租户可能有专属后端），报错里也不再写租户 "0"。
     async fn require(&self, ctx: &Ctx) -> Result<Arc<dyn RtcCapability>> {
-        if let Some(tenant) = ctx.tenant_id() {
-            let m = self.tenant_backends.read().await;
-            if let Some(b) = m.get(tenant) {
-                return Ok(Arc::clone(b));
-            }
+        let tenant = ctx
+            .tenant_id()
+            .filter(|tenant| !tenant.trim().is_empty())
+            .ok_or_else(|| CapabilityError::PolicyDenied("tenant_id required".into()))?;
+        if let Some(b) = self.tenant_backends.read().await.get(tenant) {
+            return Ok(Arc::clone(b));
         }
         self.backend.read().await.clone().ok_or_else(|| {
-            let tenant = ctx.tenant_id().unwrap_or("0");
             CapabilityError::NotRegistered(format!("rtc capability backend (tenant={tenant})"))
         })
     }
@@ -422,5 +424,42 @@ mod tests {
         assert_eq!(out.room_id, "room-1");
         assert_eq!(out.call_id, "call-1");
         assert_eq!(out.peer_id, "tenant-a");
+    }
+
+    /// 上下文缺租户（含空白）时拒绝，不落到全局默认后端，也不在报错里写租户 "0"（W13-D）。
+    /// 租户专属后端存在时，丢了租户的调用以前会被默认后端接走。
+    #[tokio::test]
+    async fn a_context_without_a_tenant_is_denied_not_served_by_the_default_backend() {
+        let router = RtcCapabilityRouter::new();
+        router
+            .set_backend(Some(Arc::new(StubRtc { id: "default" })))
+            .await;
+        router
+            .set_backend_for_tenant("0", Some(Arc::new(StubRtc { id: "tenant-zero" })))
+            .await;
+        let no_tenant: Ctx = Arc::new(Context::with_request_id("req-rtc-router-test"));
+
+        for ctx in [no_tenant, ctx(""), ctx("  ")] {
+            let error = router
+                .create_call(
+                    &ctx,
+                    &CreateCallRequest {
+                        tenant_id: String::new(),
+                        request_id: "r".into(),
+                        conversation_id: "c".into(),
+                        initiator_user_id: "u".into(),
+                        media: None,
+                        ext: Value::Null,
+                    },
+                )
+                .await
+                .map(|out| out.call_id)
+                .expect_err("a call without a tenant must be denied");
+            assert!(
+                matches!(&error, CapabilityError::PolicyDenied(reason) if reason == "tenant_id required"),
+                "{:?}: {error:?}",
+                ctx.tenant_id()
+            );
+        }
     }
 }

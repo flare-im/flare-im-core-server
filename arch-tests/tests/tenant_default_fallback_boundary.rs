@@ -29,36 +29,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "宽松策略下未绑定租户的连接按部署默认租户 0 查准入（单租户私有化的旧令牌不带租户），严格策略已拒绝；改为一律拒绝属部署级默认租户的取舍（第 36 条），待用户决定",
     ),
     (
-        "flare-capability/src/application/handler/capability_dispatch.rs",
-        1,
-        "Capability 调度请求体的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/application/handler/remote_dispatch.rs",
-        2,
-        "Capability 远程调度请求体的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/domain/capability/command_dispatch_service.rs",
-        2,
-        "Capability 命令调度请求体的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/infrastructure/capability/routing/rtc_dispatch_route.rs",
-        1,
-        "RTC 路由的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/infrastructure/capability/routing/rtc_router.rs",
-        1,
-        "RTC 路由的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/interface/grpc/capability/service.rs",
-        1,
-        "只是日志字段 tenant_for_log",
-    ),
-    (
         "flare-push/server/src/config/settings.rs",
         1,
         "推送服务的部署级默认租户配置项（PUSH_SERVER_DEFAULT_TENANT_ID 未设时为 0，单租户私有化默认），去留属第 36 条，待用户决定",
@@ -125,6 +95,17 @@ const FIXED_BY_W12_T: &[&str] = &[
     "flare-signaling/gateway/src/domain/service/push_domain_service.rs",
     "flare-signaling/gateway/src/domain/service/sync_service.rs",
     "flare-storage/reader/src/infrastructure/persistence/optimized_postgres_store.rs",
+];
+
+/// W13-D 改成缺租户即报错的 Capability 调度文件（调度请求体、RTC 选路与后端、调度日志字段）：
+/// 必须保持零兜底，也不得进入 `ALLOWED`。
+const FIXED_BY_W13_D: &[&str] = &[
+    "flare-capability/src/application/handler/capability_dispatch.rs",
+    "flare-capability/src/application/handler/remote_dispatch.rs",
+    "flare-capability/src/domain/capability/command_dispatch_service.rs",
+    "flare-capability/src/infrastructure/capability/routing/rtc_dispatch_route.rs",
+    "flare-capability/src/infrastructure/capability/routing/rtc_router.rs",
+    "flare-capability/src/interface/grpc/capability/service.rs",
 ];
 
 /// 兜底写法（已去掉空白）。语句里同时提到租户才算。
@@ -212,6 +193,27 @@ fn files_fixed_by_w12_t_stay_free_of_tenant_zero_fallbacks() {
     let root = workspace_root();
     let found = tenant_fallbacks(&root);
     for file in FIXED_BY_W12_T {
+        assert!(
+            root.join(file).is_file(),
+            "{file} moved; update this guard together with the code"
+        );
+        assert!(
+            !ALLOWED.iter().any(|(allowed, _, _)| allowed == file),
+            "{file} must not be allowlisted"
+        );
+        assert!(
+            !found.contains_key(*file),
+            "{file} defaults a missing tenant to \"0\" again:\n{}",
+            found[*file].join("\n")
+        );
+    }
+}
+
+#[test]
+fn files_fixed_by_w13_d_stay_free_of_tenant_zero_fallbacks() {
+    let root = workspace_root();
+    let found = tenant_fallbacks(&root);
+    for file in FIXED_BY_W13_D {
         assert!(
             root.join(file).is_file(),
             "{file} moved; update this guard together with the code"

@@ -373,13 +373,13 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.capability_id.is_empty() {
             return Err(Status::invalid_argument("capability_id required"));
         }
-        let tenant_id = Some(normalized_tenant_id);
-        let tenant_for_log = tenant_id.as_deref().unwrap_or("0");
+        // 规范写法检查已拒绝空租户，这里的租户必然非空，日志直接记它，不再有 "0" 兜底（W13-D）。
         tracing::trace!(
             capability_id = %r.capability_id,
-            tenant_id = %tenant_for_log,
+            tenant_id = %normalized_tenant_id,
             "capability.dispatch"
         );
+        let tenant_id = Some(normalized_tenant_id);
 
         let payload_raw = r.payload_json.as_str();
         if payload_raw.len() > self.runtime.max_payload_json_bytes {
