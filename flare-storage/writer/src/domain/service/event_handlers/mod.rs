@@ -1,7 +1,7 @@
 //! 领域事件 Payload 处理器（策略式分发）- 使用领域 Event，不依赖 proto
 
 use flare_im_contracts::Ctx;
-use flare_server_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
 use crate::domain::model::{Event, EventPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
@@ -30,6 +30,27 @@ where
     pub conversation_id: &'a str,
 }
 
+/// 写事件流失败的分类。预检时该 seq 还空着、另一个事件却抢先写入了同一 seq：事件流报不可重试的
+/// 冲突（`HttpConflict`），原样透传——与预检发现的冲突一样直接进死信（`is_operation_conflict`），
+/// 不再包成可重试的数据库错误、白白重投一次后才由预检送进死信。其余失败仍是数据库错误。
+pub(crate) fn stream_append_failure(event: &Event, error: FlareError) -> FlareError {
+    if error.code() == Some(ErrorCode::HttpConflict) {
+        tracing::warn!(
+            tenant_id = %event.tenant_id,
+            conversation_id = %event.conversation_id,
+            seq = event.seq,
+            new_type = ?event.r#type,
+            "operation event lost its seq to another event written after the pre-check; not recorded in the event stream"
+        );
+        return error;
+    }
+    map_infra_error(
+        error,
+        ErrorCode::DatabaseError,
+        "Failed to append operation event to durable event stream",
+    )
+}
+
 /// 追加事件到操作历史并写入事件流（供 Sync）；供各 handler 复用
 pub async fn append_event_and_stream<A, E>(
     ctx: &EventContext<'_, A, E>,
@@ -48,13 +69,7 @@ where
         stream
             .append_event_to_stream(ctx.ctx, event)
             .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "Failed to append operation event to durable event stream",
-                )
-            })?;
+            .map_err(|e| stream_append_failure(event, e))?;
     }
     Ok(())
 }
@@ -156,6 +171,26 @@ mod tests {
         }
     }
 
+    /// 预检之后另一个事件抢先写入了同一 seq：事件流报冲突。
+    struct ConflictingEventStreamRepository;
+
+    impl EventStreamRepository for ConflictingEventStreamRepository {
+        async fn append_event_to_stream(&self, _ctx: &Ctx, _event: &Event) -> AnyhowResult<()> {
+            Err(flare_server_core::flare_err!(
+                ErrorCode::HttpConflict,
+                "event stream conflict tenant_id=tenant-a conversation_id=conversation-a seq=2 existing_type=8 new_type=2"
+            ))
+        }
+
+        async fn match_stored_event(
+            &self,
+            _ctx: &Ctx,
+            _event: &crate::domain::model::Event,
+        ) -> AnyhowResult<crate::domain::repository::StoredEventMatch> {
+            Ok(crate::domain::repository::StoredEventMatch::Absent)
+        }
+    }
+
     fn test_ctx() -> Ctx {
         Arc::new(Context::with_request_id("req-operation-stream-test").with_tenant_id("tenant-a"))
     }
@@ -196,5 +231,29 @@ mod tests {
                 .contains("Failed to append operation event to durable event stream"),
             "unexpected error: {err}"
         );
+        assert_eq!(err.code(), Some(ErrorCode::DatabaseError), "{err}");
+    }
+
+    /// 写事件流时撞上同一 seq 上的另一个事件（预检之后被抢先写入）：冲突分类原样透传，消费者据此
+    /// 直接进死信（W14-R (d)）。修复前被包成 `DatabaseError`，重投一次后才由预检送进死信。
+    #[tokio::test]
+    async fn a_seq_taken_after_the_pre_check_is_reported_as_a_conflict() {
+        let repo = NoopArchiveRepository;
+        let stream = ConflictingEventStreamRepository;
+        let ctx = test_ctx();
+        let event_ctx = EventContext {
+            repo: &repo,
+            stream: Some(&stream),
+            ctx: &ctx,
+            tenant_id: "tenant-a",
+            conversation_id: "conversation-a",
+        };
+
+        let err = append_event_and_stream(&event_ctx, "message-a", &operation_event())
+            .await
+            .expect_err("another event holds the seq");
+
+        assert_eq!(err.code(), Some(ErrorCode::HttpConflict), "{err}");
+        assert!(!err.is_retryable(), "{err}");
     }
 }

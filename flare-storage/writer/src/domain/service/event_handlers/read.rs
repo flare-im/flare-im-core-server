@@ -4,7 +4,7 @@ use crate::domain::model::{Event, ReadPayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository};
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
-use super::EventContext;
+use super::{EventContext, stream_append_failure};
 
 pub async fn apply_read<A, E>(
     ctx: &EventContext<'_, A, E>,
@@ -58,13 +58,7 @@ where
         stream
             .append_event_to_stream(ctx.ctx, event)
             .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "Failed to append operation event to durable event stream",
-                )
-            })?;
+            .map_err(|e| stream_append_failure(event, e))?;
     }
     Ok(())
 }
@@ -182,5 +176,60 @@ mod tests {
                 .contains("Failed to append operation event to durable event stream"),
             "unexpected error: {err}"
         );
+    }
+
+    /// 已读回执写事件流时撞上同一 seq 上的另一个事件：冲突分类原样透传（W14-R (d)），修复前被包成
+    /// `DatabaseError`。
+    #[tokio::test]
+    async fn apply_read_reports_a_seq_taken_after_the_pre_check_as_a_conflict() {
+        struct ConflictingEventStreamRepository;
+
+        impl EventStreamRepository for ConflictingEventStreamRepository {
+            async fn append_event_to_stream(
+                &self,
+                _ctx: &flare_im_contracts::Ctx,
+                _event: &Event,
+            ) -> AnyhowResult<()> {
+                Err(flare_server_core::flare_err!(
+                    ErrorCode::HttpConflict,
+                    "event stream conflict tenant_id=tenant-a conversation_id=conversation-a seq=8 existing_type=8 new_type=10"
+                ))
+            }
+
+            async fn match_stored_event(
+                &self,
+                _ctx: &flare_im_contracts::Ctx,
+                _event: &crate::domain::model::Event,
+            ) -> AnyhowResult<crate::domain::repository::StoredEventMatch> {
+                Ok(crate::domain::repository::StoredEventMatch::Absent)
+            }
+        }
+
+        let repo = NoopArchiveRepository;
+        let stream = ConflictingEventStreamRepository;
+        let runtime_ctx = test_ctx();
+        let event_ctx = EventContext {
+            repo: &repo,
+            stream: Some(&stream),
+            ctx: &runtime_ctx,
+            tenant_id: "tenant-a",
+            conversation_id: "conversation-a",
+        };
+        let read = ReadPayload {
+            conversation_id: "conversation-a".to_string(),
+            read_seq: 8,
+            user_id: "reader-a".to_string(),
+            message_ids: vec!["message-a".to_string()],
+            read_at: None,
+            burn_after_read: Some(false),
+        };
+        let event = read_event(read.clone());
+
+        let err = apply_read(&event_ctx, &event, &read)
+            .await
+            .expect_err("another event holds the seq");
+
+        assert_eq!(err.code(), Some(ErrorCode::HttpConflict), "{err}");
+        assert!(!err.is_retryable(), "{err}");
     }
 }
