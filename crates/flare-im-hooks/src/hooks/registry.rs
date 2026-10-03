@@ -75,9 +75,13 @@ impl PreSendPlan {
                 }
             },
             Err(_) => {
-                let err = ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
-                    .details(format!("hook={}", self.metadata.name))
-                    .build_error();
+                // 超时与不可达同属「Hook 不可用」：回可重试的 ServiceUnavailable（摄入侧 gRPC
+                // UNAVAILABLE，HTTP 发送 503），与 gRPC 适配器对传输失败的应答一致。若回
+                // OperationTimeout，摄入侧映射为 DEADLINE_EXCEEDED，网关回 500，调用方无从判断能否重试。
+                let err =
+                    ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook timed out")
+                        .details(format!("hook={}", self.metadata.name))
+                        .build_error();
                 if self.metadata.require_success {
                     PreSendDecision::Reject { error: err }
                 } else {
@@ -701,12 +705,16 @@ mod tests {
         }
     }
 
+    /// 必需的 PreSend Hook 超时与不可达同属「Hook 不可用」：回可重试的 `ServiceUnavailable`
+    /// （摄入侧 gRPC `UNAVAILABLE`，HTTP 发送 503），不是 `OperationTimeout`（`DEADLINE_EXCEEDED`，
+    /// 以前网关回 500 `MESSAGE_SEND_FAILED`），也不带策略拒绝标记。
     #[tokio::test]
-    async fn required_pre_send_timeout_rejects() {
+    async fn required_pre_send_timeout_rejects_as_retryable_unavailable() {
         let registry = HookRegistry::new();
         registry
             .register_pre_send(
                 HookMetadata::default()
+                    .with_name("slow-policy")
                     .with_require_success(true)
                     .with_timeout(Duration::from_millis(1)),
                 HookSelector::default(),
@@ -714,13 +722,14 @@ mod tests {
             )
             .await;
         let ctx: Ctx = Arc::new(Context::with_request_id("required-timeout"));
-        let result = registry
+        let error = registry
             .execute_pre_send(&ctx, &mut MessageDraft::new(vec![]))
-            .await;
-        assert_eq!(
-            result.unwrap_err().code(),
-            Some(ErrorCode::OperationTimeout)
-        );
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+        assert!(error.is_retryable(), "{error}");
+        assert_eq!(error.reason(), "pre-send hook timed out");
+        assert!(!crate::hooks::is_pre_send_rejection(&error), "{error}");
     }
 
     #[tokio::test]

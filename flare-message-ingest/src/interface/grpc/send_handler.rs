@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(detail.message, "allow=false");
 
         let unmarked =
-            ErrorBuilder::new(ErrorCode::OperationFailed, "pre_send hook timeout").build_error();
+            ErrorBuilder::new(ErrorCode::OperationFailed, "extension failed").build_error();
         assert_eq!(send_failure_status(unmarked).code(), tonic::Code::Unknown);
 
         let unavailable = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
@@ -468,6 +468,81 @@ mod tests {
             send_failure_status(unavailable).code(),
             tonic::Code::Unavailable
         );
+    }
+
+    /// 必需的 PreSend Hook 超时，不论先到的是 Hook 自身的超时还是扩展编排器的超时，经本服务的
+    /// 错误转换都回 `UNAVAILABLE`：网关据此回可重试的 503 `SERVICE_UNAVAILABLE`，与 Hook 不可达相同。
+    /// 以前分别是 `DEADLINE_EXCEEDED` 与 `UNKNOWN`，网关都回 500 `MESSAGE_SEND_FAILED`。
+    #[tokio::test]
+    async fn required_pre_send_hook_timeouts_answer_unavailable() {
+        use crate::application::extension::{
+            ExtensionOrchestrator, ExtensionPolicy, ExtensionRouting, ExtensionRuntimePolicy,
+        };
+        use crate::domain::service::HookExecutionService;
+        use flare_im_contracts::Ctx;
+        use flare_im_hooks::hooks::{
+            HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft,
+            PreSendDecision, PreSendHook,
+        };
+        use std::time::Duration;
+
+        struct HangingPreSend;
+
+        #[async_trait::async_trait]
+        impl PreSendHook for HangingPreSend {
+            async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+                std::future::pending().await
+            }
+        }
+
+        let cases = [
+            ("hook timeout first", Duration::from_millis(5), 60_000),
+            ("orchestrator timeout first", Duration::from_secs(60), 5),
+        ];
+        for (case, hook_timeout, orchestrator_timeout_ms) in cases {
+            let registry = HookRegistry::new();
+            registry
+                .register_pre_send(
+                    HookMetadata::default()
+                        .with_name("hanging-policy")
+                        .with_require_success(true)
+                        .with_timeout(hook_timeout),
+                    HookSelector::default(),
+                    Arc::new(HangingPreSend),
+                )
+                .await;
+            let orchestrator = ExtensionOrchestrator::new(
+                Arc::new(HookExecutionService::new(
+                    Arc::new(HookDispatcher::new(registry)),
+                    None,
+                )),
+                ExtensionPolicy::new(false).with_runtime(
+                    ExtensionRuntimePolicy::new(orchestrator_timeout_ms, 0),
+                    ExtensionRuntimePolicy::new(1_000, 0),
+                ),
+                ExtensionRouting::default(),
+            );
+            let ctx: Ctx = Arc::new(
+                flare_server_core::context::Context::with_request_id("req")
+                    .with_tenant_id("tenant-a"),
+            );
+            let error = match tokio::time::timeout(
+                Duration::from_secs(10),
+                orchestrator.execute_pre_send(&ctx, Message::default(), true),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{case}: a pre-send timeout fires"))
+            {
+                Ok(_) => panic!("{case}: a hanging required hook let the message through"),
+                Err(error) => error,
+            };
+            let status = send_failure_status(error);
+            assert_eq!(
+                status.code(),
+                tonic::Code::Unavailable,
+                "{case}: {status:?}"
+            );
+        }
     }
 
     fn claims(actor_type: SignedActorType, actor_id: &str) -> SignedContextClaims {

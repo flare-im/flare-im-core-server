@@ -114,8 +114,10 @@ impl ExtensionOrchestrator {
                         Some(message.message_type),
                         None,
                     );
+                    // 编排器的时限先到同样是「Hook 不可用」：回可重试的 ServiceUnavailable（摄入侧
+                    // gRPC UNAVAILABLE，HTTP 发送 503），与 Hook 自身超时、不可达一致；不是策略拒绝。
                     return Err(flare_err!(
-                        ErrorCode::OperationFailed,
+                        ErrorCode::ServiceUnavailable,
                         "pre_send hook timeout"
                     ));
                 }
@@ -300,5 +302,70 @@ impl ExtensionOrchestrator {
             tenant_id = %ctx.tenant_id().unwrap_or("0"),
             "extension execution will retry"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use flare_im_hooks::hooks::{
+        HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft, PreSendDecision,
+        PreSendHook, is_pre_send_rejection,
+    };
+    use flare_server_core::context::Context;
+
+    /// 永不返回的 PreSend Hook：模拟被暂停、只接连接不回应答的扩展。
+    struct HangingPreSend;
+
+    #[async_trait]
+    impl PreSendHook for HangingPreSend {
+        async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+            std::future::pending().await
+        }
+    }
+
+    /// 编排器自己的 PreSend 超时先到（Hook 自身的超时更长）：回可重试的 `ServiceUnavailable`，
+    /// 与 Hook 不可达同一应答（摄入侧 gRPC `UNAVAILABLE`，HTTP 发送 503）。以前回
+    /// `OperationFailed`，摄入侧映射为 `UNKNOWN`，网关回 500 `MESSAGE_SEND_FAILED`。
+    #[tokio::test]
+    async fn pre_send_timeout_is_a_retryable_unavailable_not_an_operation_failure() {
+        let registry = HookRegistry::new();
+        registry
+            .register_pre_send(
+                HookMetadata::default()
+                    .with_name("hanging-policy")
+                    .with_require_success(true)
+                    .with_timeout(Duration::from_secs(60)),
+                HookSelector::default(),
+                Arc::new(HangingPreSend),
+            )
+            .await;
+        let orchestrator = ExtensionOrchestrator::new(
+            Arc::new(HookExecutionService::new(
+                Arc::new(HookDispatcher::new(registry)),
+                None,
+            )),
+            ExtensionPolicy::new(false).with_runtime(
+                crate::extension::ExtensionRuntimePolicy::new(5, 1),
+                crate::extension::ExtensionRuntimePolicy::new(5, 0),
+            ),
+            ExtensionRouting::default(),
+        );
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+
+        let error = match tokio::time::timeout(
+            Duration::from_secs(10),
+            orchestrator.execute_pre_send(&ctx, Message::default(), true),
+        )
+        .await
+        .expect("the orchestrator's own timeout fires")
+        {
+            Ok(_) => panic!("a hanging required hook must not let the message through"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+        assert!(error.is_retryable(), "{error}");
+        assert!(!is_pre_send_rejection(&error), "{error}");
     }
 }

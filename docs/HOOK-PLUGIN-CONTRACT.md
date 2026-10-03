@@ -76,6 +76,11 @@ an audit-log hook that is down should not stop people from sending messages.
 
 Message Ingest runs the hooks of its own configuration serially in priority
 order (lower first); each one's `require_success` decides what a failure does.
+A required pre-send hook that cannot be reached or does not answer in time — its
+own `timeout_ms`, or Message Ingest's overall pre-send deadline
+(`MESSAGE_INGEST_EXTENSION_PRE_SEND_TIMEOUT_MS`), whichever ends first — fails
+the send with a retryable `SERVICE_UNAVAILABLE` (gRPC `UNAVAILABLE`, HTTP 503),
+not a policy rejection.
 
 The Capability service's hook engine (the `HookPlugin` it serves) also groups
 hooks. A hook's `group` (`validation`, `critical` or `business`, case-insensitive)

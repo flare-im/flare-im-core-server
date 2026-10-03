@@ -46,7 +46,7 @@ pub(crate) struct MessageContextSigner(pub Option<SignedContextSigner>);
         (status = 404, description = "摄入侧找不到发送依赖的对象（NOT_FOUND）"),
         (status = 422, description = "PreSend 扩展按策略拒绝了这条消息（MESSAGE_REJECTED），不要原样重试"),
         (status = 500, description = "发送失败（MESSAGE_SEND_FAILED），不带下游错误原文"),
-        (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE），可退避重试"),
+        (status = 503, description = "暂时无法受理（SERVICE_UNAVAILABLE；含必需 PreSend Hook 不可达或超时、摄入超时），带同一 client_msg_id 退避重试"),
     ),
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -191,11 +191,16 @@ fn ingest_detail_reason(status: &tonic::Status) -> Option<String> {
 
 /// MessageIngest 拒绝映射为 HTTP。摄入侧有自己的租户闸门：租户刚停用时它的缓存可能比本网关先看到，
 /// 答 `PERMISSION_DENIED TENANT_UNAVAILABLE`。那和网关自己的拒绝是同一回事，要回确定的 403，不能当 500。
-/// 摄入侧暂时放不了行（严格策略下租户投影读不到、同一条消息正在处理、摄入不可达）答
-/// `SERVICE_UNAVAILABLE`：回 503，调用方退避重试；不能回 403，否则会被当成租户被停用。
+/// 摄入侧暂时放不了行（严格策略下租户投影读不到、同一条消息正在处理、摄入不可达、必需的 PreSend
+/// Hook 不可达或超时）答 `SERVICE_UNAVAILABLE`：回 503，调用方退避重试；不能回 403，否则会被当成租户
+/// 被停用。摄入侧按时限放弃（`DEADLINE_EXCEEDED`，如阶段超时、旧版摄入的 Hook 超时）同样回 503：
+/// 重试带同一个 `client_msg_id`，摄入侧按它去重。
 /// 其余是 500 `MESSAGE_SEND_FAILED`。内部文本一律不回显：500 只带固定原因，原文只进本网关日志。
 fn send_failure(err: FlareError) -> GatewayError {
-    if err.code() == Some(ErrorCode::ServiceUnavailable) {
+    if matches!(
+        err.code(),
+        Some(ErrorCode::ServiceUnavailable | ErrorCode::OperationTimeout)
+    ) {
         return GatewayError(
             ErrorBuilder::new(ErrorCode::HttpServiceUnavailable, "SERVICE_UNAVAILABLE")
                 .build_error(),

@@ -93,6 +93,13 @@ impl MessageSendService for FakeIngest {
                     .build_error(),
             )),
             "group:boom" => Err(tonic::Status::internal("database exploded at 10.0.0.7")),
+            // 摄入侧按时限放弃（`OperationTimeout` 经 `Status::from` 是 `DEADLINE_EXCEEDED`）：
+            // 旧版摄入的必需 Hook 超时、阶段超时都是这个形态。
+            "group:deadline" => Err(tonic::Status::from(
+                ErrorBuilder::new(ErrorCode::OperationTimeout, "pre-send hook timed out")
+                    .details("hook=social-policy-pre-send at 10.0.0.7")
+                    .build_error(),
+            )),
             // 摄入侧判消息不合法：领域校验的 InvalidParameter 经 `Status::from` 带结构化详情，
             // 接口层的纯文本 `Status::invalid_argument` 不带。
             "group:invalid" => Err(tonic::Status::from(
@@ -312,4 +319,18 @@ async fn invalid_and_missing_ingest_outcomes_are_typed_4xx_not_500() {
     assert_eq!(body["reason"], json!("NOT_FOUND"), "{body}");
     assert_eq!(body["message"], json!("conversation not found"), "{body}");
     assert!(!body.to_string().contains("10.0.0.7"), "{body}");
+}
+
+/// 摄入侧按时限放弃（`DEADLINE_EXCEEDED`）回可重试的 503 `SERVICE_UNAVAILABLE`，与 Hook 不可达
+/// 相同，不回显内部文本；以前回 500 `MESSAGE_SEND_FAILED`。重试要带同一个 `client_msg_id`，
+/// 摄入侧按它去重。
+#[tokio::test]
+async fn ingest_deadline_exceeded_is_a_retryable_503_not_a_500() {
+    let router = router().await;
+    let (status, body) = send_to(&router, "group:deadline").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], json!(503), "{body}");
+    assert_eq!(body["reason"], json!("SERVICE_UNAVAILABLE"), "{body}");
+    assert!(!body.to_string().contains("10.0.0.7"), "{body}");
+    assert!(!body.to_string().contains("social-policy"), "{body}");
 }
