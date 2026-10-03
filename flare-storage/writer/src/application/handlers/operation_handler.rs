@@ -2,7 +2,7 @@
 
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::StorageWriterMetrics;
-use flare_server_core::error::{ErrorCode, Result, map_infra_error};
+use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::instrument;
@@ -18,6 +18,12 @@ use crate::infrastructure::persistence::repository::postgres_store::PostgresMess
 type ArchiveRepo = PostgresMessageStore;
 type EventStreamRepo = PostgresEventStreamStore;
 type EventApplicationServiceType = EventApplicationService<ArchiveRepo, EventStreamRepo>;
+
+/// 操作事件与事件流中同一位置上的另一个事件冲突（[`EventApplicationService::process_event`] 的
+/// `HttpConflict`）。重试不会改变已有行，不可重试。
+pub fn is_operation_conflict(error: &FlareError) -> bool {
+    error.code() == Some(ErrorCode::HttpConflict)
+}
 
 pub struct MessageOperationCommandHandler {
     event_service: Arc<EventApplicationServiceType>,
@@ -45,6 +51,11 @@ impl MessageOperationCommandHandler {
         let event = command.event;
 
         if let Err(e) = self.event_service.process_event(ctx, &event).await {
+            // 同一 seq 上已有另一个事件：保留冲突分类（不可重试），消费者据此直接进死信。
+            if is_operation_conflict(&e) {
+                self.metrics.record_storage_persist("event", "conflict");
+                return Err(e);
+            }
             self.metrics.record_storage_persist("event", "error");
             return Err(map_infra_error(
                 e,

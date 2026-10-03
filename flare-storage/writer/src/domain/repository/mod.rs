@@ -19,7 +19,7 @@ mod wal_cleanup_repository;
 
 pub use ack_publisher::AckPublisher;
 pub use archive_store_repository::ArchiveStoreRepository;
-pub use event_stream_repository::EventStreamRepository;
+pub use event_stream_repository::{EventStreamRepository, StoredEventMatch};
 pub use hot_cache_repository::HotCacheRepository;
 pub use message_idempotency_repository::{
     MessageIdempotencyRepository, scoped_client_idempotency_key,

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, instrument, warn};
 
 use crate::config::StorageWriterConfig;
-use crate::domain::repository::EventStreamRepository;
+use crate::domain::repository::{EventStreamRepository, StoredEventMatch};
 
 fn encode_payload_bytes(payload: &Payload) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -53,8 +53,8 @@ fn db_error(operation: &str, err: sqlx::Error) -> FlareError {
 ///   每次从 MQ 解出再编码，字节可能不同，重投会被当成冲突，重试几次后进 DLQ。内容一律按「解码后相同」
 ///   比较；字节哈希同样受编码顺序影响，不能当内容指纹。
 /// - 升级窗口：`915b5c2` 之前的 Writer 以领域枚举的判别值落类型号（反应落成 11 等），同一事件由新旧
-///   Writer 各处理一次时类型号不同、载荷相同。操作事件平时在应用前按键查重（`event_exists`）就跳过了，
-///   两次投递同时处理（如滚动升级时新旧实例并存）才会走到这里。只认这一种旧编码
+///   Writer 各处理一次时类型号不同、载荷相同。操作事件在应用前按同一口径判重（`match_stored_event`），
+///   两次投递同时处理（如滚动升级时新旧实例并存）才会在写入时走到这里。只认这一种旧编码
 ///   （[`EventStreamInsertRow::legacy_event_type`]），别的类型不一致仍是冲突。已有的旧类型号不在这里
 ///   纠正（存量数据另行处理）。
 /// - 消息事件：服务端消息 ID 全局唯一，同一 `server_id`、`client_msg_id`、发送者、会话与序号且内容解码后
@@ -133,6 +133,17 @@ fn same_message(
         && existing.conversation_seq == new.conversation_seq
         && existing.message_type == new.message_type
         && existing.content == new.content
+}
+
+/// 同一位置上的另一个事件：重试不会改变已有行，按不可重试的冲突（`HttpConflict`）报错。
+fn event_stream_conflict(row: &EventStreamInsertRow, existing_event_type: i32) -> FlareError {
+    flare_server_core::flare_err!(
+        ErrorCode::HttpConflict,
+        format!(
+            "event stream conflict tenant_id={} conversation_id={} seq={} existing_type={} new_type={}",
+            row.tenant_id, row.conversation_id, row.seq, existing_event_type, row.event_type
+        )
+    )
 }
 
 /// 按 proto 类型号解 `events.payload`（与 Reader `event_stream_row::decode_payload_oneof` 同一张表）。
@@ -256,7 +267,11 @@ impl PostgresEventStreamStore {
         Ok(Some(Self::new(pool)))
     }
 
-    async fn verify_conflicting_event(&self, row: &EventStreamInsertRow) -> Result<()> {
+    /// 同一 `(tenant_id, conversation_id, seq)` 上已有行的类型号与载荷。
+    async fn load_existing_event(
+        &self,
+        row: &EventStreamInsertRow,
+    ) -> Result<Option<(i32, Vec<u8>)>> {
         let existing = sqlx::query(
             r#"
             SELECT event_type, payload FROM events
@@ -271,44 +286,58 @@ impl PostgresEventStreamStore {
         .await
         .map_err(|err| db_error("load existing event stream row", err))?;
 
-        if let Some(existing) = existing {
-            let existing_event_type: i32 = existing
-                .try_get("event_type")
-                .map_err(|err| db_error("decode event_type from event stream row", err))?;
-            let existing_payload: Option<Vec<u8>> = existing
-                .try_get("payload")
-                .map_err(|err| db_error("decode payload from event stream row", err))?;
-            let existing_payload = existing_payload.unwrap_or_default();
-            match match_existing_event(existing_event_type, &existing_payload, row, true) {
-                ExistingEvent::Identical => {}
-                ExistingEvent::SameContent => debug!(
-                    tenant_id = %row.tenant_id,
-                    conversation_id = %row.conversation_id,
-                    seq = row.seq,
-                    "event stream redelivery with re-encoded payload; keeping the existing row"
-                ),
-                verdict @ (ExistingEvent::LegacyTypeTag | ExistingEvent::SameMessage) => warn!(
-                    tenant_id = %row.tenant_id,
-                    conversation_id = %row.conversation_id,
-                    seq = row.seq,
-                    existing_type = existing_event_type,
-                    new_type = row.event_type,
-                    ?verdict,
-                    "event stream redelivery differs from the existing row; accepted as a duplicate, existing row kept"
-                ),
-                ExistingEvent::Conflict => {
-                    return Err(flare_server_core::error::FlareError::system(format!(
-                        "event stream conflict tenant_id={} conversation_id={} seq={} existing_type={} new_type={}",
-                        row.tenant_id,
-                        row.conversation_id,
-                        row.seq,
-                        existing_event_type,
-                        row.event_type
-                    )));
-                }
-            }
-        }
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        let existing_event_type: i32 = existing
+            .try_get("event_type")
+            .map_err(|err| db_error("decode event_type from event stream row", err))?;
+        let existing_payload: Option<Vec<u8>> = existing
+            .try_get("payload")
+            .map_err(|err| db_error("decode payload from event stream row", err))?;
+        Ok(Some((
+            existing_event_type,
+            existing_payload.unwrap_or_default(),
+        )))
+    }
 
+    /// 已有行与本次的行比较，按重复接受的几种情况记日志；冲突时返回 [`ExistingEvent::Conflict`]，由调用方报错。
+    fn classify_existing_event(
+        row: &EventStreamInsertRow,
+        existing_event_type: i32,
+        existing_payload: &[u8],
+    ) -> ExistingEvent {
+        let verdict = match_existing_event(existing_event_type, existing_payload, row, true);
+        match verdict {
+            ExistingEvent::Identical => {}
+            ExistingEvent::SameContent => debug!(
+                tenant_id = %row.tenant_id,
+                conversation_id = %row.conversation_id,
+                seq = row.seq,
+                "event stream redelivery with re-encoded payload; keeping the existing row"
+            ),
+            ExistingEvent::LegacyTypeTag | ExistingEvent::SameMessage => warn!(
+                tenant_id = %row.tenant_id,
+                conversation_id = %row.conversation_id,
+                seq = row.seq,
+                existing_type = existing_event_type,
+                new_type = row.event_type,
+                ?verdict,
+                "event stream redelivery differs from the existing row; accepted as a duplicate, existing row kept"
+            ),
+            // 冲突由调用方报错并记日志。
+            ExistingEvent::Conflict => {}
+        }
+        verdict
+    }
+
+    async fn verify_conflicting_event(&self, row: &EventStreamInsertRow) -> Result<()> {
+        if let Some((existing_event_type, existing_payload)) = self.load_existing_event(row).await?
+            && Self::classify_existing_event(row, existing_event_type, &existing_payload)
+                == ExistingEvent::Conflict
+        {
+            return Err(event_stream_conflict(row, existing_event_type));
+        }
         Ok(())
     }
 
@@ -439,29 +468,29 @@ impl EventStreamRepository for PostgresEventStreamStore {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(tenant_id, conversation_id, seq))]
-    async fn event_exists(
+    #[instrument(skip(self, event), fields(tenant_id = %event.tenant_id, conversation_id = %event.conversation_id, seq = %event.seq))]
+    async fn match_stored_event(
         &self,
         ctx: &Ctx,
-        tenant_id: &str,
-        conversation_id: &str,
-        seq: i64,
-    ) -> Result<bool> {
+        event: &crate::domain::model::Event,
+    ) -> Result<StoredEventMatch> {
         let _ = ctx; // 上下文用于日志追踪
-        let row = sqlx::query(
-            r#"
-            SELECT 1 FROM events
-            WHERE tenant_id = $1 AND conversation_id = $2 AND seq = $3
-            LIMIT 1
-            "#,
+        // 不落事件流的事件（没有会话 ID）无从判重，与写入侧一致。
+        let Some(row) = event_to_insert_row(event)? else {
+            return Ok(StoredEventMatch::Absent);
+        };
+        let Some((existing_event_type, existing_payload)) = self.load_existing_event(&row).await?
+        else {
+            return Ok(StoredEventMatch::Absent);
+        };
+        Ok(
+            match Self::classify_existing_event(&row, existing_event_type, &existing_payload) {
+                ExistingEvent::Conflict => StoredEventMatch::Conflict {
+                    existing_event_type,
+                },
+                _ => StoredEventMatch::Duplicate,
+            },
         )
-        .bind(tenant_id)
-        .bind(conversation_id)
-        .bind(seq)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| db_error("check event stream existence", err))?;
-        Ok(row.is_some())
     }
 }
 

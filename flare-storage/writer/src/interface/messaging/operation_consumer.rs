@@ -15,11 +15,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use flare_im_contracts::context_from_mq_metadata;
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
+use flare_server_core::error::FlareError;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
 
 use crate::application::commands::ProcessEventCommand;
 use crate::application::handlers::MessageOperationCommandHandler;
+use crate::application::handlers::operation_handler::is_operation_conflict;
 use crate::convert::{enrich_operation_event_from_ctx, event_from_proto};
 
 /// 操作事件消费者处理器
@@ -154,10 +156,7 @@ impl MessageHandler for MessageEventsHandler {
                     offset = message.context.offset,
                     "Failed to process MqEnvelope"
                 );
-                Err(ConsumerError::Handler(format!(
-                    "MessageOperationCommandHandler error: {}",
-                    e
-                )))
+                Err(operation_failure(e))
             }
         }
     }
@@ -165,6 +164,15 @@ impl MessageHandler for MessageEventsHandler {
     /// 获取处理器名称
     fn name(&self) -> &str {
         "storage-message-events-handler"
+    }
+}
+
+/// 处理失败的去向：与同一 seq 上另一个事件的冲突重投也不会变，直接进死信；其余按可重试失败交给重投。
+fn operation_failure(error: FlareError) -> ConsumerError {
+    if is_operation_conflict(&error) {
+        ConsumerError::DeadLetter(format!("operation event conflict: {error}"))
+    } else {
+        ConsumerError::Handler(format!("MessageOperationCommandHandler error: {error}"))
     }
 }
 
@@ -201,5 +209,30 @@ impl MessageEventsConsumerFactory {
     /// - `&'static str`: 消费者组名称
     pub fn consumer_group() -> &'static str {
         flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_server_core::error::ErrorCode;
+    use flare_server_core::flare_err;
+
+    /// 冲突直接进死信（W13-R1）；其余失败仍走重投。
+    #[test]
+    fn conflicts_go_straight_to_the_dead_letter_queue_and_other_failures_are_retried() {
+        let conflict = operation_failure(flare_err!(
+            ErrorCode::HttpConflict,
+            "operation event conflict tenant_id=t conversation_id=c seq=1 existing_type=8"
+        ));
+        assert!(
+            matches!(conflict, ConsumerError::DeadLetter(_)),
+            "{conflict}"
+        );
+        assert!(conflict.should_dead_letter());
+
+        let database = operation_failure(flare_err!(ErrorCode::DatabaseError, "pool timed out"));
+        assert!(matches!(database, ConsumerError::Handler(_)), "{database}");
+        assert!(database.is_retryable());
     }
 }

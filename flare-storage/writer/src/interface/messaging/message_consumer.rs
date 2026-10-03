@@ -423,14 +423,12 @@ mod tests {
             Ok(())
         }
 
-        async fn event_exists(
+        async fn match_stored_event(
             &self,
             _ctx: &Ctx,
-            _tenant_id: &str,
-            _conversation_id: &str,
-            _seq: i64,
-        ) -> FlareResult<bool> {
-            Ok(false)
+            _event: &crate::domain::model::Event,
+        ) -> FlareResult<crate::domain::repository::StoredEventMatch> {
+            Ok(crate::domain::repository::StoredEventMatch::Absent)
         }
     }
 
