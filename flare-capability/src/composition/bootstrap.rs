@@ -21,7 +21,7 @@ impl ApplicationBootstrap {
         let _tracing =
             flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
-        let config = capability_config_from_env(app_config);
+        let config = capability_config_from_env(app_config)?;
         info!(
             config_file = ?config.config_file,
             runtime_config_file = ?config.runtime_config_file,
@@ -184,19 +184,43 @@ fn default_config_center(explicit: Option<String>, static_registry: bool) -> Opt
     }
 }
 
+/// Capability 的 PostgreSQL 连接串：`DATABASE_URL`（非空）优先，其次是配置档里的 postgres 档
+/// （`[services.capability].postgres`，没有则 `media`）。两者都没有时报错、服务不启动：以前回落到
+/// 内置的带口令开发库连接串，部署漏配时会悄悄连向一个带默认口令的库（与「不带默认库口令」的
+/// 决定相悖）。错误里不带任何连接串。
+fn resolve_database_url(
+    env_database_url: Option<String>,
+    profile_url: Option<&str>,
+) -> Result<String> {
+    env_database_url
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            profile_url
+                .filter(|url| !url.trim().is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::ConfigurationError,
+                "flare-capability needs a PostgreSQL connection: set DATABASE_URL, or a postgres profile for the capability service ([services.capability].postgres, or [postgres.media])",
+            )
+            .build_error()
+        })
+}
+
 fn capability_config_from_env(
     app_config: &flare_im_service_kit::FlareAppConfig,
-) -> CapabilityServiceConfig {
+) -> Result<CapabilityServiceConfig> {
     let cap_service = app_config.capability_service();
     let postgres_profile = cap_service
         .postgres
         .as_deref()
         .and_then(|name| app_config.postgres_profile(name))
         .or_else(|| app_config.postgres_profile("media"));
-    let database_url = std::env::var("DATABASE_URL")
-        .ok()
-        .or_else(|| postgres_profile.map(|p| p.url.clone()))
-        .or_else(|| Some("postgresql://flare:flare123@localhost:25432/flare2".to_string()));
+    let database_url = Some(resolve_database_url(
+        std::env::var("DATABASE_URL").ok(),
+        postgres_profile.map(|p| p.url.as_str()),
+    )?);
     let postgres_max_connections = std::env::var("CAPABILITY_POSTGRES_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -246,7 +270,7 @@ fn capability_config_from_env(
         .map(std::path::PathBuf::from)
         .or_else(|| Some(std::path::PathBuf::from("config/services/capability.toml")));
 
-    CapabilityServiceConfig {
+    Ok(CapabilityServiceConfig {
         config_file,
         runtime_config_file,
         database_url,
@@ -259,7 +283,7 @@ fn capability_config_from_env(
         tenant_id,
         execution_mode: ExecutionMode::Sequential,
         refresh_interval_secs: 60,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -276,6 +300,49 @@ mod config_center_tests {
         assert_eq!(
             default_config_center(None, false).as_deref(),
             Some("consul://localhost:28500")
+        );
+    }
+}
+
+#[cfg(test)]
+mod database_url_tests {
+    use super::resolve_database_url;
+
+    const ENV_URL: &str = "postgres://w14h-env@db:5432/core";
+    const PROFILE_URL: &str = "postgres://w14h-profile@db:5432/core";
+
+    /// 既没有 `DATABASE_URL` 也没有 postgres 档（或都为空）时报配置错误，不回落到内置的带口令
+    /// 连接串；错误里不带任何连接串。
+    #[test]
+    fn a_missing_database_url_fails_closed() {
+        for (env, profile) in [
+            (None, None),
+            (Some(String::new()), None),
+            (Some("  ".to_string()), Some("")),
+        ] {
+            let error = resolve_database_url(env.clone(), profile).unwrap_err();
+            let printed = format!("{error} {error:?}");
+            assert!(printed.contains("DATABASE_URL"), "{printed}");
+            assert!(!printed.contains("postgres://"), "{printed}");
+            assert!(!printed.contains("postgresql://"), "{printed}");
+            assert!(!printed.contains("flare123"), "{printed}");
+        }
+    }
+
+    /// 显式给出的连接串照用：`DATABASE_URL` 优先于配置档，空的 `DATABASE_URL` 不遮住配置档。
+    #[test]
+    fn an_explicit_database_url_is_used() {
+        assert_eq!(
+            resolve_database_url(Some(ENV_URL.into()), Some(PROFILE_URL)).unwrap(),
+            ENV_URL
+        );
+        assert_eq!(
+            resolve_database_url(None, Some(PROFILE_URL)).unwrap(),
+            PROFILE_URL
+        );
+        assert_eq!(
+            resolve_database_url(Some(String::new()), Some(PROFILE_URL)).unwrap(),
+            PROFILE_URL
         );
     }
 }
