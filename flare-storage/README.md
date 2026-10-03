@@ -77,16 +77,24 @@ Common Writer environment variables:
 
 Common Reader environment variables:
 
-- `STORAGE_READER_REDIS_URL`
-- `STORAGE_READER_POSTGRES_URL`
+- `STORAGE_REDIS_URL`
+- `STORAGE_POSTGRES_URL` (falls back to `POSTGRES_URL`)
 - `STORAGE_READER_DEFAULT_RANGE_SECONDS`
 - `STORAGE_READER_MAX_PAGE_SIZE`
+
+Both processes share one Redis connection per process, bounded by:
+
+- `STORAGE_REDIS_CONNECT_TIMEOUT_MS`: each connection attempt, TCP plus handshake (default 2000). After a failed connect the process does not try again for this long and fails fast instead.
+- `STORAGE_REDIS_RESPONSE_TIMEOUT_MS`: each command or pipeline (default 3000).
+- `STORAGE_REDIS_CONNECT_RETRIES`: retries after a failed connection attempt, 0 to 5 (default 1, about 1 to 2 s apart).
+
+With the defaults an unreachable Redis fails a call within about 6 s. The Writer only logs a failed hot-cache write (WARN, `storage_writer_persist_total{path="hot_cache",result="error"}`) and still acknowledges the durable write; the Reader falls back to PostgreSQL. A value outside its range stops the process at startup.
 
 The actual configuration comes primarily from `config/services/*.toml` and `FlareAppConfig`; environment variables are used for deployment overrides.
 
 ## PostgreSQL / TimescaleDB
 
-Database initialization uses `deploy/init.sql` as the sole entry point; the DDL is not duplicated in the storage module README, to avoid schema drift.
+The authoritative schema history is `migrations/*.sql`, applied and checksum-verified by `flare-migrate` (`make db-migrate`; see `tools/flare-migrate/README.md`). `deploy/init.sql` is only the destructive development snapshot of the same schema (`make dev-reset`), never an upgrade path for an existing database. The DDL is not duplicated in this README, to avoid schema drift.
 
 Current core conventions:
 
@@ -97,7 +105,7 @@ Current core conventions:
 - Sync queries preferentially use `(tenant_id, conversation_id, seq)`.
 - Management-side retrieval preferentially uses a composite index of tenant + dimension + `timestamp DESC`.
 
-For the complete fields, indexes, compression policies, and triggers, see `deploy/init.sql` and `deploy/TIMESCALEDB_GUIDE.md`.
+For the complete fields, indexes, compression policies, and triggers, see `migrations/` (or the snapshot in `deploy/init.sql`) and `deploy/TIMESCALEDB_GUIDE.md`.
 
 ## Verification
 

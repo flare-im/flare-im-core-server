@@ -200,6 +200,44 @@ class PostgresMigrationTests(unittest.TestCase):
             with self.connect(name) as db:
                 self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE seq=7;"), "1")
 
+    def test_0009_after_an_online_concurrent_index_prebuild(self):
+        # The large-table procedure in docs/06-testing-performance-and-operations.md: add the two
+        # nullable columns and build the unique index CONCURRENTLY before the window, check that it is
+        # valid, then run 0009, whose IF NOT EXISTS steps find both and leave the ledger checksum alone.
+        columns = ("ALTER TABLE message_operation_history ADD COLUMN IF NOT EXISTS conversation_id TEXT, "
+                   "ADD COLUMN IF NOT EXISTS seq BIGINT;")
+        index = ("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_message_operation_history_event_identity "
+                 "ON message_operation_history(tenant_id, conversation_id, seq, message_id) WHERE seq IS NOT NULL;")
+        valid = ("SELECT indisvalid FROM pg_index "
+                 "WHERE indexrelid='public.idx_message_operation_history_event_identity'::regclass;")
+        clash = ("INSERT INTO message_operation_history(tenant_id,message_id,operation_type,conversation_id,seq) "
+                 "VALUES ('retained','m1','EVENT_REACTION','c1',7);")
+        with self.fixture() as name:
+            with self.connect(name) as db:
+                self.ledgered_0008(db)
+                db.query(columns)
+                # Stand-in for an interrupted build: two rows with one identity make it fail midway.
+                db.query(clash + clash)
+            with self.connect(name) as db:
+                with self.assertRaises(migrate.MigrationError):
+                    db.query(index)
+            with self.connect(name) as db:
+                # A failed concurrent build leaves an INVALID index that IF NOT EXISTS would skip; the
+                # pre-check refuses that shape before executing anything.
+                self.assertEqual(db.query(valid), "f")
+                with self.assertRaisesRegex(migrate.MigrationError, "schema mismatch"):
+                    self.run_tool(db)
+            with self.connect(name) as db:
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 8)
+                db.query("DELETE FROM message_operation_history WHERE seq IS NOT NULL;")
+                db.query("DROP INDEX CONCURRENTLY public.idx_message_operation_history_event_identity;")
+                db.query(index)
+                self.assertEqual(db.query(valid), "t")
+                self.run_tool(db)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 9)
+                actual = migrate.snapshot(db)
+                migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
+
     def test_unledgered_0008_shape_is_admitted_and_upgraded(self):
         with self.fixture() as name, self.connect(name) as db:
             db.query("BEGIN;")

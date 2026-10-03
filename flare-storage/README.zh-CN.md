@@ -77,16 +77,24 @@ Writer 常用环境变量：
 
 Reader 常用环境变量：
 
-- `STORAGE_READER_REDIS_URL`
-- `STORAGE_READER_POSTGRES_URL`
+- `STORAGE_REDIS_URL`
+- `STORAGE_POSTGRES_URL`（未设时取 `POSTGRES_URL`）
 - `STORAGE_READER_DEFAULT_RANGE_SECONDS`
 - `STORAGE_READER_MAX_PAGE_SIZE`
+
+两个进程各自共享一条 Redis 连接，上限如下：
+
+- `STORAGE_REDIS_CONNECT_TIMEOUT_MS`：每次建连尝试（TCP 加握手）的上限，默认 2000。建连失败后这段时间内不再发起连接，直接失败。
+- `STORAGE_REDIS_RESPONSE_TIMEOUT_MS`：每条命令或流水线等待应答的上限，默认 3000。
+- `STORAGE_REDIS_CONNECT_RETRIES`：建连失败后的重试次数，0 到 5，默认 1（两次尝试间隔约 1 到 2 s）。
+
+按默认值，Redis 不可达时一次调用约 6 s 内失败。Writer 对写热缓存失败只记 WARN 与 `storage_writer_persist_total{path="hot_cache",result="error"}`，照常确认已持久的写入；Reader 回落到 PostgreSQL。取值超出范围时进程启动即失败。
 
 实际配置优先来自 `config/services/*.toml` 和 `FlareAppConfig`，环境变量用于部署覆盖。
 
 ## PostgreSQL / TimescaleDB
 
-数据库初始化以 `deploy/init.sql` 为唯一入口，不在 storage 模块 README 中复制 DDL，避免 schema 漂移。
+权威的 schema 历史是 `migrations/*.sql`，由 `flare-migrate` 执行并校验 checksum（`make db-migrate`，见 `tools/flare-migrate/README.md`）。`deploy/init.sql` 只是同一 schema 的破坏性开发快照（`make dev-reset`），不能用来升级已有的库。本 README 不复制 DDL，避免 schema 漂移。
 
 当前核心约定：
 
@@ -97,7 +105,7 @@ Reader 常用环境变量：
 - 同步查询优先使用 `(tenant_id, conversation_id, seq)`。
 - 管理端检索优先使用租户 + 维度 + `timestamp DESC` 组合索引。
 
-完整字段、索引、压缩策略和触发器见 `deploy/init.sql` 与 `deploy/TIMESCALEDB_GUIDE.md`。
+完整字段、索引、压缩策略和触发器见 `migrations/`（或 `deploy/init.sql` 中的快照）与 `deploy/TIMESCALEDB_GUIDE.md`。
 
 ## 验证
 

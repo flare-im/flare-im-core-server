@@ -465,6 +465,8 @@ COMMENT ON COLUMN message_operation_history.seq IS
     '操作事件的会话 seq；迁移 0009 之前的行为 NULL';
 CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id);
 -- 一行的身份是（租户，会话，seq，消息）：Writer 重投时以 ON CONFLICT DO NOTHING 跳过（迁移 0009）。
+-- 迁移 0009 建这个索引不带 CONCURRENTLY：持 SHARE 锁扫全表、挡住写入直到整批迁移提交；历史表大时先在线预建，
+-- 做法见 docs/06-testing-performance-and-operations.md。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_operation_history_event_identity
     ON message_operation_history(tenant_id, conversation_id, seq, message_id)
     WHERE seq IS NOT NULL;

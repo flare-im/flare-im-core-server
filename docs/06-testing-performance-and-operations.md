@@ -449,6 +449,42 @@ USING (
 WHERE h.id = d.id AND d.n > 1;
 ```
 
+这两步按 `operation_data` 逐字节分组。`operation_data` 是 `{"event_base64": …}`，即 Writer 每次投递时把事件用
+prost 重新编码后的 base64；事件及其载荷里的 map 字段（如 `attributes`、`extensions`）每次编码的条目顺序可能
+不同，同一事件的两次投递只差 map 的顺序时字节不同，不会被分到一组，会留下（不会误删不同的事件）。留下的只是多出的
+操作历史行，不影响事件流（`events`）与反应、置顶等业务表。要找出这类重复只能先解码再比较内容，SQL 做不到，这里不提供。
+
+迁移 0009 的唯一索引 `idx_message_operation_history_event_identity` 不带 `CONCURRENTLY`（迁移工具不允许，建索引与账本
+同一事务提交，见 `tools/flare-migrate/README.md`）。普通 `CREATE INDEX` 持 `SHARE` 锁并扫描整张
+`message_operation_history`（部分索引同样要扫完全表），锁一直持有到整批迁移提交：这段时间里对该表的写入（Writer 记
+操作历史）全部等待，迁移工具的 `lock_timeout` 只管拿锁，扫描本身受 10 分钟的 `statement_timeout` 约束。历史表大时，
+先在维护窗口之前手工预建，再照常执行迁移：
+
+```sql
+-- 1. 加两列：可空、无默认值，只改目录不重写表；ACCESS EXCLUSIVE 锁只持有片刻（设 lock_timeout，拿不到就稍后重试）。
+SET lock_timeout = '5s';
+ALTER TABLE message_operation_history
+    ADD COLUMN IF NOT EXISTS conversation_id TEXT,
+    ADD COLUMN IF NOT EXISTS seq BIGINT;
+
+-- 2. 在线建索引：不能放在事务块里；只持 SHARE UPDATE EXCLUSIVE 锁，不挡写入，耗时约为普通建索引的两倍。
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_message_operation_history_event_identity
+    ON message_operation_history(tenant_id, conversation_id, seq, message_id)
+    WHERE seq IS NOT NULL;
+
+-- 3. 确认索引有效：必须是 t。
+SELECT indisvalid FROM pg_index
+WHERE indexrelid = 'public.idx_message_operation_history_event_identity'::regclass;
+```
+
+第 3 步得到 `f`（建索引被取消或中途失败，留下了无效索引）时，先 `DROP INDEX CONCURRENTLY
+public.idx_message_operation_history_event_identity;` 再重做第 2 步；无效索引在时迁移工具的结构预检按「schema mismatch」
+拒绝执行。三步完成后执行迁移：0009 的 `ADD COLUMN IF NOT EXISTS` 与 `CREATE UNIQUE INDEX IF NOT EXISTS` 发现两列与
+索引都在，只短暂拿锁、不再扫表，`COMMENT` 照常写入，账本记 0009 的原 checksum。0009 已经发布，文件内容不能为此改动
+（checksum 校验的是文件的全部字节）。旧 Writer 不写这两列，预建之后照常运行。这一流程在真实 TimescaleDB 上由
+`tools/flare-migrate/test_postgres.py` 的 `test_0009_after_an_online_concurrent_index_prebuild` 覆盖（含无效索引被拒、
+删除重建后升级成功）。
+
 ### Kafka 后端的消费失败
 
 Kafka 不是单机默认后端（默认 `nats`）。各消费者处理失败时的处置不同：
