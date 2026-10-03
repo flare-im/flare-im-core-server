@@ -222,7 +222,9 @@ handles it, and announces the change with a PostgreSQL `NOTIFY` on
 `flare_hook_config_changed`: every other instance sharing the database reloads the same
 tenant (everything, for a global row) without waiting for the periodic refresh. A
 listener that reconnects reloads everything once to cover notifications it missed; the
-periodic refresh remains the fallback. Each tenant reload logs the tenant and its hook
+periodic refresh remains the fallback. The listener uses a PostgreSQL connection of its
+own, outside the repository pool (one more connection per instance), and stops with the
+process. Each tenant reload logs the tenant and its hook
 count at INFO. A process started with
 `TENANT_ID` keeps the single-tenant behaviour (no name reservation) and loads, as
 global configuration:
@@ -393,7 +395,12 @@ Supports three transport methods:
    old `X-Hook-Signature` is gone. The secret is write-only: `hook_config.create`, `get`,
    `list` and `update` never return it (`transport.metadata["signing_secret_configured"]`
    says whether one is set), an `update` with an empty secret keeps the stored one, and
-   neither logs nor audit records carry it. A context without a tenant is not delivered.
+   neither logs nor audit records carry it; an `update` with an empty secret and
+   `transport.metadata["clear_signing_secret"] = "true"` removes it (unsigned delivery).
+   Header values, like gRPC `metadata` values, are read back only as their keys with the
+   value `<redacted>`; on `update` an empty or `<redacted>` value keeps the stored one.
+   `secret = ""` in the file or config center is rejected at load; omit `secret` to send
+   unsigned. A context without a tenant is not delivered.
    The gRPC transport forwards the caller's signed context (`x-flare-ctx`) and does not
    call without one.
 

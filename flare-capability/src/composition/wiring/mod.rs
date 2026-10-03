@@ -23,8 +23,9 @@ pub use capability_extension::init_capability_extension_stack;
 
 /// 构建完整 [`ApplicationContext`]（配置 → Hook → Capability）。
 pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<ApplicationContext> {
-    let sources = config_sources::prepare_config_sources(&config).await?;
+    let mut sources = config_sources::prepare_config_sources(&config).await?;
     let hook = hook_runtime::build_hook_runtime(&sources);
+    let hook_config_listener = sources.listener.take();
 
     let plugin_routes = Arc::new(PluginRouteBook::new());
 
@@ -88,5 +89,6 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         capability_runtime,
         tenant_projection,
         capability_admin,
+        hook_config_listener,
     })
 }

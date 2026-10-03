@@ -73,9 +73,21 @@ impl ApplicationBootstrap {
         let extension_router = context.extension_router;
         let tenant_projection = context.tenant_projection;
         let capability_admin = context.capability_admin;
+        let hook_config_listener = context.hook_config_listener;
 
-        let runtime = runtime_plan
-            .service_runtime()
+        let mut runtime = runtime_plan.service_runtime();
+        // Hook 配置失效通知的监听任务（独立 PostgreSQL 连接）随进程停机停掉、关掉连接。
+        if let Some(listener) = hook_config_listener {
+            runtime = runtime.add_spawn_with_shutdown(
+                "flare-capability-hook-config-listener",
+                move |shutdown_rx| async move {
+                    let _ = shutdown_rx.await;
+                    listener.shutdown().await;
+                    Ok(())
+                },
+            );
+        }
+        let runtime = runtime
             .add_spawn_with_shutdown("flare-capability-grpc", move |shutdown_rx| async move {
                 use flare_server_core::middleware::ContextLayer;
 

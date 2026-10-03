@@ -18,7 +18,7 @@ pub mod snapshot;
 pub mod watcher;
 
 pub use capability_runtime::CapabilityRuntimeConfig;
-pub use invalidation::{HOOK_CONFIG_CHANNEL, HookConfigInvalidation};
+pub use invalidation::{HOOK_CONFIG_CHANNEL, HookConfigInvalidation, HookConfigListener};
 pub use loader::{
     ConfigCenterLoader, ConfigLoader, ConfigLoaderItem, ConfigMerger, ConfigValidator,
     DatabaseConfigLoader, FileConfigLoader, LoadedHookConfig,

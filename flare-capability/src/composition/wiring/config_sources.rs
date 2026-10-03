@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::infrastructure::config::loader::{
     ConfigCenterLoader, ConfigLoaderItem, DatabaseConfigLoader, FileConfigLoader,
 };
-use crate::infrastructure::config::{ConfigWatcher, HookConfigInvalidation};
+use crate::infrastructure::config::{ConfigWatcher, HookConfigInvalidation, HookConfigListener};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 
 use crate::composition::process_config::CapabilityServiceConfig;
@@ -24,8 +24,10 @@ pub(crate) type HookConfigRepository = Arc<PostgresHookConfigRepository>;
 pub(crate) struct ConfigSourcesReady {
     pub watcher: Arc<ConfigWatcher>,
     pub hook_config_repository: Option<HookConfigRepository>,
-    /// 有库时：Administer 写入后通知其余实例，并已启动本实例的监听任务。
+    /// 有库时：Administer 写入后通知其余实例。
     pub invalidation: Option<Arc<HookConfigInvalidation>>,
+    /// 有库时：本实例已启动的监听任务（独立连接），须保存到停机时停掉。
+    pub listener: Option<HookConfigListener>,
 }
 
 pub(crate) fn log_capability_db_target(database_url: &str) {
@@ -149,16 +151,21 @@ pub(crate) async fn prepare_config_sources(
         .await
         .context("Failed to start config watcher")?;
 
-    // 多实例：其余实例经 Administer 写入的 Hook 配置不必等定时刷新。
-    let invalidation = hook_config_repository.as_ref().map(|repository| {
-        let invalidation = Arc::new(HookConfigInvalidation::new(repository.connection_pool()));
-        let _ = invalidation.spawn_listener(Arc::clone(&watcher));
-        invalidation
-    });
+    // 多实例：其余实例经 Administer 写入的 Hook 配置不必等定时刷新。监听用独立连接，不占
+    // 仓储连接池；句柄交给进程生命周期，停机时停掉。
+    let (invalidation, listener) = match hook_config_repository.as_ref() {
+        Some(repository) => {
+            let invalidation = Arc::new(HookConfigInvalidation::new(repository.connection_pool()));
+            let listener = invalidation.spawn_listener(Arc::clone(&watcher));
+            (Some(invalidation), Some(listener))
+        }
+        None => (None, None),
+    };
 
     Ok(ConfigSourcesReady {
         watcher,
         hook_config_repository,
         invalidation,
+        listener,
     })
 }

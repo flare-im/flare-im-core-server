@@ -217,7 +217,8 @@ Hook 配置支持多租户场景：
 某个配置源加载失败时沿用它上一次加载的结果。Administer 写入后，处理写入的实例立即重载该租户的
 桶，并在 PostgreSQL 频道 `flare_hook_config_changed` 上 `NOTIFY`：共用同一个库的其余实例重载同一
 租户（全局行则全量重载），不必等定时刷新。监听重连后全量重载一次，补上断开期间漏掉的通知；定时
-刷新仍是兜底。每次按租户重载在 INFO 级记录租户与 Hook 条数。设了
+刷新仍是兜底。监听用一条独立的 PostgreSQL 连接，不占仓储连接池（每个实例多一条连接），随进程
+停机关闭。每次按租户重载在 INFO 级记录租户与 Hook 条数。设了
 `TENANT_ID` 的进程保持单租户行为（不保留全局 Hook 的名字），加载下面这些行作为全局配置：
 ```sql
 SELECT * FROM hook_configs
@@ -384,7 +385,10 @@ flare-capability/
    与 Core 的 Webhook 适配器同一契约（`docs/HOOK-PLUGIN-CONTRACT.md` §7），旧的
    `X-Hook-Signature` 已删除。密钥只写不读：`hook_config.create`、`get`、`list`、`update` 都不返回
    它（`transport.metadata["signing_secret_configured"]` 说明是否已设置），`update` 时密钥留空即
-   沿用已存的，日志与审计记录里也没有它。上下文缺租户时不投递。gRPC 传输原样转发调用方的签名
+   沿用已存的，日志与审计记录里也没有它；密钥留空并带 `transport.metadata["clear_signing_secret"] = "true"`
+   的 `update` 清除密钥、回到不签名。自定义头与 gRPC `metadata` 的取值同样只写不读：读回只有键名、
+   值为 `<redacted>`，`update` 时值为空或 `<redacted>` 即沿用已存的。文件或配置中心里
+   `secret = ""` 在加载时报错，不签名就不写 `secret`。上下文缺租户时不投递。gRPC 传输原样转发调用方的签名
    上下文（`x-flare-ctx`），没有签名上下文时不发出调用。
 
 3. **Local Plugin传输**：

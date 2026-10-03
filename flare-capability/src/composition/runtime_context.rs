@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
-use crate::infrastructure::config::CapabilityRuntimeConfig;
+use crate::infrastructure::config::{CapabilityRuntimeConfig, HookConfigListener};
 use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
 use crate::interface::grpc::{
     CapabilityAdminGrpcServer, CapabilityGrpcServer, ExtensionPluginRouter, HookServiceServer,
@@ -35,4 +35,6 @@ pub struct ApplicationContext {
     pub tenant_projection: Option<TenantProjectionGrpcServer<PostgresTenantProjectionRepository>>,
     /// 管理员只读（`CapabilityAdminService`）：租户开关与本地租户投影，只认 admin 令牌。
     pub capability_admin: CapabilityAdminGrpcServer<PostgresTenantProjectionRepository>,
+    /// Hook 配置跨实例失效通知的监听任务（有库时）；进程停机时停掉。
+    pub hook_config_listener: Option<HookConfigListener>,
 }

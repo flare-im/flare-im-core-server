@@ -6,6 +6,11 @@
 //! 只写随机租户与随机名的行，结束时删除。修复前多租户进程只加载 `tenant_id IS NULL` 的行，租户
 //! 登记的 Webhook 一次都不执行（W10-S2 F1）。全局 Hook 的名字为平台保留：租户登记同类型同名的
 //! Hook 被拒，绕过 Administer 写进库的同名租户行也顶替不了全局 Hook。
+//!
+//! 用例中途失败也不留下会拖垮同库其他用例的行（W13-H）：[`RowCleanup`] 在用例结束时（含断言
+//! 失败的 unwind）删掉本次写入的全部行；全局行的 `selector.tenants` 只列本用例的三个租户，进程被
+//! 强杀、守卫没来得及跑时，留下的全局行（端点已随用例关闭）也不会让别的租户的 PreSend 都回
+//! `SERVICE_UNAVAILABLE`。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +42,57 @@ const ENV_DATABASE_URL: &str = "FLARE_TENANT_TEST_DATABASE_URL";
 
 fn suffix() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// 用例写入的行名都形如 `w11h-…-{run}`；守卫被丢弃时（正常结束或断言失败的 unwind）把它们全部
+/// 删掉。`Drop` 里不能 await、测试的运行时里也不能 `block_on`，所以另起一个线程，用自己的运行时
+/// 与连接删，删完再返回。
+struct RowCleanup {
+    url: String,
+    run: String,
+}
+
+impl RowCleanup {
+    fn pattern(run: &str) -> String {
+        format!("w11h-%{run}")
+    }
+}
+
+impl Drop for RowCleanup {
+    fn drop(&mut self) {
+        let url = self.url.clone();
+        let pattern = Self::pattern(&self.run);
+        let outcome = std::thread::spawn(move || -> Result<u64, String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async move {
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let deleted = sqlx::query("DELETE FROM hook_configs WHERE name LIKE $1")
+                    .bind(&pattern)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .rows_affected();
+                pool.close().await;
+                Ok(deleted)
+            })
+        })
+        .join();
+        match outcome {
+            Ok(Ok(deleted)) if deleted > 0 => {
+                eprintln!("RowCleanup: removed {deleted} leftover hook_configs row(s)");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => eprintln!("RowCleanup failed: {error}"),
+            Err(_) => eprintln!("RowCleanup thread panicked"),
+        }
+    }
 }
 
 fn employee(tenant: &str) -> VerifiedControlActor {
@@ -169,18 +225,22 @@ async fn tenant_webhooks_registered_through_administer_run_only_for_their_tenant
     });
     let repository = Arc::new(PostgresHookConfigRepository::new(&url).await.unwrap());
     let run = suffix();
+    let _cleanup = RowCleanup {
+        url: url.clone(),
+        run: run.clone(),
+    };
     let (tenant_a, tenant_b) = (format!("ta{run}"), format!("tb{run}"));
+    let tenant_c = format!("tc{run}");
+    // 全局行只作用于本用例的租户（见模块说明）；对这三个租户而言与不限租户的全局行相同。
+    let test_tenants = vec![tenant_a.clone(), tenant_b.clone(), tenant_c.clone()];
     let receiver = WebhookReceiver::start().await;
 
-    // 全局行：tenant_id IS NULL，对所有租户生效。
+    // 全局行：tenant_id IS NULL，对（选择器列出的）所有租户生效，包括没有登记任何 Hook 的 C。
     let global_name = format!("w11h-global-{run}");
+    let mut global = webhook_hook(&global_name, &receiver.url("/global"));
+    global.selector.tenants = test_tenants.clone();
     repository
-        .save(
-            None,
-            "pre_send",
-            &webhook_hook(&global_name, &receiver.url("/global")),
-            None,
-        )
+        .save(None, "pre_send", &global, None)
         .await
         .unwrap();
 
@@ -269,7 +329,6 @@ async fn tenant_webhooks_registered_through_administer_run_only_for_their_tenant
         .await,
         ["/b", "/global"]
     );
-    let tenant_c = format!("tc{run}");
     assert_eq!(
         trigger(
             &endpoint,
@@ -287,6 +346,7 @@ async fn tenant_webhooks_registered_through_administer_run_only_for_their_tenant
     let off_name = format!("w11h-global-off-{run}");
     let mut off = webhook_hook(&off_name, &receiver.url("/global-off"));
     off.enabled = false;
+    off.selector.tenants = test_tenants.clone();
     repository.save(None, "pre_send", &off, None).await.unwrap();
     for name in [&global_name, &off_name] {
         let status = dispatch_hook_administer(

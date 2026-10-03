@@ -103,6 +103,22 @@ A hook that must observe the *final* draft has to sort after every hook that
 rewrites it — put rewriting hooks in an earlier group, not merely a lower number
 inside the same one.
 
+A hook that is meant to decide (reject a send or a recall) therefore needs
+`group = "validation"` or `"critical"`, or priority 100 or above; with neither, the
+Capability engine only logs its rejection. Profiles that Message Ingest loads as well
+(`config/hooks*.toml`) cannot use `group` — Message Ingest rejects unknown fields — so
+they use priority 100 and above; the shipped examples do, and a test loads every shipped
+profile with both loaders.
+
+When Message Ingest reaches the Capability service's hook engine through one of its
+own hooks (a gRPC transport pointing at the Capability `HookPlugin`), that Ingest-side
+hook must keep `require_success = true`. The Capability engine answers an unreachable
+or timed-out required hook with `UNAVAILABLE` or `DEADLINE_EXCEEDED`; with
+`require_success = false` Message Ingest would treat that as an infrastructure failure
+and let the message through, so every tenant and global hook behind the Capability
+service — moderation, quota, compliance — would be skipped whenever it is down or slow.
+An explicit rejection (`allow=false`) rejects either way.
+
 ## 6. Configuration
 
 Hooks are **not** self-registering: the operator wires them in, unlike capability
@@ -134,7 +150,10 @@ tenants. A write through Administer reloads that tenant's hooks at once on the i
 that handled it, and every other Capability instance sharing the database reloads the
 same tenant (all hooks, for a global row) on a PostgreSQL `NOTIFY` on
 `flare_hook_config_changed`; changes made some other way arrive with the periodic refresh
-(60 s by default), which also covers a missed notification. A Capability process started with
+(60 s by default), which also covers a missed notification. Each instance listens on a
+connection of its own, outside the configuration repository's pool (one more PostgreSQL
+connection per instance; `CAPABILITY_POSTGRES_MAX_CONNECTIONS=1` still leaves the
+repository its connection), reconnects after a drop, and closes it on shutdown. A Capability process started with
 `TENANT_ID` keeps the single-tenant behaviour: it loads the global rows and that
 tenant's rows only, as one configuration, without the name reservation.
 
@@ -155,7 +174,25 @@ has no tenant is not sent.
 A secret registered through Administer is write-only: `hook_config.create`, `get`,
 `list` and `update` return an empty `transport.secret`, and
 `transport.metadata["signing_secret_configured"]` says whether one is set. An `update`
-with an empty secret keeps the stored one; send a new value to rotate it.
+with an empty secret keeps the stored one; send a new value to rotate it. To remove the
+secret and go back to unsigned delivery, send an `update` with an empty secret and
+`transport.metadata["clear_signing_secret"] = "true"`; that key is never in a read-back,
+so writing a read-back configuration back never clears the secret. `"false"` or no key
+leaves the secret alone, any other value is `INVALID_ARGUMENT`, and so is the key set to
+`"true"` together with a non-empty secret.
+
+Custom webhook header values and gRPC `transport.metadata` values (often credentials such
+as `Authorization` or `x-api-key`) are write-only as well: reads return every key with
+the fixed value `<redacted>`. On `update` the map replaces the stored one key by key: an
+empty or `<redacted>` value keeps the stored value of that key (matched exactly, then
+case-insensitively), a new value replaces it, and a key left out is removed; an empty or
+`<redacted>` value for a key that has no stored value is `INVALID_ARGUMENT`. `create`
+rejects `<redacted>` values. Errors name the key, never a value.
+
+A webhook in the hook configuration file or config center with `secret = ""` is rejected
+when the configuration is loaded (the error names the hook; at startup the service does
+not start, on a refresh the previous configuration stays). Omit `secret` for unsigned
+delivery.
 
 Verify the **raw request bytes**, before JSON parsing, and reject timestamps outside
 the allowed clock skew. Example receiver logic (Python standard library):
