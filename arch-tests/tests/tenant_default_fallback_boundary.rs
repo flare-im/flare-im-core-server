@@ -24,11 +24,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "定义显式租户 0 的常量（normalize_tenant_id 的别名目标），不是兜底本身",
     ),
     (
-        "crates/flare-im-hooks/src/hooks/adapters/webhook.rs",
-        1,
-        "Hook 外发 Webhook 的租户，随 Capability Hook/Webhook 条目处理（W10-S2 F2）",
-    ),
-    (
         "crates/flare-im-service-kit/src/gateway_auth.rs",
         1,
         "宽松策略下未绑定租户的连接按部署默认租户 0 查准入（单租户私有化的旧令牌不带租户），严格策略已拒绝；改为一律拒绝属部署级默认租户的取舍（第 36 条），待用户决定",
@@ -47,16 +42,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "flare-capability/src/domain/capability/command_dispatch_service.rs",
         2,
         "Capability 命令调度请求体的租户，随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/infrastructure/adapters/webhook.rs",
-        4,
-        "Capability 自带 Webhook 适配器的租户（W10-S2 F2），随 Capability 条目处理",
-    ),
-    (
-        "flare-capability/src/infrastructure/capability/dispatch/pre_send_guard_bridge.rs",
-        1,
-        "PreSend 守卫的租户：Hook 上下文缺租户时取 draft 元数据再兜底，随 Capability 条目处理",
     ),
     (
         "flare-capability/src/infrastructure/capability/routing/rtc_dispatch_route.rs",

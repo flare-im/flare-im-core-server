@@ -73,6 +73,15 @@ pub(crate) async fn ingest_pre_send(endpoint: &str, ctx: &Ctx, marker: &str) -> 
 
 /// 一条 PreSend Webhook 配置。
 pub(crate) fn webhook_hook(name: &str, endpoint: &str) -> HookConfigItem {
+    signed_webhook_hook(name, endpoint, None)
+}
+
+/// 一条 PreSend Webhook 配置，`secret` 为签名密钥。
+pub(crate) fn signed_webhook_hook(
+    name: &str,
+    endpoint: &str,
+    secret: Option<&str>,
+) -> HookConfigItem {
     HookConfigItem {
         name: name.into(),
         version: None,
@@ -87,7 +96,7 @@ pub(crate) fn webhook_hook(name: &str, endpoint: &str) -> HookConfigItem {
         selector: HookSelectorConfig::default(),
         transport: HookTransportConfig::Webhook {
             endpoint: endpoint.into(),
-            secret: None,
+            secret: secret.map(str::to_string),
             headers: HashMap::new(),
         },
         metadata: HashMap::new(),
@@ -99,9 +108,24 @@ pub(crate) fn webhook_hook(name: &str, endpoint: &str) -> HookConfigItem {
 pub(crate) struct Delivery {
     pub path: String,
     pub body: serde_json::Value,
+    /// 请求头（名字小写），按收到的顺序。
+    pub headers: Vec<(String, String)>,
+    /// 原始请求体字节（签名覆盖的就是它）。
+    pub raw: Vec<u8>,
+    /// 接收端收到时的 Unix 秒。
+    pub received: u64,
 }
 
 impl Delivery {
+    /// 名为 `name`（小写）的所有请求头的值。
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(header, _)| header == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
     pub fn tenant(&self) -> Option<&str> {
         self.body["context"]["tenant_id"].as_str()
     }
@@ -191,6 +215,14 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Delivery> {
     };
     let head = String::from_utf8_lossy(&buffer[..head_end]).to_string();
     let path = head.split_whitespace().nth(1)?.to_string();
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
     let length = head
         .lines()
         .find_map(|line| {
@@ -207,6 +239,17 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Delivery> {
         }
         buffer.extend_from_slice(&chunk[..read]);
     }
-    let body = serde_json::from_slice(&buffer[head_end..]).unwrap_or(serde_json::Value::Null);
-    Some(Delivery { path, body })
+    let raw = buffer[head_end..].to_vec();
+    let body = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    let received = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    Some(Delivery {
+        path,
+        body,
+        headers,
+        raw,
+        received,
+    })
 }
