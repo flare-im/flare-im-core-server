@@ -19,6 +19,7 @@ use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConf
 use crate::infrastructure::config::{ConfigValidator, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 /// 从 gRPC 请求中提取租户 ID。
@@ -350,19 +351,38 @@ impl HookServiceServer {
                             None
                         },
                         load_balance,
-                        metadata: transport.metadata.clone(),
+                        // 读回只给键名与掩码：值为空或等于掩码的键沿用已存的值。
+                        metadata: keep_stored_values(
+                            "metadata",
+                            &transport.metadata,
+                            stored_grpc_metadata(&hook_item.transport),
+                        )
+                        .map_err(Status::invalid_argument)?,
                     }
                 }
                 "webhook" => HookTransportConfig::Webhook {
                     endpoint: transport.endpoint.clone(),
                     // 签名密钥只写不读（读回为空），空串表示沿用已存的密钥：照读回的配置
-                    // 原样写回不会把签名关掉。换密钥就传新的非空值。
-                    secret: if transport.secret.is_empty() {
-                        stored_webhook_secret(&hook_item.transport)
-                    } else {
-                        Some(transport.secret.clone())
+                    // 原样写回不会把签名关掉。换密钥就传新的非空值；回到不签名要显式
+                    // `metadata["clear_signing_secret"] = "true"`（读回从不带这个键）。
+                    secret: match (
+                        transport.secret.is_empty(),
+                        clear_signing_secret_requested(transport)
+                            .map_err(Status::invalid_argument)?,
+                    ) {
+                        (false, false) => Some(transport.secret.clone()),
+                        (true, true) => None,
+                        (true, false) => stored_webhook_secret(&hook_item.transport),
+                        (false, true) => {
+                            return Err(Status::invalid_argument(CLEAR_WITH_NEW_SECRET));
+                        }
                     },
-                    headers: transport.headers.clone(),
+                    headers: keep_stored_values(
+                        "header",
+                        &transport.headers,
+                        stored_webhook_headers(&hook_item.transport),
+                    )
+                    .map_err(Status::invalid_argument)?,
                 },
                 "local" => HookTransportConfig::Local {
                     target: transport.target.clone(),
@@ -898,18 +918,25 @@ fn protobuf_to_hook_config_item(
                     None
                 },
                 load_balance,
-                metadata: transport.metadata.clone(),
+                metadata: reject_read_back_mask("metadata", &transport.metadata)?,
             }
         }
-        "webhook" => HookTransportConfig::Webhook {
-            endpoint: transport.endpoint.clone(),
-            secret: if transport.secret.is_empty() {
-                None
-            } else {
-                Some(transport.secret.clone())
-            },
-            headers: transport.headers.clone(),
-        },
+        "webhook" => {
+            if clear_signing_secret_requested(transport).map_err(invalid_parameter)?
+                && !transport.secret.is_empty()
+            {
+                return Err(invalid_parameter(CLEAR_WITH_NEW_SECRET.to_string()));
+            }
+            HookTransportConfig::Webhook {
+                endpoint: transport.endpoint.clone(),
+                secret: if transport.secret.is_empty() {
+                    None
+                } else {
+                    Some(transport.secret.clone())
+                },
+                headers: reject_read_back_mask("header", &transport.headers)?,
+            }
+        }
         "local" => HookTransportConfig::Local {
             target: transport.target.clone(),
         },
@@ -955,6 +982,20 @@ fn protobuf_to_hook_config_item(
 /// 密钥本身从不读回。
 pub(crate) const WEBHOOK_SECRET_CONFIGURED_KEY: &str = "signing_secret_configured";
 
+/// Webhook 的 `update` 请求里 `transport.metadata` 的这个键为 `"true"` 时清除已存的签名密钥、
+/// 回到不签名（`transport.secret` 须为空）。读回从不带这个键，照读回的配置写回不会清掉密钥。
+pub(crate) const WEBHOOK_CLEAR_SECRET_KEY: &str = "clear_signing_secret";
+
+/// 读回中 Webhook 自定义头与 gRPC metadata 的取值一律换成这个固定掩码（只给键名，与
+/// `HookTransportConfig` 的 `Debug` 脱敏口径一致）。`update` 时值为空或等于它表示沿用已存的值。
+pub(crate) const READ_BACK_VALUE_MASK: &str = "<redacted>";
+
+const CLEAR_WITH_NEW_SECRET: &str = "transport.secret must be empty when metadata clear_signing_secret is \"true\": send a new secret to rotate it, or clear it, not both";
+
+fn invalid_parameter(reason: String) -> flare_server_core::error::FlareError {
+    ErrorBuilder::new(ErrorCode::InvalidParameter, reason).build_error()
+}
+
 /// 已存配置是 Webhook 时它的签名密钥（更新时请求留空即沿用）。
 fn stored_webhook_secret(transport: &HookTransportConfig) -> Option<String> {
     match transport {
@@ -963,6 +1004,99 @@ fn stored_webhook_secret(transport: &HookTransportConfig) -> Option<String> {
         }
         HookTransportConfig::Grpc { .. } | HookTransportConfig::Local { .. } => None,
     }
+}
+
+/// 已存配置是 Webhook 时它的自定义头。
+fn stored_webhook_headers(transport: &HookTransportConfig) -> Option<&HashMap<String, String>> {
+    match transport {
+        HookTransportConfig::Webhook { headers, .. } => Some(headers),
+        HookTransportConfig::Grpc { .. } | HookTransportConfig::Local { .. } => None,
+    }
+}
+
+/// 已存配置是 gRPC 时它的请求 metadata。
+fn stored_grpc_metadata(transport: &HookTransportConfig) -> Option<&HashMap<String, String>> {
+    match transport {
+        HookTransportConfig::Grpc { metadata, .. } => Some(metadata),
+        HookTransportConfig::Webhook { .. } | HookTransportConfig::Local { .. } => None,
+    }
+}
+
+/// Webhook 请求要不要清除签名密钥：`metadata["clear_signing_secret"]` 为 `"true"` 才清，缺省或
+/// `"false"` 不清，其他取值报错（错误里只有键名）。
+fn clear_signing_secret_requested(transport: &HookTransport) -> Result<bool, String> {
+    match transport
+        .metadata
+        .get(WEBHOOK_CLEAR_SECRET_KEY)
+        .map(String::as_str)
+    {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(_) => Err(format!(
+            "metadata {WEBHOOK_CLEAR_SECRET_KEY} must be \"true\" or \"false\""
+        )),
+    }
+}
+
+/// 读回用：只留键名，值一律换成 [`READ_BACK_VALUE_MASK`]。
+fn masked_values(values: &HashMap<String, String>) -> HashMap<String, String> {
+    values
+        .keys()
+        .map(|key| (key.clone(), READ_BACK_VALUE_MASK.to_string()))
+        .collect()
+}
+
+/// `stored` 里与 `key` 同名的值；HTTP 头与 gRPC metadata 的键不区分大小写，先找完全相同的。
+fn stored_value<'a>(stored: Option<&'a HashMap<String, String>>, key: &str) -> Option<&'a String> {
+    let stored = stored?;
+    stored.get(key).or_else(|| {
+        stored
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    })
+}
+
+/// `update`：请求里的头或 metadata 整组替换已存的，但值为空或等于读回掩码的键沿用已存的值
+/// （照读回的配置写回不改任何取值）；这样的键没有已存的值时报错。请求里没有的键被删除。
+/// 错误只带键名，不带任何取值。
+fn keep_stored_values(
+    what: &str,
+    requested: &HashMap<String, String>,
+    stored: Option<&HashMap<String, String>>,
+) -> Result<HashMap<String, String>, String> {
+    requested
+        .iter()
+        .map(|(key, value)| {
+            if !value.is_empty() && value != READ_BACK_VALUE_MASK {
+                return Ok((key.clone(), value.clone()));
+            }
+            stored_value(stored, key)
+                .map(|kept| (key.clone(), kept.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "{what} '{key}' has no stored value to keep: send its value (an empty value or {READ_BACK_VALUE_MASK} keeps the stored one)"
+                    )
+                })
+        })
+        .collect()
+}
+
+/// `create`：没有已存的值可沿用，值为读回掩码的头或 metadata（多半是照读回的配置新建）报错，
+/// 不把掩码当成取值存下。
+fn reject_read_back_mask(
+    what: &str,
+    requested: &HashMap<String, String>,
+) -> FlareResult<HashMap<String, String>> {
+    if let Some(key) = requested
+        .iter()
+        .find_map(|(key, value)| (value == READ_BACK_VALUE_MASK).then_some(key))
+    {
+        return Err(invalid_parameter(format!(
+            "{what} '{key}' carries the read-back mask {READ_BACK_VALUE_MASK}: send its value"
+        )));
+    }
+    Ok(requested.clone())
 }
 
 /// 将内部HookConfigItem类型转换为protobuf类型
@@ -1003,7 +1137,8 @@ fn hook_config_item_to_protobuf(
                 headers: std::collections::HashMap::new(),
                 target: String::new(),
                 timeout_ms: item.timeout_ms as i32,
-                metadata: metadata.clone(),
+                // 请求 metadata 常带凭据（如 `x-api-key`）：只读回键名与掩码。
+                metadata: masked_values(metadata),
             },
             HookTransportConfig::Webhook {
                 endpoint,
@@ -1019,7 +1154,8 @@ fn hook_config_item_to_protobuf(
                 // 签名密钥只写不读：create、get、list、update 的应答都不带它（W11-S1 F5），
                 // 只在 metadata 里说明是否已设置。
                 secret: String::new(),
-                headers: headers.clone(),
+                // 自定义头常带凭据（如 `Authorization`）：只读回键名与掩码。
+                headers: masked_values(headers),
                 target: String::new(),
                 timeout_ms: item.timeout_ms as i32,
                 metadata: std::collections::HashMap::from([(
@@ -1149,6 +1285,188 @@ mod secret_tests {
                     .any(|window| window == SECRET.as_bytes())
             );
         }
+    }
+
+    const HEADER_VALUE: &str = "Bearer w13h-header-never-read-back";
+    const METADATA_VALUE: &str = "w13h-metadata-never-read-back";
+
+    /// 读回的 Webhook 自定义头与 gRPC metadata 只有键名与固定掩码（修复前原样返回取值，
+    /// 例如租户登记的 `Authorization: Bearer …`、`x-api-key`）。
+    #[test]
+    fn header_and_metadata_values_are_read_back_as_names_with_a_mask() {
+        let mut webhook = signed_webhook_hook("wh", "http://127.0.0.1:9/hook", Some(SECRET));
+        if let HookTransportConfig::Webhook { headers, .. } = &mut webhook.transport {
+            headers.insert("Authorization".into(), HEADER_VALUE.into());
+        }
+        let mut grpc = signed_webhook_hook("g", "http://127.0.0.1:9", None);
+        grpc.transport = HookTransportConfig::Grpc {
+            endpoint: Some("http://127.0.0.1:9".into()),
+            service_name: None,
+            registry_type: None,
+            namespace: None,
+            load_balance: None,
+            metadata: HashMap::from([("x-api-key".into(), METADATA_VALUE.into())]),
+        };
+
+        let config = hook_config_item_to_protobuf("7", "tenant-a", "pre_send", &webhook).unwrap();
+        let transport = config.transport.as_ref().unwrap();
+        assert_eq!(
+            transport.headers,
+            HashMap::from([(
+                "Authorization".to_string(),
+                READ_BACK_VALUE_MASK.to_string()
+            )])
+        );
+        let encoded = config.encode_to_vec();
+
+        let config = hook_config_item_to_protobuf("8", "tenant-a", "pre_send", &grpc).unwrap();
+        let transport = config.transport.as_ref().unwrap();
+        assert_eq!(
+            transport.metadata,
+            HashMap::from([("x-api-key".to_string(), READ_BACK_VALUE_MASK.to_string())])
+        );
+        for (bytes, value) in [
+            (encoded, HEADER_VALUE),
+            (config.encode_to_vec(), METADATA_VALUE),
+        ] {
+            assert!(
+                !bytes
+                    .windows(value.len())
+                    .any(|window| window == value.as_bytes()),
+                "a header or metadata value is read back"
+            );
+        }
+    }
+
+    /// update：值为空或等于掩码的键沿用已存的值（照读回写回不改取值），新值替换，请求里没有的
+    /// 键删除；没有已存值可沿用时报错，错误只带键名。
+    #[test]
+    fn masked_or_empty_values_on_update_keep_the_stored_ones() {
+        let stored = HashMap::from([
+            ("Authorization".to_string(), HEADER_VALUE.to_string()),
+            ("x-api-key".to_string(), METADATA_VALUE.to_string()),
+            ("x-dropped".to_string(), "w13h-dropped".to_string()),
+        ]);
+        let requested = HashMap::from([
+            (
+                "Authorization".to_string(),
+                READ_BACK_VALUE_MASK.to_string(),
+            ),
+            // 键名大小写不同也认（HTTP 头与 gRPC metadata 的键不区分大小写）。
+            ("X-API-KEY".to_string(), String::new()),
+            ("x-new".to_string(), "w13h-new".to_string()),
+        ]);
+        let kept = keep_stored_values("header", &requested, Some(&stored)).unwrap();
+        assert_eq!(
+            kept,
+            HashMap::from([
+                ("Authorization".to_string(), HEADER_VALUE.to_string()),
+                ("X-API-KEY".to_string(), METADATA_VALUE.to_string()),
+                ("x-new".to_string(), "w13h-new".to_string()),
+            ])
+        );
+
+        for stored in [None, Some(&stored)] {
+            let error = keep_stored_values(
+                "metadata",
+                &HashMap::from([("x-unknown".to_string(), READ_BACK_VALUE_MASK.to_string())]),
+                stored,
+            )
+            .unwrap_err();
+            assert!(error.contains("x-unknown"), "{error}");
+            assert!(!error.contains("w13h"), "{error}");
+        }
+    }
+
+    fn create_request(transport: HookTransport) -> CreateHookConfigRequest {
+        CreateHookConfigRequest {
+            name: "wh".into(),
+            hook_type: "pre_send".into(),
+            tenant_id: "tenant-a".into(),
+            priority: 900,
+            transport: Some(transport),
+            ..Default::default()
+        }
+    }
+
+    /// create 没有已存值可沿用：掩码值报错（不把掩码当成取值存下）；清除签名密钥与新密钥同时
+    /// 出现报错，清除标志只认 `"true"`/`"false"`。
+    #[test]
+    fn create_rejects_the_mask_and_a_contradictory_clear_flag() {
+        let webhook = |secret: &str, headers: &[(&str, &str)], metadata: &[(&str, &str)]| {
+            create_request(HookTransport {
+                r#type: "webhook".into(),
+                endpoint: "http://127.0.0.1:9/hook".into(),
+                secret: secret.into(),
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                metadata: metadata
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                timeout_ms: 1000,
+                ..Default::default()
+            })
+        };
+        let masked = webhook("", &[("Authorization", READ_BACK_VALUE_MASK)], &[]);
+        let error = protobuf_to_hook_config_item(&masked, None).unwrap_err();
+        assert!(error.to_string().contains("Authorization"), "{error}");
+
+        let grpc = create_request(HookTransport {
+            r#type: "grpc".into(),
+            endpoint: "http://127.0.0.1:9".into(),
+            metadata: HashMap::from([("x-api-key".into(), READ_BACK_VALUE_MASK.into())]),
+            timeout_ms: 1000,
+            ..Default::default()
+        });
+        assert!(protobuf_to_hook_config_item(&grpc, None).is_err());
+
+        let both = webhook(SECRET, &[], &[(WEBHOOK_CLEAR_SECRET_KEY, "true")]);
+        let error = protobuf_to_hook_config_item(&both, None).unwrap_err();
+        assert!(!error.to_string().contains(SECRET), "{error}");
+        let odd = webhook("", &[], &[(WEBHOOK_CLEAR_SECRET_KEY, "yes")]);
+        assert!(protobuf_to_hook_config_item(&odd, None).is_err());
+
+        // 照读回的 metadata（`signing_secret_configured`）新建、清除标志为 "true" 且无密钥：
+        // 都是不签名的 Webhook。
+        for metadata in [
+            [(WEBHOOK_SECRET_CONFIGURED_KEY, "true")],
+            [(WEBHOOK_CLEAR_SECRET_KEY, "true")],
+        ] {
+            let item = protobuf_to_hook_config_item(
+                &webhook("", &[("X-Service", "core")], &metadata),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(
+                item.transport,
+                HookTransportConfig::Webhook { secret: None, ref headers, .. }
+                    if headers.get("X-Service").map(String::as_str) == Some("core")
+            ));
+        }
+    }
+
+    #[test]
+    fn the_clear_flag_is_explicit() {
+        let transport = |value: Option<&str>| HookTransport {
+            r#type: "webhook".into(),
+            metadata: value
+                .map(|value| HashMap::from([(WEBHOOK_CLEAR_SECRET_KEY.into(), value.into())]))
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        assert_eq!(clear_signing_secret_requested(&transport(None)), Ok(false));
+        assert_eq!(
+            clear_signing_secret_requested(&transport(Some("false"))),
+            Ok(false)
+        );
+        assert_eq!(
+            clear_signing_secret_requested(&transport(Some("true"))),
+            Ok(true)
+        );
+        assert!(clear_signing_secret_requested(&transport(Some("1"))).is_err());
     }
 
     #[test]
