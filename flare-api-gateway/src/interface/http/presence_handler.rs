@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, instrument};
 
 use super::MessageContextSigner;
+use super::downstream::downstream_failure;
 use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, DeviceInfo, GetDeviceRequest, GetUserPresenceRequest,
     KickDeviceRequest, ListUserDevicesRequest, LogoutRequest, UserPresence,
@@ -196,6 +197,7 @@ fn user_presence_to_http(p: UserPresence) -> UserPresenceHttp {
     responses(
         (status = 200, description = "成功", body = ApiResponse<UserPresenceHttp>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -220,11 +222,15 @@ pub async fn get_user_presence(
     let grpc_req = GetUserPresenceRequest {
         user_id: uid.to_string(),
     };
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .get_user_presence_with_ctx(&ctx, &token, grpc_req)
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client
+                .get_user_presence_with_ctx(&ctx, &token, grpc_req)
+                .await
+        })
         .await
-        .map_err(|e| GatewayError::internal("GET_USER_PRESENCE_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("GET_USER_PRESENCE_FAILED", e))?;
     let presence = resp
         .presence
         .map(user_presence_to_http)
@@ -240,6 +246,7 @@ pub async fn get_user_presence(
     responses(
         (status = 200, description = "成功", body = ApiResponse<ListUserDevicesHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -261,17 +268,21 @@ pub async fn list_user_devices(
     }
     debug!(trace_id = %ctx.trace_id(), user_id = %uid, "ListUserDevices");
 
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .list_user_devices_with_ctx(
-            &ctx,
-            &token,
-            ListUserDevicesRequest {
-                user_id: uid.to_string(),
-            },
-        )
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client
+                .list_user_devices_with_ctx(
+                    &ctx,
+                    &token,
+                    ListUserDevicesRequest {
+                        user_id: uid.to_string(),
+                    },
+                )
+                .await
+        })
         .await
-        .map_err(|e| GatewayError::internal("LIST_USER_DEVICES_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("LIST_USER_DEVICES_FAILED", e))?;
     Ok(Json(ApiResponse::success(ListUserDevicesHttpResponse {
         devices: resp.devices.into_iter().map(device_info_to_http).collect(),
     })))
@@ -285,6 +296,7 @@ pub async fn list_user_devices(
     responses(
         (status = 200, description = "成功", body = ApiResponse<DevicePresenceHttp>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -310,18 +322,22 @@ pub async fn get_device(
     }
     debug!(trace_id = %ctx.trace_id(), user_id = %user_id, device_id = %did, "GetDevice");
 
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .get_device_with_ctx(
-            &ctx,
-            &token,
-            GetDeviceRequest {
-                user_id,
-                device_id: did.to_string(),
-            },
-        )
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client
+                .get_device_with_ctx(
+                    &ctx,
+                    &token,
+                    GetDeviceRequest {
+                        user_id,
+                        device_id: did.to_string(),
+                    },
+                )
+                .await
+        })
         .await
-        .map_err(|e| GatewayError::internal("GET_DEVICE_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("GET_DEVICE_FAILED", e))?;
     let device = resp
         .device
         .map(device_info_to_http)
@@ -338,6 +354,7 @@ pub async fn get_device(
     responses(
         (status = 200, description = "成功", body = ApiResponse<BatchGetUserPresenceHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer, req))]
@@ -366,11 +383,15 @@ pub async fn batch_get_user_presence(
     debug!(trace_id = %ctx.trace_id(), count = ids.len(), "BatchGetUserPresence");
 
     let grpc_req = BatchGetUserPresenceRequest { user_ids: ids };
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .batch_get_user_presence_with_ctx(&ctx, &token, grpc_req)
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client
+                .batch_get_user_presence_with_ctx(&ctx, &token, grpc_req)
+                .await
+        })
         .await
-        .map_err(|e| GatewayError::internal("BATCH_GET_USER_PRESENCE_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("BATCH_GET_USER_PRESENCE_FAILED", e))?;
     let presences = resp
         .presences
         .into_iter()
@@ -390,6 +411,7 @@ pub async fn batch_get_user_presence(
     responses(
         (status = 200, description = "成功", body = ApiResponse<LogoutPresenceHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer, req))]
@@ -424,11 +446,13 @@ pub async fn logout_presence(
         user_id,
         conversation_id: conversation_id.to_string(),
     };
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .logout_with_ctx(&ctx, &token, grpc_req)
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client.logout_with_ctx(&ctx, &token, grpc_req).await
+        })
         .await
-        .map_err(|e| GatewayError::internal("LOGOUT_PRESENCE_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("LOGOUT_PRESENCE_FAILED", e))?;
     Ok(Json(ApiResponse::success(LogoutPresenceHttpResponse {
         success: resp.success,
     })))
@@ -443,6 +467,7 @@ pub async fn logout_presence(
     responses(
         (status = 200, description = "成功", body = ApiResponse<KickDeviceHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     )
 )]
 #[instrument(skip(headers, clients, principal, signer, req))]
@@ -476,19 +501,23 @@ pub async fn kick_device(
         "KickDevice"
     );
 
-    let mut client = clients.online.lock().await;
-    let resp = client
-        .self_kick_device_with_ctx(
-            &ctx,
-            &token,
-            KickDeviceRequest {
-                user_id,
-                device_id: did.to_string(),
-                reason,
-            },
-        )
+    let resp = clients
+        .bounded(async {
+            let mut client = clients.online.lock().await;
+            client
+                .self_kick_device_with_ctx(
+                    &ctx,
+                    &token,
+                    KickDeviceRequest {
+                        user_id,
+                        device_id: did.to_string(),
+                        reason,
+                    },
+                )
+                .await
+        })
         .await
-        .map_err(|e| GatewayError::internal("KICK_DEVICE_FAILED", e.to_string()))?;
+        .map_err(|e| downstream_failure("KICK_DEVICE_FAILED", e))?;
     Ok(Json(ApiResponse::success(KickDeviceHttpResponse {
         success: resp.success,
     })))

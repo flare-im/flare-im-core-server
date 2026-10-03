@@ -514,6 +514,7 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::ApiGateway,
         EnvPurpose::ServiceEndpoint,
     ),
+    // 每次下游 gRPC 调用（含 Push Proxy、含等客户端锁）的请求超时，缺省 10 秒，0 拒绝启动。
     env(
         "FLARE_API_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS",
         EnvOwner::ApiGateway,

@@ -6,6 +6,7 @@ use axum::{
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
+use super::downstream::downstream_failure;
 use crate::application::dto::{
     ExecuteCustomEventHttpRequest, ExecuteCustomEventHttpResponse, RecallMessageHttpRequest,
     RecallMessageHttpResponse, SendMessageHttpRequest, SendMessageHttpResponse,
@@ -218,9 +219,13 @@ async fn send_message_with_id(
         svid: req.svid,
     };
 
-    let mut message_client = clients.message_ingest_send.lock().await;
-    let grpc_res = message_client
-        .send_message_with_signed_context(grpc_req, &signed_token)
+    let grpc_res = clients
+        .bounded(async {
+            let mut message_client = clients.message_ingest_send.lock().await;
+            message_client
+                .send_message_with_signed_context(grpc_req, &signed_token)
+                .await
+        })
         .await
         .map_err(send_status_failure)?;
     Ok(SendMessageHttpResponse {
@@ -307,6 +312,7 @@ fn send_failure(err: FlareError) -> GatewayError {
     responses(
         (status = 200, description = "成功", body = ApiResponse<ExecuteCustomEventHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
 #[instrument(skip(headers, clients))]
@@ -326,11 +332,13 @@ pub async fn execute_custom_event(
         "Executing custom message event"
     );
 
-    let mut event_client = clients.message_event.lock().await;
-    event_client
-        .execute_event_with_ctx(&ctx, grpc_req)
+    clients
+        .bounded(async {
+            let mut event_client = clients.message_event.lock().await;
+            event_client.execute_event_with_ctx(&ctx, grpc_req).await
+        })
         .await
-        .map_err(|err| GatewayError::internal("MESSAGE_EVENT_EXECUTE_FAILED", err.to_string()))?;
+        .map_err(|err| downstream_failure("MESSAGE_EVENT_EXECUTE_FAILED", err))?;
 
     Ok(Json(ApiResponse::success(ExecuteCustomEventHttpResponse {
         event_id,
@@ -347,6 +355,7 @@ pub async fn execute_custom_event(
     responses(
         (status = 200, description = "成功", body = ApiResponse<RecallMessageHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
 #[instrument(skip(headers, clients))]
@@ -369,11 +378,13 @@ pub async fn recall_message(
         recall_time_limit_seconds: 0,
         conversation_id: req.conversation_id,
     };
-    let mut action_client = clients.message_action.lock().await;
-    let grpc_res = action_client
-        .recall_message_with_ctx(&ctx, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut action_client = clients.message_action.lock().await;
+            action_client.recall_message_with_ctx(&ctx, grpc_req).await
+        })
         .await
-        .map_err(|err| GatewayError::internal("MESSAGE_RECALL_FAILED", err.to_string()))?;
+        .map_err(|err| downstream_failure("MESSAGE_RECALL_FAILED", err))?;
     let response = RecallMessageHttpResponse {
         success: grpc_res.success,
     };

@@ -43,9 +43,11 @@ pub async fn generate_upload_url(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), user_id = %caller.actor_id(), "Generating upload URL");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .generate_upload_url(&caller, req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.generate_upload_url(&caller, req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(grpc_res)))
@@ -97,9 +99,11 @@ pub async fn upload_file(
         });
     }
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .upload_file(&caller, chunks)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.upload_file(&caller, chunks).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
@@ -135,9 +139,13 @@ pub async fn initiate_multipart_upload(
         metadata: Some(UploadFileMetadata::from(req.metadata)),
         desired_chunk_size: req.desired_chunk_size,
     };
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .initiate_multipart_upload(&caller, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .initiate_multipart_upload(&caller, grpc_req)
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -181,9 +189,11 @@ pub async fn upload_multipart_chunk(
         chunk_index: req.chunk_index,
         payload: req.payload,
     };
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .upload_multipart_chunk(&caller, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.upload_multipart_chunk(&caller, grpc_req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -216,14 +226,18 @@ pub async fn complete_multipart_upload(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing multipart upload");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .complete_multipart_upload(
-            &caller,
-            CompleteMultipartUploadRequest {
-                upload_id: req.upload_id,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .complete_multipart_upload(
+                    &caller,
+                    CompleteMultipartUploadRequest {
+                        upload_id: req.upload_id,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
@@ -256,14 +270,18 @@ pub async fn abort_multipart_upload(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting multipart upload");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .abort_multipart_upload(
-            &caller,
-            AbortMultipartUploadRequest {
-                upload_id: req.upload_id,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .abort_multipart_upload(
+                    &caller,
+                    AbortMultipartUploadRequest {
+                        upload_id: req.upload_id,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -301,9 +319,11 @@ pub async fn initiate_direct_upload(
         head_tail_sha256: req.head_tail_sha256,
         full_sha256: req.full_sha256,
     };
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .initiate_direct_upload(&caller, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.initiate_direct_upload(&caller, grpc_req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -335,14 +355,18 @@ pub async fn get_direct_upload_status(
 ) -> Result<Json<ApiResponse<GetDirectUploadStatusHttpResponse>>> {
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Getting direct upload status");
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .get_direct_upload_status(
-            &caller,
-            GetDirectUploadStatusRequest {
-                upload_id: req.upload_id,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .get_direct_upload_status(
+                    &caller,
+                    GetDirectUploadStatusRequest {
+                        upload_id: req.upload_id,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -374,16 +398,20 @@ pub async fn presign_direct_upload_parts(
 ) -> Result<Json<ApiResponse<PresignDirectUploadPartsHttpResponse>>> {
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Presigning direct upload parts");
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .presign_direct_upload_parts(
-            &caller,
-            PresignDirectUploadPartsRequest {
-                upload_id: req.upload_id,
-                part_numbers: req.part_numbers,
-                expires_in: req.expires_in,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .presign_direct_upload_parts(
+                    &caller,
+                    PresignDirectUploadPartsRequest {
+                        upload_id: req.upload_id,
+                        part_numbers: req.part_numbers,
+                        expires_in: req.expires_in,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -425,15 +453,19 @@ pub async fn commit_direct_upload_parts(
             sha256: part.sha256.unwrap_or_default(),
         })
         .collect();
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .commit_direct_upload_parts(
-            &caller,
-            CommitDirectUploadPartsRequest {
-                upload_id: req.upload_id,
-                parts: grpc_parts,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .commit_direct_upload_parts(
+                    &caller,
+                    CommitDirectUploadPartsRequest {
+                        upload_id: req.upload_id,
+                        parts: grpc_parts,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -465,14 +497,18 @@ pub async fn complete_direct_upload(
 ) -> Result<Json<ApiResponse<UploadFileHttpResponse>>> {
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing direct upload");
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .complete_direct_upload(
-            &caller,
-            CompleteDirectUploadRequest {
-                upload_id: req.upload_id,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .complete_direct_upload(
+                    &caller,
+                    CompleteDirectUploadRequest {
+                        upload_id: req.upload_id,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(UploadFileHttpResponse::from(
@@ -504,14 +540,18 @@ pub async fn abort_direct_upload(
 ) -> Result<Json<ApiResponse<AbortMultipartUploadHttpResponse>>> {
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting direct upload");
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .abort_direct_upload(
-            &caller,
-            AbortDirectUploadRequest {
-                upload_id: req.upload_id,
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .abort_direct_upload(
+                    &caller,
+                    AbortDirectUploadRequest {
+                        upload_id: req.upload_id,
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(

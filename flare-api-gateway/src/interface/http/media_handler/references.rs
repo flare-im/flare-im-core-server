@@ -36,9 +36,11 @@ pub async fn create_reference(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Creating media reference");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .create_reference(&caller, req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.create_reference(&caller, req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -70,9 +72,11 @@ pub async fn delete_reference(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting media reference");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .delete_reference(&caller, req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.delete_reference(&caller, req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(
@@ -113,9 +117,11 @@ pub async fn list_references(
         filters: Vec::new(),
         sort: Vec::new(),
     };
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .list_references(&caller, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.list_references(&caller, grpc_req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(

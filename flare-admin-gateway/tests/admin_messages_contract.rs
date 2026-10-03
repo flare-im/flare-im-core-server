@@ -299,6 +299,7 @@ async fn messages_harness() -> MessagesHarness {
         storage_reader: Arc::new(tokio::sync::Mutex::new(
             StorageReaderServiceClientWrapper::from_channel(storage),
         )),
+        request_timeout: None,
     };
     let console = Console::new();
     let router = create_admin_router(Arc::new(clients), None)

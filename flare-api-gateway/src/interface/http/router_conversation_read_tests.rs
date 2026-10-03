@@ -208,6 +208,7 @@ async fn router(
         storage_reader: Arc::new(Mutex::new(StorageReaderServiceClientWrapper::from_channel(
             c,
         ))),
+        request_timeout: None,
     };
     let router = create_public_router(Arc::new(clients))
         .layer(axum::Extension(

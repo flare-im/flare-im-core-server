@@ -356,6 +356,15 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
     compose_router(api_router)
 }
 
+/// 对外 HTTP 的 CORS 策略：允许任意来源、方法与请求头，暴露全部应答头
+/// （`Access-Control-Expose-Headers: *`）。浏览器因此能读到发送接口的 `x-client-msg-id`
+/// （503 后带同一 id 重试要用它）、`retry-after` 等头。来源是 `*`、不带凭据，通配符对这类请求
+/// 有效；改成显式列表时须保留 `x-client-msg-id`（见 `downstream_timeout_tests` 的跨源用例）。
+/// CORS 只在这里做，Edge 原样透传。
+pub(crate) fn public_cors_layer() -> tower_http::cors::CorsLayer {
+    tower_http::cors::CorsLayer::permissive()
+}
+
 /// 顶层路由装配；与下游 gRPC 客户端无关，单测可直接用它验证文档页与健康检查。
 fn compose_router(api_router: Router) -> Router {
     api_router
@@ -386,6 +395,10 @@ mod message_send_tests;
 #[cfg(test)]
 #[path = "router_conversation_read_tests.rs"]
 mod conversation_read_tests;
+
+#[cfg(test)]
+#[path = "router_downstream_timeout_tests.rs"]
+mod downstream_timeout_tests;
 
 #[cfg(test)]
 mod api_docs_tests {

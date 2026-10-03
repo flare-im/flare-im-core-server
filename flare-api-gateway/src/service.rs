@@ -17,12 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use crate::interface::http::MessageContextSigner;
-use crate::interface::http::create_public_router;
 use crate::interface::http::{PushTokenClient, push_proxy_url_from_env, with_request_rate_limit};
+use crate::interface::http::{create_public_router, public_cors_layer};
 
 pub struct ApplicationBootstrap;
 
@@ -55,17 +55,23 @@ impl ApplicationBootstrap {
             storage_reader_service_url = %settings.grpc.storage_reader_service_url,
             "Using downstream grpc endpoints"
         );
-        let clients =
-            Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
-        info!("gRPC clients initialized");
+        // 每次下游调用（含排队等客户端锁）都按 GRPC_REQUEST_TIMEOUT_SECS 限时，超时回可重试的
+        // 503/504；以前只有设备推送令牌接口限时，其余下游卡住时请求一直挂着。
+        let request_timeout = Duration::from_secs(settings.grpc.request_timeout_secs);
+        let clients = Arc::new(
+            GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc)
+                .await?
+                .with_request_timeout(request_timeout),
+        );
+        info!(
+            request_timeout_secs = settings.grpc.request_timeout_secs,
+            "gRPC clients initialized"
+        );
 
         // 设备推送令牌接口直连 Push Proxy 的静态地址（惰性连接，不阻塞启动）。
         let push_proxy_url = push_proxy_url_from_env();
-        let push_tokens = PushTokenClient::connect_lazy(
-            &push_proxy_url,
-            Duration::from_secs(settings.grpc.request_timeout_secs),
-        )
-        .map_err(flare_server_core::error::FlareError::system)?;
+        let push_tokens = PushTokenClient::connect_lazy(&push_proxy_url, request_timeout)
+            .map_err(flare_server_core::error::FlareError::system)?;
         info!(push_proxy_url = %push_proxy_url, "device push token endpoint uses static Push Proxy address");
 
         let token_service = {
@@ -216,7 +222,7 @@ impl ApplicationBootstrap {
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
-                    .layer(CorsLayer::permissive()),
+                    .layer(public_cors_layer()),
             );
 
         let runtime = flare_im_service_kit::health::attach_runtime_health_checks(

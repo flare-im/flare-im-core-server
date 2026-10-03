@@ -274,6 +274,7 @@ fn router_with(push: Channel, signer: Option<SignedContextSigner>) -> Router {
         storage_reader: Arc::new(Mutex::new(StorageReaderServiceClientWrapper::from_channel(
             c,
         ))),
+        request_timeout: None,
     };
     create_public_router(Arc::new(clients))
         .layer(axum::Extension(

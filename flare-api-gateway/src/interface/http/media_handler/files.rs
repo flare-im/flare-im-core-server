@@ -43,9 +43,11 @@ pub async fn get_file_url(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file URL");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .get_file_url(&caller, req.into())
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.get_file_url(&caller, req.into()).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(GetFileUrlHttpResponse::from(
@@ -80,9 +82,11 @@ pub async fn get_file_info(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Getting file info");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .get_file_info(&caller, req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.get_file_info(&caller, req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     let info = grpc_res
@@ -99,14 +103,18 @@ pub async fn serve_file(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %file_id, "Serving media file");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .get_file_info(
-            &caller,
-            GetFileInfoRequest {
-                file_id: file_id.clone(),
-            },
-        )
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .get_file_info(
+                    &caller,
+                    GetFileInfoRequest {
+                        file_id: file_id.clone(),
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
     let info = grpc_res
@@ -114,21 +122,26 @@ pub async fn serve_file(
         .ok_or_else(|| GatewayError::not_found("File info not found"))?;
 
     if !info.bucket.trim().is_empty() {
-        let url_res = media_client
-            .get_file_url(
-                &caller,
-                GetFileUrlRequest {
-                    file_id,
-                    expires_in: 3600,
-                    download: false,
-                    response_headers: HashMap::new(),
-                    retention_protected: false,
-                    content_visibility: flare_proto::common::ContentVisibility::Available as i32,
-                },
-            )
+        let url_res = clients
+            .bounded(async {
+                let mut media_client = clients.media.lock().await;
+                media_client
+                    .get_file_url(
+                        &caller,
+                        GetFileUrlRequest {
+                            file_id,
+                            expires_in: 3600,
+                            download: false,
+                            response_headers: HashMap::new(),
+                            retention_protected: false,
+                            content_visibility: flare_proto::common::ContentVisibility::Available
+                                as i32,
+                        },
+                    )
+                    .await
+            })
             .await
             .map_err(media_rpc_error)?;
-        drop(media_client);
 
         let Some(redirect_to) = redirect_target(&url_res.cdn_url, &url_res.url) else {
             // 只记形状：url 是签名地址，不能进日志。
@@ -145,16 +158,22 @@ pub async fn serve_file(
         return Ok(Redirect::temporary(redirect_to).into_response());
     }
 
-    let stream = media_client
-        .download_file(
-            &caller,
-            DownloadFileRequest {
-                file_id: file_id.clone(),
-            },
-        )
+    // 请求超时只限到下载流打开（Media 回应答头）为止；之后按块转发的整段下载不限时，大文件
+    // 不会被 GRPC_REQUEST_TIMEOUT_SECS 截断。
+    let stream = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client
+                .download_file(
+                    &caller,
+                    DownloadFileRequest {
+                        file_id: file_id.clone(),
+                    },
+                )
+                .await
+        })
         .await
         .map_err(media_rpc_error)?;
-    drop(media_client);
 
     let body_stream = stream.map(|item| {
         item.map(|chunk| Bytes::from(chunk.chunk_data))
@@ -207,9 +226,11 @@ pub async fn delete_file(
     let ctx = caller.ctx();
     debug!(trace_id = %ctx.trace_id(), file_id = %req.file_id, "Deleting file");
 
-    let mut media_client = clients.media.lock().await;
-    let grpc_res = media_client
-        .delete_file(&caller, req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut media_client = clients.media.lock().await;
+            media_client.delete_file(&caller, req).await
+        })
         .await
         .map_err(media_rpc_error)?;
     Ok(Json(ApiResponse::success(grpc_res)))

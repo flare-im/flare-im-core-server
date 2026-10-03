@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, instrument};
 
 use super::MessageContextSigner;
+use super::downstream::downstream_failure;
 use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListConversationsRequest, ManageParticipantsRequest,
     ParticipantRoleUpdate,
@@ -215,6 +216,7 @@ pub struct ManageParticipantsHttpResponse {
     responses(
         (status = 200, description = "成功", body = ApiResponse<ListConversationsHttpResponse>),
         (status = 400, description = "参数错误"),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
 #[instrument(skip(headers, clients, principal, signer))]
@@ -251,11 +253,15 @@ pub async fn list_conversations(
         limit,
         order: 0,
     };
-    let mut read_client = clients.conversation_read.lock().await;
-    let grpc_res = read_client
-        .list_conversations_with_ctx(&ctx, token.as_deref(), grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut read_client = clients.conversation_read.lock().await;
+            read_client
+                .list_conversations_with_ctx(&ctx, token.as_deref(), grpc_req)
+                .await
+        })
         .await
-        .map_err(|err| GatewayError::internal("CONVERSATION_LIST_FAILED", err.to_string()))?;
+        .map_err(|err| downstream_failure("CONVERSATION_LIST_FAILED", err))?;
     let response = ListConversationsHttpResponse {
         conversations: grpc_res
             .conversations
@@ -289,7 +295,10 @@ pub async fn list_conversations(
         ("limit" = Option<i32>, Query, description = "数量"),
         ("include_removed" = Option<bool>, Query, description = "是否包含已移除成员"),
     ),
-    responses((status = 200, description = "成功", body = ApiResponse<ListConversationParticipantsHttpResponse>)),
+    responses(
+        (status = 200, description = "成功", body = ApiResponse<ListConversationParticipantsHttpResponse>),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
+    ),
 )]
 #[instrument(skip(headers, clients, principal, signer))]
 pub async fn list_conversation_participants(
@@ -307,13 +316,15 @@ pub async fn list_conversation_participants(
         include_removed: req.include_removed,
         ..Default::default()
     };
-    let mut read_client = clients.conversation_read.lock().await;
-    let grpc_res = read_client
-        .list_conversation_participants_with_ctx(&ctx, token.as_deref(), grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut read_client = clients.conversation_read.lock().await;
+            read_client
+                .list_conversation_participants_with_ctx(&ctx, token.as_deref(), grpc_req)
+                .await
+        })
         .await
-        .map_err(|err| {
-            GatewayError::internal("CONVERSATION_PARTICIPANTS_FAILED", err.to_string())
-        })?;
+        .map_err(|err| downstream_failure("CONVERSATION_PARTICIPANTS_FAILED", err))?;
     Ok(Json(ApiResponse::success(
         ListConversationParticipantsHttpResponse {
             conversation_id: grpc_res.conversation_id,
@@ -335,7 +346,10 @@ pub async fn list_conversation_participants(
     path = "/api/v1/conversations/participants/manage",
     tag = "Conversation",
     request_body = ManageParticipantsHttpRequest,
-    responses((status = 200, description = "成功", body = ApiResponse<ManageParticipantsHttpResponse>)),
+    responses(
+        (status = 200, description = "成功", body = ApiResponse<ManageParticipantsHttpResponse>),
+        (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
+    ),
 )]
 #[instrument(skip(headers, clients))]
 pub async fn manage_participants(
@@ -361,13 +375,15 @@ pub async fn manage_participants(
             })
             .collect(),
     };
-    let mut manage_client = clients.conversation_manage.lock().await;
-    let grpc_res = manage_client
-        .manage_participants_with_ctx(&ctx, grpc_req)
+    let grpc_res = clients
+        .bounded(async {
+            let mut manage_client = clients.conversation_manage.lock().await;
+            manage_client
+                .manage_participants_with_ctx(&ctx, grpc_req)
+                .await
+        })
         .await
-        .map_err(|err| {
-            GatewayError::internal("CONVERSATION_MANAGE_PARTICIPANTS_FAILED", err.to_string())
-        })?;
+        .map_err(|err| downstream_failure("CONVERSATION_MANAGE_PARTICIPANTS_FAILED", err))?;
     Ok(Json(ApiResponse::success(ManageParticipantsHttpResponse {
         participants: grpc_res
             .participants

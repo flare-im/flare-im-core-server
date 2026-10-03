@@ -359,6 +359,7 @@ mod tests {
             storage_reader: Arc::new(tokio::sync::Mutex::new(
                 StorageReaderServiceClientWrapper::from_channel(c),
             )),
+            request_timeout: None,
         };
         let (control_private, control_public) = pem_pair(61);
         let token = flare_server_core::TokenService::from_ed25519_private_key(

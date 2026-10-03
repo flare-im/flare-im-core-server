@@ -90,9 +90,59 @@ pub struct GrpcClients {
     pub conversation_manage: Arc<tokio::sync::Mutex<ConversationManageServiceClientWrapper>>,
     pub online: Arc<tokio::sync::Mutex<OnlineServiceClientWrapper>>,
     pub storage_reader: Arc<tokio::sync::Mutex<StorageReaderServiceClientWrapper>>,
+    /// 一次下游调用的请求超时，由 [`Self::bounded`] 施加；`None` 不限时。
+    ///
+    /// API Gateway 取 `FLARE_API_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS`（见
+    /// [`Self::with_request_timeout`]）。[`Self::new`] 不设：Admin Gateway 的同名变量目前只出现在
+    /// `/gateway/config` 快照里，是否接线待定。
+    pub request_timeout: Option<Duration>,
+}
+
+/// 下游调用超过请求超时时回的状态。`DEADLINE_EXCEEDED` 转成 `FlareError` 是
+/// `OperationTimeout`，各网关按可重试的 503/504 回给调用方。
+pub const DOWNSTREAM_REQUEST_TIMED_OUT: &str = "downstream request timed out";
+
+/// 给一次下游调用加请求超时：`timeout` 为 `None` 时原样等待；超时回 `DEADLINE_EXCEEDED`
+/// （[`DOWNSTREAM_REQUEST_TIMED_OUT`]），被丢弃的调用随之取消。
+pub async fn bounded_request<T, E, F>(
+    timeout: Option<Duration>,
+    call: F,
+) -> std::result::Result<T, E>
+where
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+    E: From<tonic::Status>,
+{
+    match timeout {
+        None => call.await,
+        Some(timeout) => tokio::time::timeout(timeout, call)
+            .await
+            .unwrap_or_else(|_| {
+                Err(E::from(tonic::Status::deadline_exceeded(
+                    DOWNSTREAM_REQUEST_TIMED_OUT,
+                )))
+            }),
+    }
 }
 
 impl GrpcClients {
+    /// 设置每次下游调用的请求超时（见 [`Self::bounded`]）。
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// 按 [`Self::request_timeout`] 限时执行一次下游调用。
+    ///
+    /// 客户端放在互斥锁后面、调用期间一直持锁，所以把取锁也放进 `call`：限的是从开始等锁到
+    /// 拿到应答的整段时间，排在慢调用后面的请求同样按时返回，而不是逐个等满超时。
+    pub async fn bounded<T, E, F>(&self, call: F) -> std::result::Result<T, E>
+    where
+        F: std::future::Future<Output = std::result::Result<T, E>>,
+        E: From<tonic::Status>,
+    {
+        bounded_request(self.request_timeout, call).await
+    }
+
     /// 通过服务发现（或静态回退）初始化所有下游 gRPC 客户端。
     pub async fn new(app_config: Arc<FlareAppConfig>, grpc: &DownstreamGrpcConfig) -> Result<Self> {
         let resolver = DownstreamGrpcResolver::new(Arc::clone(&app_config), grpc.clone());
@@ -135,6 +185,7 @@ impl GrpcClients {
             storage_reader: Arc::new(tokio::sync::Mutex::new(
                 StorageReaderServiceClientWrapper::from_channel(storage_reader_channel),
             )),
+            request_timeout: None,
         })
     }
 }
@@ -194,6 +245,59 @@ fn optional_static_fallback(uri: &str) -> Option<String> {
         None
     } else {
         Some(uri.to_string())
+    }
+}
+
+#[cfg(test)]
+mod request_timeout_tests {
+    use super::{DOWNSTREAM_REQUEST_TIMED_OUT, bounded_request};
+    use flare_server_core::error::{ErrorCode, FlareError};
+    use std::time::Duration;
+
+    /// 超时回 `DEADLINE_EXCEEDED`；按 `FlareError` 取结果的调用方拿到 `OperationTimeout`
+    /// （网关据此回可重试的 503/504），按 `Status` 取结果的调用方拿到原样的状态码。
+    #[tokio::test]
+    async fn a_call_past_the_request_timeout_ends_with_deadline_exceeded() {
+        let as_flare: Result<(), FlareError> = bounded_request(
+            Some(Duration::from_millis(20)),
+            std::future::pending::<Result<(), FlareError>>(),
+        )
+        .await;
+        assert_eq!(
+            as_flare.unwrap_err().code(),
+            Some(ErrorCode::OperationTimeout)
+        );
+
+        let as_status: Result<(), tonic::Status> = bounded_request(
+            Some(Duration::from_millis(20)),
+            std::future::pending::<Result<(), tonic::Status>>(),
+        )
+        .await;
+        let status = as_status.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(status.message(), DOWNSTREAM_REQUEST_TIMED_OUT);
+    }
+
+    /// 超时之内的结果（成功或下游自己的错误）原样返回；不设超时时一直等。
+    #[tokio::test]
+    async fn results_within_the_timeout_and_unbounded_calls_pass_through() {
+        let ok: Result<u32, tonic::Status> =
+            bounded_request(Some(Duration::from_secs(10)), async { Ok(7) }).await;
+        assert_eq!(ok.unwrap(), 7);
+
+        let denied: Result<(), tonic::Status> =
+            bounded_request(Some(Duration::from_secs(10)), async {
+                Err(tonic::Status::permission_denied("no"))
+            })
+            .await;
+        assert_eq!(denied.unwrap_err().code(), tonic::Code::PermissionDenied);
+
+        let slow: Result<u32, tonic::Status> = bounded_request(None, async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(1)
+        })
+        .await;
+        assert_eq!(slow.unwrap(), 1);
     }
 }
 

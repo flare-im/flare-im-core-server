@@ -634,6 +634,7 @@ fn clients(channel: Channel, media: Channel, unused: Channel) -> GrpcClients {
         storage_reader: Arc::new(tokio::sync::Mutex::new(
             StorageReaderServiceClientWrapper::from_channel(unused),
         )),
+        request_timeout: None,
     }
 }
 

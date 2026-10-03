@@ -293,6 +293,11 @@ impl GatewaySettings {
 
         // 验证配置
         settings.validate()?;
+        // API Gateway 用它限时每次下游调用，0 会让每个调用立即超时。Admin 作用域不校验：
+        // 该变量在 Admin Gateway 还不生效（只出现在 /gateway/config 快照里）。
+        if scope == GatewayEnvScope::Api && settings.grpc.request_timeout_secs == 0 {
+            return Err(config_error("GRPC_REQUEST_TIMEOUT_SECS cannot be 0"));
+        }
 
         Ok(settings)
     }
@@ -1011,6 +1016,33 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    /// `GRPC_REQUEST_TIMEOUT_SECS` 缺省 10 秒；API Gateway 用它限时每次下游调用，取 0 拒绝启动。
+    /// Admin 作用域照旧只解析不校验（该变量在 Admin Gateway 还不生效）。
+    #[test]
+    fn grpc_request_timeout_rejects_zero_where_it_bounds_downstream_calls() {
+        let api = GatewaySettings::from_env_source(GatewayEnvScope::Api, |_| None).unwrap();
+        assert_eq!(api.grpc.request_timeout_secs, 10);
+        let key = env_key(GatewayEnvScope::Api, "GRPC_REQUEST_TIMEOUT_SECS");
+        let configured = GatewaySettings::from_env_source(GatewayEnvScope::Api, |k| {
+            (k == key).then(|| "3".to_string())
+        })
+        .unwrap();
+        assert_eq!(configured.grpc.request_timeout_secs, 3);
+        assert!(
+            GatewaySettings::from_env_source(GatewayEnvScope::Api, |k| {
+                (k == key).then(|| "0".to_string())
+            })
+            .is_err()
+        );
+
+        let admin_key = env_key(GatewayEnvScope::Admin, "GRPC_REQUEST_TIMEOUT_SECS");
+        let admin = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |k| {
+            (k == admin_key).then(|| "0".to_string())
+        })
+        .unwrap();
+        assert_eq!(admin.grpc.request_timeout_secs, 0);
     }
 
     /// 每个作用域实际读取的变量都登记在 env_registry、属主是对应的网关；只探测是否出现、不读取
