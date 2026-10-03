@@ -42,6 +42,13 @@ flare-im-service-kit = { workspace = true }
 flare-im-seq = { workspace = true }
 flare-im-hooks = { workspace = true }
 
+[dev-dependencies]
+# 只用于 seq floor 服务签名的用例：生成一对测试用的 Cell 密钥，并对真实的 Storage Reader 签名边界
+# （tests/seq_floor_signed_read.rs）发起 floor 读。
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+flare-storage-reader = { path = "../flare-storage/reader" }
+sqlx = { workspace = true }
+
 [features]
 default = []
 

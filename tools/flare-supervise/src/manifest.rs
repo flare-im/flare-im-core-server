@@ -819,10 +819,12 @@ required_env_unless = [
             .collect();
         // Push Server/Worker attest broker records (broker-isolated); Push Proxy only verifies.
         // Admin Gateway signs the Control-verified tenant admin for Media. The orchestrator
-        // signs its own Service identity for conversation member reads.
+        // signs its own Service identity for conversation member reads, message ingest for
+        // its seq floor reads of Storage Reader.
         assert_eq!(
             signer_users,
             [
+                "message-ingest",
                 "orchestrator",
                 "push-server",
                 "push-worker",

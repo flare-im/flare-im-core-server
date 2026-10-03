@@ -100,6 +100,14 @@ async fn initialize_with_config(
 
     // seq 回退自愈：懒连接 storage-reader，用其权威 max_seq 作 seq 分配 floor 下限。
     // 懒连接失败仅告警并退化为普通 INCR（绝不比现状更差），不阻断摄入服务启动。
+    // floor 是摄入自己按租户与会话做的读：持有 Cell 私钥时以摄入的 Service 身份为消息租户签名，
+    // 不再转发可能属于另一租户的入站签名；私钥存在但无效时启动失败。
+    let floor_signer = flare_im_service_kit::signed_read::service_signer_from_env(MESSAGE_INGEST)?;
+    if floor_signer.is_none() {
+        tracing::warn!(
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: seq floor reads forward the inbound signature or go unsigned"
+        );
+    }
     let seq_floor_provider =
         match flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
@@ -110,7 +118,8 @@ async fn initialize_with_config(
                 let provider: Arc<dyn crate::domain::repository::SeqFloorProvider> = Arc::new(
                 crate::infrastructure::persistence::storage_seq_floor_provider::StorageSeqFloorProvider::from_channel(
                     channel,
-                ),
+                )
+                .with_service_signer(floor_signer, MESSAGE_INGEST),
             );
                 Some(provider)
             }

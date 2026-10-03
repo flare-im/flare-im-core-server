@@ -91,7 +91,12 @@ FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 name = "message-ingest"
 command = "/usr/local/bin/flare-message-ingest"
 inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CAPABILITY_GRPC_URI"]
+# The seq floor self-heal reads Storage Reader as ingest's own Service identity for
+# the message tenant; forwarding the inbound token fails whenever its tenant differs.
+# Without the private key ingest keeps forwarding (and warns once at startup).
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_CAPABILITY_GRPC_URI",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "MESSAGE_INGEST_HOOKS_CONFIG"]
 tcp_health = "127.0.0.1:50182"
 [services.environment]
