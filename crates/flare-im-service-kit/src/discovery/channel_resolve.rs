@@ -146,7 +146,14 @@ fn static_http_connector(policy: StaticChannelPolicy) -> HttpConnector {
 
 /// 懒连接的静态通道，按 [`StaticChannelPolicy::DEFAULT`]：构造时不连下游。
 pub fn connect_static_channel_lazy(uri: &str) -> Result<Channel, String> {
-    let policy = StaticChannelPolicy::DEFAULT;
+    connect_static_channel_lazy_with_policy(uri, StaticChannelPolicy::DEFAULT)
+}
+
+/// 同 [`connect_static_channel_lazy`]，按给定策略（例如网关配置的建连上限）。
+pub fn connect_static_channel_lazy_with_policy(
+    uri: &str,
+    policy: StaticChannelPolicy,
+) -> Result<Channel, String> {
     connect_static_channel_lazy_with(uri, policy, static_http_connector(policy))
 }
 

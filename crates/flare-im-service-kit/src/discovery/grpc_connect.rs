@@ -15,15 +15,20 @@ use crate::config::FlareAppConfig;
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 
 use super::channel_resolve::{
-    DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI, connect_static_channel_lazy,
+    DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI, StaticChannelPolicy,
+    connect_static_channel_lazy_with_policy,
 };
 use super::init::create_discover_from_config;
 
-/// 静态地址的懒连接通道，建连上限与 HTTP/2 探活见 [`super::StaticChannelPolicy`]。
+/// 静态地址的懒连接通道，建连上限与 HTTP/2 探活见 [`StaticChannelPolicy`]。
 fn connect_static_lazy(
     static_fallback_uri: &str,
+    policy: StaticChannelPolicy,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(connect_static_channel_lazy(static_fallback_uri)?)
+    Ok(connect_static_channel_lazy_with_policy(
+        static_fallback_uri,
+        policy,
+    )?)
 }
 
 /// 启动期连接：立即返回 lazy Channel，**不**等待 Consul / 对端进程。
@@ -32,22 +37,47 @@ pub fn connect_grpc_channel_lazy_from_app_config(
     _service_type: &str,
     static_fallback_uri: &str,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-    connect_static_lazy(static_fallback_uri)
+    connect_static_lazy(static_fallback_uri, StaticChannelPolicy::DEFAULT)
 }
 
 /// 运行时连接：限时服务发现，失败则回退静态 lazy（用于首包 RPC 或需立即可用通道的场景）。
+/// 静态回退按 [`StaticChannelPolicy::DEFAULT`] 建连。
 pub async fn connect_grpc_channel_from_app_config(
     app_config: &FlareAppConfig,
     service_type: &str,
     static_fallback_uri: &str,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-    connect_grpc_channel_from_app_config_inner(app_config, service_type, static_fallback_uri).await
+    connect_grpc_channel_from_app_config_with_policy(
+        app_config,
+        service_type,
+        static_fallback_uri,
+        StaticChannelPolicy::DEFAULT,
+    )
+    .await
+}
+
+/// 同 [`connect_grpc_channel_from_app_config`]，静态回退按给定策略建连（网关按配置的
+/// `GRPC_CONNECT_TIMEOUT_SECS`）；注册中心发现到的通道不受该策略影响。
+pub async fn connect_grpc_channel_from_app_config_with_policy(
+    app_config: &FlareAppConfig,
+    service_type: &str,
+    static_fallback_uri: &str,
+    policy: StaticChannelPolicy,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_grpc_channel_from_app_config_inner(
+        app_config,
+        service_type,
+        static_fallback_uri,
+        policy,
+    )
+    .await
 }
 
 async fn connect_grpc_channel_from_app_config_inner(
     app_config: &FlareAppConfig,
     service_type: &str,
     static_fallback_uri: &str,
+    policy: StaticChannelPolicy,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
     match create_discover_from_config(app_config, service_type).await? {
         Some(discover) => {
@@ -61,7 +91,7 @@ async fn connect_grpc_channel_from_app_config_inner(
                         fallback = static_fallback_uri,
                         "service discovery failed, using static fallback"
                     );
-                    connect_static_lazy(static_fallback_uri)
+                    connect_static_lazy(static_fallback_uri, policy)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -70,11 +100,11 @@ async fn connect_grpc_channel_from_app_config_inner(
                         fallback = static_fallback_uri,
                         "service discovery timed out, using static fallback"
                     );
-                    connect_static_lazy(static_fallback_uri)
+                    connect_static_lazy(static_fallback_uri, policy)
                 }
             }
         }
-        None => connect_static_lazy(static_fallback_uri),
+        None => connect_static_lazy(static_fallback_uri, policy),
     }
 }
 
