@@ -130,8 +130,11 @@ type, Administer rejects a tenant `hook_config.create` or `update` that uses it 
 `ALREADY_EXISTS` (a disabled global row reserves its name too), and a same-named
 tenant row written some other way is not loaded (a warning is logged) while the global
 hook keeps running. A non-empty `selector.tenants` further limits a hook to the listed
-tenants. A write through Administer reloads that tenant's hooks at once; other changes
-arrive with the periodic refresh (60 s by default). A Capability process started with
+tenants. A write through Administer reloads that tenant's hooks at once on the instance
+that handled it, and every other Capability instance sharing the database reloads the
+same tenant (all hooks, for a global row) on a PostgreSQL `NOTIFY` on
+`flare_hook_config_changed`; changes made some other way arrive with the periodic refresh
+(60 s by default), which also covers a missed notification. A Capability process started with
 `TENANT_ID` keeps the single-tenant behaviour: it loads the global rows and that
 tenant's rows only, as one configuration, without the name reservation.
 
@@ -141,9 +144,18 @@ tenant's rows only, as one configuration, without the name reservation.
 
 When a webhook transport secret is configured, requests carry
 `Flare-Signature: t=<unix-seconds>,v1=<hex(HMAC-SHA256(secret, timestamp + "." + raw-body))>`.
-The signing secret is never sent. The old `x-flare-signature` plaintext header is
-removed. Custom headers cannot override either signature header or Content-Type.
-Unsigned endpoints remain possible only when no secret was configured.
+Core's webhook adapter and the Capability service's webhook transport (hooks a tenant
+registers through `CapabilityService/Administer`) sign the same way. The signing secret
+is never sent. The old `x-flare-signature` plaintext header and the Capability
+service's old `X-Hook-Signature` (an HMAC of the body alone, without a timestamp) are
+removed; custom headers cannot use any of these names or Content-Type. Unsigned
+endpoints remain possible only when no secret was configured. A delivery whose context
+has no tenant is not sent.
+
+A secret registered through Administer is write-only: `hook_config.create`, `get`,
+`list` and `update` return an empty `transport.secret`, and
+`transport.metadata["signing_secret_configured"]` says whether one is set. An `update`
+with an empty secret keeps the stored one; send a new value to rotate it.
 
 Verify the **raw request bytes**, before JSON parsing, and reject timestamps outside
 the allowed clock skew. Example receiver logic (Python standard library):
@@ -169,6 +181,9 @@ def verify_hook(secret: bytes, raw_body: bytes, signature: str) -> bool:
         return False
 ```
 
+Rust receivers can call `flare_im_hooks::hooks::adapters::verify_webhook_signature`
+(with `WEBHOOK_SIGNATURE_TOLERANCE_SECS`, 300 s), which applies the same checks.
+
 Timestamp validation limits replay lifetime; receivers should additionally deduplicate
 side effects by message/event identity. TLS remains required outside local tests.
 
@@ -185,6 +200,10 @@ key, gets `UNAUTHENTICATED`. A `HookInvocationContext` whose `tenant_id` differs
 the signed tenant, or whose `operator_user_id` differs from a signed user, gets
 `PERMISSION_DENIED`; `pre_send` accepts only a signed user. Hooks are selected by the
 signed tenant, and the hooks it runs see the signed identity, not the request body's.
+
+When those hooks use the gRPC transport, the Capability service forwards the same
+`x-flare-ctx` token and sets `GenericRequest.request_id` to the signed request ID, so a
+plugin can apply the checks above; it does not call a gRPC hook without a signed context.
 
 Do not trust the draft's author field as an identity assertion; use the context.
 

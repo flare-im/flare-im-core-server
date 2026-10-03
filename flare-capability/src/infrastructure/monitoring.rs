@@ -1,6 +1,12 @@
 //! # Hook监控统计层
 //!
 //! 提供Hook执行指标收集、执行记录和告警触发能力。
+//!
+//! 现状（W12-W 评估）：Hook 执行路径上没有任何地方调用 [`MetricsCollector::record`] 或
+//! [`ExecutionRecorder::record`]，两者都是空的，`hook_config.get_statistics` 计数为 0、
+//! `hook_config.query_executions` 为空列表；`hook_executions` 表为预留、从不写入。记录只按 Hook
+//! 名区分、不分租户，接入前须先按租户区分（不同租户可以有同名 Hook），落库还须先定采样与保留期
+//! （每条消息的每个 Hook 一行）。见 `flare-capability/README.zh-CN.md`「监控和统计」。
 
 use std::collections::HashMap;
 use std::sync::Arc;

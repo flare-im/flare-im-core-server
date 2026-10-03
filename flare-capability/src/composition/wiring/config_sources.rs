@@ -6,10 +6,10 @@ use std::sync::Arc;
 use flare_server_core::error::{AnyhowContext, Result};
 use serde_json::json;
 
-use crate::infrastructure::config::ConfigWatcher;
 use crate::infrastructure::config::loader::{
     ConfigCenterLoader, ConfigLoaderItem, DatabaseConfigLoader, FileConfigLoader,
 };
+use crate::infrastructure::config::{ConfigWatcher, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 
 use crate::composition::process_config::CapabilityServiceConfig;
@@ -20,10 +20,12 @@ use flare_server_core::{KvBackend, KvStore};
 /// Hook 配置持久化仓储（仅当配置了 `database_url`）。
 pub(crate) type HookConfigRepository = Arc<PostgresHookConfigRepository>;
 
-/// 配置子图：已启动的 `ConfigWatcher` + 可选 Postgres Hook 仓储。
+/// 配置子图：已启动的 `ConfigWatcher` + 可选 Postgres Hook 仓储及其跨实例失效通知。
 pub(crate) struct ConfigSourcesReady {
     pub watcher: Arc<ConfigWatcher>,
     pub hook_config_repository: Option<HookConfigRepository>,
+    /// 有库时：Administer 写入后通知其余实例，并已启动本实例的监听任务。
+    pub invalidation: Option<Arc<HookConfigInvalidation>>,
 }
 
 pub(crate) fn log_capability_db_target(database_url: &str) {
@@ -147,8 +149,16 @@ pub(crate) async fn prepare_config_sources(
         .await
         .context("Failed to start config watcher")?;
 
+    // 多实例：其余实例经 Administer 写入的 Hook 配置不必等定时刷新。
+    let invalidation = hook_config_repository.as_ref().map(|repository| {
+        let invalidation = Arc::new(HookConfigInvalidation::new(repository.connection_pool()));
+        let _ = invalidation.spawn_listener(Arc::clone(&watcher));
+        invalidation
+    });
+
     Ok(ConfigSourcesReady {
         watcher,
         hook_config_repository,
+        invalidation,
     })
 }

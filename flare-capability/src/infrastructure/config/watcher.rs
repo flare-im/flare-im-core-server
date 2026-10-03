@@ -154,6 +154,7 @@ impl WatcherState {
         let mut loaded = self.loaded.lock().await;
         let mut next = loaded.clone();
         let mut scoped = false;
+        let mut hooks_count = 0;
         for (slot, loader) in next.iter_mut().zip(&self.loaders) {
             let Some(result) = loader.load_tenant(tenant_id).await else {
                 continue;
@@ -161,6 +162,7 @@ impl WatcherState {
             scoped = true;
             let config = result?;
             ConfigValidator::validate(&config)?;
+            hooks_count += config.hook_count();
             let source = slot.get_or_insert_with(LoadedHookConfig::default);
             source.failed_tenants.remove(tenant_id);
             if config.is_empty() {
@@ -173,7 +175,14 @@ impl WatcherState {
             drop(loaded);
             return self.reload_all().await;
         }
-        self.publish(&mut loaded, next).await
+        self.publish(&mut loaded, next).await?;
+        // 只含该租户自己登记的、启用的 Hook（不含全局配置）。
+        info!(
+            tenant_id = %tenant_id,
+            hooks_count,
+            "Reloaded tenant hook config"
+        );
+        Ok(())
     }
 
     /// 由 `next` 合成新快照并替换当前快照；合成失败（全局配置无效）时什么都不改。

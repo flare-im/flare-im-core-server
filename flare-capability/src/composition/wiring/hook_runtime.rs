@@ -27,10 +27,12 @@ pub(crate) fn build_hook_runtime(sources: &ConfigSourcesReady) -> HookRuntimeRea
     let registry = Arc::new(CoreHookRegistry::new(sources.watcher.clone()));
 
     let hook_governance = sources.hook_config_repository.as_ref().map(|repository| {
-        Arc::new(
-            HookServiceServer::new(repository.clone(), registry.clone())
-                .with_monitoring(metrics_collector.clone(), execution_recorder.clone()),
-        )
+        let governance = HookServiceServer::new(repository.clone(), registry.clone())
+            .with_monitoring(metrics_collector.clone(), execution_recorder.clone());
+        Arc::new(match sources.invalidation.as_ref() {
+            Some(invalidation) => governance.with_invalidation(Arc::clone(invalidation)),
+            None => governance,
+        })
     });
 
     if hook_governance.is_none() {

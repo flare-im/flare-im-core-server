@@ -197,7 +197,9 @@ impl std::str::FromStr for LoadBalanceStrategy {
 }
 
 /// Hook传输配置
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// `Debug` 手写：Webhook 的签名密钥与自定义头的值不进日志（只显示是否设置、头名）。
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HookTransportConfig {
     /// gRPC传输（支持服务发现和直接地址两种模式）
@@ -242,6 +244,43 @@ pub enum HookTransportConfig {
         /// 插件目标
         target: String,
     },
+}
+
+impl std::fmt::Debug for HookTransportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Grpc {
+                endpoint,
+                service_name,
+                registry_type,
+                namespace,
+                load_balance,
+                metadata,
+            } => f
+                .debug_struct("Grpc")
+                .field("endpoint", endpoint)
+                .field("service_name", service_name)
+                .field("registry_type", registry_type)
+                .field("namespace", namespace)
+                .field("load_balance", load_balance)
+                .field("metadata_keys", &metadata.keys().collect::<Vec<_>>())
+                .finish(),
+            Self::Webhook {
+                endpoint,
+                secret,
+                headers,
+            } => f
+                .debug_struct("Webhook")
+                .field("endpoint", endpoint)
+                .field(
+                    "secret",
+                    &secret.as_ref().map(|_| "<redacted>").unwrap_or("<none>"),
+                )
+                .field("header_names", &headers.keys().collect::<Vec<_>>())
+                .finish(),
+            Self::Local { target } => f.debug_struct("Local").field("target", target).finish(),
+        }
+    }
 }
 
 /// Hook配置
@@ -808,6 +847,30 @@ impl HookStatistics {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    /// 传输配置的 `Debug`（日志里 `?config` 的写法）不带签名密钥与头、元数据的值。
+    #[test]
+    fn transport_debug_never_prints_secrets_or_header_values() {
+        let webhook = HookTransportConfig::Webhook {
+            endpoint: "http://127.0.0.1:9/hook".into(),
+            secret: Some("w12w-debug-secret".into()),
+            headers: HashMap::from([("Authorization".into(), "Bearer w12w-header".into())]),
+        };
+        let grpc = HookTransportConfig::Grpc {
+            endpoint: Some("http://127.0.0.1:9".into()),
+            service_name: None,
+            registry_type: None,
+            namespace: None,
+            load_balance: None,
+            metadata: HashMap::from([("x-api-key".into(), "w12w-metadata".into())]),
+        };
+        let printed = format!("{webhook:?} {grpc:?} {webhook:#?}");
+        for secret in ["w12w-debug-secret", "w12w-header", "w12w-metadata"] {
+            assert!(!printed.contains(secret), "{printed}");
+        }
+        assert!(printed.contains("Authorization") && printed.contains("x-api-key"));
+        assert!(printed.contains("<redacted>"));
+    }
 
     #[test]
     fn test_load_balance_strategy_from_str() {

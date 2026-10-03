@@ -16,7 +16,7 @@ use tonic::{Request, Response, Status};
 
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::{HookConfigItem, HookSelectorConfig, HookTransportConfig};
-use crate::infrastructure::config::ConfigValidator;
+use crate::infrastructure::config::{ConfigValidator, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use chrono::Utc;
 use std::str::FromStr;
@@ -38,6 +38,7 @@ pub struct HookServiceServer {
     registry: Arc<CoreHookRegistry>,
     metrics_collector: Option<Arc<crate::infrastructure::monitoring::MetricsCollector>>,
     execution_recorder: Option<Arc<crate::infrastructure::monitoring::ExecutionRecorder>>,
+    invalidation: Option<Arc<HookConfigInvalidation>>,
 }
 
 impl HookServiceServer {
@@ -50,7 +51,14 @@ impl HookServiceServer {
             registry,
             metrics_collector: None,
             execution_recorder: None,
+            invalidation: None,
         }
+    }
+
+    /// 写入后经 PostgreSQL `LISTEN/NOTIFY` 通知其余实例（见 [`HookConfigInvalidation`]）。
+    pub fn with_invalidation(mut self, invalidation: Arc<HookConfigInvalidation>) -> Self {
+        self.invalidation = Some(invalidation);
+        self
     }
 
     pub fn with_monitoring(
@@ -64,7 +72,18 @@ impl HookServiceServer {
     }
 
     /// 写入后让配置立即生效：租户的行只重载该租户，全局行（`tenant_id IS NULL`）全量重载。
+    ///
+    /// 先通知其余实例（写入已提交；通知失败只记 WARN，其余实例等定时刷新），再重载本实例。
     async fn reload_after_write(&self, tenant_id: Option<&str>) -> Result<(), Status> {
+        if let Some(invalidation) = self.invalidation.as_ref()
+            && let Err(error) = invalidation.publish(tenant_id).await
+        {
+            tracing::warn!(
+                tenant_id = ?tenant_id,
+                %error,
+                "hook config change not announced to other instances; they pick it up with the periodic refresh"
+            );
+        }
         let reloaded = match tenant_id.filter(|tenant| !tenant.is_empty()) {
             Some(tenant) => self.registry.reload_tenant(tenant).await,
             None => self.registry.reload_config().await,
@@ -336,8 +355,10 @@ impl HookServiceServer {
                 }
                 "webhook" => HookTransportConfig::Webhook {
                     endpoint: transport.endpoint.clone(),
+                    // 签名密钥只写不读（读回为空），空串表示沿用已存的密钥：照读回的配置
+                    // 原样写回不会把签名关掉。换密钥就传新的非空值。
                     secret: if transport.secret.is_empty() {
-                        None
+                        stored_webhook_secret(&hook_item.transport)
                     } else {
                         Some(transport.secret.clone())
                     },
@@ -930,6 +951,20 @@ fn protobuf_to_hook_config_item(
     })
 }
 
+/// Webhook 配置读回时 `transport.metadata` 里说明签名密钥是否已设置的键（值为 `"true"`/`"false"`）。
+/// 密钥本身从不读回。
+pub(crate) const WEBHOOK_SECRET_CONFIGURED_KEY: &str = "signing_secret_configured";
+
+/// 已存配置是 Webhook 时它的签名密钥（更新时请求留空即沿用）。
+fn stored_webhook_secret(transport: &HookTransportConfig) -> Option<String> {
+    match transport {
+        HookTransportConfig::Webhook { secret, .. } => {
+            secret.clone().filter(|secret| !secret.is_empty())
+        }
+        HookTransportConfig::Grpc { .. } | HookTransportConfig::Local { .. } => None,
+    }
+}
+
 /// 将内部HookConfigItem类型转换为protobuf类型
 fn hook_config_item_to_protobuf(
     hook_id: &str,
@@ -981,11 +1016,19 @@ fn hook_config_item_to_protobuf(
                 registry_type: String::new(),
                 namespace: String::new(),
                 load_balance: String::new(),
-                secret: secret.clone().unwrap_or_default(),
+                // 签名密钥只写不读：create、get、list、update 的应答都不带它（W11-S1 F5），
+                // 只在 metadata 里说明是否已设置。
+                secret: String::new(),
                 headers: headers.clone(),
                 target: String::new(),
                 timeout_ms: item.timeout_ms as i32,
-                metadata: std::collections::HashMap::new(),
+                metadata: std::collections::HashMap::from([(
+                    WEBHOOK_SECRET_CONFIGURED_KEY.to_string(),
+                    secret
+                        .as_deref()
+                        .is_some_and(|secret| !secret.is_empty())
+                        .to_string(),
+                )]),
             },
             HookTransportConfig::Local { target } => HookTransport {
                 r#type: "local".to_string(),
@@ -1072,5 +1115,54 @@ fn domain_to_protobuf_execution(
         error_code: String::new(), // 暂时不填充错误码
         error_message: result.error_message.clone().unwrap_or_default(),
         executed_at: Some(executed_at),
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use crate::interface::grpc::hooks::test_support::signed_webhook_hook;
+    use prost::Message as _;
+
+    const SECRET: &str = "w12w-never-read-back";
+
+    /// 读回的配置不带签名密钥（W11-S1 F5）：应答编码后的字节里也找不到它，只说明已设置。
+    #[test]
+    fn webhook_configs_are_read_back_without_the_signing_secret() {
+        for (secret, configured) in [(Some(SECRET), "true"), (None, "false")] {
+            let item = signed_webhook_hook("wh", "http://127.0.0.1:9/hook", secret);
+            let config = hook_config_item_to_protobuf("7", "tenant-a", "pre_send", &item).unwrap();
+            let transport = config.transport.as_ref().unwrap();
+            assert_eq!(transport.r#type, "webhook");
+            assert!(transport.secret.is_empty());
+            assert_eq!(
+                transport
+                    .metadata
+                    .get(WEBHOOK_SECRET_CONFIGURED_KEY)
+                    .map(String::as_str),
+                Some(configured)
+            );
+            let encoded = config.encode_to_vec();
+            assert!(
+                !encoded
+                    .windows(SECRET.len())
+                    .any(|window| window == SECRET.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_secret_on_update_keeps_the_stored_one() {
+        let stored = signed_webhook_hook("wh", "http://127.0.0.1:9/hook", Some(SECRET));
+        assert_eq!(
+            stored_webhook_secret(&stored.transport).as_deref(),
+            Some(SECRET)
+        );
+        let unsigned = signed_webhook_hook("wh", "http://127.0.0.1:9/hook", None);
+        assert_eq!(stored_webhook_secret(&unsigned.transport), None);
+        assert_eq!(
+            stored_webhook_secret(&HookTransportConfig::Local { target: "t".into() }),
+            None
+        );
     }
 }

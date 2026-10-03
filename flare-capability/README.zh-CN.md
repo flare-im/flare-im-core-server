@@ -214,7 +214,10 @@ Hook 配置支持多租户场景：
 **加载与执行**（未设 `TENANT_ID` 的进程，即多租户默认）：数据库加载器把全局行作为全局配置，
 各租户经 `CapabilityService/Administer` 登记的行按租户分桶。`HookPlugin.Call` 按调用方签名
 上下文里的租户选 Hook：全局配置加该租户的桶。某个租户的行无效时只让该租户停在上一版配置；
-某个配置源加载失败时沿用它上一次加载的结果。Administer 写入后立即重载该租户的桶。设了
+某个配置源加载失败时沿用它上一次加载的结果。Administer 写入后，处理写入的实例立即重载该租户的
+桶，并在 PostgreSQL 频道 `flare_hook_config_changed` 上 `NOTIFY`：共用同一个库的其余实例重载同一
+租户（全局行则全量重载），不必等定时刷新。监听重连后全量重载一次，补上断开期间漏掉的通知；定时
+刷新仍是兜底。每次按租户重载在 INFO 级记录租户与 Hook 条数。设了
 `TENANT_ID` 的进程保持单租户行为（不保留全局 Hook 的名字），加载下面这些行作为全局配置：
 ```sql
 SELECT * FROM hook_configs
@@ -377,6 +380,12 @@ flare-capability/
    endpoint = "https://hooks.example.com/webhook"
    secret = "your-secret-key"
    ```
+   配了密钥时投递带 `Flare-Signature: t=<unix 秒>,v1=<hex HMAC-SHA256(secret, t "." 原始请求体)>`，
+   与 Core 的 Webhook 适配器同一契约（`docs/HOOK-PLUGIN-CONTRACT.md` §7），旧的
+   `X-Hook-Signature` 已删除。密钥只写不读：`hook_config.create`、`get`、`list`、`update` 都不返回
+   它（`transport.metadata["signing_secret_configured"]` 说明是否已设置），`update` 时密钥留空即
+   沿用已存的，日志与审计记录里也没有它。上下文缺租户时不投递。gRPC 传输原样转发调用方的签名
+   上下文（`x-flare-ctx`），没有签名上下文时不发出调用。
 
 3. **Local Plugin传输**：
    ```toml
@@ -387,13 +396,11 @@ flare-capability/
 
 ## 监控和统计
 
-本服务提供以下 Hook 相关监控指标：
-
-- `hook_execution_total`：Hook执行总次数
-- `hook_execution_duration_seconds`：Hook执行耗时
-- `hook_success_rate`：Hook成功率
-- `hook_failure_total`：Hook失败次数
-- `hook_timeout_total`：Hook超时次数
+目前**不记录**单个 Hook 的执行结果：进程内的 `MetricsCollector`、`ExecutionRecorder` 没有任何写入
+方，`deploy/init.sql` 里的 `hook_executions` 表为预留、从不写入。因此 `hook_config.get_statistics`
+的计数为 0，`hook_config.query_executions` 返回空列表。要落库执行记录，发送链路上每条消息的每个
+Hook 都多一次写库，须先定采样与保留期；记录器还须按租户（不只按 Hook 名）区分。本服务导出通用的
+gRPC 服务端指标（`GrpcMetricsLayer`），Hook 失败见日志。
 
 ## 参考文档
 

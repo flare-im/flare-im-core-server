@@ -217,7 +217,13 @@ tenant's rows (registered through `CapabilityService/Administer`) into a bucket 
 that tenant. `HookPlugin.Call` selects the hooks by the tenant of the caller's
 signed context: global hooks plus that tenant's bucket. A tenant's invalid rows only
 keep that tenant on its previous hooks; a failed source keeps its last loaded hooks.
-An Administer write reloads that tenant's bucket immediately. A process started with
+An Administer write reloads that tenant's bucket immediately on the instance that
+handles it, and announces the change with a PostgreSQL `NOTIFY` on
+`flare_hook_config_changed`: every other instance sharing the database reloads the same
+tenant (everything, for a global row) without waiting for the periodic refresh. A
+listener that reconnects reloads everything once to cover notifications it missed; the
+periodic refresh remains the fallback. Each tenant reload logs the tenant and its hook
+count at INFO. A process started with
 `TENANT_ID` keeps the single-tenant behaviour (no name reservation) and loads, as
 global configuration:
 ```sql
@@ -382,6 +388,14 @@ Supports three transport methods:
    endpoint = "https://hooks.example.com/webhook"
    secret = "your-secret-key"
    ```
+   With a secret, deliveries carry `Flare-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, t "." raw-body)>`,
+   the same contract as Core's webhook adapter (`docs/HOOK-PLUGIN-CONTRACT.md` §7); the
+   old `X-Hook-Signature` is gone. The secret is write-only: `hook_config.create`, `get`,
+   `list` and `update` never return it (`transport.metadata["signing_secret_configured"]`
+   says whether one is set), an `update` with an empty secret keeps the stored one, and
+   neither logs nor audit records carry it. A context without a tenant is not delivered.
+   The gRPC transport forwards the caller's signed context (`x-flare-ctx`) and does not
+   call without one.
 
 3. **Local Plugin transport**:
    ```toml
@@ -392,13 +406,14 @@ Supports three transport methods:
 
 ## Monitoring and statistics
 
-This service provides the following hook-related monitoring metrics:
-
-- `hook_execution_total`: total number of hook executions
-- `hook_execution_duration_seconds`: hook execution duration
-- `hook_success_rate`: hook success rate
-- `hook_failure_total`: number of hook failures
-- `hook_timeout_total`: number of hook timeouts
+Per-hook execution results are **not recorded** at present: nothing feeds the in-process
+`MetricsCollector` or `ExecutionRecorder`, and the `hook_executions` table in
+`deploy/init.sql` is reserved and never written. `hook_config.get_statistics` therefore
+returns zero counts and `hook_config.query_executions` an empty list. Persisting execution
+records would add a database write per hook per message on the send path and needs a
+sampling and retention decision first; a recorder must key records by tenant as well as
+by hook name. The service exports the generic gRPC server metrics
+(`GrpcMetricsLayer`); hook failures are visible in its logs.
 
 ## Reference documentation
 

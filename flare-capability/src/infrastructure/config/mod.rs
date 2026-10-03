@@ -8,14 +8,17 @@
 //! 3. **配置文件配置**（最低优先级）：存储在本地TOML文件中
 //!
 //! 数据库中 `tenant_id IS NULL` 的行与文件、配置中心一样是全局配置；租户登记的行按租户分桶，
-//! 只作用于该租户的事件（见 [`HookConfigSnapshot`]）。
+//! 只作用于该租户的事件（见 [`HookConfigSnapshot`]）。多个实例之间经 PostgreSQL
+//! `LISTEN/NOTIFY` 互相通知写入（见 [`HookConfigInvalidation`]）。
 
 pub mod capability_runtime;
+pub mod invalidation;
 pub mod loader;
 pub mod snapshot;
 pub mod watcher;
 
 pub use capability_runtime::CapabilityRuntimeConfig;
+pub use invalidation::{HOOK_CONFIG_CHANNEL, HookConfigInvalidation};
 pub use loader::{
     ConfigCenterLoader, ConfigLoader, ConfigLoaderItem, ConfigMerger, ConfigValidator,
     DatabaseConfigLoader, FileConfigLoader, LoadedHookConfig,
