@@ -97,13 +97,16 @@ impl PostgresMessageStore {
             .connect(url)
             .await?;
 
-        let operation_store = operation_store::OperationStore::new(pool.clone());
+        Ok(Some(Self::from_pool(pool)))
+    }
 
-        let store = Self {
+    /// 用已有连接池构造（真库用例等）。
+    pub fn from_pool(pool: Pool<Postgres>) -> Self {
+        let operation_store = operation_store::OperationStore::new(pool.clone());
+        Self {
             pool,
             operation_store,
-        };
-        Ok(Some(store))
+        }
     }
 }
 

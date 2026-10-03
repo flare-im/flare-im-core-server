@@ -438,6 +438,11 @@ impl OperationStore {
     }
 
     /// 追加事件到操作历史。operator_id 由领域侧从 metadata 注入传入（proto Event 无此字段）。
+    ///
+    /// 幂等：一行的自然身份是（租户，会话，seq，消息）——操作事件在事件流里以（租户，会话，seq）为键，
+    /// 已读回执一个事件对应多条消息。各 handler 先记操作历史、再写事件流，写事件流失败后的重投会再走到
+    /// 这里，唯一索引 `idx_message_operation_history_event_identity`（迁移 0009）让重复的一行不再写入。
+    /// 没有会话 ID 的事件不落事件流，也没有身份可判重，两列记 NULL（与迁移前的存量行一样不受约束）。
     pub async fn append_event(
         &self,
         tenant_id: &str,
@@ -455,14 +460,17 @@ impl OperationStore {
         event.encode(&mut buf)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
         let operation_data_json = json!({ "event_base64": encoded });
+        let (conversation_id, seq) = operation_history_identity(event);
 
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"
             INSERT INTO message_operation_history (
                 tenant_id, message_id, operation_type, operator_id, target_user_id,
-                operation_data, timestamp, metadata
+                operation_data, timestamp, metadata, conversation_id, seq
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (tenant_id, conversation_id, seq, message_id) WHERE seq IS NOT NULL
+            DO NOTHING
             "#,
         )
         .bind(tenant_id)
@@ -473,10 +481,35 @@ impl OperationStore {
         .bind(operation_data_json)
         .bind(ts)
         .bind(Value::Object(serde_json::Map::new()))
+        .bind(conversation_id)
+        .bind(seq)
         .execute(&self.pool)
         .await?;
 
+        if inserted.rows_affected() == 0 {
+            tracing::debug!(
+                tenant_id,
+                message_id,
+                conversation_id = conversation_id.unwrap_or_default(),
+                seq = seq.unwrap_or_default(),
+                "operation history row already recorded (redelivery); skipped"
+            );
+        }
+
         Ok(())
+    }
+}
+
+/// 操作历史一行的（会话，seq）：与事件流同一个键（`event_stream::event_to_insert_row`）。
+/// 没有会话 ID 的事件不落事件流，这里也不给身份。
+fn operation_history_identity(event: &Event) -> (Option<&str>, Option<i64>) {
+    if event.conversation_id.is_empty() {
+        (None, None)
+    } else {
+        (
+            Some(event.conversation_id.as_str()),
+            Some(event.conversation_seq as i64),
+        )
     }
 }
 
@@ -573,5 +606,28 @@ mod tests {
         }
         assert_eq!(operation_type_name(-1), "EVENT_TYPE_UNSPECIFIED");
         assert_eq!(operation_type_name(99), "EVENT_TYPE_UNSPECIFIED");
+    }
+
+    /// 操作历史的身份与事件流同键（W13-R1）：有会话 ID 时取（会话，seq），没有时两列为 NULL。
+    #[test]
+    fn operation_history_identity_follows_the_event_stream_key() {
+        let event = Event {
+            conversation_id: "conv-a".to_string(),
+            conversation_seq: 42,
+            ..Default::default()
+        };
+        assert_eq!(
+            operation_history_identity(&event),
+            (Some("conv-a"), Some(42))
+        );
+
+        let without_conversation = Event {
+            conversation_seq: 42,
+            ..Default::default()
+        };
+        assert_eq!(
+            operation_history_identity(&without_conversation),
+            (None, None)
+        );
     }
 }

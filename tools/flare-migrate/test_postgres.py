@@ -140,7 +140,7 @@ class PostgresMigrationTests(unittest.TestCase):
             before = migrate.ledger(db, self.migrations)
             self.run_tool(db)
             self.assertEqual(migrate.ledger(db, self.migrations), before)
-            self.assertEqual(len(before), 8)
+            self.assertEqual(len(before), 9)
             actual = migrate.snapshot(db)
             migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
 
@@ -153,7 +153,7 @@ class PostgresMigrationTests(unittest.TestCase):
             self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"), "retained")
             self.assertEqual(db.query("SELECT owner_id IS NULL FROM media_assets WHERE tenant_id='retained' AND file_id='legacy';"), "t")
             self.assertEqual(db.query("SELECT status FROM messages WHERE server_id='safe-status';"), "1")
-            self.assertEqual(len(migrate.ledger(db, self.migrations)), 8)
+            self.assertEqual(len(migrate.ledger(db, self.migrations)), 9)
 
     def test_existing_core_timescale_2291_version_is_supported(self):
         with self.fixture() as name, self.connect(name) as db:
@@ -161,6 +161,56 @@ class PostgresMigrationTests(unittest.TestCase):
             self.run_tool(db, admission=self.approved_fixture(db))
             actual = migrate.snapshot(db)
             self.assertEqual(actual["environment"]["timescaledb"], "2.29.1")
+            migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
+
+    def ledgered_0008(self, db):
+        """A database migrated to 0008 by the previous release: ledger rows 1..8, previous latest shape."""
+        db.query("BEGIN;")
+        db.query(migrate.LEDGER_DDL)
+        for migration in self.migrations[:8]:
+            migrate.execute_migration(db, migration.sql)
+            migrate.insert_ledger(db, migration)
+        db.query("COMMIT;")
+        actual = migrate.snapshot(db)
+        migrate.assert_schema(actual, migrate.read_profile("v0008", actual["environment"]))
+
+    def test_0009_upgrades_a_ledgered_0008_database_and_keeps_duplicate_history_rows(self):
+        # Rows written before 0009 have no identity; duplicates from redelivery stay and do not block the index.
+        history = "INSERT INTO message_operation_history(tenant_id,message_id,operation_type,operator_id,operation_data,timestamp) VALUES ('retained','m1','EVENT_REACTION','u1','{\"event_base64\":\"CAg=\"}','2026-10-01T00:00:00Z');"
+        identified = "INSERT INTO message_operation_history(tenant_id,message_id,operation_type,conversation_id,seq) VALUES ('retained','m1','EVENT_REACTION','c1',7)"
+        with self.fixture() as name:
+            with self.connect(name) as db:
+                self.ledgered_0008(db)
+                db.query(history + history)
+                self.run_tool(db)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 9)
+                self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE tenant_id='retained' AND seq IS NULL;"), "2")
+                actual = migrate.snapshot(db)
+                migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
+                # New rows carry the identity: the Writer's ON CONFLICT skips a redelivery.
+                for _ in range(2):
+                    db.query(identified + " ON CONFLICT (tenant_id,conversation_id,seq,message_id) WHERE seq IS NOT NULL DO NOTHING;")
+                self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE seq=7;"), "1")
+                self.run_tool(db)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 9)
+            with self.connect(name) as db:
+                # A plain insert of the same identity is refused by the unique index (psql stops on the error).
+                with self.assertRaises(migrate.MigrationError):
+                    db.query(identified + ";")
+            with self.connect(name) as db:
+                self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE seq=7;"), "1")
+
+    def test_unledgered_0008_shape_is_admitted_and_upgraded(self):
+        with self.fixture() as name, self.connect(name) as db:
+            db.query("BEGIN;")
+            for migration in self.migrations[:8]:
+                migrate.execute_migration(db, migration.sql)
+            db.query("COMMIT;")
+            self.run_tool(db, admission=self.approved_fixture(db))
+            ledger = migrate.ledger(db, self.migrations)
+            self.assertEqual(len(ledger), 9)
+            self.assertIsNotNone(ledger[0]["baseline_admission"])
+            actual = migrate.snapshot(db)
             migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
 
     def test_v48_label_and_table_existence_do_not_prove_a_baseline(self):
@@ -215,7 +265,7 @@ class PostgresMigrationTests(unittest.TestCase):
             with self.connect(core_only) as db:
                 self.assertEqual(db.query(absent), "t")
                 self.run_tool(db, admission=self.approved_fixture(db))
-                self.assertEqual(len(migrate.ledger(db, self.migrations)), 8)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), 9)
                 self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"), "retained")
                 self.assertEqual(db.query("SELECT status FROM messages WHERE server_id='kept';"), "1")
             with self.connect(mixed) as db:
@@ -264,7 +314,8 @@ class PostgresMigrationTests(unittest.TestCase):
     def test_sql_failure_rolls_back_ddl_and_ledger(self):
         with self.fixture() as name:
             with self.connect(name) as db:
-                broken = migrate.Migration(9, "0009_failure.sql", "CREATE TABLE rollback_marker(id bigint); SELECT 1/0;", hashlib.sha256(b"broken").hexdigest())
+                version = len(self.migrations) + 1
+                broken = migrate.Migration(version, f"{version:04}_failure.sql", "CREATE TABLE rollback_marker(id bigint); SELECT 1/0;", hashlib.sha256(b"broken").hexdigest())
                 with self.assertRaises(migrate.MigrationError):
                     self.run_tool(db, self.migrations + [broken])
             with self.connect(name) as db:

@@ -473,6 +473,17 @@
       "identity": "",
       "kind": "column",
       "name": "conversation_id",
+      "not_null": false,
+      "table": "message_operation_history",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "conversation_id",
       "not_null": true,
       "table": "message_write_ledger",
       "type": "text"
@@ -2497,6 +2508,17 @@
       "identity": "",
       "kind": "column",
       "name": "seq",
+      "not_null": false,
+      "table": "message_operation_history",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "seq",
       "not_null": true,
       "table": "message_write_ledger",
       "type": "bigint"
@@ -4345,6 +4367,16 @@
       "ready": true,
       "replica_identity": false,
       "table": "message_export_tasks",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX idx_message_operation_history_event_identity ON public.message_operation_history USING btree (tenant_id, conversation_id, seq, message_id) WHERE (seq IS NOT NULL)",
+      "kind": "index",
+      "name": "idx_message_operation_history_event_identity",
+      "ready": true,
+      "replica_identity": false,
+      "table": "message_operation_history",
       "valid": true
     },
     {

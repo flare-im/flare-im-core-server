@@ -313,8 +313,14 @@ def execute_migration(db, sql):
     db.query(f"SET LOCAL search_path={SAFE_SEARCH_PATH};")
 
 
+# Reviewed logical shapes a Core database may have before `run`: the frozen 0001 snapshot (0002..0007
+# change nothing on it), the shape after 0008 and the current latest. When a migration changes the shape,
+# keep the previous latest as `v<NNNN>` so ledgered databases at that version still pass the pre-check.
+REVIEWED_SHAPES = ("baseline", "v0008", "latest")
+
+
 def assert_reviewed_baseline(actual):
-    if canonical(actual) not in {canonical(read_profile(name, actual["environment"])) for name in ("baseline", "latest")}:
+    if canonical(actual) not in {canonical(read_profile(name, actual["environment"])) for name in REVIEWED_SHAPES}:
         raise MigrationError("schema mismatch: not a reviewed Core baseline; audited import required")
 
 

@@ -445,7 +445,9 @@ CREATE TABLE message_operation_history (
     target_user_id TEXT DEFAULT '',
     operation_data JSONB DEFAULT '{}'::jsonb,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    metadata JSONB DEFAULT '{}'::jsonb
+    metadata JSONB DEFAULT '{}'::jsonb,
+    conversation_id TEXT,
+    seq BIGINT
 );
 COMMENT ON TABLE message_operation_history IS '操作历史（Event 序列化/索引）；QueryMessageEvents 等';
 COMMENT ON COLUMN message_operation_history.id IS '自增主键';
@@ -457,7 +459,15 @@ COMMENT ON COLUMN message_operation_history.target_user_id IS '目标用户 ID�
 COMMENT ON COLUMN message_operation_history.operation_data IS '操作数据（如 event_base64 或 JSON）';
 COMMENT ON COLUMN message_operation_history.timestamp IS '操作时间';
 COMMENT ON COLUMN message_operation_history.metadata IS '扩展元数据';
+COMMENT ON COLUMN message_operation_history.conversation_id IS
+    '操作事件所在会话；与 seq 一起是事件流 events 的键。迁移 0009 之前的行为 NULL';
+COMMENT ON COLUMN message_operation_history.seq IS
+    '操作事件的会话 seq；迁移 0009 之前的行为 NULL';
 CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id);
+-- 一行的身份是（租户，会话，seq，消息）：Writer 重投时以 ON CONFLICT DO NOTHING 跳过（迁移 0009）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_operation_history_event_identity
+    ON message_operation_history(tenant_id, conversation_id, seq, message_id)
+    WHERE seq IS NOT NULL;
 
 -- ============================================================================
 -- 5. 话题/子线程（common/models.proto ThreadInfo）

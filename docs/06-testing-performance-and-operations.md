@@ -113,6 +113,7 @@ python3 scripts/test_smoke_message_flow.py
 | `FLARE_CONVERSATION_TEST_DATABASE_URL` | 任意可建 schema 的一次性 PostgreSQL | `flare-conversation` 的 `conversation_admin_pg`、`conversation_history_purge_pg`（2 条） |
 | `FLARE_CONVERSATION_TEST_REDIS_URL` | 一次性 Redis | `conversation_history_purge_pg` 的读侧缓存失效用例 |
 | `FLARE_MEDIA_TEST_DATABASE_URL` | 一次性 PostgreSQL | `flare-media` lib 的 5 条 |
+| `FLARE_STORAGE_TEST_DATABASE_URL` | 一次性 PostgreSQL；`operation_idempotency_pg` 需要已按 `migrations/`（`flare-migrate run`）或 `deploy/init.sql` 建好的库 | `flare-storage-writer` 的 `event_stream_redelivery_pg`、`operation_idempotency_pg` |
 | `FLARE_REDIS_TEST_URL` | 一次性 Redis | `flare-im-ack` 的 `test_ack_status_management` |
 | `FLARE_TEST_REDIS_URL` | 一次性 Redis | `flare-signaling-online` 的准入用例；`flare-im-seq` 的 `leased_allocator` 3 条（未设置时连本机 `redis://127.0.0.1/`，`sequence_allocator` 的 3 条固定连这个地址） |
 | `PUSH_WORKER_GETUI_APP_ID` / `_APP_KEY` / `_MASTER_SECRET` / `_SANDBOX_CID` | 个推沙箱凭据 | `flare-push-worker` 的 `getui_sandbox_push` |
@@ -409,14 +410,44 @@ exporter，目前不在面板和告警里。
 正确的去重要按（租户，会话，seq）记下已计入未读的消息（新表或新列、迁移与清理），发送热路径上每条消息多一次写，
 不是低成本改动，目前只按上面的规则人工控制重放。
 
-Storage Writer 的事件流（`events` 表）以（租户，会话，seq）为键。操作事件在应用前先按键查，已有行就整条跳过（不比较内容），
-只有两次投递同时处理时才会在写入时遇到已有行；消息事件不查，每次都写。写入时遇到已有行，以下情况按重复接受并保留已有行：
+Storage Writer 的事件流（`events` 表）以（租户，会话，seq）为键。操作事件在应用前先与同一位置上的已有行按下面的口径比较：
+是同一个事件就整条跳过，是另一个事件就不应用、报冲突；只有两次投递同时处理时才会在写入时遇到已有行。消息事件不查，每次都写。
+遇到已有行时，以下情况按重复接受并保留已有行：
 类型号与载荷都相同；载荷解码后相同（同一事件每次编码时 map 字段的条目顺序可能不同）；已有行是修复前的 Writer 以领域枚举
 判别值落的类型号（反应 11、置顶 12、取消置顶 13、标记 14、取消标记 15 等）而载荷相同；同一条消息（`server_id`、
 `client_msg_id`、发送者、会话、序号与消息类型相同，内容解码后相同）只差 attributes 等元数据。后两种记 WARN
-`event stream redelivery differs from the existing row`，已有的旧类型号不会因此纠正。其余情况报 `event stream conflict`，
-重试后进 DLQ；这类死信重放也还是冲突，先查该会话的 seq 分配。`message_operation_history` 的追加在写事件流之前且不判重，
-操作事件写事件流失败后重试会多记一行操作历史。
+`event stream redelivery differs from the existing row`，已有的旧类型号不会因此纠正。其余情况是冲突：消息事件报
+`event stream conflict`，重试后进 DLQ；操作事件报 `operation event conflict`（错误码 `CONFLICT`，不可重试），记 WARN
+`operation event conflicts with another event at the same seq; not applied` 并计入
+`storage_writer_persist_total{path="event",result="conflict"}`，不重投、直接进 DLQ（此前只按键查、不比内容，这样的操作
+被静默跳过，只有 trace 日志）。这类死信重放也还是冲突，先查该会话的 seq 分配。
+
+操作历史（`message_operation_history`）在写事件流之前追加，写事件流失败后的重投会再走一遍。Core 迁移 0009 起每行记操作事件的
+会话与 seq（`conversation_id`、`seq` 两列），（租户，会话，seq，消息）上有部分唯一索引
+`idx_message_operation_history_event_identity`，Writer 以 `ON CONFLICT DO NOTHING` 写入，重投不再多记。0009 须先于新的
+Storage Writer 执行：新 Writer 写这两列，缺列时操作事件写入失败并重投。迁移前写入的行两列为 NULL、不受该索引约束，其中重投
+多记的行原样保留（迁移不删数据）。同一事件的重复行 `operation_data` 相同（它是整个事件的编码，含会话 seq），`timestamp`
+可能不同（事件没有 `created_at` 时取写入时刻）。需要清理时，先备份，在维护窗口内按下面两步查与删，每组只留 `id` 最小的一行：
+
+```sql
+-- 查：迁移 0009 之前写入、同一条消息上内容相同的多行
+SELECT tenant_id, message_id, operation_type, count(*) AS rows, min(id) AS keep_id
+FROM message_operation_history
+WHERE seq IS NULL
+GROUP BY tenant_id, message_id, operation_type, operation_data
+HAVING count(*) > 1;
+
+-- 删：每组只留 id 最小的一行
+DELETE FROM message_operation_history h
+USING (
+    SELECT id, row_number() OVER (
+        PARTITION BY tenant_id, message_id, operation_type, operation_data ORDER BY id
+    ) AS n
+    FROM message_operation_history
+    WHERE seq IS NULL
+) d
+WHERE h.id = d.id AND d.n > 1;
+```
 
 ### Kafka 后端的消费失败
 
