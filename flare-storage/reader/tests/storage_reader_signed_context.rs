@@ -13,7 +13,10 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
-use flare_grpc_proto::storage::{GetMessageRequest, QueryMessagesBySeqRequest};
+use flare_grpc_proto::storage::{
+    ConversationWindowTarget, GetMessageRequest, QueryConversationsMessageWindowsRequest,
+    QueryMessagesBySeqRequest,
+};
 use flare_im_service_kit::control_auth::{
     CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, ConsoleControlVerifier,
 };
@@ -121,6 +124,55 @@ async fn read_messages(client: &mut Client, metadata: &[(&'static str, &str)]) -
 
 const UNSIGNED_VICTIM: [(&str, &str); 2] = [("x-tenant-id", "tenant-a"), ("x-user-id", "alice")];
 
+/// 带可见性下限的两种读：按 seq 读与批量窗口，请求体的 `user_id` 取 `user_id`。
+#[derive(Debug, Clone, Copy)]
+enum FloorRead {
+    BySeq,
+    Windows,
+}
+
+impl FloorRead {
+    async fn call(
+        self,
+        client: &mut Client,
+        user_id: &str,
+        metadata: &[(&'static str, &str)],
+    ) -> tonic::Status {
+        match self {
+            FloorRead::BySeq => client
+                .query_messages_by_seq(with_metadata(
+                    QueryMessagesBySeqRequest {
+                        conversation_id: "group:g1".into(),
+                        after_seq: 0,
+                        limit: 10,
+                        user_id: user_id.into(),
+                        ..Default::default()
+                    },
+                    metadata,
+                ))
+                .await
+                .map(|_| ())
+                .expect_err("the store is unreachable"),
+            FloorRead::Windows => client
+                .query_conversations_message_windows(with_metadata(
+                    QueryConversationsMessageWindowsRequest {
+                        targets: vec![ConversationWindowTarget {
+                            conversation_id: "group:g1".into(),
+                            after_seq: 0,
+                        }],
+                        per_conversation_limit: 10,
+                        user_id: user_id.into(),
+                        ..Default::default()
+                    },
+                    metadata,
+                ))
+                .await
+                .map(|_| ())
+                .expect_err("the store is unreachable"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn unsigned_reads_are_refused_when_signing_is_required() {
     let (signer, verifier) = cell_keys(91);
@@ -166,6 +218,71 @@ async fn valid_signatures_and_tolerated_legacy_calls_reach_the_store() {
     let mut tolerant = serve(SignedFirstContextLayer::new(Some(verifier)), None).await;
     let status = read_messages(&mut tolerant, &UNSIGNED_VICTIM).await;
     assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+}
+
+/// 按 seq 读与批量窗口的 `user_id` 是可见性下限（W13-R2）：签名的 User 指名他人时回
+/// PERMISSION_DENIED、到不了存储，签名读开关打开与关闭都一样；指名自己、留空（按签名用户补上）
+/// 与 Service 签名指名任意用户都走到存储。开关关闭时未签名的旧调用仍按请求体。修复前 mallory
+/// 带自己的签名、请求体写 alice，就能按 alice 的下限读同租户的会话。
+#[tokio::test]
+async fn signed_users_cannot_read_with_another_users_visibility_floor() {
+    let (signer, verifier) = cell_keys(91);
+    let mallory = sign(&signer, SignedActorType::User, "mallory");
+    let alice = sign(&signer, SignedActorType::User, "alice");
+    let service = sign(&signer, SignedActorType::Service, "flare-sync-orchestrator");
+    for require in [true, false] {
+        let mut client = serve(
+            SignedFirstContextLayer::new(Some(verifier.clone())).require_signed(require),
+            None,
+        )
+        .await;
+        for read in [FloorRead::BySeq, FloorRead::Windows] {
+            let status = read
+                .call(&mut client, "alice", &[("x-flare-ctx", &mallory)])
+                .await;
+            assert_eq!(
+                status.code(),
+                Code::PermissionDenied,
+                "require={require} {read:?}: {status:?}"
+            );
+            assert_eq!(status.message(), "user_id does not match the signed user");
+
+            for (token, user_id) in [
+                (&alice, "alice"),
+                (&alice, ""),
+                (&mallory, ""),
+                (&service, "alice"),
+                (&service, ""),
+            ] {
+                let status = read
+                    .call(&mut client, user_id, &[("x-flare-ctx", token)])
+                    .await;
+                assert_eq!(
+                    status.code(),
+                    Code::Unavailable,
+                    "require={require} {read:?} user_id={user_id:?}: {status:?}"
+                );
+            }
+
+            let status = read
+                .call(
+                    &mut client,
+                    "alice",
+                    &[("x-tenant-id", "tenant-a"), ("x-user-id", "mallory")],
+                )
+                .await;
+            let expected = if require {
+                Code::Unauthenticated
+            } else {
+                Code::Unavailable
+            };
+            assert_eq!(
+                status.code(),
+                expected,
+                "require={require} {read:?} unsigned: {status:?}"
+            );
+        }
+    }
 }
 
 /// 管理检索不要 `x-flare-ctx`：带 admin 令牌的调用越过读接口边界走到存储；不带的被处理器以

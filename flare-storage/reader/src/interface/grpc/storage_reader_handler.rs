@@ -28,6 +28,7 @@ use flare_im_service_kit::control_auth::{
 };
 use flare_server_core::context::keys;
 use flare_server_core::utils::extract_ctx_from_request_opt;
+use flare_server_core::{SignedActorType, VerifiedContext};
 
 #[derive(Clone)]
 pub struct StorageReaderGrpcHandler<M>
@@ -93,6 +94,28 @@ fn admin_context(
         Some(trace_id) => ctx.with_trace_id(trace_id),
         None => ctx,
     })
+}
+
+/// 按 seq 读与批量窗口里请求体的 `user_id` 是可见性下限（入群前的、为自己删除的消息不返回），
+/// 不是谁在读。调用方是验过签的 User 时它只能是签名用户本人：填了别人回 PERMISSION_DENIED（以前
+/// 同租户内可以指名他人、按别人的下限读），留空按签名用户补上（留空等于不加下限）。Service、
+/// TenantAdmin 签名的调用（替用户读的服务）与读接口边界放行的未签名调用仍按请求体。
+fn bound_read_user(
+    ctx: &flare_server_core::context::Ctx,
+    requested: String,
+) -> Result<Option<String>, Status> {
+    let signed_user = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .filter(|claims| claims.actor_type == SignedActorType::User)
+        .map(|claims| claims.actor_id.as_str());
+    match signed_user {
+        None => Ok((!requested.is_empty()).then_some(requested)),
+        Some(user) if requested.is_empty() || requested == user => Ok(Some(user.to_string())),
+        Some(_) => Err(Status::permission_denied(
+            "user_id does not match the signed user",
+        )),
+    }
 }
 
 /// 失败的是哪一类读：按 id 取一条消息（或某条消息的事件、编辑历史、已读、标记、反应）时，
@@ -464,6 +487,7 @@ where
             .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
 
         let req = request.into_inner();
+        let user_id = bound_read_user(&ctx, req.user_id)?;
         let requested_limit = req.limit.max(1);
         let is_backfill_tail_page = crate::domain::repository::is_backfill_tail_page(
             req.after_seq,
@@ -479,11 +503,7 @@ where
                 Some(req.before_seq)
             },
             limit: requested_limit + 1,
-            user_id: if req.user_id.is_empty() {
-                None
-            } else {
-                Some(req.user_id)
-            },
+            user_id,
             include_burned_placeholder: req.include_burned_placeholder,
         };
 
@@ -547,7 +567,7 @@ where
         let ctx = extract_ctx_from_request_opt(&request)
             .unwrap_or_else(|| Arc::new(flare_server_core::context::Context::root()));
         let req = request.into_inner();
-        let user_id = (!req.user_id.is_empty()).then_some(req.user_id.as_str());
+        let user_id = bound_read_user(&ctx, req.user_id)?;
         let targets: Vec<(String, i64)> = req
             .targets
             .iter()
@@ -559,7 +579,7 @@ where
             .handle_query_conversations_message_windows(
                 &ctx,
                 &targets,
-                user_id,
+                user_id.as_deref(),
                 req.per_conversation_limit,
                 req.newest_window,
                 req.include_burned_placeholder,
@@ -1555,5 +1575,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+    }
+
+    // ---- 按 seq 读与批量窗口：请求体 user_id 与签名用户绑定（W13-R2）----
+
+    /// 经真实验签得到的上下文（带 `VerifiedContext`），与读接口边界放行后处理器拿到的相同。
+    fn signed_ctx(actor_type: SignedActorType, actor: &str) -> flare_server_core::context::Ctx {
+        let key = SigningKey::from_bytes(&[61; 32]);
+        let signer = flare_server_core::SignedContextSigner::from_private_key(
+            &key.to_pkcs8_pem(Default::default()).unwrap(),
+        )
+        .unwrap();
+        let verifier = flare_server_core::SignedContextVerifier::from_public_key(
+            &key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        let token = signer
+            .sign(&flare_server_core::SignedContextIdentity::new(
+                actor_type, actor, "tenant-a", "req-bind",
+            ))
+            .unwrap();
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert("x-flare-ctx", token.parse().unwrap());
+        flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata(
+            &metadata, &verifier,
+        )
+        .unwrap()
+    }
+
+    /// 签名的 User 只能按自己的可见性下限读：请求体填别人回 PERMISSION_DENIED，留空补成签名
+    /// 用户；Service、TenantAdmin 签名与未签名的调用仍按请求体（留空即不加下限）。修复前请求体
+    /// 原样生效，同租户的用户可以指名他人。
+    #[test]
+    fn signed_users_read_only_with_their_own_visibility_floor() {
+        let alice = signed_ctx(SignedActorType::User, "alice");
+        assert_eq!(
+            bound_read_user(&alice, "alice".into()).unwrap().as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            bound_read_user(&alice, String::new()).unwrap().as_deref(),
+            Some("alice")
+        );
+        for other in ["bob", "alice ", "ALICE"] {
+            let status = bound_read_user(&alice, other.into()).unwrap_err();
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{other:?}");
+            assert!(!status.message().contains(other.trim()), "{status:?}");
+        }
+
+        for (actor_type, actor) in [
+            (SignedActorType::Service, "flare-sync-orchestrator"),
+            (SignedActorType::TenantAdmin, "admin-1"),
+        ] {
+            let ctx = signed_ctx(actor_type, actor);
+            assert_eq!(
+                bound_read_user(&ctx, "bob".into()).unwrap().as_deref(),
+                Some("bob"),
+                "{actor_type:?}"
+            );
+            assert_eq!(bound_read_user(&ctx, String::new()).unwrap(), None);
+        }
+
+        let unsigned: flare_server_core::context::Ctx = Arc::new(
+            Context::with_request_id("req-legacy")
+                .with_tenant_id("tenant-a")
+                .with_user_id("alice"),
+        );
+        assert_eq!(
+            bound_read_user(&unsigned, "bob".into()).unwrap().as_deref(),
+            Some("bob")
+        );
+        assert_eq!(bound_read_user(&unsigned, String::new()).unwrap(), None);
     }
 }
