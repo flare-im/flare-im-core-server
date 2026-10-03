@@ -43,6 +43,7 @@ Failure handling:
 
 - Retryable errors go into `STORAGE_MESSAGE_RETRY_TOPIC`.
 - Errors that exceed the retry budget or are unrecoverable go into `STORAGE_MESSAGE_DLQ_TOPIC`.
+- A redelivered event is checked against the existing `events` row at the same `(tenant_id, conversation_id, seq)`: the same event (identical, re-encoded with a different map entry order, stored with the type number of the pre-fix writer, or the same message differing only in metadata) is accepted as a duplicate and the existing row is kept; a different event is a conflict and goes through retry to the DLQ.
 - `message_write_ledger` records stages such as archive/event/ack, to facilitate troubleshooting by `tenant_id + server_id`.
 
 ## Reader

@@ -43,6 +43,7 @@ flare-message-ingest
 
 - 可重试错误进入 `STORAGE_MESSAGE_RETRY_TOPIC`。
 - 超过重试预算或不可恢复错误进入 `STORAGE_MESSAGE_DLQ_TOPIC`。
+- 重投按同一 `(tenant_id, conversation_id, seq)` 上已有的 `events` 行判重：同一事件（完全相同、map 条目顺序不同的重新编码、修复前 Writer 落的旧类型号，或只差元数据的同一条消息）按重复接受并保留已有行；另一个事件按冲突处理，经重试进 DLQ。
 - `message_write_ledger` 记录 archive/event/ack 等阶段，便于按 `tenant_id + server_id` 排障。
 
 ## Reader
