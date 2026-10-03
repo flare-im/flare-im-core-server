@@ -51,6 +51,53 @@ fn mark_type_to_int(s: &str) -> i32 {
     }
 }
 
+/// 一次表态变更对 `message_reactions` 一行的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReactionChange {
+    /// 不改这一行：重复的表态，或该用户没有表态过的移除（重投、乱序或从未表态）。
+    Unchanged,
+    /// 写回新的用户列表与计数。
+    Update { user_ids: Vec<String>, count: i32 },
+    /// 计数到 0：删掉这一行（与原先的语义相同）。
+    Delete,
+}
+
+/// 表态变更，加与移除都幂等：加只在该用户还没表态时计入；移除只在该用户确实表态过时才减。
+/// 以前移除分支总是 `count.max(0) - 1`：事件流写失败后的重投、或从未表态的用户的移除，会减掉
+/// 别人的计数，计数到 0 时把别人的表态整行删掉。
+///
+/// 移除后的计数不低于剩下的用户数：被旧逻辑多减过的行（计数小于用户数）不会因为一次合法的移除
+/// 而删掉其他用户的表态。
+fn apply_reaction_change(
+    mut user_ids: Vec<String>,
+    count: i32,
+    user_id: &str,
+    add: bool,
+) -> ReactionChange {
+    let reacted = user_ids.iter().any(|id| id == user_id);
+    if add {
+        if reacted {
+            return ReactionChange::Unchanged;
+        }
+        user_ids.push(user_id.to_string());
+        return ReactionChange::Update {
+            user_ids,
+            count: count.max(0) + 1,
+        };
+    }
+    if !reacted {
+        return ReactionChange::Unchanged;
+    }
+    user_ids.retain(|id| id != user_id);
+    let remaining = i32::try_from(user_ids.len()).unwrap_or(i32::MAX);
+    let count = (count.max(0) - 1).max(remaining);
+    if count > 0 {
+        ReactionChange::Update { user_ids, count }
+    } else {
+        ReactionChange::Delete
+    }
+}
+
 /// `message_operation_history.operation_type`：proto `flare.common.v1.EventType` 的取值名
 /// （`Event.type` 是 proto 取值，见 `convert::event_to_proto`）。
 ///
@@ -288,8 +335,10 @@ impl OperationStore {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
+        // FOR UPDATE：同一表情的两次变更（含同一事件的并发重投）串行，后一次看到前一次的结果，
+        // 不会各自从同一个旧值算起、重复减计数。
         let reaction_row = sqlx::query(
-            r#"SELECT user_ids, count FROM message_reactions WHERE tenant_id = $1 AND message_id = $2 AND emoji = $3"#,
+            r#"SELECT user_ids, count FROM message_reactions WHERE tenant_id = $1 AND message_id = $2 AND emoji = $3 FOR UPDATE"#,
         )
         .bind(tenant_id)
         .bind(message_id)
@@ -298,37 +347,31 @@ impl OperationStore {
         .await?;
 
         if let Some(row) = reaction_row {
-            let mut user_ids: Vec<String> = row.get("user_ids");
-            let mut count: i32 = row.get("count");
+            let user_ids: Vec<String> = row.get("user_ids");
+            let count: i32 = row.get("count");
 
-            if add {
-                if !user_ids.contains(&user_id.to_string()) {
-                    user_ids.push(user_id.to_string());
-                    count += 1;
-                }
-            } else {
-                user_ids.retain(|id| id != user_id);
-                count = count.max(0) - 1;
-            }
-
-            if count > 0 {
-                sqlx::query(
-                    r#"UPDATE message_reactions SET user_ids = $1, count = $2, last_updated = CURRENT_TIMESTAMP WHERE message_id = $3 AND emoji = $4 AND tenant_id = $5"#,
-                )
-                .bind(&user_ids)
-                .bind(count)
-                .bind(message_id)
-                .bind(emoji)
-                .bind(tenant_id)
-                .execute(&mut *tx)
-                .await?;
-            } else {
-                sqlx::query(r#"DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND tenant_id = $3"#)
+            match apply_reaction_change(user_ids, count, user_id, add) {
+                ReactionChange::Unchanged => {}
+                ReactionChange::Update { user_ids, count } => {
+                    sqlx::query(
+                        r#"UPDATE message_reactions SET user_ids = $1, count = $2, last_updated = CURRENT_TIMESTAMP WHERE message_id = $3 AND emoji = $4 AND tenant_id = $5"#,
+                    )
+                    .bind(&user_ids)
+                    .bind(count)
                     .bind(message_id)
                     .bind(emoji)
                     .bind(tenant_id)
                     .execute(&mut *tx)
                     .await?;
+                }
+                ReactionChange::Delete => {
+                    sqlx::query(r#"DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND tenant_id = $3"#)
+                        .bind(message_id)
+                        .bind(emoji)
+                        .bind(tenant_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
             }
         } else if add {
             sqlx::query(
@@ -516,6 +559,63 @@ fn operation_history_identity(event: &Event) -> (Option<&str>, Option<i64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn users(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(ToString::to_string).collect()
+    }
+
+    /// 移除幂等（W14-R (c)）：只有该用户确实表态过才减；重复移除（事件流写失败后的重投）与从未表态
+    /// 的移除不改计数，不会减掉别人的计数或删掉别人的表态。修复前移除分支总是 `count.max(0) - 1`。
+    #[test]
+    fn removing_a_reaction_only_counts_a_user_who_reacted() {
+        // 正常移除：减一，剩下的用户不变。
+        assert_eq!(
+            apply_reaction_change(users(&["u1", "u2"]), 2, "u1", false),
+            ReactionChange::Update {
+                user_ids: users(&["u2"]),
+                count: 1
+            }
+        );
+        // 同一移除的重投：u1 已不在，不改。
+        assert_eq!(
+            apply_reaction_change(users(&["u2"]), 1, "u1", false),
+            ReactionChange::Unchanged
+        );
+        // 从未表态的用户移除：不改（修复前会把 u2 的这一行删掉）。
+        assert_eq!(
+            apply_reaction_change(users(&["u2"]), 1, "u3", false),
+            ReactionChange::Unchanged
+        );
+        // 最后一个用户移除：计数到 0，删掉这一行（原有语义）。
+        assert_eq!(
+            apply_reaction_change(users(&["u2"]), 1, "u2", false),
+            ReactionChange::Delete
+        );
+        // 旧逻辑多减过的行（计数小于用户数）：一次合法移除不删掉其他用户的表态。
+        assert_eq!(
+            apply_reaction_change(users(&["u1", "u2", "u3"]), 1, "u1", false),
+            ReactionChange::Update {
+                user_ids: users(&["u2", "u3"]),
+                count: 2
+            }
+        );
+    }
+
+    /// 加表态同样幂等：重复的加不改；新用户加一。
+    #[test]
+    fn adding_a_reaction_is_idempotent() {
+        assert_eq!(
+            apply_reaction_change(users(&["u1"]), 1, "u1", true),
+            ReactionChange::Unchanged
+        );
+        assert_eq!(
+            apply_reaction_change(users(&["u1"]), 1, "u2", true),
+            ReactionChange::Update {
+                user_ids: users(&["u1", "u2"]),
+                count: 2
+            }
+        );
+    }
 
     /// 撤回必须落 RECALLED，不能落 DELETED。
     ///
