@@ -310,8 +310,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use flare_im_hooks::hooks::{
-        HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft, PreSendDecision,
-        PreSendHook, is_pre_send_rejection,
+        HookDispatcher, HookMetadata, HookOutcome, HookRegistry, HookSelector, MessageDraft,
+        MessageRecord, PostSendHook, PreSendDecision, PreSendHook, is_pre_send_rejection,
     };
     use flare_server_core::context::Context;
 
@@ -367,5 +367,77 @@ mod tests {
         assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
         assert!(error.is_retryable(), "{error}");
         assert!(!is_pre_send_rejection(&error), "{error}");
+    }
+
+    /// 永不返回的 PostSend Hook。
+    struct HangingPostSend;
+
+    #[async_trait]
+    impl PostSendHook for HangingPostSend {
+        async fn handle(
+            &self,
+            _ctx: &Ctx,
+            _record: &MessageRecord,
+            _draft: &MessageDraft,
+        ) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    struct Submitted(Message);
+
+    impl SubmittedMessage for Submitted {
+        fn message(&self) -> &Message {
+            &self.0
+        }
+        fn message_id(&self) -> &str {
+            "m1"
+        }
+    }
+
+    /// 同步发送路径不随 W13-D 改变：必需 PostSend Hook 自身超时（注册表里现在是可重试的
+    /// `ServiceUnavailable`）经 `HookExecutionService` 仍收成 `InternalError`，失败关闭时编排器原样
+    /// 返回、失败开放时放行；摄入在消息受理之后只记日志，发送应答不变。
+    #[tokio::test]
+    async fn sync_post_send_hook_timeout_keeps_its_internal_error() {
+        for fail_open in [false, true] {
+            let registry = HookRegistry::new();
+            registry
+                .register_post_send(
+                    HookMetadata::default()
+                        .with_name("hanging-post-send")
+                        .with_require_success(true)
+                        .with_timeout(Duration::from_millis(5)),
+                    HookSelector::default(),
+                    Arc::new(HangingPostSend),
+                )
+                .await;
+            let orchestrator = ExtensionOrchestrator::new(
+                Arc::new(HookExecutionService::new(
+                    Arc::new(HookDispatcher::new(registry)),
+                    None,
+                )),
+                ExtensionPolicy::new(fail_open).with_runtime(
+                    crate::extension::ExtensionRuntimePolicy::new(1_000, 0),
+                    crate::extension::ExtensionRuntimePolicy::new(10_000, 0),
+                ),
+                ExtensionRouting::default(),
+            );
+            let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                orchestrator.execute_post_send(&ctx, &Submitted(Message::default()), &ctx),
+            )
+            .await
+            .expect("the hook's own timeout fires");
+            if fail_open {
+                assert!(result.is_ok(), "fail-open degrades: {result:?}");
+            } else {
+                let error = result.expect_err("fail-closed returns the hook failure");
+                assert_eq!(error.code(), Some(ErrorCode::InternalError), "{error}");
+                assert!(!error.is_retryable(), "{error}");
+            }
+        }
     }
 }

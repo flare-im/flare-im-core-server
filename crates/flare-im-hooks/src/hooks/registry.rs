@@ -280,19 +280,7 @@ impl HookRegistry {
             let outcome = tokio::time::timeout(entry.metadata.timeout, fut).await;
             let outcome = match outcome {
                 Ok(result) => result,
-                Err(_) => {
-                    if entry.metadata.require_success {
-                        return Err(entry
-                            .metadata
-                            .build_error(ErrorCode::OperationTimeout, "post-send hook timed out"));
-                    } else {
-                        tracing::warn!(
-                            hook = %entry.metadata.name,
-                            "post-send hook timeout ignored"
-                        );
-                        HookOutcome::Completed
-                    }
-                }
+                Err(_) => timeout_outcome(&entry.metadata, "post-send hook timed out")?,
             };
             if let Err(err) = outcome.into_result(&entry.metadata) {
                 handle_hook_error_or_degrade(&entry.metadata, "post_send", err)?;
@@ -308,19 +296,7 @@ impl HookRegistry {
             let outcome = tokio::time::timeout(entry.metadata.timeout, fut).await;
             let outcome = match outcome {
                 Ok(result) => result,
-                Err(_) => {
-                    if entry.metadata.require_success {
-                        return Err(entry
-                            .metadata
-                            .build_error(ErrorCode::OperationTimeout, "delivery hook timed out"));
-                    } else {
-                        tracing::warn!(
-                            hook = %entry.metadata.name,
-                            "delivery hook timeout ignored"
-                        );
-                        HookOutcome::Completed
-                    }
-                }
+                Err(_) => timeout_outcome(&entry.metadata, "delivery hook timed out")?,
             };
             if let Err(err) = outcome.into_result(&entry.metadata) {
                 handle_hook_error_or_degrade(&entry.metadata, "delivery", err)?;
@@ -336,19 +312,7 @@ impl HookRegistry {
             let outcome = tokio::time::timeout(entry.metadata.timeout, fut).await;
             let outcome = match outcome {
                 Ok(result) => result,
-                Err(_) => {
-                    if entry.metadata.require_success {
-                        return Err(entry
-                            .metadata
-                            .build_error(ErrorCode::OperationTimeout, "recall hook timed out"));
-                    } else {
-                        tracing::warn!(
-                            hook = %entry.metadata.name,
-                            "recall hook timeout ignored"
-                        );
-                        HookOutcome::Completed
-                    }
-                }
+                Err(_) => timeout_outcome(&entry.metadata, "recall hook timed out")?,
             };
             if let Err(err) = outcome.into_result(&entry.metadata) {
                 handle_hook_error_or_degrade(&entry.metadata, "recall", err)?;
@@ -476,9 +440,18 @@ fn should_fail_open_on_hook_unavailable(err: &FlareError) -> bool {
     )
 }
 
+/// 必需的事件类 Hook（PreSend 之外的各类）超时：与不可达同属「Hook 不可用」，回可重试的
+/// `ServiceUnavailable`，与 PreSend 的口径一致（W12-T）。这些 Hook 跑在 MQ 消费者上时，消费者按
+/// `is_retryable()` 交给重投，按既有重试与退避预算用尽后才进死信；以前回 `OperationTimeout`
+/// （不可重试），一次暂时的超时就直接进死信（W13-D）。同步发送路径上的 PostSend 失败由
+/// `HookExecutionService` 收成 `InternalError`、摄入在受理之后只记日志，应答不受影响。
+fn required_timeout_error(metadata: &HookMetadata, message: &str) -> FlareError {
+    metadata.build_error(ErrorCode::ServiceUnavailable, message)
+}
+
 fn timeout_outcome(metadata: &HookMetadata, message: &str) -> Result<HookOutcome> {
     if metadata.require_success {
-        Err(metadata.build_error(ErrorCode::OperationTimeout, message))
+        Err(required_timeout_error(metadata, message))
     } else {
         tracing::warn!(hook = %metadata.name, "{message} ignored");
         Ok(HookOutcome::Completed)
@@ -487,7 +460,7 @@ fn timeout_outcome(metadata: &HookMetadata, message: &str) -> Result<HookOutcome
 
 fn timeout_decision(metadata: &HookMetadata, message: &str) -> Result<HookDecision> {
     if metadata.require_success {
-        Err(metadata.build_error(ErrorCode::OperationTimeout, message))
+        Err(required_timeout_error(metadata, message))
     } else {
         tracing::warn!(hook = %metadata.name, "{message} ignored");
         Ok(HookDecision::Allow)
@@ -538,11 +511,16 @@ mod tests {
     use crate::Ctx;
     use crate::hooks::selector::HookSelector;
     use crate::hooks::{
-        DeliveryEvent, DeliveryHook, HookMetadata, MessageDraft, PreSendDecision, PreSendHook,
+        ConversationLifecycleEvent, ConversationLifecycleEventKind, ConversationLifecycleHook,
+        ConversationMemberChangeKind, ConversationMemberEvent, ConversationMemberHook,
+        DeliveryEvent, DeliveryHook, HookDecision, HookMetadata, HookOutcome, MessageDraft,
+        MessageReactionEvent, MessageReactionHook, MessageReadEvent, MessageReadHook,
+        MessageRecord, PostSendHook, PreSendDecision, PreSendHook, RecallEvent, RecallHook,
     };
     use async_trait::async_trait;
     use flare_server_core::context::Context;
     use flare_server_core::error::{ErrorBuilder, ErrorCode};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::SystemTime;
     use tokio::time::Duration;
@@ -810,5 +788,282 @@ mod tests {
             result.is_err(),
             "business failure should remain fail-closed"
         );
+    }
+
+    /// 永不返回的事件类 Hook：模拟被暂停、只接连接不回应答的扩展。
+    struct HangingEventHook;
+
+    #[async_trait]
+    impl PostSendHook for HangingEventHook {
+        async fn handle(
+            &self,
+            _ctx: &Ctx,
+            _record: &MessageRecord,
+            _draft: &MessageDraft,
+        ) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl DeliveryHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &DeliveryEvent) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl RecallHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &RecallEvent) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl MessageReadHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &MessageReadEvent) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl MessageReactionHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &MessageReactionEvent) -> HookDecision {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl ConversationLifecycleHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &ConversationLifecycleEvent) -> HookOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl ConversationMemberHook for HangingEventHook {
+        async fn handle(&self, _ctx: &Ctx, _event: &ConversationMemberEvent) -> HookDecision {
+            std::future::pending().await
+        }
+    }
+
+    /// 每种事件类 Hook 各注册一个永不返回的实例（1 ms 超时），逐一执行，返回（阶段名，结果）。
+    async fn run_hanging_event_hooks(
+        required: bool,
+    ) -> Vec<(&'static str, flare_server_core::error::Result<()>)> {
+        let registry = HookRegistry::new();
+        let hook = Arc::new(HangingEventHook);
+        let metadata = || {
+            HookMetadata::default()
+                .with_name("hanging")
+                .with_require_success(required)
+                .with_timeout(Duration::from_millis(1))
+        };
+        let selector = HookSelector::default;
+        registry
+            .register_post_send(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_delivery(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_recall(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_message_read(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_message_reaction(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_conversation_lifecycle(metadata(), selector(), hook.clone())
+            .await;
+        registry
+            .register_conversation_member(metadata(), selector(), hook)
+            .await;
+
+        let ctx: Ctx = Arc::new(Context::with_request_id("req-hanging").with_tenant_id("t1"));
+        let now = SystemTime::now();
+        let record = MessageRecord {
+            message_id: "m1".into(),
+            client_message_id: None,
+            conversation_id: "c1".into(),
+            sender_id: "u1".into(),
+            conversation_type: None,
+            message_type: None,
+            persisted_at: now,
+            metadata: HashMap::new(),
+        };
+        vec![
+            (
+                "post-send",
+                registry
+                    .execute_post_send(&ctx, &record, &MessageDraft::new(vec![]))
+                    .await,
+            ),
+            (
+                "delivery",
+                registry
+                    .execute_delivery(
+                        &ctx,
+                        &DeliveryEvent {
+                            message_id: "m1".into(),
+                            user_id: "u2".into(),
+                            channel: "push".into(),
+                            delivered_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+            (
+                "recall",
+                registry
+                    .execute_recall(
+                        &ctx,
+                        &RecallEvent {
+                            message_id: "m1".into(),
+                            conversation_id: Some("c1".into()),
+                            operator_id: "u1".into(),
+                            recalled_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+            (
+                "message-read",
+                registry
+                    .execute_message_read(
+                        &ctx,
+                        &MessageReadEvent {
+                            conversation_id: "c1".into(),
+                            message_id: "m1".into(),
+                            reader_user_id: "u2".into(),
+                            device_id: None,
+                            read_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+            (
+                "message-reaction",
+                registry
+                    .execute_message_reaction(
+                        &ctx,
+                        &MessageReactionEvent {
+                            conversation_id: "c1".into(),
+                            message_id: "m1".into(),
+                            actor_user_id: "u2".into(),
+                            reaction_key: "like".into(),
+                            added: true,
+                            occurred_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+            (
+                "conversation-lifecycle",
+                registry
+                    .execute_conversation_lifecycle(
+                        &ctx,
+                        &ConversationLifecycleEvent {
+                            conversation_id: "c1".into(),
+                            conversation_type: None,
+                            event: ConversationLifecycleEventKind::Created,
+                            operator_user_id: None,
+                            participant_version: None,
+                            occurred_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+            (
+                "conversation-member",
+                registry
+                    .execute_conversation_member(
+                        &ctx,
+                        &ConversationMemberEvent {
+                            conversation_id: "c1".into(),
+                            tenant_id: Some("t1".into()),
+                            change: ConversationMemberChangeKind::Joined,
+                            operator_user_id: None,
+                            affected_user_id: "u2".into(),
+                            previous_role: None,
+                            new_role: None,
+                            participant_version: None,
+                            occurred_at: now,
+                            metadata: HashMap::new(),
+                        },
+                    )
+                    .await,
+            ),
+        ]
+    }
+
+    /// 必需的事件类 Hook（post_send、delivery、recall、已读、表态、会话生命周期，以及共用同一
+    /// 超时分支的会话成员）超时与不可达同属「Hook 不可用」：回可重试的 `ServiceUnavailable`，
+    /// 与 PreSend（W12-T）一致。以前回 `OperationTimeout`，`is_retryable()` 为否（W13-D）。
+    #[tokio::test]
+    async fn required_event_hook_timeouts_are_retryable_unavailable() {
+        let results = run_hanging_event_hooks(true).await;
+        assert_eq!(results.len(), 7);
+        for (phase, result) in results {
+            let error = result.expect_err(phase);
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::ServiceUnavailable),
+                "{phase}: {error}"
+            );
+            assert!(error.is_retryable(), "{phase}: {error}");
+            assert_eq!(error.reason(), format!("{phase} hook timed out"));
+        }
+    }
+
+    /// MQ 消费者路径：推送类消费者（`flare-push` 的 `push_consumer`、`online_consumer`）按
+    /// `FlareError::is_retryable()` 决定重投还是进死信。必需 Hook 的一次暂时超时在既有重试与退避
+    /// 预算内重投，预算用尽（`max_retries`）后才进死信；以前第一次失败就进死信（W13-D）。
+    /// 可选 Hook 的超时照旧只记日志、放行。
+    #[tokio::test]
+    async fn a_consumer_retries_required_hook_timeouts_before_dead_lettering() {
+        use flare_server_core::mq::consumer::{
+            ConsumerError, FailureAction, RetryBackoff, RetryPolicy,
+        };
+
+        let max_retries = 3;
+        let policy = RetryPolicy::new(max_retries, true).with_backoff(RetryBackoff::new(
+            Duration::from_millis(500),
+            Duration::from_secs(30),
+        ));
+        for (phase, result) in run_hanging_event_hooks(true).await {
+            let error = result.expect_err(phase);
+            let consumer_error = if error.is_retryable() {
+                ConsumerError::Retry(error.to_string())
+            } else {
+                ConsumerError::DeadLetter(error.to_string())
+            };
+            for retry_count in 0..max_retries {
+                assert_eq!(
+                    policy.action_for_error(&consumer_error, retry_count),
+                    FailureAction::Retry,
+                    "{phase}: attempt {retry_count} should be redelivered: {error}"
+                );
+            }
+            assert_eq!(
+                policy.action_for_error(&consumer_error, max_retries),
+                FailureAction::DeadLetter,
+                "{phase}: an exhausted budget dead-letters"
+            );
+        }
+
+        for (phase, result) in run_hanging_event_hooks(false).await {
+            assert!(
+                result.is_ok(),
+                "{phase}: an optional hook timeout is ignored"
+            );
+        }
     }
 }
