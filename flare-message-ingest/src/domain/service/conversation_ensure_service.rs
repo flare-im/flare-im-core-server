@@ -18,7 +18,10 @@ use moka::future::Cache;
 
 use crate::config::SessionCreationMode;
 use crate::domain::repository::ConversationClient;
-use flare_server_core::error::{FlareError, Result};
+use flare_server_core::error::{ErrorCode, FlareError, Result};
+
+/// 同步模式下等会话服务确保会话的上限。
+const SYNC_ENSURE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 会话生成服务
 ///
@@ -184,12 +187,14 @@ impl ConversationEnsureService {
         ctx: &Ctx,
         request: &ConversationEnsureRequest,
     ) -> Result<bool> {
+        // 没配会话仓储是部署配置错误：重试也不会好，不可重试（网关 500）。
         let Some(conversation_repo) = &self.conversation_repository else {
             tracing::trace!(
                 conversation_id = %request.conversation_id,
                 "Conversation repository not configured, cannot sync ensure"
             );
-            return Err(FlareError::system(
+            return Err(FlareError::localized(
+                ErrorCode::ConfigurationError,
                 "conversation repository not configured for sync ensure",
             ));
         };
@@ -215,7 +220,7 @@ impl ConversationEnsureService {
         }
 
         // 调用会话服务（带超时）
-        let ensure_result = tokio::time::timeout(std::time::Duration::from_secs(2), {
+        let ensure_result = tokio::time::timeout(SYNC_ENSURE_TIMEOUT, {
             use crate::domain::model::ConversationType;
             let conversation_type = ConversationType::from_proto(request.conversation_type);
 
@@ -246,15 +251,19 @@ impl ConversationEnsureService {
                 );
                 Err(e)
             }
+            // 会话服务没在时限内答复与它不可达同属暂时不可用：回可重试的 ServiceUnavailable（摄入
+            // gRPC UNAVAILABLE，HTTP 发送 503，调用方带同一 client_msg_id 退避重试），与必需 Hook
+            // 超时一致。以前是 system 错误，网关回 500，调用方无从判断能否重试。
             Err(_) => {
                 tracing::warn!(
                     conversation_id = %request.conversation_id,
-                    "Timeout ensuring conversation (2s), block message send"
+                    timeout_ms = SYNC_ENSURE_TIMEOUT.as_millis() as u64,
+                    "Timeout ensuring conversation, block message send"
                 );
-                Err(FlareError::system(format!(
-                    "timeout ensuring conversation {}",
-                    request.conversation_id
-                )))
+                Err(FlareError::localized(
+                    ErrorCode::ServiceUnavailable,
+                    "conversation ensure timed out",
+                ))
             }
         }
     }
@@ -360,7 +369,6 @@ fn persisted_conversation_channel_id(conversation_type: i32, message_channel_id:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_server_core::error::ErrorCode;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 每次都返回同一个预置错误、并记下调用次数的会话事件发布器。
@@ -445,5 +453,81 @@ mod tests {
             .await
             .expect_err("publisher fails");
         assert!(matches!(error, FlareError::System(ref reason) if reason == "broker closed"));
+    }
+
+    /// 同步模式下会话服务不答复：2 s 后回可重试的 ServiceUnavailable（摄入 gRPC UNAVAILABLE，
+    /// 网关 503），走不走单飞缓存都一样，失败不缓存（W13-R2）。以前是 system 错误（INTERNAL，
+    /// 网关 500）。会话服务是一个只建连、从不答复的回环端口。
+    #[tokio::test]
+    async fn sync_ensure_timeout_is_retryable_unavailable() {
+        let black_hole = std::net::TcpListener::bind("127.0.0.1:0").expect("bind black hole");
+        let address = black_hole.local_addr().expect("black hole address");
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect_lazy();
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        for cache_capacity in [100, 0] {
+            let service = ConversationEnsureService::with_cache(
+                Some(Arc::new(ConversationClient::new(channel.clone()))),
+                SessionCreationMode::Sync,
+                None,
+                cache_capacity,
+                Duration::from_secs(30),
+            );
+            let started = std::time::Instant::now();
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                service.ensure_conversation(&ctx, &group_request()),
+            )
+            .await
+            .expect("the ensure timeout fires first")
+            .expect_err("the conversation service never answers");
+            assert!(
+                started.elapsed() >= SYNC_ENSURE_TIMEOUT,
+                "cache {cache_capacity}"
+            );
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::ServiceUnavailable),
+                "cache {cache_capacity}: {error}"
+            );
+            assert!(error.is_retryable(), "cache {cache_capacity}: {error}");
+            assert_eq!(
+                tonic::Status::from(error).code(),
+                tonic::Code::Unavailable,
+                "cache {cache_capacity}"
+            );
+        }
+        drop(black_hole);
+    }
+
+    /// 同步模式没配会话仓储仍是不可重试的配置错误（INTERNAL，网关 500），不因上面的改动变成 503。
+    #[tokio::test]
+    async fn sync_ensure_without_a_repository_is_a_configuration_error() {
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+        for cache_capacity in [100, 0] {
+            let service = ConversationEnsureService::with_cache(
+                None,
+                SessionCreationMode::Sync,
+                None,
+                cache_capacity,
+                Duration::from_secs(30),
+            );
+            let error = service
+                .ensure_conversation(&ctx, &group_request())
+                .await
+                .expect_err("no repository");
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::ConfigurationError),
+                "cache {cache_capacity}: {error}"
+            );
+            assert!(!error.is_retryable(), "cache {cache_capacity}: {error}");
+            assert_eq!(
+                tonic::Status::from(error).code(),
+                tonic::Code::Internal,
+                "cache {cache_capacity}"
+            );
+        }
     }
 }
