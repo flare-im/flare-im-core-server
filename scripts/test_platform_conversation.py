@@ -69,6 +69,7 @@ def listening(number):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--contract', type=Path, default=ROOT.parent / 'flare-social/contracts/platform/platform-v1.openapi.json')
+    parser.add_argument('--via-social', action='store_true', help='real Social Gateway -> real Core Gateway -> real Conversation, separate owned PG databases')
     args = parser.parse_args()
     spec = json.loads(args.contract.read_text())
     operation = '/platform/v1/apps/{app_id}/conversations/{conversation_id}/participants'
@@ -86,9 +87,13 @@ def main():
     for name in ('flare-api-gateway', 'flare-conversation'):
         if not (BIN / name).is_file():
             raise RuntimeError(f'build production binary first: {name}')
+    if args.via_social and not (BIN / 'flare-social-gateway').is_file():
+        raise RuntimeError('build production Social Gateway first')
     db = 'flare_platform_core_test_' + secrets.token_hex(6)
     address = ['-h', host, '-p', str(pg_port)]
     created = False
+    social_db = 'flare_platform_social_bridge_test_' + secrets.token_hex(6)
+    social_created = False
     processes, handles = [], []
     original_umask = os.umask(0o077)
     try:
@@ -108,6 +113,15 @@ def main():
         password = os.environ.get('PGPASSWORD')
         credential = quote(user, safe='') + (':' + quote(password, safe='') if password else '')
         url = f'postgresql://{credential}@localhost:{pg_port}/{db}?host={quote(host, safe="")}'
+        social_url = f'postgresql://{credential}@localhost:{pg_port}/{social_db}?host={quote(host, safe="")}'
+        def social_sql(statement):
+            return checked(['psql', *address, '-X', '-qAt', '-d', social_db, '-v', 'ON_ERROR_STOP=1', '-f', '-'], input=statement.encode()).decode().strip()
+        if args.via_social:
+            checked(['createdb', *address, social_db])
+            social_created = True
+            for migration in sorted((ROOT.parent / 'flare-social/migrations').glob('*.sql')):
+                checked(['psql', *address, '-X', '-d', social_db, '-v', 'ON_ERROR_STOP=1', '-1', '-f', str(migration)])
+            social_sql("INSERT INTO flare_tenants(tenant_id,name,status,version) VALUES('app-a','native-a',1,1),('app-b','native-b',1,1); INSERT INTO flare_credential_projection_versions(app_id,version) VALUES('app-a',1),('app-b',1);")
         sql("""
           INSERT INTO tenants(tenant_id,name,status,version) VALUES('app-a','native-a','active',1),('app-b','native-b','active',1);
           INSERT INTO conversations(tenant_id,conversation_id) VALUES('app-a','same-conversation'),('app-b','same-conversation');
@@ -134,6 +148,8 @@ def main():
             record.update(changes)
             payload = json.dumps(record, separators=(',', ':'))
             sql(f"INSERT INTO credential_keys VALUES('{selector}','{app}','{payload}'::jsonb);")
+            if args.via_social:
+                social_sql(f"INSERT INTO flare_credential_keys VALUES('{selector}','{app}','{payload}'::jsonb);")
             materials.extend([token, b64(secret), payload, hashlib.sha256(pepper + secret).hexdigest(), json.dumps(record['hash']), json.dumps(record['hash'], separators=(',', ':'))])
             return token
         token, other = key(), key('app-b')
@@ -144,8 +160,12 @@ def main():
             public = checked(['openssl', 'pkey', '-pubout'], input=private.encode()).decode()
             materials.extend([private, url])
             conversation_port, gateway_port = port(), port()
+            core_gateway_port = gateway_port
+            social_gateway_port = port() if args.via_social else None
             if conversation_port == gateway_port:
                 raise RuntimeError('owned port collision: retry fixture')
+            if args.via_social and social_gateway_port in (conversation_port, gateway_port):
+                raise RuntimeError('owned Social port collision: retry fixture')
             config = cwd / 'config'
             config.mkdir()
             # Runtime-only, 0600 fixture, no secrets in config or inherited defaults.
@@ -183,10 +203,19 @@ port = {conversation_port}
                        FLARE_PLATFORM_API_ENABLED='true', FLARE_API_KEY_PEPPER=b64(pepper),
                        FLARE_SNOWFLAKE_WORKER_ID='29', FLARE_SNOWFLAKE_DATACENTER_ID='29', RUST_LOG='info')
             materials.append(env['FLARE_API_GATEWAY_TOKEN_SECRET'])
+            if args.via_social:
+                env.update(SOCIAL_POSTGRES_URL=social_url, SOCIAL_REGISTRY_MODE='static',
+                           SOCIAL_JWT_SECRET=secrets.token_urlsafe(48), FLARE_INTERNAL_CTX_SIGNING_KEY=private,
+                           FLARE_SOCIAL_GATEWAY_ADDRESS=f'127.0.0.1:{social_gateway_port}',
+                           FLARE_PLATFORM_CORE_API_URL=f'http://127.0.0.1:{core_gateway_port}')
+                materials.extend([social_url, env['SOCIAL_JWT_SECRET']])
             def start(name):
                 log = (cwd / f'{name}.log').open('ab')
                 handles.append(log)
-                process = subprocess.Popen([str(BIN / name)], cwd=cwd, env=env, stdout=log, stderr=log, start_new_session=True)
+                child_env = dict(env)
+                if args.via_social and name == 'flare-api-gateway':
+                    child_env['FLARE_PLATFORM_TRUSTED_PROXY_CIDRS'] = '127.0.0.1/32'
+                process = subprocess.Popen([str(BIN / name)], cwd=cwd, env=child_env, stdout=log, stderr=log, start_new_session=True)
                 processes.append(process)
                 return process
             def stop(process):
@@ -194,11 +223,17 @@ port = {conversation_port}
                 process.wait(timeout=10)
             conversation_process = start('flare-conversation')
             wait_for(lambda: listening(conversation_port), 'Conversation ready', processes)
-            gateway = start('flare-api-gateway')
+            entry_binary = 'flare-social-gateway' if args.via_social else 'flare-api-gateway'
+            core_gateway = None
+            if args.via_social:
+                core_gateway = start('flare-api-gateway')
+                wait_for(lambda: listening(core_gateway_port), 'Core Gateway ready', processes)
+                gateway_port = social_gateway_port
+            gateway = start(entry_binary)
             try:
                 wait_for(lambda: listening(gateway_port), 'Gateway ready', processes)
             except RuntimeError:
-                raw = (cwd / 'flare-api-gateway.log').read_text(errors='replace')
+                raw = (cwd / f'{entry_binary}.log').read_text(errors='replace')
                 markers = ('fallback', 'Connecting to gRPC', 'gRPC clients initialized', 'API tenant admission initialized', 'Gateway HTTP service is listening')
                 print('Owned Gateway startup diagnostics: ' + ', '.join(f'{marker}={marker in raw}' for marker in markers))
                 listen_lines = [line for line in raw.splitlines() if 'HTTP listen address resolved' in line or 'Gateway HTTP service is listening' in line]
@@ -231,7 +266,7 @@ port = {conversation_port}
                 finally:
                     connection.close()
             def client_probe(value=None):
-                connection = http.client.HTTPConnection('127.0.0.1', gateway_port, timeout=5)
+                connection = http.client.HTTPConnection('127.0.0.1', core_gateway_port, timeout=5)
                 try:
                     connection.request('GET', '/api/v1/conversations' if value else '/health',
                                        headers={'Authorization':f'Bearer {value}'} if value else {})
@@ -271,6 +306,13 @@ port = {conversation_port}
             call(path, token, 403, 'TENANT_INACTIVE')
             sql("UPDATE tenants SET status='active' WHERE tenant_id='app-a';")
             time.sleep(1.1)
+            if args.via_social:
+                social_sql("UPDATE flare_tenants SET status=2,version=version+1 WHERE tenant_id='app-a';")
+                time.sleep(1.1)
+                call(path, token, 403, 'TENANT_INACTIVE')
+                social_sql("UPDATE flare_tenants SET status=1,version=version+1 WHERE tenant_id='app-a';")
+                time.sleep(1.1)
+                call(path, token)
             sql("BEGIN; DELETE FROM credential_keys WHERE app_id='app-a'; UPDATE credential_projection_versions SET version=2 WHERE app_id='app-a'; COMMIT;")
             time.sleep(1.1)
             call(path, token, 401, 'API_KEY_UNAUTHENTICATED')
@@ -284,22 +326,47 @@ port = {conversation_port}
             time.sleep(2.2)
             call(path, fresh)
             stop(gateway)
-            gateway = start('flare-api-gateway')
+            gateway = start(entry_binary)
             wait_for(lambda: listening(gateway_port), 'Gateway restart', (gateway, conversation_process))
             call(path, token, 401, 'API_KEY_UNAUTHENTICATED')
             call(path, fresh)
+            if core_gateway is not None:
+                stop(core_gateway)
+                call(path, fresh, 503, 'UPSTREAM_UNAVAILABLE')
+                connection = http.client.HTTPConnection('127.0.0.1', gateway_port, timeout=5)
+                try:
+                    connection.request('GET', '/health')
+                    response = connection.getresponse()
+                    response.read()
+                    if response.status != 200:
+                        raise RuntimeError('Social health failed during actual Core Gateway outage')
+                finally:
+                    connection.close()
+                core_gateway = start('flare-api-gateway')
+                wait_for(lambda: listening(core_gateway_port), 'Core Gateway restart', (core_gateway, conversation_process))
+                time.sleep(2.2)
+                call(path, fresh)
             stop(gateway)
             env['FLARE_PLATFORM_TRUSTED_PROXY_CIDRS'] = '127.0.0.1/32'
-            gateway = start('flare-api-gateway')
+            gateway = start(entry_binary)
             wait_for(lambda: listening(gateway_port), 'Trusted Gateway', (gateway, conversation_process))
             call(path, fresh, 400, 'INVALID_REQUEST')
             call(path, fresh, 400, 'INVALID_REQUEST', headers={'x-forwarded-for':'invalid'})
             call(path, fresh, headers={'x-forwarded-for':'127.0.0.1'})
             call(path, fresh, 403, 'API_KEY_FORBIDDEN', headers={'x-forwarded-for':'127.0.0.1,192.0.2.1'})
+            if args.via_social:
+                source_key = key(ip_allow=['192.0.2.0/24'])
+                call(path, source_key, headers={'x-forwarded-for':'127.0.0.1,192.0.2.1'})
+                # Explicit corrupt/lagging local-policy fixture: Social still grants this
+                # exact credential, Core independently denies the endpoint scope.
+                selector = source_key.split('_')[2]
+                sql(f"UPDATE credential_keys SET payload=jsonb_set(payload,'{{scopes}}','[\"platform.users.read\"]'::jsonb) WHERE key_id='{selector}';")
+                time.sleep(1.1)
+                call(path, source_key, 403, 'API_KEY_FORBIDDEN', headers={'x-forwarded-for':'192.0.2.1'})
             stop(gateway)
             env['FLARE_PLATFORM_API_ENABLED'] = 'false'
             env.pop('FLARE_API_KEY_PEPPER')
-            gateway = start('flare-api-gateway')
+            gateway = start(entry_binary)
             wait_for(lambda: listening(gateway_port), 'Disabled bridge', (gateway, conversation_process))
             connection = http.client.HTTPConnection('127.0.0.1', gateway_port, timeout=5)
             try:
@@ -311,19 +378,25 @@ port = {conversation_port}
             finally:
                 connection.close()
             stop(gateway)
-            sql('ALTER TABLE credential_keys RENAME TO fixture_credentials;')
+            if args.via_social:
+                social_sql('ALTER TABLE flare_credential_keys RENAME TO fixture_credentials;')
+            else:
+                sql('ALTER TABLE credential_keys RENAME TO fixture_credentials;')
             env.update(FLARE_PLATFORM_API_ENABLED='true', FLARE_API_KEY_PEPPER=b64(pepper))
-            broken = start('flare-api-gateway')
+            broken = start(entry_binary)
             if broken.wait(timeout=10) == 0:
                 raise RuntimeError('missing credential schema silently accepted')
             stop(conversation_process)
+            if core_gateway is not None:
+                stop(core_gateway)
             for handle in handles:
                 handle.flush()
             for log in cwd.glob('*.log'):
                 raw = log.read_bytes()
                 if any(material.encode() in raw for material in materials):
                     raise RuntimeError('secret material reached owned service logs')
-            print(f'PASS native production Gateway -> Conversation -> owned PG: {count} JSON contract responses; real Service read, keyset/filter/isolation, local revocation/restart, outage/recovery, trusted source chain, disabled bridge, missing-schema refusal, redacted logs; NOT container/Control delivery acceptance')
+            chain = 'Social Gateway -> Core Gateway -> Conversation -> separate owned PGs' if args.via_social else 'Core Gateway -> Conversation -> owned PG'
+            print(f'PASS native production {chain}: {count} JSON contract responses; real Service read, keyset/filter/isolation, local revocation/restart, outage/recovery, trusted source chain, disabled bridge, missing-schema refusal, redacted logs; NOT container/Control delivery acceptance')
     finally:
         for process in processes:
             if process.poll() is None:
@@ -337,6 +410,8 @@ port = {conversation_port}
             handle.close()
         if created:
             checked(['dropdb', *address, '--if-exists', db])
+        if social_created:
+            checked(['dropdb', *address, '--if-exists', social_db])
         os.umask(original_umask)
 
 

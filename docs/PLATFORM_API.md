@@ -41,5 +41,12 @@ Platform的只读PG4连接/250ms获取、独立Channel（32并发、32缓冲、2
 11条签名RPC、64并发、撤销缓存；新增连接池断言4连接全只读/写入25006/第五拒绝/
 缺表拒绝。没有弱化Core既有客户端、同步或权限模型。
 
-尚缺Social统一Gateway/Edge转发、安装预算、Control实际投递/恢复、真实容器
+新增 `--via-social` 本机模式：真实Social Gateway→Core Gateway→Conversation，
+两侧独占不同PG，38条契约响应通过。Social仅转发原API Key与已验证来源IP，Core
+仍独立授权；分别暂停两侧租户、仅Core撤销/收窄scope、Core Gateway停机恢复及
+非回环CIDR来源转发均有真实响应。Core须显式信任Social实际socket peer，而非任意
+私网。此驱动额外创建Social随机库，finally同样清理；不是Control投递或容器验收。
+暂停Social夹具最初没递增投影version导致失败，修正测试version后通过，不改缓存。
+
+尚缺Edge转发、安装预算、Control实际投递/恢复、真实容器
 压测和安全桥回切；不能据此勾选MIG-05/06或整个CRED。
