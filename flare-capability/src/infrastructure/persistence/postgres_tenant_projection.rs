@@ -612,7 +612,7 @@ mod credential_postgres_tests {
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .acquire_timeout(Duration::from_secs(5))
-            .connect_with(options)
+            .connect_with(options.clone())
             .await
             .unwrap();
         let marker: String = sqlx::query_scalar("SELECT token FROM flare_credential_test_fixture")
@@ -620,6 +620,49 @@ mod credential_postgres_tests {
             .await
             .unwrap();
         assert_eq!(marker, db, "never mutate installed DB");
+        let readonly =
+            flare_im_service_kit::credential_projection::connect_readonly_credential_pool_with(
+                options.clone(),
+            )
+            .await
+            .unwrap();
+        let mut connections = Vec::new();
+        for _ in 0..4 {
+            let mut connection = readonly.acquire().await.unwrap();
+            let mode: String = sqlx::query_scalar("SHOW default_transaction_read_only")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert_eq!(mode, "on");
+            let error = sqlx::query("INSERT INTO credential_projection_versions(app_id,version) VALUES('readonly-probe',1)")
+                .execute(&mut *connection).await.expect_err("Platform pool must never write");
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("25006")
+            );
+            connections.push(connection);
+        }
+        assert!(
+            readonly.acquire().await.is_err(),
+            "fifth acquisition must be bounded/refused"
+        );
+        drop(connections);
+        readonly.close().await;
+        sqlx::query("ALTER TABLE credential_keys RENAME TO credential_fixture_keys")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            flare_im_service_kit::credential_projection::connect_readonly_credential_pool_with(
+                options
+            )
+            .await,
+            Err("Platform credential schema unavailable")
+        ));
+        sqlx::query("ALTER TABLE credential_fixture_keys RENAME TO credential_keys")
+            .execute(&pool)
+            .await
+            .unwrap();
         let repo = Arc::new(PostgresTenantProjectionRepository::new(Arc::new(
             pool.clone(),
         )));

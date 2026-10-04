@@ -4,6 +4,7 @@ mod conversation_handler;
 mod downstream;
 mod media_handler;
 mod message_handler;
+pub(crate) mod platform;
 mod presence_handler;
 mod push_token_handler;
 mod rate_limit;

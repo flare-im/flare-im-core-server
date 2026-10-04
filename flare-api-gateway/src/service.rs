@@ -33,6 +33,10 @@ impl ApplicationBootstrap {
             flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Api)?;
+        let platform =
+            crate::interface::http::platform::PlatformConfig::from_env().map_err(|_| {
+                flare_server_core::error::FlareError::system("invalid Platform configuration")
+            })?;
         ensure_dev_issue_allowed(
             std::env::var("FLARE_ENV").ok().as_deref(),
             settings.auth.dev_issue,
@@ -205,6 +209,32 @@ impl ApplicationBootstrap {
             }
         };
 
+        let platform_router = match platform {
+            Some(config) => Some(
+                config
+                    .router(
+                        tenant_url.as_deref().ok_or_else(|| {
+                            flare_server_core::error::FlareError::system(
+                                "Platform requires a local primary database",
+                            )
+                        })?,
+                        &settings.grpc.conversation_service_url,
+                        Arc::new(message_signer.clone().ok_or_else(|| {
+                            flare_server_core::error::FlareError::system(
+                                "Platform requires the Cell signing key",
+                            )
+                        })?),
+                    )
+                    .await
+                    .map_err(|_| {
+                        flare_server_core::error::FlareError::system(
+                            "Platform initialization failed",
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+
         // 限流在指标层之内：被拒的请求也计入 HTTP 指标。
         let app = with_request_rate_limit(create_public_router(clients), &settings.rate_limit)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
@@ -225,6 +255,12 @@ impl ApplicationBootstrap {
                     .layer(public_cors_layer()),
             );
 
+        // Merge only after all client layers: Platform never accepts client JWT/tenant policy.
+        let app = match platform_router {
+            Some(platform) => app.merge(platform),
+            None => app,
+        };
+
         let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
             ServiceRuntime::new(API_GATEWAY)
                 .with_address(address)
@@ -235,12 +271,15 @@ impl ApplicationBootstrap {
                     let listener = TcpListener::bind(address).await?;
                     info!(address = %address, "✅ Gateway HTTP service is listening");
 
-                    axum::serve(listener, app)
-                        .with_graceful_shutdown(async {
-                            let _ = shutdown_rx.await;
-                        })
-                        .await
-                        .map_err(|e| e.into())
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .map_err(|e| e.into())
                 }),
             API_GATEWAY,
         );
