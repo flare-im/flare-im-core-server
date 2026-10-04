@@ -1823,11 +1823,13 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rand 0.8.7",
  "redis 0.32.7",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -1836,6 +1838,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

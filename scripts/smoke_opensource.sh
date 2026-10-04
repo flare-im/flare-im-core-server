@@ -41,6 +41,14 @@ if [ ! -f "$SDK_ROOT/Cargo.toml" ]; then
 fi
 SDK_ROOT="$(cd "$SDK_ROOT" && pwd)"
 
+# Container fixtures pass an exclusively owned 0700 directory; do not overwrite
+# another run's fixed /tmp logs. The existing interactive default is unchanged.
+LOG_DIR="${FLARE_SMOKE_LOG_DIR:-/tmp}"
+if [[ "$LOG_DIR" != /* ]] || [ ! -d "$LOG_DIR" ] || [ -L "$LOG_DIR" ]; then
+  echo "FLARE_SMOKE_LOG_DIR must name an existing absolute directory" >&2
+  exit 1
+fi
+
 if [ ! -s "$CORE_ROOT/logs/.dev-token-secret" ]; then
   echo -e "${RED}✗ logs/.dev-token-secret not found — run ./scripts/start_server.sh${NC}" >&2
   exit 1
@@ -64,15 +72,17 @@ E2EE_CASE="e2ee_demo:end-to-end encryption (server sees ciphertext only)"
 # 实测正常情况下单项都在几十秒内结束，300 秒是留足余量的上限。
 CASE_TIMEOUT="${FLARE_SMOKE_TIMEOUT:-300}"
 
-# macOS 默认没有 timeout(1)（coreutils 里叫 gtimeout）。都没有时退化为不限时，
-# 并明确告知——静默地不设超时才是最坏的情况。
+# macOS 默认没有 timeout(1)（coreutils 里叫 gtimeout）；用 Python 标准库
+# 的进程组超时，不能静默退化为不限时或留下 Cargo/SDK 子进程。
 if command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(timeout "$CASE_TIMEOUT")
 elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(gtimeout "$CASE_TIMEOUT")
+elif command -v python3 >/dev/null 2>&1; then
+  TIMEOUT_CMD=(python3 "$SCRIPT_DIR/lib/timeout_process.py" "$CASE_TIMEOUT")
 else
-  TIMEOUT_CMD=()
-  echo -e "${YELLOW}   注意：未找到 timeout/gtimeout，单项不设超时上限（brew install coreutils 可启用）${NC}"
+  echo "timeout/gtimeout or python3 is required for bounded smoke cases" >&2
+  exit 1
 fi
 
 # 超时的退出码不统一：GNU coreutils 的 timeout 返回 124，busybox（Alpine 等）
@@ -84,7 +94,7 @@ run_case() {
   # `${arr[@]}` 在 set -u 下展开空数组会报 unbound variable（bash 3.2，即 macOS 自带版本）。
   # 用 ${arr[@]+"${arr[@]}"} 让空数组展开成「什么都没有」而不是报错。
   ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} cargo run -q --example "$ex" "$@" \
-    >"/tmp/flare-smoke-$ex.log" 2>&1
+    >"$LOG_DIR/flare-smoke-$ex.log" 2>&1
 }
 
 pass=0; fail=0
@@ -100,16 +110,16 @@ for entry in "${CASES[@]}"; do
     fail=$((fail+1))
     if is_timeout_rc "$rc"; then
       echo -e "  ${RED}✗${NC} $desc  — 超过 ${CASE_TIMEOUT}s 未结束（多半是连不上服务端，客户端在死等）"
-    elif grep -q "flare-strom-sfu" "/tmp/flare-smoke-$ex.log" 2>/dev/null; then
+    elif grep -q "flare-strom-sfu" "$LOG_DIR/flare-smoke-$ex.log" 2>/dev/null; then
       # RTC 走的是能力插件，不在核心服务里。插件没起时报出来的是一句
       # 「discover media-control service ... timeout」，看不出该去做什么。
       echo -e "  ${RED}✗${NC} $desc  — SFU 能力插件没在跑"
       echo -e "      RTC 由插件提供，start_server.sh 只在 ../flare-plugin/flare-strom-sfu"
       echo -e "      存在时才起它。核心链路是否正常看其余几项。"
     else
-      echo -e "  ${RED}✗${NC} $desc  — see /tmp/flare-smoke-$ex.log"
+      echo -e "  ${RED}✗${NC} $desc  — see $LOG_DIR/flare-smoke-$ex.log"
     fi
-    tail -3 "/tmp/flare-smoke-$ex.log" | sed 's/^/      /'
+    tail -3 "$LOG_DIR/flare-smoke-$ex.log" | sed 's/^/      /'
   fi
 done
 
@@ -122,9 +132,9 @@ else
   if is_timeout_rc "$rc"; then
     echo -e "  ${RED}✗${NC} $desc  — 超过 ${CASE_TIMEOUT}s 未结束（多半是连不上服务端，客户端在死等）"
   else
-    echo -e "  ${RED}✗${NC} $desc  — see /tmp/flare-smoke-$ex.log"
+    echo -e "  ${RED}✗${NC} $desc  — see $LOG_DIR/flare-smoke-$ex.log"
   fi
-  tail -3 "/tmp/flare-smoke-$ex.log" | sed 's/^/      /'
+  tail -3 "$LOG_DIR/flare-smoke-$ex.log" | sed 's/^/      /'
 fi
 
 echo

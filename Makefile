@@ -58,8 +58,12 @@ check-dockerfile-build-args:
 	bash scripts/check_dockerfile_build_args.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_check_dockerfile_build_args.py'
 
-test:
+test: test-opensource-runner
 	$(CARGO) test --all
+
+.PHONY: test-opensource-runner
+test-opensource-runner:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_smoke_opensource_container.py scripts/lib/test_timeout_process.py
 
 .PHONY: db-migrate check-schema dev-reset test-migrations
 db-migrate:
