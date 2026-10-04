@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use flare_im_contracts::domain::tenant::{TenantQuota, TenantStatus};
 use flare_server_core::auth::credential_snapshot::CredentialSnapshot;
+use flare_server_core::auth::credential_verifier::{
+    CredentialReadError, LocalCredential, LocalCredentialReader,
+};
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use sqlx::{PgPool, Row};
 
@@ -20,6 +23,38 @@ pub struct PostgresTenantProjectionRepository {
 impl PostgresTenantProjectionRepository {
     pub fn new(pool: Arc<PgPool>) -> Self {
         Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl LocalCredentialReader for PostgresTenantProjectionRepository {
+    async fn lookup(
+        &self,
+        key_id: &str,
+    ) -> std::result::Result<Option<LocalCredential>, CredentialReadError> {
+        // One statement on the local primary: never mix an old key with a new
+        // version, and never consult Control or trust an app supplied in headers.
+        let row = sqlx::query(
+            "SELECT k.app_id,k.payload,v.version FROM credential_keys k \
+            JOIN credential_projection_versions v USING(app_id) WHERE k.key_id=$1",
+        )
+        .bind(key_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|_| CredentialReadError::Unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let invalid = |_| CredentialReadError::InvalidProjection;
+        let app_id: String = row.try_get("app_id").map_err(invalid)?;
+        if app_id != flare_im_contracts::utils::normalize_tenant_id(&app_id) {
+            return Err(CredentialReadError::InvalidProjection);
+        }
+        let version: i64 = row.try_get("version").map_err(invalid)?;
+        let payload: serde_json::Value = row.try_get("payload").map_err(invalid)?;
+        let record =
+            serde_json::from_value(payload).map_err(|_| CredentialReadError::InvalidProjection)?;
+        LocalCredential::new(key_id, app_id, version, record).map(Some)
     }
 }
 
@@ -274,14 +309,16 @@ mod credential_postgres_tests {
         let material = ApiKeyToken::generate(ApiKeyKind::Test).unwrap();
         let pepper =
             ApiKeyPepper::from_base64url("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        let projected_key_id = material.key_id().to_string();
+        let projected_hash = material.digest(&pepper);
         let payload = || CredentialsProjectionUpsert {
             app_id: "rpc-app".into(),
             version: 5,
             keys: vec![CredentialKey {
-                key_id: material.key_id().into(),
+                key_id: projected_key_id.clone(),
                 service_account_id: "sa-rpc".into(),
                 mode: 2,
-                hash: material.digest(&pepper).to_vec(),
+                hash: projected_hash.to_vec(),
                 pepper_fingerprint: pepper.fingerprint().to_vec(),
                 scopes: vec!["endpoint.read".into()],
                 expires_at_ms: 0,
@@ -405,6 +442,137 @@ mod credential_postgres_tests {
             .unwrap();
         assert_eq!(identity.app_id, "rpc-app");
         assert_eq!(identity.service_account_id, "sa-rpc");
+        use flare_server_core::auth::credential_verifier::{
+            CachedApiKeyVerifier, CredentialAuthError,
+        };
+        assert_eq!(
+            repo.lookup(material.key_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .version(),
+            5
+        );
+        let encoded = material.into_issuance_token();
+        let selector = stored.key_id.clone();
+        let cache = CachedApiKeyVerifier::new(repo.clone());
+        let ip = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            cache
+                .verify(&encoded, &pepper, Some("rpc-app"), "endpoint.read", ip)
+                .await
+                .unwrap(),
+            identity
+        );
+        assert_eq!(
+            cache
+                .verify(&encoded, &pepper, Some("other-app"), "endpoint.read", ip)
+                .await,
+            Err(CredentialAuthError::Forbidden)
+        );
+
+        // Corrupted local rows never acquire a default mode/account state.
+        for corruption in [
+            serde_json::json!({"mode": 0}),
+            serde_json::json!({"key_id": "OTHERKEY2345"}),
+        ] {
+            let mut stored_json = serde_json::to_value(&stored).unwrap();
+            stored_json
+                .as_object_mut()
+                .unwrap()
+                .extend(corruption.as_object().unwrap().clone());
+            sqlx::query("UPDATE credential_keys SET payload=$2 WHERE key_id=$1")
+                .bind(&selector)
+                .bind(stored_json)
+                .execute(&*repo.pool)
+                .await
+                .unwrap();
+            assert!(matches!(
+                repo.lookup(&selector).await,
+                Err(CredentialReadError::InvalidProjection)
+            ));
+            assert_eq!(
+                CachedApiKeyVerifier::new(repo.clone())
+                    .verify(&encoded, &pepper, None, "endpoint.read", ip)
+                    .await,
+                Err(CredentialAuthError::Unavailable)
+            );
+        }
+        let mut stored_json = serde_json::to_value(&stored).unwrap();
+        stored_json
+            .as_object_mut()
+            .unwrap()
+            .remove("service_account_enabled");
+        sqlx::query("UPDATE credential_keys SET payload=$2 WHERE key_id=$1")
+            .bind(&selector)
+            .bind(stored_json)
+            .execute(&*repo.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.lookup(&selector).await,
+            Err(CredentialReadError::InvalidProjection)
+        ));
+        let stored_json = serde_json::to_value(&stored).unwrap();
+        sqlx::query("UPDATE credential_keys SET payload=$2 WHERE key_id=$1")
+            .bind(&selector)
+            .bind(stored_json)
+            .execute(&*repo.pool)
+            .await
+            .unwrap();
+
+        // An operator-corrupted alias binding must not normalize into tenant 0.
+        sqlx::query(
+            "INSERT INTO credential_projection_versions(app_id,version) VALUES('default',1)",
+        )
+        .execute(&*repo.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE credential_keys SET app_id='default' WHERE key_id=$1")
+            .bind(&selector)
+            .execute(&*repo.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.lookup(&selector).await,
+            Err(CredentialReadError::InvalidProjection)
+        ));
+        sqlx::query("UPDATE credential_keys SET app_id='rpc-app' WHERE key_id=$1")
+            .bind(&selector)
+            .execute(&*repo.pool)
+            .await
+            .unwrap();
+        let mut empty = payload();
+        empty.version = 7;
+        empty.keys.clear();
+        let ack = client
+            .upsert_credentials(signed(empty, worker, "rpc-app", audience))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ack.accepted);
+        assert_eq!(ack.current_version, 7);
+        assert!(repo.lookup(&selector).await.unwrap().is_none());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            cache
+                .verify(&encoded, &pepper, None, "endpoint.read", ip)
+                .await,
+            Err(CredentialAuthError::Unauthenticated)
+        );
+        let replay = client
+            .upsert_credentials(signed(payload(), worker, "rpc-app", audience))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!replay.accepted);
+        assert_eq!(replay.current_version, 7);
+        assert_eq!(
+            CachedApiKeyVerifier::new(repo.clone())
+                .verify(&encoded, &pepper, None, "endpoint.read", ip)
+                .await,
+            Err(CredentialAuthError::Unauthenticated)
+        );
         stop_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(3), task)
             .await

@@ -16,7 +16,7 @@
 和只有凭证、尚无租户的应用，便于完整对账。
 
 本地门禁：`make test-credential-projection` 创建随机独占 PostgreSQL 库，只应用0010，
-执行实际接收器的回环 tonic gRPC 与实际仓储，再删除夹具。九条真实 RPC 覆盖认证/
+执行实际接收器的回环 tonic gRPC 与实际仓储，再删除夹具。十一条真实 RPC 覆盖认证/
 scope/伪造头/无效新快照不改状态；仓储覆盖版本乱序、空撤销、跨 app Key 冲突回滚、
 64路并发最高版本获胜与他应用不变。普通 cargo 中该用例显式 ignored；由专用驱动
 实际执行，不能把默认 ignored 计作通过。该门禁不启动整套 Core、Social、Console，
@@ -24,5 +24,16 @@ scope/伪造头/无效新快照不改状态；仓储覆盖版本乱序、空撤�
 
 上线硬前提：0010 的两版真实 Timescale 指纹与迁移回归通过；同步 schema-aware
 回滚候选，不能回退到仅认识9条迁移的旧迁移器。当前没有 Control 凭证 outbox、
-生命周期 API、数据面凭证缓存/加载器或真实 Platform 业务路由，因此 MIG-05/CRED
+生命周期 API、网关装配或真实 Platform 业务路由，因此 MIG-05/CRED
 仍未验收。Core 消息、会话、Storage 热路径未重构。
+
+## 本地读取/缓存增量
+
+仓储实现共享 `LocalCredentialReader`：单条本库主库MVCC查询读取绑定/材料/版本，
+重新校验selector、规范app、模式、必需账号状态；坏行不暴露SQL/JSON详情。
+共享Verifier缓存hash-only授予，1s/100ms正负TTL、4096容量、16冷读、64固定分片、
+250ms查询/等待上限；命中重验摘要/pepper/app/scope/IP/到期，无过期值容错。
+真实gRPC夹具使用随机生成Key在该adapter/verifier正向授权，错app拒绝；三种坏JSON
+及default别名绑定拒绝。随后空撤销、等TTL、新Verifier、旧版本重放都不能复活Key。
+缓存1s界限只覆盖本地投影提交后的缓存窗口，不覆盖Control投递延迟；此处仍无
+HTTP Platform路由，不能称为CRED-02或九容器验收。接入时仍须独立运行租户门禁。

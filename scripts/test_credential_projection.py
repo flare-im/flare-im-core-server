@@ -45,7 +45,7 @@ def main():
         code = process.wait(timeout=600)
         if code:
             raise SystemExit(code)
-        print('PASS flare-capability real PostgreSQL: atomic rollback, empty revocation watermark, 64 concurrent snapshots, app isolation')
+        print('PASS flare-capability real PostgreSQL/gRPC: 11 RPC auth/snapshot cases, local cached verification/revocation/restart, corrupt-row refusal, atomic rollback, 64 concurrent snapshots, app isolation')
     finally:
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
