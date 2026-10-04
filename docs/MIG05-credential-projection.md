@@ -37,3 +37,12 @@ scope/伪造头/无效新快照不改状态；仓储覆盖版本乱序、空撤�
 及default别名绑定拒绝。随后空撤销、等TTL、新Verifier、旧版本重放都不能复活Key。
 缓存1s界限只覆盖本地投影提交后的缓存窗口，不覆盖Control投递延迟；此处仍无
 HTTP Platform路由，不能称为CRED-02或九容器验收。接入时仍须独立运行租户门禁。
+
+## Gateway 读取 adapter 的基础层归属
+
+只读本库主库 adapter 移入 `flare-im-service-kit::credential_projection`，Capability
+接收仓储委托同一个实现。API Gateway 无须导入 Capability writer，Core 不依赖
+Social/Control 实现；SQL、MVCC与验证逻辑、0010账本不改。实际独占 PG/gRPC
+十一条RPC、Key缓存吊销/重启/坏行及并发回归复跑通过；service-kit/capability lib
+为281 passed、9 ignored（凭据用例由专用驱动实际执行，不算默认通过），严格
+Clippy、fmt/diff通过。尚无Platform HTTP或新容器候选，MIG-05/06仍未完成。

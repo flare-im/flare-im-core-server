@@ -32,29 +32,11 @@ impl LocalCredentialReader for PostgresTenantProjectionRepository {
         &self,
         key_id: &str,
     ) -> std::result::Result<Option<LocalCredential>, CredentialReadError> {
-        // One statement on the local primary: never mix an old key with a new
-        // version, and never consult Control or trust an app supplied in headers.
-        let row = sqlx::query(
-            "SELECT k.app_id,k.payload,v.version FROM credential_keys k \
-            JOIN credential_projection_versions v USING(app_id) WHERE k.key_id=$1",
+        flare_im_service_kit::credential_projection::PostgresCredentialReader::new(
+            (*self.pool).clone(),
         )
-        .bind(key_id)
-        .fetch_optional(&*self.pool)
+        .lookup(key_id)
         .await
-        .map_err(|_| CredentialReadError::Unavailable)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let invalid = |_| CredentialReadError::InvalidProjection;
-        let app_id: String = row.try_get("app_id").map_err(invalid)?;
-        if app_id != flare_im_contracts::utils::normalize_tenant_id(&app_id) {
-            return Err(CredentialReadError::InvalidProjection);
-        }
-        let version: i64 = row.try_get("version").map_err(invalid)?;
-        let payload: serde_json::Value = row.try_get("payload").map_err(invalid)?;
-        let record =
-            serde_json::from_value(payload).map_err(|_| CredentialReadError::InvalidProjection)?;
-        LocalCredential::new(key_id, app_id, version, record).map(Some)
     }
 }
 

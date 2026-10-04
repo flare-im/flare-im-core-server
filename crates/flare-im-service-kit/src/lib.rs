@@ -4,6 +4,7 @@ pub mod clients;
 pub mod config;
 pub mod consumer_retry;
 pub mod control_auth;
+pub mod credential_projection;
 pub mod discovery;
 pub mod env_registry;
 pub mod gateway;
