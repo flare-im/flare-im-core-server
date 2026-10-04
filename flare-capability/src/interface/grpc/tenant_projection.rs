@@ -11,11 +11,14 @@ use std::sync::Arc;
 
 use flare_grpc_proto::control::tenant_projection_server::TenantProjection;
 use flare_grpc_proto::control::{
-    FeatureFlagsProjectionUpsert, GetVersionsRequest, ProjectionAck, ProjectionVersions,
-    TenantProjectionUpsert, TenantVersions,
+    CredentialsProjectionUpsert, FeatureFlagsProjectionUpsert, GetVersionsRequest, ProjectionAck,
+    ProjectionVersions, TenantProjectionUpsert, TenantVersions,
 };
 use flare_im_service_kit::control_auth::{
     ConsoleControlVerifier, ControlActorKind, require_grpc_control,
+};
+use flare_server_core::auth::credential_snapshot::{
+    CredentialKeyRecord, CredentialSnapshot, MAX_CREDENTIAL_KEYS,
 };
 use flare_server_core::error::grpc::IntoGrpc;
 use tonic::{Request, Response, Status};
@@ -24,6 +27,35 @@ use crate::application::commands::apply_tenant_projection;
 use crate::application::queries::tenant_projection_versions;
 use crate::domain::model::TenantProjectionRecord;
 use crate::domain::repository::TenantProjectionRepository;
+
+fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSnapshot, Status> {
+    let invalid = || Status::invalid_argument("invalid credential projection");
+    if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&req.app_id)
+        || req.app_id != flare_im_contracts::utils::normalize_tenant_id(&req.app_id)
+        || req.keys.len() > MAX_CREDENTIAL_KEYS
+    {
+        return Err(invalid());
+    }
+    let keys = req
+        .keys
+        .into_iter()
+        .map(|key| {
+            Ok(CredentialKeyRecord {
+                key_id: key.key_id,
+                service_account_id: key.service_account_id,
+                mode: u8::try_from(key.mode).map_err(|_| invalid())?,
+                hash: key.hash.try_into().map_err(|_| invalid())?,
+                pepper_fingerprint: key.pepper_fingerprint.try_into().map_err(|_| invalid())?,
+                scopes: key.scopes,
+                expires_at_ms: key.expires_at_ms,
+                ip_allow: key.ip_allow,
+                revoked: key.revoked,
+                service_account_enabled: key.service_account_enabled,
+            })
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    CredentialSnapshot::new(req.app_id, req.version, keys).map_err(|_| invalid())
+}
 
 pub struct TenantProjectionGrpcServer<R: TenantProjectionRepository + 'static> {
     repository: Arc<R>,
@@ -50,6 +82,24 @@ impl<R: TenantProjectionRepository + 'static> Clone for TenantProjectionGrpcServ
 
 #[tonic::async_trait]
 impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProjectionGrpcServer<R> {
+    async fn upsert_credentials(
+        &self,
+        request: Request<CredentialsProjectionUpsert>,
+    ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        actor.require_tenant(&request.get_ref().app_id)?;
+        let snapshot = credentials_snapshot(request.into_inner())?;
+        let outcome = self
+            .repository
+            .replace_credentials(&snapshot)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(ProjectionAck {
+            accepted: outcome.accepted,
+            current_version: outcome.current_version,
+        }))
+    }
     async fn upsert_tenant(
         &self,
         request: Request<TenantProjectionUpsert>,
@@ -94,6 +144,9 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
         actor.require_kind(ControlActorKind::ProjectionWorker)?;
         let ids = request.into_inner().im_tenant_ids;
+        if ids.len() > 512 {
+            return Err(Status::invalid_argument("too many projection tenants"));
+        }
         if ids.len() == 1 {
             actor.require_tenant(&ids[0])?;
         } else if actor.tenant_id != "*" {
@@ -110,7 +163,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         let versions = tenant_projection_versions(self.repository.as_ref(), &ids)
             .await
             .into_grpc()?;
-        let versions: HashMap<String, TenantVersions> = versions
+        let mut versions: HashMap<String, TenantVersions> = versions
             .into_iter()
             .map(|(tenant_id, tenant_version)| {
                 (
@@ -118,10 +171,19 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
                     TenantVersions {
                         tenant_version,
                         features_version: 0,
+                        credentials_version: 0,
                     },
                 )
             })
             .collect();
+        for (app_id, version) in self
+            .repository
+            .credential_versions(&ids)
+            .await
+            .into_grpc()?
+        {
+            versions.entry(app_id).or_default().credentials_version = version;
+        }
         Ok(Response::new(ProjectionVersions { versions }))
     }
 }
@@ -140,10 +202,39 @@ mod tests {
     #[derive(Default)]
     struct MemoryRepo {
         rows: Mutex<HashMap<String, (TenantProjectionRecord, u64)>>,
+        credentials: Mutex<HashMap<String, CredentialSnapshot>>,
     }
 
     #[async_trait::async_trait]
     impl TenantProjectionRepository for MemoryRepo {
+        async fn replace_credentials(
+            &self,
+            p: &CredentialSnapshot,
+        ) -> FlareResult<TenantProjectionOutcome> {
+            let mut rows = self.credentials.lock().unwrap();
+            let current = rows
+                .get(p.app_id())
+                .map(|p| p.version() as u64)
+                .unwrap_or(0);
+            let accepted = p.version() as u64 > current;
+            if accepted {
+                rows.insert(p.app_id().into(), p.clone());
+            }
+            Ok(TenantProjectionOutcome {
+                accepted,
+                current_version: current.max(p.version() as u64),
+            })
+        }
+        async fn credential_versions(&self, ids: &[String]) -> FlareResult<Vec<(String, u64)>> {
+            Ok(self
+                .credentials
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| ids.is_empty() || ids.contains(id))
+                .map(|(id, p)| (id.clone(), p.version() as u64))
+                .collect())
+        }
         async fn upsert_if_newer(
             &self,
             record: &TenantProjectionRecord,
@@ -206,6 +297,97 @@ mod tests {
             flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
             flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
         )
+    }
+
+    #[tokio::test]
+    async fn credentials_rpc_requires_worker_scope_and_preserves_empty_watermarks() {
+        let (repo, server) = server();
+        let request = || CredentialsProjectionUpsert {
+            app_id: "app-a".into(),
+            version: 9,
+            keys: vec![],
+        };
+        assert_eq!(
+            server
+                .upsert_credentials(Request::new(request()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            server
+                .upsert_credentials(authed(request(), "app-b"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let employee = signed_request(
+            request(),
+            "app-a",
+            "employee-7",
+            flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
+        );
+        assert_eq!(
+            server
+                .upsert_credentials(employee)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert!(repo.credentials.lock().unwrap().is_empty());
+        let ack = server
+            .upsert_credentials(authed(request(), "app-a"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ack.accepted);
+        assert_eq!(ack.current_version, 9);
+        let mut old = request();
+        old.version = 8;
+        let ack = server
+            .upsert_credentials(authed(old, "app-a"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!ack.accepted);
+        assert_eq!(ack.current_version, 9);
+        let versions = server
+            .get_versions(authed(
+                GetVersionsRequest {
+                    im_tenant_ids: vec!["app-a".into()],
+                },
+                "app-a",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(versions.versions["app-a"].credentials_version, 9);
+        let mut invalid = request();
+        invalid.version = 0;
+        assert_eq!(
+            server
+                .upsert_credentials(authed(invalid, "app-a"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut invalid = request();
+        invalid
+            .keys
+            .push(flare_grpc_proto::control::CredentialKey::default());
+        assert_eq!(
+            server
+                .upsert_credentials(authed(invalid, "app-a"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(repo.credentials.lock().unwrap()["app-a"].version(), 9);
     }
 
     fn signed_request<T>(payload: T, tenant_id: &str, subject: &str, audience: &str) -> Request<T> {

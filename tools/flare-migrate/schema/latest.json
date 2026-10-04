@@ -115,6 +115,28 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "app_id",
+      "not_null": true,
+      "table": "credential_keys",
+      "type": "character varying(32)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "app_id",
+      "not_null": true,
+      "table": "credential_projection_versions",
+      "type": "character varying(32)"
+    },
+    {
       "collation": null,
       "default": null,
       "generated": "",
@@ -1495,6 +1517,17 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "key_id",
+      "not_null": true,
+      "table": "credential_keys",
+      "type": "character varying(12)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "last_error",
       "not_null": false,
       "table": "message_write_ledger",
@@ -2122,6 +2155,17 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "payload",
+      "not_null": true,
+      "table": "credential_keys",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "persisted_at",
       "not_null": false,
       "table": "messages",
@@ -2192,6 +2236,17 @@
       "not_null": true,
       "table": "hook_configs",
       "type": "integer"
+    },
+    {
+      "collation": null,
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "projected_at",
+      "not_null": true,
+      "table": "credential_projection_versions",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -3427,6 +3482,17 @@
     },
     {
       "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "version",
+      "not_null": true,
+      "table": "credential_projection_versions",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": "0",
       "generated": "",
       "identity": "",
@@ -3631,6 +3697,76 @@
       "name": "conversations_pkey",
       "table": "conversations",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (app_id) REFERENCES credential_projection_versions(app_id)",
+      "kind": "constraint",
+      "name": "credential_keys_app_id_fkey",
+      "table": "credential_keys",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((key_id)::text ~ '^[A-Z2-7]{12}$'::text))",
+      "kind": "constraint",
+      "name": "credential_keys_key_id_check",
+      "table": "credential_keys",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((jsonb_typeof(payload) = 'object'::text) AND (octet_length((payload)::text) <= 16384)))",
+      "kind": "constraint",
+      "name": "credential_keys_payload_check",
+      "table": "credential_keys",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (key_id)",
+      "kind": "constraint",
+      "name": "credential_keys_pkey",
+      "table": "credential_keys",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((app_id)::text ~ '^[A-Za-z0-9_-]{1,32}$'::text))",
+      "kind": "constraint",
+      "name": "credential_projection_versions_app_id_check",
+      "table": "credential_projection_versions",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (app_id)",
+      "kind": "constraint",
+      "name": "credential_projection_versions_pkey",
+      "table": "credential_projection_versions",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((version > 0))",
+      "kind": "constraint",
+      "name": "credential_projection_versions_version_check",
+      "table": "credential_projection_versions",
+      "type": "c",
       "validated": true
     },
     {
@@ -4027,6 +4163,36 @@
       "ready": true,
       "replica_identity": false,
       "table": "conversations",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX credential_keys_app_idx ON public.credential_keys USING btree (app_id)",
+      "kind": "index",
+      "name": "credential_keys_app_idx",
+      "ready": true,
+      "replica_identity": false,
+      "table": "credential_keys",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX credential_keys_pkey ON public.credential_keys USING btree (key_id)",
+      "kind": "index",
+      "name": "credential_keys_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "credential_keys",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX credential_projection_versions_pkey ON public.credential_projection_versions USING btree (app_id)",
+      "kind": "index",
+      "name": "credential_projection_versions_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "credential_projection_versions",
       "valid": true
     },
     {
@@ -5031,6 +5197,28 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "conversations",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "credential_keys",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "credential_projection_versions",
       "options": null,
       "partition": null,
       "persistence": "p",

@@ -11,6 +11,21 @@
 --   - flare-capability: hook_configs / hook_executions（Hook 引擎）；capability_*（CapabilityService 策略）
 -- 数据库: PostgreSQL + TimescaleDB
 -- 维护约定: 生产 DDL 只追加 migrations/*.sql；本文件同步最新开发快照，不用于升级已有数据库。
+
+-- Hash-only credential read model (migration 0010); dev reset only.
+DROP TABLE IF EXISTS credential_keys CASCADE;
+DROP TABLE IF EXISTS credential_projection_versions CASCADE;
+CREATE TABLE credential_projection_versions (
+    app_id VARCHAR(32) PRIMARY KEY CHECK (app_id ~ '^[A-Za-z0-9_-]{1,32}$'),
+    version BIGINT NOT NULL CHECK (version > 0),
+    projected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE credential_keys (
+    key_id VARCHAR(12) PRIMARY KEY CHECK (key_id ~ '^[A-Z2-7]{12}$'),
+    app_id VARCHAR(32) NOT NULL REFERENCES credential_projection_versions(app_id),
+    payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object' AND octet_length(payload::text) <= 16384)
+);
+CREATE INDEX credential_keys_app_idx ON credential_keys(app_id);
 -- 开发阶段: 可随时删库或清空数据卷后对目标 PostgreSQL 执行本文件全量初始化
 --   例: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/init.sql
 -- 表结构: 凡 CREATE TABLE 前须有对应 DROP TABLE IF EXISTS ... CASCADE。

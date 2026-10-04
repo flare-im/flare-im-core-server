@@ -23,6 +23,18 @@ pub trait HookConfigRepository: Send + Sync {
 /// 用 `async_trait`：实现被 tonic 服务持有并跨线程执行，future 必须是 `Send`。
 #[async_trait::async_trait]
 pub trait TenantProjectionRepository: Send + Sync {
+    /// Validated full app snapshot; replace keys and version atomically. Empty
+    /// snapshots keep their watermarks, and old/equal versions do nothing.
+    async fn replace_credentials(
+        &self,
+        snapshot: &flare_server_core::auth::credential_snapshot::CredentialSnapshot,
+    ) -> flare_server_core::error::Result<crate::domain::model::TenantProjectionOutcome>;
+
+    async fn credential_versions(
+        &self,
+        app_ids: &[String],
+    ) -> flare_server_core::error::Result<Vec<(String, u64)>>;
+
     /// 仅当来件 `version` 大于本地版本时写入；返回是否接受与写入后的本地版本。
     async fn upsert_if_newer(
         &self,

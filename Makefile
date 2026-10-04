@@ -66,6 +66,10 @@ test-opensource-runner:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_smoke_opensource_container.py scripts/lib/test_timeout_process.py
 
 .PHONY: db-migrate check-schema dev-reset test-migrations
+.PHONY: test-credential-projection
+test-credential-projection:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_credential_projection.py
+
 db-migrate:
 	bash scripts/migrate_db.sh
 

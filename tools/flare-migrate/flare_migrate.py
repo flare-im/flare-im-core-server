@@ -316,7 +316,7 @@ def execute_migration(db, sql):
 # Reviewed logical shapes a Core database may have before `run`: the frozen 0001 snapshot (0002..0007
 # change nothing on it), the shape after 0008 and the current latest. When a migration changes the shape,
 # keep the previous latest as `v<NNNN>` so ledgered databases at that version still pass the pre-check.
-REVIEWED_SHAPES = ("baseline", "v0008", "latest")
+REVIEWED_SHAPES = ("baseline", "v0008", "v0009", "latest")
 
 
 def assert_reviewed_baseline(actual):

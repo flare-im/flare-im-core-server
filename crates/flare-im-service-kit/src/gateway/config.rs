@@ -571,8 +571,9 @@ where
         "http://127.0.0.1:50110",
     );
     let static_fallback = static_fallback.trim();
-    if !static_fallback.is_empty()
-        && !(static_fallback.starts_with("http://") || static_fallback.starts_with("https://"))
+    if !(static_fallback.is_empty()
+        || static_fallback.starts_with("http://")
+        || static_fallback.starts_with("https://"))
     {
         return Err(config_error(
             "capability static fallback must be http:// or https://",
