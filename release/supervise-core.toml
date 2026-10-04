@@ -198,7 +198,10 @@ tcp_health = "127.0.0.1:60081"
 name = "api-gateway"
 command = "/usr/local/bin/flare-api-gateway"
 inherit_env_prefixes = ["FLARE_API_GATEWAY_", "GRPC_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT"]
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT",
+  "FLARE_API_KEY_PEPPER", "FLARE_PLATFORM_API_ENABLED", "FLARE_PLATFORM_TRUSTED_PROXY_CIDRS",
+]
 required_env = ["FLARE_API_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50050"
 [services.environment]
