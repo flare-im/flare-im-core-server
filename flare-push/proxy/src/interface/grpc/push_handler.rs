@@ -347,6 +347,9 @@ mod identity_boundary_tests {
             roles: Vec::new(),
             credential_id: None,
             request_id: "req-1".into(),
+            org_id: None,
+            permission: None,
+            perm_version: None,
         }
     }
 

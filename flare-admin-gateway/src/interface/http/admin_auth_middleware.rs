@@ -254,7 +254,7 @@ mod tests {
             .unwrap();
         let signer = flare_server_core::TokenService::from_ed25519_private_key(
             &private,
-            flare_im_service_kit::control_auth::CONSOLE_ISSUER,
+            flare_im_service_kit::control_auth::PLATFORM_ISSUER,
             60,
         )
         .unwrap();
@@ -395,7 +395,7 @@ mod tests {
             "employee-1",
             "tenant-a",
             "admin",
-            flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
+            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         );
         assert_eq!(
             verified_admin_actor(&verifier, &headers)

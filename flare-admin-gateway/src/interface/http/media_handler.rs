@@ -270,7 +270,7 @@ mod tests {
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::clients::*;
     use flare_im_service_kit::control_auth::{
-        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, ConsoleControlVerifier,
+        CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, PLATFORM_ISSUER,
     };
     use flare_server_core::{SignedActorType, SignedContextVerifier};
     use std::sync::Mutex as StdMutex;
@@ -364,7 +364,7 @@ mod tests {
         let (control_private, control_public) = pem_pair(61);
         let token = flare_server_core::TokenService::from_ed25519_private_key(
             &control_private,
-            CONSOLE_ISSUER,
+            PLATFORM_ISSUER,
             60,
         )
         .unwrap()

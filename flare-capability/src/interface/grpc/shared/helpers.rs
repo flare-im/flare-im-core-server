@@ -59,7 +59,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::control_auth::{
-        CONSOLE_ISSUER, CORE_CONTROL_AUDIENCE, PROJECTION_WORKER_SUBJECT,
+        CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
     };
 
     fn signed_request(subject: &str, audience: &str) -> (ConsoleControlVerifier, Request<()>) {
@@ -69,9 +69,12 @@ mod tests {
             .verifying_key()
             .to_public_key_pem(Default::default())
             .unwrap();
-        let signer =
-            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
-                .unwrap();
+        let signer = flare_server_core::TokenService::from_ed25519_private_key(
+            &private,
+            PLATFORM_ISSUER,
+            60,
+        )
+        .unwrap();
         let token = signer
             .generate_with_ed25519(subject, Some("tenant-a"), "control", audience)
             .unwrap();
@@ -87,7 +90,7 @@ mod tests {
 
     #[test]
     fn capability_admin_rejects_legacy_headers_and_non_employee_assertions() {
-        let (verifier, mut request) = signed_request("employee-1", CORE_CONTROL_AUDIENCE);
+        let (verifier, mut request) = signed_request("employee-1", CORE_PROJECTION_AUDIENCE);
         assert_eq!(
             require_capability_policy_admin(&request, Some(&verifier))
                 .unwrap()
@@ -114,14 +117,14 @@ mod tests {
             tonic::Code::Unauthenticated
         );
 
-        let (_, worker) = signed_request(PROJECTION_WORKER_SUBJECT, CORE_CONTROL_AUDIENCE);
+        let (_, worker) = signed_request(PROJECTION_WORKER_SUBJECT, CORE_PROJECTION_AUDIENCE);
         assert_eq!(
             require_capability_policy_admin(&worker, Some(&verifier))
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
         );
-        let (_, wrong_audience) = signed_request("employee-1", "flare-social-control");
+        let (_, wrong_audience) = signed_request("employee-1", "flare-social-projection");
         assert_eq!(
             require_capability_policy_admin(&wrong_audience, Some(&verifier))
                 .unwrap_err()

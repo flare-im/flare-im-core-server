@@ -1,10 +1,10 @@
-//! Console → Core control-plane JWT boundary.
+//! Platform → Core control-plane JWT boundary.
 //!
-//! This verifier only holds the Console public key. It cannot mint credentials,
+//! This verifier only holds the platform public key. It cannot mint credentials,
 //! and neither a user access JWT nor a cell-internal `x-flare-ctx` is accepted.
 //!
-//! Two assertions reach Core gRPC services: the control assertion Console sends
-//! directly (`token_use=control`, audience [`CORE_CONTROL_AUDIENCE`]) and the
+//! Two assertions reach Core gRPC services: the control assertion the platform sends
+//! directly (`token_use=control`, audience [`CORE_PROJECTION_AUDIENCE`]) and the
 //! admin assertion that admin-gateway has already verified and forwards unchanged
 //! (`token_use=admin`, audience [`CORE_ADMIN_AUDIENCE`]). The admin branch is
 //! always employee-only and bound to one concrete tenant; admin-gateway never
@@ -17,10 +17,10 @@ use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::TokenService;
 use tonic::{Request, Status};
 
-pub const CONSOLE_ISSUER: &str = "flare-im-console";
-pub const CORE_CONTROL_AUDIENCE: &str = "flare-core-control";
+pub const PLATFORM_ISSUER: &str = "flare-platform";
+pub const CORE_PROJECTION_AUDIENCE: &str = "flare-core-projection";
 pub const CORE_ADMIN_AUDIENCE: &str = "flare-core-admin";
-pub const PROJECTION_WORKER_SUBJECT: &str = "flare-platform-control-worker";
+pub const PROJECTION_WORKER_SUBJECT: &str = "flare-platform-worker";
 pub const SCHEDULER_SUBJECT: &str = "flare-platform-control-scheduler";
 const MAX_TOKEN_BYTES: usize = 8192;
 const MAX_TOKEN_LIFETIME_SECONDS: usize = 60;
@@ -35,10 +35,10 @@ pub enum ControlActorKind {
     Scheduler,
 }
 
-/// Which Console assertion authorized a gRPC call.
+/// Which platform assertion authorized a gRPC call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlChannel {
-    /// Console → Core directly: `token_use=control`, audience [`CORE_CONTROL_AUDIENCE`].
+    /// Console → Core directly: `token_use=control`, audience [`CORE_PROJECTION_AUDIENCE`].
     Control,
     /// Console → admin-gateway → Core, forwarded unchanged: `token_use=admin`,
     /// audience [`CORE_ADMIN_AUDIENCE`], employee subject, concrete tenant.
@@ -76,7 +76,7 @@ impl ConsoleControlVerifier {
     pub fn from_public_key(material: &str) -> flare_server_core::error::Result<Self> {
         Ok(Self(Arc::new(TokenService::from_ed25519_public_key(
             material,
-            CONSOLE_ISSUER,
+            PLATFORM_ISSUER,
         )?)))
     }
 
@@ -139,7 +139,7 @@ impl ConsoleControlVerifier {
     }
 
     pub fn verify_grpc<T>(&self, request: &Request<T>) -> Result<VerifiedControlActor, Status> {
-        self.verify_token(grpc_bearer(request)?, "control", CORE_CONTROL_AUDIENCE)
+        self.verify_token(grpc_bearer(request)?, "control", CORE_PROJECTION_AUDIENCE)
     }
 
     /// The admin assertion admin-gateway forwards unchanged. Only an employee
@@ -169,7 +169,7 @@ impl ConsoleControlVerifier {
         request: &Request<T>,
     ) -> Result<(VerifiedControlActor, ControlChannel), Status> {
         let token = grpc_bearer(request)?;
-        if let Ok(actor) = self.verify_token(token, "control", CORE_CONTROL_AUDIENCE) {
+        if let Ok(actor) = self.verify_token(token, "control", CORE_PROJECTION_AUDIENCE) {
             return Ok((actor, ControlChannel::Control));
         }
         Ok((self.verify_admin_token(token)?, ControlChannel::Admin))
@@ -241,7 +241,7 @@ mod tests {
             .to_public_key_pem(Default::default())
             .unwrap();
         (
-            TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, ttl).unwrap(),
+            TokenService::from_ed25519_private_key(&private, PLATFORM_ISSUER, ttl).unwrap(),
             ConsoleControlVerifier::from_public_key(&public).unwrap(),
         )
     }
@@ -283,11 +283,11 @@ mod tests {
                 "employee-1",
                 Some("tenant-a"),
                 "control",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
         let actor = verifier
-            .verify_token(&valid, "control", CORE_CONTROL_AUDIENCE)
+            .verify_token(&valid, "control", CORE_PROJECTION_AUDIENCE)
             .unwrap();
         assert_eq!(actor.subject, "employee-1");
         assert_eq!(actor.tenant_id, "tenant-a");
@@ -303,7 +303,7 @@ mod tests {
         );
         assert!(
             verifier
-                .verify_token(&format!("{valid}x"), "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&format!("{valid}x"), "control", CORE_PROJECTION_AUDIENCE)
                 .is_err()
         );
 
@@ -312,12 +312,12 @@ mod tests {
                 "employee-1",
                 Some("tenant-a"),
                 "access",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
         assert!(
             verifier
-                .verify_token(&wrong_use, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&wrong_use, "control", CORE_PROJECTION_AUDIENCE)
                 .is_err()
         );
         let wrong_aud = signer
@@ -325,31 +325,31 @@ mod tests {
                 "employee-1",
                 Some("tenant-a"),
                 "control",
-                "flare-social-control",
+                "flare-social-projection",
             )
             .unwrap();
         assert!(
             verifier
-                .verify_token(&wrong_aud, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&wrong_aud, "control", CORE_PROJECTION_AUDIENCE)
                 .is_err()
         );
         let wildcard = signer
-            .generate_with_ed25519("employee-1", Some("*"), "control", CORE_CONTROL_AUDIENCE)
+            .generate_with_ed25519("employee-1", Some("*"), "control", CORE_PROJECTION_AUDIENCE)
             .unwrap();
         assert!(
             verifier
-                .verify_token(&wildcard, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&wildcard, "control", CORE_PROJECTION_AUDIENCE)
                 .unwrap()
                 .require_tenant("tenant-a")
                 .is_err()
         );
 
-        let hmac = TokenService::new("test-only-secret", CONSOLE_ISSUER, 60)
+        let hmac = TokenService::new("test-only-secret", PLATFORM_ISSUER, 60)
             .generate_token("employee-1", None, Some("tenant-a"))
             .unwrap();
         assert!(
             verifier
-                .verify_token(&hmac, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&hmac, "control", CORE_PROJECTION_AUDIENCE)
                 .is_err()
         );
         assert!(
@@ -359,7 +359,7 @@ mod tests {
                     "employee-1",
                     Some("tenant-a"),
                     "control",
-                    CORE_CONTROL_AUDIENCE
+                    CORE_PROJECTION_AUDIENCE
                 )
                 .is_err()
         );
@@ -370,12 +370,12 @@ mod tests {
                 "employee-1",
                 Some("tenant-a"),
                 "control",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
         assert!(
             verifier
-                .verify_token(&too_long, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&too_long, "control", CORE_PROJECTION_AUDIENCE)
                 .is_err()
         );
     }
@@ -455,8 +455,13 @@ mod tests {
         );
         // Wrong audience / purpose: a direct control assertion is not an admin one.
         for token in [
-            admin("employee-1", "tenant-a", "control", CORE_CONTROL_AUDIENCE),
-            admin("employee-1", "tenant-a", "admin", CORE_CONTROL_AUDIENCE),
+            admin(
+                "employee-1",
+                "tenant-a",
+                "control",
+                CORE_PROJECTION_AUDIENCE,
+            ),
+            admin("employee-1", "tenant-a", "admin", CORE_PROJECTION_AUDIENCE),
             admin("employee-1", "tenant-a", "control", CORE_ADMIN_AUDIENCE),
         ] {
             assert_eq!(
@@ -503,7 +508,7 @@ mod tests {
                 SCHEDULER_SUBJECT,
                 "tenant-a",
                 "control",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             ),
             Some(&verifier),
         )
@@ -531,7 +536,7 @@ mod tests {
         for request in [
             Request::new(()),
             token("employee-1", "tenant-a", "access", CORE_ADMIN_AUDIENCE),
-            token("employee-1", "tenant-a", "admin", "flare-social-control"),
+            token("employee-1", "tenant-a", "admin", "flare-social-projection"),
         ] {
             assert_eq!(
                 require_grpc_control_or_admin(&request, Some(&verifier))
@@ -550,16 +555,67 @@ mod tests {
                 "employee-1",
                 Some("tenant-a"),
                 "control",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         assert_eq!(
             verifier
-                .verify_token(&token, "control", CORE_CONTROL_AUDIENCE)
+                .verify_token(&token, "control", CORE_PROJECTION_AUDIENCE)
                 .unwrap_err()
                 .code(),
             tonic::Code::Unauthenticated
         );
+    }
+
+    #[test]
+    fn legacy_console_issuer_audience_and_worker_subject_are_rejected() {
+        let (signer, verifier) = token_pair(60);
+        let key = SigningKey::from_bytes(&[83; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let legacy =
+            TokenService::from_ed25519_private_key(&private, "flare-im-console", 60).unwrap();
+        let employee = legacy
+            .generate_with_ed25519(
+                "employee-1",
+                Some("tenant-a"),
+                "control",
+                CORE_PROJECTION_AUDIENCE,
+            )
+            .unwrap();
+        assert!(
+            verifier
+                .verify_token(&employee, "control", CORE_PROJECTION_AUDIENCE)
+                .is_err()
+        );
+        let old_audience = signer
+            .generate_with_ed25519(
+                "employee-1",
+                Some("tenant-a"),
+                "control",
+                "flare-core-control",
+            )
+            .unwrap();
+        assert!(
+            verifier
+                .verify_token(&old_audience, "control", CORE_PROJECTION_AUDIENCE)
+                .is_err()
+        );
+        let old_subject = signer
+            .generate_with_ed25519(
+                "flare-platform-control-worker",
+                Some("*"),
+                "control",
+                CORE_PROJECTION_AUDIENCE,
+            )
+            .unwrap();
+        if let Ok(actor) = verifier.verify_token(&old_subject, "control", CORE_PROJECTION_AUDIENCE)
+        {
+            assert!(
+                actor
+                    .require_kind(ControlActorKind::ProjectionWorker)
+                    .is_err()
+            );
+        }
     }
 }

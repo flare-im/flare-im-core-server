@@ -764,7 +764,7 @@ mod plugin_listing_tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::control_auth::{
-        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, CORE_CONTROL_AUDIENCE, PROJECTION_WORKER_SUBJECT,
+        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
     };
     use tonic::Code;
 
@@ -779,8 +779,12 @@ mod plugin_listing_tests {
             .to_public_key_pem(Default::default())
             .unwrap();
         (
-            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
-                .unwrap(),
+            flare_server_core::TokenService::from_ed25519_private_key(
+                &private,
+                PLATFORM_ISSUER,
+                60,
+            )
+            .unwrap(),
             ConsoleControlVerifier::from_public_key(&public).unwrap(),
         )
     }
@@ -863,7 +867,7 @@ mod plugin_listing_tests {
                 "employee-1",
                 Some("tenant-a"),
                 "control",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
 
@@ -894,7 +898,7 @@ mod plugin_listing_tests {
                 "employee-1",
                 Some("tenant-a"),
                 "admin",
-                CORE_CONTROL_AUDIENCE,
+                CORE_PROJECTION_AUDIENCE,
             )
             .unwrap();
         assert_eq!(
@@ -908,7 +912,7 @@ mod plugin_listing_tests {
         assert!(listed(&server, Some(&wildcard), "tenant-a").await.is_err());
         // 投影 worker 不是员工：control 分支按员工拒绝，admin 分支直接拒绝。
         for (token_use, audience) in [
-            ("control", CORE_CONTROL_AUDIENCE),
+            ("control", CORE_PROJECTION_AUDIENCE),
             ("admin", CORE_ADMIN_AUDIENCE),
         ] {
             let worker = tokens

@@ -4,15 +4,15 @@ The Console/Control backend is the sole issuer of Core management assertions. Co
 
 | Boundary | JWT `iss` | `aud` | `token_use` | Allowed subject / tenant |
 | --- | --- | --- | --- | --- |
-| Capability management, TenantProjection, Online Kick gRPC | `flare-im-console` | `flare-core-control` | `control` | See method policy below |
-| Admin Gateway HTTP `/api/v1/admin/**` | `flare-im-console` | `flare-core-admin` | `admin` | Real employee subject and one concrete, matching `x-tenant-id` |
-| Admin reads forwarded by Admin Gateway (Conversation, Online, Capability admin services, Capability `ListRegisteredPlugins`), Online Kick gRPC | `flare-im-console` | `flare-core-admin` | `admin` | Employee subject, one concrete tenant; see "Forwarded admin assertion" below |
+| Capability management, TenantProjection, Online Kick gRPC | `flare-platform` | `flare-core-projection` | `control` | See method policy below |
+| Admin Gateway HTTP `/api/v1/admin/**` | `flare-platform` | `flare-core-admin` | `admin` | Real employee subject and one concrete, matching `x-tenant-id` |
+| Admin reads forwarded by Admin Gateway (Conversation, Online, Capability admin services, Capability `ListRegisteredPlugins`), Online Kick gRPC | `flare-platform` | `flare-core-admin` | `admin` | Employee subject, one concrete tenant; see "Forwarded admin assertion" below |
 
 Every assertion has `sub`, `tenant_id`, `iat`, `exp`, `jti`; Core enforces EdDSA, exact issuer/audience/use, and `exp - iat <= 60s`. Plain user-access JWTs, the cell-internal `x-flare-ctx`, old shared-secret headers, missing assertions, and duplicate Authorization headers do not authorize control operations. TLS/private listener protection remains required; a valid short-lived assertion is not a substitute for network isolation. Retries of writes also need stable idempotency keys; the JWT alone does not deduplicate a replay inside its validity window.
 
 ## Method policy
 
-- `TenantProjection.UpsertTenant` / `UpsertFeatureFlags`: subject exactly `flare-platform-control-worker`; token tenant must equal the canonical body tenant. `UpsertFeatureFlags` remains explicitly `UNIMPLEMENTED` in Core, after authentication.
+- `TenantProjection.UpsertTenant` / `UpsertFeatureFlags`: subject exactly `flare-platform-worker`; token tenant must equal the canonical body tenant. `UpsertFeatureFlags` remains explicitly `UNIMPLEMENTED` in Core, after authentication.
 - `TenantProjection.GetVersions`: worker only; one requested tenant must equal token tenant; multiple or no tenant IDs require token tenant `*`. Non-canonical IDs are rejected.
 - `CapabilityService.ListCapabilities`: employee assertion (platform-wide Control listing may use token tenant `*`). `ListUserCapabilities`, `GrantUserCapability`, `RevokeUserCapability`, `SetTenantCapabilitySwitch`, `RegisterPluginEndpoint`, `DeregisterPluginEndpoint`, `ListRegisteredPlugins`, `Administer`: employee subject, concrete token tenant exactly matching the requested tenant. `ListRegisteredPlugins` is read-only and also accepts the forwarded admin assertion (Admin Gateway `GET /api/v1/admin/plugins`); registering and deregistering plugins stay control-only. Hook ID operations resolve the stored Hook config tenant before read/change; `GenericRequest.metadata` is not identity. In-process Hook governance calls receive a context reconstructed from the verified assertion, preserving the real actor for audit.
 - `OnlineService.KickDevice`: employee only, with a concrete token tenant; the live session's tenant must match before removal. The request proto does not carry a tenant field. Accepts the control assertion or the forwarded admin assertion.
@@ -27,7 +27,7 @@ Admin Gateway verifies the admin assertion on `/api/v1/admin/**` and then forwar
 Each receiving service (Online, Capability, Conversation) adds the same branch through `flare_im_service_kit::control_auth`:
 
 1. exactly one `authorization` entry with a `Bearer` token;
-2. `verify_token(token, "admin", CORE_ADMIN_AUDIENCE)` with the Console public key — EdDSA, issuer `flare-im-console`, `token_use=admin`, audience `flare-core-admin`, lifetime at most 60 seconds;
+2. `verify_token(token, "admin", CORE_ADMIN_AUDIENCE)` with the Console public key — EdDSA, issuer `flare-platform`, `token_use=admin`, audience `flare-core-admin`, lifetime at most 60 seconds;
 3. `require_kind(Employee)` — the projection worker and scheduler subjects never pass the admin branch;
 4. `require_tenant(actor.tenant_id)` — the token names one concrete, canonical tenant; `*` is rejected.
 

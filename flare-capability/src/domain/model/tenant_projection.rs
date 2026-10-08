@@ -146,6 +146,7 @@ mod tests {
 
     fn upsert() -> TenantProjectionUpsert {
         TenantProjectionUpsert {
+            organization_id: Default::default(),
             im_tenant_id: "acme".to_string(),
             name: " Acme ".to_string(),
             status: flare_grpc_proto::control::TenantStatus::Active as i32,

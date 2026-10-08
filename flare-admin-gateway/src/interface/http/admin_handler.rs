@@ -125,7 +125,7 @@ pub struct AdminGrpcConfigSnapshot {
 /// Admin Gateway 实际使用的认证方式。
 ///
 /// 管理请求只经 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言（EdDSA，issuer
-/// `flare-im-console`，audience `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒）。
+/// `flare-platform`，audience `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒）。
 /// `FLARE_ADMIN_GATEWAY_AUTH_*`（`core_jwt` / `http_hook`）在 Admin 作用域下不读取（出现时启动
 /// 日志 WARN），快照也不转述它们。四个 `hook_*` 字段只为保持 Control 已登记的响应结构，
 /// 取值固定为「没有认证 hook」。

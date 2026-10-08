@@ -146,7 +146,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::control_auth::{
-        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, CORE_CONTROL_AUDIENCE, PROJECTION_WORKER_SUBJECT,
+        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
         SCHEDULER_SUBJECT,
     };
     use flare_server_core::error::Result as FlareResult;
@@ -322,11 +322,14 @@ mod tests {
         let private = SigningKey::from_bytes(&KEY)
             .to_pkcs8_pem(Default::default())
             .unwrap();
-        let token =
-            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
-                .unwrap()
-                .generate_with_ed25519(subject, Some(tenant), token_use, aud)
-                .unwrap();
+        let token = flare_server_core::TokenService::from_ed25519_private_key(
+            &private,
+            PLATFORM_ISSUER,
+            60,
+        )
+        .unwrap()
+        .generate_with_ed25519(subject, Some(tenant), token_use, aud)
+        .unwrap();
         let mut request = Request::new(payload);
         request
             .metadata_mut()
@@ -413,8 +416,8 @@ mod tests {
     async fn admin_reads_reject_wrong_audience_and_non_employee_tokens() {
         let (repo, conversations) = handler(true);
         for (token_use, aud) in [
-            ("control", CORE_CONTROL_AUDIENCE),
-            ("admin", CORE_CONTROL_AUDIENCE),
+            ("control", CORE_PROJECTION_AUDIENCE),
+            ("admin", CORE_PROJECTION_AUDIENCE),
             ("control", CORE_ADMIN_AUDIENCE),
         ] {
             assert_eq!(

@@ -49,6 +49,7 @@ async fn tenant_runtime_and_switches_read_back_per_tenant() {
     );
 
     let record = TenantProjectionRecord::from_proto(&TenantProjectionUpsert {
+        organization_id: Default::default(),
         im_tenant_id: tenant_a.clone(),
         name: "Tenant A".to_string(),
         status: ProtoStatus::Suspended as i32,

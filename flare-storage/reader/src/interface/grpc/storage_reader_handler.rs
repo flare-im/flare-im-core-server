@@ -1204,7 +1204,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::control_auth::{
-        CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, CORE_CONTROL_AUDIENCE, ControlActorKind,
+        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, ControlActorKind, PLATFORM_ISSUER,
     };
 
     /// Console 的测试密钥对：签令牌的一方与验签器。
@@ -1216,8 +1216,12 @@ mod tests {
             .to_public_key_pem(Default::default())
             .unwrap();
         (
-            flare_server_core::TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60)
-                .unwrap(),
+            flare_server_core::TokenService::from_ed25519_private_key(
+                &private,
+                PLATFORM_ISSUER,
+                60,
+            )
+            .unwrap(),
             ConsoleControlVerifier::from_public_key(&public).unwrap(),
         )
     }
@@ -1271,11 +1275,11 @@ mod tests {
         let unsigned = [("x-tenant-id", "tenant-a"), ("x-user-id", "employee-1")];
         let control = format!(
             "Bearer {}",
-            token(&signer, "tenant-a", "control", CORE_CONTROL_AUDIENCE)
+            token(&signer, "tenant-a", "control", CORE_PROJECTION_AUDIENCE)
         );
         let wrong_audience = format!(
             "Bearer {}",
-            token(&signer, "tenant-a", "admin", CORE_CONTROL_AUDIENCE)
+            token(&signer, "tenant-a", "admin", CORE_PROJECTION_AUDIENCE)
         );
         let mut refused: Vec<Vec<(&'static str, &str)>> = vec![unsigned.to_vec()];
         for bearer in [control.as_str(), wrong_audience.as_str()] {

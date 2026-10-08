@@ -477,6 +477,9 @@ mod realtime_relay_tests {
                 "same",
                 &body("same").packet,
             ),
+            org_id: None,
+            permission: None,
+            perm_version: None,
         }
     }
 

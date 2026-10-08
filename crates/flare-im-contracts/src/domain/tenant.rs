@@ -1,6 +1,6 @@
 //! 租户运行时契约（控制面投影在核里的只读视图）。
 //!
-//! 真源在控制面（flare-im-console），核经 `flare.control.v1.TenantProjection` 接收投影并写入
+//! 真源在控制面（flare-platform），核经 `flare.control.v1.TenantProjection` 接收投影并写入
 //! `tenants` 表；网关 / ingest / sync 只读本模块的快照。这里不放任何产品语义：状态只有
 //! 「能否接入」，配额只有核自己执行的三项运行时配额。
 

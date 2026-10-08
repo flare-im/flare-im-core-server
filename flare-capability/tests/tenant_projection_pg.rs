@@ -42,6 +42,7 @@ fn upsert(
     send_qps: u32,
 ) -> TenantProjectionRecord {
     TenantProjectionRecord::from_proto(&TenantProjectionUpsert {
+        organization_id: Default::default(),
         im_tenant_id: tenant.to_string(),
         name: format!("tenant {tenant}"),
         status: status as i32,

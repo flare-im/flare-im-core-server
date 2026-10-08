@@ -18,7 +18,7 @@ use flare_grpc_proto::storage::{
     QueryMessagesBySeqRequest,
 };
 use flare_im_service_kit::control_auth::{
-    CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, ConsoleControlVerifier,
+    CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, PLATFORM_ISSUER,
 };
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
@@ -55,7 +55,7 @@ fn console() -> (TokenService, ConsoleControlVerifier) {
         .to_public_key_pem(Default::default())
         .unwrap();
     (
-        TokenService::from_ed25519_private_key(&private, CONSOLE_ISSUER, 60).unwrap(),
+        TokenService::from_ed25519_private_key(&private, PLATFORM_ISSUER, 60).unwrap(),
         ConsoleControlVerifier::from_public_key(&public).unwrap(),
     )
 }

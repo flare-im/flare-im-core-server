@@ -253,7 +253,7 @@ mod credential_postgres_tests {
         let private = key.to_pkcs8_pem(Default::default()).unwrap();
         let signer = flare_server_core::TokenService::from_ed25519_private_key(
             &private,
-            "flare-im-console",
+            "flare-platform",
             60,
         )
         .unwrap();
@@ -318,8 +318,8 @@ mod credential_postgres_tests {
                 .insert("authorization", format!("Bearer {token}").parse().unwrap());
             r
         };
-        let worker = "flare-platform-control-worker";
-        let audience = "flare-core-control";
+        let worker = "flare-platform-worker";
+        let audience = "flare-core-projection";
         let mut forged = Request::new(payload());
         forged
             .metadata_mut()

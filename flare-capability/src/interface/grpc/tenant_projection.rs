@@ -12,7 +12,7 @@ use std::sync::Arc;
 use flare_grpc_proto::control::tenant_projection_server::TenantProjection;
 use flare_grpc_proto::control::{
     CredentialsProjectionUpsert, FeatureFlagsProjectionUpsert, GetVersionsRequest, ProjectionAck,
-    ProjectionVersions, TenantProjectionUpsert, TenantVersions,
+    ProjectionVersions, RoleBundleProjectionUpsert, TenantProjectionUpsert, TenantVersions,
 };
 use flare_im_service_kit::control_auth::{
     ConsoleControlVerifier, ControlActorKind, require_grpc_control,
@@ -137,6 +137,22 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         ))
     }
 
+    /// 核不持有员工角色权限包:只有 Social 投影接收端实现它(供统一网关 admin 分区)。
+    /// 先验签并要求通配 worker 范围,再回 UNIMPLEMENTED,与 `UpsertFeatureFlags` 同样的口径。
+    async fn upsert_role_bundle(
+        &self,
+        request: Request<RoleBundleProjectionUpsert>,
+    ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        if actor.tenant_id != "*" {
+            return Err(Status::permission_denied("control tenant mismatch"));
+        }
+        Err(Status::unimplemented(
+            "flare-im-core does not consume role bundle projections; the Social projection receiver serves the gateway admin partition",
+        ))
+    }
+
     async fn get_versions(
         &self,
         request: Request<GetVersionsRequest>,
@@ -172,6 +188,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
                         tenant_version,
                         features_version: 0,
                         credentials_version: 0,
+                        role_bundle_version: 0,
                     },
                 )
             })
@@ -267,6 +284,7 @@ mod tests {
 
     fn upsert(tenant: &str, status: ProtoStatus, version: u64) -> TenantProjectionUpsert {
         TenantProjectionUpsert {
+            organization_id: Default::default(),
             im_tenant_id: tenant.to_string(),
             name: tenant.to_string(),
             status: status as i32,
@@ -295,7 +313,7 @@ mod tests {
             payload,
             tenant_id,
             flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
-            flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
+            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         )
     }
 
@@ -327,7 +345,7 @@ mod tests {
             request(),
             "app-a",
             "employee-7",
-            flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE,
+            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         );
         assert_eq!(
             server
@@ -395,7 +413,7 @@ mod tests {
         let private = key.to_pkcs8_pem(Default::default()).unwrap();
         let signer = flare_server_core::TokenService::from_ed25519_private_key(
             &private,
-            flare_im_service_kit::control_auth::CONSOLE_ISSUER,
+            flare_im_service_kit::control_auth::PLATFORM_ISSUER,
             60,
         )
         .unwrap();
@@ -557,7 +575,7 @@ mod tests {
                     body.clone(),
                     "tenant-a",
                     "employee-1",
-                    flare_im_service_kit::control_auth::CORE_CONTROL_AUDIENCE
+                    flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
                 ))
                 .await
                 .unwrap_err()

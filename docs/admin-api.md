@@ -8,7 +8,7 @@ The machine-readable contract is the OpenAPI document at `GET /api-doc/openapi.j
 
 Every `/api/v1/admin/**` request needs `authorization: Bearer <admin assertion>` signed by Console:
 
-- EdDSA, issuer `flare-im-console`, audience `flare-core-admin`, `token_use=admin`, lifetime at most 60 seconds;
+- EdDSA, issuer `flare-platform`, audience `flare-core-admin`, `token_use=admin`, lifetime at most 60 seconds;
 - an employee subject (the projection worker and scheduler subjects are refused);
 - one concrete tenant in the token (`*` is refused).
 

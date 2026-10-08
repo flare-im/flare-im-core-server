@@ -57,7 +57,7 @@ use flare_im_service_kit::clients::{
     MessageSendServiceClientWrapper, OnlineServiceClientWrapper, StorageReaderServiceClientWrapper,
 };
 use flare_im_service_kit::control_auth::{
-    CONSOLE_ISSUER, CORE_ADMIN_AUDIENCE, ConsoleControlVerifier,
+    CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, PLATFORM_ISSUER,
 };
 use flare_proto::common::{
     ConversationDetail, ConversationLifecycleState, ConversationParticipant,
@@ -584,7 +584,7 @@ impl Console {
         Self {
             tokens: flare_server_core::TokenService::from_ed25519_private_key(
                 &private,
-                CONSOLE_ISSUER,
+                PLATFORM_ISSUER,
                 60,
             )
             .unwrap(),
