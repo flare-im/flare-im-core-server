@@ -38,8 +38,8 @@ use crate::application::ports::{
     ConversationVersionIndexPort, MemorySyncCursorCache, StorageReadPort, SyncCursorCachePort,
 };
 use crate::domain::model::{
-    SyncIntent, clamp_messages_per_conversation, clamp_query_events_limit,
-    normalize_query_event_types,
+    MAX_MULTI_SYNC_CONVERSATIONS, SyncIntent, clamp_messages_per_conversation,
+    clamp_query_events_limit, normalize_query_event_types,
 };
 use crate::domain::service::{
     build_snapshot_cursor, max_seq_from_events, parse_snapshot_cursor, snapshot_global_seq,
@@ -516,6 +516,17 @@ where
     ) -> Result<SingleConversationSyncRes, FlareError> {
         let conversation_id = req.conversation_id;
         require_nonempty_conversation_id(&conversation_id)?;
+        let virtual_inbox = self
+            .authorize_conversation_sync_read(ctx, user_id, &conversation_id)
+            .await?;
+        if virtual_inbox {
+            // Business ephemeral inboxes have neither participants nor durable history/seq.
+            // Ownership is explicit in the namespace; never query a physical conversation.
+            return Ok(SingleConversationSyncRes {
+                conversation_id,
+                ..Default::default()
+            });
+        }
         let limit = req.limit.clamp(1, 500);
         let requested_after_seq = req.after_conversation_seq;
         // 历史回溯：方向由 proto 显式字段表达（替代旧 "before:" 字符串游标约定）。
@@ -593,6 +604,68 @@ where
         })
     }
 
+    /// Authorize before any message/head read. Conversation detail is the existing
+    /// tenant-scoped participant authorization boundary (including retained history
+    /// participants); Reader still owns its visible_from_seq/history predicates.
+    /// Returns true only for the authenticated user's virtual ephemeral inbox.
+    async fn authorize_conversation_sync_read(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<bool, FlareError> {
+        snapshot_tenant(ctx)?;
+        let authenticated_user = ctx
+            .user_id()
+            .filter(|user| !user.trim().is_empty())
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::AuthenticationRequired,
+                    "authenticated user required for sync",
+                )
+                .build_error()
+            })?;
+        if authenticated_user != user_id {
+            return Err(sync_read_access_denied());
+        }
+        if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(conversation_id)
+        {
+            if conversation_id
+                != flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id(
+                    authenticated_user,
+                )
+            {
+                return Err(sync_read_access_denied());
+            }
+            return Ok(true);
+        }
+        let detail = self
+            .infra
+            .conversation_detail(
+                ctx,
+                flare_grpc_proto::conversation::GetConversationDetailRequest {
+                    conversation_id: conversation_id.to_string(),
+                },
+            )
+            .await
+            .map_err(|error| match error.code() {
+                Some(
+                    ErrorCode::MessageNotFound
+                    | ErrorCode::UserNotFound
+                    | ErrorCode::PermissionDenied,
+                ) => sync_read_access_denied(),
+                _ => error,
+            })?;
+        if detail
+            .detail
+            .as_ref()
+            .is_none_or(|detail| detail.conversation_id != conversation_id)
+        {
+            return Err(sync_read_access_denied());
+        }
+        Ok(false)
+    }
+
     async fn conversation_head_max_seq(
         &self,
         ctx: &Ctx,
@@ -622,6 +695,13 @@ where
         user_id: &str,
         req: MultiConversationSync,
     ) -> Result<MultiConversationSyncRes, FlareError> {
+        if req.conversation_ids.len() > MAX_MULTI_SYNC_CONVERSATIONS {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "multi sync supports at most 100 conversation IDs",
+            )
+            .build_error());
+        }
         let limit = req.limit_per_conversation.clamp(1, 500);
         let targets: Vec<(String, i64)> = req
             .conversation_ids
@@ -636,12 +716,59 @@ where
                 (cid.clone(), after)
             })
             .collect();
+        let mut unique_ids = HashSet::with_capacity(targets.len());
+        if targets
+            .iter()
+            .any(|(cid, _)| !unique_ids.insert(cid.as_str()))
+        {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "multi sync conversation IDs must be unique",
+            )
+            .build_error());
+        }
+        // Preflight the complete batch before touching Reader or any message head.
+        // One unauthorized ID rejects the batch with the same public error as a missing ID.
+        let virtual_inboxes: Vec<bool> =
+            futures::stream::iter(targets.clone().into_iter().map(|(cid, _)| {
+                let auth_ctx = ctx.clone();
+                let auth_user = user_id.to_string();
+                async move {
+                    self.authorize_conversation_sync_read(&auth_ctx, &auth_user, &cid)
+                        .await
+                }
+            }))
+            .buffered(MULTI_SYNC_QUERY_CONCURRENCY)
+            .try_collect()
+            .await?;
+        let durable_targets: Vec<(String, i64)> = targets
+            .iter()
+            .zip(&virtual_inboxes)
+            .filter(|(_, virtual_inbox)| !**virtual_inbox)
+            .map(|(target, _)| target.clone())
+            .collect();
         // 消息批量窗口：一次存储 RPC 取全部会话增量页（limit+1 探测 has_more）；
         // 水位 head 仍逐会话（单行点查），保序有界并发。
-        let windows = self
-            .infra
-            .query_conversations_message_windows(ctx, &targets, limit + 1, false, user_id)
-            .await?;
+        let mut windows = if durable_targets.is_empty() {
+            Vec::new()
+        } else {
+            self.infra
+                .query_conversations_message_windows(
+                    ctx,
+                    &durable_targets,
+                    limit + 1,
+                    false,
+                    user_id,
+                )
+                .await?
+        };
+        windows.extend(
+            targets
+                .iter()
+                .zip(&virtual_inboxes)
+                .filter(|(_, virtual_inbox)| **virtual_inbox)
+                .map(|((cid, _), _)| (cid.clone(), Vec::new(), 0)),
+        );
         let after_by_id: HashMap<&str, i64> = targets
             .iter()
             .map(|(cid, after)| (cid.as_str(), *after))
@@ -650,6 +777,19 @@ where
             futures::stream::iter(windows.into_iter().map(|(cid, messages, _last_seq)| {
                 let after = after_by_id.get(cid.as_str()).copied().unwrap_or(0);
                 async move {
+                    if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+                        &cid,
+                    ) {
+                        return Ok::<_, FlareError>((
+                            cid,
+                            ContiguousSyncPage {
+                                items: Vec::new(),
+                                max_seq: 0,
+                                next_cursor: String::new(),
+                                has_more: false,
+                            },
+                        ));
+                    }
                     let head_max_seq = self.conversation_head_max_seq(ctx, &cid, after).await;
                     let page = build_contiguous_sync_items(
                         &cid,
@@ -1698,6 +1838,10 @@ fn snapshot_tenant(ctx: &Ctx) -> Result<String, FlareError> {
     })
 }
 
+fn sync_read_access_denied() -> FlareError {
+    ErrorBuilder::new(ErrorCode::PermissionDenied, "conversation access denied").build_error()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,6 +1927,12 @@ mod tests {
         updates: Mutex<Vec<UpdateCursorRequest>>,
         settings_updates: Mutex<Vec<UpdateConversationUserSettingsRequest>>,
         version_changes: Vec<crate::application::ports::ConversationVersionChange>,
+        read_access: Option<HashSet<(String, String, String)>>,
+        detail_error: Option<ErrorCode>,
+        detail_absent: bool,
+        detail_queries: Mutex<Vec<(String, String, String)>>,
+        head_queries: Mutex<Vec<String>>,
+        batch_queries: Mutex<Vec<Vec<(String, i64)>>>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1814,10 +1964,36 @@ mod tests {
 
         async fn conversation_detail(
             &self,
-            _ctx: &Ctx,
+            ctx: &Ctx,
             req: flare_grpc_proto::conversation::GetConversationDetailRequest,
         ) -> Result<flare_grpc_proto::conversation::GetConversationDetailResponse, FlareError>
         {
+            let key = (
+                snapshot_tenant(ctx)?,
+                ctx.user_id().unwrap_or_default().to_string(),
+                req.conversation_id.clone(),
+            );
+            self.detail_queries
+                .lock()
+                .expect("detail queries lock")
+                .push(key.clone());
+            if let Some(code) = self.detail_error {
+                return Err(ErrorBuilder::new(code, "detail dependency failure").build_error());
+            }
+            if self
+                .read_access
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&key))
+            {
+                return Err(ErrorBuilder::new(
+                    ErrorCode::MessageNotFound,
+                    "conversation not found",
+                )
+                .build_error());
+            }
+            if self.detail_absent {
+                return Ok(Default::default());
+            }
             Ok(
                 flare_grpc_proto::conversation::GetConversationDetailResponse {
                     detail: Some(flare_proto::common::ConversationDetail {
@@ -1918,8 +2094,12 @@ mod tests {
         async fn get_conversation_message_head(
             &self,
             _ctx: &Ctx,
-            _conversation_id: &str,
+            conversation_id: &str,
         ) -> Result<crate::application::ports::StorageConversationMessageHead, FlareError> {
+            self.head_queries
+                .lock()
+                .expect("head queries lock")
+                .push(conversation_id.to_string());
             Ok(self.message_head.clone())
         }
 
@@ -1933,6 +2113,10 @@ mod tests {
             newest_window: bool,
             user_id: &str,
         ) -> Result<Vec<(String, Vec<Message>, i64)>, FlareError> {
+            self.batch_queries
+                .lock()
+                .expect("batch queries lock")
+                .push(targets.to_vec());
             let mut windows = Vec::with_capacity(targets.len());
             for (conversation_id, after_seq) in targets {
                 let after = if newest_window {
@@ -2014,6 +2198,417 @@ mod tests {
             event_id: format!("{conversation_id}:{seq}"),
             ..Default::default()
         }
+    }
+
+    fn assert_no_sync_data_reads(infra: &MockInfra) {
+        assert!(
+            infra.head_queries.lock().unwrap().is_empty(),
+            "unauthorized head oracle"
+        );
+        assert!(
+            infra.message_queries.lock().unwrap().is_empty(),
+            "unauthorized Reader query"
+        );
+        assert!(
+            infra.batch_queries.lock().unwrap().is_empty(),
+            "unauthorized batch Reader query"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_denies_missing_and_nonmembers_before_head_or_reader() {
+        for cid in ["protected-existing", "unknown"] {
+            for before in [0, 10] {
+                let infra = Arc::new(MockInfra {
+                    read_access: Some(HashSet::new()),
+                    ..Default::default()
+                });
+                let handler = SyncOrchestrationHandler::new(
+                    infra.clone(),
+                    Arc::new(MemorySyncCursorCache::new()),
+                );
+                let error = handler
+                    .single_conversation_sync(
+                        &ctx(),
+                        "22",
+                        SingleConversationSync {
+                            conversation_id: cid.into(),
+                            before_conversation_seq: before,
+                            limit: 20,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect_err("nonmember/missing must have one failure shape");
+                assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+                assert_eq!(error.reason(), "conversation access denied");
+                let status: tonic::Status = error.into();
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                assert_no_sync_data_reads(&infra);
+                assert_eq!(infra.detail_queries.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_binds_tenant_and_authenticated_user() {
+        let infra = Arc::new(MockInfra {
+            read_access: Some(HashSet::from([(
+                "0".into(),
+                "22".into(),
+                "protected".into(),
+            )])),
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let foreign: Ctx = Arc::new(Context::root().with_tenant_id("other").with_user_id("22"));
+        let error = handler
+            .single_conversation_sync(
+                &foreign,
+                "22",
+                SingleConversationSync {
+                    conversation_id: "protected".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("same user/ID in another tenant is not authorized");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(
+            infra.detail_queries.lock().unwrap().as_slice(),
+            &[("other".into(), "22".into(), "protected".into())]
+        );
+        let error = handler
+            .single_conversation_sync(
+                &ctx(),
+                "spoofed",
+                SingleConversationSync {
+                    conversation_id: "protected".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("claimed user must match authenticated context");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(
+            infra.detail_queries.lock().unwrap().len(),
+            1,
+            "spoof must fail before dependency"
+        );
+        let missing_tenant: Ctx = Arc::new(Context::root().with_user_id("22"));
+        assert!(
+            handler
+                .single_conversation_sync(
+                    &missing_tenant,
+                    "22",
+                    SingleConversationSync {
+                        conversation_id: "protected".into(),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(infra.detail_queries.lock().unwrap().len(), 1);
+        assert_no_sync_data_reads(&infra);
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_dependency_unavailable_is_not_permission_denied() {
+        for code in [ErrorCode::ServiceUnavailable, ErrorCode::OperationTimeout] {
+            let infra = Arc::new(MockInfra {
+                detail_error: Some(code),
+                ..Default::default()
+            });
+            let handler = SyncOrchestrationHandler::new(
+                infra.clone(),
+                Arc::new(MemorySyncCursorCache::new()),
+            );
+            let error = handler
+                .single_conversation_sync(
+                    &ctx(),
+                    "22",
+                    SingleConversationSync {
+                        conversation_id: "protected".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("dependency failure must stop data reads");
+            assert_eq!(error.code(), Some(code));
+            assert_no_sync_data_reads(&infra);
+        }
+        let infra = Arc::new(MockInfra {
+            detail_absent: true,
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let error = handler
+            .single_conversation_sync(
+                &ctx(),
+                "22",
+                SingleConversationSync {
+                    conversation_id: "protected".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("empty detail cannot grant access");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_no_sync_data_reads(&infra);
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_preserves_authorized_single_group_and_history_reads() {
+        for cid in ["single", "group", "retained-history"] {
+            let infra = Arc::new(MockInfra {
+                read_access: Some(HashSet::from([("0".into(), "22".into(), cid.into())])),
+                messages: vec![Message {
+                    conversation_id: cid.into(),
+                    conversation_seq: 1,
+                    ..Default::default()
+                }],
+                message_head: crate::application::ports::StorageConversationMessageHead {
+                    max_seq: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let handler = SyncOrchestrationHandler::new(
+                infra.clone(),
+                Arc::new(MemorySyncCursorCache::new()),
+            );
+            let page = handler
+                .single_conversation_sync(
+                    &ctx(),
+                    "22",
+                    SingleConversationSync {
+                        conversation_id: cid.into(),
+                        limit: 20,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.max_conversation_seq, 1);
+            assert_eq!(
+                infra.head_queries.lock().unwrap().as_slice(),
+                &[cid.to_string()]
+            );
+            assert_eq!(infra.message_queries.lock().unwrap()[0].user_id, "22");
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_rejects_entire_mixed_batch_before_any_data_read() {
+        let infra = Arc::new(MockInfra {
+            read_access: Some(HashSet::from([("0".into(), "22".into(), "allowed".into())])),
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let error = handler
+            .multi_conversation_sync(
+                &ctx(),
+                "22",
+                MultiConversationSync {
+                    conversation_ids: vec!["allowed".into(), "protected".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("one denied target rejects the batch before Reader");
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_no_sync_data_reads(&infra);
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_batch_cardinality_and_duplicates_fail_before_dependencies() {
+        for conversation_ids in [
+            (0..=MAX_MULTI_SYNC_CONVERSATIONS)
+                .map(|n| format!("c{n}"))
+                .collect(),
+            vec!["group".into(), "group".into()],
+        ] {
+            let infra = Arc::new(MockInfra::default());
+            let handler = SyncOrchestrationHandler::new(
+                infra.clone(),
+                Arc::new(MemorySyncCursorCache::new()),
+            );
+            let error = handler
+                .multi_conversation_sync(
+                    &ctx(),
+                    "22",
+                    MultiConversationSync {
+                        conversation_ids,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("invalid cardinality/duplicate batch must fail before dependencies");
+            assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+            assert!(infra.detail_queries.lock().unwrap().is_empty());
+            assert_no_sync_data_reads(&infra);
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_batch_accepts_exactly_one_hundred_unique_ids() {
+        let conversation_ids: Vec<String> = (0..MAX_MULTI_SYNC_CONVERSATIONS)
+            .map(|n| format!("c{n}"))
+            .collect();
+        let infra = Arc::new(MockInfra {
+            read_access: Some(
+                conversation_ids
+                    .iter()
+                    .map(|cid| ("0".into(), "22".into(), cid.clone()))
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let page = handler
+            .multi_conversation_sync(
+                &ctx(),
+                "22",
+                MultiConversationSync {
+                    conversation_ids,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.slices.len(), MAX_MULTI_SYNC_CONVERSATIONS);
+        assert_eq!(
+            infra.detail_queries.lock().unwrap().len(),
+            MAX_MULTI_SYNC_CONVERSATIONS
+        );
+        assert_eq!(infra.batch_queries.lock().unwrap().len(), 1);
+        assert_eq!(
+            infra.batch_queries.lock().unwrap()[0].len(),
+            MAX_MULTI_SYNC_CONVERSATIONS
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_authorized_batch_skips_virtual_inbox_storage() {
+        let infra = Arc::new(MockInfra {
+            read_access: Some(HashSet::from([("0".into(), "22".into(), "group".into())])),
+            messages: vec![Message {
+                conversation_id: "group".into(),
+                conversation_seq: 1,
+                ..Default::default()
+            }],
+            message_head: crate::application::ports::StorageConversationMessageHead {
+                max_seq: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let page = handler
+            .multi_conversation_sync(
+                &ctx(),
+                "22",
+                MultiConversationSync {
+                    conversation_ids: vec!["sync:22".into(), "group".into()],
+                    limit_per_conversation: 20,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.slices.len(), 2);
+        let group = page
+            .slices
+            .iter()
+            .find(|slice| slice.conversation_id == "group")
+            .unwrap();
+        assert_eq!(group.items.len(), 1);
+        assert_eq!(group.max_conversation_seq, 1);
+        let inbox = page
+            .slices
+            .iter()
+            .find(|slice| slice.conversation_id == "sync:22")
+            .unwrap();
+        assert!(inbox.items.is_empty());
+        assert_eq!(inbox.max_conversation_seq, 0);
+        assert_eq!(
+            infra.batch_queries.lock().unwrap().as_slice(),
+            &[vec![("group".into(), 0)]]
+        );
+        assert_eq!(
+            infra.head_queries.lock().unwrap().as_slice(),
+            &["group".to_string()]
+        );
+        assert_eq!(
+            infra.detail_queries.lock().unwrap().as_slice(),
+            &[("0".into(), "22".into(), "group".into())]
+        );
+        assert_eq!(
+            infra.message_queries.lock().unwrap()[0].conversation_id,
+            "group"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_read_authorization_virtual_inbox_is_owner_only_without_physical_reads() {
+        let infra = Arc::new(MockInfra {
+            read_access: Some(HashSet::new()),
+            ..Default::default()
+        });
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let own = handler
+            .single_conversation_sync(
+                &ctx(),
+                "22",
+                SingleConversationSync {
+                    conversation_id: "sync:22".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(own.items.is_empty());
+        assert_eq!(own.max_conversation_seq, 0);
+        let batch = handler
+            .multi_conversation_sync(
+                &ctx(),
+                "22",
+                MultiConversationSync {
+                    conversation_ids: vec!["sync:22".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch.slices.len(), 1);
+        assert_eq!(batch.slices[0].max_conversation_seq, 0);
+        for cid in ["sync:other", "sync:", "sync: 22"] {
+            let error = handler
+                .single_conversation_sync(
+                    &ctx(),
+                    "22",
+                    SingleConversationSync {
+                        conversation_id: cid.into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("foreign/malformed inbox denied");
+            assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        }
+        assert!(
+            infra.detail_queries.lock().unwrap().is_empty(),
+            "virtual inbox has no participants"
+        );
+        assert_no_sync_data_reads(&infra);
     }
 
     #[tokio::test]

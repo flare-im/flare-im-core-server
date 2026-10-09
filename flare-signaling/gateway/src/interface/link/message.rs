@@ -168,7 +168,9 @@ impl LongConnectionHandler {
         let message = match decode_message_payload(&command.payload) {
             Ok(m) => m,
             Err(e) => {
-                let frame = build_data_error_frame(command.message_id.clone(), "decode_error", &e);
+                let error = CoreFlareError::from(e);
+                let frame =
+                    build_data_error_frame(command.message_id.clone(), "decode_error", &error);
                 return Ok(Some(frame));
             }
         };
@@ -252,7 +254,9 @@ impl LongConnectionHandler {
         let packet = match decode_data_packet(&command.payload) {
             Ok(p) => p,
             Err(e) => {
-                let frame = build_data_error_frame(command.message_id.clone(), "decode_error", &e);
+                let error = CoreFlareError::from(e);
+                let frame =
+                    build_data_error_frame(command.message_id.clone(), "decode_error", &error);
                 return Ok(Some(frame));
             }
         };
@@ -266,7 +270,7 @@ impl LongConnectionHandler {
             Err(e) => Ok(Some(build_data_error_frame(
                 command.message_id.clone(),
                 "send_data_error",
-                e.to_string(),
+                &e,
             ))),
         }
     }

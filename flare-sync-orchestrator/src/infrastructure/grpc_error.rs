@@ -16,7 +16,10 @@ pub fn flare_from_tonic_status(status: &Status) -> FlareError {
 
     // 尝试从 Status details 解析结构化错误（如果启用 proto feature）
     #[cfg(feature = "proto")]
-    if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(status) {
+    if !status.details().is_empty()
+        && let Some(detail) = flare_server_core::error::grpc::decode_error_detail(status)
+        && ErrorCode::from_u32(detail.code.max(0) as u32).is_some()
+    {
         return flare_server_core::error::from_error_detail(&detail);
     }
 
@@ -75,5 +78,46 @@ pub fn flare_from_tonic_status(status: &Status) -> FlareError {
         Code::Unauthenticated => ErrorBuilder::new(ErrorCode::AuthenticationFailed, msg)
             .param("grpc_code", "UNAUTHENTICATED")
             .build_error(),
+    }
+}
+
+#[cfg(all(test, feature = "proto"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_grpc_mapper_proto_details_are_validated_before_fallback() {
+        // Empty bytes are a syntactically valid default protobuf, not a typed error.
+        let denied = flare_from_tonic_status(&Status::permission_denied("access denied"));
+        assert_eq!(denied.code(), Some(ErrorCode::PermissionDenied));
+
+        for unknown_code in [0, -1, 123_456] {
+            let detail = flare_proto::common::ErrorDetail {
+                code: unknown_code,
+                reason: "PermissionDenied".into(),
+                message: "PermissionDenied".into(),
+                ..Default::default()
+            };
+            let status =
+                flare_server_core::error::grpc::build_status(tonic::Code::Unavailable, detail);
+            assert_eq!(
+                flare_from_tonic_status(&status).code(),
+                Some(ErrorCode::ServiceUnavailable),
+                "unknown detail code must not replace the gRPC classification",
+            );
+        }
+
+        let typed = Status::from(FlareError::localized(
+            ErrorCode::PermissionDenied,
+            "typed_access_denied",
+        ));
+        let error = flare_from_tonic_status(&typed);
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(error.reason(), "typed_access_denied");
+        assert_eq!(
+            flare_from_tonic_status(&Status::internal("PermissionDenied")).code(),
+            Some(ErrorCode::InternalError),
+            "display strings do not define authorization outcomes",
+        );
     }
 }

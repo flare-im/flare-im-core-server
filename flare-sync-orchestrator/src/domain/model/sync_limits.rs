@@ -6,6 +6,9 @@ pub const MAX_MESSAGES_PER_CONVERSATION: i32 = 100;
 /// 单次事件查询条数上限。
 pub const MAX_QUERY_EVENTS_LIMIT: i32 = 500;
 
+/// 单次批量消息同步的会话数量上限（独立于每会话页大小与并发上限）。
+pub const MAX_MULTI_SYNC_CONVERSATIONS: usize = 100;
+
 /// 快照分页：每页最少会话数（用于 `has_more` 计算）。
 pub const MIN_SNAPSHOT_PAGE_SIZE: i32 = 1;
 

@@ -76,7 +76,7 @@ impl SyncService {
         self.port
             .forward_sync(tx, sync)
             .await
-            .map_err(|e| FlareError::system(format!("sync forward: {e}")))
+            .map_err(crate::infrastructure::error::server_error_to_core)
     }
 }
 
@@ -123,6 +123,22 @@ mod tests {
         }
     }
 
+    struct RejectingSyncPort(flare_server_core::error::ErrorCode);
+
+    #[async_trait]
+    impl ISyncPort for RejectingSyncPort {
+        async fn forward_sync(
+            &self,
+            _tx: &Ctx,
+            _sync: Sync,
+        ) -> flare_server_core::error::Result<SyncRes> {
+            Err(flare_server_core::error::FlareError::localized(
+                self.0,
+                "typed sync failure",
+            ))
+        }
+    }
+
     fn context() -> Ctx {
         Arc::new(
             flare_server_core::Context::root()
@@ -130,6 +146,27 @@ mod tests {
                 .with_user_id("u1")
                 .with_device_id("d1"),
         )
+    }
+
+    #[tokio::test]
+    async fn sync_forward_preserves_authorization_and_dependency_error_types() {
+        use flare_server_core::error::ErrorCode as ServerCode;
+        for (server_code, expected) in [
+            (ServerCode::PermissionDenied, ErrorCode::PermissionDenied),
+            (
+                ServerCode::ServiceUnavailable,
+                ErrorCode::ServiceUnavailable,
+            ),
+            (ServerCode::OperationTimeout, ErrorCode::OperationTimeout),
+        ] {
+            let service = SyncService::new(Arc::new(RejectingSyncPort(server_code)));
+            let error = service
+                .execute(&context(), "conn-1", Sync::default())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Some(expected));
+            assert_eq!(error.reason(), "typed sync failure");
+        }
     }
 
     #[tokio::test]
