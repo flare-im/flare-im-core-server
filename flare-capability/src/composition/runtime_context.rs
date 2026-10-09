@@ -23,6 +23,8 @@ pub struct ApplicationContext {
     pub plugin_routes: Arc<PluginRouteBook>,
     /// 通用 `ExtensionPlugin` 路由器：具体 operation 由插件注册（核心不感知实现）。
     pub extension_router: ExtensionPluginRouter,
+    /// `ExtensionPlugin.Call` 的验签器（Cell 公钥集）；没有时路由器只回答健康检查。
+    pub extension_verifier: Option<flare_server_core::SignedContextVerifier>,
     /// 能力扩展：Guard / Resolver / RTC 注册表。
     pub capability_registry: CapabilityExtensionRegistry,
     /// 用户授权与租户开关（内存或 PostgreSQL，与 `CapabilityService` 共用）。
@@ -33,7 +35,7 @@ pub struct ApplicationContext {
     pub capability_runtime: Arc<CapabilityRuntimeConfig>,
     /// 控制面租户投影接收端（`flare.control.v1.TenantProjection`）；仅当配置了 PostgreSQL。
     pub tenant_projection: Option<TenantProjectionGrpcServer<PostgresTenantProjectionRepository>>,
-    /// 管理员只读（`CapabilityAdminService`）：租户开关与本地租户投影，只认 admin 令牌。
+    /// 管理员只读（`CapabilityAdminService`）：租户开关与本地租户投影，只认转发的 Staff 上下文。
     pub capability_admin: CapabilityAdminGrpcServer<PostgresTenantProjectionRepository>,
     /// Hook 配置跨实例失效通知的监听任务（有库时）；进程停机时停掉。
     pub hook_config_listener: Option<HookConfigListener>,

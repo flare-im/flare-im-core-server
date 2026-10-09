@@ -37,15 +37,27 @@ POST /api/v1/admin/users/{user_id}/kick
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick
 POST /api/v1/admin/tenant/kick-all
 GET  /api/v1/admin/tenant/runtime
+GET  /api/v1/admin/capabilities/catalog
 GET  /api/v1/admin/capabilities/tenant
+PUT  /api/v1/admin/capabilities/tenant/{capability_id}
 GET  /api/v1/admin/plugins
+POST /api/v1/admin/plugins/register
+POST /api/v1/admin/plugins/deregister
+GET  /api/v1/admin/hooks
+POST /api/v1/admin/hooks
+GET  /api/v1/admin/hooks/{hook_id}
+PUT  /api/v1/admin/hooks/{hook_id}
+DELETE /api/v1/admin/hooks/{hook_id}
+PUT  /api/v1/admin/hooks/{hook_id}/status
+GET  /api/v1/admin/hooks/{hook_id}/statistics
+GET  /api/v1/admin/hooks/{hook_id}/executions
 GET  /api/v1/admin/medias/bucket
 GET  /api/v1/admin/medias/objects
 POST /api/v1/admin/medias/cleanup-orphaned-assets
 POST /api/v1/admin/medias/object-acl
 ```
 
-会话、在线、踢线、租户运行时、能力开关与插件路由（ADM-01）以及媒资路由的说明见 [docs/admin-api.md](../docs/admin-api.md)（英文）。本清单与 OpenAPI 文档的一致性由测试保证。
+会话、在线、踢线、租户运行时、能力目录与开关、插件、Hook 治理以及媒资路由的说明见 [docs/admin-api.md](../docs/admin-api.md)（英文）。路由集合就是共享的 Core 管理路由表 `core_admin::ROUTES`；本清单与 OpenAPI 文档及该表的一致性由测试保证。
 
 本地默认监听 `0.0.0.0:50051`，配置文件为 `config/services/admin-gateway.toml`。
 
@@ -55,35 +67,33 @@ POST /api/v1/admin/medias/object-acl
 
 ## 认证
 
-Admin Gateway 不签发、不刷新、不存储 token，也不持有签发用的密钥。每个 `/api/v1/admin/**` 请求都带 Console（Control 后端）签发的 admin 令牌：
+Admin Gateway 不签发、不刷新、不存储 token，也不持有平台密钥。每个 `/api/v1/admin/**` 请求都带且只带一个网关 admin 分区签的 Staff 上下文（网关 admin 分区是本面的唯一调用方）：
 
 ```http
-authorization: Bearer <admin 令牌>
-x-tenant-id: tenant-1
+x-flare-ctx: <Staff 上下文>
 ```
 
-- EdDSA，issuer 为 `flare-im-console`，audience 为 `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒；
-- 主体必须是员工（投影 worker 与调度器主体被拒绝），令牌只含一个具体租户（`*` 被拒绝）；
-- `x-tenant-id` 恰好出现一次，且等于令牌租户。
+- Cell 内部签名上下文（EdDSA，有效期不超过 60 秒），`actor_type=staff`，用登记为 `kid=gateway` 的 Cell 钥签；
+- `tenant_id` 是被管理的应用，只能是一个具体租户（空与 `*` 被拒绝）；
+- `permission` 是共享路由表 `core_admin::ROUTES` 里该路由的权限码（如 `core:users:kick`）；平台员工没有 `org_id`，两条 `plugins/*` 写路由只允许平台员工。
 
-网关用 `FLARE_CONSOLE_PUBLIC_KEY` 验签，启动时缺失即失败。验签后删掉请求里所有身份头，再按令牌写回主体与租户。令牌缺失、格式错误、过期或由其他密钥签发时回 401；租户不一致回 403。网关不读 `FLARE_ADMIN_GATEWAY_AUTH_*`（没有 `core_jwt`、`http_hook`），也不读 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`（网关不做限流）；配了其中任何一个，启动日志记一条带变量名的 WARN，照常启动。
+网关用 Cell 公钥集（`FLARE_INTERNAL_CTX_PUBLIC_KEYS` 叠加在 `FLARE_INTERNAL_CTX_PUBLIC_KEY` 之上，Staff 钉死 `kid=gateway`）验签，启动时缺失即失败；再用与 admin 分区相同的路由表解析路由，核对签名里的权限码；验过后删掉请求里所有身份头。上下文缺失、重复、格式错误、过期、由其他密钥或 hook 钥签发时回 401；权限码不符回 403 `ADMIN_PERMISSION_DENIED`；组织员工调平台专属路由回 403 `ADMIN_SCOPE_DENIED`。`x-tenant-id` 与 `x-actor-id` 既不要求也不读。网关不读 `FLARE_ADMIN_GATEWAY_AUTH_*`（没有 `core_jwt`、`http_hook`），也不读 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`（网关不做限流）；配了其中任何一个，启动日志记一条带变量名的 WARN，照常启动。
 
-下游调用不带调用方自报的身份。会话、在线、能力与插件路由把同一枚令牌原样转发，由下游服务再验一次。Media 不认这枚令牌：媒资路由用 `FLARE_INTERNAL_CTX_PRIVATE_KEY` 把该员工签成令牌租户的 `tenant_admin`，作为 Cell 内部上下文发给 Media；没有这把私钥时媒资路由回 500 `MEDIA_SIGNER_UNAVAILABLE`，不会调用 Media。详见 [docs/admin-api.md](../docs/admin-api.md) 与 [SEC02](../docs/SEC02-console-control-auth.md)。
+下游调用不带调用方自报的身份。会话、在线、能力、插件、Hook 与消息路由把同一枚上下文原样转发，由下游服务再验一次并复核权限码。Media 不认 Staff 上下文：媒资路由用 `FLARE_INTERNAL_CTX_PRIVATE_KEY` 按 `kid=admin-gateway` 把该员工签成应用的 `tenant_admin`，作为 Cell 内部上下文发给 Media；没有这把私钥时媒资路由回 500 `MEDIA_SIGNER_UNAVAILABLE`，不会调用 Media。每次下游调用受 `FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS`（缺省 5 秒）限时。详见 [docs/admin-api.md](../docs/admin-api.md) 与 [SEC02](../docs/SEC02-console-control-auth.md)。
 
 Admin 写操作还必须携带：
 
 ```http
-x-actor-id: <令牌主体>
 x-audit-reason: compliance-investigation
 idempotency-key: request-1
 ```
 
-也可以用 `x-request-id` 替代 `idempotency-key`。两者都只用于审计日志关联，网关不保存也不去重，同一个键重放会再执行一次。
-两个受限的只读 POST：`/messages/query` 与 `/messages/write-ledger/query`，仍要求已签名的员工令牌和明确租户，但不要求写操作审计头；`/messages/export` 仍按受保护的写类操作处理。
+也可以用 `x-request-id` 替代 `idempotency-key`。两者都只用于审计日志关联，网关不保存也不去重，同一个键重放会再执行一次。写操作成功后网关向 `FLARE_AUDIT_NATS_URL` 发一条 `flare.audit.effect.v1` 事件（未设则不记审计，启动告警一次）。
+两个受限的只读 POST：`/messages/query` 与 `/messages/write-ledger/query`，要求带 `core:messages:read` 的 Staff 上下文，但不要求写操作审计头；`/messages/export` 仍按受保护的写类操作处理（`core:messages:export`）。
 
 ## 消息写链路账本查询
 
-`POST /api/v1/admin/messages/write-ledger/query` 用于排查消息从 broker accepted 到 archive/storage/WAL/ACK 的写入状态。该接口是只读内部运维 API，必须带 `x-tenant-id`，并且请求体至少包含 `server_id`、`conversation_id`、`write_state`、`failed_only=true` 或 `updated_after/updated_before` 之一，避免误触发大表扫描。
+`POST /api/v1/admin/messages/write-ledger/query` 用于排查消息从 broker accepted 到 archive/storage/WAL/ACK 的写入状态。该接口是只读内部运维 API，按 Staff 上下文里的应用限定范围，并且请求体至少包含 `server_id`、`conversation_id`、`write_state`、`failed_only=true` 或 `updated_after/updated_before` 之一，避免误触发大表扫描。
 
 示例：
 

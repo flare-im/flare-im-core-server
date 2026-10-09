@@ -1,15 +1,18 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
-    clients::{CapabilityAdminClientWrapper, DownstreamGrpcResolver, GrpcClients},
-    control_auth::ConsoleControlVerifier,
+    audit_effects::AuditEffects,
+    clients::{AdminGrpcClients, CapabilityAdminClientWrapper, DownstreamGrpcResolver},
     gateway::{GatewayEnvScope, GatewaySettings, capability_downstream_from_env},
     service_names::ADMIN_GATEWAY,
+    staff_context::admin_staff_verifier_from_env,
 };
 use flare_server_core::SignedContextSigner;
+use flare_server_core::auth::kid;
 use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -49,26 +52,44 @@ impl ApplicationBootstrap {
         };
         info!(address = %address, "Admin Gateway HTTP listen address resolved");
 
+        // The Staff context the Social gateway admin partition signs is the only identity on
+        // the admin surface: the Cell key set is required, with Staff pinned to `kid=gateway`.
+        let staff_verifier = Arc::new(admin_staff_verifier_from_env("admin-gateway")?);
+        info!(
+            kids = ?staff_verifier.key_set().kids(),
+            single_key = staff_verifier.key_set().is_single_key(),
+            "Admin Gateway staff context verifier initialized"
+        );
+
+        // Only the downstreams the admin surface uses; Message Ingest and the Orchestrator are
+        // never dialed. Every call is bounded by FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS.
         info!("Connecting Admin Gateway to downstream gRPC services...");
         info!(
             storage_reader_service_url = %settings.grpc.storage_reader_service_url,
-            message_ingest_service_url = %settings.grpc.message_ingest_service_url,
-            message_orchestrator_service_url = %settings.grpc.message_orchestrator_service_url,
             conversation_service_url = %settings.grpc.conversation_service_url,
+            online_service_url = %settings.grpc.online_service_url,
             media_service_url = %settings.grpc.media_service_url,
+            request_timeout_secs = settings.grpc.request_timeout_secs,
             "Using downstream grpc endpoints for admin typed facade"
         );
-        let clients =
-            Arc::new(GrpcClients::new(Arc::new(app_config.clone()), &settings.grpc).await?);
+        let request_timeout = Duration::from_secs(settings.grpc.request_timeout_secs);
+        let clients = Arc::new(
+            AdminGrpcClients::connect(
+                Arc::new(app_config.clone()),
+                &settings.grpc,
+                Some(request_timeout),
+            )
+            .await?,
+        );
         info!("Admin Gateway gRPC clients initialized");
 
-        // 租户运行时、能力开关与插件（ADM-01）只经这条可选下游；URL 设为空串即关闭，
-        // 对应三条路由回 503，其余管理接口不受影响。
+        // 租户运行时、能力目录与开关、插件、Hook 治理只经这条可选下游；URL 设为空串即关闭，
+        // 对应路由回 503，其余管理接口不受影响。
         let capability = match capability_downstream_from_env(GatewayEnvScope::Admin)? {
             Some(config) => {
                 info!(
                     capability_service_url = %config.service_url,
-                    "Using capability downstream for admin tenant runtime, switches and plugins"
+                    "Using capability downstream for admin tenant runtime, switches, plugins and hooks"
                 );
                 let resolver = DownstreamGrpcResolver::new(
                     Arc::new(app_config.clone()),
@@ -83,27 +104,31 @@ impl ApplicationBootstrap {
             }
         };
 
-        let control_verifier = Arc::new(
-            ConsoleControlVerifier::from_env()
-                .context("invalid FLARE_CONSOLE_PUBLIC_KEY")?
-                .context("FLARE_CONSOLE_PUBLIC_KEY required for admin gateway")?,
-        );
-        info!("Admin Gateway Console public-key verifier initialized");
-
-        // Media admits only Cell-signed context; the Control-verified admin is signed here.
+        // Media admits only Cell-signed context; the verified staff is re-signed here under
+        // the admin-gateway key id so Media can pin this gateway once per-component keys exist.
         let media_signer = match std::env::var("FLARE_INTERNAL_CTX_PRIVATE_KEY") {
-            Ok(material) => Some(SignedContextSigner::from_private_key(&material).map_err(
-                |_| {
-                    flare_server_core::error::FlareError::system(
-                        "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY for admin gateway",
-                    )
-                },
-            )?),
+            Ok(material) => Some(
+                SignedContextSigner::from_private_key(&material)
+                    .and_then(|signer| signer.with_kid(kid::ADMIN_GATEWAY))
+                    .map_err(|_| {
+                        flare_server_core::error::FlareError::system(
+                            "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY for admin gateway",
+                        )
+                    })?,
+            ),
             Err(_) => {
                 warn!("FLARE_INTERNAL_CTX_PRIVATE_KEY missing; admin media API fails closed");
                 None
             }
         };
+
+        // Effect events of successful writes (flare.audit.effect.v1); unset URL disables them
+        // with a warning, an unreachable stream refuses startup.
+        let audit_effects = Arc::new(AuditEffects::from_env("admin-gateway").await?);
+        info!(
+            enabled = audit_effects.enabled(),
+            "Admin Gateway audit effect sink initialized"
+        );
 
         let app = create_admin_router(clients, capability)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
@@ -111,7 +136,8 @@ impl ApplicationBootstrap {
             ))
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
-            .layer(axum::Extension(control_verifier))
+            .layer(axum::Extension(staff_verifier))
+            .layer(axum::Extension(audit_effects))
             .layer(axum::Extension(MediaContextSigner(media_signer)))
             .layer(
                 ServiceBuilder::new()

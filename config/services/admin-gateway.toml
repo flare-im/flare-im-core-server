@@ -5,10 +5,13 @@
 # Admin Gateway 是独立管理面入口，不提供管理后台页面。
 # 生产建议部署在内网、VPN、mTLS 或 service mesh policy 后面。
 
-# 管理请求只接受 Control Plane EdDSA 短期令牌。
-# 启动时必须通过 FLARE_CONSOLE_PUBLIC_KEY 注入 Ed25519 公钥；无 HMAC 或
-# api-gateway 用户令牌回退。私钥只在 Control 后端，不能注入本服务。
-# 本地 scripts/start_server.sh 在配置公钥时才启动该服务，并通过
+# 管理请求只接受网关 admin 分区签的 Staff `x-flare-ctx`（EdDSA，Cell 公钥集，Staff 钉死
+# kid=gateway，权限码按共享路由表 core_admin::ROUTES 核对）。启动时必须有
+# FLARE_INTERNAL_CTX_PUBLIC_KEY（或 FLARE_INTERNAL_CTX_PUBLIC_KEYS）；无 HMAC、平台断言或
+# api-gateway 用户令牌回退。FLARE_INTERNAL_CTX_PRIVATE_KEY 只用来按 kid=admin-gateway 给
+# Media 重签已验证的员工。写操作成功后发 flare.audit.effect.v1 到 FLARE_AUDIT_NATS_URL
+# （未设则不记审计并告警一次）。本地 scripts/start_server.sh 在设置
+# FLARE_ADMIN_GATEWAY_ENABLED 时才启动该服务，并通过
 # FLARE_ADMIN_GATEWAY_BIND_ADDRESS=127.0.0.1:50051 默认仅监听环回地址；
 # Compose 按私有服务网络使用下方地址，不向公网发布端口。
 
@@ -16,25 +19,27 @@
 address = "0.0.0.0"
 port = 50051
 
-# 下游 gRPC 默认走 discovery:// 服务发现；覆盖时使用 Admin Gateway 独立环境变量：
-# FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL
-# FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL
+# 下游 gRPC 默认走 discovery:// 服务发现；覆盖时使用 Admin Gateway 独立环境变量。Admin Gateway
+# 只连 Media、Conversation、Online、Storage Reader 与可选的 Capability，不连 Message Ingest 与
+# Orchestrator（它们的 *_SERVICE_URL 在 Admin 作用域下只做格式校验）。每次下游调用受
+# FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS 限时（缺省 5 秒，超时回 504）。
 # FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_MEDIA_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL（仅 Admin Gateway 的可选下游；设为空串即不连接，
-#   此时 /tenant/runtime、/capabilities/tenant、/plugins 回 503 ADMIN_CAPABILITY_DISABLED）
+#   此时 /tenant/runtime、/capabilities/{catalog,tenant}、/plugins/**、/hooks/** 回 503
+#   ADMIN_CAPABILITY_DISABLED）
 # 以及各自 FLARE_ADMIN_GATEWAY_*_STATIC_FALLBACK。
-# ADM-01 管理接口（会话与成员、在线设备、踢线、租户运行时、能力开关、插件）只依赖其中的
-# CONVERSATION、ONLINE、CAPABILITY 三个下游，路由表见 docs/admin-api.md。
-# 显式 static 注册模式（FLARE_REGISTRY_MODE=static，单容器 Core）不做服务发现：启动时
-# 每个下游打印一条回退 WARN，然后使用 *_STATIC_FALLBACK 的缺省值，即同一 Core 容器内的固定地址：
-#   MEDIA http://127.0.0.1:60081            MESSAGE_INGEST http://127.0.0.1:50182
-#   MESSAGE_ORCHESTRATOR http://127.0.0.1:50181   CONVERSATION http://127.0.0.1:50090
+# 管理接口（会话与成员、在线设备、踢线、租户运行时、能力目录与开关、插件、Hook 治理）只依赖
+# 其中的 CONVERSATION、ONLINE、CAPABILITY 三个下游，路由表见 docs/admin-api.md。
+# 显式 static 注册模式（FLARE_REGISTRY_MODE=static，单容器 Core）不做服务发现：
+# release/supervise-core.toml 把这 5 个 *_SERVICE_URL 直接设成同一 Core 容器内的固定地址；
+# 没设时启动时每个下游打印一条回退 WARN，然后使用 *_STATIC_FALLBACK 的缺省值，即同样的地址：
+#   MEDIA http://127.0.0.1:60081            CONVERSATION http://127.0.0.1:50090
 #   ONLINE http://127.0.0.1:50061           STORAGE_READER http://127.0.0.1:60083
 #   CAPABILITY http://127.0.0.1:50110
-# flare-deploy 单机模板在 Compose 里把这 7 个 *_SERVICE_URL 直接设成上述地址，不走回退。
+# flare-deploy 单机模板在 Compose 里把这 5 个 *_SERVICE_URL 直接设成上述地址，不走回退。
 # 把对应的 *_SERVICE_URL 设成 http:// 地址即直接连接，不再先尝试发现；下游不在同一容器时
 # 填它的私网地址。见 release/README.md「DEP-08 单容器静态发现候选」。
 

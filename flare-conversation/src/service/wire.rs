@@ -26,7 +26,7 @@ use crate::interface::grpc::{ConversationAdminGrpcHandler, ConversationGrpcHandl
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub handler: ConversationGrpcHandler,
-    /// 管理员只读（`ConversationAdminService`）：只认 admin-gateway 转发的 admin 令牌。
+    /// 管理员只读（`ConversationAdminService`）：只认 admin-gateway 转发的 Staff 上下文。
     pub admin_handler: ConversationAdminGrpcHandler<PostgresConversationAdminRepository>,
     /// 配置了 JetStream 且初始化成功时存在，由 bootstrap 后台 `run`（`ctx` 在 MQ 侧重建）
     pub read_receipt_consumer: Option<ReadReceiptEventConsumer>,
@@ -203,21 +203,29 @@ pub async fn initialize(
     };
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler)
         .with_purge_verifier(purge_verifier);
-    // 管理员只读只认 Console 公钥验签的 admin 令牌；没配公钥时 fail closed（UNAUTHENTICATED）。
-    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
-        .map_err(|_| {
-        ErrorBuilder::new(
-            ErrorCode::ConfigurationError,
-            "invalid FLARE_CONSOLE_PUBLIC_KEY for conversation",
-        )
-        .build_error()
-    })?;
-    if control_verifier.is_none() {
-        tracing::warn!("Console control public key missing; conversation admin RPCs fail closed");
-    }
+    // 管理员只读只认网关 admin 分区签的 Staff `x-flare-ctx`（Cell 公钥集，Staff 钉死
+    // kid=gateway）；没配公钥时 fail closed（UNAUTHENTICATED）。
+    let staff_verifier = match SignedContextVerifier::from_env_optional() {
+        Ok(Some(_)) => Some(
+            flare_im_service_kit::staff_context::admin_staff_verifier_from_env("conversation")?,
+        ),
+        Ok(None) => {
+            tracing::warn!(
+                "FLARE_INTERNAL_CTX_PUBLIC_KEY(S) missing; conversation admin RPCs fail closed"
+            );
+            None
+        }
+        Err(error) => {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                format!("invalid Cell public key set for conversation: {error}"),
+            )
+            .build_error());
+        }
+    };
     let admin_handler = ConversationAdminGrpcHandler::new(
         Arc::new(ConversationAdminQueryHandler::new(admin_repository)),
-        control_verifier,
+        staff_verifier,
     );
 
     let mq_consumers_enabled =

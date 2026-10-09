@@ -22,7 +22,7 @@ cd flare-im-core
 cp deploy/.env.example deploy/.env
 # 至少填 FLARE_TOKEN_SECRET：openssl rand -base64 48 | tr -d '\n' | head -c 64
 # 以及三项 Ed25519 密钥 FLARE_INTERNAL_CTX_SIGNING_KEY / FLARE_INTERNAL_CTX_PUBLIC_KEY /
-# FLARE_CONSOLE_PUBLIC_KEY，生成方法写在 .env.example 里
+# FLARE_PLATFORM_PUBLIC_KEY，生成方法写在 .env.example 里
 
 docker compose --env-file deploy/.env \
   -f deploy/docker-compose.yml \

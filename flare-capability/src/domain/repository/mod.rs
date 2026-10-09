@@ -57,3 +57,38 @@ pub trait TenantRuntimeReader: Send + Sync {
         tenant_id: &str,
     ) -> flare_server_core::error::Result<Option<crate::domain::model::TenantRuntimeView>>;
 }
+
+/// 经 `RegisterPluginEndpoint` 登记的插件端点的持久化端口（`capability_plugin_endpoints`）。
+/// 读模型仍是进程内的 `PluginRouteBook`：启动时整表载入、登记/注销先写这里、按周期重读。
+#[async_trait::async_trait]
+pub trait PluginEndpointRepository: Send + Sync {
+    /// 写入或覆盖一条登记；首次登记时间保留，`updated_at` 取当前时间。
+    async fn upsert(
+        &self,
+        endpoint: &crate::domain::model::PluginEndpoint,
+    ) -> flare_server_core::error::Result<()>;
+
+    /// 删除一条登记；返回是否删到了行。
+    async fn delete(
+        &self,
+        tenant_id: &str,
+        plugin_id: &str,
+    ) -> flare_server_core::error::Result<bool>;
+
+    /// 全部登记，按 `(tenant_id, plugin_id)` 排序。
+    async fn list_all(
+        &self,
+    ) -> flare_server_core::error::Result<Vec<crate::domain::model::PluginEndpoint>>;
+
+    /// 把这些登记的 `last_healthy_at` 记为当前时间（一条语句）；返回更新的行数。
+    async fn record_healthy(
+        &self,
+        keys: &[crate::domain::model::PluginEndpointKey],
+    ) -> flare_server_core::error::Result<u64>;
+
+    /// 删除 `cutoff` 之后既没重新登记、也没有健康检查通过的登记；返回删掉的键。
+    async fn delete_stale(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> flare_server_core::error::Result<Vec<crate::domain::model::PluginEndpointKey>>;
+}

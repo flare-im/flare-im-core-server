@@ -1,47 +1,45 @@
-//! SEC-05 迁入的媒资管理路由契约，与 ADM-01 路由同口径：缺令牌 401、跨租户 403、写操作审计头
-//! 403，经回环替身 Media 验证成功响应形状、下游收到的请求与签名身份，以及下游拒绝的类型化
-//! 映射（不回显下游文案）。
+//! SEC-05 迁入的媒资管理路由契约，与 ADM-01 路由同口径：缺上下文 401、权限码不符 403、写操作
+//! 审计头 403，经回环替身 Media 验证成功响应形状、下游收到的请求与签名身份，以及下游拒绝的
+//! 类型化映射（不回显下游文案）。
 mod common;
 
 use axum::http::StatusCode;
 use common::media::*;
 use common::*;
 use flare_server_core::SignedActorType;
+use flare_server_core::auth::kid;
 
 fn reason(body: &serde_json::Value) -> &str {
     body["reason"].as_str().unwrap_or_default()
 }
 
-fn write_extra(method: &str) -> &'static [(&'static str, &'static str)] {
-    if method == "POST" { WRITE_HEADERS } else { &[] }
+fn write_extra(method: &str, path: &str) -> &'static [(&'static str, &'static str)] {
+    if is_write(method, path) {
+        WRITE_HEADERS
+    } else {
+        &[]
+    }
 }
 
 #[tokio::test]
-async fn every_media_route_requires_an_admin_token() {
+async fn every_media_route_requires_a_staff_context() {
     let h = media_harness(true, None).await;
-    let forged = Console::new_with_seed(11).admin_token(EMPLOYEE, TENANT);
     for (method, path, body) in media_routes() {
-        let extra = write_extra(method);
+        let extra = write_extra(method, &path);
         let (status, response) = send(
             &h.router,
-            media_request(method, &path, None, Some(TENANT), extra, body.as_deref()),
+            media_request(method, &path, None, extra, body.as_deref()),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
         assert_eq!(reason(&response), "UNAUTHORIZED", "{method} {path}");
 
-        // 格式不对的令牌与别的 Console 密钥签的令牌同样是 401。
-        for token in ["not-a-jwt", forged.as_str()] {
+        // 格式不对的上下文与别的 Cell 密钥签的上下文同样是 401。
+        let foreign = Gateway::new_with_seed(11).token_for(method, &path);
+        for token in ["not-a-jwt", foreign.as_str()] {
             let (status, _) = send(
                 &h.router,
-                media_request(
-                    method,
-                    &path,
-                    Some(token),
-                    Some(TENANT),
-                    extra,
-                    body.as_deref(),
-                ),
+                media_request(method, &path, Some(token), extra, body.as_deref()),
             )
             .await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
@@ -51,51 +49,48 @@ async fn every_media_route_requires_an_admin_token() {
 }
 
 #[tokio::test]
-async fn every_media_route_rejects_a_foreign_or_missing_tenant_header() {
+async fn every_media_route_rejects_another_routes_permission_code() {
     let h = media_harness(true, None).await;
-    // 另一租户员工的令牌配本租户的头，同样 403。
-    let other = h.console.admin_token(EMPLOYEE, OTHER_TENANT);
     for (method, path, body) in media_routes() {
-        let extra = write_extra(method);
-        for tenant in [Some(OTHER_TENANT), None, Some("*")] {
+        let extra = write_extra(method, &path);
+        // 读码调写路由、写码调读路由、别的路由的码：都是 403。
+        for permission in [
+            "core:conversations:read",
+            "core:medias:read",
+            "core:medias:write",
+        ] {
+            let relative = path.strip_prefix("/api/v1/admin").unwrap();
+            let route = flare_server_core::auth::core_admin::resolve(
+                method,
+                relative.split('?').next().unwrap(),
+            )
+            .unwrap();
+            if route.permission == permission {
+                continue;
+            }
+            let token = h.gateway.staff_token(EMPLOYEE, TENANT, permission);
             let (status, response) = send(
                 &h.router,
-                media_request(
-                    method,
-                    &path,
-                    Some(&h.token),
-                    tenant,
-                    extra,
-                    body.as_deref(),
-                ),
+                media_request(method, &path, Some(&token), extra, body.as_deref()),
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} {tenant:?}");
-            assert_eq!(reason(&response), "FORBIDDEN", "{method} {path} {tenant:?}");
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{method} {path} {permission}"
+            );
+            assert_eq!(
+                reason(&response),
+                "ADMIN_PERMISSION_DENIED",
+                "{method} {path} {permission}"
+            );
         }
-        let (status, _) = send(
-            &h.router,
-            media_request(
-                method,
-                &path,
-                Some(&other),
-                Some(TENANT),
-                extra,
-                body.as_deref(),
-            ),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "{method} {path} foreign token"
-        );
     }
     assert!(h.media.calls().is_empty(), "{:?}", h.media.calls());
 }
 
 #[tokio::test]
-async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
+async fn media_write_routes_require_audit_reason_and_idempotency() {
     let h = media_harness(true, None).await;
     // 写标记与能力契约一致：两个 POST 是写，两个 GET 不是。
     let contract = flare_admin_gateway::interface::http::build_admin_capabilities();
@@ -123,47 +118,23 @@ async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
             .collect()
     };
     for (method, path, body) in &writes {
-        for dropped in [
-            &["x-audit-reason"][..],
-            &["idempotency-key"][..],
-            &["x-actor-id"][..],
-        ] {
+        let token = h.gateway.token_for(method, path);
+        for dropped in [&["x-audit-reason"][..], &["idempotency-key"][..]] {
             let headers = without(dropped);
             let (status, response) = send(
                 &h.router,
-                media_request(
-                    method,
-                    path,
-                    Some(&h.token),
-                    Some(TENANT),
-                    &headers,
-                    body.as_deref(),
-                ),
+                media_request(method, path, Some(&token), &headers, body.as_deref()),
             )
             .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{path} without {dropped:?}");
             assert_eq!(reason(&response), "FORBIDDEN", "{path} without {dropped:?}");
         }
-        let mut spoofed = without(&["x-actor-id"]);
-        spoofed.push(("x-actor-id", "someone-else"));
-        let (status, _) = send(
-            &h.router,
-            media_request(
-                method,
-                path,
-                Some(&h.token),
-                Some(TENANT),
-                &spoofed,
-                body.as_deref(),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{path} spoofed actor");
     }
     assert!(h.media.calls().is_empty(), "{:?}", h.media.calls());
 
     // idempotency-key 与 x-request-id 任一即可；只读的两条 GET 不需要审计头。
     for (method, path, body) in &writes {
+        let token = h.gateway.token_for(method, path);
         let mut with_request_id = without(&["idempotency-key"]);
         with_request_id.push(("x-request-id", "req-7"));
         let (status, response) = send(
@@ -171,8 +142,7 @@ async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
             media_request(
                 method,
                 path,
-                Some(&h.token),
-                Some(TENANT),
+                Some(&token),
                 &with_request_id,
                 body.as_deref(),
             ),
@@ -185,7 +155,7 @@ async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
         );
         let (status, response) = send(
             &h.router,
-            media_admin_request(method, path, &h.token, body.as_deref()),
+            media_admin_request(method, path, &h.gateway, body.as_deref()),
         )
         .await;
         assert_eq!(
@@ -195,9 +165,10 @@ async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
         );
     }
     for (method, path, _) in media_routes().into_iter().filter(|(m, _, _)| *m == "GET") {
+        let token = h.gateway.token_for(method, &path);
         let (status, response) = send(
             &h.router,
-            media_request(method, &path, Some(&h.token), Some(TENANT), &[], None),
+            media_request(method, &path, Some(&token), &[], None),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{path}: {response}");
@@ -205,33 +176,27 @@ async fn media_write_routes_require_actor_audit_reason_and_idempotency() {
 }
 
 #[tokio::test]
-async fn media_calls_carry_only_the_signed_tenant_admin_of_the_token() {
+async fn media_calls_carry_only_the_signed_tenant_admin_of_the_staff_context() {
     let h = media_harness(true, None).await;
-    let other = h.console.admin_token(EMPLOYEE, OTHER_TENANT);
     let forged_values = ["victim-user", "system", "forged.context.token", "tenant-z"];
-    for (token, tenant) in [(&h.token, TENANT), (&other, OTHER_TENANT)] {
+    for tenant in [TENANT, OTHER_TENANT] {
         for (method, path, body) in media_routes() {
             h.media.clear();
-            let mut extra: Vec<(&str, &str)> = write_extra(method).to_vec();
+            let mut extra: Vec<(&str, &str)> = write_extra(method, &path).to_vec();
             extra.retain(|(name, _)| *name != "idempotency-key");
             extra.extend([
                 ("x-request-id", "req-media-1"),
                 // 伪造的身份头：签名身份与转发给 Media 的元数据都不能受它们影响。
                 ("x-user-id", "victim-user"),
                 ("x-actor-type", "system"),
-                ("x-flare-ctx", "forged.context.token"),
+                ("x-tenant-id", "tenant-z"),
                 ("x-device-id", "tenant-z"),
+                ("authorization", "Bearer forged.context.token"),
             ]);
+            let token = h.gateway.token_for_tenant(method, &path, tenant);
             let (status, response) = send(
                 &h.router,
-                media_request(
-                    method,
-                    &path,
-                    Some(token),
-                    Some(tenant),
-                    &extra,
-                    body.as_deref(),
-                ),
+                media_request(method, &path, Some(&token), &extra, body.as_deref()),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{method} {path}: {response}");
@@ -252,8 +217,11 @@ async fn media_calls_carry_only_the_signed_tenant_admin_of_the_token() {
             );
             assert_eq!(claims.tenant_id, tenant, "{}", call.method);
             assert_eq!(claims.actor_id, EMPLOYEE, "{}", call.method);
-            assert_eq!(claims.request_id, "req-media-1", "{}", call.method);
-            // admin 令牌不交给 Media：Media 只认 Cell 签名上下文。
+            // The request id is the one the admin partition signed, not a header.
+            assert_eq!(claims.request_id, "req-staff-1", "{}", call.method);
+            assert_eq!(claims.kid, kid::ADMIN_GATEWAY, "{}", call.method);
+            // The staff token itself is re-signed, never forwarded, and no bearer reaches Media.
+            assert_ne!(call.signed_context[0], token);
             assert!(call.authorization.is_empty(), "{}", call.method);
             for (key, value) in &call.x_metadata {
                 assert!(
@@ -271,7 +239,7 @@ async fn cleanup_shape_and_request() {
     let h = media_harness(true, None).await;
     let (status, body) = send(
         &h.router,
-        media_admin_request("POST", CLEANUP, &h.token, Some(&cleanup_body(50))),
+        media_admin_request("POST", CLEANUP, &h.gateway, Some(&cleanup_body(50))),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -296,7 +264,7 @@ async fn cleanup_shape_and_request() {
     h.media.clear();
     let (status, _) = send(
         &h.router,
-        media_admin_request("POST", CLEANUP, &h.token, Some(&cleanup_body(0))),
+        media_admin_request("POST", CLEANUP, &h.gateway, Some(&cleanup_body(0))),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -309,7 +277,7 @@ async fn cleanup_shape_and_request() {
         media_admin_request(
             "POST",
             CLEANUP,
-            &h.token,
+            &h.gateway,
             Some(r#"{"limit":10,"dry_run":true}"#),
         ),
     )
@@ -317,7 +285,7 @@ async fn cleanup_shape_and_request() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(reason(&body), "ADMIN_MEDIA_DRY_RUN_UNSUPPORTED");
     // 空体、缺字段、类型不对或不是 JSON 都不会触发一次清理：网关自己的 400 信封
-    // `ADMIN_INVALID_JSON_BODY`，不回显请求取值（原先是 axum 的纯文本 422/400）。
+    // `ADMIN_INVALID_JSON_BODY`，不回显请求取值。
     for invalid in [
         "{}",
         r#"{"limit":10}"#,
@@ -326,7 +294,7 @@ async fn cleanup_shape_and_request() {
     ] {
         let (status, body) = send(
             &h.router,
-            media_admin_request("POST", CLEANUP, &h.token, Some(invalid)),
+            media_admin_request("POST", CLEANUP, &h.gateway, Some(invalid)),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}: {body}");
@@ -345,7 +313,7 @@ async fn object_acl_shape_and_request() {
     let h = media_harness(true, None).await;
     let (status, body) = send(
         &h.router,
-        media_admin_request("POST", OBJECT_ACL, &h.token, Some(&acl_body("f-1"))),
+        media_admin_request("POST", OBJECT_ACL, &h.gateway, Some(&acl_body("f-1"))),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -364,7 +332,7 @@ async fn object_acl_shape_and_request() {
     for invalid in [r#"{"file_id":"f-1"}"#, "not json"] {
         let (status, _) = send(
             &h.router,
-            media_admin_request("POST", OBJECT_ACL, &h.token, Some(invalid)),
+            media_admin_request("POST", OBJECT_ACL, &h.gateway, Some(invalid)),
         )
         .await;
         assert!(status.is_client_error(), "{invalid}: {status}");
@@ -376,7 +344,11 @@ async fn object_acl_shape_and_request() {
 async fn list_objects_shape_and_request() {
     let h = media_harness(true, None).await;
     let path = format!("{OBJECTS}?bucket=media&prefix=2026/");
-    let (status, body) = send(&h.router, media_admin_request("GET", &path, &h.token, None)).await;
+    let (status, body) = send(
+        &h.router,
+        media_admin_request("GET", &path, &h.gateway, None),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let data = &body["data"];
     assert_eq!(keys(data), sorted(&["files"]));
@@ -402,7 +374,7 @@ async fn list_objects_shape_and_request() {
     h.media.clear();
     let (status, _) = send(
         &h.router,
-        media_admin_request("GET", &format!("{OBJECTS}?bucket=media"), &h.token, None),
+        media_admin_request("GET", &format!("{OBJECTS}?bucket=media"), &h.gateway, None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -413,7 +385,7 @@ async fn list_objects_shape_and_request() {
     h.media.clear();
     let (status, body) = send(
         &h.router,
-        media_admin_request("GET", OBJECTS, &h.token, None),
+        media_admin_request("GET", OBJECTS, &h.gateway, None),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -426,7 +398,7 @@ async fn bucket_shape_and_request() {
     let h = media_harness(true, None).await;
     let (status, body) = send(
         &h.router,
-        media_admin_request("GET", &format!("{BUCKET}?bucket=media"), &h.token, None),
+        media_admin_request("GET", &format!("{BUCKET}?bucket=media"), &h.gateway, None),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -450,7 +422,7 @@ async fn bucket_shape_and_request() {
     h.media.clear();
     let (status, body) = send(
         &h.router,
-        media_admin_request("GET", BUCKET, &h.token, None),
+        media_admin_request("GET", BUCKET, &h.gateway, None),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -519,7 +491,7 @@ async fn media_rejections_are_typed_and_never_echo_media_text() {
         for (method, path, body, failure_reason) in requests {
             let (status, response) = send(
                 &h.router,
-                media_admin_request(method, &path, &h.token, body.as_deref()),
+                media_admin_request(method, &path, &h.gateway, body.as_deref()),
             )
             .await;
             assert_eq!(status, expected, "{key} {path}: {response}");
@@ -539,7 +511,7 @@ async fn media_rejections_are_typed_and_never_echo_media_text() {
     // 文件不在本租户：404，同样不回显。
     let (status, response) = send(
         &h.router,
-        media_admin_request("POST", OBJECT_ACL, &h.token, Some(&acl_body("missing"))),
+        media_admin_request("POST", OBJECT_ACL, &h.gateway, Some(&acl_body("missing"))),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
@@ -553,7 +525,7 @@ async fn media_routes_without_a_signer_never_call_media() {
     for (method, path, body) in media_routes() {
         let (status, response) = send(
             &h.router,
-            media_admin_request(method, &path, &h.token, body.as_deref()),
+            media_admin_request(method, &path, &h.gateway, body.as_deref()),
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
@@ -564,13 +536,14 @@ async fn media_routes_without_a_signer_never_call_media() {
 
 #[tokio::test]
 async fn media_signed_context_layer_accepts_the_gateway_and_rejects_another_cell_key() {
-    // Media 实际使用的 SignedContextLayer，配与网关私钥成对的公钥：四条路由都通过。
+    // Media 实际使用的 SignedContextLayer，配与网关私钥成对的公钥（单钥，`kid=admin-gateway`
+    // 回落到它）：四条路由都通过。
     let (_, cell) = cell_keys(62);
     let h = media_harness(true, Some(cell)).await;
     for (method, path, body) in media_routes() {
         let (status, response) = send(
             &h.router,
-            media_admin_request(method, &path, &h.token, body.as_deref()),
+            media_admin_request(method, &path, &h.gateway, body.as_deref()),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{path}: {response}");
@@ -583,7 +556,7 @@ async fn media_signed_context_layer_accepts_the_gateway_and_rejects_another_cell
     for (method, path, body) in media_routes() {
         let (status, response) = send(
             &h.router,
-            media_admin_request(method, &path, &h.token, body.as_deref()),
+            media_admin_request(method, &path, &h.gateway, body.as_deref()),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{path}: {response}");

@@ -2,7 +2,7 @@
 #
 #   export FLARE_TOKEN_SECRET="$(openssl rand -base64 48 | tr -d '\n' | head -c 64)"
 #   # also required: FLARE_INTERNAL_CTX_SIGNING_KEY, FLARE_INTERNAL_CTX_PUBLIC_KEY and
-#   # FLARE_CONSOLE_PUBLIC_KEY (Ed25519; how to generate them is in deploy/.env.example)
+#   # FLARE_PLATFORM_PUBLIC_KEY (Ed25519; how to generate them is in deploy/.env.example)
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
 #                  -f deploy/docker-compose.stack.yml up -d
 #
@@ -120,9 +120,12 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: admin-gateway
-      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
-      # 把已验证的租户管理员签成 Media 能校验的内部上下文（媒资管理接口）。
+      # 只认网关 admin 分区签的 Staff x-flare-ctx（Cell 公钥集，Staff 钉死 kid=gateway）。
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
+      # 把已验证的员工按 kid=admin-gateway 签成 Media 能校验的内部上下文（媒资管理接口）。
       FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
+      # 管理写操作成功后的效果事件；留空则不记审计（启动告警一次）。
+      FLARE_AUDIT_NATS_URL: ${FLARE_AUDIT_NATS_URL:-}
     command: ["flare-admin-gateway"]
 
   # ── Signaling ──────────────────────────────────────────────────────────────
@@ -133,7 +136,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: signaling-online
-      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      # 平台公钥只验 KickTenant 的调度器断言；员工经 admin-gateway 转发的 Staff 上下文用 Cell 公钥验。
+      FLARE_PLATFORM_PUBLIC_KEY: ${FLARE_PLATFORM_PUBLIC_KEY:?set FLARE_PLATFORM_PUBLIC_KEY to the platform Ed25519 public key}
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set FLARE_INTERNAL_CTX_PUBLIC_KEY to the Cell Ed25519 public key}
     command: ["flare-signaling-online"]
 
@@ -176,9 +180,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: conversation
-      # 会话管理员只读接口校验 admin-gateway 转发的 admin 令牌；不给公钥时一律 UNAUTHENTICATED。
-      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
-      # PurgeConversationHistory 验 flare-social-bridge 的服务签名；不给公钥时该 RPC fail closed。
+      # 会话管理员只读接口校验 admin-gateway 转发的 Staff 上下文，PurgeConversationHistory 验
+      # flare-social-bridge 的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-conversation"]
 
@@ -208,8 +211,8 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: storage-reader
-      # 管理检索（admin-gateway 的 5 条 messages 路由）校验转发的 admin 令牌；不给公钥时一律 UNAUTHENTICATED。
-      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      # 管理检索（admin-gateway 的 5 条 messages 路由）校验转发的 Staff 上下文；不给 Cell 公钥时一律 UNAUTHENTICATED。
+      FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-storage-reader"]
 
   # ── Push / capability / media ──────────────────────────────────────────────
@@ -262,7 +265,8 @@ services:
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: capability
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
-      FLARE_CONSOLE_PUBLIC_KEY: ${FLARE_CONSOLE_PUBLIC_KEY:?set FLARE_CONSOLE_PUBLIC_KEY to the Control Ed25519 public key}
+      # 平台公钥只验租户投影的 worker 断言。
+      FLARE_PLATFORM_PUBLIC_KEY: ${FLARE_PLATFORM_PUBLIC_KEY:?set FLARE_PLATFORM_PUBLIC_KEY to the platform Ed25519 public key}
     command: ["flare-capability"]
 
   media:

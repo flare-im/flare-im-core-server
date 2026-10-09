@@ -16,6 +16,7 @@ use flare_server_core::flare_err;
 use prost_types::Timestamp;
 use tracing::{info, warn};
 
+use super::loggable_reason;
 use crate::domain::repository::{ConversationRepository, kick_reason, parse_tenant_session_member};
 use crate::domain::value_object::UserId;
 
@@ -263,7 +264,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 user_id = %user_id,
                 device_id = %device_id,
                 conversation_id = %session.id().as_str(),
-                reason = %request.reason,
+                reason = %loggable_reason(&request.reason),
                 "device kicked"
             );
 
@@ -359,7 +360,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         info!(
             tenant_id = %tenant_id,
-            reason = %reason,
+            reason = %loggable_reason(reason),
             kicked,
             stale,
             failed,
@@ -689,6 +690,89 @@ mod tests {
         assert_eq!(
             *repo.kick_reasons.lock().unwrap(),
             vec![kick_reason::DEVICE_KICKED.to_string()]
+        );
+    }
+
+    /// 文本日志的落点：`fmt` 订阅者写进这块共享缓冲。
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// admin-gateway 转来的原因是解码后的文本，可以含 `\n`、`\r`。用 tracing-subscriber 的文本
+    /// 格式（`fmt`）记一次踢设备、一次踢租户：每个事件仍只占一行，原因以转义形式出现。
+    #[tokio::test]
+    async fn a_kick_reason_with_line_breaks_cannot_add_a_log_line() {
+        let logs = LogBuffer::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        // 进程里只登记了一个调度器时，tracing 按触发线程自己的默认调度器缓存 callsite 兴趣：别的
+        // 测试线程先触发 "tenant kicked" 就会把它缓存成 never，这里便收不到。多登记一个空调度器，
+        // 兴趣改按全部调度器计算，再整体重算一次。
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let forged = "清理\nINFO forged line\r\nWARN x";
+        let (repo, service) = seeded().await;
+        service
+            .kick_device(
+                KickDeviceRequest {
+                    user_id: "u1".into(),
+                    device_id: "d1".into(),
+                    reason: forged.into(),
+                },
+                "acme",
+            )
+            .await
+            .unwrap();
+        service
+            .kick_tenant(KickTenantRequest {
+                tenant_id: "acme".to_string(),
+                reason: forged.to_string(),
+            })
+            .await
+            .unwrap();
+        drop(guard);
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains('\r'), "{output}");
+        let lines: Vec<&str> = output.lines().collect();
+        // kick_device 一行；kick_tenant 踢剩下的两台设备各一行，再加汇总一行。
+        assert_eq!(lines.len(), 4, "{output}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("device kicked")).count(),
+            3,
+            "{output}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("tenant kicked")).count(),
+            1,
+            "{output}"
+        );
+        let escaped = "reason=清理\\nINFO forged line\\r\\nWARN x";
+        assert!(lines.iter().all(|l| l.contains(escaped)), "{output}");
+        // 连接端收到的仍是类型化原因，与请求里的原因无关。
+        assert!(
+            repo.kick_reasons
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| r == kick_reason::DEVICE_KICKED || r == kick_reason::TENANT_UNAVAILABLE)
         );
     }
 

@@ -11,9 +11,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use flare_im_service_kit::control_auth::{
-    ConsoleControlVerifier, ControlActorKind, VerifiedControlActor, require_grpc_admin,
-    require_grpc_control_or_admin,
+    PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
+use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff, require_staff_any};
+use flare_server_core::auth::core_admin::permission::{TENANT_KICK, USERS_KICK, USERS_READ};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;
@@ -43,8 +44,12 @@ where
     query_handler: Arc<OnlineQueryHandler<CR>>,
     user_handler: Arc<OnlineUserHandler<CR>>,
     presence_watcher_handler: Arc<OnlinePresenceWatcherHandler<PW>>,
-    control_verifier: Option<ConsoleControlVerifier>,
+    /// 平台公钥（`FLARE_PLATFORM_PUBLIC_KEY`）：只验 `KickTenant` 的调度器断言。
+    control_verifier: Option<PlatformAssertionVerifier>,
+    /// Cell 公钥集：用户态 RPC 的签名上下文。
     identity_verifier: Option<SignedContextVerifier>,
+    /// Cell 公钥集，Staff 钉死 `kid=gateway`：admin-gateway 转发的员工上下文。
+    staff_verifier: Option<SignedContextVerifier>,
 }
 
 impl<CR, SR, PP, PW> Clone for OnlineHandler<CR, SR, PP, PW>
@@ -62,6 +67,7 @@ where
             presence_watcher_handler: self.presence_watcher_handler.clone(),
             control_verifier: self.control_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
+            staff_verifier: self.staff_verifier.clone(),
         }
     }
 }
@@ -86,16 +92,22 @@ where
             presence_watcher_handler,
             control_verifier: None,
             identity_verifier: None,
+            staff_verifier: None,
         }
     }
 
-    pub fn with_control_verifier(mut self, verifier: Option<ConsoleControlVerifier>) -> Self {
+    pub fn with_control_verifier(mut self, verifier: Option<PlatformAssertionVerifier>) -> Self {
         self.control_verifier = verifier;
         self
     }
 
     pub fn with_identity_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
         self.identity_verifier = verifier;
+        self
+    }
+
+    pub fn with_staff_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
+        self.staff_verifier = verifier;
         self
     }
 
@@ -415,9 +427,23 @@ where
         Ok(Response::new(response))
     }
 
-    /// 管理员只读：只认 admin-gateway 原样转发的 admin 令牌，租户取自令牌。
-    fn admin_actor<T>(&self, request: &Request<T>) -> Result<VerifiedControlActor, Status> {
-        require_grpc_admin(request, self.control_verifier.as_ref())
+    /// 管理员分支：只认 admin-gateway 原样转发的 Staff `x-flare-ctx`（网关 admin 分区签，
+    /// `kid=gateway`），按 RPC 族复核签名里的权限码；租户取自签名。
+    fn staff<T>(&self, request: &Request<T>, permission: &str) -> Result<VerifiedStaff, Status> {
+        let verifier = self
+            .staff_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        require_staff(request, verifier, permission)
+    }
+
+    /// [`Self::staff`] admitting any of `codes`.
+    fn staff_any<T>(&self, request: &Request<T>, codes: &[&str]) -> Result<VerifiedStaff, Status> {
+        let verifier = self
+            .staff_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        require_staff_any(request, verifier, codes)
     }
 
     fn require_admin_user_id(user_id: &str) -> Result<(), Status> {
@@ -431,13 +457,15 @@ where
         &self,
         request: Request<AdminListUserDevicesRequest>,
     ) -> Result<Response<ListUserDevicesResponse>, Status> {
-        let actor = self.admin_actor(&request)?;
+        // 设备列表既是只读查询（`core:users:read`），也是整用户踢线（`core:users:kick`）的
+        // 第一步：admin-gateway 先列设备再逐台 KickDevice，转发的是同一个 kick 上下文。
+        let staff = self.staff_any(&request, &[USERS_READ, USERS_KICK])?;
         let user_id = request.into_inner().user_id;
         Self::require_admin_user_id(&user_id)?;
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "admin list_user_devices");
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "admin list_user_devices");
         let response = self
             .user_handler
-            .list_user_devices(&actor.tenant_id, ListUserDevicesRequest { user_id })
+            .list_user_devices(&staff.tenant_id, ListUserDevicesRequest { user_id })
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -447,13 +475,13 @@ where
         &self,
         request: Request<AdminGetUserPresenceRequest>,
     ) -> Result<Response<GetUserPresenceResponse>, Status> {
-        let actor = self.admin_actor(&request)?;
+        let staff = self.staff(&request, USERS_READ)?;
         let user_id = request.into_inner().user_id;
         Self::require_admin_user_id(&user_id)?;
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "admin get_user_presence");
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "admin get_user_presence");
         let response = self
             .user_handler
-            .get_user_presence(&actor.tenant_id, GetUserPresenceRequest { user_id })
+            .get_user_presence(&staff.tenant_id, GetUserPresenceRequest { user_id })
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -463,15 +491,12 @@ where
         &self,
         request: Request<KickDeviceRequest>,
     ) -> Result<Response<KickDeviceResponse>, Status> {
-        // Console 直连的 control 令牌，或 admin-gateway 转发的 admin 令牌；两者都只允许员工、具体租户。
-        let (actor, channel) =
-            require_grpc_control_or_admin(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::Employee)?;
-        actor.require_tenant(&actor.tenant_id)?;
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, ?channel, "control kick_device authorized");
+        // admin-gateway 转发的 Staff 上下文（`core:users:kick`）；租户取自签名，会话须属于它。
+        let staff = self.staff(&request, USERS_KICK)?;
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "staff kick_device authorized");
         let response = self
             .user_handler
-            .kick_device(request.into_inner(), &actor.tenant_id)
+            .kick_device(request.into_inner(), &staff.tenant_id)
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -495,16 +520,20 @@ where
         &self,
         request: Request<KickTenantRequest>,
     ) -> Result<Response<KickTenantResponse>, Status> {
-        // admin 分支已限定为员工；Scheduler 只能走 Console 直连的 control 令牌。
-        let (actor, channel) =
-            require_grpc_control_or_admin(&request, self.control_verifier.as_ref())?;
-        if actor.kind != ControlActorKind::Employee && actor.kind != ControlActorKind::Scheduler {
-            return Err(Status::permission_denied(
-                "control actor not permitted to kick tenant",
-            ));
+        // 两条分支：admin-gateway 转发的 Staff 上下文（`core:tenant:kick`，签名租户须等于请求
+        // 租户），或平台调度器的控制断言（`FLARE_PLATFORM_PUBLIC_KEY`，租户须等于请求租户）。
+        // 带 `x-flare-ctx` 的调用走 Staff 分支，否则走调度器分支；两边各自 fail closed。
+        let tenant_id = request.get_ref().tenant_id.clone();
+        if request.metadata().contains_key("x-flare-ctx") {
+            let staff = self.staff(&request, TENANT_KICK)?;
+            staff.require_tenant(&tenant_id)?;
+            tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "staff kick_tenant authorized");
+        } else {
+            let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+            actor.require_kind(PlatformActorKind::Scheduler)?;
+            actor.require_tenant(&tenant_id)?;
+            tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "scheduler kick_tenant authorized");
         }
-        actor.require_tenant(&request.get_ref().tenant_id)?;
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, ?channel, "control kick_tenant authorized");
         let response = self
             .user_handler
             .kick_tenant(request.into_inner())
@@ -530,7 +559,8 @@ where
 
 #[cfg(test)]
 mod admin_branch_tests {
-    //! 管理员分支：缺令牌、错误受众、跨租户三类负向用例，外加租户只取自令牌的正向对照。
+    //! 管理员分支：缺上下文、错误 kid、平台断言、权限码不符、跨租户的负向用例，外加租户只取自
+    //! 签名的正向对照；`KickTenant` 另有调度器断言分支。
 
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -538,11 +568,12 @@ mod admin_branch_tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::control_auth::{
-        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
-        SCHEDULER_SUBJECT,
+        CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT, SCHEDULER_SUBJECT,
     };
+    use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::context::Context;
     use flare_server_core::error::Result as FlareResult;
+    use flare_server_core::{SignedContextIdentity, SignedContextSigner};
     use tonic::Code;
 
     use super::*;
@@ -764,15 +795,29 @@ mod admin_branch_tests {
 
     type Handler = OnlineHandler<TenantSessions, NoSubscriptions, NoPresence, NoWatcher>;
 
-    const KEY: [u8; 32] = [37; 32];
+    /// 平台钥（调度器断言）、网关钥与 hook 钥（Staff 上下文）。
+    const PLATFORM_KEY: [u8; 32] = [37; 32];
+    const GATEWAY_KEY: [u8; 32] = [38; 32];
+    const HOOK_KEY: [u8; 32] = [39; 32];
+
+    fn pem(seed: [u8; 32]) -> (String, String) {
+        let key = SigningKey::from_bytes(&seed);
+        (
+            key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+    }
 
     fn handler(repo: Arc<TenantSessions>, with_key: bool) -> Handler {
-        let verifier = with_key.then(|| {
-            let public = SigningKey::from_bytes(&KEY)
-                .verifying_key()
-                .to_public_key_pem(Default::default())
-                .unwrap();
-            ConsoleControlVerifier::from_public_key(&public).unwrap()
+        let control = with_key
+            .then(|| PlatformAssertionVerifier::from_public_key(&pem(PLATFORM_KEY).1).unwrap());
+        let staff = with_key.then(|| {
+            let mut keys = KeySet::empty();
+            keys.insert(kid::GATEWAY, &pem(GATEWAY_KEY).1).unwrap();
+            keys.insert(kid::HOOK, &pem(HOOK_KEY).1).unwrap();
+            SignedContextVerifier::from_key_set(keys).require_staff_kid([kid::GATEWAY])
         });
         OnlineHandler::new(
             Arc::new(OnlineCommandHandler::new(
@@ -786,7 +831,8 @@ mod admin_branch_tests {
             Arc::new(OnlineUserHandler::new(Arc::new(UserService::new(repo)))),
             Arc::new(OnlinePresenceWatcherHandler::new(Arc::new(NoWatcher))),
         )
-        .with_control_verifier(verifier)
+        .with_control_verifier(control)
+        .with_staff_verifier(staff)
     }
 
     fn seeded() -> Arc<TenantSessions> {
@@ -798,6 +844,7 @@ mod admin_branch_tests {
         repo
     }
 
+    /// 平台签的控制断言，放在 `authorization`。
     fn signed<T>(
         payload: T,
         subject: &str,
@@ -805,11 +852,8 @@ mod admin_branch_tests {
         token_use: &str,
         aud: &str,
     ) -> Request<T> {
-        let private = SigningKey::from_bytes(&KEY)
-            .to_pkcs8_pem(Default::default())
-            .unwrap();
         let token = flare_server_core::TokenService::from_ed25519_private_key(
-            &private,
+            &pem(PLATFORM_KEY).0,
             PLATFORM_ISSUER,
             60,
         )
@@ -823,8 +867,36 @@ mod admin_branch_tests {
         request
     }
 
+    fn staff_token(seed: [u8; 32], key_id: &str, tenant: &str, permission: &str) -> String {
+        SignedContextSigner::from_private_key(&pem(seed).0)
+            .unwrap()
+            .with_kid(key_id)
+            .unwrap()
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "employee-1", tenant, "req-1")
+                    .with_staff_grant(Some("org-1".into()), Some(permission.into()), 2),
+            )
+            .unwrap()
+    }
+
+    fn with_ctx<T>(payload: T, token: &str) -> Request<T> {
+        let mut request = Request::new(payload);
+        request
+            .metadata_mut()
+            .insert("x-flare-ctx", token.parse().unwrap());
+        request
+    }
+
+    /// 网关 admin 分区签的 Staff 上下文，带 `permission`。
+    fn staff<T>(payload: T, tenant: &str, permission: &str) -> Request<T> {
+        with_ctx(
+            payload,
+            &staff_token(GATEWAY_KEY, kid::GATEWAY, tenant, permission),
+        )
+    }
+
     fn admin<T>(payload: T, tenant: &str) -> Request<T> {
-        signed(payload, "employee-1", tenant, "admin", CORE_ADMIN_AUDIENCE)
+        staff(payload, tenant, USERS_READ)
     }
 
     fn devices_req(user: &str) -> AdminListUserDevicesRequest {
@@ -846,7 +918,7 @@ mod admin_branch_tests {
     }
 
     #[tokio::test]
-    async fn admin_reads_require_the_forwarded_admin_token() {
+    async fn admin_reads_require_the_forwarded_staff_context() {
         fn code<T>(result: Result<T, Status>) -> Code {
             result.map(|_| ()).unwrap_err().code()
         }
@@ -867,7 +939,19 @@ mod admin_branch_tests {
             ),
             Code::Unauthenticated
         );
-        // 没配 Console 公钥时 fail closed。
+        // 平台断言（旧 admin 受众或 control 受众）放在 authorization 里不是身份。
+        for (token_use, aud) in [
+            ("admin", "flare-core-admin"),
+            ("control", CORE_PROJECTION_AUDIENCE),
+        ] {
+            let request = signed(devices_req("u1"), "employee-1", "tenant-a", token_use, aud);
+            assert_eq!(
+                code(online.handle_admin_list_user_devices(request).await),
+                Code::Unauthenticated,
+                "{token_use}/{aud}"
+            );
+        }
+        // 没配 Cell 公钥集时 fail closed。
         let unkeyed = handler(seeded(), false);
         assert_eq!(
             code(
@@ -880,45 +964,44 @@ mod admin_branch_tests {
     }
 
     #[tokio::test]
-    async fn admin_reads_reject_wrong_audience_and_non_employee_tokens() {
+    async fn admin_reads_reject_wrong_kid_permission_and_non_staff_contexts() {
         let online = handler(seeded(), true);
-        // 错误受众/用途：Console 直连的 control 令牌不能当 admin 令牌用。
-        for (token_use, aud) in [
-            ("control", CORE_PROJECTION_AUDIENCE),
-            ("admin", CORE_PROJECTION_AUDIENCE),
-            ("control", CORE_ADMIN_AUDIENCE),
-        ] {
-            let request = signed(devices_req("u1"), "employee-1", "tenant-a", token_use, aud);
+        // hook 钥签的 Staff 上下文：Staff 钉死 gateway。
+        let forged = staff_token(HOOK_KEY, kid::HOOK, "tenant-a", USERS_READ);
+        assert_eq!(
+            online
+                .handle_admin_list_user_devices(with_ctx(devices_req("u1"), &forged))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unauthenticated
+        );
+        // 别的权限码（含踢线码调只读）。
+        for permission in [USERS_KICK, "core:conversations:read"] {
             assert_eq!(
                 online
-                    .handle_admin_list_user_devices(request)
-                    .await
-                    .unwrap_err()
-                    .code(),
-                Code::Unauthenticated,
-                "{token_use}/{aud}"
-            );
-        }
-        for (subject, tenant) in [
-            (PROJECTION_WORKER_SUBJECT, "tenant-a"),
-            (SCHEDULER_SUBJECT, "tenant-a"),
-            ("employee-1", "*"),
-        ] {
-            let request = signed(
-                presence_req("u1"),
-                subject,
-                tenant,
-                "admin",
-                CORE_ADMIN_AUDIENCE,
-            );
-            assert_eq!(
-                online
-                    .handle_admin_get_user_presence(request)
+                    .handle_admin_get_user_presence(staff(
+                        presence_req("u1"),
+                        "tenant-a",
+                        permission
+                    ))
                     .await
                     .unwrap_err()
                     .code(),
                 Code::PermissionDenied,
-                "{subject}/{tenant}"
+                "{permission}"
+            );
+        }
+        // 没有应用（平台范围）或通配租户的 Staff 上下文。
+        for tenant in ["", "*"] {
+            assert_eq!(
+                online
+                    .handle_admin_get_user_presence(staff(presence_req("u1"), tenant, USERS_READ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::PermissionDenied,
+                "{tenant:?}"
             );
         }
         assert_eq!(
@@ -928,6 +1011,60 @@ mod admin_branch_tests {
                 .unwrap_err()
                 .code(),
             Code::InvalidArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn device_listing_also_admits_the_whole_user_kick_code() {
+        // POST /users/{user_id}/kick 带 `core:users:kick`：admin-gateway 用同一个上下文先列设备。
+        let online = handler(seeded(), true);
+        let listed = online
+            .handle_admin_list_user_devices(staff(devices_req("u1"), "tenant-b", USERS_KICK))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(device_ids(listed), vec!["b1", "b2"]);
+        // 在场状态仍只认只读码；其它码（含租户踢线码）列设备也不行。
+        assert_eq!(
+            online
+                .handle_admin_get_user_presence(staff(presence_req("u1"), "tenant-b", USERS_KICK))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        for permission in [TENANT_KICK, "core:conversations:read"] {
+            assert_eq!(
+                online
+                    .handle_admin_list_user_devices(staff(
+                        devices_req("u1"),
+                        "tenant-b",
+                        permission
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::PermissionDenied,
+                "{permission}"
+            );
+        }
+        // 没有权限码的 Staff 上下文：两个码都对不上。
+        let codeless = SignedContextSigner::from_private_key(&pem(GATEWAY_KEY).0)
+            .unwrap()
+            .with_kid(kid::GATEWAY)
+            .unwrap()
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "employee-1", "tenant-b", "r")
+                    .with_staff_grant(Some("org-1".into()), None, 2),
+            )
+            .unwrap();
+        assert_eq!(
+            online
+                .handle_admin_list_user_devices(with_ctx(devices_req("u1"), &codeless))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
         );
     }
 
@@ -982,7 +1119,7 @@ mod admin_branch_tests {
     }
 
     #[tokio::test]
-    async fn kick_device_accepts_the_admin_audience_within_the_token_tenant() {
+    async fn kick_device_accepts_the_staff_kick_permission_within_the_signed_tenant() {
         let repo = seeded();
         let online = handler(repo.clone(), true);
         assert_eq!(
@@ -993,39 +1130,38 @@ mod admin_branch_tests {
                 .code(),
             Code::Unauthenticated
         );
+        // 平台断言（调度器也好、员工主体也好）不能踢设备。
+        for subject in [SCHEDULER_SUBJECT, "employee-1"] {
+            assert_eq!(
+                online
+                    .handle_kick_device(signed(
+                        kick_device_req("u1", "a1"),
+                        subject,
+                        "tenant-a",
+                        "control",
+                        CORE_PROJECTION_AUDIENCE,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::Unauthenticated,
+                "{subject}"
+            );
+        }
+        // 只读码不能踢。
         assert_eq!(
             online
-                .handle_kick_device(signed(
-                    kick_device_req("u1", "a1"),
-                    "employee-1",
-                    "tenant-a",
-                    "admin",
-                    CORE_PROJECTION_AUDIENCE,
-                ))
-                .await
-                .unwrap_err()
-                .code(),
-            Code::Unauthenticated
-        );
-        assert_eq!(
-            online
-                .handle_kick_device(signed(
-                    kick_device_req("u1", "a1"),
-                    SCHEDULER_SUBJECT,
-                    "tenant-a",
-                    "admin",
-                    CORE_ADMIN_AUDIENCE,
-                ))
+                .handle_kick_device(staff(kick_device_req("u1", "a1"), "tenant-a", USERS_READ))
                 .await
                 .unwrap_err()
                 .code(),
             Code::PermissionDenied
         );
 
-        // 跨租户：b9 只在 tenant-b，tenant-a 的管理员踢不到，会话原样保留。
+        // 跨租户：b9 只在 tenant-b，tenant-a 的员工踢不到，会话原样保留。
         assert!(
             online
-                .handle_kick_device(admin(kick_device_req("u9", "b9"), "tenant-a"))
+                .handle_kick_device(staff(kick_device_req("u9", "b9"), "tenant-a", USERS_KICK))
                 .await
                 .is_err()
         );
@@ -1033,7 +1169,7 @@ mod admin_branch_tests {
 
         assert!(
             online
-                .handle_kick_device(admin(kick_device_req("u1", "a1"), "tenant-a"))
+                .handle_kick_device(staff(kick_device_req("u1", "a1"), "tenant-a", USERS_KICK))
                 .await
                 .unwrap()
                 .into_inner()
@@ -1051,7 +1187,7 @@ mod admin_branch_tests {
     }
 
     #[tokio::test]
-    async fn kick_tenant_admin_branch_is_employee_only_and_same_tenant() {
+    async fn kick_tenant_takes_the_staff_kick_code_or_the_scheduler_assertion() {
         let repo = seeded();
         let online = handler(repo.clone(), true);
         assert_eq!(
@@ -1062,39 +1198,55 @@ mod admin_branch_tests {
                 .code(),
             Code::Unauthenticated
         );
+        // 旧 admin 断言与员工主体的 control 断言都不是身份。
+        for (subject, token_use, aud) in [
+            ("employee-1", "admin", "flare-core-admin"),
+            ("employee-1", "control", CORE_PROJECTION_AUDIENCE),
+            (SCHEDULER_SUBJECT, "admin", "flare-core-admin"),
+        ] {
+            assert_eq!(
+                online
+                    .handle_kick_tenant(signed(
+                        kick_tenant_req("tenant-a"),
+                        subject,
+                        "tenant-a",
+                        token_use,
+                        aud,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::Unauthenticated,
+                "{subject}/{token_use}/{aud}"
+            );
+        }
+        // 投影 worker 不能踢租户。
         assert_eq!(
             online
                 .handle_kick_tenant(signed(
                     kick_tenant_req("tenant-a"),
-                    "employee-1",
+                    PROJECTION_WORKER_SUBJECT,
                     "tenant-a",
-                    "admin",
-                    "flare-social-projection",
-                ))
-                .await
-                .unwrap_err()
-                .code(),
-            Code::Unauthenticated
-        );
-        // Scheduler 只能走 control 令牌；admin 分支一律要求员工。
-        assert_eq!(
-            online
-                .handle_kick_tenant(signed(
-                    kick_tenant_req("tenant-a"),
-                    SCHEDULER_SUBJECT,
-                    "tenant-a",
-                    "admin",
-                    CORE_ADMIN_AUDIENCE,
+                    "control",
+                    CORE_PROJECTION_AUDIENCE,
                 ))
                 .await
                 .unwrap_err()
                 .code(),
             Code::PermissionDenied
         );
-        // 跨租户：令牌租户与请求租户不一致。
+        // Staff 分支：踢设备的码不够；签名租户与请求租户不一致也拒绝。
         assert_eq!(
             online
-                .handle_kick_tenant(admin(kick_tenant_req("tenant-b"), "tenant-a"))
+                .handle_kick_tenant(staff(kick_tenant_req("tenant-a"), "tenant-a", USERS_KICK))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            online
+                .handle_kick_tenant(staff(kick_tenant_req("tenant-b"), "tenant-a", TENANT_KICK))
                 .await
                 .unwrap_err()
                 .code(),
@@ -1103,7 +1255,7 @@ mod admin_branch_tests {
         assert_eq!(repo.devices("tenant-b", "u1"), vec!["b1", "b2"]);
 
         let kicked = online
-            .handle_kick_tenant(admin(kick_tenant_req("tenant-a"), "tenant-a"))
+            .handle_kick_tenant(staff(kick_tenant_req("tenant-a"), "tenant-a", TENANT_KICK))
             .await
             .unwrap()
             .into_inner()
@@ -1112,7 +1264,7 @@ mod admin_branch_tests {
         assert!(repo.devices("tenant-a", "u1").is_empty());
         assert_eq!(repo.devices("tenant-b", "u9"), vec!["b9"]);
 
-        // 原有 control 分支不变：Scheduler 用 control 令牌仍可踢自己的租户。
+        // 调度器分支不变：平台的 control 断言仍可踢自己的租户。
         let kicked = online
             .handle_kick_tenant(signed(
                 kick_tenant_req("tenant-b"),

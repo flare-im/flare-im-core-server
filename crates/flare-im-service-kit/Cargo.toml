@@ -23,7 +23,7 @@ flare-core-runtime = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-contracts = { version = "1.0.3", path = "../flare-im-contracts" }
 flare-proto = { workspace = true }
-flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc"] }
+flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc", "nats"] }
 hex = { workspace = true }
 # 静态 gRPC 通道自带连接器，让 tonic 的建连超时同时覆盖名字解析（见 discovery::channel_resolve）。
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }

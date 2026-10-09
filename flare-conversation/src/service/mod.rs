@@ -75,7 +75,7 @@ impl ApplicationBootstrap {
                 let manage_svc = ContextLayer::new()
                     .allow_missing()
                     .layer(ConversationManageServiceServer::new(handler));
-                // 管理员只读不读 ContextLayer 构造的上下文，只认 admin 令牌；包一层只为统一请求 ID。
+                // 管理员只读不读 ContextLayer 构造的上下文，只认转发的 Staff 上下文；包一层只为统一请求 ID。
                 let admin_svc = ContextLayer::new()
                     .allow_missing()
                     .layer(ConversationAdminServiceServer::new(admin_handler));

@@ -42,3 +42,6 @@ pub use domain::model::{
 };
 pub use infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 pub use infrastructure::config::{ConfigLoader, ConfigWatcher};
+
+#[cfg(test)]
+pub(crate) mod test_logs;

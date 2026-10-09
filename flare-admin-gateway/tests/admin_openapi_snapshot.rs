@@ -20,7 +20,7 @@ async fn openapi_document() -> serde_json::Value {
     let h = harness(true).await;
     let (status, doc) = send(
         &h.router,
-        request("GET", "/api-doc/openapi.json", None, None, &[]),
+        request("GET", "/api-doc/openapi.json", None, &[]),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -103,22 +103,25 @@ async fn openapi_responses_match_the_committed_snapshot() {
     assert_eq!(openapi_document().await, doc);
 }
 
-/// 在调用下游之前就会回的 400 逐条写进每个操作：审计头超长（中间件，读写都查）、请求体解析
-/// 失败（带请求体的 5 条）、查询串解析失败（带查询参数的 6 条）、路径参数解析失败（带路径参数
-/// 的 8 条）。网关不再回 422，文档里也不再有 422。
+/// 在调用下游之前就会回的 400 逐条写进每个操作：审计头超长与审计原因编码不合规（中间件，读写
+/// 都查）、请求体解析
+/// 失败（带请求体的 11 条）、查询串解析失败（带查询参数的 9 条）、路径参数解析失败（带路径参数
+/// 的 15 条）。网关不再回 422，文档里也不再有 422。
 #[tokio::test]
 async fn every_admin_operation_documents_its_request_rejections() {
     let doc = openapi_document().await;
     let operations = admin_operations(&doc);
-    assert_eq!(operations.len(), 26);
+    assert_eq!(operations.len(), 38);
     let (mut with_body, mut with_query, mut with_path) = (0, 0, 0);
     for (operation_name, operation) in &operations {
         let bad_request = response_description(operation, "400")
             .unwrap_or_else(|| panic!("{operation_name} does not document 400"));
-        assert!(
-            bad_request.contains("ADMIN_AUDIT_HEADER_TOO_LONG"),
-            "{operation_name}: {bad_request}"
-        );
+        for reason in ["ADMIN_AUDIT_HEADER_TOO_LONG", "ADMIN_AUDIT_REASON_INVALID"] {
+            assert!(
+                bad_request.contains(reason),
+                "{operation_name}: {bad_request}"
+            );
+        }
         if operation.get("requestBody").is_some() {
             with_body += 1;
             for reason in ["ADMIN_INVALID_JSON_BODY", "ADMIN_REQUEST_BODY_TOO_LARGE"] {
@@ -153,7 +156,20 @@ async fn every_admin_operation_documents_its_request_rejections() {
             "{operation_name} still documents 422"
         );
     }
-    assert_eq!((with_body, with_query, with_path), (5, 6, 8));
+    assert_eq!((with_body, with_query, with_path), (11, 9, 15));
+}
+
+/// 文档里的操作集合就是共享路由表 `core_admin::ROUTES`：一条不多、一条不少。网关 admin 分区
+/// 用同一张表解析并签权限码，这里的路由表现为 utoipa 路径。
+#[tokio::test]
+async fn documented_operations_are_exactly_the_shared_core_admin_route_table() {
+    use flare_server_core::auth::core_admin::{ADMIN_ROOT, ROUTES};
+    let documented = documented_operations().await;
+    let table: BTreeSet<String> = ROUTES
+        .iter()
+        .map(|route| format!("{} {ADMIN_ROOT}{}", route.method, route.pattern))
+        .collect();
+    assert_eq!(documented, table);
 }
 
 #[tokio::test]
@@ -179,7 +195,7 @@ async fn contract_inventory_and_openapi_list_the_same_operations() {
     let h = harness(true).await;
     let (status, body) = send(
         &h.router,
-        admin_request("GET", "/api/v1/admin/gateway/routes", &h.token),
+        admin_request("GET", "/api/v1/admin/gateway/routes", &h.gateway),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -200,7 +216,7 @@ async fn contract_inventory_and_openapi_list_the_same_operations() {
         "gateway route inventory vs AdminApiDoc"
     );
 
-    // 写标记在两处一致；POST 除两个只读查询外都是写操作。
+    // 写标记在两处一致，且与共享路由表一致；GET 以外除两个只读查询 POST 都是写操作。
     for endpoint in &contract.endpoints {
         let route = routes
             .iter()
@@ -213,11 +229,34 @@ async fn contract_inventory_and_openapi_list_the_same_operations() {
         );
         assert_eq!(
             endpoint.write,
-            endpoint.method == "POST" && !read_only_query,
+            endpoint.method != "GET" && !read_only_query,
             "{} {}",
             endpoint.method,
             endpoint.path
         );
+        // The table resolves concrete paths: placeholders become sample ids.
+        let concrete: String = endpoint
+            .path
+            .strip_prefix("/api/v1/admin")
+            .unwrap()
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "x"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let shared = flare_server_core::auth::core_admin::resolve(&endpoint.method, &concrete)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} {} is not in core_admin::ROUTES",
+                    endpoint.method, endpoint.path
+                )
+            });
+        assert_eq!(shared.write, endpoint.write, "{}", endpoint.path);
     }
 }
 
@@ -227,7 +266,7 @@ async fn every_documented_operation_is_routed_behind_admin_auth() {
     let h = harness(true).await;
     for operation in &documented {
         let (method, path) = operation.split_once(' ').unwrap();
-        // 路径参数换成占位值；不带令牌必须是 401，而不是 404/405（未挂路由）。
+        // 路径参数换成占位值；不带上下文必须是 401，而不是 404/405（未挂路由）。
         let concrete: String = path
             .split('/')
             .map(|segment| {
@@ -239,20 +278,16 @@ async fn every_documented_operation_is_routed_behind_admin_auth() {
             })
             .collect::<Vec<_>>()
             .join("/");
-        let (status, _) = send(
-            &h.router,
-            request(method, &concrete, None, Some(TENANT), &[]),
-        )
-        .await;
+        let (status, _) = send(&h.router, request(method, &concrete, None, &[])).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{operation}");
     }
     assert!(h.recorder.calls().is_empty());
 }
 
-/// ADM-01、SEC-05 媒资路由与消息检索的 5 条路由都经 `admin_rpc_error` 映射下游失败：文档逐条
-/// 列出它的每种答复及类型化原因——下游拒绝参数 400 `BAD_REQUEST`、拒绝租户 403 `FORBIDDEN`、
-/// 路由固定原因的 500、拒绝已验过的令牌 502、不可用 503、超时 504（与 API Gateway 的 Media
-/// 路由同一口径）。
+/// ADM-01、SEC-05 媒资路由、消息检索的 5 条路由与 R3-2 的 Capability 路由都经 `admin_rpc_error`
+/// 映射下游失败：文档逐条列出它的每种答复及类型化原因——下游拒绝参数 400 `BAD_REQUEST`、拒绝
+/// 应用 403 `FORBIDDEN`、路由固定原因的 500、拒绝已验过的上下文 502、不可用 503、超时 504
+/// （与 API Gateway 的 Media 路由同一口径）。
 #[tokio::test]
 async fn downstream_routes_document_every_typed_downstream_failure() {
     let doc = openapi_document().await;
@@ -260,10 +295,11 @@ async fn downstream_routes_document_every_typed_downstream_failure() {
         "/api/v1/admin/conversations",
         "/api/v1/admin/users/",
         "/api/v1/admin/tenant/",
-        "/api/v1/admin/capabilities/tenant",
+        "/api/v1/admin/capabilities/",
         "/api/v1/admin/plugins",
         "/api/v1/admin/medias/",
         "/api/v1/admin/messages/",
+        "/api/v1/admin/hooks",
     ];
     let mut checked = 0;
     for (path, item) in doc["paths"].as_object().expect("paths object") {
@@ -292,7 +328,7 @@ async fn downstream_routes_document_every_typed_downstream_failure() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 20);
+    assert_eq!(checked, 32);
 }
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];
@@ -338,7 +374,8 @@ async fn readmes_and_admin_api_guide_list_the_routed_operations() {
         );
     }
 
-    // docs/admin-api.md 的路由表只列真实操作，且 ADM-01 与 SEC-05 媒资路由一条不缺。
+    // docs/admin-api.md 的路由表只列真实操作，且 ADM-01、SEC-05 媒资与 R3-2 Capability 路由一条
+    // 不缺。
     let guide = std::fs::read_to_string(root.join("../docs/admin-api.md")).unwrap();
     let tabled = guide_table_operations(&guide);
     let stale: Vec<_> = tabled.difference(&documented).collect();
@@ -350,9 +387,10 @@ async fn readmes_and_admin_api_guide_list_the_routed_operations() {
         "/api/v1/admin/conversations",
         "/api/v1/admin/users/",
         "/api/v1/admin/tenant/",
-        "/api/v1/admin/capabilities/tenant",
+        "/api/v1/admin/capabilities/",
         "/api/v1/admin/plugins",
         "/api/v1/admin/medias/",
+        "/api/v1/admin/hooks",
     ];
     let required: BTreeSet<String> = documented
         .iter()
@@ -364,7 +402,7 @@ async fn readmes_and_admin_api_guide_list_the_routed_operations() {
         })
         .cloned()
         .collect();
-    assert_eq!(required.len(), 15, "{required:?}");
+    assert_eq!(required.len(), 27, "{required:?}");
     let missing: Vec<_> = required.difference(&tabled).collect();
     assert!(missing.is_empty(), "docs/admin-api.md misses {missing:?}");
 }

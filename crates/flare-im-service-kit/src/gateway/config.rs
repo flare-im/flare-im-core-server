@@ -49,6 +49,15 @@ impl GatewayEnvScope {
             Self::Admin => "flare-admin-gateway",
         }
     }
+
+    /// 一次下游调用的请求超时缺省（秒）：API Gateway 10 秒；Admin Gateway 5 秒，管理调用是
+    /// 操作员在等的同步请求，慢下游要尽快回 504 而不是挂住控制台。
+    fn default_grpc_request_timeout_secs(self) -> &'static str {
+        match self {
+            Self::Api => "10",
+            Self::Admin => "5",
+        }
+    }
 }
 
 /// IM Gateway 运行配置。
@@ -249,7 +258,12 @@ impl GatewaySettings {
             ),
             // 缺省 2 秒，与 StaticChannelPolicy::DEFAULT 一致（以前写 5，却从不生效）。
             connect_timeout_secs: parse_env(&mut source, scope, "GRPC_CONNECT_TIMEOUT_SECS", "2")?,
-            request_timeout_secs: parse_env(&mut source, scope, "GRPC_REQUEST_TIMEOUT_SECS", "10")?,
+            request_timeout_secs: parse_env(
+                &mut source,
+                scope,
+                "GRPC_REQUEST_TIMEOUT_SECS",
+                scope.default_grpc_request_timeout_secs(),
+            )?,
         };
 
         let (auth, rate_limit) = match scope {
@@ -257,7 +271,7 @@ impl GatewaySettings {
                 parse_auth(&mut source, scope)?,
                 parse_rate_limit(&mut source, scope)?,
             ),
-            // Admin Gateway 只用 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言，也不做
+            // Admin Gateway 只验网关 admin 分区签的 Staff `x-flare-ctx`（Cell 公钥集），也不做
             // 请求限流：这两组变量在 Admin 作用域下不解析、不校验，误配不会挡住启动。
             GatewayEnvScope::Admin => (
                 AuthProviderConfig::default(),
@@ -293,9 +307,8 @@ impl GatewaySettings {
 
         // 验证配置
         settings.validate()?;
-        // API Gateway 用它限时每次下游调用，0 会让每个调用立即超时。Admin 作用域不校验：
-        // 该变量在 Admin Gateway 还不生效（只出现在 /gateway/config 快照里）。
-        if scope == GatewayEnvScope::Api && settings.grpc.request_timeout_secs == 0 {
+        // 两个网关都用它限时每次下游调用，0 会让每个调用立即超时。
+        if settings.grpc.request_timeout_secs == 0 {
             return Err(config_error("GRPC_REQUEST_TIMEOUT_SECS cannot be 0"));
         }
 
@@ -453,7 +466,7 @@ fn ignored_reason(scope: GatewayEnvScope) -> &'static str {
             "its listen address comes from api-gateway.toml, it applies no overall request timeout, and logging and tracing follow the logging config"
         }
         GatewayEnvScope::Admin => {
-            "it verifies Console admin assertions with FLARE_CONSOLE_PUBLIC_KEY and applies no request rate limit"
+            "it verifies the gateway-signed staff context with the Cell public key set and applies no request rate limit"
         }
     }
 }
@@ -1019,8 +1032,8 @@ mod tests {
         }
     }
 
-    /// `GRPC_REQUEST_TIMEOUT_SECS` 缺省 10 秒；API Gateway 用它限时每次下游调用，取 0 拒绝启动。
-    /// Admin 作用域照旧只解析不校验（该变量在 Admin Gateway 还不生效）。
+    /// `GRPC_REQUEST_TIMEOUT_SECS` 缺省 API 10 秒、Admin 5 秒；两个网关都用它限时每次下游调用，
+    /// 取 0 拒绝启动。
     #[test]
     fn grpc_request_timeout_rejects_zero_where_it_bounds_downstream_calls() {
         let api = GatewaySettings::from_env_source(GatewayEnvScope::Api, |_| None).unwrap();
@@ -1038,12 +1051,20 @@ mod tests {
             .is_err()
         );
 
+        let admin = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |_| None).unwrap();
+        assert_eq!(admin.grpc.request_timeout_secs, 5);
         let admin_key = env_key(GatewayEnvScope::Admin, "GRPC_REQUEST_TIMEOUT_SECS");
-        let admin = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |k| {
-            (k == admin_key).then(|| "0".to_string())
+        let configured = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |k| {
+            (k == admin_key).then(|| "2".to_string())
         })
         .unwrap();
-        assert_eq!(admin.grpc.request_timeout_secs, 0);
+        assert_eq!(configured.grpc.request_timeout_secs, 2);
+        assert!(
+            GatewaySettings::from_env_source(GatewayEnvScope::Admin, |k| {
+                (k == admin_key).then(|| "0".to_string())
+            })
+            .is_err()
+        );
     }
 
     /// 每个作用域实际读取的变量都登记在 env_registry、属主是对应的网关；只探测是否出现、不读取

@@ -32,13 +32,12 @@ use flare_im_hooks::PreSendDecision;
 use flare_im_hooks::hooks::adapters::{
     WEBHOOK_SIGNATURE_TOLERANCE_SECS, WebhookSignatureError, verify_webhook_signature,
 };
-use flare_im_service_kit::control_auth::{ControlActorKind, VerifiedControlActor};
 use flare_server_core::SignedActorType;
 use prost::Message;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::administer::dispatch_hook_administer;
+use super::administer::{HookAdministrator, dispatch_hook_administer};
 use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::HookTransportConfig;
@@ -122,11 +121,10 @@ fn cleanup(tenant: &str) -> TenantRowCleanup {
     }
 }
 
-fn employee(tenant: &str) -> VerifiedControlActor {
-    VerifiedControlActor {
-        subject: "employee-w12w".into(),
+fn employee(tenant: &str) -> HookAdministrator {
+    HookAdministrator {
+        actor_id: "employee-w12w".into(),
         tenant_id: tenant.into(),
-        kind: ControlActorKind::Employee,
     }
 }
 

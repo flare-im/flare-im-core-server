@@ -16,8 +16,12 @@ use flare_server_core::context::{Context, Ctx};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result as FlareResult};
 use tokio::time::timeout;
 
+pub mod hook_name;
+pub mod plugin_endpoint;
 pub mod tenant_projection;
 pub mod tenant_runtime;
+pub use hook_name::{LoggableName, MAX_HOOK_NAME_CHARS, validate_hook_name};
+pub use plugin_endpoint::{PluginEndpoint, PluginEndpointKey, validate_plugin_endpoint};
 pub use tenant_projection::{
     TenantProjectionOutcome, TenantProjectionRecord, TenantProjectionValidationError,
 };
@@ -93,7 +97,7 @@ impl HookConfigItem {
                     ErrorCode::InvalidParameter,
                     "hook group must be validation, critical or business",
                 )
-                .details(format!("hook={}", self.name))
+                .details(format!("hook={}", LoggableName(&self.name)))
                 .build_error()
             }),
         }
@@ -633,7 +637,7 @@ impl HookExecutionPlan {
         // 取值（`ConfigValidator::validate_hook`）；直接构造的非法取值按 fail_fast 并告警。
         let error_policy = HookErrorPolicy::parse(&config.error_policy).unwrap_or_else(|| {
             tracing::warn!(
-                hook = %config.name,
+                hook = %LoggableName(&config.name),
                 "invalid hook error_policy, falling back to fail_fast"
             );
             HookErrorPolicy::FailFast
@@ -738,7 +742,7 @@ impl HookExecutionPlan {
     /// [`HOOK_UNAVAILABLE_PARAM`] 标记。
     fn timeout_decision(&self, stage: &'static str) -> PreSendDecision {
         if self.must_succeed() {
-            tracing::warn!(hook = %self.name(), stage, group = ?self.group, "required hook timed out, rejecting");
+            tracing::warn!(hook = %LoggableName(self.name()), stage, group = ?self.group, "required hook timed out, rejecting");
             PreSendDecision::Reject {
                 error: unavailable_rejection(
                     ErrorCode::OperationTimeout,
@@ -756,9 +760,9 @@ impl HookExecutionPlan {
     /// 记 DEBUG（business 组本就容错；要求成功的 business Hook 不可用时由编排层记 WARN）。
     fn log_skipped_unavailable(&self, stage: &'static str, what: &'static str) {
         if self.group == HookGroup::Business && !self.require_success() {
-            tracing::debug!(hook = %self.name(), stage, what, "optional business hook unavailable, ignored");
+            tracing::debug!(hook = %LoggableName(self.name()), stage, what, "optional business hook unavailable, ignored");
         } else {
-            tracing::warn!(hook = %self.name(), stage, what, group = ?self.group, "optional hook unavailable, ignored");
+            tracing::warn!(hook = %LoggableName(self.name()), stage, what, group = ?self.group, "optional hook unavailable, ignored");
         }
     }
 
@@ -768,7 +772,7 @@ impl HookExecutionPlan {
     /// 拒绝原因只带 Hook 名，不带下游错误原文（其中可能有内部地址），原文只进日志。
     fn unavailable_decision(&self, stage: &'static str, cause: &FlareError) -> PreSendDecision {
         if self.must_succeed() {
-            tracing::warn!(hook = %self.name(), stage, group = ?self.group, error = %cause, "required hook unavailable, rejecting");
+            tracing::warn!(hook = %LoggableName(self.name()), stage, group = ?self.group, error = %cause, "required hook unavailable, rejecting");
             PreSendDecision::Reject {
                 error: unavailable_rejection(
                     ErrorCode::ServiceUnavailable,
@@ -777,7 +781,7 @@ impl HookExecutionPlan {
                 ),
             }
         } else {
-            tracing::debug!(hook = %self.name(), stage, error = %cause, "hook call failed");
+            tracing::debug!(hook = %LoggableName(self.name()), stage, error = %cause, "hook call failed");
             self.log_skipped_unavailable(stage, "call failed");
             PreSendDecision::Continue
         }
@@ -811,14 +815,14 @@ impl HookExecutionPlan {
     /// 可选的只记 WARN 放行，文案不变。下游调用本身失败（非超时）的错误仍原样返回。
     fn event_timeout_outcome(&self, stage: &'static str) -> FlareResult<()> {
         if self.must_succeed() {
-            tracing::warn!(hook = %self.name(), stage, group = ?self.group, "required hook timed out, failing");
+            tracing::warn!(hook = %LoggableName(self.name()), stage, group = ?self.group, "required hook timed out, failing");
             Err(unavailable_rejection(
                 ErrorCode::ServiceUnavailable,
                 format!("{stage} hook timed out"),
                 self.name(),
             ))
         } else {
-            tracing::warn!(hook = %self.name(), "{stage} hook timeout ignored");
+            tracing::warn!(hook = %LoggableName(self.name()), "{stage} hook timeout ignored");
             Ok(())
         }
     }
@@ -865,7 +869,7 @@ impl HookExecutionPlan {
 /// [`HOOK_UNAVAILABLE_PARAM`] 标记。
 fn unavailable_rejection(code: ErrorCode, reason: String, hook: &str) -> FlareError {
     ErrorBuilder::new(code, reason)
-        .details(format!("hook={hook}"))
+        .details(format!("hook={}", LoggableName(hook)))
         .param(HOOK_UNAVAILABLE_PARAM, "true")
         .build_error()
 }
@@ -1008,6 +1012,52 @@ mod tests {
         assert_eq!(stats.failure_count, 1);
         assert_eq!(stats.avg_latency_ms, 150.0);
         assert_eq!(stats.success_rate(), 0.5);
+    }
+
+    /// 规则之前存下的名称（带换行）照常执行；执行路径上的日志与拒绝原因里名称一律转义，伪造不了
+    /// 日志行。
+    #[test]
+    fn legacy_names_are_escaped_in_execution_logs_and_rejections() {
+        let config = HookConfigItem {
+            name: "legacy\nWARN forged line".to_string(),
+            version: None,
+            description: None,
+            enabled: true,
+            priority: 50,
+            group: None,
+            timeout_ms: 1000,
+            max_retries: 0,
+            error_policy: "fail_fast".to_string(),
+            require_success: false,
+            selector: HookSelectorConfig::default(),
+            transport: HookTransportConfig::Local {
+                target: "noop".to_string(),
+            },
+            metadata: HashMap::new(),
+        };
+        let optional = HookExecutionPlan::from_hook_config(config.clone(), "post_send");
+        let required = HookExecutionPlan::from_hook_config(
+            HookConfigItem {
+                require_success: true,
+                ..config
+            },
+            "post_send",
+        );
+        let capture = crate::test_logs::LogCapture::start(tracing::Level::WARN);
+        assert!(optional.event_timeout_outcome("post-send").is_ok());
+        let rejection = required.event_timeout_outcome("post-send").unwrap_err();
+        let output = capture.finish();
+
+        let escaped = "hook=legacy\\nWARN forged line";
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "{output}");
+        assert!(lines.iter().all(|line| line.contains(escaped)), "{output}");
+        let FlareError::Localized { details, .. } = rejection else {
+            panic!("{rejection:?}");
+        };
+        assert_eq!(details.as_deref(), Some(escaped));
+        // 名称本身不变：执行、统计与按名查询仍用原值。
+        assert_eq!(required.name(), "legacy\nWARN forged line");
     }
 
     #[test]

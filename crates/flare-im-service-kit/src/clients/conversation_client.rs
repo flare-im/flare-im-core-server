@@ -1,15 +1,16 @@
 use flare_server_core::error::Result;
 use tonic::transport::Channel;
 
-use crate::clients::{Ctx, admin_bearer_request};
+use crate::clients::Ctx;
+use crate::staff_context::staff_context_request;
 use flare_grpc_proto::conversation::conversation_admin_service_client::ConversationAdminServiceClient;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_grpc_proto::conversation::*;
 
 /// 会话读客户端。用户态方法带调用者上下文与签名身份（`x-flare-ctx`）；管理员方法
-/// （`admin_*`）走同一通道上的 `ConversationAdminService`，只带 admin-gateway 原样转发的
-/// admin 令牌。
+/// （`admin_*`）走同一通道上的 `ConversationAdminService`，只带 admin-gateway 验过后原样转发的
+/// Staff `x-flare-ctx`（`staff_token`）。
 #[derive(Clone)]
 pub struct ConversationReadServiceClientWrapper {
     client: ConversationReadServiceClient<Channel>,
@@ -43,36 +44,36 @@ impl ConversationReadServiceClientWrapper {
 
     pub async fn admin_list_conversations(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         request: AdminListConversationsRequest,
     ) -> Result<AdminListConversationsResponse> {
         let response = self
             .admin
-            .admin_list_conversations(admin_bearer_request(request, admin_token)?)
+            .admin_list_conversations(staff_context_request(request, staff_token)?)
             .await?;
         Ok(response.into_inner())
     }
 
     pub async fn admin_get_conversation(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         request: AdminGetConversationRequest,
     ) -> Result<AdminGetConversationResponse> {
         let response = self
             .admin
-            .admin_get_conversation(admin_bearer_request(request, admin_token)?)
+            .admin_get_conversation(staff_context_request(request, staff_token)?)
             .await?;
         Ok(response.into_inner())
     }
 
     pub async fn admin_list_participants(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         request: AdminListParticipantsRequest,
     ) -> Result<AdminListParticipantsResponse> {
         let response = self
             .admin
-            .admin_list_participants(admin_bearer_request(request, admin_token)?)
+            .admin_list_participants(staff_context_request(request, staff_token)?)
             .await?;
         Ok(response.into_inner())
     }

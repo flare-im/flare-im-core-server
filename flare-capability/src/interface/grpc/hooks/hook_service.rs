@@ -16,7 +16,8 @@ use tonic::{Request, Response, Status};
 
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::{
-    HookConfigItem, HookSelectorConfig, HookTransportConfig, administrable_hook_type,
+    HookConfigItem, HookSelectorConfig, HookTransportConfig, LoggableName, administrable_hook_type,
+    validate_hook_name,
 };
 use crate::infrastructure::config::{ConfigValidator, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
@@ -110,7 +111,8 @@ impl HookServiceServer {
                 .map_err(|e| Status::internal(format!("Failed to check hook name: {}", e)))?;
         if reserved {
             return Err(Status::already_exists(format!(
-                "hook name '{name}' is reserved by a global {hook_type} hook"
+                "hook name '{}' is reserved by a global {hook_type} hook",
+                LoggableName(name)
             )));
         }
         Ok(())
@@ -137,6 +139,8 @@ impl HookServiceServer {
         if req.name.is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
+        // 名称每次执行都进日志：控制字符与超长名称在登记时就拒绝，错误里不带取值。
+        validate_hook_name(&req.name).map_err(Status::invalid_argument)?;
         if req.hook_type.is_empty() {
             return Err(Status::invalid_argument("hook_type is required"));
         }
@@ -255,6 +259,10 @@ impl HookServiceServer {
 
         if req.hook_id.is_empty() {
             return Err(Status::invalid_argument("hook_id is required"));
+        }
+        // 改名与创建同一规则，查库之前就拒绝。不改名的更新照常：规则之前存下的名称仍可改其余字段。
+        if !req.name.is_empty() {
+            validate_hook_name(&req.name).map_err(Status::invalid_argument)?;
         }
 
         // 解析hook_id（格式：hook_type:name 或 id）
@@ -1755,5 +1763,108 @@ mod secret_tests {
             stored_webhook_secret(&HookTransportConfig::Local { target: "t".into() }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    //! 创建与改名时的名称规则（`validate_hook_name`）：在查库之前就拒绝。仓储指向不监听的端口，
+    //! 规则放过的请求会走到存储并失败，所以 INVALID_ARGUMENT 只能来自名称校验。
+
+    use super::*;
+    use crate::domain::model::MAX_HOOK_NAME_CHARS;
+    use crate::infrastructure::config::ConfigWatcher;
+    use flare_server_core::context::{Context, Ctx};
+    use tonic::Code;
+
+    fn governance() -> HookServiceServer {
+        let watcher = Arc::new(ConfigWatcher::with_config(Default::default()));
+        HookServiceServer::new(
+            Arc::new(PostgresHookConfigRepository::unconnected()),
+            Arc::new(CoreHookRegistry::new(watcher)),
+        )
+    }
+
+    fn trusted<T>(payload: T) -> Request<T> {
+        let ctx: Ctx = Arc::new(
+            Context::with_request_id("req-1")
+                .with_tenant_id("tenant-a")
+                .with_user_id("employee-1"),
+        );
+        let mut request = Request::new(payload);
+        request.extensions_mut().insert(ctx);
+        request
+    }
+
+    fn create(name: &str) -> CreateHookConfigRequest {
+        CreateHookConfigRequest {
+            name: name.into(),
+            hook_type: "pre_send".into(),
+            tenant_id: "tenant-a".into(),
+            priority: 900,
+            transport: Some(HookTransport {
+                r#type: "webhook".into(),
+                endpoint: "http://127.0.0.1:9/hook".into(),
+                timeout_ms: 1000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    const BAD_NAMES: [&str; 5] = [
+        "dlp\nINFO forged line",
+        "dlp\r\nWARN x",
+        "dlp\t",
+        "dlp\u{1b}[31m",
+        "dlp\u{85}",
+    ];
+
+    #[tokio::test]
+    async fn create_rejects_control_characters_and_over_long_names_before_storage() {
+        let governance = governance();
+        let too_long = "n".repeat(MAX_HOOK_NAME_CHARS + 1);
+        for name in BAD_NAMES.into_iter().chain([too_long.as_str()]) {
+            let status = governance
+                .grpc_create_hook_config(trusted(create(name)))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::InvalidArgument, "{name:?}: {status:?}");
+            assert!(status.message().starts_with("name must"), "{status:?}");
+            assert!(!status.message().contains("dlp"), "{status:?}");
+        }
+        // 同一请求换成合规名称（含中文与空格、恰好 128 个字符）就过了校验，止于存储。
+        for name in ["内容审核 v2", "n".repeat(MAX_HOOK_NAME_CHARS).as_str()] {
+            let status = governance
+                .grpc_create_hook_config(trusted(create(name)))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::Internal, "{name:?}: {status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn renaming_follows_the_same_rule_and_keeping_the_name_does_not() {
+        let governance = governance();
+        let update = |name: &str| UpdateHookConfigRequest {
+            hook_id: "7".into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        for name in BAD_NAMES {
+            let status = governance
+                .grpc_update_hook_config(trusted(update(name)))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::InvalidArgument, "{name:?}: {status:?}");
+        }
+        // 不改名（name 为空）或改成合规名称：照常去库里找这一行。
+        for name in ["", "dlp-v2"] {
+            let status = governance
+                .grpc_update_hook_config(trusted(update(name)))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::Internal, "{name:?}: {status:?}");
+        }
     }
 }

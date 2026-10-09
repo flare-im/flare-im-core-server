@@ -12,7 +12,7 @@ use flare_im_hooks::hooks::adapters::is_reserved_webhook_header;
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::{debug, error, info, warn};
 
-use crate::domain::model::{HookConfig, HookTransportConfig};
+use crate::domain::model::{HookConfig, HookTransportConfig, LoggableName, validate_hook_name};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use flare_server_core::KvStore;
 
@@ -157,7 +157,7 @@ impl ConfigValidator {
                 flare_server_core::error::ErrorCode::ConfigurationError,
                 "Webhook signing secret is empty: omit `secret` to send unsigned, or set a non-empty value",
             )
-            .details(format!("hook={}", hook.name))
+            .details(format!("hook={}", LoggableName(&hook.name)))
             .build_error());
         }
 
@@ -172,7 +172,7 @@ impl ConfigValidator {
                     "Webhook header {header} is reserved: custom headers cannot set Content-Type, Flare-Signature, x-flare-signature or X-Hook-Signature"
                 ),
             )
-            .details(format!("hook={}", hook.name))
+            .details(format!("hook={}", LoggableName(&hook.name)))
             .build_error());
         }
 
@@ -181,12 +181,23 @@ impl ConfigValidator {
                 flare_server_core::error::ErrorCode::ConfigurationError,
                 "Hook error_policy must be fail_fast, retry or ignore (case and underscores do not matter)",
             )
-            .details(format!("hook={}", hook.name))
+            .details(format!("hook={}", LoggableName(&hook.name)))
             .build_error());
         }
 
         if hook.name.is_empty() {
             return Err(config_error("Hook name cannot be empty"));
+        }
+
+        // 创建与改名时才强制的名称规则（`validate_hook_name`：不超过 128 个字符、不含控制字符）。
+        // 规则之前已经存下或写在配置文件里的名称照常加载，已有部署不受影响；这里只告警，名称在
+        // 日志与错误信息里一律经 `LoggableName` 转义。
+        if let Err(rule) = validate_hook_name(&hook.name) {
+            warn!(
+                hook = %LoggableName(&hook.name),
+                rule,
+                "hook name breaks the naming rule for new hooks; it is still loaded, rename it"
+            );
         }
 
         if hook.priority < 0 || hook.priority > 1000 {
@@ -733,6 +744,40 @@ mod tests {
         assert!(ConfigValidator::validate(&config).is_ok());
         config.get_conversation_participants[0].priority = 2000;
         assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    /// 规则之前写进文件或库里的名称（带换行、超过 128 个字符）照常加载，快照里仍有这两条；
+    /// 只各告警一次，告警里的名称已转义，伪造不了日志行。
+    #[test]
+    fn names_breaking_the_new_rule_still_load_and_are_reported_escaped() {
+        let long = "n".repeat(129);
+        let config = parse(&format!(
+            "[[pre_send]]\nname = \"legacy\\nWARN forged line\"\nenabled = true\npriority = 100\ntimeout_ms = 500\n[pre_send.selector]\n[pre_send.transport]\ntype = \"local\"\ntarget = \"noop\"\n\n\
+             [[pre_send]]\nname = \"{long}\"\nenabled = true\npriority = 100\ntimeout_ms = 500\n[pre_send.selector]\n[pre_send.transport]\ntype = \"local\"\ntarget = \"noop\"\n"
+        ));
+        assert_eq!(config.pre_send[0].name, "legacy\nWARN forged line");
+
+        let capture = crate::test_logs::LogCapture::start(tracing::Level::WARN);
+        assert!(ConfigValidator::validate(&config).is_ok());
+        let output = capture.finish();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "{output}");
+        assert!(
+            lines[0].contains("hook=legacy\\nWARN forged line")
+                && lines[0].contains("control characters"),
+            "{output}"
+        );
+        assert!(
+            lines[1].contains(&long) && lines[1].contains("128 characters"),
+            "{output}"
+        );
+
+        let snapshot = HookConfigSnapshot::build(
+            &[Some(LoadedHookConfig::global(config))],
+            &HookConfigSnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.for_tenant("tenant-a").pre_send.len(), 2);
     }
 
     const EMPTY_SECRET_PROFILE: &str = r#"

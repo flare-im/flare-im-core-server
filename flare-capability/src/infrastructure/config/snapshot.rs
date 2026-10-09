@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use tracing::{error, warn};
 
-use crate::domain::model::HookConfig;
+use crate::domain::model::{HookConfig, LoggableName};
 use crate::infrastructure::config::loader::{ConfigMerger, ConfigValidator, LoadedHookConfig};
 use flare_server_core::error::Result;
 
@@ -124,7 +124,7 @@ fn drop_reserved_names(tenant: &str, config: &mut HookConfig, global: &HookConfi
         warn!(
             tenant_id = %tenant,
             hook_type,
-            hook_name = %name,
+            hook_name = %LoggableName(&name),
             "tenant hook reuses the name of a global hook; the global hook keeps running and the tenant hook is not loaded"
         );
     }

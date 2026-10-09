@@ -828,6 +828,7 @@ CREATE INDEX IF NOT EXISTS idx_ack_archive_message_user_type ON ack_archive_reco
 
 DROP TABLE IF EXISTS hook_executions CASCADE;
 DROP TABLE IF EXISTS hook_configs CASCADE;
+DROP TABLE IF EXISTS capability_plugin_endpoints CASCADE;
 DROP TABLE IF EXISTS capability_audit_log CASCADE;
 DROP TABLE IF EXISTS capability_user_grants CASCADE;
 DROP TABLE IF EXISTS capability_tenant_switches CASCADE;
@@ -971,6 +972,45 @@ COMMENT ON COLUMN capability_audit_log.actor_id IS '操作者（metadata x-actor
 COMMENT ON COLUMN capability_audit_log.detail IS '扩展字段 JSON';
 CREATE INDEX IF NOT EXISTS idx_capability_audit_tenant_time ON capability_audit_log(tenant_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_capability_audit_action_time ON capability_audit_log(action, occurred_at DESC);
+
+-- 插件端点登记（RegisterPluginEndpoint；与 migrations/0011 同一结构）：各实例启动载入、登记先写库、
+-- 周期重读、超过 TTL 不健康的登记被清理。配置发现的端点不入库。
+CREATE TABLE capability_plugin_endpoints (
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    grpc_authority TEXT NOT NULL,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    plugin_version TEXT NOT NULL DEFAULT '',
+    api_version TEXT NOT NULL DEFAULT '',
+    manifest_sha256 TEXT NOT NULL DEFAULT '',
+    declared_operations TEXT[] NOT NULL DEFAULT '{}',
+    unverified BOOLEAN NOT NULL,
+    seat_model TEXT NOT NULL DEFAULT '',
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_healthy_at TIMESTAMPTZ,
+    CONSTRAINT capability_plugin_endpoints_pkey PRIMARY KEY (tenant_id, plugin_id),
+    CONSTRAINT capability_plugin_endpoints_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT capability_plugin_endpoints_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128),
+    CONSTRAINT capability_plugin_endpoints_capability_check
+        CHECK (char_length(capability_id) BETWEEN 1 AND 128),
+    CONSTRAINT capability_plugin_endpoints_authority_check
+        CHECK (char_length(grpc_authority) BETWEEN 1 AND 512),
+    CONSTRAINT capability_plugin_endpoints_labels_check
+        CHECK (jsonb_typeof(labels) = 'object' AND octet_length(labels::text) <= 16384),
+    CONSTRAINT capability_plugin_endpoints_manifest_check
+        CHECK (char_length(plugin_version) <= 64 AND char_length(api_version) <= 64
+               AND char_length(manifest_sha256) <= 128 AND char_length(seat_model) <= 32),
+    CONSTRAINT capability_plugin_endpoints_operations_check
+        CHECK (cardinality(declared_operations) <= 256
+               AND array_position(declared_operations, NULL) IS NULL),
+    CONSTRAINT capability_plugin_endpoints_unverified_check
+        CHECK (unverified = (cardinality(declared_operations) = 0))
+);
+COMMENT ON TABLE capability_plugin_endpoints IS '插件端点登记（RegisterPluginEndpoint）；多实例共享，配置发现的端点不入库';
 
 -- 可按用户追加（示例，与 tenant 0 一致时取消注释）
 -- INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)

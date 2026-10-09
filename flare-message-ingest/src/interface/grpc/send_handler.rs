@@ -563,6 +563,8 @@ mod tests {
             org_id: None,
             permission: None,
             perm_version: None,
+            trace_id: None,
+            kid: flare_server_core::auth::LEGACY_KID.to_owned(),
         }
     }
 

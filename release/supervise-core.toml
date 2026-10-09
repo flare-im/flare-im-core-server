@@ -24,7 +24,10 @@ required_env = [
 required_env_unless = [
   { name = "FLARE_CONSUL_ENDPOINT", when_env = "FLARE_REGISTRY_MODE", equals = "static" },
 ]
+# The platform's signing keys never enter Core: Core holds only FLARE_PLATFORM_PUBLIC_KEY
+# (worker and scheduler assertions). The retired console names stay forbidden forever.
 forbidden_env = [
+  "FLARE_PLATFORM_SIGNING_KEY", "FLARE_PLATFORM_PRIVATE_KEY",
   "FLARE_CONSOLE_SIGNING_KEY", "FLARE_CONSOLE_PRIVATE_KEY",
   "FLARE_CONTROL_DATABASE_URL", "FLARE_PLATFORM_CONTROL_DATABASE_URL",
   "FLARE_ADMIN_GATEWAY_TOKEN_SECRET", "FLARE_ADMIN_GATEWAY_AUTH_APP_CREDENTIALS",
@@ -40,7 +43,11 @@ stop_grace_secs = 20
 name = "signaling-online"
 command = "/usr/local/bin/flare-signaling-online"
 inherit_env_prefixes = ["SIGNALING_ONLINE_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CONSOLE_PUBLIC_KEY"]
+# The Cell key set verifies user contexts and the Staff context Admin Gateway forwards
+# (kid=gateway); the platform public key verifies only the scheduler's KickTenant assertion.
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50061"
 [services.environment]
@@ -50,7 +57,7 @@ SIGNALING_ONLINE_TENANT_POLICY = "strict"
 name = "signaling-route"
 command = "/usr/local/bin/flare-signaling-route"
 inherit_env_prefixes = ["SIGNALING_ROUTE_", "ROUTER_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "ORCHESTRATOR_SERVICE"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "ORCHESTRATOR_SERVICE"]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50062"
 
@@ -58,7 +65,12 @@ tcp_health = "127.0.0.1:50062"
 name = "capability"
 command = "/usr/local/bin/flare-capability"
 inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_CONSOLE_PUBLIC_KEY", "CONFIG_CENTER_ENDPOINT", "TENANT_ID"]
+# The Cell key set verifies dispatch, plugin self-registration and the Staff context Admin
+# Gateway forwards; the platform public key verifies only the projection worker.
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
+  "CONFIG_CENTER_ENDPOINT", "TENANT_ID",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50110"
 
@@ -66,12 +78,12 @@ tcp_health = "127.0.0.1:50110"
 name = "conversation"
 command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
-# Verifies the admin assertion Admin Gateway forwards; without it every admin read fails closed.
-# PurgeConversationHistory verifies the flare-social-bridge service context with the Cell public
-# key; without it that RPC fails closed. The read service verifies x-flare-ctx with the same key
-# and, with FLARE_REQUIRE_SIGNED_READ_CTX, refuses unsigned reads.
+# The Cell key set verifies the Staff context Admin Gateway forwards (every admin read fails
+# closed without it), the flare-social-bridge service context of PurgeConversationHistory, and
+# the x-flare-ctx of the read service, which with FLARE_REQUIRE_SIGNED_READ_CTX refuses
+# unsigned reads.
 inherit_env = [
-  "FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_REQUIRE_SIGNED_READ_CTX",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50090"
@@ -95,7 +107,8 @@ inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_"]
 # the message tenant; forwarding the inbound token fails whenever its tenant differs.
 # Without the private key ingest keeps forwarding (and warns once at startup).
 inherit_env = [
-  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_CAPABILITY_GRPC_URI",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+  "FLARE_CAPABILITY_GRPC_URI",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "MESSAGE_INGEST_HOOKS_CONFIG"]
 tcp_health = "127.0.0.1:50182"
@@ -123,11 +136,11 @@ inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
 name = "storage-reader"
 command = "/usr/local/bin/flare-storage-reader"
 inherit_env_prefixes = ["STORAGE_"]
-# Verifies the admin assertion Admin Gateway forwards on message retrieval; without it those reads fail closed.
-# The other reads verify x-flare-ctx with the Cell public key; see conversation for the switch.
+# The Cell key set verifies the Staff context Admin Gateway forwards on message retrieval (those
+# reads fail closed without it) and the x-flare-ctx of the other reads; see conversation for the switch.
 inherit_env = [
-  "POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT", "FLARE_CONSOLE_PUBLIC_KEY",
-  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX",
+  "POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_REQUIRE_SIGNED_READ_CTX",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60083"
@@ -143,7 +156,9 @@ command = "/usr/local/bin/flare-sync-orchestrator"
 inherit_env_prefixes = ["SYNC_ORCHESTRATOR_", "SNAPSHOT_", "BOOTSTRAP_", "MULTI_SYNC_"]
 # ExecuteSync verifies the gateway's signed user context and forwards it to the
 # conversation and Storage Reader reads; see conversation for the switch.
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_REQUIRE_SIGNED_READ_CTX"]
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_REQUIRE_SIGNED_READ_CTX",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60084"
 [[services.environment_defaults]]
@@ -161,14 +176,16 @@ command = "/usr/local/bin/flare-push-server"
 enabled_if_env = "PUSH_SERVER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_SERVER_"]
 # broker-isolated: each consumed record is attested as this service with the Cell key.
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 
 [[services]]
 name = "push-proxy"
 command = "/usr/local/bin/flare-push-proxy"
 inherit_env_prefixes = ["PUSH_PROXY_"]
-inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+inherit_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS"]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50091"
 
@@ -178,7 +195,8 @@ command = "/usr/local/bin/flare-push-worker"
 enabled_if_env = "PUSH_WORKER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_GETUI_"]
 inherit_env = [
-  "ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+  "ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
+  "FLARE_INTERNAL_CTX_PRIVATE_KEY",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 
@@ -186,8 +204,9 @@ required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY
 name = "media"
 command = "/usr/local/bin/flare-media"
 inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_"]
-# Media gRPC admits only Cell-signed internal context (verify-only public key).
-inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+# Media gRPC admits only Cell-signed internal context (verify-only public key set; Admin
+# Gateway signs its media calls as kid=admin-gateway).
+inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS"]
 required_env = [
   "FLARE_S3_ENDPOINT", "FLARE_S3_ACCESS_KEY", "FLARE_S3_SECRET_KEY",
   "FLARE_INTERNAL_CTX_PUBLIC_KEY",
@@ -229,7 +248,7 @@ inherit_env_prefixes = ["ACCESS_GATEWAY_", "GATEWAY_"]
 # FLARE_QUIC_TLS_*: the installation certificate for QUIC behind Edge's UDP
 # passthrough (optional; without it the listener generates a localhost one).
 inherit_env = [
-  "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+  "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
   "FLARE_QUIC_TLS_CERT", "FLARE_QUIC_TLS_KEY",
 ]
 required_env = ["ACCESS_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
@@ -244,11 +263,18 @@ GRPC_PORT = "60060"
 [[services]]
 name = "admin-gateway"
 command = "/usr/local/bin/flare-admin-gateway"
-enabled_if_env = "FLARE_CONSOLE_PUBLIC_KEY"
+# Started only when the deployment enables the Core admin surface (the Social gateway admin
+# partition is its only caller).
+enabled_if_env = "FLARE_ADMIN_GATEWAY_ENABLED"
 inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
-# Signs the Control-verified tenant admin into the context Media authenticates.
-inherit_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
-required_env = ["FLARE_CONSOLE_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+# Verifies the Staff context the Social gateway admin partition signs (Cell key set, Staff
+# pinned to kid=gateway); re-signs the verified staff as kid=admin-gateway for Media; publishes
+# flare.audit.effect.v1 to FLARE_AUDIT_NATS_URL when set (unset: not audited, one warning).
+inherit_env = [
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+  "FLARE_AUDIT_NATS_URL",
+]
+required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50051"
 # FLARE_REGISTRY_MODE=static has no discovery: name the listeners of this
 # container directly instead of trying discovery and falling back, with a WARN,
@@ -259,8 +285,6 @@ when_env = "FLARE_REGISTRY_MODE"
 equals = "static"
 [services.environment_defaults.values]
 FLARE_ADMIN_GATEWAY_GRPC_MEDIA_SERVICE_URL = "http://127.0.0.1:60081"
-FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_INGEST_SERVICE_URL = "http://127.0.0.1:50182"
-FLARE_ADMIN_GATEWAY_GRPC_MESSAGE_ORCHESTRATOR_SERVICE_URL = "http://127.0.0.1:50181"
 FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL = "http://127.0.0.1:50090"
 FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL = "http://127.0.0.1:50061"
 FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"

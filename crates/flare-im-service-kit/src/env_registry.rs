@@ -367,8 +367,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::SignalingRoute,
         EnvPurpose::TenantDefaults,
     ),
+    // 平台（flare-platform）的 Ed25519 公钥：只验投影 worker 与调度器的服务断言，只给
+    // capability（TenantProjection）与 signaling-online（KickTenant 的调度器分支）。员工
+    // 不再持平台断言到达 Core，而是带网关签的 Staff `x-flare-ctx`（见 staff_context）。
     env(
-        "FLARE_CONSOLE_PUBLIC_KEY",
+        "FLARE_PLATFORM_PUBLIC_KEY",
         EnvOwner::Shared,
         EnvPurpose::Auth,
     ),
@@ -381,6 +384,18 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "FLARE_INTERNAL_CTX_PUBLIC_KEY",
         EnvOwner::Shared,
         EnvPurpose::Auth,
+    ),
+    // Cell 公钥集（JSON `{"<kid>": "<key>"}` 或目录），叠加在单钥之上；Staff 上下文钉死 kid=gateway。
+    env(
+        "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
+        EnvOwner::Shared,
+        EnvPurpose::Auth,
+    ),
+    // 管理面效果事件（flare.audit.effect.v1）的 NATS 地址；未设则不记审计并告警一次。
+    env(
+        "FLARE_AUDIT_NATS_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::Mq,
     ),
     env(
         "FLARE_REQUIRE_SIGNED_READ_CTX",
@@ -538,6 +553,12 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::ApiGateway,
         EnvPurpose::Auth,
     ),
+    // 单容器清单（release/supervise-core.toml）的开关：设了才启动 admin-gateway。
+    env(
+        "FLARE_ADMIN_GATEWAY_ENABLED",
+        EnvOwner::AdminGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
     env(
         "FLARE_ADMIN_GATEWAY_BIND_ADDRESS",
         EnvOwner::AdminGateway,
@@ -546,9 +567,9 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     // gateway::GatewaySettings 按 `FLARE_ADMIN_GATEWAY_` 作用域拼出的变量（不是字面量，
     // env_registry_boundary 门禁扫不到；gateway::config 的单测逐个核对已登记）。
     // 生效的：SERVER_MAX_BODY_SIZE（请求体上限）、GRPC_*_SERVICE_URL 与 *_STATIC_FALLBACK（下游路由）、
-    // GRPC_CONNECT_TIMEOUT_SECS（静态下游的建连上限）。SERVER_BIND/PORT/TIMEOUT_SECS、
-    // GRPC_REQUEST_TIMEOUT_SECS 与 TRACING_* 只在 /gateway/config 快照里回报；监听地址取
-    // admin-gateway.toml 或 FLARE_ADMIN_GATEWAY_BIND_ADDRESS。
+    // GRPC_CONNECT_TIMEOUT_SECS（静态下游的建连上限）、GRPC_REQUEST_TIMEOUT_SECS（每次下游调用的
+    // 请求超时，缺省 5 秒）。SERVER_BIND/PORT/TIMEOUT_SECS 与 TRACING_* 只在 /gateway/config 快照里
+    // 回报；监听地址取 admin-gateway.toml 或 FLARE_ADMIN_GATEWAY_BIND_ADDRESS。
     env(
         "FLARE_ADMIN_GATEWAY_SERVER_BIND",
         EnvOwner::AdminGateway,

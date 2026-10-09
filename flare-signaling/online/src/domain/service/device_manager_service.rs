@@ -275,7 +275,7 @@ impl<R: ConversationRepository + Send + Sync> DeviceManagerService<R> {
         warn!(
             user_id = %user_id,
             conversation_id = %conversation_id,
-            reason = %reason,
+            reason = %super::loggable_reason(reason),
             "Kicking device"
         );
         self.repository

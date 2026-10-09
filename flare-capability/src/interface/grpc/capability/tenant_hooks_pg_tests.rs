@@ -20,11 +20,10 @@ use flare_grpc_proto::capability::{
     GenericResponse, HookRetryPolicy, HookSelector, HookTransport, UpdateHookConfigRequest,
 };
 use flare_im_hooks::PreSendDecision;
-use flare_im_service_kit::control_auth::{ControlActorKind, VerifiedControlActor};
 use flare_server_core::SignedActorType;
 use prost::Message;
 
-use super::administer::dispatch_hook_administer;
+use super::administer::{HookAdministrator, dispatch_hook_administer};
 use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::service::HookOrchestrationService;
@@ -95,11 +94,10 @@ impl Drop for RowCleanup {
     }
 }
 
-fn employee(tenant: &str) -> VerifiedControlActor {
-    VerifiedControlActor {
-        subject: "employee-w11h".into(),
+fn employee(tenant: &str) -> HookAdministrator {
+    HookAdministrator {
+        actor_id: "employee-w11h".into(),
         tenant_id: tenant.into(),
-        kind: ControlActorKind::Employee,
     }
 }
 

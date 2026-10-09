@@ -32,6 +32,31 @@ When the process is configured with **`database_url`**, the authorization / tena
 
 `INSERT INTO public.capability_user_grants (tenant_id, user_id, capability_id, plan_code, source) VALUES ('0', '*', 'rtc.*', 'dev', 'manual') ON CONFLICT DO NOTHING;`
 
+### Plugin registrations (`RegisterPluginEndpoint`)
+
+A plugin endpoint reaches the route book in one of two ways:
+
+- **Configuration discovery**: `capability_runtime.plugin_discovery_endpoints` and `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT`. These endpoints live only in the process that read the configuration; they are never written to the database and never removed by the TTL below.
+- **Registration**: `CapabilityService.RegisterPluginEndpoint` / `DeregisterPluginEndpoint`, called by platform staff through Admin Gateway (`core:plugins:write`) or by a plugin host with a Cell-signed `Service` context for its own tenant. With a database, Capability writes the registration to `capability_plugin_endpoints` (migration `0011`) first and only then adds it to its in-memory route book; a failed write fails the call with `UNAVAILABLE` and changes nothing. A deregistration deletes the row first. A registration of a `(tenant, plugin)` that configuration also discovered replaces the configured one.
+
+Every Capability instance loads the table at startup (a missing table stops startup: run the migrations), re-reads it periodically so the instances converge, and survives a restart without losing registrations. A local write newer than a refresh snapshot is not overwritten by that snapshot. Healthy registrations get `last_healthy_at` after each health round; a registration that was neither re-registered nor healthy within the TTL is deleted (checked once a minute) and disappears from the other instances on their next refresh. Without a database, registrations are process-local: other instances do not see them and a restart loses them (the startup log says so once).
+
+| Setting (environment variable, then `[capability_runtime]` key) | Default | Allowed |
+| --- | --- | --- |
+| `FLARE_CAPABILITY_PLUGIN_ROUTE_REFRESH_SECS` / `plugin_route_refresh_secs` | 10 | 1 to 3600 seconds |
+| `FLARE_CAPABILITY_PLUGIN_ROUTE_TTL_SECS` / `plugin_route_ttl_secs` | 86400 | 300 seconds to 30 days |
+
+A value outside the range is ignored and the default applies.
+
+### `ExtensionPlugin` identity
+
+The `ExtensionPlugin` router (`flare.capability.v1.ExtensionPlugin/Call`) sits behind the signed-context layer with anonymous admission. The verified `x-flare-ctx` is the only identity: `GenericRequest.metadata`, `x-tenant-id`, `x-user-id` and similar caller metadata are never read.
+
+- `flare.capability.v1.health_check` is the only operation answered without a context; an invalid context is refused with `UNAUTHENTICATED` even there.
+- Every other operation needs a signed `User`, `Service` or `TenantAdmin` context: without one it is `UNAUTHENTICATED`. `Staff`, `System` and `Guest` contexts, and a tenant that is empty, `*` or padded with blanks, are `PERMISSION_DENIED`. Staff reach Core only through Admin Gateway.
+- The handler receives the verified context, so tenant, user, actor, request id and trace id come from the signature. `flare.media.v1.list_plugin_routes` lists the signed tenant's plugins only; a `tenant_id` in its body must be empty or that tenant.
+- Without a Cell key set (`FLARE_INTERNAL_CTX_PUBLIC_KEYS` / `FLARE_INTERNAL_CTX_PUBLIC_KEY`) the router is served without the layer and answers only the health check; every other call is `UNAUTHENTICATED`.
+
 ## Hook configuration sources
 
 In this service, hook configuration supports three sources, ordered from highest to lowest priority:

@@ -6,7 +6,7 @@ use flare_server_core::error::Result;
 use futures_util::future::join_all;
 use std::sync::Arc;
 
-use crate::domain::model::{HookExecutionPlan, is_hook_unavailable};
+use crate::domain::model::{HookExecutionPlan, LoggableName, is_hook_unavailable};
 use flare_im_hooks::{
     DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
@@ -39,9 +39,9 @@ fn log_business_rejection(
 ) {
     if let PreSendDecision::Reject { error } = decision {
         if is_hook_unavailable(error) {
-            tracing::warn!(hook = %hook.name(), stage, reason = %error, "required business hook unavailable; business group does not block, continuing");
+            tracing::warn!(hook = %LoggableName(hook.name()), stage, reason = %error, "required business hook unavailable; business group does not block, continuing");
         } else {
-            tracing::warn!(hook = %hook.name(), stage, reason = %error, "business hook rejected; business group does not block, continuing");
+            tracing::warn!(hook = %LoggableName(hook.name()), stage, reason = %error, "business hook rejected; business group does not block, continuing");
         }
     }
 }
@@ -129,7 +129,7 @@ impl HookOrchestrationService {
                 if hook.must_succeed() {
                     return Err(e);
                 }
-                tracing::warn!(hook = %hook.name(), error = %e, "PostSend hook failed but continuing");
+                tracing::warn!(hook = %LoggableName(hook.name()), error = %e, "PostSend hook failed but continuing");
             }
         }
 
@@ -144,9 +144,9 @@ impl HookOrchestrationService {
         for (hook, result) in grouped.business.iter().zip(results) {
             if let Err(e) = result {
                 if hook.require_success() {
-                    tracing::warn!(hook = %hook.name(), error = %e, "PostSend hook failed");
+                    tracing::warn!(hook = %LoggableName(hook.name()), error = %e, "PostSend hook failed");
                 } else {
-                    tracing::trace!(hook = %hook.name(), error = %e, "PostSend hook failed but ignored");
+                    tracing::trace!(hook = %LoggableName(hook.name()), error = %e, "PostSend hook failed but ignored");
                 }
             }
         }
@@ -170,7 +170,7 @@ impl HookOrchestrationService {
                 if hook.must_succeed() {
                     return Err(e);
                 }
-                tracing::warn!(hook = %hook.name(), error = %e, "Delivery hook failed but continuing");
+                tracing::warn!(hook = %LoggableName(hook.name()), error = %e, "Delivery hook failed but continuing");
             }
         }
 
@@ -185,9 +185,9 @@ impl HookOrchestrationService {
         for (hook, result) in grouped.business.iter().zip(results) {
             if let Err(e) = result {
                 if hook.require_success() {
-                    tracing::warn!(hook = %hook.name(), error = %e, "Delivery hook failed");
+                    tracing::warn!(hook = %LoggableName(hook.name()), error = %e, "Delivery hook failed");
                 } else {
-                    tracing::trace!(hook = %hook.name(), error = %e, "Delivery hook failed but ignored");
+                    tracing::trace!(hook = %LoggableName(hook.name()), error = %e, "Delivery hook failed but ignored");
                 }
             }
         }

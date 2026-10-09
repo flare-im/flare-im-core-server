@@ -29,7 +29,7 @@ impl ApplicationBootstrap {
         info!("ApplicationBootstrap created successfully");
 
         // 读接口的身份边界：带 x-flare-ctx 就验签并以之为准，FLARE_REQUIRE_SIGNED_READ_CTX
-        // 打开时拒绝未签名调用；管理检索照旧只认 admin 令牌。
+        // 打开时拒绝未签名调用；管理检索只认转发的 Staff 上下文。
         let read_layer =
             flare_im_service_kit::signed_read::signed_read_layer_from_env(STORAGE_READER)?;
 

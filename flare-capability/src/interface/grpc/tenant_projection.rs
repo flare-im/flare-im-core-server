@@ -4,7 +4,8 @@
 //! - `GetVersions`：对账；核不消费功能开关投影，`features_version` 恒为 0。
 //! - `UpsertFeatureFlags`：核只有能力开关（`CapabilityService.SetTenantCapabilitySwitch`），返回 `Unimplemented`。
 //!
-//! 所有投影 RPC 均验证 Console 公钥控制令牌并绑定租户；内网监听不构成授权。
+//! 所有投影 RPC 均验证平台公钥（`FLARE_PLATFORM_PUBLIC_KEY`）签的 worker 控制断言并绑定租户；
+//! 内网监听不构成授权。员工不经这里：他们的 Staff 上下文只到 admin-gateway 与管理 RPC。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use flare_grpc_proto::control::{
     ProjectionVersions, RoleBundleProjectionUpsert, TenantProjectionUpsert, TenantVersions,
 };
 use flare_im_service_kit::control_auth::{
-    ConsoleControlVerifier, ControlActorKind, require_grpc_control,
+    PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
 use flare_server_core::auth::credential_snapshot::{
     CredentialKeyRecord, CredentialSnapshot, MAX_CREDENTIAL_KEYS,
@@ -59,11 +60,11 @@ fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSn
 
 pub struct TenantProjectionGrpcServer<R: TenantProjectionRepository + 'static> {
     repository: Arc<R>,
-    control_verifier: Option<ConsoleControlVerifier>,
+    control_verifier: Option<PlatformAssertionVerifier>,
 }
 
 impl<R: TenantProjectionRepository + 'static> TenantProjectionGrpcServer<R> {
-    pub fn new(repository: Arc<R>, control_verifier: Option<ConsoleControlVerifier>) -> Self {
+    pub fn new(repository: Arc<R>, control_verifier: Option<PlatformAssertionVerifier>) -> Self {
         Self {
             repository,
             control_verifier,
@@ -86,8 +87,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<CredentialsProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
-        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         actor.require_tenant(&request.get_ref().app_id)?;
         let snapshot = credentials_snapshot(request.into_inner())?;
         let outcome = self
@@ -104,8 +105,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<TenantProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
-        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         actor.require_tenant(&request.get_ref().im_tenant_id)?;
         let record = TenantProjectionRecord::from_proto(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -122,8 +123,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<FeatureFlagsProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
-        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         let tenant_id = &request.get_ref().im_tenant_id;
         if tenant_id == "*" {
             if actor.tenant_id != "*" {
@@ -143,8 +144,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<RoleBundleProjectionUpsert>,
     ) -> Result<Response<ProjectionAck>, Status> {
-        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         if actor.tenant_id != "*" {
             return Err(Status::permission_denied("control tenant mismatch"));
         }
@@ -157,8 +158,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         &self,
         request: Request<GetVersionsRequest>,
     ) -> Result<Response<ProjectionVersions>, Status> {
-        let actor = require_grpc_control(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::ProjectionWorker)?;
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         let ids = request.into_inner().im_tenant_ids;
         if ids.len() > 512 {
             return Err(Status::invalid_argument("too many projection tenants"));
@@ -301,7 +302,7 @@ mod tests {
             .verifying_key()
             .to_public_key_pem(Default::default())
             .unwrap();
-        let verifier = ConsoleControlVerifier::from_public_key(&public).unwrap();
+        let verifier = PlatformAssertionVerifier::from_public_key(&public).unwrap();
         (
             repo.clone(),
             TenantProjectionGrpcServer::new(repo, Some(verifier)),
@@ -341,6 +342,7 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+        // An employee subject is not a platform service: refused as unauthenticated.
         let employee = signed_request(
             request(),
             "app-a",
@@ -353,7 +355,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated
         );
         assert!(repo.credentials.lock().unwrap().is_empty());
         let ack = server
@@ -569,6 +571,7 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+        // An employee subject is not a platform service at all (no admin assertion exists).
         assert_eq!(
             server
                 .upsert_tenant(signed_request(
@@ -580,7 +583,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated
         );
         assert_eq!(
             server
@@ -588,7 +591,7 @@ mod tests {
                     body,
                     "tenant-a",
                     flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
-                    flare_im_service_kit::control_auth::CORE_ADMIN_AUDIENCE
+                    "flare-core-admin"
                 ))
                 .await
                 .unwrap_err()

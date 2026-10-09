@@ -3,7 +3,7 @@ use axum::{
     http::header,
     middleware,
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use std::sync::Arc;
 use utoipa::{
@@ -17,9 +17,10 @@ use utoipa::{
 
 use super::admin_auth_middleware::admin_auth_middleware;
 use super::admin_handler;
+use super::hooks_handler;
 use super::media_handler;
 use super::ops_handler::{self, AdminCapability, AdminCapabilityDownstream};
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_service_kit::clients::AdminGrpcClients;
 
 #[allow(dead_code)]
 #[derive(OpenApi)]
@@ -49,8 +50,20 @@ use flare_im_service_kit::clients::GrpcClients;
         ops_handler::kick_device,
         ops_handler::kick_tenant,
         ops_handler::get_tenant_runtime,
+        ops_handler::list_capability_catalog,
         ops_handler::list_tenant_capabilities,
+        ops_handler::set_tenant_capability_switch,
         ops_handler::list_plugins,
+        ops_handler::register_plugin,
+        ops_handler::deregister_plugin,
+        hooks_handler::list_hooks,
+        hooks_handler::create_hook,
+        hooks_handler::get_hook,
+        hooks_handler::update_hook,
+        hooks_handler::delete_hook,
+        hooks_handler::set_hook_status,
+        hooks_handler::get_hook_statistics,
+        hooks_handler::query_hook_executions,
     ),
     components(
         schemas(
@@ -107,8 +120,32 @@ use flare_im_service_kit::clients::GrpcClients;
             crate::application::admin_ops::AdminTenantRuntimeHttp,
             crate::application::admin_ops::AdminCapabilitySwitchHttp,
             crate::application::admin_ops::AdminTenantCapabilitiesHttp,
+            crate::application::admin_ops::AdminCapabilityDescriptorHttp,
+            crate::application::admin_ops::AdminCapabilityCatalogHttp,
+            crate::application::admin_ops::AdminTenantCapabilitySwitchHttpRequest,
+            crate::application::admin_ops::AdminCapabilitySwitchUpdateHttp,
             crate::application::admin_ops::AdminPluginHttp,
             crate::application::admin_ops::AdminPluginsHttp,
+            crate::application::admin_ops::AdminPluginRegisterHttpRequest,
+            crate::application::admin_ops::AdminPluginRegisterHttp,
+            crate::application::admin_ops::AdminPluginDeregisterHttpRequest,
+            crate::application::admin_ops::AdminPluginDeregisterHttp,
+            crate::application::admin_hooks::AdminHookTransportHttp,
+            crate::application::admin_hooks::AdminHookSelectorHttp,
+            crate::application::admin_hooks::AdminHookRetryPolicyHttp,
+            crate::application::admin_hooks::AdminProtoAnyHttp,
+            crate::application::admin_hooks::AdminHookExtensionBagHttp,
+            crate::application::admin_hooks::AdminHookHttp,
+            crate::application::admin_hooks::AdminHookDetailHttp,
+            crate::application::admin_hooks::AdminHooksPageHttp,
+            crate::application::admin_hooks::AdminHookCreateHttpRequest,
+            crate::application::admin_hooks::AdminHookUpdateHttpRequest,
+            crate::application::admin_hooks::AdminHookStatusHttpRequest,
+            crate::application::admin_hooks::AdminHookStatusHttp,
+            crate::application::admin_hooks::AdminHookDeleteHttp,
+            crate::application::admin_hooks::AdminHookStatisticsHttp,
+            crate::application::admin_hooks::AdminHookExecutionHttp,
+            crate::application::admin_hooks::AdminHookExecutionsPageHttp,
         )
     ),
     tags(
@@ -124,7 +161,7 @@ struct AdminApiDoc;
 /// `responses` 里。
 struct AdminRequestRejections;
 
-const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too)";
+const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)";
 const JSON_BODY_REJECTION: &str = "ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit";
 const QUERY_REJECTION: &str =
     "ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type";
@@ -264,9 +301,10 @@ fn api_docs_router() -> Router {
         )
 }
 
-/// `capability` 为 `None` 时（下游被显式关闭），租户运行时、能力开关、插件三条路由回 503。
+/// `capability` 为 `None` 时（下游被显式关闭），租户运行时、能力目录与开关、插件、Hook 治理
+/// 的路由回 503。Staff 验签器、审计效果与 Media 签名器由调用方以 `Extension` 挂在外层。
 pub fn create_admin_router(
-    clients: Arc<GrpcClients>,
+    clients: Arc<AdminGrpcClients>,
     capability: Option<AdminCapabilityDownstream>,
 ) -> Router {
     let admin_router = Router::new()
@@ -328,10 +366,42 @@ pub fn create_admin_router(
         .route("/tenant/kick-all", post(ops_handler::kick_tenant))
         .route("/tenant/runtime", get(ops_handler::get_tenant_runtime))
         .route(
+            "/capabilities/catalog",
+            get(ops_handler::list_capability_catalog),
+        )
+        .route(
             "/capabilities/tenant",
             get(ops_handler::list_tenant_capabilities),
         )
+        .route(
+            "/capabilities/tenant/{capability_id}",
+            put(ops_handler::set_tenant_capability_switch),
+        )
         .route("/plugins", get(ops_handler::list_plugins))
+        .route("/plugins/register", post(ops_handler::register_plugin))
+        .route("/plugins/deregister", post(ops_handler::deregister_plugin))
+        .route(
+            "/hooks",
+            get(hooks_handler::list_hooks).post(hooks_handler::create_hook),
+        )
+        .route(
+            "/hooks/{hook_id}",
+            get(hooks_handler::get_hook)
+                .put(hooks_handler::update_hook)
+                .delete(hooks_handler::delete_hook),
+        )
+        .route(
+            "/hooks/{hook_id}/status",
+            put(hooks_handler::set_hook_status),
+        )
+        .route(
+            "/hooks/{hook_id}/statistics",
+            get(hooks_handler::get_hook_statistics),
+        )
+        .route(
+            "/hooks/{hook_id}/executions",
+            get(hooks_handler::query_hook_executions),
+        )
         .layer(axum::Extension(clients))
         .layer(axum::Extension(AdminCapability::new(capability)))
         .route_layer(middleware::from_fn(admin_auth_middleware));

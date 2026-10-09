@@ -272,7 +272,7 @@ pub trait ThreadRepository: Send + Sync {
     ) -> Result<Vec<String>>;
 }
 
-/// 管理员只读仓储：每个方法显式接收租户（来自已验证的 admin 令牌），不读调用上下文，
+/// 管理员只读仓储：每个方法显式接收租户（来自已验证的 Staff 上下文），不读调用上下文，
 /// 也不做成员资格校验。会话不属于该租户时与不存在同样处理（`None`）。
 ///
 /// 用 `async_trait`：gRPC 处理器对实现泛型持有并跨线程执行，future 必须是 `Send`。

@@ -260,7 +260,7 @@ mod credential_postgres_tests {
         let handler = crate::interface::grpc::TenantProjectionGrpcServer::new(
             repo.clone(),
             Some(
-                flare_im_service_kit::control_auth::ConsoleControlVerifier::from_public_key(
+                flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_public_key(
                     &public,
                 )
                 .unwrap(),
@@ -331,13 +331,16 @@ mod credential_postgres_tests {
             client.upsert_credentials(forged).await.unwrap_err().code(),
             tonic::Code::Unauthenticated
         );
+        // Only the two platform service subjects may sign a control assertion: the verifier
+        // (`PlatformAssertionVerifier::verify_token`) refuses any other subject, an employee
+        // included, as UNAUTHENTICATED before any tenant check.
         assert_eq!(
             client
                 .upsert_credentials(signed(payload(), "employee-7", "rpc-app", audience))
                 .await
                 .unwrap_err()
                 .code(),
-            tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated
         );
         assert_eq!(
             client

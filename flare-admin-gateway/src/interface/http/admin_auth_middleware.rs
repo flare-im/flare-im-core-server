@@ -1,17 +1,34 @@
+//! The admin boundary (v4 R3-2): one Staff `x-flare-ctx`, signed by the Social gateway admin
+//! partition with the Cell key registered as `kid=gateway`, is the only identity on
+//! `/api/v1/admin/**`.
+//!
+//! Order of checks: exactly one `x-flare-ctx` (401), verified Staff with an accepted kid (401
+//! `ADMIN_STAFF_CONTEXT_INVALID`), the route exists in the shared Core admin route table (404),
+//! the signed permission is the route's code (403 `ADMIN_PERMISSION_DENIED`), a platform-only
+//! route is called by platform staff (403 `ADMIN_SCOPE_DENIED`), the signed application is one
+//! concrete tenant (403 `ADMIN_IDENTITY_REQUIRED`), and a write route carries the audit headers
+//! (403). Before the route checks, on reads too, the audit headers must be within their limits
+//! (400 `ADMIN_AUDIT_HEADER_TOO_LONG`) and `x-audit-reason`, when present, must be one header of
+//! percent-encoded UTF-8 (400 `ADMIN_AUDIT_REASON_INVALID`); see
+//! [`audit_reason`](super::admin_contract::audit_reason). The gateway never reads `x-tenant-id`
+//! or `x-actor-id`: tenant and actor come from the signed claims only, and every identity header
+//! is stripped before the handlers run.
 use axum::{
     extract::Request,
-    http::{HeaderMap, HeaderValue, Method},
+    http::{HeaderMap, Method},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use flare_core_base::context::keys;
-use flare_im_service_kit::control_auth::{
-    CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, ControlActorKind, VerifiedControlActor,
-    bearer_token,
-};
 use flare_im_service_kit::gateway_auth::{auth_error_response, header_value};
+use flare_im_service_kit::staff_context::VerifiedStaff;
+use flare_server_core::auth::core_admin::{self, CoreAdminRoute};
+use flare_server_core::grpc::middleware::signed_context::{
+    SIGNED_CONTEXT_HEADER, verify_signed_context_metadata,
+};
 use flare_server_core::{
-    AuthError, AuthenticatedPrincipal,
+    AuthError, AuthenticatedPrincipal, SignedActorType, SignedContextVerifier, VerifiedContext,
+    context::Ctx,
     error::{ErrorBuilder, ErrorCode},
     http::HttpApiError,
 };
@@ -19,65 +36,117 @@ use std::sync::Arc;
 use tonic::Status;
 
 use super::admin_contract::{
-    AUDIT_REASON_HEADER, IDEMPOTENCY_KEY_HEADER, MAX_AUDIT_REASON_BYTES, MAX_CORRELATION_ID_BYTES,
+    AUDIT_REASON_HEADER, AuditReasonError, IDEMPOTENCY_KEY_HEADER, MAX_AUDIT_REASON_BYTES,
+    MAX_AUDIT_REASON_HEADER_BYTES, MAX_CORRELATION_ID_BYTES, audit_reason,
 };
 
 const GATEWAY_NAME: &str = "admin-gateway";
 
-/// The admin assertion this middleware has just verified, kept verbatim for the
-/// downstream admin RPCs (Conversation, Online, Capability re-verify it themselves).
+/// The Staff context this middleware has just verified, kept verbatim for the downstream
+/// admin RPCs (Conversation, Online, Capability and the Storage Reader re-verify it) and as
+/// the context of the audit effect events.
 ///
-/// The gateway holds no signing key, so forwarding the unchanged assertion is the
-/// only way it can speak for the employee; `Debug` never prints the token.
+/// The gateway signs nothing on that path, so forwarding the unchanged token is the only way
+/// it can speak for the employee; `Debug` never prints the token.
 #[derive(Clone)]
-pub struct VerifiedAdminAssertion(Arc<str>);
+pub struct VerifiedStaffContext(Arc<VerifiedStaff>);
 
-impl VerifiedAdminAssertion {
+impl VerifiedStaffContext {
+    pub fn new(staff: VerifiedStaff) -> Self {
+        Self(Arc::new(staff))
+    }
+
+    /// The verified token, byte for byte.
     pub fn token(&self) -> &str {
+        self.0.token()
+    }
+
+    /// The context the verifier built: request id and trace id from the claims, the
+    /// `VerifiedContext` marker with the claims and the token.
+    pub fn ctx(&self) -> &Ctx {
+        &self.0.ctx
+    }
+
+    pub fn staff(&self) -> &VerifiedStaff {
         &self.0
     }
-}
 
-impl std::fmt::Debug for VerifiedAdminAssertion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("VerifiedAdminAssertion(<redacted>)")
+    pub fn tenant_id(&self) -> &str {
+        &self.0.tenant_id
+    }
+
+    pub fn actor_id(&self) -> &str {
+        &self.0.actor_id
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.0.request_id
     }
 }
 
+impl std::fmt::Debug for VerifiedStaffContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedStaffContext(<redacted>)")
+    }
+}
+
+/// The resolved entry of the shared Core admin route table, for handlers that log the
+/// permission code or branch on the write flag.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminRoute(pub &'static CoreAdminRoute);
+
 pub async fn admin_auth_middleware(
-    axum::extract::Extension(verifier): axum::extract::Extension<Arc<ConsoleControlVerifier>>,
+    axum::extract::Extension(verifier): axum::extract::Extension<Arc<SignedContextVerifier>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let (actor, assertion) = match verified_admin_actor(&verifier, request.headers()) {
-        Ok(verified) => verified,
-        Err(status) => return control_status_response(status),
+    let staff = match verified_staff(&verifier, request.headers()) {
+        Ok(staff) => staff,
+        Err(rejection) => return *rejection,
     };
     if let Some((name, max)) = audit_header_too_long(request.headers()) {
-        return HttpApiError(
-            ErrorBuilder::new(ErrorCode::HttpBadRequest, "ADMIN_AUDIT_HEADER_TOO_LONG")
-                .details(format!("{name} must be at most {max} bytes"))
-                .build_error(),
-        )
-        .into_response();
+        return bad_request(
+            "ADMIN_AUDIT_HEADER_TOO_LONG",
+            format!("{name} must be at most {max} bytes"),
+        );
     }
-    if let Err(status) = authorize_admin_request(
+    match audit_reason(request.headers()) {
+        Ok(_) => {}
+        Err(AuditReasonError::TooLong) => {
+            return bad_request(
+                "ADMIN_AUDIT_HEADER_TOO_LONG",
+                format!(
+                    "{AUDIT_REASON_HEADER} must be at most {MAX_AUDIT_REASON_BYTES} bytes once percent-decoded"
+                ),
+            );
+        }
+        Err(AuditReasonError::Invalid) => {
+            return bad_request(
+                "ADMIN_AUDIT_REASON_INVALID",
+                format!("{AUDIT_REASON_HEADER} must be one header of percent-encoded UTF-8"),
+            );
+        }
+    }
+    // Axum's nested admin router passes the prefix-stripped path here.
+    let route = match authorize_admin_request(
         request.method(),
         request.uri().path(),
         request.headers(),
-        &actor,
+        &staff,
     ) {
-        return control_status_response(status);
-    }
+        Ok(route) => route,
+        Err(rejection) => return *rejection,
+    };
 
-    // Downstream handlers still consume a request Context built from headers;
-    // replace every identity-bearing legacy value with verified token claims.
+    // Downstream handlers never read identity from headers; drop every identity-bearing
+    // value so a forged one cannot shape a legacy context either.
     for name in [
         keys::USER_ID,
         keys::TENANT_ID,
         keys::ACTOR_ID,
         keys::DEVICE_ID,
         keys::SESSION_ID,
+        "authorization",
     ] {
         request.headers_mut().remove(name);
     }
@@ -90,55 +159,75 @@ pub async fn admin_auth_middleware(
     for name in untrusted_actor_headers {
         request.headers_mut().remove(name);
     }
-    let Ok(subject) = HeaderValue::from_str(&actor.subject) else {
-        return control_status_response(Status::unauthenticated("invalid control actor"));
-    };
-    let Ok(tenant) = HeaderValue::from_str(&actor.tenant_id) else {
-        return control_status_response(Status::unauthenticated("invalid control tenant"));
-    };
-    request.headers_mut().insert(keys::USER_ID, subject.clone());
-    request.headers_mut().insert(keys::ACTOR_ID, subject);
-    request.headers_mut().insert(keys::TENANT_ID, tenant);
     request.extensions_mut().insert(AuthenticatedPrincipal {
-        user_id: actor.subject.clone(),
-        tenant_id: Some(actor.tenant_id.clone()),
+        user_id: staff.actor_id.clone(),
+        tenant_id: Some(staff.tenant_id.clone()),
         device_id: None,
         app_id: None,
         expires_at: None,
         scopes: vec!["admin_gateway:admin".into()],
         metadata: Default::default(),
     });
-    request.extensions_mut().insert(assertion);
+    request.extensions_mut().insert(AdminRoute(route));
+    request
+        .extensions_mut()
+        .insert(VerifiedStaffContext::new(staff));
 
     next.run(request).await
 }
 
-fn verified_admin_actor(
-    verifier: &ConsoleControlVerifier,
+/// A refusal, ready to send. Boxed: the response is large and the success path is the common one.
+type Rejection = Box<Response>;
+
+/// Exactly one `x-flare-ctx`, verified as a Staff actor by a key id the verifier accepts.
+/// The permission and tenant are checked against the route afterwards.
+fn verified_staff(
+    verifier: &SignedContextVerifier,
     headers: &HeaderMap,
-) -> Result<(VerifiedControlActor, VerifiedAdminAssertion), Status> {
-    let mut auth_values = headers.get_all("authorization").iter();
-    let value = auth_values
-        .next()
-        .ok_or_else(|| Status::unauthenticated("admin control token required"))?;
-    if auth_values.next().is_some() {
-        return Err(Status::unauthenticated("duplicate authorization"));
+) -> Result<VerifiedStaff, Rejection> {
+    let supplied = headers.get_all(SIGNED_CONTEXT_HEADER).iter().count();
+    if supplied == 0 {
+        return Err(Box::new(auth_error_response(
+            AuthError::MissingToken,
+            GATEWAY_NAME,
+        )));
     }
-    let token = bearer_token(
-        value
-            .to_str()
-            .map_err(|_| Status::unauthenticated("invalid authorization"))?,
-    )
-    .ok_or_else(|| Status::unauthenticated("bearer admin token required"))?;
-    let actor = verifier.verify_token(token, "admin", CORE_ADMIN_AUDIENCE)?;
-    actor.require_kind(ControlActorKind::Employee)?;
-    actor.require_tenant(&actor.tenant_id)?;
-    Ok((actor, VerifiedAdminAssertion(Arc::from(token))))
+    if supplied > 1 {
+        return Err(unauthenticated(
+            "ADMIN_STAFF_CONTEXT_INVALID",
+            "duplicate staff context",
+        ));
+    }
+    let metadata = tonic::metadata::MetadataMap::from_headers(headers.clone());
+    let ctx = verify_signed_context_metadata(&metadata, verifier).map_err(|_| {
+        unauthenticated(
+            "ADMIN_STAFF_CONTEXT_INVALID",
+            "staff context is missing, malformed, expired, or signed by a key this gateway does not accept for staff",
+        )
+    })?;
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .filter(|claims| claims.actor_type == SignedActorType::Staff)
+        .cloned()
+        .ok_or_else(|| {
+            unauthenticated(
+                "ADMIN_STAFF_CONTEXT_INVALID",
+                "the verified context is not a staff context",
+            )
+        })?;
+    VerifiedStaff::from_verified(&claims, ctx).map_err(|_| {
+        forbidden(
+            "ADMIN_IDENTITY_REQUIRED",
+            "staff context must name one concrete application",
+        )
+    })
 }
 
-/// 进审计日志的请求头（原因、请求号、幂等键）与各自的长度上限（字节）。
+/// 进审计日志的请求头（原因、请求号、幂等键）与各自原始头值的长度上限（字节）。原因另有
+/// 解码后的上限，见 [`audit_reason`]。
 const AUDIT_HEADER_LIMITS: [(&str, usize); 3] = [
-    (AUDIT_REASON_HEADER, MAX_AUDIT_REASON_BYTES),
+    (AUDIT_REASON_HEADER, MAX_AUDIT_REASON_HEADER_BYTES),
     (keys::REQUEST_ID, MAX_CORRELATION_ID_BYTES),
     (IDEMPOTENCY_KEY_HEADER, MAX_CORRELATION_ID_BYTES),
 ];
@@ -154,126 +243,143 @@ fn audit_header_too_long(headers: &HeaderMap) -> Option<(&'static str, usize)> {
     })
 }
 
-fn control_status_response(status: Status) -> Response {
+fn bad_request(reason: &'static str, message: String) -> Response {
+    HttpApiError(
+        ErrorBuilder::new(ErrorCode::HttpBadRequest, reason)
+            .details(message)
+            .build_error(),
+    )
+    .into_response()
+}
+
+fn unauthenticated(reason: &'static str, message: &str) -> Rejection {
+    Box::new(
+        HttpApiError(
+            ErrorBuilder::new(ErrorCode::HttpUnauthorized, reason)
+                .details(message)
+                .build_error(),
+        )
+        .into_response(),
+    )
+}
+
+fn forbidden(reason: &'static str, message: &str) -> Rejection {
+    tracing::debug!(reason, message, "admin request refused");
+    Box::new(auth_error_response(
+        AuthError::Forbidden(reason.to_owned()),
+        GATEWAY_NAME,
+    ))
+}
+
+fn not_found() -> Rejection {
+    Box::new(HttpApiError::not_found("no such admin route").into_response())
+}
+
+fn control_status_response(status: Status) -> Rejection {
     let error = if status.code() == tonic::Code::Unauthenticated {
         AuthError::InvalidToken(status.message().to_owned())
     } else {
         AuthError::Forbidden(status.message().to_owned())
     };
-    auth_error_response(error, GATEWAY_NAME)
+    Box::new(auth_error_response(error, GATEWAY_NAME))
 }
 
+/// The route table decides what the request is; the signed grant decides whether this
+/// employee may do it. Returns the resolved route for the handlers.
 fn authorize_admin_request(
     method: &Method,
     path: &str,
     headers: &HeaderMap,
-    actor: &VerifiedControlActor,
-) -> Result<(), Status> {
-    let tenant_id = header_value(headers, keys::TENANT_ID)
-        .ok_or_else(|| Status::permission_denied("tenant context is required for admin api"))?;
-    if tenant_id == "*" || headers.get_all(keys::TENANT_ID).iter().count() != 1 {
-        return Err(Status::permission_denied(
-            "one concrete tenant is required for admin api",
+    staff: &VerifiedStaff,
+) -> Result<&'static CoreAdminRoute, Rejection> {
+    let route = core_admin::resolve(method.as_str(), path).ok_or_else(not_found)?;
+    if staff.permission.as_deref() != Some(route.permission) {
+        return Err(forbidden(
+            "ADMIN_PERMISSION_DENIED",
+            "the signed staff permission is not this route's code",
         ));
     }
-    actor.require_tenant(&tenant_id)?;
-    if headers.get_all(keys::ACTOR_ID).iter().count() > 1
-        || header_value(headers, keys::ACTOR_ID).is_some_and(|id| id != actor.subject)
-    {
-        return Err(Status::permission_denied(
-            "admin actor header does not match token",
+    if route.platform_only && !staff.is_platform_staff() {
+        return Err(forbidden(
+            "ADMIN_SCOPE_DENIED",
+            "this route is for platform staff only",
         ));
     }
-    if !is_admin_write_request(method, path) {
-        return Ok(());
+    if !route.write {
+        return Ok(route);
     }
-
-    if header_value(headers, keys::ACTOR_ID).as_deref() != Some(actor.subject.as_str()) {
-        return Err(Status::permission_denied(
-            "verified actor header is required for admin write api",
-        ));
+    // A reason that is blank once decoded counts as missing; the middleware has already
+    // refused a malformed one with 400.
+    if !matches!(audit_reason(headers), Ok(Some(_))) {
+        return Err(control_status_response(Status::permission_denied(
+            "audit reason is required for admin write api",
+        )));
     }
-    require_header(
-        headers,
-        AUDIT_REASON_HEADER,
-        "audit reason is required for admin write api",
-    )?;
-
     if header_value(headers, IDEMPOTENCY_KEY_HEADER).is_none()
         && header_value(headers, keys::REQUEST_ID).is_none()
     {
-        return Err(Status::permission_denied(
+        return Err(control_status_response(Status::permission_denied(
             "x-request-id or idempotency-key is required for admin write api",
-        ));
+        )));
     }
-
-    Ok(())
-}
-
-fn require_header(
-    headers: &HeaderMap,
-    name: &str,
-    error_message: &'static str,
-) -> Result<(), Status> {
-    header_value(headers, name)
-        .map(|_| ())
-        .ok_or_else(|| Status::permission_denied(error_message))
-}
-
-fn is_admin_write_request(method: &Method, path: &str) -> bool {
-    // Axum's nested admin router passes the prefix-stripped path here.
-    // These query POSTs are declared read-only by the admin contract;
-    // message searches are audited by the Control Plane before this call.
-    if *method == Method::POST && matches!(path, "/messages/query" | "/messages/write-ledger/query")
-    {
-        return false;
-    }
-    matches!(
-        *method,
-        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-    )
+    Ok(route)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderValue, StatusCode};
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use flare_server_core::auth::{KeySet, kid};
+    use flare_server_core::{SignedContextIdentity, SignedContextSigner};
 
-    fn signed_headers(
-        subject: &str,
-        tenant: &str,
-        use_name: &str,
-        audience: &str,
-    ) -> (ConsoleControlVerifier, HeaderMap) {
-        let key = SigningKey::from_bytes(&[89; 32]);
-        let private = key.to_pkcs8_pem(Default::default()).unwrap();
-        let public = key
-            .verifying_key()
-            .to_public_key_pem(Default::default())
-            .unwrap();
-        let signer = flare_server_core::TokenService::from_ed25519_private_key(
-            &private,
-            flare_im_service_kit::control_auth::PLATFORM_ISSUER,
-            60,
-        )
-        .unwrap();
-        let token = signer
-            .generate_with_ed25519(subject, Some(tenant), use_name, audience)
-            .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    /// A gateway key, a hook key, and a verifier holding both with Staff pinned to the gateway.
+    fn keys() -> (
+        SignedContextSigner,
+        SignedContextSigner,
+        SignedContextVerifier,
+    ) {
+        let pem = |seed: u8| {
+            let key = SigningKey::from_bytes(&[seed; 32]);
+            (
+                key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+                key.verifying_key()
+                    .to_public_key_pem(Default::default())
+                    .unwrap(),
+            )
+        };
+        let (gateway_private, gateway_public) = pem(89);
+        let (hook_private, hook_public) = pem(90);
+        let mut set = KeySet::empty();
+        set.insert(kid::GATEWAY, &gateway_public).unwrap();
+        set.insert(kid::HOOK, &hook_public).unwrap();
         (
-            ConsoleControlVerifier::from_public_key(&public).unwrap(),
-            headers,
+            SignedContextSigner::from_private_key(&gateway_private)
+                .unwrap()
+                .with_kid(kid::GATEWAY)
+                .unwrap(),
+            SignedContextSigner::from_private_key(&hook_private)
+                .unwrap()
+                .with_kid(kid::HOOK)
+                .unwrap(),
+            SignedContextVerifier::from_key_set(set).require_staff_kid([kid::GATEWAY]),
         )
     }
-    fn employee() -> VerifiedControlActor {
-        VerifiedControlActor {
-            subject: "employee-1".into(),
-            tenant_id: "tenant-a".into(),
-            kind: ControlActorKind::Employee,
-        }
+
+    fn identity(tenant: &str, permission: &str, org_id: Option<&str>) -> SignedContextIdentity {
+        SignedContextIdentity::new(SignedActorType::Staff, "employee-1", tenant, "req-1")
+            .with_staff_grant(org_id.map(str::to_owned), Some(permission.to_owned()), 1)
+    }
+
+    fn headers_with(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(SIGNED_CONTEXT_HEADER, token.parse().unwrap());
+        headers
+    }
+
+    fn status_of(response: &Response) -> StatusCode {
+        response.status()
     }
 
     #[test]
@@ -302,118 +408,165 @@ mod tests {
     }
 
     #[test]
-    fn admin_read_requires_one_exact_tenant() {
-        let actor = employee();
-        let mut headers = HeaderMap::new();
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-a"));
-        authorize_admin_request(&Method::GET, "/api/v1/admin/messages/m1", &headers, &actor)
+    fn the_boundary_admits_only_a_gateway_signed_staff_context() {
+        let (gateway, hook, verifier) = keys();
+        let token = gateway
+            .sign(&identity("tenant-a", "core:users:read", None))
             .unwrap();
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-b"));
-        assert!(
-            authorize_admin_request(&Method::GET, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
+        let staff = verified_staff(&verifier, &headers_with(&token)).unwrap();
+        assert_eq!(staff.actor_id, "employee-1");
+        assert_eq!(staff.tenant_id, "tenant-a");
+        assert_eq!(staff.token(), token);
+        assert!(!format!("{:?}", VerifiedStaffContext::new(staff)).contains(&token));
+
+        // No context, two contexts, a hook-signed staff context, a service context, and a
+        // staff context without an application.
+        assert_eq!(
+            status_of(&verified_staff(&verifier, &HeaderMap::new()).unwrap_err()),
+            StatusCode::UNAUTHORIZED
         );
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("*"));
-        assert!(
-            authorize_admin_request(&Method::GET, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
+        let mut duplicated = headers_with(&token);
+        duplicated.append(SIGNED_CONTEXT_HEADER, token.parse().unwrap());
+        assert_eq!(
+            status_of(&verified_staff(&verifier, &duplicated).unwrap_err()),
+            StatusCode::UNAUTHORIZED
         );
-        headers.remove(keys::TENANT_ID);
-        assert!(
-            authorize_admin_request(&Method::GET, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
+        let forged = hook
+            .sign(&identity("tenant-a", "core:users:read", None))
+            .unwrap();
+        assert_eq!(
+            status_of(&verified_staff(&verifier, &headers_with(&forged)).unwrap_err()),
+            StatusCode::UNAUTHORIZED
         );
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-a"));
-        headers.append(keys::TENANT_ID, HeaderValue::from_static("tenant-b"));
-        assert!(
-            authorize_admin_request(&Method::GET, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
+        let service = gateway
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::Service,
+                "flare-social-bridge",
+                "tenant-a",
+                "req-2",
+            ))
+            .unwrap();
+        assert_eq!(
+            status_of(&verified_staff(&verifier, &headers_with(&service)).unwrap_err()),
+            StatusCode::UNAUTHORIZED
+        );
+        let platform_scoped = gateway
+            .sign(&identity("", "core:users:read", None))
+            .unwrap();
+        assert_eq!(
+            status_of(&verified_staff(&verifier, &headers_with(&platform_scoped)).unwrap_err()),
+            StatusCode::FORBIDDEN
         );
     }
 
+    fn staff_with(permission: &str, org_id: Option<&str>) -> VerifiedStaff {
+        let (gateway, _, verifier) = keys();
+        let token = gateway
+            .sign(&identity("tenant-a", permission, org_id))
+            .unwrap();
+        verified_staff(&verifier, &headers_with(&token)).unwrap()
+    }
+
     #[test]
-    fn admin_write_requires_verified_actor_and_audit_context() {
-        let actor = employee();
+    fn the_route_table_and_the_signed_permission_decide() {
+        let headers = HeaderMap::new();
+        let staff = staff_with("core:messages:read", Some("org-1"));
+        let route =
+            authorize_admin_request(&Method::GET, "/messages/m1", &headers, &staff).unwrap();
+        assert_eq!(route.permission, "core:messages:read");
+        assert!(!route.write);
+        // The query POSTs are reads by contract: no audit headers needed.
+        assert!(
+            authorize_admin_request(&Method::POST, "/messages/query", &headers, &staff).is_ok()
+        );
+        // Another route's code.
+        assert_eq!(
+            status_of(
+                &authorize_admin_request(&Method::GET, "/conversations", &headers, &staff)
+                    .unwrap_err()
+            ),
+            StatusCode::FORBIDDEN
+        );
+        // Not an admin route, an unsafe path, an invalid parameter.
+        for (method, path) in [
+            (Method::GET, "/messages"),
+            (Method::GET, "/messages/%FF"),
+            (Method::GET, "/messages/m 1"),
+            (Method::DELETE, "/messages/m1"),
+        ] {
+            assert_eq!(
+                status_of(&authorize_admin_request(&method, path, &headers, &staff).unwrap_err()),
+                StatusCode::NOT_FOUND,
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_routes_require_audit_context_and_platform_routes_platform_staff() {
+        let staff = staff_with("core:users:kick", Some("org-1"));
         let mut headers = HeaderMap::new();
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-a"));
-        assert!(
-            authorize_admin_request(&Method::POST, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
+        assert_eq!(
+            status_of(
+                &authorize_admin_request(&Method::POST, "/users/u1/kick", &headers, &staff)
+                    .unwrap_err()
+            ),
+            StatusCode::FORBIDDEN
         );
-        headers.insert(keys::ACTOR_ID, HeaderValue::from_static("attacker"));
-        assert!(
-            authorize_admin_request(&Method::POST, "/api/v1/admin/messages/m1", &headers, &actor)
-                .is_err()
-        );
-        headers.insert(keys::ACTOR_ID, HeaderValue::from_static("employee-1"));
-        headers.insert(AUDIT_REASON_HEADER, HeaderValue::from_static("ops-audit"));
         headers.insert(keys::REQUEST_ID, HeaderValue::from_static("request-a"));
-        authorize_admin_request(&Method::POST, "/api/v1/admin/messages/m1", &headers, &actor)
-            .unwrap();
-    }
+        // A reason that is blank once percent-decoded is no reason.
+        headers.insert(AUDIT_REASON_HEADER, HeaderValue::from_static("%20%09"));
+        assert_eq!(
+            status_of(
+                &authorize_admin_request(&Method::POST, "/users/u1/kick", &headers, &staff)
+                    .unwrap_err()
+            ),
+            StatusCode::FORBIDDEN
+        );
+        headers.remove(keys::REQUEST_ID);
+        headers.insert(AUDIT_REASON_HEADER, HeaderValue::from_static("ops-audit"));
+        assert_eq!(
+            status_of(
+                &authorize_admin_request(&Method::POST, "/users/u1/kick", &headers, &staff)
+                    .unwrap_err()
+            ),
+            StatusCode::FORBIDDEN
+        );
+        headers.insert(keys::REQUEST_ID, HeaderValue::from_static("request-a"));
+        let route =
+            authorize_admin_request(&Method::POST, "/users/u1/kick", &headers, &staff).unwrap();
+        assert!(route.write);
+        // A tenant or actor header is neither required nor consulted.
+        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-z"));
+        headers.insert(keys::ACTOR_ID, HeaderValue::from_static("attacker"));
+        assert!(authorize_admin_request(&Method::POST, "/users/u1/kick", &headers, &staff).is_ok());
 
-    #[test]
-    fn message_query_post_is_read_only_but_other_posts_still_require_audit_context() {
-        let actor = employee();
-        let mut headers = HeaderMap::new();
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-a"));
-        authorize_admin_request(&Method::POST, "/messages/query", &headers, &actor).unwrap();
-        authorize_admin_request(
-            &Method::POST,
-            "/messages/write-ledger/query",
-            &headers,
-            &actor,
-        )
-        .unwrap();
+        // Plugin registration is platform-only: organization staff are refused even with the code.
+        let mut write_headers = HeaderMap::new();
+        write_headers.insert(AUDIT_REASON_HEADER, HeaderValue::from_static("ops-audit"));
+        write_headers.insert(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("idem-1"));
+        let org_staff = staff_with("core:plugins:write", Some("org-1"));
+        assert_eq!(
+            status_of(
+                &authorize_admin_request(
+                    &Method::POST,
+                    "/plugins/register",
+                    &write_headers,
+                    &org_staff
+                )
+                .unwrap_err()
+            ),
+            StatusCode::FORBIDDEN
+        );
+        let platform_staff = staff_with("core:plugins:write", None);
         assert!(
-            authorize_admin_request(&Method::POST, "/messages/export", &headers, &actor).is_err()
-        );
-        headers.insert(keys::TENANT_ID, HeaderValue::from_static("tenant-b"));
-        assert!(
-            authorize_admin_request(&Method::POST, "/messages/query", &headers, &actor).is_err()
-        );
-    }
-
-    #[test]
-    fn admin_boundary_accepts_only_signed_employee_admin_audience() {
-        let (verifier, headers) =
-            signed_headers("employee-1", "tenant-a", "admin", CORE_ADMIN_AUDIENCE);
-        let (actor, assertion) = verified_admin_actor(&verifier, &headers).unwrap();
-        assert_eq!(actor.subject, "employee-1");
-        // The forwarded assertion is exactly the bearer token that was verified.
-        let bearer = headers.get("authorization").unwrap().to_str().unwrap();
-        assert_eq!(Some(assertion.token()), bearer.strip_prefix("Bearer "));
-        assert!(!format!("{assertion:?}").contains(assertion.token()));
-        let (_, headers) = signed_headers("employee-1", "tenant-a", "control", CORE_ADMIN_AUDIENCE);
-        assert_eq!(
-            verified_admin_actor(&verifier, &headers)
-                .unwrap_err()
-                .code(),
-            tonic::Code::Unauthenticated
-        );
-        let (_, headers) = signed_headers(
-            "employee-1",
-            "tenant-a",
-            "admin",
-            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
-        );
-        assert_eq!(
-            verified_admin_actor(&verifier, &headers)
-                .unwrap_err()
-                .code(),
-            tonic::Code::Unauthenticated
-        );
-        let (_, headers) = signed_headers(
-            flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
-            "tenant-a",
-            "admin",
-            CORE_ADMIN_AUDIENCE,
-        );
-        assert_eq!(
-            verified_admin_actor(&verifier, &headers)
-                .unwrap_err()
-                .code(),
-            tonic::Code::PermissionDenied
+            authorize_admin_request(
+                &Method::POST,
+                "/plugins/register",
+                &write_headers,
+                &platform_staff
+            )
+            .is_ok()
         );
     }
 }

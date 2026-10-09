@@ -1,9 +1,9 @@
-//! `GET /api/v1/admin/gateway/config` 的认证与限流两节：如实报告 Admin Gateway 只用 Console
-//! Ed25519 公钥验签、不做请求限流，不转述 Admin 作用域下不读取的 `FLARE_ADMIN_GATEWAY_AUTH_*`
-//! 与 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`。
+//! `GET /api/v1/admin/gateway/config` 的认证与限流两节：如实报告 Admin Gateway 只验网关签的
+//! Staff 上下文（Cell Ed25519 公钥集）、不做请求限流，不转述 Admin 作用域下不读取的
+//! `FLARE_ADMIN_GATEWAY_AUTH_*` 与 `FLARE_ADMIN_GATEWAY_RATE_LIMIT_*`。
 //!
-//! Control 原样转发这份快照，并在 flare-social 的管理契约里登记了它的结构，所以这里同时钉住
-//! 响应里 `auth` 的字段集与 OpenAPI 的 `AdminAuthConfigSnapshot` 字段集。
+//! 平台原样转发这份快照并登记了它的结构，所以这里同时钉住响应里 `auth` 的字段集与 OpenAPI 的
+//! `AdminAuthConfigSnapshot` 字段集。
 mod common;
 
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ fn settings_with_unused_hook() -> GatewaySettings {
 }
 
 #[tokio::test]
-async fn gateway_config_reports_console_ed25519_and_no_hook() {
+async fn gateway_config_reports_staff_context_ed25519_and_no_hook() {
     let h = harness(true).await;
     let router = h
         .router
@@ -46,7 +46,7 @@ async fn gateway_config_reports_console_ed25519_and_no_hook() {
 
     let (status, body) = send(
         &router,
-        admin_request("GET", "/api/v1/admin/gateway/config", &h.token),
+        admin_request("GET", "/api/v1/admin/gateway/config", &h.gateway),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -65,7 +65,7 @@ async fn gateway_config_reports_console_ed25519_and_no_hook() {
     assert_eq!(
         data["auth"],
         json!({
-            "mode": "console_ed25519",
+            "mode": "staff_context_ed25519",
             "hook_url": null,
             "hook_timeout_ms": 0,
             "hook_secret_header": "",
@@ -93,16 +93,10 @@ async fn gateway_config_reports_console_ed25519_and_no_hook() {
         assert!(!rendered.contains(unused), "{unused} leaked: {rendered}");
     }
 
-    // 未经 admin 认证仍是 401：快照本身也只对已验过的 admin 断言开放。
+    // 未经 Staff 认证仍是 401：快照本身也只对已验过的 Staff 上下文开放。
     let (status, _) = send(
         &router,
-        request(
-            "GET",
-            "/api/v1/admin/gateway/config",
-            None,
-            Some(TENANT),
-            &[],
-        ),
+        request("GET", "/api/v1/admin/gateway/config", None, &[]),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -113,7 +107,7 @@ async fn openapi_pins_the_auth_snapshot_fields() {
     let h = harness(true).await;
     let (status, doc) = send(
         &h.router,
-        request("GET", "/api-doc/openapi.json", None, None, &[]),
+        request("GET", "/api-doc/openapi.json", None, &[]),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -132,5 +126,5 @@ async fn openapi_pins_the_auth_snapshot_fields() {
     let description = schema["properties"]["mode"]["description"]
         .as_str()
         .unwrap_or_default();
-    assert!(description.contains("console_ed25519"), "{schema}");
+    assert!(description.contains("staff_context_ed25519"), "{schema}");
 }

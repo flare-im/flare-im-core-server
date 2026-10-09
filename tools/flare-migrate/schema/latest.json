@@ -116,6 +116,17 @@
     },
     {
       "collation": "default",
+      "default": "''::text",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "api_version",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
+      "collation": "default",
       "default": null,
       "generated": "",
       "identity": "",
@@ -288,6 +299,17 @@
       "name": "capability_id",
       "not_null": false,
       "table": "capability_audit_log",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "capability_id",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
       "type": "text"
     },
     {
@@ -762,6 +784,17 @@
       "not_null": true,
       "table": "alert_history",
       "type": "double precision"
+    },
+    {
+      "collation": "default",
+      "default": "'{}'::text[]",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "declared_operations",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text[]"
     },
     {
       "collation": null,
@@ -1242,6 +1275,17 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "grpc_authority",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "hook_id",
       "not_null": false,
       "table": "hook_configs",
@@ -1523,6 +1567,17 @@
       "type": "character varying(12)"
     },
     {
+      "collation": null,
+      "default": "'{}'::jsonb",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "labels",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "jsonb"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -1532,6 +1587,17 @@
       "not_null": false,
       "table": "message_write_ledger",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "last_healthy_at",
+      "not_null": false,
+      "table": "capability_plugin_endpoints",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -1663,6 +1729,17 @@
       "name": "lifecycle_state",
       "not_null": true,
       "table": "conversations",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": "''::text",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "manifest_sha256",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
       "type": "text"
     },
     {
@@ -2216,6 +2293,28 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": "''::text",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_version",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": "'{}'::jsonb",
       "generated": "",
@@ -2335,6 +2434,17 @@
       "not_null": true,
       "table": "media_references",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "registered_at",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -2500,6 +2610,17 @@
       "not_null": true,
       "table": "pinned_messages",
       "type": "integer"
+    },
+    {
+      "collation": "default",
+      "default": "''::text",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "seat_model",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "text"
     },
     {
       "collation": null,
@@ -2807,6 +2928,17 @@
       "name": "tenant_id",
       "not_null": true,
       "table": "capability_audit_log",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
       "type": "text"
     },
     {
@@ -3229,6 +3361,17 @@
     },
     {
       "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "unverified",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
@@ -3236,6 +3379,17 @@
       "name": "updated_at",
       "not_null": false,
       "table": "alert_rules",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
+      "table": "capability_plugin_endpoints",
       "type": "timestamp with time zone"
     },
     {
@@ -3627,6 +3781,96 @@
       "name": "capability_audit_log_pkey",
       "table": "capability_audit_log",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(grpc_authority) >= 1) AND (char_length(grpc_authority) <= 512)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_authority_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(capability_id) >= 1) AND (char_length(capability_id) <= 128)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_capability_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((jsonb_typeof(labels) = 'object'::text) AND (octet_length((labels)::text) <= 16384)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_labels_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(plugin_version) <= 64) AND (char_length(api_version) <= 64) AND (char_length(manifest_sha256) <= 128) AND (char_length(seat_model) <= 32)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_manifest_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((cardinality(declared_operations) <= 256) AND (array_position(declared_operations, NULL::text) IS NULL)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_operations_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, plugin_id)",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_pkey",
+      "table": "capability_plugin_endpoints",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(plugin_id) >= 1) AND (char_length(plugin_id) <= 128)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_plugin_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(tenant_id) >= 1) AND (char_length(tenant_id) <= 256)) AND (tenant_id <> '*'::text)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_tenant_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((unverified = (cardinality(declared_operations) = 0)))",
+      "kind": "constraint",
+      "name": "capability_plugin_endpoints_unverified_check",
+      "table": "capability_plugin_endpoints",
+      "type": "c",
       "validated": true
     },
     {
@@ -4113,6 +4357,16 @@
       "ready": true,
       "replica_identity": false,
       "table": "capability_audit_log",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX capability_plugin_endpoints_pkey ON public.capability_plugin_endpoints USING btree (tenant_id, plugin_id)",
+      "kind": "index",
+      "name": "capability_plugin_endpoints_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "capability_plugin_endpoints",
       "valid": true
     },
     {
@@ -5142,6 +5396,17 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "capability_audit_log",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "capability_plugin_endpoints",
       "options": null,
       "partition": null,
       "persistence": "p",

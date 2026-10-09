@@ -1,8 +1,13 @@
 //! 媒资管理路由（SEC-05 迁入）的替身 Media 服务与夹具。
 //!
-//! 与 Conversation / Online / Capability 不同，Media 不认转发的 admin 令牌，只认 Cell 私钥
-//! 签的内部上下文（`x-flare-ctx`）。替身记下每次调用收到的签名上下文、`authorization`
-//! 与全部 `x-*` 元数据，测试再用 Cell 公钥验签，断言身份只来自网关验过的 admin 令牌。
+//! 与 Conversation / Online / Capability 不同，Media 不认转发的 Staff 上下文，只认网关用
+//! Cell 私钥（`kid=admin-gateway`）另签的内部上下文（`x-flare-ctx`）。替身记下每次调用收到的
+//! 签名上下文、`authorization` 与全部 `x-*` 元数据，测试再用 Cell 公钥验签，断言身份只来自
+//! 网关验过的 Staff 上下文。
+//!
+//! 替身也像真实 Media 一样把关（`require_media_admin`）：记下调用后，用网关签名私钥配对的
+//! Cell 公钥验上下文，签名不对是 UNAUTHENTICATED，操作人不是租户管理员（或系统）、或没有租户
+//! 是 PERMISSION_DENIED。
 //!
 //! 替身按输入给出固定回答：`denied` / `down` / `missing` / `unsupported` / `rejected`
 //! 分别回 PERMISSION_DENIED / UNAVAILABLE / NOT_FOUND / UNKNOWN（真实 Media 对未实现的
@@ -20,11 +25,17 @@ use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_admin_gateway::interface::http::{MediaContextSigner, create_admin_router};
 use flare_grpc_proto::media::media_service_server::{MediaService, MediaServiceServer};
 use flare_grpc_proto::media::*;
-use flare_server_core::{SignedContextLayer, SignedContextSigner, SignedContextVerifier};
+use flare_im_service_kit::audit_effects::AuditEffects;
+use flare_server_core::auth::kid;
+use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
+use flare_server_core::{
+    SignedActorType, SignedContextLayer, SignedContextSigner, SignedContextVerifier,
+    VerifiedContext,
+};
 use tonic::transport::Channel;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status, Streaming};
 
-use super::{Console, EMPLOYEE, TENANT, WRITE_HEADERS, clients};
+use super::{Gateway, TENANT, WRITE_HEADERS, clients, is_write};
 
 pub const SECRET_MARKER: &str = "id-secret-1";
 
@@ -133,9 +144,33 @@ fn file(file_id: &str) -> FileInfo {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MediaFake {
     pub recorder: MediaRecorder,
+    /// The Cell public key Media resolves `kid=admin-gateway` with.
+    cell: SignedContextVerifier,
+}
+
+impl MediaFake {
+    /// Media's admin gate: a context its Cell key verifies, whose actor is a tenant
+    /// administrator (or the system) of a named tenant.
+    fn gate<T>(&self, request: &GrpcRequest<T>) -> Result<(), Status> {
+        let ctx = verify_signed_context_metadata(request.metadata(), &self.cell)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .ok_or_else(|| Status::unauthenticated("signed context required"))?;
+        match claims.actor_type {
+            SignedActorType::TenantAdmin | SignedActorType::System
+                if !claims.tenant_id.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(Status::permission_denied(
+                "media administration requires a tenant administrator",
+            )),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -148,6 +183,7 @@ impl MediaService for MediaFake {
         let summary = format!("limit={} dry_run={}", r.limit, r.dry_run);
         self.recorder
             .record("CleanupOrphanedAssets", &request, summary);
+        self.gate(&request)?;
         if let Some(status) = cleanup_failure(r.limit) {
             return Err(status);
         }
@@ -171,6 +207,7 @@ impl MediaService for MediaFake {
             .collect();
         let summary = format!("file_id={} entries={}", r.file_id, entries.join(","));
         self.recorder.record("SetObjectAcl", &request, summary);
+        self.gate(&request)?;
         if let Some(status) = failure(&r.file_id) {
             return Err(status);
         }
@@ -191,6 +228,7 @@ impl MediaService for MediaFake {
             r.sort.len()
         );
         self.recorder.record("ListObjects", &request, summary);
+        self.gate(&request)?;
         if let Some(status) = failure(&r.bucket) {
             return Err(status);
         }
@@ -207,6 +245,7 @@ impl MediaService for MediaFake {
         let bucket = request.get_ref().bucket.clone();
         self.recorder
             .record("DescribeBucket", &request, format!("bucket={bucket}"));
+        self.gate(&request)?;
         if let Some(status) = failure(&bucket) {
             return Err(status);
         }
@@ -352,7 +391,7 @@ impl MediaService for MediaFake {
     }
 }
 
-/// Cell 内部上下文密钥对：私钥给网关签，公钥给 Media（及测试）验。
+/// Cell 内部上下文密钥对：私钥给网关按 `kid=admin-gateway` 签，单钥的 Media（及测试）用公钥验。
 pub fn cell_keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
     let key = SigningKey::from_bytes(&[seed; 32]);
     let private = key.to_pkcs8_pem(Default::default()).unwrap();
@@ -361,20 +400,28 @@ pub fn cell_keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
         .to_public_key_pem(Default::default())
         .unwrap();
     (
-        SignedContextSigner::from_private_key(&private).unwrap(),
+        SignedContextSigner::from_private_key(&private)
+            .unwrap()
+            .with_kid(kid::ADMIN_GATEWAY)
+            .unwrap(),
         SignedContextVerifier::from_public_key(&public).unwrap(),
     )
 }
 
 /// 起一个只绑 127.0.0.1 的替身 Media。`media_verifier` 为 `Some` 时套上 Media 实际使用的
-/// `SignedContextLayer`（签名不对就在层内 UNAUTHENTICATED，替身 handler 不会被调用）。
+/// `SignedContextLayer`（签名不对就在层内 UNAUTHENTICATED，替身 handler 不会被调用）；`cell`
+/// 是替身自己把关用的 Cell 公钥。
 pub async fn spawn_media(
     media_verifier: Option<SignedContextVerifier>,
+    cell: SignedContextVerifier,
 ) -> (std::net::SocketAddr, MediaRecorder) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     assert!(address.ip().is_loopback());
-    let fake = MediaFake::default();
+    let fake = MediaFake {
+        recorder: MediaRecorder::default(),
+        cell,
+    };
     let recorder = fake.recorder.clone();
     let incoming = tonic::transport::server::TcpIncoming::from(listener);
     let mut server = tonic::transport::Server::builder();
@@ -402,8 +449,7 @@ pub async fn spawn_media(
 pub struct MediaHarness {
     pub router: Router,
     pub media: MediaRecorder,
-    pub console: Console,
-    pub token: String,
+    pub gateway: Gateway,
     /// 与网关签名私钥配对的 Cell 公钥。
     pub cell: SignedContextVerifier,
 }
@@ -413,27 +459,28 @@ pub async fn media_harness(
     signer: bool,
     media_verifier: Option<SignedContextVerifier>,
 ) -> MediaHarness {
-    let (address, media) = spawn_media(media_verifier).await;
+    let (cell_signer, cell) = cell_keys(62);
+    let (address, media) = spawn_media(media_verifier, cell.clone()).await;
     let media_channel = Channel::from_shared(format!("http://{address}"))
         .unwrap()
         .connect_lazy();
     let unused = Channel::from_static("http://127.0.0.1:9").connect_lazy();
-    let (cell_signer, cell) = cell_keys(62);
-    let console = Console::new();
+    let gateway = Gateway::new();
     let router = create_admin_router(
         Arc::new(clients(unused.clone(), media_channel, unused)),
         None,
     )
-    .layer(axum::Extension(Arc::new(console.verifier.clone())))
+    .layer(axum::Extension(Arc::new(gateway.verifier.clone())))
+    .layer(axum::Extension(Arc::new(AuditEffects::disabled(
+        "admin-gateway",
+    ))))
     .layer(axum::Extension(MediaContextSigner(
         signer.then_some(cell_signer),
     )));
-    let token = console.admin_token(EMPLOYEE, TENANT);
     MediaHarness {
         router,
         media,
-        console,
-        token,
+        gateway,
         cell,
     }
 }
@@ -468,36 +515,34 @@ pub fn media_request(
     method: &str,
     path: &str,
     token: Option<&str>,
-    tenant: Option<&str>,
     extra: &[(&str, &str)],
     body: Option<&str>,
 ) -> Request<Body> {
-    let mut builder = Request::builder().method(method).uri(path);
-    if let Some(token) = token {
-        builder = builder.header("authorization", format!("Bearer {token}"));
-    }
-    if let Some(tenant) = tenant {
-        builder = builder.header("x-tenant-id", tenant);
-    }
-    for (name, value) in extra {
-        builder = builder.header(*name, *value);
-    }
-    match body {
-        Some(body) => builder
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap(),
-        None => builder.body(Body::empty()).unwrap(),
-    }
+    super::request_with_body(method, path, token, extra, body)
 }
 
-/// 管理员请求：写路由自动带齐审计头。
+/// 管理员请求：按路由签对应权限码的 Staff 上下文（`TENANT`），写路由自动带齐审计头。
 pub fn media_admin_request(
     method: &str,
     path: &str,
-    token: &str,
+    gateway: &Gateway,
     body: Option<&str>,
 ) -> Request<Body> {
-    let extra = if method == "POST" { WRITE_HEADERS } else { &[] };
-    media_request(method, path, Some(token), Some(TENANT), extra, body)
+    media_admin_request_for_tenant(method, path, gateway, TENANT, body)
+}
+
+pub fn media_admin_request_for_tenant(
+    method: &str,
+    path: &str,
+    gateway: &Gateway,
+    tenant: &str,
+    body: Option<&str>,
+) -> Request<Body> {
+    let extra = if is_write(method, path) {
+        WRITE_HEADERS
+    } else {
+        &[]
+    };
+    let token = gateway.token_for_tenant(method, path, tenant);
+    media_request(method, path, Some(&token), extra, body)
 }

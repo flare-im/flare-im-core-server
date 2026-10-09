@@ -219,27 +219,32 @@ load_internal_context_keys() {
     export -n CORE_INTERNAL_PRIVATE_KEY CORE_INTERNAL_PUBLIC_KEY
 }
 
-# The Control Plane owns the EdDSA private key. Core receives only its public
-# key, and only the services that verify Control or forwarded admin assertions
-# need it: signaling-online, capability, conversation, storage-reader and
-# admin-gateway.
-load_console_control_public_key() {
-    CORE_CONSOLE_PUBLIC_KEY="${FLARE_CONSOLE_PUBLIC_KEY:-}"
-    if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
-        if [[ "$CORE_CONSOLE_PUBLIC_KEY" == -----BEGIN* ]]; then
-            printf '%s' "$CORE_CONSOLE_PUBLIC_KEY" | openssl pkey -pubin -noout >/dev/null 2>&1 || {
-                echo "Control 公钥格式无效" >&2
+# The platform owns its EdDSA private key. Core receives only the public key, and
+# only the two services that verify platform service assertions need it:
+# signaling-online (scheduler KickTenant) and capability (projection worker).
+# Employees reach Core as a Staff x-flare-ctx signed by the Social gateway admin
+# partition, verified with the Cell public key every admin verifier already holds.
+load_platform_public_key() {
+    CORE_PLATFORM_PUBLIC_KEY="${FLARE_PLATFORM_PUBLIC_KEY:-}"
+    if [ -n "$CORE_PLATFORM_PUBLIC_KEY" ]; then
+        if [[ "$CORE_PLATFORM_PUBLIC_KEY" == -----BEGIN* ]]; then
+            printf '%s' "$CORE_PLATFORM_PUBLIC_KEY" | openssl pkey -pubin -noout >/dev/null 2>&1 || {
+                echo "平台公钥格式无效" >&2
                 return 1
             }
         else
-            printf '%s' "$CORE_CONSOLE_PUBLIC_KEY" | openssl base64 -d -A 2>/dev/null | openssl pkey -pubin -noout >/dev/null 2>&1 || {
-                echo "Control 公钥格式无效" >&2
+            printf '%s' "$CORE_PLATFORM_PUBLIC_KEY" | openssl base64 -d -A 2>/dev/null | openssl pkey -pubin -noout >/dev/null 2>&1 || {
+                echo "平台公钥格式无效" >&2
                 return 1
             }
         fi
     fi
-    unset FLARE_CONSOLE_PUBLIC_KEY FLARE_CONSOLE_SIGNING_KEY FLARE_ADMIN_GATEWAY_TOKEN_SECRET
-    export -n CORE_CONSOLE_PUBLIC_KEY
+    # Admin Gateway is started on its own switch; it needs no platform key.
+    CORE_ADMIN_GATEWAY_ENABLED="${FLARE_ADMIN_GATEWAY_ENABLED:-}"
+    CORE_AUDIT_NATS_URL="${FLARE_AUDIT_NATS_URL:-}"
+    unset FLARE_PLATFORM_PUBLIC_KEY FLARE_PLATFORM_SIGNING_KEY FLARE_ADMIN_GATEWAY_TOKEN_SECRET
+    unset FLARE_ADMIN_GATEWAY_ENABLED FLARE_AUDIT_NATS_URL
+    export -n CORE_PLATFORM_PUBLIC_KEY CORE_ADMIN_GATEWAY_ENABLED CORE_AUDIT_NATS_URL
 }
 
 FLARE_BUILD_PROFILE="${FLARE_BUILD_PROFILE:-debug}"
@@ -300,7 +305,7 @@ REQUIRED_CORE_BINARIES=(
     flare-api-gateway
     flare-signaling-gateway
 )
-if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
+if [ -n "$CORE_ADMIN_GATEWAY_ENABLED" ]; then
     REQUIRED_CORE_BINARIES+=(flare-admin-gateway)
 fi
 
@@ -359,7 +364,7 @@ CORE_API_APP_CREDENTIALS="${FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS:-}"
 unset FLARE_API_GATEWAY_TOKEN_SECRET ACCESS_GATEWAY_TOKEN_SECRET FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS
 export -n CORE_API_TOKEN_SECRET CORE_ACCESS_TOKEN_SECRET CORE_API_APP_CREDENTIALS
 load_internal_context_keys
-load_console_control_public_key
+load_platform_public_key
 echo -e "${BLUE}🔐 本地网关 token secret 已准备: logs/.dev-token-secret（内容不会打印；本地客户端可将该文件内容作为 TOKEN_SECRET）${NC}"
 echo ""
 
@@ -473,11 +478,11 @@ CORE_SERVICES=(
     "media"
     "api-gateway"
 )
-# Always stop a previously launched Admin Gateway, including when the Console
-# public key was removed. Only start it when this Core process can verify
-# Control Plane credentials; the regular Core-only profile keeps it closed.
+# Always stop a previously launched Admin Gateway, including when the switch was
+# removed. Only start it when FLARE_ADMIN_GATEWAY_ENABLED is set; the regular
+# Core-only profile keeps the admin surface closed.
 CORE_STOP_SERVICES=("${CORE_SERVICES[@]}" "admin-gateway")
-if [ -n "$CORE_CONSOLE_PUBLIC_KEY" ]; then
+if [ -n "$CORE_ADMIN_GATEWAY_ENABLED" ]; then
     CORE_SERVICES+=("admin-gateway")
 fi
 
@@ -632,7 +637,7 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 # 8. 推送服务：push-server（推送服务）、push-worker（推送工作器）
 # 9. 媒资服务：media（媒资服务）
 # 10. API 网关：api-gateway（业务系统统一入口）
-# 11. 管理网关：admin-gateway（仅在配置 Console 公钥时启动）
+# 11. 管理网关：admin-gateway（仅在设置 FLARE_ADMIN_GATEWAY_ENABLED 时启动）
 # 12. 接入网关：signaling-gateway (Signaling Gateway 服务，位于 flare-signaling/gateway，通过单/多网关模式启动，见下方启动部分)
 
 # 启动服务（后台运行）
@@ -796,19 +801,23 @@ for service in "${CORE_SERVICES[@]}"; do
             [ -n "$CORE_API_APP_CREDENTIALS" ] && env_args+=("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS=$CORE_API_APP_CREDENTIALS") ;;
     esac
     case "$service" in
-        signaling-online|signaling-route|message-ingest|capability|push-proxy|media|conversation)
+        signaling-online|signaling-route|message-ingest|capability|push-proxy|media|conversation|storage-reader)
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
-        api-gateway|admin-gateway)
+        api-gateway)
+            env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+        admin-gateway)
+            # Verifies the gateway-signed staff context and re-signs it for Media.
+            env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY")
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
     esac
     case "$service" in
-        signaling-online|capability|conversation|storage-reader)
-            [ -n "$CORE_CONSOLE_PUBLIC_KEY" ] && env_args+=("FLARE_CONSOLE_PUBLIC_KEY=$CORE_CONSOLE_PUBLIC_KEY") ;;
+        signaling-online|capability)
+            [ -n "$CORE_PLATFORM_PUBLIC_KEY" ] && env_args+=("FLARE_PLATFORM_PUBLIC_KEY=$CORE_PLATFORM_PUBLIC_KEY") ;;
         admin-gateway)
-            # This development launcher runs Control on the same host. Keep the
-            # management HTTP listener off LAN interfaces by default.
+            # This development launcher runs the Social gateway on the same host. Keep
+            # the management HTTP listener off LAN interfaces by default.
             env_args+=("FLARE_ADMIN_GATEWAY_BIND_ADDRESS=${FLARE_ADMIN_GATEWAY_BIND_ADDRESS:-127.0.0.1:50051}")
-            env_args+=("FLARE_CONSOLE_PUBLIC_KEY=$CORE_CONSOLE_PUBLIC_KEY") ;;
+            [ -n "$CORE_AUDIT_NATS_URL" ] && env_args+=("FLARE_AUDIT_NATS_URL=$CORE_AUDIT_NATS_URL") ;;
     esac
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）

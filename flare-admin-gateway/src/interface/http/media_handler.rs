@@ -8,26 +8,27 @@ use axum::{
     http::{HeaderMap, request::Parts},
 };
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::clients::{GrpcClients, MediaCaller};
+use flare_im_service_kit::audit_effects::AuditEffects;
+use flare_im_service_kit::clients::{AdminGrpcClients, MediaCaller};
 use flare_server_core::{
     AuthenticatedPrincipal, SignedContextSigner,
-    context::Ctx,
     error::{ErrorBuilder, ErrorCode},
-    http::{ApiResponse, ContextFromHeaders, HttpApiError, Result},
+    http::{ApiResponse, HttpApiError, Result},
 };
 use std::sync::Arc;
 
+use super::admin_auth_middleware::VerifiedStaffContext;
 use super::admin_extract::{AdminJson, AdminQuery};
 use super::audit_target::AuditTarget;
 use super::ops_handler::{admin_rpc_error, audit_write, verified_tenant};
 
-/// Cell internal-context signer, used only to turn the Control-verified admin into a
-/// context Media can verify. Without it every media admin route fails; nothing unsigned
-/// is sent.
+/// Cell internal-context signer (`kid=admin-gateway`), used only to turn the verified staff
+/// into a context Media can verify. Without it every media admin route fails; nothing
+/// unsigned is sent.
 #[derive(Clone)]
 pub struct MediaContextSigner(pub Option<SignedContextSigner>);
 
-/// Caller of media admin RPCs: the tenant admin comes only from the verified principal
+/// Caller of media admin RPCs: the tenant admin comes only from the verified staff context
 /// that admin_auth_middleware installed, never from request headers.
 pub struct AdminMediaIdentity(MediaCaller);
 
@@ -48,22 +49,15 @@ impl<S: Send + Sync> FromRequestParts<S> for AdminMediaIdentity {
                     "internal identity signer not configured",
                 )
             })?;
-        let principal = parts
+        let staff = parts
             .extensions
-            .get::<AuthenticatedPrincipal>()
-            .filter(|principal| !principal.user_id.is_empty())
-            .ok_or_else(|| forbidden("verified admin actor required"))?;
-        let tenant_id = principal
-            .tenant_id
-            .as_deref()
-            .filter(|tenant| !tenant.is_empty() && *tenant != "*")
-            .ok_or_else(|| forbidden("one concrete tenant is required for admin api"))?;
-        let ctx = Ctx::from_headers(&parts.headers);
+            .get::<VerifiedStaffContext>()
+            .ok_or_else(|| forbidden("verified staff context required"))?;
         Ok(Self(MediaCaller::tenant_admin(
-            ctx,
+            staff.ctx().clone(),
             signer,
-            tenant_id,
-            &principal.user_id,
+            staff.tenant_id(),
+            staff.actor_id(),
         )))
     }
 }
@@ -100,17 +94,17 @@ pub struct AdminMediaObjects {
 #[utoipa::path(post, path = "/api/v1/admin/medias/cleanup-orphaned-assets", tag = "Admin",
     request_body(content = CleanupOrphanedAssetsRequest, description = "Both fields are required; `limit` 0 means 100, capped at 1000 by Media; `dry_run` must be false"),
     params(
-        ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log"),
+        ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "Orphaned message assets of the token tenant that this pass deleted", body = ApiResponse<CleanupOrphanedAssetsResponse>),
+        (status = 200, description = "Orphaned message assets of the staff application that this pass deleted", body = ApiResponse<CleanupOrphanedAssetsResponse>),
         (status = 400, description = "dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting (ADMIN_MEDIA_DRY_RUN_UNSUPPORTED), or Media refused an argument (BAD_REQUEST)"),
-        (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)"),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:medias:write (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Media refused the tenant admin (FORBIDDEN)"),
         (status = 500, description = "Media failed (ADMIN_MEDIA_CLEANUP_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
-        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
@@ -118,7 +112,9 @@ pub async fn cleanup_orphaned_assets(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     headers: HeaderMap,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(request): AdminJson<CleanupOrphanedAssetsRequest>,
 ) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
     // Media ignores dry_run and deletes as in a real run; a "preview" must not delete.
@@ -136,30 +132,37 @@ pub async fn cleanup_orphaned_assets(
         &AuditTarget::id(&tenant_id),
     );
     let response = clients
-        .media
-        .lock()
-        .await
-        .cleanup_orphaned_assets(&caller, request)
+        .bounded(async {
+            clients
+                .media
+                .lock()
+                .await
+                .cleanup_orphaned_assets(&caller, request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_CLEANUP_FAILED"))?;
+    effects
+        .record(staff.ctx(), "media_assets", &tenant_id, "cleanup_orphaned")
+        .await;
     Ok(Json(ApiResponse::success(response)))
 }
 
 #[utoipa::path(post, path = "/api/v1/admin/medias/object-acl", tag = "Admin",
-    request_body(content = SetObjectAclRequest, description = "File of the token tenant and its ACL entries"),
+    request_body(content = SetObjectAclRequest, description = "File of the staff application and its ACL entries"),
     params(
-        ("x-audit-reason" = String, Header, description = "Operator reason, recorded in the audit log"),
+        ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
         (status = 200, description = "ACL applied (`data: true`)", body = ApiResponse<bool>),
         (status = 400, description = "Media refused an argument (BAD_REQUEST)"),
-        (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, audit reason / idempotency header missing, or Media refused the tenant admin (FORBIDDEN)"),
-        (status = 404, description = "No such file in the token tenant (NOT_FOUND)"),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:medias:write (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Media refused the tenant admin (FORBIDDEN)"),
+        (status = 404, description = "No such file in the staff application (NOT_FOUND)"),
         (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_OBJECT_ACL_FAILED), never a successful no-op; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
-        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
@@ -167,7 +170,9 @@ pub async fn set_object_acl(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     headers: HeaderMap,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(request): AdminJson<SetObjectAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
     audit_write(
@@ -176,47 +181,59 @@ pub async fn set_object_acl(
         &headers,
         &AuditTarget::id(&request.file_id),
     );
+    let file_id = request.file_id.clone();
     clients
-        .media
-        .lock()
-        .await
-        .set_object_acl(&caller, request)
+        .bounded(async {
+            clients
+                .media
+                .lock()
+                .await
+                .set_object_acl(&caller, request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_OBJECT_ACL_FAILED"))?;
+    effects
+        .record(staff.ctx(), "media_object", &file_id, "set_acl")
+        .await;
     Ok(Json(ApiResponse::success(true)))
 }
 
 #[utoipa::path(get, path = "/api/v1/admin/medias/objects", tag = "Admin",
     params(("bucket" = String, Query, description = "Configured bucket"), ("prefix" = Option<String>, Query, description = "Tenant-relative prefix")),
     responses(
-        (status = 200, description = "Objects of the token tenant; only file_id, file_name, mime_type, size and object_key", body = ApiResponse<AdminMediaObjects>),
+        (status = 200, description = "Objects of the staff application; only file_id, file_name, mime_type, size and object_key", body = ApiResponse<AdminMediaObjects>),
         (status = 400, description = "Media refused the bucket or prefix (BAD_REQUEST)"),
-        (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or Media refused the tenant admin or the bucket (FORBIDDEN)"),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:medias:read (ADMIN_PERMISSION_DENIED), or Media refused the tenant admin or the bucket (FORBIDDEN)"),
         (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_LIST_OBJECTS_FAILED), never a fabricated empty inventory; or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
-        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn list_objects(
     AdminMediaIdentity(caller): AdminMediaIdentity,
-    Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
     AdminQuery(request): AdminQuery<ListObjectsQuery>,
 ) -> Result<Json<ApiResponse<AdminMediaObjects>>> {
     let response = clients
-        .media
-        .lock()
-        .await
-        .list_objects(
-            &caller,
-            ListObjectsRequest {
-                bucket: request.bucket,
-                prefix: request.prefix,
-                pagination: None,
-                filters: Vec::new(),
-                sort: Vec::new(),
-            },
-        )
+        .bounded(async {
+            clients
+                .media
+                .lock()
+                .await
+                .list_objects(
+                    &caller,
+                    ListObjectsRequest {
+                        bucket: request.bucket,
+                        prefix: request.prefix,
+                        pagination: None,
+                        filters: Vec::new(),
+                        sort: Vec::new(),
+                    },
+                )
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_LIST_OBJECTS_FAILED"))?;
     Ok(Json(ApiResponse::success(AdminMediaObjects {
@@ -237,25 +254,29 @@ pub async fn list_objects(
 #[utoipa::path(get, path = "/api/v1/admin/medias/bucket", tag = "Admin",
     params(("bucket" = String, Query, description = "Configured bucket")),
     responses(
-        (status = 200, description = "Configured media bucket with this tenant's object-key prefix; no global object statistics", body = ApiResponse<DescribeBucketResponse>),
+        (status = 200, description = "Configured media bucket with this application's object-key prefix; no global object statistics", body = ApiResponse<DescribeBucketResponse>),
         (status = 400, description = "Media refused the bucket (BAD_REQUEST)"),
-        (status = 401, description = "Admin token is missing or invalid"),
-        (status = 403, description = "Tenant header mismatch, or the bucket is not the one Media serves (FORBIDDEN)"),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:medias:read (ADMIN_PERMISSION_DENIED), or the bucket is not the one Media serves (FORBIDDEN)"),
         (status = 500, description = "Media failed (ADMIN_MEDIA_BUCKET_FAILED), or the internal identity signer is not configured (MEDIA_SIGNER_UNAVAILABLE)"),
-        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: FLARE_INTERNAL_CTX_PUBLIC_KEY does not pair with the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
     ))]
 pub async fn describe_bucket(
     AdminMediaIdentity(caller): AdminMediaIdentity,
-    Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
     AdminQuery(request): AdminQuery<DescribeBucketRequest>,
 ) -> Result<Json<ApiResponse<DescribeBucketResponse>>> {
     let response = clients
-        .media
-        .lock()
-        .await
-        .describe_bucket(&caller, request)
+        .bounded(async {
+            clients
+                .media
+                .lock()
+                .await
+                .describe_bucket(&caller, request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_BUCKET_FAILED"))?;
     Ok(Json(ApiResponse::success(response)))
@@ -269,10 +290,8 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_im_service_kit::clients::*;
-    use flare_im_service_kit::control_auth::{
-        CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, PLATFORM_ISSUER,
-    };
-    use flare_server_core::{SignedActorType, SignedContextVerifier};
+    use flare_server_core::auth::{KeySet, kid};
+    use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextVerifier};
     use std::sync::Mutex as StdMutex;
     use std::task::Poll;
     use tonic::transport::Channel;
@@ -334,24 +353,12 @@ mod tests {
             .unwrap()
             .connect_lazy();
         let c = Channel::from_static("http://127.0.0.1:9").connect_lazy();
-        let clients = GrpcClients {
+        let clients = AdminGrpcClients {
             media: Arc::new(tokio::sync::Mutex::new(
                 MediaServiceClientWrapper::from_channel(media_channel, None),
             )),
-            message_ingest_send: Arc::new(tokio::sync::Mutex::new(
-                MessageSendServiceClientWrapper::from_channel(c.clone()),
-            )),
-            message_event: Arc::new(tokio::sync::Mutex::new(
-                MessageEventServiceClientWrapper::from_channel(c.clone()),
-            )),
-            message_action: Arc::new(tokio::sync::Mutex::new(
-                MessageActionServiceClientWrapper::from_channel(c.clone()),
-            )),
             conversation_read: Arc::new(tokio::sync::Mutex::new(
                 ConversationReadServiceClientWrapper::from_channel(c.clone()),
-            )),
-            conversation_manage: Arc::new(tokio::sync::Mutex::new(
-                ConversationManageServiceClientWrapper::from_channel(c.clone()),
             )),
             online: Arc::new(tokio::sync::Mutex::new(
                 OnlineServiceClientWrapper::from_channel(c.clone()),
@@ -361,28 +368,37 @@ mod tests {
             )),
             request_timeout: None,
         };
-        let (control_private, control_public) = pem_pair(61);
-        let token = flare_server_core::TokenService::from_ed25519_private_key(
-            &control_private,
-            PLATFORM_ISSUER,
-            60,
-        )
-        .unwrap()
-        .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", CORE_ADMIN_AUDIENCE)
-        .unwrap();
+        // The Social gateway admin partition signs the staff context with the gateway key.
+        let (gateway_private, gateway_public) = pem_pair(61);
+        let mut keys = KeySet::empty();
+        keys.insert(kid::GATEWAY, &gateway_public).unwrap();
+        let verifier = SignedContextVerifier::from_key_set(keys).require_staff_kid([kid::GATEWAY]);
+        let token = SignedContextSigner::from_private_key(&gateway_private)
+            .unwrap()
+            .with_kid(kid::GATEWAY)
+            .unwrap()
+            .sign(
+                &SignedContextIdentity::new(
+                    SignedActorType::Staff,
+                    "employee-1",
+                    "tenant-a",
+                    "req-media-unit",
+                )
+                .with_staff_grant(None, Some("core:medias:read".to_owned()), 1),
+            )
+            .unwrap();
         let router = super::super::create_admin_router(Arc::new(clients), None)
-            .layer(Extension(Arc::new(
-                ConsoleControlVerifier::from_public_key(&control_public).unwrap(),
-            )))
+            .layer(Extension(Arc::new(verifier)))
+            .layer(Extension(Arc::new(AuditEffects::disabled("admin-gateway"))))
             .layer(Extension(MediaContextSigner(signer)));
         (router, media, token)
     }
 
     fn bucket_request(token: &str) -> Request<Body> {
         Request::get("/api/v1/admin/medias/bucket?bucket=b")
-            .header("authorization", format!("Bearer {token}"))
-            .header("x-tenant-id", "tenant-a")
-            // Spoofed user/actor-type headers must not shape the signed Media identity.
+            .header("x-flare-ctx", token)
+            // Spoofed identity headers must not shape the signed Media identity.
+            .header("x-tenant-id", "tenant-z")
             .header("x-user-id", "victim-user")
             .header("x-actor-type", "system")
             .body(Body::empty())
@@ -390,14 +406,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_media_rpc_carries_signed_tenant_admin_of_verified_actor() {
+    async fn admin_media_rpc_carries_signed_tenant_admin_of_verified_staff() {
         let (cell_private, cell_public) = pem_pair(62);
-        let signer = SignedContextSigner::from_private_key(&cell_private).unwrap();
+        let signer = SignedContextSigner::from_private_key(&cell_private)
+            .unwrap()
+            .with_kid(kid::ADMIN_GATEWAY)
+            .unwrap();
         let (router, media, token) = admin_router(Some(signer)).await;
         let response = router.oneshot(bucket_request(&token)).await.unwrap();
         assert_ne!(response.status(), StatusCode::OK);
         let captured = media.0.lock().unwrap().clone();
         assert_eq!(captured.len(), 1);
+        // A single-key Media resolves `kid=admin-gateway` to its only key.
         let claims = SignedContextVerifier::from_public_key(&cell_public)
             .unwrap()
             .verify(captured[0].as_deref().expect("signed context header"))
@@ -405,6 +425,8 @@ mod tests {
         assert_eq!(claims.actor_type, SignedActorType::TenantAdmin);
         assert_eq!(claims.tenant_id, "tenant-a");
         assert_eq!(claims.actor_id, "employee-1");
+        assert_eq!(claims.request_id, "req-media-unit");
+        assert_eq!(claims.kid, kid::ADMIN_GATEWAY);
     }
 
     #[tokio::test]

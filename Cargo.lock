@@ -1601,6 +1601,7 @@ version = "1.0.3"
 dependencies = [
  "anyhow",
  "axum 0.8.6",
+ "base64",
  "ed25519-dalek",
  "flare-core-base",
  "flare-core-runtime",
@@ -1608,6 +1609,8 @@ dependencies = [
  "flare-im-service-kit",
  "flare-proto",
  "flare-server-core",
+ "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "tokio",

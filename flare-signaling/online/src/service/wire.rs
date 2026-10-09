@@ -120,31 +120,34 @@ pub async fn initialize(
     let query_handler = Arc::new(OnlineQueryHandler::new(conversation_repository.clone()));
 
     // 6. 构建 OnlineService Handler（interface::grpc，仅编排 application handlers）
-    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
-        .map_err(|_| {
-        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
-    })?;
+    // 平台公钥只验 KickTenant 的调度器断言；员工经 admin-gateway 转发的 Staff 上下文用 Cell 公钥集验。
+    let control_verifier =
+        flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
+            |_| flare_server_core::error::FlareError::system("invalid FLARE_PLATFORM_PUBLIC_KEY"),
+        )?;
     if control_verifier.is_none() {
-        tracing::warn!("Console control public key missing; Online kick RPCs fail closed");
+        tracing::warn!("platform public key missing; the scheduler KickTenant branch fails closed");
     }
-    let identity_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
-        Ok(key) => Some(SignedContextVerifier::from_public_key(&key).map_err(|_| {
-            flare_server_core::error::FlareError::system(
-                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY for Online",
-            )
-        })?),
-        Err(std::env::VarError::NotPresent) => {
+    let identity_verifier = match SignedContextVerifier::from_env_optional() {
+        Ok(Some(verifier)) => Some(verifier),
+        Ok(None) => {
             tracing::warn!(
-                "Online session and presence RPCs disabled: internal context verifier missing"
+                "Online session, presence and admin RPCs disabled: internal context verifier missing"
             );
             None
         }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(flare_server_core::error::FlareError::system(
-                "invalid FLARE_INTERNAL_CTX_PUBLIC_KEY encoding",
-            ));
+        Err(error) => {
+            return Err(flare_server_core::error::FlareError::system(format!(
+                "invalid Cell public key set for Online: {error}"
+            )));
         }
     };
+    let staff_verifier = identity_verifier
+        .is_some()
+        .then(|| {
+            flare_im_service_kit::staff_context::admin_staff_verifier_from_env("signaling-online")
+        })
+        .transpose()?;
     let online_handler = OnlineHandler::new(
         command_handler,
         query_handler,
@@ -152,7 +155,8 @@ pub async fn initialize(
         presence_watcher_handler,
     )
     .with_control_verifier(control_verifier)
-    .with_identity_verifier(identity_verifier);
+    .with_identity_verifier(identity_verifier)
+    .with_staff_verifier(staff_verifier);
 
     Ok(ApplicationContext { online_handler })
 }
@@ -262,7 +266,7 @@ impl OnlineService for WiredOnlineHandler {
     }
 }
 
-/// 管理员只读入口：只认 admin-gateway 转发的 admin 令牌（见 `OnlineHandler::handle_admin_*`）。
+/// 管理员只读入口：只认 admin-gateway 转发的 Staff 上下文（见 `OnlineHandler::handle_admin_*`）。
 #[tonic::async_trait]
 impl OnlineAdminService for WiredOnlineHandler {
     async fn admin_list_user_devices(

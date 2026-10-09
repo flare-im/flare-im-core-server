@@ -6,4 +6,4 @@
 
 mod router;
 
-pub use router::ExtensionPluginRouter;
+pub use router::{ExtensionPluginRouter, HEALTH_CHECK_OPERATION, extension_plugin_services};

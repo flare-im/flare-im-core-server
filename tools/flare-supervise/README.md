@@ -98,11 +98,12 @@ Core then disables service registration and discovery, and this does not by
 itself provide static targets for every caller or prove DEP-08 viability.
 In static mode the manifest's `environment_defaults` give API Gateway and
 Admin Gateway the `FLARE_{API,ADMIN}_GATEWAY_GRPC_*_SERVICE_URL` of this
-container's listeners (media 60081, message ingest 50182, orchestrator 50181,
-conversation 50090, online 50061, storage reader 60083, and capability 50110
-for Admin Gateway only), so they connect directly instead of trying discovery
-and logging a fallback WARN per downstream; values the deployment sets win,
-and configured mode keeps discovery.
+container's listeners (media 60081, conversation 50090, online 50061 and
+storage reader 60083 for both; message ingest 50182 and orchestrator 50181 for
+API Gateway only; capability 50110 for Admin Gateway only), so they connect
+directly instead of trying discovery and logging a fallback WARN per
+downstream; values the deployment sets win, and configured mode keeps
+discovery.
 The Core manifest fixes the signaling gateway child `PORT=60051` and
 `GRPC_PORT=60060` regardless of parent values, preserving WS/QUIC 60051/60052
 and matching the in-Cell GatewayRouter gRPC target. In static mode, an enabled
@@ -112,12 +113,17 @@ Use the Core container's network alias (for example `core`) as
 `SERVICE_ADVERTISE_HOST` for every registry entry in configured mode. The API and signaling
 gateways additionally require their respective end-user token secrets and the
 Cell context signing private key. Signed-context consumers require the public
-key (including Push Proxy; it never receives the private key). Media requires
+key (including Push Proxy; it never receives the private key) and may also
+receive the component key set `FLARE_INTERNAL_CTX_PUBLIC_KEYS`. Media requires
 the S3 endpoint and credentials. Message Ingest requires
 its Hook configuration path. Admin Gateway joins `all` only when
-`FLARE_CONSOLE_PUBLIC_KEY` is provided; Online, Capability, Conversation and
-Storage Reader inherit the same public key to verify Control and forwarded admin
-assertions.
+`FLARE_ADMIN_GATEWAY_ENABLED` is set; it verifies the Staff context the Social
+gateway admin partition signs with the Cell key set (Staff pinned to
+`kid=gateway`), needs the private key to re-sign that staff for Media, and may
+receive `FLARE_AUDIT_NATS_URL` for management effect events. Only Online and
+Capability inherit `FLARE_PLATFORM_PUBLIC_KEY`, which verifies the platform's
+scheduler and projection worker assertions; no Core service verifies an employee
+with it, and the platform signing keys are forbidden in the supervisor environment.
 
 Push Server and Push Worker are also excluded from default `all` until the
 deployment enforces broker provenance. The manifest's

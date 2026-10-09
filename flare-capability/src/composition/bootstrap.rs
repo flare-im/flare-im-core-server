@@ -71,6 +71,7 @@ impl ApplicationBootstrap {
         let im_hook_plugin = context.im_hook_plugin;
         let capability_grpc = context.capability_grpc;
         let extension_router = context.extension_router;
+        let extension_verifier = context.extension_verifier;
         let tenant_projection = context.tenant_projection;
         let capability_admin = context.capability_admin;
         let hook_config_listener = context.hook_config_listener;
@@ -98,12 +99,13 @@ impl ApplicationBootstrap {
                         im_hook_plugin,
                     );
 
-                let extension_plugin_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(
-                        flare_grpc_proto::capability::extension_plugin_server::ExtensionPluginServer::new(
-                            extension_router,
-                        ),
+                // ExtensionPlugin.Call: the Cell-signed `x-flare-ctx` is the only identity. Anonymous
+                // admission answers the health check alone; without a key set the router is served
+                // bare and answers nothing but the health check (caller metadata is never read).
+                let (extension_plugin_signed, extension_plugin_unverified) =
+                    crate::interface::grpc::extensions::extension_plugin_services(
+                        extension_router,
+                        extension_verifier,
                     );
 
                 let capability_service = ContextLayer::new()
@@ -135,7 +137,8 @@ impl ApplicationBootstrap {
                 let server = Server::builder()
                     .layer(grpc_metrics)
                     .add_service(hook_plugin_service)
-                    .add_service(extension_plugin_service)
+                    .add_optional_service(extension_plugin_signed)
+                    .add_optional_service(extension_plugin_unverified)
                     .add_service(capability_service)
                     .add_service(capability_admin_service)
                     .add_optional_service(tenant_projection_service);

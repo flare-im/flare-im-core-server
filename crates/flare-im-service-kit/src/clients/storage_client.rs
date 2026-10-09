@@ -1,7 +1,8 @@
 use flare_server_core::error::Result;
 use tonic::transport::Channel;
 
-use crate::clients::{Ctx, admin_traced_request};
+use crate::clients::Ctx;
+use crate::staff_context::staff_traced_request;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
     ExportMessagesRequest, ExportMessagesResponse, GetConversationMessageHeadRequest,
@@ -30,30 +31,30 @@ impl StorageReaderServiceClientWrapper {
         }
     }
 
-    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    /// 管理检索：只带 Staff `x-flare-ctx` 与请求号、追踪号（见 `staff_traced_request`）。
     pub async fn search_messages_as_admin(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         ctx: &Ctx,
         request: SearchMessagesRequest,
     ) -> Result<SearchMessagesResponse> {
         let response = self
             .client
-            .search_messages(admin_traced_request(request, admin_token, ctx)?)
+            .search_messages(staff_traced_request(request, staff_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    /// 管理检索：只带 Staff `x-flare-ctx` 与请求号、追踪号（见 `staff_traced_request`）。
     pub async fn get_message_as_admin(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         ctx: &Ctx,
         request: GetMessageRequest,
     ) -> Result<GetMessageResponse> {
         let response = self
             .client
-            .get_message(admin_traced_request(request, admin_token, ctx)?)
+            .get_message(staff_traced_request(request, staff_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
@@ -71,44 +72,44 @@ impl StorageReaderServiceClientWrapper {
         Ok(response.into_inner())
     }
 
-    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    /// 管理检索：只带 Staff `x-flare-ctx` 与请求号、追踪号（见 `staff_traced_request`）。
     pub async fn query_message_events_as_admin(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         ctx: &Ctx,
         request: QueryMessageEventsRequest,
     ) -> Result<QueryMessageEventsResponse> {
         let response = self
             .client
-            .query_message_events(admin_traced_request(request, admin_token, ctx)?)
+            .query_message_events(staff_traced_request(request, staff_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    /// 管理检索：只带 Staff `x-flare-ctx` 与请求号、追踪号（见 `staff_traced_request`）。
     pub async fn query_message_write_ledger_as_admin(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         ctx: &Ctx,
         request: QueryMessageWriteLedgerRequest,
     ) -> Result<QueryMessageWriteLedgerResponse> {
         let response = self
             .client
-            .query_message_write_ledger(admin_traced_request(request, admin_token, ctx)?)
+            .query_message_write_ledger(staff_traced_request(request, staff_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }
 
-    /// 管理检索：只带 admin 令牌与请求号、追踪号（见 `admin_traced_request`）。
+    /// 管理检索：只带 Staff `x-flare-ctx` 与请求号、追踪号（见 `staff_traced_request`）。
     pub async fn export_messages_as_admin(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         ctx: &Ctx,
         request: ExportMessagesRequest,
     ) -> Result<ExportMessagesResponse> {
         let response = self
             .client
-            .export_messages(admin_traced_request(request, admin_token, ctx)?)
+            .export_messages(staff_traced_request(request, staff_token, ctx)?)
             .await?;
         Ok(response.into_inner())
     }

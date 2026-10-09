@@ -754,31 +754,39 @@ required_env_unless = [
     }
 
     #[test]
-    fn core_manifest_hands_console_public_key_to_every_admin_verifier() {
+    fn core_manifest_hands_the_platform_public_key_to_the_two_service_verifiers_only() {
         let manifest: Manifest =
             toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
         // Children start from an empty environment and only receive what
-        // `env_allowed` admits. Online and Capability verify Control assertions;
-        // Online, Capability, Conversation and Storage Reader also verify the
-        // admin assertion Admin Gateway forwards (SEC-02, ADM-01). A verifier
-        // started without the key answers every admin RPC with UNAUTHENTICATED.
+        // `env_allowed` admits. The platform key verifies only the projection
+        // worker (Capability) and the scheduler (Online KickTenant); employees
+        // reach Core as a Staff x-flare-ctx verified with the Cell key set, so
+        // Conversation, Storage Reader and Admin Gateway never see the platform key.
         let key_users: Vec<_> = manifest
             .services
             .iter()
-            .filter(|service| manifest.env_allowed(service, "FLARE_CONSOLE_PUBLIC_KEY"))
+            .filter(|service| manifest.env_allowed(service, "FLARE_PLATFORM_PUBLIC_KEY"))
             .map(|service| service.name.as_str())
             .collect();
-        assert_eq!(
-            key_users,
-            [
-                "signaling-online",
-                "capability",
-                "conversation",
-                "storage-reader",
-                "admin-gateway"
-            ]
-        );
-        for private in ["FLARE_CONSOLE_SIGNING_KEY", "FLARE_CONSOLE_PRIVATE_KEY"] {
+        assert_eq!(key_users, ["signaling-online", "capability"]);
+        // No retired console-era variable is handed to any child.
+        assert!(!manifest.services.iter().any(|service| {
+            service
+                .inherit_env
+                .iter()
+                .chain(&service.required_env)
+                .any(|name| name.contains("CONSOLE"))
+        }));
+        for private in [
+            "FLARE_PLATFORM_SIGNING_KEY",
+            "FLARE_PLATFORM_PRIVATE_KEY",
+            "FLARE_CONSOLE_SIGNING_KEY",
+            "FLARE_CONSOLE_PRIVATE_KEY",
+        ] {
+            assert!(
+                manifest.forbidden_env.iter().any(|name| name == private),
+                "{private} must be forbidden"
+            );
             assert!(
                 !manifest
                     .services
@@ -787,6 +795,46 @@ required_env_unless = [
                 "{private}"
             );
         }
+        // Every signed-context verifier may receive the component key set next to the single
+        // key; Admin Gateway is switched on explicitly and may receive the audit stream URL.
+        for service in &manifest.services {
+            if manifest.env_allowed(service, "FLARE_INTERNAL_CTX_PUBLIC_KEY") {
+                assert!(
+                    manifest.env_allowed(service, "FLARE_INTERNAL_CTX_PUBLIC_KEYS"),
+                    "{} inherits the single key but not the key set",
+                    service.name
+                );
+            }
+        }
+        let admin_gateway = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "admin-gateway")
+            .unwrap();
+        assert_eq!(
+            admin_gateway.enabled_if_env.as_deref(),
+            Some("FLARE_ADMIN_GATEWAY_ENABLED")
+        );
+        for name in [
+            "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+            "FLARE_AUDIT_NATS_URL",
+        ] {
+            assert!(manifest.env_allowed(admin_gateway, name), "{name}");
+        }
+        assert!(
+            admin_gateway
+                .required_env
+                .iter()
+                .any(|name| name == "FLARE_INTERNAL_CTX_PUBLIC_KEY")
+        );
+        assert!(
+            !manifest
+                .services
+                .iter()
+                .filter(|service| service.name != "admin-gateway")
+                .any(|service| manifest.env_allowed(service, "FLARE_AUDIT_NATS_URL"))
+        );
     }
 
     #[test]
@@ -1151,11 +1199,19 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
         let manifest: Manifest =
             toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
         manifest.validate().unwrap();
-        // Each downstream variable suffix and the manifest service that listens for it.
-        let downstreams = [
+        // Each downstream variable suffix and the manifest service that listens for it. The
+        // API Gateway dials the six message-path services; the Admin Gateway dials only Media,
+        // Conversation, Online, the Storage Reader and Capability.
+        let api_downstreams: &[(&str, &str)] = &[
             ("MEDIA", "media"),
             ("MESSAGE_INGEST", "message-ingest"),
             ("MESSAGE_ORCHESTRATOR", "orchestrator"),
+            ("CONVERSATION", "conversation"),
+            ("ONLINE", "signaling-online"),
+            ("STORAGE_READER", "storage-reader"),
+        ];
+        let admin_downstreams: &[(&str, &str)] = &[
+            ("MEDIA", "media"),
             ("CONVERSATION", "conversation"),
             ("ONLINE", "signaling-online"),
             ("STORAGE_READER", "storage-reader"),
@@ -1165,9 +1221,9 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
             let service = manifest.services.iter().find(|s| s.name == name).unwrap();
             format!("http://{}", service.tcp_health.as_deref().unwrap())
         };
-        for (gateway, prefix, count) in [
-            ("api-gateway", "FLARE_API_GATEWAY", 6),
-            ("admin-gateway", "FLARE_ADMIN_GATEWAY", 7),
+        for (gateway, prefix, downstreams) in [
+            ("api-gateway", "FLARE_API_GATEWAY", api_downstreams),
+            ("admin-gateway", "FLARE_ADMIN_GATEWAY", admin_downstreams),
         ] {
             let service = manifest
                 .services
@@ -1187,7 +1243,6 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
             };
             let expected: BTreeMap<_, _> = downstreams
                 .iter()
-                .take(count)
                 .map(|(suffix, listener_service)| {
                     (
                         format!("{prefix}_GRPC_{suffix}_SERVICE_URL"),

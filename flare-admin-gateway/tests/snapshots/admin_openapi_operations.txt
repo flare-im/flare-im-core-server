@@ -1,5 +1,7 @@
+DELETE /api/v1/admin/hooks/{hook_id}
 GET /api/v1/admin/auth/check
 GET /api/v1/admin/capabilities
+GET /api/v1/admin/capabilities/catalog
 GET /api/v1/admin/capabilities/tenant
 GET /api/v1/admin/conversations
 GET /api/v1/admin/conversations/{conversation_id}
@@ -8,6 +10,10 @@ GET /api/v1/admin/gateway/config
 GET /api/v1/admin/gateway/health
 GET /api/v1/admin/gateway/routes
 GET /api/v1/admin/gateway/upstreams
+GET /api/v1/admin/hooks
+GET /api/v1/admin/hooks/{hook_id}
+GET /api/v1/admin/hooks/{hook_id}/executions
+GET /api/v1/admin/hooks/{hook_id}/statistics
 GET /api/v1/admin/medias/bucket
 GET /api/v1/admin/medias/objects
 GET /api/v1/admin/messages/{message_id}
@@ -16,11 +22,17 @@ GET /api/v1/admin/plugins
 GET /api/v1/admin/tenant/runtime
 GET /api/v1/admin/users/{user_id}/devices
 GET /api/v1/admin/users/{user_id}/presence
+POST /api/v1/admin/hooks
 POST /api/v1/admin/medias/cleanup-orphaned-assets
 POST /api/v1/admin/medias/object-acl
 POST /api/v1/admin/messages/export
 POST /api/v1/admin/messages/query
 POST /api/v1/admin/messages/write-ledger/query
+POST /api/v1/admin/plugins/deregister
+POST /api/v1/admin/plugins/register
 POST /api/v1/admin/tenant/kick-all
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick
 POST /api/v1/admin/users/{user_id}/kick
+PUT /api/v1/admin/capabilities/tenant/{capability_id}
+PUT /api/v1/admin/hooks/{hook_id}
+PUT /api/v1/admin/hooks/{hook_id}/status

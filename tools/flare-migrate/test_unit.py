@@ -67,7 +67,7 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_all_patches_are_accounted_for_and_baseline_has_no_drop(self):
         migrations = migrate.load_migrations()
-        self.assertEqual(len(migrations), 10)
+        self.assertEqual(len(migrations), 11)
         self.assertNotIn("\nDROP ", migrations[0].sql)
         for patch in (migrate.ROOT / "deploy/patches").glob("*.sql"):
             self.assertTrue(any(patch.name in migration.name for migration in migrations[1:]), patch.name)
@@ -123,14 +123,14 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_every_reviewed_shape_has_a_profile_per_environment(self):
         # A ledgered database at 0008 still has the previous latest shape; refusing it would block the
-        # upgrade. Each environment keeps baseline, v0008, v0009 and latest profiles.
+        # upgrade. Each environment keeps baseline, v0008, v0009, v0010 and latest profiles.
         environments = {json.dumps(json.loads(path.read_text())["environment"], sort_keys=True)
                         for path in (migrate.HERE / "schema").glob("latest*.json")}
         self.assertEqual(len(environments), 2)
         for environment in map(json.loads, environments):
             shapes = {name: migrate.read_profile(name, environment) for name in migrate.REVIEWED_SHAPES}
-            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "latest"})
-            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 4)
+            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "latest"})
+            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 5)
             for name, shape in shapes.items():
                 with self.subTest(environment=environment, shape=name):
                     migrate.assert_reviewed_baseline(shape)
@@ -158,11 +158,29 @@ class MigrationUnitTests(unittest.TestCase):
         for timescale in ("2.30.0","2.29.1"):
             env={"postgres_major":16,"timescaledb":timescale}
             before={migrate.canonical(o) for o in migrate.read_profile("v0009",env)["objects"]}
-            after={migrate.canonical(o):o for o in migrate.read_profile("latest",env)["objects"]}
+            after={migrate.canonical(o):o for o in migrate.read_profile("v0010",env)["objects"]}
             self.assertFalse(before-set(after))
             added=[after[key] for key in set(after)-before]
             self.assertEqual(len(added),18)
             self.assertEqual({o.get("table",o["name"]) for o in added}, {"credential_keys","credential_projection_versions"})
+
+    def test_0011_adds_only_the_plugin_endpoint_table(self):
+        for timescale in ("2.30.0", "2.29.1"):
+            env = {"postgres_major": 16, "timescaledb": timescale}
+            before = migrate.read_profile("v0010", env)
+            after = migrate.read_profile("latest", env)
+            self.assertEqual(before["timescale"], after["timescale"], timescale)
+            old = {migrate.canonical(o) for o in before["objects"]}
+            new = {migrate.canonical(o): o for o in after["objects"]}
+            self.assertFalse(old - set(new), timescale)
+            added = [new[key] for key in sorted(set(new) - old)]
+            self.assertEqual(len(added), 25, timescale)
+            self.assertEqual({o.get("table", o["name"]) for o in added}, {"capability_plugin_endpoints"})
+            # 14 columns, the primary key (constraint + index), eight named CHECKs and the relation.
+            kinds = sorted(o["kind"] for o in added)
+            self.assertEqual(kinds.count("column"), 14)
+            self.assertEqual(kinds.count("constraint"), 9)
+            self.assertEqual(kinds.count("index"), 1)
 
     def test_version_and_definition_drift_are_not_ignored(self):
         old = {"objects": [{"kind": "column", "not_null": True}], "environment": {"timescaledb": "2.29.1"}}

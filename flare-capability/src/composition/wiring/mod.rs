@@ -6,12 +6,12 @@ mod capability_extension;
 mod config_sources;
 mod hook_runtime;
 mod internal_ctx;
+mod plugin_routes;
 
 use std::sync::Arc;
 
 use flare_server_core::error::Result;
 
-use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
 use crate::interface::grpc::{CapabilityAdminGrpcServer, TenantProjectionGrpcServer};
 
@@ -27,12 +27,12 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let hook = hook_runtime::build_hook_runtime(&sources);
     let hook_config_listener = sources.listener.take();
 
-    let plugin_routes = Arc::new(PluginRouteBook::new());
-
     let db_pool = sources
         .hook_config_repository
         .as_ref()
         .map(|r| r.connection_pool());
+    // 有库时登记写 capability_plugin_endpoints；没有库时只在本进程（plugin_routes 里说明一次）。
+    let plugin_routes = Arc::new(plugin_routes::plugin_route_book(db_pool.as_ref()));
     let (capability_registry, capability_policy, capability_grpc) =
         init_capability_extension_stack(
             config
@@ -45,29 +45,35 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         )
         .await?;
     let capability_runtime = capability_grpc.runtime_config();
+    // 配置发现的端点已在上面进簿；再载入库里的登记（同键时登记覆盖配置），然后起周期重读与清理。
+    plugin_routes::load_and_maintain(&plugin_routes, &capability_runtime).await?;
 
     // 租户投影只在有库时可用：没有库就没有 `tenants` 表可写，控制面推送会得到 Unimplemented 的路由缺席错误。
-    let control_verifier = flare_im_service_kit::control_auth::ConsoleControlVerifier::from_env()
-        .map_err(|_| {
-        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
-    })?;
-    if control_verifier.is_none() {
-        tracing::warn!("Console control public key missing; tenant projection RPCs fail closed");
+    // 投影只认平台 worker 的控制断言（FLARE_PLATFORM_PUBLIC_KEY）；员工不经这里。
+    let platform_verifier =
+        flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
+            |_| flare_server_core::error::FlareError::system("invalid FLARE_PLATFORM_PUBLIC_KEY"),
+        )?;
+    if platform_verifier.is_none() {
+        tracing::warn!("platform public key missing; tenant projection RPCs fail closed");
     }
     let tenant_projection_repository = db_pool
         .as_ref()
         .map(|pool| Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))));
     let tenant_projection = tenant_projection_repository.as_ref().map(|repository| {
-        TenantProjectionGrpcServer::new(Arc::clone(repository), control_verifier.clone())
+        TenantProjectionGrpcServer::new(Arc::clone(repository), platform_verifier.clone())
     });
-    // 管理员只读与投影接收端读同一张 `tenants` 表；开关读同一个策略后端。
+    // 管理员只读与投影接收端读同一张 `tenants` 表；开关读同一个策略后端。只认 admin-gateway
+    // 转发的 Staff 上下文（Cell 公钥集，Staff 钉死 kid=gateway）。
     let capability_admin = CapabilityAdminGrpcServer::new(
         Arc::clone(&capability_policy),
         tenant_projection_repository,
-        control_verifier.clone(),
+        internal_ctx::admin_staff_verifier_from_env("Capability admin RPCs")?,
     );
 
     let extension_router = capability_registry.extension_router().await;
+    // ExtensionPlugin.Call 只认 Cell 签名的上下文；没有公钥集时只回答健康检查。
+    let extension_verifier = internal_ctx::internal_ctx_verifier_from_env("ExtensionPlugin")?;
     // HookPlugin 只收 Cell 签名的调用（Message Ingest 等原样转发的 `x-flare-ctx`）；没有公钥时全部拒绝。
     let hook_plugin_verifier = internal_ctx::internal_ctx_verifier_from_env("HookPlugin")?;
     let im_hook_plugin = ImHookPluginServer::new(
@@ -83,6 +89,7 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         hook_governance: hook.hook_governance,
         plugin_routes,
         extension_router,
+        extension_verifier,
         capability_registry,
         capability_policy,
         capability_grpc,

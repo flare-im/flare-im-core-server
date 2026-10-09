@@ -1,46 +1,71 @@
-# Console → Core control authentication (SEC-02)
+# Platform → Core control authentication (SEC-02, v4 R3)
 
-The Console/Control backend is the sole issuer of Core management assertions. Core processes receive only `FLARE_CONSOLE_PUBLIC_KEY` (Ed25519 public key, PEM or base64). The private `FLARE_CONSOLE_SIGNING_KEY` must never be mounted in Core, Social data-plane, or a browser. Missing public key makes protected mixed-service RPCs return `UNAUTHENTICATED`; Admin Gateway refuses startup. Invalid public-key material fails startup.
+Two identities reach Core's management surfaces, and they are verified with two different keys.
 
-| Boundary | JWT `iss` | `aud` | `token_use` | Allowed subject / tenant |
+| Identity | Who signs it | Where it is carried | Core verifies it with | Who accepts it |
 | --- | --- | --- | --- | --- |
-| Capability management, TenantProjection, Online Kick gRPC | `flare-platform` | `flare-core-projection` | `control` | See method policy below |
-| Admin Gateway HTTP `/api/v1/admin/**` | `flare-platform` | `flare-core-admin` | `admin` | Real employee subject and one concrete, matching `x-tenant-id` |
-| Admin reads forwarded by Admin Gateway (Conversation, Online, Capability admin services, Capability `ListRegisteredPlugins`), Online Kick gRPC | `flare-platform` | `flare-core-admin` | `admin` | Employee subject, one concrete tenant; see "Forwarded admin assertion" below |
+| Staff context | The Social gateway admin partition, with the Cell key registered as `kid=gateway` | `x-flare-ctx` (the cell-internal signed context, `actor_type=staff`) | The Cell key set: `FLARE_INTERNAL_CTX_PUBLIC_KEYS` layered over `FLARE_INTERNAL_CTX_PUBLIC_KEY`, with `Staff` pinned to `kid=gateway` | Admin Gateway and the admin RPCs of Conversation, Online, Capability and the Storage Reader |
+| Platform service assertion | The platform (`flare-platform`), with its own Ed25519 key | `authorization: Bearer <token>` | `FLARE_PLATFORM_PUBLIC_KEY` | Capability `TenantProjection` (subject `flare-platform-worker`) and Online `KickTenant` (subject `flare-platform-control-scheduler`) |
 
-Every assertion has `sub`, `tenant_id`, `iat`, `exp`, `jti`; Core enforces EdDSA, exact issuer/audience/use, and `exp - iat <= 60s`. Plain user-access JWTs, the cell-internal `x-flare-ctx`, old shared-secret headers, missing assertions, and duplicate Authorization headers do not authorize control operations. TLS/private listener protection remains required; a valid short-lived assertion is not a substitute for network isolation. Retries of writes also need stable idempotency keys; the JWT alone does not deduplicate a replay inside its validity window.
+There is no platform-issued employee assertion any more. The former `token_use=admin` / audience `flare-core-admin` token, the console public-key variable and the kit's console verifier are gone; a bearer with an employee subject is `UNAUTHENTICATED` everywhere in Core. Rollback is a redeploy of the previous image set of Core, platform, gateway and console together; there is no compatibility flag that keeps both schemes alive.
 
-## Method policy
+## The staff context
 
-- `TenantProjection.UpsertTenant` / `UpsertFeatureFlags`: subject exactly `flare-platform-worker`; token tenant must equal the canonical body tenant. `UpsertFeatureFlags` remains explicitly `UNIMPLEMENTED` in Core, after authentication.
-- `TenantProjection.GetVersions`: worker only; one requested tenant must equal token tenant; multiple or no tenant IDs require token tenant `*`. Non-canonical IDs are rejected.
-- `CapabilityService.ListCapabilities`: employee assertion (platform-wide Control listing may use token tenant `*`). `ListUserCapabilities`, `GrantUserCapability`, `RevokeUserCapability`, `SetTenantCapabilitySwitch`, `RegisterPluginEndpoint`, `DeregisterPluginEndpoint`, `ListRegisteredPlugins`, `Administer`: employee subject, concrete token tenant exactly matching the requested tenant. `ListRegisteredPlugins` is read-only and also accepts the forwarded admin assertion (Admin Gateway `GET /api/v1/admin/plugins`); registering and deregistering plugins stay control-only. Hook ID operations resolve the stored Hook config tenant before read/change; `GenericRequest.metadata` is not identity. In-process Hook governance calls receive a context reconstructed from the verified assertion, preserving the real actor for audit.
-- `OnlineService.KickDevice`: employee only, with a concrete token tenant; the live session's tenant must match before removal. The request proto does not carry a tenant field. Accepts the control assertion or the forwarded admin assertion.
-- `OnlineService.KickTenant`: employee with exact tenant, or subject exactly `flare-platform-control-scheduler` with exact tenant. Scheduler cannot call `KickDevice` or other management operations. Accepts the control assertion or the forwarded admin assertion; the scheduler is only accepted on the control assertion.
-- `ConversationAdminService` (`AdminListConversations`, `AdminGetConversation`, `AdminListParticipants`), `OnlineAdminService` (`AdminListUserDevices`, `AdminGetUserPresence`), `CapabilityAdminService` (`ListTenantCapabilitySwitches`, `GetTenantRuntime`): forwarded admin assertion only. A control assertion is rejected with `UNAUTHENTICATED`. None of these requests carries a tenant ID or a caller user ID; every read is scoped to the token tenant, and a conversation that belongs to another tenant is answered exactly like a missing one (`NOT_FOUND`).
-- Admin Gateway: employee with concrete matching `x-tenant-id`. Write requests additionally require `x-actor-id` equal to signed `sub`, an audit reason, and `x-request-id` or `idempotency-key`. After verification the gateway replaces identity headers with the signed subject/tenant before downstream handlers run; no legacy API-Gateway JWT fallback remains.
+The gateway admin partition authenticates the employee (staff session or personal access token), resolves the request against the shared Core admin route table `flare_core_infra::auth::core_admin::ROUTES` (the same table Admin Gateway resolves `/api/v1/admin/<path>` with, so the two cannot drift), checks the employee's role bundle, and signs:
 
-## Forwarded admin assertion (ADM-01)
+| Claim | Value |
+| --- | --- |
+| `actor_type` | `staff` |
+| `actor_id` | the employee id (the acting user of every downstream operation) |
+| `tenant_id` | the application being administered: one concrete IM tenant, never empty, never `*` |
+| `permission` | the route's code from `core_admin::ROUTES` (`core:conversations:read`, `core:messages:read`, `core:messages:export`, `core:users:read`, `core:users:kick`, `core:tenant:read`, `core:tenant:kick`, `core:capabilities:read`, `core:capabilities:write`, `core:plugins:read`, `core:plugins:write`, `core:hooks:read`, `core:hooks:write`, `core:medias:read`, `core:medias:write`, `core:gateway:read`) |
+| `org_id` | the staff member's organization; absent for platform staff |
+| `roles`, `credential_id`, `perm_version` | the grant description |
+| `request_id`, `trace_id` | correlation; the downstream services log them and the Storage Reader keys export tasks by the request id |
+| JWT header `kid` | `gateway` |
 
-Admin Gateway verifies the admin assertion on `/api/v1/admin/**` and then forwards the same token, byte for byte, as the only identity on downstream gRPC calls: `authorization: Bearer <admin token>`. The service kit's admin client methods (`OnlineServiceClientWrapper::{kick_device, kick_tenant, admin_*}`, `ConversationReadServiceClientWrapper::admin_*`, `CapabilityAdminClientWrapper`, including its `list_registered_plugins`) attach nothing else; no `x-flare-ctx`, `x-tenant-id` or actor metadata is sent.
+The token has the usual cell-internal shape (`iss`/`aud` `flare-internal`, `token_use=internal_context`, EdDSA, lifetime at most 60 seconds) and verifies with `SignedContextVerifier::from_env().require_staff_kid([kid::GATEWAY])`. The pin reads the JWT header: a Staff token without a `kid` is `legacy` and is refused even on a deployment that holds a single Cell key, so the admin partition sets `kid=gateway` on every deployment. On a single-key deployment a token naming `kid=gateway` resolves to that one key (`KeySet` fallback, removed in R6-4 once per-component keys exist); a Staff token signed with any other component key (`hook`, `bridge`, `ingest`, `admin-gateway`) is refused by kid.
 
-Each receiving service (Online, Capability, Conversation) adds the same branch through `flare_im_service_kit::control_auth`:
+`flare_im_service_kit::staff_context` is the shared gate: `admin_staff_verifier_from_env(service)` builds the pinned verifier (a configuration error naming both key variables when neither is set), `require_staff(request, verifier, code)` verifies exactly one `x-flare-ctx`, requires a `Staff` actor whose signed `permission` is `code` (`flare_server_core::require_staff_permission`), and refuses an empty or wildcard application. Missing, duplicate or invalid tokens (including a wrong kid) are `UNAUTHENTICATED`; a verified non-staff actor, another code, or no application is `PERMISSION_DENIED`. `staff_context_request` / `staff_traced_request` forward the verified token unchanged as `x-flare-ctx` to the next admin service, with nothing else.
 
-1. exactly one `authorization` entry with a `Bearer` token;
-2. `verify_token(token, "admin", CORE_ADMIN_AUDIENCE)` with the Console public key — EdDSA, issuer `flare-platform`, `token_use=admin`, audience `flare-core-admin`, lifetime at most 60 seconds;
-3. `require_kind(Employee)` — the projection worker and scheduler subjects never pass the admin branch;
-4. `require_tenant(actor.tenant_id)` — the token names one concrete, canonical tenant; `*` is rejected.
+### Admin Gateway
 
-`require_grpc_admin` implements the admin-only form; `require_grpc_control_or_admin` tries the control assertion first and falls back to the admin branch for the two Online kicks and Capability `ListRegisteredPlugins`. Missing or malformed tokens and wrong audience or purpose map to `UNAUTHENTICATED`; a non-employee subject, a `*` tenant or a tenant mismatch maps to `PERMISSION_DENIED`.
+`admin_auth_middleware` on `/api/v1/admin/**`, in order: exactly one `x-flare-ctx` (401 `UNAUTHORIZED` when missing, 401 `ADMIN_STAFF_CONTEXT_INVALID` when duplicated, malformed, expired, non-staff or signed with a kid the verifier does not accept for staff); the route exists in `core_admin::ROUTES` with a valid parameter (otherwise 404 `NOT_FOUND`; percent-encoded, over-long or non-identifier parameters are not admin routes); the signed `permission` equals the route's code (403 `ADMIN_PERMISSION_DENIED`); a `platform_only` route is called by platform staff, that is without `org_id` (403 `ADMIN_SCOPE_DENIED`); the signed application is one concrete tenant (403 `ADMIN_IDENTITY_REQUIRED`); a write route carries `x-audit-reason` and `x-request-id` or `idempotency-key` (403 `FORBIDDEN`). Before the route checks, on reads too, the audit headers must be within their limits (400 `ADMIN_AUDIT_HEADER_TOO_LONG`) and `x-audit-reason` must be one header of percent-encoded UTF-8 (400 `ADMIN_AUDIT_REASON_INVALID`); the gateway logs it decoded. `x-tenant-id` and `x-actor-id` are neither required nor read; every identity header is stripped before the handlers run. The gateway forwards the same token, byte for byte, to Conversation, Online, Capability and the Storage Reader; for Media it re-signs the verified staff as `tenant_admin` with `FLARE_INTERNAL_CTX_PRIVATE_KEY` under `kid=admin-gateway`. See [admin-api.md](admin-api.md).
 
-What this deliberately avoids:
+### Downstream admin RPCs
 
-- These calls need no signing key in Admin Gateway: it signs neither a cell-internal context nor a Control assertion for them, so it cannot mint or widen an identity; it can only replay what Console signed, within the assertion's 60-second lifetime. (The admin media routes still sign a cell-internal context with `FLARE_INTERNAL_CTX_PRIVATE_KEY`, see SEC05; that path is unchanged here.)
-- Downstream services no longer derive an admin identity from unsigned context metadata. The conversation service still installs `ContextLayer::allow_missing` for its user-facing services, but the admin service ignores that context. The Storage Reader does the same for its five admin retrieval RPCs (`SearchMessages`, `GetMessage`, `QueryMessageEvents`, `QueryMessageWriteLedger`, `ExportMessages`, used only by Admin Gateway's `messages/*` routes): they verify the forwarded assertion with `require_grpc_admin` and take the tenant and actor from it; only `x-request-id` and `x-trace-id` are read from metadata, for log correlation and export-task deduplication. Its sync and history RPCs keep their existing context.
-- Capability serves tenant switches and the tenant runtime view from its own `capability_tenant_switches` table and `tenants` projection, so Admin Gateway needs no database role.
+Each service re-verifies the forwarded token with its own copy of the Cell key set (Staff pinned to `gateway`) and compares the signed code with the operation it serves. The tenant is always the signed application; requests carry no tenant of their own, or must name the signed one.
 
-All three Core launch paths hand `FLARE_CONSOLE_PUBLIC_KEY` to exactly the five verifiers (Online, Capability, Conversation, Storage Reader, Admin Gateway) and to nothing else: `release/supervise-core.toml` through `inherit_env` (supervised children start from an empty environment), `deploy/docker-compose.stack.yml`, and `scripts/start_server.sh`. Online, Capability, Conversation or Storage Reader started without the key keeps serving its user-facing RPCs but answers every Control and admin RPC with `UNAUTHENTICATED` (only Admin Gateway refuses to start), so a missing entry does not show up at deploy time. `flare-supervise`'s `core_manifest_hands_console_public_key_to_every_admin_verifier` and the service kit's `console_public_key_reaches_every_admin_verifier_on_both_launch_paths` pin the list.
+| Service and RPCs | Code |
+| --- | --- |
+| Conversation `ConversationAdminService.{AdminListConversations, AdminGetConversation, AdminListParticipants}` | `core:conversations:read` |
+| Online `OnlineAdminService.AdminListUserDevices` | `core:users:read`, or `core:users:kick` (the whole-user kick lists the devices with its kick context first) |
+| Online `OnlineAdminService.AdminGetUserPresence` | `core:users:read` |
+| Online `OnlineService.KickDevice` | `core:users:kick` (the session must belong to the signed application) |
+| Online `OnlineService.KickTenant` | `core:tenant:kick` with the signed application equal to the request tenant; or the scheduler's platform assertion (see below). A call with `x-flare-ctx` takes the staff branch, one without takes the scheduler branch; each fails closed on its own key |
+| Capability `CapabilityAdminService.GetTenantRuntime` | `core:tenant:read` |
+| Capability `CapabilityAdminService.ListTenantCapabilitySwitches`, `CapabilityService.{ListCapabilities, ListUserCapabilities}` | `core:capabilities:read` |
+| Capability `CapabilityService.{GrantUserCapability, RevokeUserCapability, SetTenantCapabilitySwitch}` | `core:capabilities:write` |
+| Capability `CapabilityService.ListRegisteredPlugins` | `core:plugins:read`, or a Cell-signed `Service` context whose signed tenant is the request tenant |
+| Capability `CapabilityService.{RegisterPluginEndpoint, DeregisterPluginEndpoint}` | `core:plugins:write` from platform staff (`org_id` absent), or the plugin host's own `Service` context for its own tenant |
+| Capability `CapabilityService.Administer` | `core:hooks:read` for `flare.extension.v1.hook_config.{get, list, get_statistics, query_executions}`, `core:hooks:write` for `{create, update, delete, set_status}`; the code is checked before the payload is decoded, and hook-id operations first resolve the stored configuration's tenant. The in-process governance call gets a context rebuilt from the verified claims (actor type `Staff`, `user_id` = the employee), never from `GenericRequest.metadata` |
+| Storage Reader `StorageReaderService.{SearchMessages, GetMessage, QueryMessageEvents, QueryMessageWriteLedger}` | `core:messages:read` |
+| Storage Reader `StorageReaderService.ExportMessages` | `core:messages:export` |
 
-The admin-only Capability downstream is configured with `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL` (default `discovery://flare-capability`; an empty value disables it) and `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_STATIC_FALLBACK` (default `http://127.0.0.1:50110`). API Gateway never reads these variables and never connects to Capability.
+The Storage Reader's five admin RPCs stay exempt from its signed-first read boundary (whose verifier admits only User, TenantAdmin and Service actors) and verify the staff context in the handler; request and trace ids come from the claims first and from `x-request-id` / `x-trace-id` only as a fallback.
 
-Control must issue an employee assertion only after its own IAM authorization. Core's public-key verifier distinguishes the two reserved service subjects from employee subjects, but cannot independently look up Control's employee directory; issuer key protection and Control's IAM policy are part of this trust boundary. Rotate the signing key through a coordinated public-key rollout; do not reuse the cell-internal context key.
+## The platform service assertion
+
+`flare_im_service_kit::control_auth::PlatformAssertionVerifier` holds `FLARE_PLATFORM_PUBLIC_KEY` and verifies EdDSA, issuer `flare-platform`, audience `flare-core-projection`, `token_use=control`, `exp - iat <= 60s`, and a subject that is exactly `flare-platform-worker` or `flare-platform-control-scheduler`; every other subject is `UNAUTHENTICATED`. `require_platform_assertion` is the RPC gate; the method still checks the kind and the tenant:
+
+- `TenantProjection.UpsertTenant` / `UpsertCredentials` / `UpsertFeatureFlags`: worker only; the token tenant must equal the canonical body tenant (`UpsertFeatureFlags` and `UpsertRoleBundle` stay `UNIMPLEMENTED` after authentication).
+- `TenantProjection.GetVersions`: worker only; one requested tenant must equal the token tenant; several or none require token tenant `*`.
+- `OnlineService.KickTenant`: scheduler only, with the token tenant equal to the request tenant. The scheduler cannot call any other RPC.
+
+Only Capability and Online receive the platform key. `release/supervise-core.toml`, `deploy/docker-compose.stack.yml` and `scripts/start_server.sh` hand it to exactly those two; the supervisor forbids `FLARE_PLATFORM_SIGNING_KEY` and `FLARE_PLATFORM_PRIVATE_KEY` (and the retired console names) in its environment. `flare-supervise`'s `core_manifest_hands_the_platform_public_key_to_the_two_service_verifiers_only` and the service kit's `platform_public_key_reaches_only_the_two_service_verifiers_on_both_launch_paths` pin both lists.
+
+## Keys and launch
+
+Every signed-context verifier (Online, Route, Capability, Conversation, Message Ingest, Storage Reader, Sync Orchestrator, Push Server/Proxy/Worker, Media, the signaling gateway, Admin Gateway) inherits `FLARE_INTERNAL_CTX_PUBLIC_KEY` and the optional `FLARE_INTERNAL_CTX_PUBLIC_KEYS`. Conversation, the Storage Reader and Admin Gateway started without a key answer every admin RPC with `UNAUTHENTICATED` (Admin Gateway refuses to start, since the key set is its only identity source); the manifest requires the single key for all of them. Admin Gateway is started only when `FLARE_ADMIN_GATEWAY_ENABLED` is set, needs `FLARE_INTERNAL_CTX_PRIVATE_KEY` for its Media calls, and publishes `flare.audit.effect.v1` to `FLARE_AUDIT_NATS_URL` when that is set.
+
+TLS/private listener protection remains required; a valid short-lived token is not a substitute for network isolation. Retries of writes also need stable idempotency keys; a token alone does not deduplicate a replay inside its validity window. The platform must sign a worker or scheduler assertion only for its own jobs, and the gateway must sign a staff context only after its own IAM authorization: Core verifies signatures and codes, it cannot look up the employee directory. Rotate the Cell and platform keys through coordinated public-key rollouts; do not reuse one for the other.

@@ -1,16 +1,16 @@
 use axum::{Json, extract::Extension, http::HeaderMap};
-use flare_core_base::context::keys;
+use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_server_core::{
     AuthenticatedPrincipal,
-    context::Ctx,
-    http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
+    http::{ApiResponse, HttpApiError as GatewayError, Result},
 };
 use serde::Serialize;
 
-use super::admin_auth_middleware::VerifiedAdminAssertion;
+use super::admin_auth_middleware::VerifiedStaffContext;
 use super::admin_contract::{APP_ID_HEADER, AdminCapabilitiesResponse, build_admin_capabilities};
 use super::admin_extract::{AdminJson, AdminPath, AdminQuery};
-use super::ops_handler::{AdminCapability, admin_rpc_error};
+use super::audit_target::AuditTarget;
+use super::ops_handler::{AdminCapability, admin_rpc_error, audit_write};
 use crate::application::admin_messages::{
     AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
     AdminMessageEventsQueryHttpRequest, AdminMessageExportHttpRequest,
@@ -23,19 +23,28 @@ use crate::application::admin_messages::{
     build_storage_write_ledger_request,
 };
 use flare_im_service_kit::{
-    clients::{CapabilityDownstreamConfig, GrpcClients, StorageReaderServiceClientWrapper},
+    clients::{AdminGrpcClients, CapabilityDownstreamConfig},
     gateway::GatewaySettings,
 };
 use std::sync::Arc;
 
+/// What the verified staff context says about the caller.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminAuthCheckResponse {
+    /// The employee id (the signed actor).
     pub user_id: String,
+    /// The application the context administers.
     pub tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor_id: Option<String>,
+    /// The organization of the staff member; absent for platform staff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// The permission code signed for this request (`core:gateway:read` here).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
     pub request_id: String,
     pub trace_id: String,
     pub scopes: Vec<String>,
@@ -101,17 +110,15 @@ pub struct AdminServerConfigSnapshot {
     pub max_body_size: usize,
 }
 
+/// The downstreams Admin Gateway connects: Media, Conversation, Online, the Storage Reader
+/// and the optional Capability. It opens no channel to Message Ingest or the Orchestrator.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminGrpcConfigSnapshot {
     pub media_service_url: String,
-    pub message_ingest_service_url: String,
-    pub message_orchestrator_service_url: String,
     pub conversation_service_url: String,
     pub online_service_url: String,
     pub storage_reader_service_url: String,
     pub media_static_fallback: Option<String>,
-    pub message_ingest_static_fallback: Option<String>,
-    pub message_orchestrator_static_fallback: Option<String>,
     pub conversation_static_fallback: Option<String>,
     pub online_static_fallback: Option<String>,
     pub storage_reader_static_fallback: Option<String>,
@@ -124,14 +131,14 @@ pub struct AdminGrpcConfigSnapshot {
 
 /// Admin Gateway 实际使用的认证方式。
 ///
-/// 管理请求只经 `FLARE_CONSOLE_PUBLIC_KEY` 验 Console 签发的 admin 断言（EdDSA，issuer
-/// `flare-platform`，audience `flare-core-admin`，`token_use=admin`，有效期不超过 60 秒）。
+/// 管理请求只验网关 admin 分区签的 Staff `x-flare-ctx`（EdDSA，Cell 公钥集，Staff 钉死
+/// `kid=gateway`，有效期不超过 60 秒，权限码按共享路由表核对）。
 /// `FLARE_ADMIN_GATEWAY_AUTH_*`（`core_jwt` / `http_hook`）在 Admin 作用域下不读取（出现时启动
-/// 日志 WARN），快照也不转述它们。四个 `hook_*` 字段只为保持 Control 已登记的响应结构，
+/// 日志 WARN），快照也不转述它们。四个 `hook_*` 字段只为保持平台已登记的响应结构，
 /// 取值固定为「没有认证 hook」。
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminAuthConfigSnapshot {
-    /// 固定为 `console_ed25519`。
+    /// 固定为 `staff_context_ed25519`。
     pub mode: String,
     /// 不调用认证 hook，固定为 `null`。
     pub hook_url: Option<String>,
@@ -143,8 +150,8 @@ pub struct AdminAuthConfigSnapshot {
     pub hook_secret_configured: Option<String>,
 }
 
-/// `gateway/config` 报告的认证方式：Console Ed25519 公钥验签。
-const ADMIN_AUTH_MODE: &str = "console_ed25519";
+/// `gateway/config` 报告的认证方式：网关签的 Staff 上下文，Cell Ed25519 公钥集验签。
+const ADMIN_AUTH_MODE: &str = "staff_context_ed25519";
 
 /// Admin Gateway 的请求限流：它不做限流，所以固定报告关闭。
 ///
@@ -172,21 +179,24 @@ pub struct AdminTracingConfigSnapshot {
     path = "/api/v1/admin/auth/check",
     tag = "Admin",
     responses(
-        (status = 200, description = "Admin token is valid", body = ApiResponse<AdminAuthCheckResponse>),
-        (status = 401, description = "Token is missing or invalid"),
-        (status = 403, description = "Admin scope or admin context is missing"),
+        (status = 200, description = "Staff context is valid for core:gateway:read; echoes what it signs", body = ApiResponse<AdminAuthCheckResponse>),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:gateway:read (ADMIN_PERMISSION_DENIED)"),
     ),
 )]
 pub async fn admin_auth_check(
     headers: HeaderMap,
     Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(staff): Extension<VerifiedStaffContext>,
 ) -> Json<ApiResponse<AdminAuthCheckResponse>> {
-    let ctx = Ctx::from_headers(&headers);
+    let ctx = staff.ctx();
     let response = AdminAuthCheckResponse {
         user_id: principal.user_id,
-        tenant_id: ctx.tenant_id().unwrap_or_default().to_string(),
+        tenant_id: staff.tenant_id().to_string(),
         app_id: header_value(&headers, APP_ID_HEADER).or(principal.app_id),
-        actor_id: header_value(&headers, keys::ACTOR_ID),
+        actor_id: Some(staff.actor_id().to_string()),
+        org_id: staff.staff().org_id.clone(),
+        permission: staff.staff().permission.clone(),
         request_id: ctx.request_id().to_string(),
         trace_id: ctx.trace_id().to_string(),
         scopes: principal.scopes,
@@ -298,12 +308,10 @@ pub async fn admin_gateway_config(
     ),
 )]
 pub async fn admin_query_messages(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
     AdminJson(req): AdminJson<AdminMessageQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageQueryHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_search_request(&req)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
     let requested_limit = storage_request
@@ -312,9 +320,13 @@ pub async fn admin_query_messages(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = storage_reader(&clients).await;
-    let storage_response = storage
-        .search_messages_as_admin(assertion.token(), &ctx, storage_request)
+    let storage_response = clients
+        .bounded(async {
+            storage_reader(&clients)
+                .await
+                .search_messages_as_admin(staff.token(), staff.ctx(), storage_request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_QUERY_FAILED"))?;
 
@@ -344,18 +356,20 @@ pub async fn admin_query_messages(
     ),
 )]
 pub async fn admin_get_message(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
     AdminPath(message_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminMessageDetailHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_get_message_request(&message_id)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
 
-    let mut storage = storage_reader(&clients).await;
-    let storage_response = storage
-        .get_message_as_admin(assertion.token(), &ctx, storage_request)
+    let storage_response = clients
+        .bounded(async {
+            storage_reader(&clients)
+                .await
+                .get_message_as_admin(staff.token(), staff.ctx(), storage_request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_DETAIL_FAILED"))?;
     let response = admin_message_detail_response(storage_response)
@@ -386,13 +400,11 @@ pub async fn admin_get_message(
     ),
 )]
 pub async fn admin_query_message_events(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
     AdminPath(message_id): AdminPath<String>,
     AdminQuery(query): AdminQuery<AdminMessageEventsQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageEventsHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_message_events_request(&message_id, &query)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
     let requested_limit = storage_request
@@ -401,9 +413,13 @@ pub async fn admin_query_message_events(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = storage_reader(&clients).await;
-    let storage_response = storage
-        .query_message_events_as_admin(assertion.token(), &ctx, storage_request)
+    let storage_response = clients
+        .bounded(async {
+            storage_reader(&clients)
+                .await
+                .query_message_events_as_admin(staff.token(), staff.ctx(), storage_request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EVENTS_FAILED"))?;
 
@@ -430,12 +446,10 @@ pub async fn admin_query_message_events(
     ),
 )]
 pub async fn admin_query_message_write_ledger(
-    headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
     AdminJson(req): AdminJson<AdminMessageWriteLedgerQueryHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageWriteLedgerHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_write_ledger_request(&req)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
     let requested_limit = storage_request
@@ -444,9 +458,13 @@ pub async fn admin_query_message_write_ledger(
         .map(|pagination| pagination.limit)
         .unwrap_or_default();
 
-    let mut storage = storage_reader(&clients).await;
-    let storage_response = storage
-        .query_message_write_ledger_as_admin(assertion.token(), &ctx, storage_request)
+    let storage_response = clients
+        .bounded(async {
+            storage_reader(&clients)
+                .await
+                .query_message_write_ledger_as_admin(staff.token(), staff.ctx(), storage_request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_WRITE_LEDGER_QUERY_FAILED"))?;
 
@@ -473,19 +491,38 @@ pub async fn admin_query_message_write_ledger(
 )]
 pub async fn admin_export_messages(
     headers: HeaderMap,
-    Extension(clients): Extension<Arc<GrpcClients>>,
-    Extension(assertion): Extension<VerifiedAdminAssertion>,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(req): AdminJson<AdminMessageExportHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageExportHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
     let storage_request = build_storage_message_export_request(&req)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
+    audit_write(
+        "messages.export",
+        &principal,
+        &headers,
+        &AuditTarget::id(&storage_request.conversation_id),
+    );
 
-    let mut storage = storage_reader(&clients).await;
-    let storage_response = storage
-        .export_messages_as_admin(assertion.token(), &ctx, storage_request)
+    let storage_response = clients
+        .bounded(async {
+            storage_reader(&clients)
+                .await
+                .export_messages_as_admin(staff.token(), staff.ctx(), storage_request)
+                .await
+        })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EXPORT_FAILED"))?;
+    effects
+        .record(
+            staff.ctx(),
+            "message_export",
+            &storage_response.export_task_id,
+            "export",
+        )
+        .await;
 
     Ok(Json(ApiResponse::success(admin_message_export_response(
         storage_response,
@@ -493,9 +530,11 @@ pub async fn admin_export_messages(
 }
 
 /// Storage Reader 客户端的一份克隆：只在取克隆时占锁，调用期间不占，一次慢检索不会让其他
-/// 管理检索排队等它。下游只认转发的 admin 令牌（Storage Reader 按令牌租户检索），不带未签名
+/// 管理检索排队等它。下游只认转发的 Staff 上下文（Storage Reader 按签名租户检索），不带未签名
 /// 的身份元数据。
-async fn storage_reader(clients: &GrpcClients) -> StorageReaderServiceClientWrapper {
+async fn storage_reader(
+    clients: &AdminGrpcClients,
+) -> flare_im_service_kit::clients::StorageReaderServiceClientWrapper {
     clients.storage_reader.lock().await.clone()
 }
 
@@ -508,7 +547,7 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// 6 个固定下游，外加启用时的 Capability。
+/// 4 个固定下游（Media、Conversation、Online、Storage Reader），外加启用时的 Capability。
 fn build_gateway_health(
     capability: Option<&CapabilityDownstreamConfig>,
 ) -> AdminGatewayHealthResponse {
@@ -518,7 +557,7 @@ fn build_gateway_health(
         boundary: "internal_admin_api_only_no_admin_console".to_string(),
         admin_api_version: "v1".to_string(),
         route_count: build_gateway_routes().routes.len(),
-        upstream_count: 6 + usize::from(capability.is_some()),
+        upstream_count: 4 + usize::from(capability.is_some()),
     }
 }
 
@@ -532,20 +571,6 @@ fn build_gateway_upstreams(
             "media",
             &grpc.media_service_url,
             &grpc.media_static_fallback,
-            grpc.connect_timeout_secs,
-            grpc.request_timeout_secs,
-        ),
-        gateway_upstream(
-            "message-ingest",
-            &grpc.message_ingest_service_url,
-            &grpc.message_ingest_static_fallback,
-            grpc.connect_timeout_secs,
-            grpc.request_timeout_secs,
-        ),
-        gateway_upstream(
-            "message-orchestrator",
-            &grpc.message_orchestrator_service_url,
-            &grpc.message_orchestrator_static_fallback,
             grpc.connect_timeout_secs,
             grpc.request_timeout_secs,
         ),
@@ -808,7 +833,19 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
             ),
             ops_route(
                 "GET",
+                "/api/v1/admin/capabilities/catalog",
+                "admin-capability",
+                "capability",
+            ),
+            ops_route(
+                "GET",
                 "/api/v1/admin/capabilities/tenant",
+                "admin-capability",
+                "capability",
+            ),
+            ops_route(
+                "PUT",
+                "/api/v1/admin/capabilities/tenant/{capability_id}",
                 "admin-capability",
                 "capability",
             ),
@@ -818,11 +855,62 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
                 "admin-capability",
                 "capability",
             ),
+            ops_route(
+                "POST",
+                "/api/v1/admin/plugins/register",
+                "admin-capability",
+                "capability",
+            ),
+            ops_route(
+                "POST",
+                "/api/v1/admin/plugins/deregister",
+                "admin-capability",
+                "capability",
+            ),
+            ops_route("GET", "/api/v1/admin/hooks", "admin-hook", "capability"),
+            ops_route("POST", "/api/v1/admin/hooks", "admin-hook", "capability"),
+            ops_route(
+                "GET",
+                "/api/v1/admin/hooks/{hook_id}",
+                "admin-hook",
+                "capability",
+            ),
+            ops_route(
+                "PUT",
+                "/api/v1/admin/hooks/{hook_id}",
+                "admin-hook",
+                "capability",
+            ),
+            ops_route(
+                "DELETE",
+                "/api/v1/admin/hooks/{hook_id}",
+                "admin-hook",
+                "capability",
+            ),
+            ops_route(
+                "PUT",
+                "/api/v1/admin/hooks/{hook_id}/status",
+                "admin-hook",
+                "capability",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/hooks/{hook_id}/statistics",
+                "admin-hook",
+                "capability",
+            ),
+            ops_route(
+                "GET",
+                "/api/v1/admin/hooks/{hook_id}/executions",
+                "admin-hook",
+                "capability",
+            ),
         ],
     }
 }
 
-/// ADM-01 路由：POST 即写操作（踢线），其余只读。
+/// 管理路由：写标记按共享路由表 `core_admin::ROUTES`（GET 只读；POST/PUT/DELETE 为写，两个只读
+/// 查询 POST 不在这里）。
 fn ops_route(method: &str, path: &str, category: &str, downstream: &str) -> AdminGatewayRoute {
     route(
         method,
@@ -830,7 +918,7 @@ fn ops_route(method: &str, path: &str, category: &str, downstream: &str) -> Admi
         category,
         true,
         true,
-        method == "POST",
+        method != "GET",
         downstream,
         "available",
     )
@@ -872,21 +960,10 @@ fn build_gateway_config_snapshot(
         },
         grpc: AdminGrpcConfigSnapshot {
             media_service_url: settings.grpc.media_service_url.clone(),
-            message_ingest_service_url: settings.grpc.message_ingest_service_url.clone(),
-            message_orchestrator_service_url: settings
-                .grpc
-                .message_orchestrator_service_url
-                .clone(),
             conversation_service_url: settings.grpc.conversation_service_url.clone(),
             online_service_url: settings.grpc.online_service_url.clone(),
             storage_reader_service_url: settings.grpc.storage_reader_service_url.clone(),
             media_static_fallback: optional_string(&settings.grpc.media_static_fallback),
-            message_ingest_static_fallback: optional_string(
-                &settings.grpc.message_ingest_static_fallback,
-            ),
-            message_orchestrator_static_fallback: optional_string(
-                &settings.grpc.message_orchestrator_static_fallback,
-            ),
             conversation_static_fallback: optional_string(
                 &settings.grpc.conversation_static_fallback,
             ),
@@ -940,6 +1017,7 @@ mod tests {
         RetentionEnforcementAnchor,
     };
     use super::*;
+    use flare_core_base::context::keys;
     use flare_im_service_kit::gateway::{
         GatewayGrpcConfig, GatewaySettings, RateLimitConfig, ServerConfig, TracingConfig,
     };
@@ -994,25 +1072,36 @@ mod tests {
 
         let response = build_gateway_upstreams(&settings, None);
 
-        assert_eq!(response.upstreams.len(), 6);
-        assert!(
-            response
-                .upstreams
-                .iter()
-                .any(|upstream| upstream.name == "message-ingest"
-                    && upstream.route == "discovery://flare-message-ingest")
+        // Only the downstreams the gateway connects: no Message Ingest, no Orchestrator.
+        let names: Vec<_> = response
+            .upstreams
+            .iter()
+            .map(|upstream| upstream.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "media",
+                "conversation",
+                "signaling-online",
+                "storage-reader"
+            ]
         );
         assert!(
             response
                 .upstreams
                 .iter()
-                .any(|upstream| upstream.name == "message-orchestrator"
-                    && upstream.route == "discovery://flare-orchestrator")
+                .any(|upstream| upstream.name == "conversation"
+                    && upstream.route == "discovery://flare-conversation")
         );
+        let snapshot =
+            serde_json::to_string(&build_gateway_config_snapshot(&settings, None)).unwrap();
+        assert!(!snapshot.contains("message_ingest"));
+        assert!(!snapshot.contains("message_orchestrator"));
     }
 
     #[test]
-    fn admin_config_snapshot_reports_console_ed25519_whatever_the_unused_auth_settings() {
+    fn admin_config_snapshot_reports_staff_context_whatever_the_unused_auth_settings() {
         // 网关设置里的 auth 是 API Gateway 那套（这里故意配成 http_hook 带 URL 与密钥），
         // Admin Gateway 不用它，快照也不能转述它。
         let hook = test_settings();
@@ -1022,7 +1111,7 @@ mod tests {
 
         for settings in [&hook, &core_jwt] {
             let snapshot = build_gateway_config_snapshot(settings, None);
-            assert_eq!(snapshot.auth.mode, "console_ed25519");
+            assert_eq!(snapshot.auth.mode, "staff_context_ed25519");
             assert_eq!(snapshot.auth.hook_url, None);
             assert_eq!(snapshot.auth.hook_timeout_ms, 0);
             assert_eq!(snapshot.auth.hook_secret_header, "");
@@ -1051,15 +1140,15 @@ mod tests {
         };
 
         let response = build_gateway_upstreams(&settings, Some(&capability));
-        assert_eq!(response.upstreams.len(), 7);
+        assert_eq!(response.upstreams.len(), 5);
         let upstream = response.upstreams.last().unwrap();
         assert_eq!(upstream.name, "capability");
         assert_eq!(
             upstream.static_fallback.as_deref(),
             Some("http://127.0.0.1:50110")
         );
-        assert_eq!(build_gateway_health(Some(&capability)).upstream_count, 7);
-        assert_eq!(build_gateway_health(None).upstream_count, 6);
+        assert_eq!(build_gateway_health(Some(&capability)).upstream_count, 5);
+        assert_eq!(build_gateway_health(None).upstream_count, 4);
         let snapshot = build_gateway_config_snapshot(&settings, Some(&capability));
         assert_eq!(
             snapshot.grpc.capability_service_url.as_deref(),
@@ -1085,6 +1174,29 @@ mod tests {
                     && route.admin_required
                     && !route.write)
         );
+    }
+
+    /// The route inventory is the shared Core admin route table, one entry each, with the
+    /// same write flags.
+    #[test]
+    fn admin_route_inventory_matches_the_shared_core_admin_route_table() {
+        use flare_server_core::auth::core_admin::{ADMIN_ROOT, ROUTES};
+        let inventory = build_gateway_routes().routes;
+        assert_eq!(inventory.len(), ROUTES.len());
+        for route in ROUTES {
+            let listed = inventory
+                .iter()
+                .find(|listed| {
+                    listed.method == route.method
+                        && listed.path == format!("{ADMIN_ROOT}{}", route.pattern)
+                })
+                .unwrap_or_else(|| panic!("{} {} is not listed", route.method, route.pattern));
+            assert_eq!(
+                listed.write, route.write,
+                "{} {}",
+                route.method, route.pattern
+            );
+        }
     }
 
     fn test_settings() -> GatewaySettings {

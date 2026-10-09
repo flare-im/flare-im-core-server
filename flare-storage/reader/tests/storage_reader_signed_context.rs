@@ -1,8 +1,9 @@
 //! Storage Reader 读接口的身份边界（W10-D）：经 `signed_read_service` 起一个真的 gRPC 服务。
 //! 消息、会话头等读以 `x-flare-ctx` 的签名为准，与签名不一致的裸 `x-tenant-id`、`x-user-id`
-//! 被拒；边界要求签名时未签名调用被拒。管理检索不经这道边界，照旧只认 admin 令牌。
+//! 被拒；边界要求签名时未签名调用被拒。管理检索不经这道边界，只认转发的 Staff 上下文。
 //!
 //! 以前这些读只看调用方自报的元数据：内网里任何能连到端口的进程带上任意租户与用户就能读消息。
+//! 管理检索（admin-gateway 转发的 Staff 上下文）由处理器自己验，见 `admin_retrieval_*`。
 //!
 //! 数据库是连不上的回环端口：通过边界的读在处理器里走到存储，回可重试的 UNAVAILABLE；
 //! 被边界拒绝的是 UNAUTHENTICATED 或 PERMISSION_DENIED，到不了存储。
@@ -17,12 +18,10 @@ use flare_grpc_proto::storage::{
     ConversationWindowTarget, GetMessageRequest, QueryConversationsMessageWindowsRequest,
     QueryMessagesBySeqRequest,
 };
-use flare_im_service_kit::control_auth::{
-    CORE_ADMIN_AUDIENCE, ConsoleControlVerifier, PLATFORM_ISSUER,
-};
+use flare_server_core::auth::kid;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
-    SignedFirstContextLayer, TokenService,
+    SignedFirstContextLayer,
 };
 use flare_storage_reader::application::handlers::MessageStorageQueryHandler;
 use flare_storage_reader::infrastructure::persistence::optimized_postgres_store::OptimizedPostgresMessageStorageImpl;
@@ -46,8 +45,9 @@ fn cell_keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
     )
 }
 
-/// Console 的测试密钥对（admin-gateway 原样转发的 admin 令牌由它签）。
-fn console() -> (TokenService, ConsoleControlVerifier) {
+/// 网关 admin 分区的测试密钥对（admin-gateway 原样转发的 Staff 上下文由它按 `kid=gateway` 签），
+/// 以及钉死 gateway 的验签器。
+fn gateway() -> (SignedContextSigner, SignedContextVerifier) {
     let key = SigningKey::from_bytes(&[47; 32]);
     let private = key.to_pkcs8_pem(Default::default()).unwrap();
     let public = key
@@ -55,8 +55,13 @@ fn console() -> (TokenService, ConsoleControlVerifier) {
         .to_public_key_pem(Default::default())
         .unwrap();
     (
-        TokenService::from_ed25519_private_key(&private, PLATFORM_ISSUER, 60).unwrap(),
-        ConsoleControlVerifier::from_public_key(&public).unwrap(),
+        SignedContextSigner::from_private_key(&private)
+            .unwrap()
+            .with_kid(kid::GATEWAY)
+            .unwrap(),
+        SignedContextVerifier::from_public_key(&public)
+            .unwrap()
+            .require_staff_kid([kid::GATEWAY]),
     )
 }
 
@@ -72,7 +77,7 @@ fn sign(signer: &SignedContextSigner, actor_type: SignedActorType, actor: &str) 
 }
 
 /// 与 `service/mod.rs` 同一个装配函数，存储是连不上的回环端口。
-async fn serve(layer: SignedFirstContextLayer, admin: Option<ConsoleControlVerifier>) -> Client {
+async fn serve(layer: SignedFirstContextLayer, admin: Option<SignedContextVerifier>) -> Client {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(Duration::from_millis(500))
         .connect_lazy("postgres://reader@127.0.0.1:1/flare")
@@ -285,23 +290,24 @@ async fn signed_users_cannot_read_with_another_users_visibility_floor() {
     }
 }
 
-/// 管理检索不要 `x-flare-ctx`：带 admin 令牌的调用越过读接口边界走到存储；不带的被处理器以
-/// admin 令牌缺失拒绝，而不是以缺签名上下文拒绝。
+/// 管理检索不经读接口边界：带网关签的 Staff 上下文的调用越过边界走到存储（边界的验签器是另一把
+/// Cell 钥、也不放行 Staff，仍不碍事）；不带的被处理器以 Staff 上下文缺失拒绝，而不是以边界的
+/// 缺签名上下文拒绝。
 #[tokio::test]
-async fn admin_retrieval_keeps_its_admin_token_check() {
+async fn admin_retrieval_keeps_its_staff_context_check() {
     let (_, verifier) = cell_keys(91);
-    let (console, admin_verifier) = console();
+    let (gateway_signer, staff_verifier) = gateway();
     let mut client = serve(
         SignedFirstContextLayer::new(Some(verifier)).require_signed(true),
-        Some(admin_verifier),
+        Some(staff_verifier),
     )
     .await;
-    let admin = format!(
-        "Bearer {}",
-        console
-            .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", CORE_ADMIN_AUDIENCE)
-            .unwrap()
-    );
+    let staff = gateway_signer
+        .sign(
+            &SignedContextIdentity::new(SignedActorType::Staff, "employee-1", "tenant-a", "req-1")
+                .with_staff_grant(None, Some("core:messages:read".into()), 1),
+        )
+        .unwrap();
     let get = |metadata: Vec<(&'static str, String)>| {
         let mut request = tonic::Request::new(GetMessageRequest {
             message_id: "m1".into(),
@@ -312,7 +318,7 @@ async fn admin_retrieval_keeps_its_admin_token_check() {
         request
     };
     let status = client
-        .get_message(get(vec![("authorization", admin)]))
+        .get_message(get(vec![("x-flare-ctx", staff)]))
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::Unavailable, "{status:?}");

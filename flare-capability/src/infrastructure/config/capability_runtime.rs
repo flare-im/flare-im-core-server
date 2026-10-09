@@ -55,6 +55,11 @@ pub struct CapabilityRuntimeConfig {
     pub plugin_health_check_interval: Duration,
     /// 插件健康检查 / 远程调用超时。
     pub plugin_call_timeout: Duration,
+    /// 有库时从 `capability_plugin_endpoints` 重读登记的周期：各实例据此收敛到同一份登记。
+    pub plugin_route_refresh_interval: Duration,
+    /// 登记的插件端点多久既没重新登记、也没有一次健康检查通过，就被清理掉（配置发现来的端点
+    /// 不入库，从不清理）。
+    pub plugin_route_ttl: Duration,
 }
 
 impl CapabilityRuntimeConfig {
@@ -68,6 +73,8 @@ impl CapabilityRuntimeConfig {
         let mut plugin_discovery_endpoints: Vec<PluginDiscoveryEndpoint> = vec![];
         let mut plugin_health_check_interval_secs = 15u64;
         let mut plugin_call_timeout_ms = 5_000u64;
+        let mut plugin_route_refresh_secs = 10u64;
+        let mut plugin_route_ttl_secs = 86_400u64;
 
         if let Some(v) = layered
             .resolve_usize(
@@ -126,6 +133,26 @@ impl CapabilityRuntimeConfig {
             plugin_call_timeout_ms = v;
         }
 
+        if let Some(v) = layered
+            .resolve_u64(
+                "FLARE_CAPABILITY_PLUGIN_ROUTE_REFRESH_SECS",
+                "capability_runtime.plugin_route_refresh_secs",
+            )
+            .filter(|&n: &u64| (1..=3600).contains(&n))
+        {
+            plugin_route_refresh_secs = v;
+        }
+
+        if let Some(v) = layered
+            .resolve_u64(
+                "FLARE_CAPABILITY_PLUGIN_ROUTE_TTL_SECS",
+                "capability_runtime.plugin_route_ttl_secs",
+            )
+            .filter(|&n: &u64| (300..=30 * 86_400).contains(&n))
+        {
+            plugin_route_ttl_secs = v;
+        }
+
         let cfg = Self {
             max_payload_json_bytes,
             dispatch_timeout: Duration::from_millis(dispatch_timeout_ms),
@@ -133,6 +160,8 @@ impl CapabilityRuntimeConfig {
             plugin_discovery_endpoints,
             plugin_health_check_interval: Duration::from_secs(plugin_health_check_interval_secs),
             plugin_call_timeout: Duration::from_millis(plugin_call_timeout_ms),
+            plugin_route_refresh_interval: Duration::from_secs(plugin_route_refresh_secs),
+            plugin_route_ttl: Duration::from_secs(plugin_route_ttl_secs),
         };
 
         tracing::info!(
@@ -142,6 +171,8 @@ impl CapabilityRuntimeConfig {
             discovered_plugin_count = cfg.plugin_discovery_endpoints.len(),
             plugin_health_interval_secs = plugin_health_check_interval_secs,
             plugin_call_timeout_ms = plugin_call_timeout_ms,
+            plugin_route_refresh_secs = plugin_route_refresh_secs,
+            plugin_route_ttl_secs = plugin_route_ttl_secs,
             "CapabilityRuntimeConfig loaded"
         );
 

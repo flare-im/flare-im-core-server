@@ -32,6 +32,31 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 
 `INSERT INTO public.capability_user_grants (tenant_id, user_id, capability_id, plan_code, source) VALUES ('0', '*', 'rtc.*', 'dev', 'manual') ON CONFLICT DO NOTHING;`
 
+### 插件登记（`RegisterPluginEndpoint`）
+
+插件端点有两种来源：
+
+- **配置发现**：`capability_runtime.plugin_discovery_endpoints` 与 `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT`。这类端点只在读到配置的进程里，从不写库，也不会被下面的 TTL 清理。
+- **登记**：`CapabilityService.RegisterPluginEndpoint` / `DeregisterPluginEndpoint`，由平台员工经 Admin Gateway 调用（`core:plugins:write`），或由插件宿主带 Cell 签发的、租户为自己的 `Service` 上下文调用。有库时 Capability 先把登记写进 `capability_plugin_endpoints`（迁移 `0011`），写成功才进本进程的路由簿；写库失败则调用回 `UNAVAILABLE`，什么也不变。注销先删库里的行。同一 `(tenant, plugin)` 先由配置发现、后被登记时，登记覆盖配置。
+
+每个 Capability 实例启动时整表载入（表不存在则启动失败：先跑迁移），之后按周期重读，多实例由此收敛，重启也不丢登记。比某次重读快照更新的本地写不会被那次快照覆盖。每轮健康检查通过的登记记下 `last_healthy_at`；超过 TTL 既没重新登记、也没通过一次健康检查的登记被删除（每分钟检查一次），其他实例在下次重读时去掉。没有库时登记只在本进程：其他实例看不到，重启即丢（启动日志说明一次）。
+
+| 设置（环境变量，其次 `[capability_runtime]` 键） | 缺省 | 取值范围 |
+| --- | --- | --- |
+| `FLARE_CAPABILITY_PLUGIN_ROUTE_REFRESH_SECS` / `plugin_route_refresh_secs` | 10 | 1 到 3600 秒 |
+| `FLARE_CAPABILITY_PLUGIN_ROUTE_TTL_SECS` / `plugin_route_ttl_secs` | 86400 | 300 秒到 30 天 |
+
+超出范围的值被忽略，使用缺省值。
+
+### `ExtensionPlugin` 的身份
+
+`ExtensionPlugin` 路由器（`flare.capability.v1.ExtensionPlugin/Call`）挂在允许匿名准入的签名上下文层后面。验过的 `x-flare-ctx` 是唯一身份：`GenericRequest.metadata`、`x-tenant-id`、`x-user-id` 等调用方元数据一概不读。
+
+- `flare.capability.v1.health_check` 是唯一不带上下文也回答的 operation；带了无效上下文时它同样回 `UNAUTHENTICATED`。
+- 其余 operation 需要签名的 `User`、`Service` 或 `TenantAdmin` 上下文，没有则 `UNAUTHENTICATED`。`Staff`、`System`、`Guest` 上下文，以及租户为空、`*` 或带首尾空白的上下文，回 `PERMISSION_DENIED`。员工只经 Admin Gateway 进 Core。
+- handler 拿到的是验过的上下文，租户、用户、actor、请求号与追踪号都来自签名。`flare.media.v1.list_plugin_routes` 只列签名租户的插件；请求体里的 `tenant_id` 必须为空或等于该租户。
+- 没有 Cell 公钥集（`FLARE_INTERNAL_CTX_PUBLIC_KEYS` / `FLARE_INTERNAL_CTX_PUBLIC_KEY`）时路由器不挂该层，只回答健康检查，其余调用一律 `UNAUTHENTICATED`。
+
 ## Hook配置方式
 
 本服务中 Hook 配置支持三种来源，按优先级从高到低排序：

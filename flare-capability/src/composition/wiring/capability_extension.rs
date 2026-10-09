@@ -5,11 +5,10 @@
 
 use std::sync::Arc;
 
-use flare_im_service_kit::control_auth::ConsoleControlVerifier;
 use flare_server_core::error::Result;
 use sqlx::PgPool;
 
-use super::internal_ctx::internal_ctx_verifier_from_env;
+use super::internal_ctx::{admin_staff_verifier_from_env, internal_ctx_verifier_from_env};
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::infrastructure::capability::DispatchRateLimiter;
 use crate::infrastructure::capability::PluginRouteBook;
@@ -102,16 +101,9 @@ pub async fn init_capability_extension_stack(
 
     register_discovered_media_plugins(&registry, &plugin_routes, runtime.as_ref()).await?;
 
+    // Dispatch 与插件自注册验 Cell 公钥集里的任何组件钥；管理 RPC 的 Staff 上下文钉死 kid=gateway。
     let dispatch_verifier = internal_ctx_verifier_from_env("Capability Dispatch")?;
-
-    let control_verifier = ConsoleControlVerifier::from_env().map_err(|_| {
-        flare_server_core::error::FlareError::system("invalid FLARE_CONSOLE_PUBLIC_KEY")
-    })?;
-    if control_verifier.is_none() {
-        tracing::warn!(
-            "Console control public key missing; Capability management RPCs fail closed"
-        );
-    }
+    let staff_verifier = admin_staff_verifier_from_env("Capability management RPCs")?;
 
     let capability_grpc = CapabilityGrpcServer::new(
         registry.clone(),
@@ -123,7 +115,7 @@ pub async fn init_capability_extension_stack(
         hook_governance,
         Arc::clone(&plugin_routes),
         dispatch_verifier,
-        control_verifier,
+        staff_verifier,
     );
 
     tracing::info!("capability extension stack initialized (media plugins via service discovery)");

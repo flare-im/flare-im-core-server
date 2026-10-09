@@ -1,6 +1,6 @@
 # MIG-05 凭证投影接收前置
 
-`TenantProjection.UpsertCredentials` 仅接受已有 Console 公钥验证的 ProjectionWorker，
+`TenantProjection.UpsertCredentials` 仅接受已由平台公钥（`FLARE_PLATFORM_PUBLIC_KEY`）验证的 ProjectionWorker，
 `token_use=control`、Core audience、签名租户与 app_id 必须精确匹配。员工、用户令牌、
 错误 audience、通配 Worker、跨 app、无签名/伪造身份头都不能写入。
 

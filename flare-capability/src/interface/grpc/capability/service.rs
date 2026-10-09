@@ -1,4 +1,10 @@
-//! `flare.capability.v1.CapabilityService` gRPC 实现（生产护栏：超时、限流、控制令牌、审计）。
+//! `flare.capability.v1.CapabilityService` gRPC 实现（生产护栏：超时、限流、Staff 上下文、审计）。
+//!
+//! 管理 RPC 只认 admin-gateway 转发的 Staff `x-flare-ctx`（网关 admin 分区按 `kid=gateway` 签），
+//! 按 RPC 族复核签名里的权限码：目录与用户授权读 `core:capabilities:read`，授予/吊销/租户开关
+//! `core:capabilities:write`，插件簿读 `core:plugins:read`，插件登记与注销 `core:plugins:write`
+//! （仅平台员工），Hook 治理 `core:hooks:read` / `core:hooks:write`。插件登记、注销与列表另接受
+//! Cell 签的 Service 上下文（插件宿主自注册），其签名租户须等于请求租户。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,18 +24,23 @@ use flare_grpc_proto::capability::{
     UserCapabilityGrant as ProtoGrant,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::control_auth::{
-    ConsoleControlVerifier, ControlActorKind, VerifiedControlActor, require_grpc_control_or_admin,
+use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
+use flare_server_core::auth::core_admin::permission::{
+    CAPABILITIES_READ, CAPABILITIES_WRITE, HOOKS_READ, HOOKS_WRITE, PLUGINS_READ, PLUGINS_WRITE,
 };
-use flare_server_core::SignedContextVerifier;
+use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
+use flare_server_core::{SignedActorType, SignedContextVerifier, VerifiedContext};
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
-use super::administer::dispatch_hook_administer;
+use super::administer::{
+    HookAdministrator, READ_OPERATIONS, WRITE_OPERATIONS, dispatch_hook_administer,
+};
 use crate::application::handler::{VerifiedDispatchOrigin, dispatch_capability_command};
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::PluginHealthProbe;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
+use crate::domain::model::{PluginEndpoint, validate_plugin_endpoint};
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use crate::infrastructure::capability::plugin_contract::{
     HEALTH_PROTOCOL_SFU_CONTROL, LABEL_HEALTH_PROTOCOL,
@@ -40,9 +51,7 @@ use crate::infrastructure::capability::{
 use crate::infrastructure::config::CapabilityRuntimeConfig;
 use crate::infrastructure::persistence::PostgresCapabilityAuditLog;
 use crate::interface::grpc::hooks::HookServiceServer;
-use crate::interface::grpc::shared::helpers::{
-    capability_error_to_status, require_capability_policy_admin, trace_id_from_request,
-};
+use crate::interface::grpc::shared::helpers::{capability_error_to_status, trace_id_from_request};
 
 /// 可观测计数（后续可对接 Prometheus / OTel）。
 #[derive(Debug, Default)]
@@ -93,9 +102,11 @@ pub struct CapabilityGrpcServer {
     hook_governance: Option<Arc<HookServiceServer>>,
     /// 扩展插件 endpoint 登记（开发期进程内簿；可换持久化）。
     plugin_routes: Arc<PluginRouteBook>,
-    /// Dispatch alone requires cell-signed identity; other RPCs keep their own auth contract.
+    /// Dispatch requires cell-signed identity (any component key); plugin self-registration
+    /// verifies its Service context with the same key set.
     dispatch_verifier: Option<SignedContextVerifier>,
-    control_verifier: Option<ConsoleControlVerifier>,
+    /// The same key set with Staff pinned to `kid=gateway`: the admin RPCs.
+    staff_verifier: Option<SignedContextVerifier>,
 }
 
 impl CapabilityGrpcServer {
@@ -110,7 +121,7 @@ impl CapabilityGrpcServer {
         hook_governance: Option<Arc<HookServiceServer>>,
         plugin_routes: Arc<PluginRouteBook>,
         dispatch_verifier: Option<SignedContextVerifier>,
-        control_verifier: Option<ConsoleControlVerifier>,
+        staff_verifier: Option<SignedContextVerifier>,
     ) -> Self {
         let server = Self {
             registry,
@@ -122,7 +133,7 @@ impl CapabilityGrpcServer {
             hook_governance,
             plugin_routes,
             dispatch_verifier,
-            control_verifier,
+            staff_verifier,
         };
         server.register_discovered_plugin_endpoints();
         server.spawn_plugin_health_checker();
@@ -131,6 +142,52 @@ impl CapabilityGrpcServer {
 
     pub fn metrics(&self) -> CapabilityMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    /// The admin gate: the forwarded Staff context with `permission`; without a key set every
+    /// admin RPC is UNAUTHENTICATED.
+    fn staff<T>(&self, request: &Request<T>, permission: &str) -> Result<VerifiedStaff, Status> {
+        let verifier = self
+            .staff_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        require_staff(request, verifier, permission)
+    }
+
+    /// Plugin route-book RPCs: platform staff with `permission`, or a Cell-signed `Service`
+    /// context (a plugin host registering itself) whose signed tenant is `tenant_id`. The two
+    /// are told apart by the verified actor type; the key set is shared.
+    fn plugin_route_actor<T>(
+        &self,
+        request: &Request<T>,
+        permission: &str,
+        tenant_id: &str,
+    ) -> Result<PluginRouteActor, Status> {
+        let verifier = self
+            .dispatch_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("signed context verifier not configured"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .ok_or_else(|| Status::unauthenticated("signed internal context required"))?;
+        if claims.actor_type == SignedActorType::Service {
+            if claims.tenant_id != tenant_id {
+                return Err(Status::permission_denied(
+                    "plugin service context tenant mismatch",
+                ));
+            }
+            return Ok(PluginRouteActor::Service(claims.actor_id.clone()));
+        }
+        let staff = self.staff(request, permission)?;
+        if permission == PLUGINS_WRITE && !staff.is_platform_staff() {
+            return Err(Status::permission_denied(
+                "plugin registration is for platform staff only",
+            ));
+        }
+        staff.require_tenant(tenant_id)?;
+        Ok(PluginRouteActor::Staff(staff.actor_id))
     }
 
     pub fn runtime_config(&self) -> Arc<CapabilityRuntimeConfig> {
@@ -192,6 +249,7 @@ impl CapabilityGrpcServer {
             loop {
                 ticker.tick().await;
                 let snapshots = routes.list_snapshots();
+                let mut healthy = Vec::new();
                 for snapshot in snapshots {
                     let result = check_plugin_health(
                         snapshot.instance.grpc_authority.as_str(),
@@ -205,12 +263,15 @@ impl CapabilityGrpcServer {
                     )
                     .await;
                     match result {
-                        Ok(()) => routes.mark_health(
-                            snapshot.tenant_id.as_str(),
-                            snapshot.instance.plugin_id.as_str(),
-                            true,
-                            None,
-                        ),
+                        Ok(()) => {
+                            routes.mark_health(
+                                snapshot.tenant_id.as_str(),
+                                snapshot.instance.plugin_id.as_str(),
+                                true,
+                                None,
+                            );
+                            healthy.push((snapshot.tenant_id, snapshot.instance.plugin_id));
+                        }
                         Err(err) => routes.mark_health(
                             snapshot.tenant_id.as_str(),
                             snapshot.instance.plugin_id.as_str(),
@@ -218,6 +279,11 @@ impl CapabilityGrpcServer {
                             Some(err),
                         ),
                     }
+                }
+                // One statement per round for every registration that passed; the TTL cleanup
+                // reads `last_healthy_at`. A storage failure only delays that bookkeeping.
+                if let Err(error) = routes.persist_health(&healthy).await {
+                    tracing::warn!(%error, "recording plugin health in capability_plugin_endpoints failed");
                 }
             }
         });
@@ -310,13 +376,28 @@ async fn check_plugin_health(
     }
 }
 
+/// Who may touch the plugin route book: platform staff, or the plugin host's own service identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PluginRouteActor {
+    Staff(String),
+    Service(String),
+}
+
+impl PluginRouteActor {
+    fn id(&self) -> &str {
+        match self {
+            Self::Staff(id) | Self::Service(id) => id,
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl CapabilityService for CapabilityGrpcServer {
     async fn list_capabilities(
         &self,
         request: Request<ListCapabilitiesRequest>,
     ) -> Result<Response<ListCapabilitiesResponse>, Status> {
-        let _actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        let _staff = self.staff(&request, CAPABILITIES_READ)?;
         let capabilities = list_registered_capabilities()
             .into_iter()
             .map(domain_descriptor_to_proto)
@@ -328,9 +409,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListUserCapabilitiesRequest>,
     ) -> Result<Response<ListUserCapabilitiesResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        let staff = self.staff(&request, CAPABILITIES_READ)?;
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
+        staff.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id and user_id required"));
         }
@@ -477,10 +558,13 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<GrantUserCapabilityRequest>,
     ) -> Result<Response<GrantUserCapabilityResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
-        let trace = trace_id_from_request(&request);
+        let staff = self.staff(&request, CAPABILITIES_WRITE)?;
+        let trace = staff
+            .trace_id
+            .clone()
+            .or_else(|| trace_id_from_request(&request));
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
+        staff.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, user_id, capability_id required",
@@ -525,7 +609,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "grant",
                 &r.tenant_id,
-                Some(actor.subject.as_str()),
+                Some(staff.actor_id.as_str()),
                 Some(r.user_id.as_str()),
                 Some(r.capability_id.as_str()),
                 detail,
@@ -543,10 +627,13 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<RevokeUserCapabilityRequest>,
     ) -> Result<Response<RevokeUserCapabilityResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
-        let trace = trace_id_from_request(&request);
+        let staff = self.staff(&request, CAPABILITIES_WRITE)?;
+        let trace = staff
+            .trace_id
+            .clone()
+            .or_else(|| trace_id_from_request(&request));
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
+        staff.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.user_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, user_id, capability_id required",
@@ -562,7 +649,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "revoke",
                 &r.tenant_id,
-                Some(actor.subject.as_str()),
+                Some(staff.actor_id.as_str()),
                 Some(r.user_id.as_str()),
                 Some(r.capability_id.as_str()),
                 serde_json::json!({}),
@@ -580,10 +667,13 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<SetTenantCapabilitySwitchRequest>,
     ) -> Result<Response<SetTenantCapabilitySwitchResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
-        let trace = trace_id_from_request(&request);
+        let staff = self.staff(&request, CAPABILITIES_WRITE)?;
+        let trace = staff
+            .trace_id
+            .clone()
+            .or_else(|| trace_id_from_request(&request));
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
+        staff.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, capability_id required",
@@ -601,7 +691,7 @@ impl CapabilityService for CapabilityGrpcServer {
             a.record_policy_event(
                 "tenant_switch",
                 &r.tenant_id,
-                Some(actor.subject.as_str()),
+                Some(staff.actor_id.as_str()),
                 None,
                 Some(r.capability_id.as_str()),
                 serde_json::json!({ "enabled": r.enabled }),
@@ -619,9 +709,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<RegisterPluginEndpointRequest>,
     ) -> Result<Response<RegisterPluginEndpointResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        let actor =
+            self.plugin_route_actor(&request, PLUGINS_WRITE, &request.get_ref().tenant_id)?;
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, plugin_id, capability_id required",
@@ -634,37 +724,51 @@ impl CapabilityService for CapabilityGrpcServer {
         //
         // 这里是兼容窗口的关键位置——要求必填的话，核心升级的瞬间所有已部署
         // 插件都会注册失败。降级 + 告警，让新旧插件能在同一集群共存。
-        let declared_operations = r.declared_operations;
-        let unverified = declared_operations.is_empty();
+        let unverified = r.declared_operations.is_empty();
+        let endpoint = PluginEndpoint {
+            tenant_id: r.tenant_id,
+            instance: RegisteredPluginInstance {
+                plugin_id: r.plugin_id,
+                capability_id: r.capability_id,
+                grpc_authority: r.grpc_authority,
+                labels: r.labels,
+                plugin_version: r.plugin_version,
+                api_version: r.api_version,
+                manifest_sha256: r.manifest_sha256,
+                declared_operations: r.declared_operations,
+                unverified,
+                seat_model: r.seat_model,
+            },
+        };
+        // 先校验再记日志或回显：plugin_id、capability_id 与声明的每一项来自 Admin 接口和插件自报，
+        // 校验过的才是标识（见 `is_plugin_identifier`），带换行的值伪造不了日志行。
+        validate_plugin_endpoint(&endpoint).map_err(Status::invalid_argument)?;
+        let instance = &endpoint.instance;
         if unverified {
             tracing::warn!(
-                tenant_id = %r.tenant_id,
-                plugin_id = %r.plugin_id,
-                capability_id = %r.capability_id,
+                tenant_id = %endpoint.tenant_id,
+                plugin_id = %instance.plugin_id,
+                capability_id = %instance.capability_id,
+                registered_by = actor.id(),
                 "plugin registered without declared_operations;                  running unverified — declaration cannot be enforced"
             );
-        } else if !declared_operations.iter().any(|op| op == &r.capability_id) {
+        } else if !instance
+            .declared_operations
+            .iter()
+            .any(|op| op == &instance.capability_id)
+        {
             // 声明了却不包含自己注册的 capability_id —— 这是清单与注册对不上，
             // 属于配置错误，早拒早发现，而不是等第一次调用时报 unknown op。
             return Err(Status::invalid_argument(format!(
                 "capability_id {} not present in declared_operations {:?}",
-                r.capability_id, declared_operations
+                instance.capability_id, instance.declared_operations
             )));
         }
-
-        let instance = RegisteredPluginInstance {
-            plugin_id: r.plugin_id,
-            capability_id: r.capability_id,
-            grpc_authority: r.grpc_authority,
-            labels: r.labels,
-            plugin_version: r.plugin_version,
-            api_version: r.api_version,
-            manifest_sha256: r.manifest_sha256,
-            declared_operations,
-            unverified,
-            seat_model: r.seat_model,
-        };
-        self.plugin_routes.upsert(r.tenant_id.as_str(), instance);
+        // 有库时先写 capability_plugin_endpoints，写成功才进本进程的读模型；其他实例重读后收敛。
+        self.plugin_routes
+            .register(endpoint.tenant_id.as_str(), endpoint.instance)
+            .await
+            .map_err(|_| Status::unavailable("plugin registration storage is unavailable"))?;
         Ok(Response::new(RegisterPluginEndpointResponse {
             accepted: true,
             message: if unverified {
@@ -680,15 +784,17 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<DeregisterPluginEndpointRequest>,
     ) -> Result<Response<DeregisterPluginEndpointResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
+        let _actor =
+            self.plugin_route_actor(&request, PLUGINS_WRITE, &request.get_ref().tenant_id)?;
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id, plugin_id required"));
         }
         let removed = self
             .plugin_routes
-            .remove(r.tenant_id.as_str(), r.plugin_id.as_str());
+            .deregister(r.tenant_id.as_str(), r.plugin_id.as_str())
+            .await
+            .map_err(|_| Status::unavailable("plugin registration storage is unavailable"))?;
         Ok(Response::new(DeregisterPluginEndpointResponse {
             accepted: removed,
         }))
@@ -698,9 +804,9 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListRegisteredPluginsRequest>,
     ) -> Result<Response<ListRegisteredPluginsResponse>, Status> {
-        let actor = plugin_listing_actor(&request, self.control_verifier.as_ref())?;
+        let _actor =
+            self.plugin_route_actor(&request, PLUGINS_READ, &request.get_ref().tenant_id)?;
         let r = request.into_inner();
-        actor.require_tenant(&r.tenant_id)?;
         if r.tenant_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id required"));
         }
@@ -714,27 +820,33 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<GenericRequest>,
     ) -> Result<Response<GenericResponse>, Status> {
-        let actor = require_capability_policy_admin(&request, self.control_verifier.as_ref())?;
-        actor.require_kind(ControlActorKind::Employee)?;
+        // The operation decides the code before anything is dispatched: reads need
+        // core:hooks:read, writes core:hooks:write; an unknown operation is refused with the
+        // read code so it cannot probe for a weaker gate.
+        let operation = request.get_ref().operation.as_str();
+        let permission = if WRITE_OPERATIONS.contains(&operation) {
+            HOOKS_WRITE
+        } else if READ_OPERATIONS.contains(&operation) {
+            HOOKS_READ
+        } else {
+            self.staff(&request, HOOKS_READ)?;
+            return Err(Status::unimplemented(format!(
+                "unknown administer operation: {operation}"
+            )));
+        };
+        let staff = self.staff(&request, permission)?;
         let Some(ref gov) = self.hook_governance else {
             return Err(Status::failed_precondition(
                 "hook governance disabled: configure database_url for HookService",
             ));
         };
-        dispatch_hook_administer(gov.as_ref(), request.into_inner(), &actor).await
+        dispatch_hook_administer(
+            gov.as_ref(),
+            request.into_inner(),
+            &HookAdministrator::from_staff(&staff),
+        )
+        .await
     }
-}
-
-/// `ListRegisteredPlugins` 只读：Console 直连的 control 令牌，或 admin-gateway 原样转发的
-/// admin 令牌（ADM-01 `GET /api/v1/admin/plugins`）。两条分支都只允许员工，请求租户仍须
-/// 等于令牌租户；登记与注销插件（写）继续只认 control 令牌。
-fn plugin_listing_actor<T>(
-    request: &Request<T>,
-    verifier: Option<&ConsoleControlVerifier>,
-) -> Result<VerifiedControlActor, Status> {
-    let (actor, _channel) = require_grpc_control_or_admin(request, verifier)?;
-    actor.require_kind(ControlActorKind::Employee)?;
-    Ok(actor)
 }
 
 #[cfg(test)]
@@ -755,38 +867,46 @@ mod dispatch_identity_tests {
 }
 
 #[cfg(test)]
-mod plugin_listing_tests {
-    //! `ListRegisteredPlugins` 的两条令牌分支：缺令牌、错误受众、跨租户、非员工四类负向用例，
-    //! 外加 control 与 admin 两个正向对照；只返回请求租户（即令牌租户）下的实例。
+mod plugin_route_book_tests {
+    //! 插件簿三个 RPC 的两条身份分支：网关签的平台员工 Staff 上下文，与 Cell 签的插件宿主
+    //! Service 上下文；负向：缺上下文、hook 钥签的 Staff、组织员工登记、权限码不符、跨租户。
 
     use std::time::Duration;
 
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::control_auth::{
-        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
-    };
+    use flare_server_core::auth::{KeySet, kid};
+    use flare_server_core::{SignedContextIdentity, SignedContextSigner};
     use tonic::Code;
 
     use super::*;
     use crate::infrastructure::capability::InMemoryCapabilityGrants;
 
-    fn signer() -> (flare_server_core::TokenService, ConsoleControlVerifier) {
-        let key = SigningKey::from_bytes(&[47; 32]);
-        let private = key.to_pkcs8_pem(Default::default()).unwrap();
-        let public = key
-            .verifying_key()
-            .to_public_key_pem(Default::default())
-            .unwrap();
+    const GATEWAY_KEY: [u8; 32] = [47; 32];
+    const HOOK_KEY: [u8; 32] = [48; 32];
+
+    fn pem(seed: [u8; 32]) -> (String, String) {
+        let key = SigningKey::from_bytes(&seed);
         (
-            flare_server_core::TokenService::from_ed25519_private_key(
-                &private,
-                PLATFORM_ISSUER,
-                60,
-            )
-            .unwrap(),
-            ConsoleControlVerifier::from_public_key(&public).unwrap(),
+            key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
         )
+    }
+
+    fn signer(seed: [u8; 32], key_id: &str) -> SignedContextSigner {
+        SignedContextSigner::from_private_key(&pem(seed).0)
+            .unwrap()
+            .with_kid(key_id)
+            .unwrap()
+    }
+
+    fn verifier() -> SignedContextVerifier {
+        let mut keys = KeySet::empty();
+        keys.insert(kid::GATEWAY, &pem(GATEWAY_KEY).1).unwrap();
+        keys.insert(kid::HOOK, &pem(HOOK_KEY).1).unwrap();
+        SignedContextVerifier::from_key_set(keys)
     }
 
     fn plugin(plugin_id: &str) -> RegisteredPluginInstance {
@@ -798,10 +918,11 @@ mod plugin_listing_tests {
         }
     }
 
-    fn server(verifier: ConsoleControlVerifier) -> CapabilityGrpcServer {
+    fn server() -> CapabilityGrpcServer {
         let routes = Arc::new(PluginRouteBook::new());
         routes.upsert("tenant-a", plugin("plugin-a"));
         routes.upsert("tenant-b", plugin("plugin-b"));
+        let keys = verifier();
         CapabilityGrpcServer::new(
             CapabilityExtensionRegistry::new(),
             Arc::new(InMemoryCapabilityGrants::new()),
@@ -812,15 +933,43 @@ mod plugin_listing_tests {
                 plugin_discovery_endpoints: Vec::new(),
                 plugin_health_check_interval: Duration::from_secs(3600),
                 plugin_call_timeout: Duration::from_millis(50),
+                plugin_route_refresh_interval: Duration::from_secs(10),
+                plugin_route_ttl: Duration::from_secs(86_400),
             }),
             None,
             None,
             Arc::new(CapabilityInvocationMetrics::default()),
             None,
             routes,
-            None,
-            Some(verifier),
+            Some(keys.clone()),
+            Some(keys.require_staff_kid([kid::GATEWAY])),
         )
+    }
+
+    fn staff_token(
+        seed: [u8; 32],
+        key_id: &str,
+        tenant: &str,
+        permission: &str,
+        org: Option<&str>,
+    ) -> String {
+        signer(seed, key_id)
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "employee-1", tenant, "req-1")
+                    .with_staff_grant(org.map(str::to_owned), Some(permission.into()), 2),
+            )
+            .unwrap()
+    }
+
+    fn service_token(tenant: &str) -> String {
+        signer(GATEWAY_KEY, kid::GATEWAY)
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::Service,
+                "flare-plugin-host",
+                tenant,
+                "req-2",
+            ))
+            .unwrap()
     }
 
     fn request(token: Option<&str>, tenant_id: &str) -> Request<ListRegisteredPluginsRequest> {
@@ -831,7 +980,7 @@ mod plugin_listing_tests {
         if let Some(token) = token {
             request
                 .metadata_mut()
-                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+                .insert("x-flare-ctx", token.parse().unwrap());
         }
         request
     }
@@ -855,28 +1004,43 @@ mod plugin_listing_tests {
             .map_err(|status| status.code())
     }
 
-    #[tokio::test]
-    async fn plugin_listing_accepts_control_and_forwarded_admin_within_the_token_tenant() {
-        let (tokens, verifier) = signer();
-        let server = server(verifier);
-        let admin = tokens
-            .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", CORE_ADMIN_AUDIENCE)
-            .unwrap();
-        let control = tokens
-            .generate_with_ed25519(
-                "employee-1",
-                Some("tenant-a"),
-                "control",
-                CORE_PROJECTION_AUDIENCE,
-            )
-            .unwrap();
+    fn register(
+        token: &str,
+        tenant_id: &str,
+        plugin_id: &str,
+    ) -> Request<RegisterPluginEndpointRequest> {
+        let mut request = Request::new(RegisterPluginEndpointRequest {
+            tenant_id: tenant_id.to_string(),
+            plugin_id: plugin_id.to_string(),
+            capability_id: "rtc.call".to_string(),
+            grpc_authority: "http://127.0.0.1:9".to_string(),
+            declared_operations: vec!["rtc.call".to_string()],
+            ..Default::default()
+        });
+        request
+            .metadata_mut()
+            .insert("x-flare-ctx", token.parse().unwrap());
+        request
+    }
 
-        for token in [&admin, &control] {
+    #[tokio::test]
+    async fn plugin_listing_accepts_platform_staff_org_staff_and_the_plugin_service() {
+        let server = server();
+        let platform = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_READ, None);
+        let org = staff_token(
+            GATEWAY_KEY,
+            kid::GATEWAY,
+            "tenant-a",
+            PLUGINS_READ,
+            Some("org-1"),
+        );
+        let service = service_token("tenant-a");
+        for token in [&platform, &org, &service] {
             assert_eq!(
                 listed(&server, Some(token), "tenant-a").await,
                 Ok(vec!["plugin-a".to_string()])
             );
-            // 跨租户：请求租户不是令牌租户。
+            // 跨租户：请求租户不是签名租户。
             assert_eq!(
                 listed(&server, Some(token), "tenant-b").await,
                 Err(Code::PermissionDenied)
@@ -885,49 +1049,268 @@ mod plugin_listing_tests {
     }
 
     #[tokio::test]
-    async fn plugin_listing_rejects_missing_wrong_audience_and_non_employee_tokens() {
-        let (tokens, verifier) = signer();
-        let server = server(verifier);
+    async fn plugin_listing_rejects_missing_wrong_kid_and_wrong_permission() {
+        let server = server();
         assert_eq!(
             listed(&server, None, "tenant-a").await,
             Err(Code::Unauthenticated)
         );
-        // admin 令牌配 control 受众（或反过来）都不是任何一条分支的合法组合。
-        let crossed = tokens
-            .generate_with_ed25519(
-                "employee-1",
-                Some("tenant-a"),
-                "admin",
-                CORE_PROJECTION_AUDIENCE,
-            )
-            .unwrap();
+        let forged = staff_token(HOOK_KEY, kid::HOOK, "tenant-a", PLUGINS_READ, None);
         assert_eq!(
-            listed(&server, Some(&crossed), "tenant-a").await,
+            listed(&server, Some(&forged), "tenant-a").await,
             Err(Code::Unauthenticated)
         );
-        // 通配租户的 admin 令牌不接受。
-        let wildcard = tokens
-            .generate_with_ed25519("employee-1", Some("*"), "admin", CORE_ADMIN_AUDIENCE)
-            .unwrap();
-        assert!(listed(&server, Some(&wildcard), "tenant-a").await.is_err());
-        // 投影 worker 不是员工：control 分支按员工拒绝，admin 分支直接拒绝。
-        for (token_use, audience) in [
-            ("control", CORE_PROJECTION_AUDIENCE),
-            ("admin", CORE_ADMIN_AUDIENCE),
+        let wrong = staff_token(
+            GATEWAY_KEY,
+            kid::GATEWAY,
+            "tenant-a",
+            CAPABILITIES_READ,
+            None,
+        );
+        assert_eq!(
+            listed(&server, Some(&wrong), "tenant-a").await,
+            Err(Code::PermissionDenied)
+        );
+        let wildcard = staff_token(GATEWAY_KEY, kid::GATEWAY, "*", PLUGINS_READ, None);
+        assert_eq!(
+            listed(&server, Some(&wildcard), "tenant-a").await,
+            Err(Code::PermissionDenied)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_registration_is_platform_staff_or_the_plugin_service_itself() {
+        let server = server();
+        // 组织员工即使持写码也不能登记。
+        let org = staff_token(
+            GATEWAY_KEY,
+            kid::GATEWAY,
+            "tenant-a",
+            PLUGINS_WRITE,
+            Some("org-1"),
+        );
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&org, "tenant-a", "plugin-c"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        // 读码不能登记。
+        let read = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_READ, None);
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&read, "tenant-a", "plugin-c"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        // 平台员工登记自己签名里的应用。
+        let platform = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_WRITE, None);
+        assert!(
+            server
+                .register_plugin_endpoint(register(&platform, "tenant-a", "plugin-c"))
+                .await
+                .unwrap()
+                .into_inner()
+                .accepted
+        );
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&platform, "tenant-b", "plugin-c"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        // 插件宿主以自己的 Service 上下文自注册，租户须一致。
+        let service = service_token("tenant-b");
+        assert!(
+            server
+                .register_plugin_endpoint(register(&service, "tenant-b", "plugin-d"))
+                .await
+                .unwrap()
+                .into_inner()
+                .accepted
+        );
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&service, "tenant-a", "plugin-d"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        let mut ids = listed(&server, Some(&service), "tenant-b").await.unwrap();
+        ids.sort();
+        assert_eq!(ids, ["plugin-b", "plugin-d"]);
+
+        // Registrations the table would refuse are INVALID_ARGUMENT before anything is stored:
+        // a wildcard tenant, an over-long plugin id.
+        let wildcard = service_token("*");
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&wildcard, "*", "plugin-e"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&service, "tenant-b", &"p".repeat(129)))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+    }
+
+    /// plugin_id、capability_id 与声明的每一项须是标识（ASCII 字母、数字、`_ - . :`），在记日志
+    /// 之前校验：不带声明的登记会记一条 unverified 告警，带换行的值若先被记下就能伪造日志行。
+    #[tokio::test]
+    async fn plugin_registration_refuses_non_identifiers_before_logging_them() {
+        let server = server();
+        let platform = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_WRITE, None);
+        let unverified = |plugin_id: &str, capability_id: &str| {
+            let mut request = register(&platform, "tenant-a", plugin_id);
+            request.get_mut().capability_id = capability_id.to_string();
+            request.get_mut().declared_operations.clear();
+            request
+        };
+        let capture = crate::test_logs::LogCapture::start(tracing::Level::WARN);
+        for request in [
+            unverified("p1\nWARN forged line", "rtc.call"),
+            unverified("plugin-c", "rtc.call\r\nWARN forged line"),
+            unverified("plugin c", "rtc.call"),
+            unverified("plugin-c", "rtc/call"),
         ] {
-            let worker = tokens
-                .generate_with_ed25519(
-                    PROJECTION_WORKER_SUBJECT,
-                    Some("tenant-a"),
-                    token_use,
-                    audience,
-                )
-                .unwrap();
-            assert_eq!(
-                listed(&server, Some(&worker), "tenant-a").await,
-                Err(Code::PermissionDenied),
-                "{token_use}"
-            );
+            let status = server.register_plugin_endpoint(request).await.unwrap_err();
+            assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+            assert!(!status.message().contains("forged"), "{status:?}");
         }
+        let mut operation = register(&platform, "tenant-a", "plugin-c");
+        operation.get_mut().declared_operations = vec![
+            "rtc.call".to_string(),
+            "rtc.call\nWARN forged line".to_string(),
+        ];
+        let status = server
+            .register_plugin_endpoint(operation)
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+        assert!(
+            status.message().contains("declared_operations"),
+            "{status:?}"
+        );
+        // 合规的不带声明的登记照常受理，并记一条告警。
+        assert!(
+            server
+                .register_plugin_endpoint(unverified("plugin-c", "rtc.call"))
+                .await
+                .unwrap()
+                .into_inner()
+                .accepted
+        );
+        let output = capture.finish();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 1, "{output}");
+        assert!(
+            lines[0].contains("without declared_operations") && lines[0].contains("plugin-c"),
+            "{output}"
+        );
+        assert!(!output.contains("forged"), "{output}");
+
+        let read = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_READ, None);
+        assert_eq!(
+            listed(&server, Some(&read), "tenant-a").await.unwrap(),
+            ["plugin-a", "plugin-c"]
+        );
+    }
+
+    #[tokio::test]
+    async fn administer_checks_the_operation_code_before_dispatching() {
+        let server = server();
+        let administer = |token: &str, operation: &str| {
+            let mut request = Request::new(GenericRequest {
+                operation: operation.to_string(),
+                metadata: Default::default(),
+                payload: Some(prost_types::Any::default()),
+                request_id: "req-1".to_string(),
+            });
+            request
+                .metadata_mut()
+                .insert("x-flare-ctx", token.parse().unwrap());
+            request
+        };
+        let read = staff_token(
+            GATEWAY_KEY,
+            kid::GATEWAY,
+            "tenant-a",
+            HOOKS_READ,
+            Some("org-1"),
+        );
+        let write = staff_token(
+            GATEWAY_KEY,
+            kid::GATEWAY,
+            "tenant-a",
+            HOOKS_WRITE,
+            Some("org-1"),
+        );
+        // 读码调写操作、写码调读操作：权限码不符；没有治理服务时通过了鉴权的调用回 FAILED_PRECONDITION。
+        assert_eq!(
+            server
+                .administer(administer(&read, "flare.extension.v1.hook_config.create"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            server
+                .administer(administer(&write, "flare.extension.v1.hook_config.list"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            server
+                .administer(administer(&read, "flare.extension.v1.hook_config.list"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            server
+                .administer(administer(
+                    &write,
+                    "flare.extension.v1.hook_config.set_status"
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition
+        );
+        // 未知操作先验身份再拒绝。
+        assert_eq!(
+            server
+                .administer(administer(&read, "flare.extension.v1.hook_config.explode"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unimplemented
+        );
+        assert_eq!(
+            server
+                .administer(Request::new(GenericRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unauthenticated
+        );
     }
 }

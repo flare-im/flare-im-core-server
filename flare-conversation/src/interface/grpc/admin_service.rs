@@ -1,7 +1,8 @@
 //! `ConversationAdminService`：管理员只读（admin-gateway 专用下游）。
 //!
-//! 只认 admin-gateway 原样转发的 admin 令牌（受众 `flare-core-admin`、员工、具体租户），
-//! 不依赖未签名的 `x-tenant-id` / actor 元数据；租户只取自令牌，请求里没有 tenant_id 与 user_id。
+//! 只认 admin-gateway 原样转发的 Staff `x-flare-ctx`（网关 admin 分区按 `kid=gateway` 签，权限码
+//! `core:conversations:read`），不依赖未签名的 `x-tenant-id` / actor 元数据；租户只取自签名，
+//! 请求里没有 tenant_id 与 user_id。
 
 use std::sync::Arc;
 
@@ -10,8 +11,10 @@ use flare_grpc_proto::conversation::{
     AdminGetConversationRequest, AdminGetConversationResponse, AdminListConversationsRequest,
     AdminListConversationsResponse, AdminListParticipantsRequest, AdminListParticipantsResponse,
 };
-use flare_im_service_kit::control_auth::{ConsoleControlVerifier, require_grpc_admin};
+use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_proto::common::ConversationDetail;
+use flare_server_core::SignedContextVerifier;
+use flare_server_core::auth::core_admin::permission::CONVERSATIONS_READ;
 use flare_server_core::error::grpc::IntoGrpc;
 use tonic::{Request, Response, Status};
 
@@ -22,18 +25,27 @@ use crate::domain::repository::ConversationAdminRepository;
 
 pub struct ConversationAdminGrpcHandler<R: ConversationAdminRepository + 'static> {
     queries: Arc<ConversationAdminQueryHandler<R>>,
-    control_verifier: Option<ConsoleControlVerifier>,
+    /// Cell 公钥集，Staff 钉死 `kid=gateway`；没有配置时管理读一律 UNAUTHENTICATED。
+    staff_verifier: Option<SignedContextVerifier>,
 }
 
 impl<R: ConversationAdminRepository + 'static> ConversationAdminGrpcHandler<R> {
     pub fn new(
         queries: Arc<ConversationAdminQueryHandler<R>>,
-        control_verifier: Option<ConsoleControlVerifier>,
+        staff_verifier: Option<SignedContextVerifier>,
     ) -> Self {
         Self {
             queries,
-            control_verifier,
+            staff_verifier,
         }
+    }
+
+    fn staff<T>(&self, request: &Request<T>) -> Result<VerifiedStaff, Status> {
+        let verifier = self
+            .staff_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        require_staff(request, verifier, CONVERSATIONS_READ)
     }
 }
 
@@ -41,7 +53,7 @@ impl<R: ConversationAdminRepository + 'static> Clone for ConversationAdminGrpcHa
     fn clone(&self) -> Self {
         Self {
             queries: Arc::clone(&self.queries),
-            control_verifier: self.control_verifier.clone(),
+            staff_verifier: self.staff_verifier.clone(),
         }
     }
 }
@@ -66,13 +78,13 @@ impl<R: ConversationAdminRepository + 'static> ConversationAdminService
         &self,
         request: Request<AdminListConversationsRequest>,
     ) -> Result<Response<AdminListConversationsResponse>, Status> {
-        let actor = require_grpc_admin(&request, self.control_verifier.as_ref())?;
+        let staff = self.staff(&request)?;
         let req = request.into_inner();
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "admin list_conversations");
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "admin list_conversations");
         let page = self
             .queries
             .list_conversations(
-                &actor.tenant_id,
+                &staff.tenant_id,
                 optional(&req.cursor),
                 req.limit,
                 req.include_deleted,
@@ -90,12 +102,12 @@ impl<R: ConversationAdminRepository + 'static> ConversationAdminService
         &self,
         request: Request<AdminGetConversationRequest>,
     ) -> Result<Response<AdminGetConversationResponse>, Status> {
-        let actor = require_grpc_admin(&request, self.control_verifier.as_ref())?;
+        let staff = self.staff(&request)?;
         let req = request.into_inner();
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, conversation_id = %req.conversation_id, "admin get_conversation");
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, conversation_id = %req.conversation_id, "admin get_conversation");
         let conversation = self
             .queries
-            .get_conversation(&actor.tenant_id, &req.conversation_id)
+            .get_conversation(&staff.tenant_id, &req.conversation_id)
             .await
             .into_grpc()?;
         Ok(Response::new(AdminGetConversationResponse {
@@ -107,13 +119,13 @@ impl<R: ConversationAdminRepository + 'static> ConversationAdminService
         &self,
         request: Request<AdminListParticipantsRequest>,
     ) -> Result<Response<AdminListParticipantsResponse>, Status> {
-        let actor = require_grpc_admin(&request, self.control_verifier.as_ref())?;
+        let staff = self.staff(&request)?;
         let req = request.into_inner();
-        tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, conversation_id = %req.conversation_id, "admin list_participants");
+        tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, conversation_id = %req.conversation_id, "admin list_participants");
         let page = self
             .queries
             .list_participants(
-                &actor.tenant_id,
+                &staff.tenant_id,
                 &req.conversation_id,
                 optional(&req.cursor),
                 req.limit,
@@ -137,7 +149,7 @@ impl<R: ConversationAdminRepository + 'static> ConversationAdminService
 
 #[cfg(test)]
 mod tests {
-    //! 缺令牌、错误受众、跨租户三类负向用例，外加租户只取自令牌的正向对照。
+    //! 缺上下文、错误 kid、平台断言、权限码不符、跨租户的负向用例，外加租户只取自签名的正向对照。
 
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -145,11 +157,10 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::control_auth::{
-        CORE_ADMIN_AUDIENCE, CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
-        SCHEDULER_SUBJECT,
-    };
+    use flare_im_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
+    use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::error::Result as FlareResult;
+    use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};
     use tonic::Code;
 
     use super::*;
@@ -158,7 +169,7 @@ mod tests {
         ConversationParticipantsPage, ConversationType, ConversationVisibility,
     };
 
-    /// (tenant, conversation) → 成员；记录每次调用收到的租户，证明租户只来自令牌。
+    /// (tenant, conversation) → 成员；记录每次调用收到的租户，证明租户只来自签名。
     #[derive(Default)]
     struct MemoryAdminRepo {
         conversations: HashMap<(String, String), Vec<String>>,
@@ -283,7 +294,18 @@ mod tests {
         }
     }
 
-    const KEY: [u8; 32] = [61; 32];
+    const GATEWAY_KEY: [u8; 32] = [61; 32];
+    const HOOK_KEY: [u8; 32] = [62; 32];
+
+    fn pem(seed: [u8; 32]) -> (String, String) {
+        let key = SigningKey::from_bytes(&seed);
+        (
+            key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+    }
 
     fn handler(
         with_key: bool,
@@ -297,11 +319,10 @@ mod tests {
                 .with("tenant-b", "g-b", &["mallory"]),
         );
         let verifier = with_key.then(|| {
-            let public = SigningKey::from_bytes(&KEY)
-                .verifying_key()
-                .to_public_key_pem(Default::default())
-                .unwrap();
-            ConsoleControlVerifier::from_public_key(&public).unwrap()
+            let mut keys = KeySet::empty();
+            keys.insert(kid::GATEWAY, &pem(GATEWAY_KEY).1).unwrap();
+            keys.insert(kid::HOOK, &pem(HOOK_KEY).1).unwrap();
+            SignedContextVerifier::from_key_set(keys).require_staff_kid([kid::GATEWAY])
         });
         (
             Arc::clone(&repo),
@@ -312,33 +333,32 @@ mod tests {
         )
     }
 
-    fn signed<T>(
-        payload: T,
-        subject: &str,
-        tenant: &str,
-        token_use: &str,
-        aud: &str,
-    ) -> Request<T> {
-        let private = SigningKey::from_bytes(&KEY)
-            .to_pkcs8_pem(Default::default())
-            .unwrap();
-        let token = flare_server_core::TokenService::from_ed25519_private_key(
-            &private,
-            PLATFORM_ISSUER,
-            60,
-        )
-        .unwrap()
-        .generate_with_ed25519(subject, Some(tenant), token_use, aud)
-        .unwrap();
+    fn signer(seed: [u8; 32], key_id: &str) -> SignedContextSigner {
+        SignedContextSigner::from_private_key(&pem(seed).0)
+            .unwrap()
+            .with_kid(key_id)
+            .unwrap()
+    }
+
+    fn staff_identity(tenant: &str, permission: &str) -> SignedContextIdentity {
+        SignedContextIdentity::new(SignedActorType::Staff, "employee-1", tenant, "req-1")
+            .with_staff_grant(Some("org-1".into()), Some(permission.into()), 2)
+    }
+
+    fn with_ctx<T>(payload: T, token: &str) -> Request<T> {
         let mut request = Request::new(payload);
         request
             .metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            .insert("x-flare-ctx", token.parse().unwrap());
         request
     }
 
+    /// 网关 admin 分区签的 Staff 上下文，带会话读的权限码。
     fn admin<T>(payload: T, tenant: &str) -> Request<T> {
-        signed(payload, "employee-1", tenant, "admin", CORE_ADMIN_AUDIENCE)
+        let token = signer(GATEWAY_KEY, kid::GATEWAY)
+            .sign(&staff_identity(tenant, CONVERSATIONS_READ))
+            .unwrap();
+        with_ctx(payload, &token)
     }
 
     fn code<T>(result: Result<T, Status>) -> Code {
@@ -359,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_reads_require_the_forwarded_admin_token() {
+    async fn admin_reads_require_the_forwarded_staff_context() {
         let (repo, conversations) = handler(true);
         assert_eq!(
             code(
@@ -387,12 +407,22 @@ mod tests {
             ),
             Code::Unauthenticated
         );
-        // 未签名的租户/actor 元数据不是身份。
+        // 未签名的租户/actor 元数据与平台断言都不是身份。
         let mut forged = Request::new(get("g-a"));
+        let (private, _) = pem([63; 32]);
+        let assertion = flare_server_core::TokenService::from_ed25519_private_key(
+            &private,
+            PLATFORM_ISSUER,
+            60,
+        )
+        .unwrap()
+        .generate_with_ed25519("employee-1", Some("tenant-a"), "admin", "flare-core-admin")
+        .unwrap();
         for (key, value) in [
             ("x-tenant-id", "tenant-a"),
             ("x-actor-type", "system"),
             ("x-actor-id", "flare-admin-gateway"),
+            ("authorization", &format!("Bearer {assertion}")),
         ] {
             forged.metadata_mut().insert(key, value.parse().unwrap());
         }
@@ -400,6 +430,29 @@ mod tests {
             code(conversations.admin_get_conversation(forged).await),
             Code::Unauthenticated
         );
+        let control = flare_server_core::TokenService::from_ed25519_private_key(
+            &private,
+            PLATFORM_ISSUER,
+            60,
+        )
+        .unwrap()
+        .generate_with_ed25519(
+            "employee-1",
+            Some("tenant-a"),
+            "control",
+            CORE_PROJECTION_AUDIENCE,
+        )
+        .unwrap();
+        let mut bearer = Request::new(get("g-a"));
+        bearer.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {control}").parse().unwrap(),
+        );
+        assert_eq!(
+            code(conversations.admin_get_conversation(bearer).await),
+            Code::Unauthenticated
+        );
+        // 没配 Cell 公钥集时 fail closed。
         let (_, unkeyed) = handler(false);
         assert_eq!(
             code(
@@ -413,55 +466,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_reads_reject_wrong_audience_and_non_employee_tokens() {
+    async fn admin_reads_reject_wrong_kid_permission_and_non_staff_contexts() {
         let (repo, conversations) = handler(true);
-        for (token_use, aud) in [
-            ("control", CORE_PROJECTION_AUDIENCE),
-            ("admin", CORE_PROJECTION_AUDIENCE),
-            ("control", CORE_ADMIN_AUDIENCE),
-        ] {
+        // hook 钥签的 Staff 上下文：签名有效，但 Staff 钉死 gateway。
+        let forged = signer(HOOK_KEY, kid::HOOK)
+            .sign(&staff_identity("tenant-a", CONVERSATIONS_READ))
+            .unwrap();
+        assert_eq!(
+            code(
+                conversations
+                    .admin_list_conversations(with_ctx(
+                        AdminListConversationsRequest::default(),
+                        &forged
+                    ))
+                    .await
+            ),
+            Code::Unauthenticated
+        );
+        // 别的路由的权限码，或没有权限码。
+        for permission in [Some("core:messages:read"), Some("core:users:read"), None] {
+            let identity = SignedContextIdentity::new(
+                SignedActorType::Staff,
+                "employee-1",
+                "tenant-a",
+                "req-1",
+            )
+            .with_staff_grant(Some("org-1".into()), permission.map(Into::into), 2);
+            let token = signer(GATEWAY_KEY, kid::GATEWAY).sign(&identity).unwrap();
             assert_eq!(
                 code(
                     conversations
-                        .admin_list_conversations(signed(
-                            AdminListConversationsRequest::default(),
-                            "employee-1",
-                            "tenant-a",
-                            token_use,
-                            aud,
-                        ))
-                        .await
-                ),
-                Code::Unauthenticated,
-                "{token_use}/{aud}"
-            );
-        }
-        for (subject, tenant) in [
-            (PROJECTION_WORKER_SUBJECT, "tenant-a"),
-            (SCHEDULER_SUBJECT, "tenant-a"),
-            ("employee-1", "*"),
-        ] {
-            assert_eq!(
-                code(
-                    conversations
-                        .admin_list_participants(signed(
-                            participants("g-a"),
-                            subject,
-                            tenant,
-                            "admin",
-                            CORE_ADMIN_AUDIENCE,
-                        ))
+                        .admin_list_participants(with_ctx(participants("g-a"), &token))
                         .await
                 ),
                 Code::PermissionDenied,
-                "{subject}/{tenant}"
+                "{permission:?}"
             );
         }
+        // 网关钥签的非 Staff 上下文。
+        let service = signer(GATEWAY_KEY, kid::GATEWAY)
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::Service,
+                "flare-social-bridge",
+                "tenant-a",
+                "req-2",
+            ))
+            .unwrap();
+        assert_eq!(
+            code(
+                conversations
+                    .admin_get_conversation(with_ctx(get("g-a"), &service))
+                    .await
+            ),
+            Code::PermissionDenied
+        );
+        // 没有应用的平台范围 Staff 上下文。
+        let platform_scoped = signer(GATEWAY_KEY, kid::GATEWAY)
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "employee-1", "", "req-3")
+                    .with_staff_grant(None, Some(CONVERSATIONS_READ.into()), 2),
+            )
+            .unwrap();
+        assert_eq!(
+            code(
+                conversations
+                    .admin_get_conversation(with_ctx(get("g-a"), &platform_scoped))
+                    .await
+            ),
+            Code::PermissionDenied
+        );
         assert!(repo.tenants_seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn admin_reads_are_scoped_to_the_token_tenant() {
+    async fn admin_reads_are_scoped_to_the_signed_tenant() {
         let (repo, conversations) = handler(true);
         let page = conversations
             .admin_list_conversations(admin(AdminListConversationsRequest::default(), "tenant-a"))
@@ -485,7 +563,7 @@ mod tests {
         assert_eq!(detail.member_count, 2);
         assert_eq!(detail.conversation_type, "group");
 
-        // 跨租户：tenant-a 的管理员读 tenant-b 的会话，与不存在同样是 NOT_FOUND。
+        // 跨租户：tenant-a 的员工读 tenant-b 的会话，与不存在同样是 NOT_FOUND。
         assert_eq!(
             code(
                 conversations

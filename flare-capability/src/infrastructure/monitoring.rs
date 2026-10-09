@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::domain::model::{HookExecutionResult, HookStatistics};
+use crate::domain::model::{HookExecutionResult, HookStatistics, LoggableName};
 
 /// 指标收集器
 pub struct MetricsCollector {
@@ -133,7 +133,7 @@ impl AlertTrigger {
             let failure_rate = 1.0 - hook_stats.success_rate();
             if failure_rate > self.failure_rate_threshold {
                 warn!(
-                    hook = %hook_name,
+                    hook = %LoggableName(&hook_name),
                     failure_rate = %failure_rate,
                     threshold = %self.failure_rate_threshold,
                     "Hook failure rate exceeds threshold"
@@ -143,7 +143,7 @@ impl AlertTrigger {
             // 检查平均延迟
             if hook_stats.avg_latency_ms > self.latency_threshold_ms as f64 {
                 warn!(
-                    hook = %hook_name,
+                    hook = %LoggableName(&hook_name),
                     avg_latency_ms = hook_stats.avg_latency_ms,
                     threshold_ms = self.latency_threshold_ms,
                     "Hook average latency exceeds threshold"

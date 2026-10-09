@@ -639,6 +639,20 @@ impl PostgresHookConfigRepository {
 }
 
 #[cfg(test)]
+impl PostgresHookConfigRepository {
+    /// 指向不监听端口的惰性连接池：只给在查库之前就该拒绝的测试用，真查库会很快失败。
+    pub(crate) fn unconnected() -> Self {
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://flare@127.0.0.1:1/none")
+            .expect("a lazy pool does not connect");
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

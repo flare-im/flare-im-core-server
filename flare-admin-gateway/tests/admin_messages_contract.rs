@@ -13,11 +13,14 @@ use flare_grpc_proto::storage::storage_reader_service_server::{
     StorageReaderService, StorageReaderServiceServer,
 };
 use flare_grpc_proto::storage::*;
+use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_im_service_kit::clients::{
-    ConversationManageServiceClientWrapper, ConversationReadServiceClientWrapper, GrpcClients,
-    MediaServiceClientWrapper, MessageActionServiceClientWrapper, MessageEventServiceClientWrapper,
-    MessageSendServiceClientWrapper, OnlineServiceClientWrapper, StorageReaderServiceClientWrapper,
+    AdminGrpcClients, ConversationReadServiceClientWrapper, MediaServiceClientWrapper,
+    OnlineServiceClientWrapper, StorageReaderServiceClientWrapper,
 };
+use flare_im_service_kit::staff_context::require_staff;
+use flare_server_core::SignedContextVerifier;
+use flare_server_core::auth::core_admin::permission::{MESSAGES_EXPORT, MESSAGES_READ};
 use tonic::transport::Channel;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
@@ -80,39 +83,66 @@ fn failure_for(summary: &str) -> Option<Status> {
 /// 请求里带这个键的检索停在替身里，直到测试放行（模拟一次慢查询）。
 const HOLD_KEY: &str = "k-hold";
 
-/// 替身收到的调用（`authorization` 与全部 `x-*` 元数据键）与慢查询的闸门。
+/// 替身收到的一次调用：`x-flare-ctx`、`authorization`、全部 `x-*` 元数据键（不含 `x-flare-ctx`）
+/// 与 `x-request-id` / `x-trace-id` 的取值。
+#[derive(Debug, Clone)]
+struct Observed {
+    signed_context: Vec<String>,
+    authorization: Vec<String>,
+    x_metadata: Vec<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
+}
+
+/// 替身收到的调用与慢查询的闸门，以及真实 Storage Reader 持有的 Cell 公钥集（网关同一份）。
 #[derive(Default)]
 struct FakeState {
-    calls: std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>,
+    calls: std::sync::Mutex<Vec<Observed>>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    verifier: Option<SignedContextVerifier>,
 }
 
 #[derive(Clone, Default)]
 struct FakeStorageReader(Arc<FakeState>);
 
 impl FakeStorageReader {
+    /// 真实 Storage Reader 的管理闸门：转发来的 Staff 上下文，检索四条认 `core:messages:read`，
+    /// 导出认 `core:messages:export`；码不对是 PERMISSION_DENIED。
+    fn gate<T>(&self, request: &GrpcRequest<T>, permission: &str) -> Result<(), Status> {
+        let verifier = self
+            .0
+            .verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        require_staff(request, verifier, permission).map(|_| ())
+    }
+
     async fn observe<T>(&self, request: &GrpcRequest<T>, key: &str) {
         let metadata = request.metadata();
-        let authorization = metadata
-            .get_all("authorization")
-            .iter()
-            .map(|value| value.to_str().unwrap_or("<non-ascii>").to_string())
-            .collect();
+        let values = |name: &str| -> Vec<String> {
+            metadata
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap_or("<non-ascii>").to_string())
+                .collect()
+        };
         let mut x_metadata: Vec<String> = metadata
             .keys()
             .map(|key| match key {
                 tonic::metadata::KeyRef::Ascii(key) => key.as_str().to_string(),
                 tonic::metadata::KeyRef::Binary(key) => key.as_str().to_string(),
             })
-            .filter(|key| key.starts_with("x-"))
+            .filter(|key| key.starts_with("x-") && key != "x-flare-ctx")
             .collect();
         x_metadata.sort();
-        self.0
-            .calls
-            .lock()
-            .unwrap()
-            .push((authorization, x_metadata));
+        self.0.calls.lock().unwrap().push(Observed {
+            signed_context: values("x-flare-ctx"),
+            authorization: values("authorization"),
+            x_metadata,
+            request_id: values("x-request-id").into_iter().next(),
+            trace_id: values("x-trace-id").into_iter().next(),
+        });
         if key.contains(HOLD_KEY) {
             self.0.entered.notify_one();
             self.0.release.notified().await;
@@ -132,6 +162,7 @@ impl StorageReaderService for FakeStorageReader {
     ) -> Result<GrpcResponse<SearchMessagesResponse>, Status> {
         let summary = format!("{:?}", request.get_ref());
         self.observe(&request, &summary).await;
+        self.gate(&request, MESSAGES_READ)?;
         if let Some(status) = failure_for(&summary) {
             return Err(status);
         }
@@ -143,6 +174,7 @@ impl StorageReaderService for FakeStorageReader {
         request: GrpcRequest<GetMessageRequest>,
     ) -> Result<GrpcResponse<GetMessageResponse>, Status> {
         self.observe(&request, &request.get_ref().message_id).await;
+        self.gate(&request, MESSAGES_READ)?;
         if let Some(status) = failure_for(&request.get_ref().message_id) {
             return Err(status);
         }
@@ -159,6 +191,7 @@ impl StorageReaderService for FakeStorageReader {
         request: GrpcRequest<QueryMessageEventsRequest>,
     ) -> Result<GrpcResponse<QueryMessageEventsResponse>, Status> {
         self.observe(&request, &request.get_ref().message_id).await;
+        self.gate(&request, MESSAGES_READ)?;
         if let Some(status) = failure_for(&request.get_ref().message_id) {
             return Err(status);
         }
@@ -171,6 +204,7 @@ impl StorageReaderService for FakeStorageReader {
     ) -> Result<GrpcResponse<QueryMessageWriteLedgerResponse>, Status> {
         self.observe(&request, &request.get_ref().conversation_id)
             .await;
+        self.gate(&request, MESSAGES_READ)?;
         if let Some(status) = failure_for(&request.get_ref().conversation_id) {
             return Err(status);
         }
@@ -183,6 +217,7 @@ impl StorageReaderService for FakeStorageReader {
     ) -> Result<GrpcResponse<ExportMessagesResponse>, Status> {
         self.observe(&request, &request.get_ref().conversation_id)
             .await;
+        self.gate(&request, MESSAGES_EXPORT)?;
         if let Some(status) = failure_for(&request.get_ref().conversation_id) {
             return Err(status);
         }
@@ -255,7 +290,7 @@ impl StorageReaderService for FakeStorageReader {
 
 struct MessagesHarness {
     router: axum::Router,
-    token: String,
+    gateway: Gateway,
     fake: FakeStorageReader,
 }
 
@@ -263,7 +298,11 @@ async fn messages_harness() -> MessagesHarness {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     assert!(address.ip().is_loopback());
-    let fake = FakeStorageReader::default();
+    let gateway = Gateway::new();
+    let fake = FakeStorageReader(Arc::new(FakeState {
+        verifier: Some(gateway.verifier.clone()),
+        ..FakeState::default()
+    }));
     tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(StorageReaderServiceServer::new(fake.clone()))
@@ -274,24 +313,12 @@ async fn messages_harness() -> MessagesHarness {
         .connect_lazy();
     // 其余下游指向一个不会被调用的环回端口。
     let unused = Channel::from_static("http://127.0.0.1:9").connect_lazy();
-    let clients = GrpcClients {
+    let clients = AdminGrpcClients {
         media: Arc::new(tokio::sync::Mutex::new(
             MediaServiceClientWrapper::from_channel(unused.clone(), None),
         )),
-        message_ingest_send: Arc::new(tokio::sync::Mutex::new(
-            MessageSendServiceClientWrapper::from_channel(unused.clone()),
-        )),
-        message_event: Arc::new(tokio::sync::Mutex::new(
-            MessageEventServiceClientWrapper::from_channel(unused.clone()),
-        )),
-        message_action: Arc::new(tokio::sync::Mutex::new(
-            MessageActionServiceClientWrapper::from_channel(unused.clone()),
-        )),
         conversation_read: Arc::new(tokio::sync::Mutex::new(
             ConversationReadServiceClientWrapper::from_channel(unused.clone()),
-        )),
-        conversation_manage: Arc::new(tokio::sync::Mutex::new(
-            ConversationManageServiceClientWrapper::from_channel(unused.clone()),
         )),
         online: Arc::new(tokio::sync::Mutex::new(
             OnlineServiceClientWrapper::from_channel(unused),
@@ -301,19 +328,21 @@ async fn messages_harness() -> MessagesHarness {
         )),
         request_timeout: None,
     };
-    let console = Console::new();
     let router = create_admin_router(Arc::new(clients), None)
-        .layer(axum::Extension(Arc::new(console.verifier.clone())));
-    let token = console.admin_token(EMPLOYEE, TENANT);
+        .layer(axum::Extension(Arc::new(gateway.verifier.clone())))
+        .layer(axum::Extension(Arc::new(AuditEffects::disabled(
+            "admin-gateway",
+        ))));
     MessagesHarness {
         router,
-        token,
+        gateway,
         fake,
     }
 }
 
-/// 5 条路由各自的请求：键放在替身据以判定失败的字段里。导出是写操作，带齐审计头。
-fn message_request(route: usize, key: &str, token: &str) -> Request<Body> {
+/// 5 条路由各自的请求：键放在替身据以判定失败的字段里。导出是写操作，带齐审计头。按路由签
+/// 对应权限码的 Staff 上下文（检索四条 `core:messages:read`，导出 `core:messages:export`）。
+fn message_request(route: usize, key: &str, gateway: &Gateway) -> Request<Body> {
     let (method, path, body, write) = match route {
         0 => (
             "POST",
@@ -344,11 +373,11 @@ fn message_request(route: usize, key: &str, token: &str) -> Request<Body> {
         ),
         _ => unreachable!(),
     };
+    let token = gateway.token_for(method, &path);
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-tenant-id", TENANT);
+        .header("x-flare-ctx", token);
     if write {
         for (name, value) in WRITE_HEADERS {
             builder = builder.header(*name, *value);
@@ -376,7 +405,7 @@ const INTERNAL_REASONS: [&str; 5] = [
 async fn message_routes_reach_the_storage_reader_fake() {
     let h = messages_harness().await;
     for route in 0..INTERNAL_REASONS.len() {
-        let (status, body) = send(&h.router, message_request(route, "ok", &h.token)).await;
+        let (status, body) = send(&h.router, message_request(route, "ok", &h.gateway)).await;
         assert_eq!(status, StatusCode::OK, "route {route}: {body}");
     }
 }
@@ -394,7 +423,7 @@ async fn storage_reader_failures_are_typed_and_never_echoed() {
                 *internal_reason,
             )]);
         for (key, expected_status, expected_reason) in cases {
-            let (status, body) = send(&h.router, message_request(route, key, &h.token)).await;
+            let (status, body) = send(&h.router, message_request(route, key, &h.gateway)).await;
             assert_eq!(status, expected_status, "route {route} {key}: {body}");
             assert_eq!(
                 body["reason"].as_str().unwrap_or_default(),
@@ -412,32 +441,47 @@ async fn storage_reader_failures_are_typed_and_never_echoed() {
     }
 }
 
-/// Storage Reader 只认转发的 admin 令牌：5 条路由都只带这个令牌，外加请求号与追踪号，不带
-/// 未签名的租户、用户或操作人元数据。修复前带的是 `x-tenant-id`、`x-user-id` 等元数据，
-/// 没有令牌。
+/// Storage Reader 只认转发的 Staff 上下文：5 条路由都只带这个上下文，外加签名里的请求号与
+/// 追踪号作关联元数据，不带 `authorization`，也不带未签名的租户、用户或操作人元数据。
 #[tokio::test]
-async fn message_routes_forward_only_the_admin_assertion_and_correlation_ids() {
+async fn message_routes_forward_only_the_staff_context_and_correlation_ids() {
     let h = messages_harness().await;
     for route in 0..INTERNAL_REASONS.len() {
-        let (status, body) = send(&h.router, message_request(route, "ok", &h.token)).await;
+        let (status, body) = send(&h.router, message_request(route, "ok", &h.gateway)).await;
         assert_eq!(status, StatusCode::OK, "route {route}: {body}");
     }
     let calls = h.fake.0.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), INTERNAL_REASONS.len());
-    for (route, (authorization, x_metadata)) in calls.iter().enumerate() {
+    for (route, call) in calls.iter().enumerate() {
+        let expected = if route == 4 {
+            "core:messages:export"
+        } else {
+            "core:messages:read"
+        };
+        assert_eq!(call.signed_context.len(), 1, "route {route}");
+        let claims = h.gateway.verifier.verify(&call.signed_context[0]).unwrap();
+        assert_eq!(claims.actor_id, EMPLOYEE, "route {route}");
+        assert_eq!(claims.tenant_id, TENANT, "route {route}");
         assert_eq!(
-            authorization,
-            &vec![format!("Bearer {}", h.token)],
+            claims.permission.as_deref(),
+            Some(expected),
             "route {route}"
         );
-        assert!(
-            x_metadata
-                .iter()
-                .all(|key| key == "x-request-id" || key == "x-trace-id"),
-            "route {route} sent unsigned metadata {x_metadata:?}"
+        assert!(call.authorization.is_empty(), "route {route}");
+        assert_eq!(
+            call.x_metadata,
+            vec!["x-request-id".to_string(), "x-trace-id".to_string()],
+            "route {route} sent unsigned metadata {:?}",
+            call.x_metadata
         );
-        assert!(
-            x_metadata.contains(&"x-request-id".to_string()),
+        assert_eq!(
+            call.request_id.as_deref(),
+            Some("req-staff-1"),
+            "route {route}"
+        );
+        assert_eq!(
+            call.trace_id.as_deref(),
+            Some("trace-staff-1"),
             "route {route}"
         );
     }
@@ -450,7 +494,7 @@ async fn a_slow_storage_query_does_not_hold_up_other_admin_searches() {
     let h = messages_harness().await;
     let slow = tokio::spawn({
         let router = h.router.clone();
-        let request = message_request(0, HOLD_KEY, &h.token);
+        let request = message_request(0, HOLD_KEY, &h.gateway);
         async move { send(&router, request).await }
     });
     tokio::time::timeout(
@@ -463,7 +507,7 @@ async fn a_slow_storage_query_does_not_hold_up_other_admin_searches() {
     for route in 1..INTERNAL_REASONS.len() {
         let (status, body) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            send(&h.router, message_request(route, "ok", &h.token)),
+            send(&h.router, message_request(route, "ok", &h.gateway)),
         )
         .await
         .unwrap_or_else(|_| panic!("route {route} waited for the slow search"));
@@ -481,7 +525,7 @@ fn raw_body_request(
     route: usize,
     content_type: Option<&str>,
     body: &str,
-    token: &str,
+    gateway: &Gateway,
 ) -> Request<Body> {
     let (path, write) = match route {
         0 => ("/api/v1/admin/messages/query", false),
@@ -489,11 +533,11 @@ fn raw_body_request(
         4 => ("/api/v1/admin/messages/export", true),
         _ => unreachable!(),
     };
+    let token = gateway.token_for("POST", path);
     let mut builder = Request::builder()
         .method("POST")
         .uri(path)
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-tenant-id", TENANT);
+        .header("x-flare-ctx", token);
     if write {
         for (name, value) in WRITE_HEADERS {
             builder = builder.header(*name, *value);
@@ -532,7 +576,7 @@ async fn malformed_message_bodies_are_typed_bad_requests_without_echo() {
         for (content_type, body) in &cases {
             let (status, answer) = send(
                 &h.router,
-                raw_body_request(route, *content_type, body, &h.token),
+                raw_body_request(route, *content_type, body, &h.gateway),
             )
             .await;
             assert_eq!(
@@ -567,8 +611,11 @@ async fn malformed_event_query_strings_are_typed_bad_requests_without_echo() {
         .uri(format!(
             "/api/v1/admin/messages/ok/events?limit={BODY_MARKER}"
         ))
-        .header("authorization", format!("Bearer {}", h.token))
-        .header("x-tenant-id", TENANT)
+        .header(
+            "x-flare-ctx",
+            h.gateway
+                .token_for("GET", "/api/v1/admin/messages/ok/events"),
+        )
         .body(Body::empty())
         .unwrap();
     let (status, answer) = send(&h.router, request).await;
@@ -579,26 +626,31 @@ async fn malformed_event_query_strings_are_typed_bad_requests_without_echo() {
     assert!(h.fake.0.calls.lock().unwrap().is_empty());
 }
 
-/// 消息 id 百分号解码后不是 UTF-8：400 `ADMIN_INVALID_PATH` 信封，不回显取值，不调用 Storage
-/// Reader。修复前是 axum 的纯文本 400，带着解码后的取值。
+/// 消息 id 带百分号编码：共享路由表 `core_admin::resolve` 不认这样的参数，回类型化 404
+/// `NOT_FOUND` 信封，不回显取值，不调用 Storage Reader。
 #[tokio::test]
-async fn undecodable_message_ids_are_typed_bad_requests_without_echo() {
+async fn percent_encoded_message_ids_are_typed_not_found_without_echo() {
     let h = messages_harness().await;
-    for uri in [
-        format!("/api/v1/admin/messages/{BODY_MARKER}%FF"),
-        format!("/api/v1/admin/messages/{BODY_MARKER}%FF/events"),
+    for (uri, pattern) in [
+        (
+            format!("/api/v1/admin/messages/{BODY_MARKER}%FF"),
+            "/api/v1/admin/messages/x",
+        ),
+        (
+            format!("/api/v1/admin/messages/{BODY_MARKER}%FF/events"),
+            "/api/v1/admin/messages/x/events",
+        ),
     ] {
         let request = Request::builder()
             .method("GET")
             .uri(&uri)
-            .header("authorization", format!("Bearer {}", h.token))
-            .header("x-tenant-id", TENANT)
+            .header("x-flare-ctx", h.gateway.token_for("GET", pattern))
             .body(Body::empty())
             .unwrap();
         let (status, answer) = send(&h.router, request).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {answer}");
-        assert_eq!(answer["code"], 400, "{uri}: {answer}");
-        assert_eq!(answer["reason"], "ADMIN_INVALID_PATH", "{uri}: {answer}");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {answer}");
+        assert_eq!(answer["code"], 404, "{uri}: {answer}");
+        assert_eq!(answer["reason"], "NOT_FOUND", "{uri}: {answer}");
         assert!(!answer.to_string().contains(BODY_MARKER), "{answer}");
     }
     assert!(h.fake.0.calls.lock().unwrap().is_empty());
@@ -616,7 +668,7 @@ async fn an_oversized_message_body_is_a_typed_bad_request() {
     let body = format!(r#"{{"conversation_id":"{}"}}"#, "c".repeat(128));
     let (status, answer) = send(
         &router,
-        raw_body_request(0, Some("application/json"), &body, &h.token),
+        raw_body_request(0, Some("application/json"), &body, &h.gateway),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");

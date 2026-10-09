@@ -1,19 +1,26 @@
-//! Capability 管理员只读客户端：admin-gateway 专用的可选下游。
+//! Capability 管理员客户端：admin-gateway 专用的可选下游。
 //!
-//! 只有 admin-gateway 需要读租户能力开关与租户运行时投影；api-gateway 启动时不加载
-//! 这份配置，也不会去连 Capability。
+//! 只有 admin-gateway 需要读租户能力开关、租户运行时投影、能力目录与插件簿，并经
+//! `CapabilityService.Administer` 治理 Hook 配置；api-gateway 启动时不加载这份配置，也不会去
+//! 连 Capability。每次调用只带中间件验过后原样转发的 Staff `x-flare-ctx`（`staff_token`），
+//! Capability 按 RPC 族复核签名里的权限码。
 
 use flare_server_core::error::Result;
+use prost::Message;
 use tonic::transport::Channel;
 
-use crate::clients::{DownstreamGrpcResolver, admin_bearer_request};
+use crate::clients::DownstreamGrpcResolver;
 use crate::service_names::CAPABILITY;
+use crate::staff_context::staff_context_request;
 use flare_grpc_proto::capability::capability_admin_service_client::CapabilityAdminServiceClient;
 use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::capability::{
-    GetTenantRuntimeRequest, GetTenantRuntimeResponse, ListRegisteredPluginsRequest,
-    ListRegisteredPluginsResponse, ListTenantCapabilitySwitchesRequest,
-    ListTenantCapabilitySwitchesResponse,
+    DeregisterPluginEndpointRequest, DeregisterPluginEndpointResponse, GenericRequest,
+    GenericResponse, GetTenantRuntimeRequest, GetTenantRuntimeResponse, ListCapabilitiesRequest,
+    ListCapabilitiesResponse, ListRegisteredPluginsRequest, ListRegisteredPluginsResponse,
+    ListTenantCapabilitySwitchesRequest, ListTenantCapabilitySwitchesResponse,
+    RegisterPluginEndpointRequest, RegisterPluginEndpointResponse,
+    SetTenantCapabilitySwitchRequest, SetTenantCapabilitySwitchResponse,
 };
 
 /// Capability 下游路由（`discovery://flare-capability` 或静态 `http(s)://`）。
@@ -26,9 +33,11 @@ pub struct CapabilityDownstreamConfig {
     pub static_fallback: String,
 }
 
+/// `type.googleapis.com/` 前缀：`Administer` 的载荷按 proto 消息全名打包成 `google.protobuf.Any`。
+pub const TYPE_URL_PREFIX: &str = "type.googleapis.com/flare.capability.v1.";
+
 /// Capability 管理员客户端：`CapabilityAdminService` 的两个只读方法，外加同一通道上
-/// `CapabilityService.ListRegisteredPlugins`（该方法同时接受 Console 直连的 control 令牌
-/// 与这里转发的 admin 令牌）。
+/// `CapabilityService` 的目录、开关、插件簿与 `Administer`。
 #[derive(Clone)]
 pub struct CapabilityAdminClientWrapper {
     admin: CapabilityAdminServiceClient<Channel>,
@@ -59,55 +68,137 @@ impl CapabilityAdminClientWrapper {
         Ok(Self::from_channel(channel))
     }
 
-    /// 令牌租户的全部能力开关（按 capability_id 升序）。
+    /// 令牌租户的全部能力开关（按 capability_id 升序）；`core:capabilities:read`。
     pub async fn list_tenant_capability_switches(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
     ) -> Result<ListTenantCapabilitySwitchesResponse> {
         let response = self
             .admin
-            .list_tenant_capability_switches(admin_bearer_request(
+            .list_tenant_capability_switches(staff_context_request(
                 ListTenantCapabilitySwitchesRequest {},
-                admin_token,
+                staff_token,
             )?)
             .await?;
         Ok(response.into_inner())
     }
 
-    /// 令牌租户在 Capability 本地持有的投影；未投影时 `projected=false`。
+    /// 令牌租户在 Capability 本地持有的投影；未投影时 `projected=false`；`core:tenant:read`。
     pub async fn get_tenant_runtime(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
     ) -> Result<GetTenantRuntimeResponse> {
         let response = self
             .admin
-            .get_tenant_runtime(admin_bearer_request(
+            .get_tenant_runtime(staff_context_request(
                 GetTenantRuntimeRequest {},
-                admin_token,
+                staff_token,
             )?)
             .await?;
         Ok(response.into_inner())
     }
 
-    /// 令牌租户下已登记的扩展插件实例；`capability_id` 为空表示不过滤。
+    /// 已登记的能力目录（本部署支持的能力描述符）；`core:capabilities:read`。
+    pub async fn list_capabilities(
+        &mut self,
+        staff_token: &str,
+    ) -> Result<ListCapabilitiesResponse> {
+        let response = self
+            .service
+            .list_capabilities(staff_context_request(
+                ListCapabilitiesRequest {},
+                staff_token,
+            )?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 设置令牌租户的一个能力开关；`core:capabilities:write`。`tenant_id` 必须是签名里的租户，
+    /// Capability 会再核对一次。
+    pub async fn set_tenant_capability_switch(
+        &mut self,
+        staff_token: &str,
+        request: SetTenantCapabilitySwitchRequest,
+    ) -> Result<SetTenantCapabilitySwitchResponse> {
+        let response = self
+            .service
+            .set_tenant_capability_switch(staff_context_request(request, staff_token)?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 令牌租户下已登记的扩展插件实例；`capability_id` 为空表示不过滤；`core:plugins:read`。
     ///
-    /// `tenant_id` 必须是已验签 admin 令牌里的租户：Capability 会再核对一次，不一致即
+    /// `tenant_id` 必须是已验签 Staff 上下文里的租户：Capability 会再核对一次，不一致即
     /// PERMISSION_DENIED。
     pub async fn list_registered_plugins(
         &mut self,
-        admin_token: &str,
+        staff_token: &str,
         tenant_id: &str,
         capability_id: &str,
     ) -> Result<ListRegisteredPluginsResponse> {
         let response = self
             .service
-            .list_registered_plugins(admin_bearer_request(
+            .list_registered_plugins(staff_context_request(
                 ListRegisteredPluginsRequest {
                     tenant_id: tenant_id.to_string(),
                     capability_id: capability_id.to_string(),
                 },
-                admin_token,
+                staff_token,
             )?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 登记一个扩展插件实例（仅平台员工，`core:plugins:write`）。
+    pub async fn register_plugin_endpoint(
+        &mut self,
+        staff_token: &str,
+        request: RegisterPluginEndpointRequest,
+    ) -> Result<RegisterPluginEndpointResponse> {
+        let response = self
+            .service
+            .register_plugin_endpoint(staff_context_request(request, staff_token)?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 注销一个扩展插件实例（仅平台员工，`core:plugins:write`）。
+    pub async fn deregister_plugin_endpoint(
+        &mut self,
+        staff_token: &str,
+        request: DeregisterPluginEndpointRequest,
+    ) -> Result<DeregisterPluginEndpointResponse> {
+        let response = self
+            .service
+            .deregister_plugin_endpoint(staff_context_request(request, staff_token)?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// 一次 Hook 治理操作：`operation` 是 `flare.extension.v1.hook_config.*`，`payload` 是对应
+    /// 请求消息（打包成 `Any`，类型名 `flare.capability.v1.<Request>`）。读操作要求
+    /// `core:hooks:read`，写操作 `core:hooks:write`，由 Capability 按 operation 复核。
+    pub async fn administer<P: Message>(
+        &mut self,
+        staff_token: &str,
+        operation: &str,
+        request_type: &str,
+        payload: &P,
+        request_id: &str,
+    ) -> Result<GenericResponse> {
+        let request = GenericRequest {
+            operation: operation.to_string(),
+            metadata: Default::default(),
+            payload: Some(prost_types::Any {
+                type_url: format!("{TYPE_URL_PREFIX}{request_type}"),
+                value: payload.encode_to_vec(),
+            }),
+            request_id: request_id.to_string(),
+        };
+        let response = self
+            .service
+            .administer(staff_context_request(request, staff_token)?)
             .await?;
         Ok(response.into_inner())
     }

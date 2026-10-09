@@ -93,8 +93,8 @@ pub struct GrpcClients {
     /// 一次下游调用的请求超时，由 [`Self::bounded`] 施加；`None` 不限时。
     ///
     /// API Gateway 取 `FLARE_API_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS`（见
-    /// [`Self::with_request_timeout`]）。[`Self::new`] 不设：Admin Gateway 的同名变量目前只出现在
-    /// `/gateway/config` 快照里，是否接线待定。
+    /// [`Self::with_request_timeout`]）。Admin Gateway 不用这个聚合：它只连自己用到的下游，见
+    /// [`AdminGrpcClients`]。
     pub request_timeout: Option<Duration>,
 }
 
@@ -190,54 +190,60 @@ impl GrpcClients {
     }
 }
 
-/// 管理员调用：把 admin-gateway 已验签的 admin 令牌原样放进 `authorization`。
+/// Admin Gateway 的下游 gRPC 客户端：只连它用到的四个固定下游（Media、Conversation 读、
+/// Online、Storage Reader；可选的 Capability 另见 [`CapabilityAdminClientWrapper`]），不连
+/// Message Ingest 与 Orchestrator，也不要求它们的地址可达。
 ///
-/// 网关不持有任何签名私钥，也不附带未签名的身份元数据；下游按 admin 受众重新验签，
-/// 只认令牌里的员工主体与租户（见 `docs/SEC02-console-control-auth.md`）。
-pub(crate) fn admin_bearer_request<T>(payload: T, admin_token: &str) -> Result<tonic::Request<T>> {
-    let rejected = || {
-        flare_server_core::error::ErrorBuilder::new(
-            flare_server_core::error::ErrorCode::AuthenticationRequired,
-            "admin token required for downstream admin call",
-        )
-        .build_error()
-    };
-    // JWT 只含可见 ASCII；HTTP 头允许的 obs-text（0x80–0xFF）在这里同样拒绝。
-    if admin_token.is_empty() || !admin_token.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(rejected());
-    }
-    let value = tonic::metadata::MetadataValue::try_from(format!("Bearer {admin_token}"))
-        .map_err(|_| rejected())?;
-    let mut request = tonic::Request::new(payload);
-    request.metadata_mut().insert("authorization", value);
-    Ok(request)
+/// 管理员调用只带中间件验过的 Staff `x-flare-ctx` 原样转发（见
+/// [`crate::staff_context::staff_context_request`]）；Media 另由网关按 `kid=admin-gateway` 重签。
+pub struct AdminGrpcClients {
+    pub media: Arc<tokio::sync::Mutex<MediaServiceClientWrapper>>,
+    pub conversation_read: Arc<tokio::sync::Mutex<ConversationReadServiceClientWrapper>>,
+    pub online: Arc<tokio::sync::Mutex<OnlineServiceClientWrapper>>,
+    pub storage_reader: Arc<tokio::sync::Mutex<StorageReaderServiceClientWrapper>>,
+    /// 一次下游调用的请求超时（`FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS`，缺省 5 秒），由
+    /// [`Self::bounded`] 施加；`None` 不限时（只在测试里）。
+    pub request_timeout: Option<Duration>,
 }
 
-/// 管理检索调用：admin 令牌原样转发（[`admin_bearer_request`]），外加请求号与追踪号。
-///
-/// 这两个号不是身份：Storage Reader 只用它们关联日志，并让同一请求号的导出落到同一个导出
-/// 任务；租户与操作人只取自令牌。
-pub(crate) fn admin_traced_request<T>(
-    payload: T,
-    admin_token: &str,
-    ctx: &Ctx,
-) -> Result<tonic::Request<T>> {
-    let mut request = admin_bearer_request(payload, admin_token)?;
-    for (key, value) in [
-        (
-            flare_server_core::context::keys::REQUEST_ID,
-            ctx.request_id(),
-        ),
-        (flare_server_core::context::keys::TRACE_ID, ctx.trace_id()),
-    ] {
-        if value.is_empty() {
-            continue;
-        }
-        if let Ok(value) = tonic::metadata::MetadataValue::try_from(value) {
-            request.metadata_mut().insert(key, value);
-        }
+impl AdminGrpcClients {
+    /// 通过服务发现（或静态回退）只连 Admin Gateway 用到的四个下游。
+    pub async fn connect(
+        app_config: Arc<FlareAppConfig>,
+        grpc: &DownstreamGrpcConfig,
+        request_timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let resolver = DownstreamGrpcResolver::new(Arc::clone(&app_config), grpc.clone());
+        let media_channel = resolver.connect(DownstreamKind::Media).await?;
+        let conversation_channel = resolver.connect(DownstreamKind::Conversation).await?;
+        let online_channel = resolver.connect(DownstreamKind::SignalingOnline).await?;
+        let storage_reader_channel = resolver.connect(DownstreamKind::StorageReader).await?;
+        let media_fallback = optional_static_fallback(&grpc.media_static_fallback);
+        Ok(Self {
+            media: Arc::new(tokio::sync::Mutex::new(
+                MediaServiceClientWrapper::from_channel(media_channel, media_fallback),
+            )),
+            conversation_read: Arc::new(tokio::sync::Mutex::new(
+                ConversationReadServiceClientWrapper::from_channel(conversation_channel),
+            )),
+            online: Arc::new(tokio::sync::Mutex::new(
+                OnlineServiceClientWrapper::from_channel(online_channel),
+            )),
+            storage_reader: Arc::new(tokio::sync::Mutex::new(
+                StorageReaderServiceClientWrapper::from_channel(storage_reader_channel),
+            )),
+            request_timeout,
+        })
     }
-    Ok(request)
+
+    /// 按 [`Self::request_timeout`] 限时执行一次下游调用（含取锁，见 [`GrpcClients::bounded`]）。
+    pub async fn bounded<T, E, F>(&self, call: F) -> std::result::Result<T, E>
+    where
+        F: std::future::Future<Output = std::result::Result<T, E>>,
+        E: From<tonic::Status>,
+    {
+        bounded_request(self.request_timeout, call).await
+    }
 }
 
 fn optional_static_fallback(uri: &str) -> Option<String> {
@@ -298,53 +304,5 @@ mod request_timeout_tests {
         })
         .await;
         assert_eq!(slow.unwrap(), 1);
-    }
-}
-
-#[cfg(test)]
-mod admin_request_tests {
-    use super::{admin_bearer_request, admin_traced_request};
-
-    #[test]
-    fn traced_admin_calls_add_only_the_request_and_trace_ids() {
-        let ctx = std::sync::Arc::new(
-            flare_server_core::context::Context::with_request_id("req-1")
-                .with_trace_id("trace-1")
-                .with_tenant_id("tenant-a")
-                .with_user_id("employee-1"),
-        );
-        let request = admin_traced_request((), "a.b.c", &ctx).unwrap();
-        let metadata = request.metadata();
-        assert_eq!(metadata.get("authorization").unwrap(), "Bearer a.b.c");
-        assert_eq!(metadata.get("x-request-id").unwrap(), "req-1");
-        assert_eq!(metadata.get("x-trace-id").unwrap(), "trace-1");
-        // 上下文里的租户与用户不随调用下发：下游只认令牌。
-        for key in ["x-tenant-id", "x-user-id", "x-actor-id", "x-flare-ctx"] {
-            assert!(metadata.get(key).is_none(), "{key}");
-        }
-        assert!(admin_traced_request((), "", &ctx).is_err());
-    }
-
-    #[test]
-    fn forwards_the_admin_token_as_the_only_identity() {
-        let request = admin_bearer_request((), "a.b.c").unwrap();
-        let values: Vec<_> = request
-            .metadata()
-            .get_all("authorization")
-            .iter()
-            .map(|value| value.to_str().unwrap().to_string())
-            .collect();
-        assert_eq!(values, vec!["Bearer a.b.c".to_string()]);
-        // 不附带任何未签名的身份元数据。
-        for key in ["x-tenant-id", "x-user-id", "x-actor-id", "x-flare-ctx"] {
-            assert!(request.metadata().get(key).is_none(), "{key}");
-        }
-    }
-
-    #[test]
-    fn rejects_empty_or_ambiguous_tokens() {
-        for token in ["", "a.b c", "a.b.c\n", "a.b.\u{7f}c", "令牌"] {
-            assert!(admin_bearer_request((), token).is_err(), "{token:?}");
-        }
     }
 }

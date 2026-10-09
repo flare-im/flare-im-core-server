@@ -88,8 +88,8 @@ fn smoke_message_flow_script_sends_through_edge_and_checks_durable_storage() {
     }
 }
 
-/// Services whose launch block passes `FLARE_CONSOLE_PUBLIC_KEY`, in file order.
-fn compose_console_key_services(compose: &str) -> Vec<String> {
+/// Services whose launch block passes `FLARE_PLATFORM_PUBLIC_KEY`, in file order.
+fn compose_platform_key_services(compose: &str) -> Vec<String> {
     let services = between(compose, "\nservices:\n", "\nnetworks:");
     let mut users = Vec::new();
     let mut current: Option<&str> = None;
@@ -100,7 +100,7 @@ fn compose_console_key_services(compose: &str) -> Vec<String> {
             && line.trim_end().ends_with(':');
         if is_service_header {
             current = Some(line.trim().trim_end_matches(':'));
-        } else if line.trim_start().starts_with("FLARE_CONSOLE_PUBLIC_KEY:")
+        } else if line.trim_start().starts_with("FLARE_PLATFORM_PUBLIC_KEY:")
             && let Some(service) = current
         {
             users.push(service.to_string());
@@ -109,12 +109,12 @@ fn compose_console_key_services(compose: &str) -> Vec<String> {
     users
 }
 
-/// `case "$service"` labels whose branch hands the child the Control public key.
-fn start_server_console_key_services(start_server: &str) -> Vec<String> {
+/// `case "$service"` labels whose branch hands the child the platform public key.
+fn start_server_platform_key_services(start_server: &str) -> Vec<String> {
     let lines: Vec<&str> = start_server.lines().collect();
     let mut users = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if !line.contains("env_args+=(\"FLARE_CONSOLE_PUBLIC_KEY=") {
+        if !line.contains("env_args+=(\"FLARE_PLATFORM_PUBLIC_KEY=") {
             continue;
         }
         let label = lines[..index]
@@ -122,44 +122,40 @@ fn start_server_console_key_services(start_server: &str) -> Vec<String> {
             .rev()
             .map(|line| line.trim())
             .find(|line| line.ends_with(')') && !line.contains('=') && !line.contains(' '))
-            .expect("console key assignment should sit inside a case branch");
+            .expect("platform key assignment should sit inside a case branch");
         users.extend(label.trim_end_matches(')').split('|').map(str::to_string));
     }
     users
 }
 
 #[test]
-fn console_public_key_reaches_every_admin_verifier_on_both_launch_paths() {
-    // SEC-02 / ADM-01: Online and Capability verify Control assertions, and
-    // Online, Capability, Conversation and Storage Reader verify the admin
-    // assertion Admin Gateway forwards. A verifier started without the key answers every
-    // admin RPC with UNAUTHENTICATED; the supervise manifest has its own
-    // test in flare-supervise.
-    let mut compose = compose_console_key_services(&script("deploy/docker-compose.stack.yml"));
+fn platform_public_key_reaches_only_the_two_service_verifiers_on_both_launch_paths() {
+    // SEC-02 (v4 R3): the platform key verifies only the projection worker (Capability
+    // TenantProjection) and the scheduler (Online KickTenant). Employees reach Core as a
+    // Staff x-flare-ctx signed by the gateway admin partition, verified with the Cell key
+    // set every admin verifier already holds, so no other service may receive the platform
+    // key; the supervise manifest has its own test in flare-supervise.
+    let mut compose = compose_platform_key_services(&script("deploy/docker-compose.stack.yml"));
     compose.sort();
     assert_eq!(
         compose,
-        [
-            "admin-gateway",
-            "capability",
-            "conversation",
-            "signaling-online",
-            "storage-reader"
-        ],
-        "deploy/docker-compose.stack.yml must pass FLARE_CONSOLE_PUBLIC_KEY to exactly these services"
+        ["capability", "signaling-online"],
+        "deploy/docker-compose.stack.yml must pass FLARE_PLATFORM_PUBLIC_KEY to exactly these services"
     );
 
-    let mut start_server = start_server_console_key_services(&script("scripts/start_server.sh"));
+    let mut start_server = start_server_platform_key_services(&script("scripts/start_server.sh"));
     start_server.sort();
     assert_eq!(
         start_server,
-        [
-            "admin-gateway",
-            "capability",
-            "conversation",
-            "signaling-online",
-            "storage-reader"
-        ],
-        "scripts/start_server.sh must pass FLARE_CONSOLE_PUBLIC_KEY to exactly these services"
+        ["capability", "signaling-online"],
+        "scripts/start_server.sh must pass FLARE_PLATFORM_PUBLIC_KEY to exactly these services"
     );
+
+    // No retired console-era variable comes back on either launch path.
+    for path in ["deploy/docker-compose.stack.yml", "scripts/start_server.sh"] {
+        assert!(
+            !script(path).contains("FLARE_CONSOLE_"),
+            "{path} still mentions a console-era variable"
+        );
+    }
 }

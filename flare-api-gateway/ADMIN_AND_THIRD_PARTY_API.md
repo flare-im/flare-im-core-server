@@ -29,7 +29,7 @@ Gateway 可以做边界级认证，但不能拥有 token 生命周期，不能�
 | 密钥用途 | 推荐位置 | Gateway 行为 |
 |----------|----------|--------------|
 | API Gateway 调用业务 auth hook | `FLARE_API_GATEWAY_AUTH_HOOK_SECRET` | API Gateway 发送给 hook，证明调用方是 API Gateway |
-| Admin Gateway 验管理请求 | `FLARE_CONSOLE_PUBLIC_KEY` | 只验 Console 签发的 admin 令牌，不调用业务 auth hook；`FLARE_ADMIN_GATEWAY_AUTH_*` 不读取，配了只记 WARN |
+| Admin Gateway 验管理请求 | `FLARE_INTERNAL_CTX_PUBLIC_KEY(S)` | 只验网关 admin 分区签的 Staff `x-flare-ctx`（kid=gateway），不调用业务 auth hook；`FLARE_ADMIN_GATEWAY_AUTH_*` 不读取，配了只记 WARN |
 | 业务系统签发 JWT | 业务认证系统或 `trusted_token_issuers` | Provider 校验后返回 principal |
 | 服务间 mTLS / service token | 网格、反向代理、业务 auth provider | Gateway 只消费认证结果 |
 | `ADMIN_SECRET` 直接调用 Gateway | 不推荐 | 会让 Gateway 重新承担认证中心职责 |

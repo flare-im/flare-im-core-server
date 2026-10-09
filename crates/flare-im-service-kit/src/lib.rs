@@ -1,5 +1,6 @@
 //! Runtime service kit for Flare IM server processes.
 
+pub mod audit_effects;
 pub mod clients;
 pub mod config;
 pub mod consumer_retry;
@@ -17,6 +18,7 @@ pub mod redis_connection;
 pub mod runtime;
 pub mod service_helper;
 pub mod signed_read;
+pub mod staff_context;
 pub mod tenant_runtime;
 pub mod tracing;
 
@@ -27,7 +29,7 @@ pub use flare_server_core::discovery::{
 };
 pub use flare_server_core::{Config, RegistryConfig, ServerConfig, ServiceConfig};
 
-pub use clients::GrpcClients;
+pub use clients::{AdminGrpcClients, GrpcClients};
 pub use config::{
     AccessGatewayServiceConfig, AdminGatewayServiceConfig, ApiGatewayServiceConfig,
     CapabilityServiceConfig, ConfigManager, ConversationServiceConfig, FlareAppConfig,

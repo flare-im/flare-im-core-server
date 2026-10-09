@@ -11,6 +11,10 @@ port = 50110
 [capability_runtime]
 plugin_call_timeout_ms = 5000
 plugin_health_check_interval_secs = 15
+# RegisterPluginEndpoint 的登记存在 capability_plugin_endpoints 表里：各实例按此周期重读，
+# 超过 TTL 既没重新登记也没通过一次健康检查的登记被清理（配置发现的端点不入库、不清理）。
+plugin_route_refresh_secs = 10
+plugin_route_ttl_secs = 86400
 
 # 插件 endpoint 仅登记 discovery 路由，启动时不拨号；Dispatch 时再经 Consul 解析。
 [[capability_runtime.plugin_discovery_endpoints]]
