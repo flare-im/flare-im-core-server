@@ -87,8 +87,9 @@ def main():
     for name in ('flare-api-gateway', 'flare-conversation'):
         if not (BIN / name).is_file():
             raise RuntimeError(f'build production binary first: {name}')
-    if args.via_social and not (BIN / 'flare-social-gateway').is_file():
-        raise RuntimeError('build production Social Gateway first')
+    # The Social gateway: package flare-gateway in flare-social/gateway/flare-gateway.
+    if args.via_social and not (BIN / 'flare-gateway').is_file():
+        raise RuntimeError('build production Social Gateway first: flare-gateway')
     db = 'flare_platform_core_test_' + secrets.token_hex(6)
     address = ['-h', host, '-p', str(pg_port)]
     created = False
@@ -119,7 +120,7 @@ def main():
         if args.via_social:
             checked(['createdb', *address, social_db])
             social_created = True
-            for migration in sorted((ROOT.parent / 'flare-social/migrations').glob('*.sql')):
+            for migration in sorted((ROOT.parent / 'flare-social/social/migrations').glob('*.sql')):
                 checked(['psql', *address, '-X', '-d', social_db, '-v', 'ON_ERROR_STOP=1', '-1', '-f', str(migration)])
             social_sql("INSERT INTO flare_tenants(tenant_id,name,status,version) VALUES('app-a','native-a',1,1),('app-b','native-b',1,1); INSERT INTO flare_credential_projection_versions(app_id,version) VALUES('app-a',1),('app-b',1);")
         sql("""
@@ -223,7 +224,7 @@ port = {conversation_port}
                 process.wait(timeout=10)
             conversation_process = start('flare-conversation')
             wait_for(lambda: listening(conversation_port), 'Conversation ready', processes)
-            entry_binary = 'flare-social-gateway' if args.via_social else 'flare-api-gateway'
+            entry_binary = 'flare-gateway' if args.via_social else 'flare-api-gateway'
             core_gateway = None
             if args.via_social:
                 core_gateway = start('flare-api-gateway')
