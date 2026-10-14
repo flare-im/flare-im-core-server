@@ -468,7 +468,10 @@ impl OnlineService for Fakes {
         let summary = format!("tenant_id={} reason={}", r.tenant_id, r.reason);
         self.recorder.record("KickTenant", &request, summary);
         self.gate_tenant(&request, &[TENANT_KICK], &r.tenant_id)?;
-        Ok(GrpcResponse::new(KickTenantResponse { kicked: 3 }))
+        Ok(GrpcResponse::new(KickTenantResponse {
+            kicked: 3,
+            superseded: false,
+        }))
     }
 
     async fn get_device(

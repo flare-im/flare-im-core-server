@@ -181,6 +181,7 @@ impl Default for TenantRuntimeCacheOptions {
 struct Inner {
     source: Arc<dyn TenantRuntimeSource>,
     cache: Cache<String, TenantLookup>,
+    kick_fence: Option<crate::tenant_kick_fence::TenantKickFence>,
 }
 
 /// 进程内租户运行时缓存（`Clone` 共享同一份状态）。
@@ -196,9 +197,10 @@ impl TenantRuntimeCache {
     }
 
     pub fn from_pool(pool: PgPool) -> Self {
-        Self::with_source(
-            Arc::new(PgTenantRuntimeSource::new(pool)),
+        Self::with_source_and_fence(
+            Arc::new(PgTenantRuntimeSource::new(pool.clone())),
             TenantRuntimeCacheOptions::default(),
+            Some(crate::tenant_kick_fence::TenantKickFence::new(pool)),
         )
     }
 
@@ -206,12 +208,24 @@ impl TenantRuntimeCache {
         source: Arc<dyn TenantRuntimeSource>,
         options: TenantRuntimeCacheOptions,
     ) -> Self {
+        Self::with_source_and_fence(source, options, None)
+    }
+
+    fn with_source_and_fence(
+        source: Arc<dyn TenantRuntimeSource>,
+        options: TenantRuntimeCacheOptions,
+        kick_fence: Option<crate::tenant_kick_fence::TenantKickFence>,
+    ) -> Self {
         let cache = Cache::builder()
             .max_capacity(options.capacity.max(1))
             .time_to_live(options.refresh_interval.max(Duration::from_millis(1)))
             .build();
         Self {
-            inner: Some(Arc::new(Inner { source, cache })),
+            inner: Some(Arc::new(Inner {
+                source,
+                cache,
+                kick_fence,
+            })),
         }
     }
 
@@ -230,6 +244,10 @@ impl TenantRuntimeCache {
 
     pub fn is_enabled(&self) -> bool {
         self.inner.is_some()
+    }
+
+    pub fn kick_fence(&self) -> Option<crate::tenant_kick_fence::TenantKickFence> {
+        self.inner.as_ref().and_then(|i| i.kick_fence.clone())
     }
 
     /// 查询租户快照；`tenant_id` 先按 [`normalize_tenant_id`] 归一（`""` / `"default"` → `"0"`）。

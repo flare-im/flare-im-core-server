@@ -50,6 +50,7 @@ where
     identity_verifier: Option<SignedContextVerifier>,
     /// Cell 公钥集，Staff 钉死 `kid=gateway`：admin-gateway 转发的员工上下文。
     staff_verifier: Option<SignedContextVerifier>,
+    tenant_kick_fence: Option<flare_im_service_kit::tenant_kick_fence::TenantKickFence>,
 }
 
 impl<CR, SR, PP, PW> Clone for OnlineHandler<CR, SR, PP, PW>
@@ -68,6 +69,7 @@ where
             control_verifier: self.control_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
             staff_verifier: self.staff_verifier.clone(),
+            tenant_kick_fence: self.tenant_kick_fence.clone(),
         }
     }
 }
@@ -93,11 +95,20 @@ where
             control_verifier: None,
             identity_verifier: None,
             staff_verifier: None,
+            tenant_kick_fence: None,
         }
     }
 
     pub fn with_control_verifier(mut self, verifier: Option<PlatformAssertionVerifier>) -> Self {
         self.control_verifier = verifier;
+        self
+    }
+
+    pub fn with_tenant_kick_fence(
+        mut self,
+        fence: Option<flare_im_service_kit::tenant_kick_fence::TenantKickFence>,
+    ) -> Self {
+        self.tenant_kick_fence = fence;
         self
     }
 
@@ -532,13 +543,40 @@ where
             let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
             actor.require_kind(PlatformActorKind::Scheduler)?;
             actor.require_tenant(&tenant_id)?;
+            if request.get_ref().expected_tenant_version.is_none() {
+                return Err(Status::invalid_argument(
+                    "scheduler kick requires tenant version",
+                ));
+            }
             tracing::info!(actor_id = %actor.subject, tenant_id = %actor.tenant_id, "scheduler kick_tenant authorized");
         }
-        let response = self
-            .user_handler
-            .kick_tenant(request.into_inner())
-            .await
-            .into_grpc()?;
+        let lease = if let Some(version) = request.get_ref().expected_tenant_version {
+            let fence = self
+                .tenant_kick_fence
+                .as_ref()
+                .ok_or_else(|| Status::failed_precondition("tenant fence not configured"))?;
+            match fence.acquire(&tenant_id, version).await? {
+                Some(lease) => Some(lease),
+                None => {
+                    return Ok(Response::new(KickTenantResponse {
+                        kicked: 0,
+                        superseded: true,
+                    }));
+                }
+            }
+        } else {
+            None
+        };
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.user_handler.kick_tenant(request.into_inner()),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("tenant kick deadline"))?
+        .into_grpc()?;
+        if let Some(lease) = lease {
+            lease.finish().await?;
+        }
         Ok(Response::new(response))
     }
 
@@ -658,6 +696,33 @@ mod admin_branch_tests {
         }
         async fn touch_connection(&self, _: &str, _: &ConnectionId, _: &UserId) -> FlareResult<()> {
             Ok(())
+        }
+
+        async fn remove_connection_for_kick(
+            &self,
+            tenant: &str,
+            id: &ConnectionId,
+            user: &UserId,
+            reason: &str,
+        ) -> FlareResult<Option<String>> {
+            let session = self
+                .get_user_connections(tenant, user)
+                .await?
+                .into_iter()
+                .find(|s| s.id() == id);
+            let Some(session) = session else {
+                return Ok(None);
+            };
+            self.broadcast_user_kick(
+                tenant,
+                user.as_str(),
+                Some(session.device_id().as_str()),
+                Some(&format!("physical-{}", id.as_str())),
+                reason,
+            )
+            .await?;
+            self.remove_connection(tenant, id, user).await?;
+            Ok(Some(format!("physical-{}", id.as_str())))
         }
         async fn fetch_statuses(
             &self,
@@ -1183,6 +1248,7 @@ mod admin_branch_tests {
         KickTenantRequest {
             tenant_id: tenant.to_string(),
             reason: "admin".to_string(),
+            expected_tenant_version: None,
         }
     }
 
@@ -1264,8 +1330,8 @@ mod admin_branch_tests {
         assert!(repo.devices("tenant-a", "u1").is_empty());
         assert_eq!(repo.devices("tenant-b", "u9"), vec!["b9"]);
 
-        // 调度器分支不变：平台的 control 断言仍可踢自己的租户。
-        let kicked = online
+        // Scheduler cannot issue an unconditional kick, even with a valid assertion.
+        let denied = online
             .handle_kick_tenant(signed(
                 kick_tenant_req("tenant-b"),
                 SCHEDULER_SUBJECT,
@@ -1274,10 +1340,9 @@ mod admin_branch_tests {
                 CORE_PROJECTION_AUDIENCE,
             ))
             .await
-            .unwrap()
-            .into_inner()
-            .kicked;
-        assert_eq!(kicked, 3);
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::InvalidArgument);
+        assert_eq!(repo.devices("tenant-b", "u1"), vec!["b1", "b2"]);
         assert!(
             repo.kicked
                 .lock()

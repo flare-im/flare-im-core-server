@@ -247,23 +247,19 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 ));
             }
             // 删除会话
-            self.conversation_repository
-                .remove_connection(expected_tenant_id, session.id(), &user_vo)
+            let physical = self
+                .conversation_repository
+                .remove_connection_for_kick(expected_tenant_id, session.id(), &user_vo, wire_reason)
                 .await?;
-            self.conversation_repository
-                .broadcast_user_kick(
-                    expected_tenant_id,
-                    user_id,
-                    Some(device_id),
-                    None,
-                    wire_reason,
-                )
-                .await?;
+            let Some(physical) = physical else {
+                return Ok(KickDeviceResponse { success: false });
+            };
 
             info!(
                 user_id = %user_id,
                 device_id = %device_id,
                 conversation_id = %session.id().as_str(),
+                connection_id = %physical,
                 reason = %loggable_reason(&request.reason),
                 "device kicked"
             );
@@ -275,7 +271,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
     }
 
     /// 踢出整个租户：按 `tenant:sessions:{tenant}` 索引分页 SSCAN，每个成员复用 `kick_device`；
-    /// 索引里已无会话的陈旧成员顺手清掉；最后按用户去重通知网关关 socket。
+    /// 陈旧索引以条件删除清理；只通知旧物理连接，绝不广播踢整个用户。
     pub async fn kick_tenant(&self, request: KickTenantRequest) -> Result<KickTenantResponse> {
         let tenant_id = normalize_tenant_id(&request.tenant_id);
         if !is_valid_tenant_id(&tenant_id) {
@@ -293,7 +289,6 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         let mut kicked = 0u32;
         let mut stale = 0u32;
         let mut failed = 0u32;
-        let mut kicked_users = std::collections::BTreeSet::new();
         loop {
             let (next, members) = self
                 .conversation_repository
@@ -319,10 +314,10 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                     )
                     .await
                 {
-                    Ok(_) => {
+                    Ok(response) if response.success => {
                         kicked = kicked.saturating_add(1);
-                        kicked_users.insert(user_id.to_string());
                     }
+                    Ok(_) => {} // Replaced before removal: keep the replacement's index.
                     Err(error) if error.code() == Some(ErrorCode::UserNotFound) => {
                         // 会话已经过期 / 被别处删掉，只剩索引成员。
                         stale = stale.saturating_add(1);
@@ -342,32 +337,24 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             cursor = next;
         }
 
-        for user_id in &kicked_users {
-            if let Err(error) = self
-                .conversation_repository
-                .broadcast_user_kick(
-                    &tenant_id,
-                    user_id,
-                    None,
-                    None,
-                    kick_reason::TENANT_UNAVAILABLE,
-                )
-                .await
-            {
-                warn!(tenant_id = %tenant_id, user_id = %user_id, %error, "kick broadcast failed");
-            }
-        }
-
         info!(
             tenant_id = %tenant_id,
             reason = %loggable_reason(reason),
             kicked,
             stale,
             failed,
-            users = kicked_users.len(),
             "tenant kicked"
         );
-        Ok(KickTenantResponse { kicked })
+        if failed > 0 {
+            return Err(flare_err!(
+                ErrorCode::ServiceUnavailable,
+                "tenant kick incomplete"
+            ));
+        }
+        Ok(KickTenantResponse {
+            kicked,
+            superseded: false,
+        })
     }
 
     pub async fn get_device(
@@ -531,6 +518,33 @@ mod tests {
 
         async fn touch_connection(&self, _: &str, _: &ConnectionId, _: &UserId) -> Result<()> {
             Ok(())
+        }
+
+        async fn remove_connection_for_kick(
+            &self,
+            tenant: &str,
+            id: &ConnectionId,
+            user: &UserId,
+            reason: &str,
+        ) -> Result<Option<String>> {
+            let session = self
+                .get_user_connections(tenant, user)
+                .await?
+                .into_iter()
+                .find(|s| s.id() == id);
+            let Some(session) = session else {
+                return Ok(None);
+            };
+            self.broadcast_user_kick(
+                tenant,
+                user.as_str(),
+                Some(session.device_id().as_str()),
+                Some(&format!("physical-{}", id.as_str())),
+                reason,
+            )
+            .await?;
+            self.remove_connection(tenant, id, user).await?;
+            Ok(Some(format!("physical-{}", id.as_str())))
         }
 
         async fn fetch_statuses(
@@ -744,6 +758,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "acme".to_string(),
                 reason: forged.to_string(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap();
@@ -847,6 +862,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "acme".to_string(),
                 reason: "suspended".to_string(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap();
@@ -878,12 +894,12 @@ mod tests {
             reasons.iter().all(|r| r == kick_reason::TENANT_UNAVAILABLE),
             "{reasons:?}"
         );
-        // 每个设备按租户精确通知，随后按用户发送租户范围兜底通知。
+        // Only device/physical-session kicks: never a user-wide reconnect-unsafe fallback.
         let mut kicks = repo.kicks.lock().unwrap().clone();
         kicks.sort();
         assert!(kicks.iter().all(|(tenant, _, _)| tenant == "acme"));
-        assert!(kicks.contains(&("acme".into(), "u1".into(), None)));
-        assert!(kicks.contains(&("acme".into(), "u2".into(), None)));
+        assert_eq!(kicks.len(), 3);
+        assert!(kicks.iter().all(|(_, _, device)| device.is_some()));
     }
 
     #[tokio::test]
@@ -896,6 +912,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "acme".to_string(),
                 reason: String::new(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap();
@@ -925,6 +942,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "big".to_string(),
                 reason: String::new(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap();
@@ -947,6 +965,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "default".to_string(),
                 reason: String::new(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap();
@@ -956,6 +975,7 @@ mod tests {
             .kick_tenant(KickTenantRequest {
                 tenant_id: "*".to_string(),
                 reason: String::new(),
+                expected_tenant_version: None,
             })
             .await
             .unwrap_err();

@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod service_helper;
 pub mod signed_read;
 pub mod staff_context;
+pub mod tenant_kick_fence;
 pub mod tenant_runtime;
 pub mod tracing;
 

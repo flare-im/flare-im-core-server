@@ -62,6 +62,22 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &ConnectionId,
         user_id: &UserId,
     ) -> Result<()>;
+
+    /// Publish a physical-session-only kick, then atomically remove that session.
+    /// Failed publication leaves it retryable; replacement/index must survive.
+    /// Return the old physical gateway ID. Unsupported adapters fail closed.
+    async fn remove_connection_for_kick(
+        &self,
+        _tenant: &str,
+        _session: &ConnectionId,
+        _user: &UserId,
+        _reason: &str,
+    ) -> Result<Option<String>> {
+        Err(flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::ServiceUnavailable,
+            "conditional session removal unavailable"
+        ))
+    }
     async fn touch_connection(
         &self,
         tenant_id: &str,

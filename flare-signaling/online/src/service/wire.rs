@@ -93,7 +93,7 @@ pub async fn initialize(
             gateway_id,
         )
         .with_tenant_runtime(
-            tenant_runtime,
+            tenant_runtime.clone(),
             online_config.tenant_policy,
             online_config.max_online_devices_per_user,
         ),
@@ -155,6 +155,7 @@ pub async fn initialize(
         presence_watcher_handler,
     )
     .with_control_verifier(control_verifier)
+    .with_tenant_kick_fence(tenant_runtime.kick_fence())
     .with_identity_verifier(identity_verifier)
     .with_staff_verifier(staff_verifier);
 

@@ -130,6 +130,33 @@ pub struct RedisConversationRepository {
     config: Arc<OnlineConfig>,
 }
 
+// No split HGET/HDEL/unindex window: a concurrent login may replace the same device.
+// Return the removed record's PHYSICAL connection, not a user/device-wide broadcast.
+const REMOVE_FOR_KICK: &str = r#"
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return false end
+local rec = cjson.decode(raw)
+if rec.tenant_id ~= ARGV[2] or type(rec.connection_id) ~= 'string' or rec.connection_id == '' then
+  return redis.error_reply('invalid kick session')
+end
+local keep = false
+for _, value in ipairs(redis.call('HVALS', KEYS[1])) do
+  local other = cjson.decode(value)
+  if other.conversation_id ~= rec.conversation_id and other.device_id == rec.device_id then keep = true end
+end
+redis.call('HDEL', KEYS[1], ARGV[1])
+if not keep then redis.call('SREM', KEYS[2], ARGV[3] .. rec.device_id) end
+return rec.connection_id
+"#;
+
+const UNINDEX_IF_ABSENT: &str = r#"
+for _, raw in ipairs(redis.call('HVALS', KEYS[1])) do
+  local rec = cjson.decode(raw)
+  if rec.tenant_id == ARGV[1] and rec.device_id == ARGV[2] then return 0 end
+end
+return redis.call('SREM', KEYS[2], ARGV[3])
+"#;
+
 impl RedisConversationRepository {
     pub fn new(client: Arc<redis::Client>, config: Arc<OnlineConfig>) -> Self {
         let kick_client = if config.kick_redis_url == config.redis_url {
@@ -378,6 +405,62 @@ impl ConversationRepository for RedisConversationRepository {
         Ok(())
     }
 
+    async fn remove_connection_for_kick(
+        &self,
+        tenant: &str,
+        session: &ConnectionId,
+        user: &UserId,
+        reason: &str,
+    ) -> Result<Option<String>> {
+        let mut conn = self.connection().await?;
+        let raw: Option<String> = conn
+            .hget(
+                Self::connection_key(tenant, user.as_str()),
+                session.as_str(),
+            )
+            .await
+            .map_err(|_| {
+                flare_server_core::flare_err!(
+                    flare_server_core::error::ErrorCode::DatabaseError,
+                    "kick session lookup failed"
+                )
+            })?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let record = Self::parse_record(&raw)?;
+        if record.tenant_id != tenant || record.connection_id.is_empty() {
+            return Err(flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::PermissionDenied,
+                "kick session mismatch"
+            ));
+        }
+        // Failed publication leaves the exact session available for retry. The
+        // signal only names this physical socket; a later same-device login is safe.
+        self.broadcast_user_kick(
+            tenant,
+            user.as_str(),
+            Some(&record.device_id),
+            Some(&record.connection_id),
+            reason,
+        )
+        .await?;
+        redis::Script::new(REMOVE_FOR_KICK)
+            .key(Self::connection_key(tenant, user.as_str()))
+            .key(Self::tenant_sessions_key(tenant))
+            .arg(session.as_str())
+            .arg(tenant)
+            .arg(tenant_session_member_prefix(user.as_str()))
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|_| {
+                flare_server_core::flare_err!(
+                    flare_server_core::error::ErrorCode::DatabaseError,
+                    "conditional session removal failed"
+                )
+            })
+    }
+
     async fn touch_connection(
         &self,
         tenant_id: &str,
@@ -584,6 +667,24 @@ impl ConversationRepository for RedisConversationRepository {
 
     async fn unindex_tenant_session(&self, tenant_id: &str, member: &str) -> Result<()> {
         let mut conn = self.connection().await?;
+        if let Some((user, device)) = crate::domain::repository::parse_tenant_session_member(member)
+        {
+            let _: usize = redis::Script::new(UNINDEX_IF_ABSENT)
+                .key(Self::connection_key(tenant_id, user))
+                .key(Self::tenant_sessions_key(tenant_id))
+                .arg(tenant_id)
+                .arg(device)
+                .arg(member)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|_| {
+                    flare_server_core::flare_err!(
+                        flare_server_core::error::ErrorCode::DatabaseError,
+                        "conditional index cleanup failed"
+                    )
+                })?;
+            return Ok(());
+        }
         let _: usize = conn
             .srem(Self::tenant_sessions_key(tenant_id), member)
             .await
@@ -630,6 +731,101 @@ impl ConversationRepository for RedisConversationRepository {
 mod admission_tests {
     use super::*;
     use crate::domain::repository::EvictionCause;
+
+    #[tokio::test]
+    #[ignore = "requires isolated FLARE_TEST_REDIS_URL"]
+    async fn a_delayed_kick_never_removes_or_targets_the_replacement_connection() {
+        let client = redis::Client::open(std::env::var("FLARE_TEST_REDIS_URL").unwrap()).unwrap();
+        let mut conn = ConnectionManager::new(client).await.unwrap();
+        let tenant = format!("kick-{}", uuid::Uuid::new_v4().simple());
+        let key = RedisConversationRepository::connection_key(&tenant, "same");
+        let index = RedisConversationRepository::tenant_sessions_key(&tenant);
+        let old = record(&tenant, "device", "old", 1);
+        let new = record(&tenant, "device", "new", 2);
+        let _: () = redis::pipe()
+            .hset(
+                &key,
+                &old.conversation_id,
+                serde_json::to_string(&old).unwrap(),
+            )
+            .ignore()
+            .hset(
+                &key,
+                &new.conversation_id,
+                serde_json::to_string(&new).unwrap(),
+            )
+            .ignore()
+            .sadd(
+                &index,
+                crate::domain::repository::tenant_session_member("same", "device"),
+            )
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let physical: Option<String> = redis::Script::new(REMOVE_FOR_KICK)
+            .key(&key)
+            .key(&index)
+            .arg(&old.conversation_id)
+            .arg(&tenant)
+            .arg(tenant_session_member_prefix("same"))
+            .invoke_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(physical.as_deref(), Some("old"));
+        let surviving: bool = conn.hexists(&key, &new.conversation_id).await.unwrap();
+        assert!(surviving);
+        let indexed: bool = conn
+            .sismember(
+                &index,
+                crate::domain::repository::tenant_session_member("same", "device"),
+            )
+            .await
+            .unwrap();
+        assert!(indexed);
+        let repeated: Option<String> = redis::Script::new(REMOVE_FOR_KICK)
+            .key(&key)
+            .key(&index)
+            .arg(&old.conversation_id)
+            .arg(&tenant)
+            .arg(tenant_session_member_prefix("same"))
+            .invoke_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(repeated.is_none());
+        let removed: usize = redis::Script::new(UNINDEX_IF_ABSENT)
+            .key(&key)
+            .key(&index)
+            .arg(&tenant)
+            .arg("device")
+            .arg(crate::domain::repository::tenant_session_member(
+                "same", "device",
+            ))
+            .invoke_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "stale cleanup must preserve the newly admitted index"
+        );
+        let wrong: redis::RedisResult<Option<String>> = redis::Script::new(REMOVE_FOR_KICK)
+            .key(&key)
+            .key(&index)
+            .arg(&new.conversation_id)
+            .arg("other")
+            .arg(tenant_session_member_prefix("same"))
+            .invoke_async(&mut conn)
+            .await;
+        assert!(wrong.is_err());
+        let _: () = redis::pipe()
+            .del(&key)
+            .ignore()
+            .del(&index)
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
 
     fn record(
         tenant: &str,

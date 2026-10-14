@@ -688,6 +688,7 @@ pub async fn kick_tenant(
                     KickTenantRequest {
                         tenant_id: tenant_id.clone(),
                         reason,
+                        expected_tenant_version: None,
                     },
                 )
                 .await
