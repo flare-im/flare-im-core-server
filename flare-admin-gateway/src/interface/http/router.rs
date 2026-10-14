@@ -70,6 +70,11 @@ use flare_im_service_kit::clients::AdminGrpcClients;
             media_handler::ListObjectsQuery,
             media_handler::AdminMediaObjects,
             media_handler::AdminMediaObject,
+            media_handler::AdminMediaCleanupRequest,
+            media_handler::AdminMediaCleanupResponse,
+            media_handler::AdminMediaAclEntry,
+            media_handler::AdminMediaAclRequest,
+            media_handler::AdminMediaBucketResponse,
             super::admin_contract::AdminCapabilitiesResponse,
             super::admin_contract::AdminRequiredHeaders,
             super::admin_contract::AdminEndpointDescriptor,
@@ -224,7 +229,13 @@ fn add_bad_request_reasons(operation: &mut Operation, reasons: &[&str]) {
 }
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
-    Json(AdminApiDoc::openapi())
+    Json(admin_openapi())
+}
+
+/// The owning serializer's API document, usable by offline AdminClient code generation.
+/// No router, authentication fixture, downstream connection or database is started.
+pub fn admin_openapi() -> utoipa::openapi::OpenApi {
+    AdminApiDoc::openapi()
 }
 
 // Swagger UI 5.3.1 的静态资源随二进制内嵌（Apache-2.0，许可与 NOTICE 见

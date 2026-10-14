@@ -91,15 +91,53 @@ pub struct AdminMediaObjects {
     pub files: Vec<AdminMediaObject>,
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMediaCleanupRequest {
+    pub limit: u32,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AdminMediaCleanupResponse {
+    pub file_ids: Vec<String>,
+    pub success: bool,
+    pub error_message: String,
+    pub scanned: u32,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMediaAclEntry {
+    pub principal: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMediaAclRequest {
+    pub file_id: String,
+    pub entries: Vec<AdminMediaAclEntry>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AdminMediaBucketResponse {
+    pub bucket: String,
+    pub region: String,
+    pub storage_class: String,
+    pub versioning_enabled: bool,
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
 #[utoipa::path(post, path = "/api/v1/admin/medias/cleanup-orphaned-assets", tag = "Admin",
-    request_body(content = CleanupOrphanedAssetsRequest, description = "Both fields are required; `limit` 0 means 100, capped at 1000 by Media; `dry_run` must be false"),
+    request_body(content = AdminMediaCleanupRequest, description = "Both fields are required; `limit` 0 means 100, capped at 1000 by Media; `dry_run` must be false"),
     params(
         ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "Orphaned message assets of the staff application that this pass deleted", body = ApiResponse<CleanupOrphanedAssetsResponse>),
+        (status = 200, description = "Orphaned message assets of the staff application that this pass deleted", body = ApiResponse<AdminMediaCleanupResponse>),
         (status = 400, description = "dry_run=true: Media does not honor dry runs, so the gateway refuses instead of deleting (ADMIN_MEDIA_DRY_RUN_UNSUPPORTED), or Media refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:medias:write (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Media refused the tenant admin (FORBIDDEN)"),
@@ -115,8 +153,8 @@ pub async fn cleanup_orphaned_assets(
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(effects): Extension<Arc<AuditEffects>>,
-    AdminJson(request): AdminJson<CleanupOrphanedAssetsRequest>,
-) -> Result<Json<ApiResponse<CleanupOrphanedAssetsResponse>>> {
+    AdminJson(request): AdminJson<AdminMediaCleanupRequest>,
+) -> Result<Json<ApiResponse<AdminMediaCleanupResponse>>> {
     // Media ignores dry_run and deletes as in a real run; a "preview" must not delete.
     if request.dry_run {
         return Err(HttpApiError::bad_request(
@@ -137,7 +175,13 @@ pub async fn cleanup_orphaned_assets(
                 .media
                 .lock()
                 .await
-                .cleanup_orphaned_assets(&caller, request)
+                .cleanup_orphaned_assets(
+                    &caller,
+                    CleanupOrphanedAssetsRequest {
+                        limit: request.limit,
+                        dry_run: request.dry_run,
+                    },
+                )
                 .await
         })
         .await
@@ -145,11 +189,16 @@ pub async fn cleanup_orphaned_assets(
     effects
         .record(staff.ctx(), "media_assets", &tenant_id, "cleanup_orphaned")
         .await;
-    Ok(Json(ApiResponse::success(response)))
+    Ok(Json(ApiResponse::success(AdminMediaCleanupResponse {
+        file_ids: response.file_ids,
+        success: response.success,
+        error_message: response.error_message,
+        scanned: response.scanned,
+    })))
 }
 
 #[utoipa::path(post, path = "/api/v1/admin/medias/object-acl", tag = "Admin",
-    request_body(content = SetObjectAclRequest, description = "File of the staff application and its ACL entries"),
+    request_body(content = AdminMediaAclRequest, description = "File of the staff application and its ACL entries"),
     params(
         ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
@@ -173,7 +222,7 @@ pub async fn set_object_acl(
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(effects): Extension<Arc<AuditEffects>>,
-    AdminJson(request): AdminJson<SetObjectAclRequest>,
+    AdminJson(request): AdminJson<AdminMediaAclRequest>,
 ) -> Result<Json<ApiResponse<bool>>> {
     audit_write(
         "medias.object_acl",
@@ -188,7 +237,20 @@ pub async fn set_object_acl(
                 .media
                 .lock()
                 .await
-                .set_object_acl(&caller, request)
+                .set_object_acl(
+                    &caller,
+                    SetObjectAclRequest {
+                        file_id: request.file_id,
+                        entries: request
+                            .entries
+                            .into_iter()
+                            .map(|entry| AccessControlEntry {
+                                principal: entry.principal,
+                                permissions: entry.permissions,
+                            })
+                            .collect(),
+                    },
+                )
                 .await
         })
         .await
@@ -254,7 +316,7 @@ pub async fn list_objects(
 #[utoipa::path(get, path = "/api/v1/admin/medias/bucket", tag = "Admin",
     params(("bucket" = String, Query, description = "Configured bucket")),
     responses(
-        (status = 200, description = "Configured media bucket with this application's object-key prefix; no global object statistics", body = ApiResponse<DescribeBucketResponse>),
+        (status = 200, description = "Configured media bucket with this application's object-key prefix; no global object statistics", body = ApiResponse<AdminMediaBucketResponse>),
         (status = 400, description = "Media refused the bucket (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:medias:read (ADMIN_PERMISSION_DENIED), or the bucket is not the one Media serves (FORBIDDEN)"),
@@ -267,7 +329,7 @@ pub async fn describe_bucket(
     AdminMediaIdentity(caller): AdminMediaIdentity,
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     AdminQuery(request): AdminQuery<DescribeBucketRequest>,
-) -> Result<Json<ApiResponse<DescribeBucketResponse>>> {
+) -> Result<Json<ApiResponse<AdminMediaBucketResponse>>> {
     let response = clients
         .bounded(async {
             clients
@@ -279,7 +341,13 @@ pub async fn describe_bucket(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_BUCKET_FAILED"))?;
-    Ok(Json(ApiResponse::success(response)))
+    Ok(Json(ApiResponse::success(AdminMediaBucketResponse {
+        bucket: response.bucket,
+        region: response.region,
+        storage_class: response.storage_class,
+        versioning_enabled: response.versioning_enabled,
+        metadata: response.metadata,
+    })))
 }
 
 #[cfg(test)]
