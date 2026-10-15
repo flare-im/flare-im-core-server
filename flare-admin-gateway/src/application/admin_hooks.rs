@@ -356,10 +356,10 @@ fn transport_to_http(transport: HookTransport) -> AdminHookTransportHttp {
         load_balance: transport.load_balance,
         secret: None,
         secret_configured: Some(!transport.secret.is_empty()),
-        headers: transport.headers,
+        headers: HashMap::new(),
         target: transport.target,
         timeout_ms: transport.timeout_ms,
-        metadata: transport.metadata,
+        metadata: HashMap::new(),
     }
 }
 
@@ -753,6 +753,14 @@ mod tests {
 
     #[test]
     fn read_back_hooks_hide_the_secret_and_use_millis() {
+        let incoming = transport_from_http(AdminHookTransportHttp {
+            transport_type: "grpc".into(),
+            headers: HashMap::from([("x-api-key".into(), "write-canary".into())]),
+            metadata: HashMap::from([("authorization".into(), "metadata-write-canary".into())]),
+            ..Default::default()
+        });
+        assert_eq!(incoming.headers["x-api-key"], "write-canary");
+        assert_eq!(incoming.metadata["authorization"], "metadata-write-canary");
         let hook = hook_http(HookConfig {
             hook_id: "7".into(),
             name: "dlp".into(),
@@ -763,6 +771,8 @@ mod tests {
             transport: Some(HookTransport {
                 r#type: "webhook".into(),
                 secret: "s3cret".into(),
+                headers: HashMap::from([("authorization".into(), "header-canary".into())]),
+                metadata: HashMap::from([("x-api-key".into(), "metadata-canary".into())]),
                 ..Default::default()
             }),
             selector: None,
@@ -778,6 +788,8 @@ mod tests {
         let transport = hook.transport.unwrap();
         assert_eq!(transport.secret, None);
         assert_eq!(transport.secret_configured, Some(true));
+        assert!(transport.headers.is_empty());
+        assert!(transport.metadata.is_empty());
         assert_eq!(hook.created_at, Some(1_700_000_000_250));
         assert_eq!(
             hook.hook_points,
@@ -785,6 +797,7 @@ mod tests {
         );
         let json = serde_json::to_string(&transport).unwrap();
         assert!(!json.contains("s3cret"));
+        assert!(!json.contains("canary"));
         assert!(!json.contains("\"secret\""));
     }
 
