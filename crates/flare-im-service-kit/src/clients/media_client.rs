@@ -11,15 +11,20 @@ use crate::clients::Ctx;
 use flare_grpc_proto::media::media_service_client::MediaServiceClient;
 use flare_grpc_proto::media::*;
 
-/// Media 调用方身份。Media 只认 Cell 签名的内部上下文（`x-flare-ctx`），
-/// 不再信任 metadata 里的 tenant/user；每次 RPC 现签一枚 60 秒令牌，
-/// 慢速上传或一个 handler 内的多次调用都不会拿到过期令牌。
-/// `ctx` 只提供 trace/request 关联信息。
+/// Users get a fresh Cell token per RPC. Staff forwards the original verified gateway
+/// assertion, including its permission and lifetime; admin-gateway never re-signs employees.
 #[derive(Clone)]
 pub struct MediaCaller {
     ctx: Ctx,
-    signer: SignedContextSigner,
-    identity: SignedContextIdentity,
+    authority: MediaAuthority,
+}
+#[derive(Clone)]
+enum MediaAuthority {
+    User {
+        signer: SignedContextSigner,
+        identity: SignedContextIdentity,
+    },
+    Staff(crate::staff_context::VerifiedStaff),
 }
 
 impl MediaCaller {
@@ -28,20 +33,27 @@ impl MediaCaller {
         Self::new(ctx, signer, SignedActorType::User, tenant_id, user_id)
     }
 
-    /// Admin Gateway 已验证 Control 断言的租户管理员；Media 管理类 RPC 只接受该身份。
-    pub fn tenant_admin(
-        ctx: Ctx,
-        signer: SignedContextSigner,
-        tenant_id: &str,
-        actor_id: &str,
-    ) -> Self {
-        Self::new(
+    /// Requires an already verified Staff gateway assertion. No unsigned actor conversion.
+    pub fn staff(ctx: Ctx) -> Result<Self> {
+        let rejected = || {
+            FlareError::localized(
+                flare_server_core::error::ErrorCode::AuthenticationRequired,
+                "verified gateway staff required for Media",
+            )
+        };
+        let claims = crate::staff_context::staff_claims_of(&ctx).ok_or_else(rejected)?;
+        if claims.kid != flare_server_core::auth::kid::GATEWAY {
+            return Err(rejected());
+        }
+        let staff = crate::staff_context::VerifiedStaff::from_verified(claims, ctx.clone())
+            .map_err(|_| rejected())?;
+        if staff.token().is_empty() {
+            return Err(rejected());
+        }
+        Ok(Self {
             ctx,
-            signer,
-            SignedActorType::TenantAdmin,
-            tenant_id,
-            actor_id,
-        )
+            authority: MediaAuthority::Staff(staff),
+        })
     }
 
     fn new(
@@ -63,8 +75,7 @@ impl MediaCaller {
         let identity = SignedContextIdentity::new(actor_type, actor_id, tenant_id, request_id);
         Self {
             ctx,
-            signer,
-            identity,
+            authority: MediaAuthority::User { signer, identity },
         }
     }
 
@@ -73,13 +84,25 @@ impl MediaCaller {
     }
 
     pub fn actor_id(&self) -> &str {
-        &self.identity.actor_id
+        match &self.authority {
+            MediaAuthority::User { identity, .. } => &identity.actor_id,
+            MediaAuthority::Staff(staff) => &staff.actor_id,
+        }
     }
 
     fn request<T>(&self, payload: T) -> Result<tonic::Request<T>> {
-        let token = self
-            .signer
-            .sign(&self.identity)
+        let (signer, identity) = match &self.authority {
+            MediaAuthority::User { signer, identity } => (signer, identity),
+            MediaAuthority::Staff(staff) => {
+                return crate::staff_context::staff_traced_request(
+                    payload,
+                    staff.token(),
+                    &self.ctx,
+                );
+            }
+        };
+        let token = signer
+            .sign(identity)
             .map_err(|_| FlareError::system("media caller identity signing failed"))?;
         let mut request = flare_server_core::request_with_context(payload, &self.ctx);
         set_signed_context_token(&mut request, &token)?;
@@ -558,18 +581,49 @@ mod tests {
         assert_eq!(claims.request_id, "req-1");
         assert_ne!(verifier.verify(&token(&second)).unwrap().jti, claims.jti);
 
-        let admin = MediaCaller::tenant_admin(
-            std::sync::Arc::new(Context::with_request_id("bad\nid")),
-            signer,
-            "tenant-a",
-            "employee-1",
+        assert!(
+            MediaCaller::staff(std::sync::Arc::new(Context::with_request_id("forged"))).is_err()
         );
-        let claims = verifier
-            .verify(&token(&admin.request(()).unwrap()))
+    }
+
+    #[test]
+    fn staff_forwards_the_verified_assertion_without_minting_another_identity() {
+        let (signer, verifier) = keys();
+        let signer = signer.with_kid("gateway").unwrap();
+        let verifier = verifier.require_staff_kid(["gateway"]);
+        let token = signer
+            .sign(
+                &SignedContextIdentity::new(
+                    SignedActorType::Staff,
+                    "employee",
+                    "tenant-a",
+                    "staff-request",
+                )
+                .with_staff_grant(None, Some("core:medias:write".into()), 7),
+            )
             .unwrap();
-        assert_eq!(claims.actor_type, SignedActorType::TenantAdmin);
-        assert_eq!(claims.actor_id, "employee-1");
-        assert!(uuid::Uuid::parse_str(&claims.request_id).is_ok());
+        let mut carrier = tonic::Request::new(());
+        set_signed_context_token(&mut carrier, &token).unwrap();
+        let ctx =
+            flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata(
+                carrier.metadata(),
+                &verifier,
+            )
+            .unwrap();
+        let caller = MediaCaller::staff(ctx).unwrap();
+        for _ in 0..2 {
+            let request = caller.request(()).unwrap();
+            assert_eq!(
+                request
+                    .metadata()
+                    .get(SIGNED_CONTEXT_HEADER)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                token
+            );
+        }
+        assert_eq!(caller.actor_id(), "employee");
     }
 
     #[test]

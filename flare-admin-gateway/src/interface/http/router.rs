@@ -313,7 +313,7 @@ fn api_docs_router() -> Router {
 }
 
 /// `capability` 为 `None` 时（下游被显式关闭），租户运行时、能力目录与开关、插件、Hook 治理
-/// 的路由回 503。Staff 验签器、审计效果与 Media 签名器由调用方以 `Extension` 挂在外层。
+/// 的路由回 503。Staff 验签器与审计观察由调用方以 `Extension` 挂在外层；不持员工签名私钥。
 pub fn create_admin_router(
     clients: Arc<AdminGrpcClients>,
     capability: Option<AdminCapabilityDownstream>,

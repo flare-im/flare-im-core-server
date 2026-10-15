@@ -298,7 +298,7 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
     }
 
     // 媒资写同样记一条；媒资读不记。被网关拒绝的写（dry_run）不记。
-    let m = media_harness(true, None).await;
+    let m = media_harness(None).await;
     let writes = [
         (
             CLEANUP,

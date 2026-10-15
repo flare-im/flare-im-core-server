@@ -120,8 +120,17 @@ impl MediaService {
         let limit = if limit == 0 { 100 } else { limit.min(1000) };
 
         let Some(store) = &self.metadata_store else {
-            return Ok(vec![]);
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ServiceUnavailable,
+                "media metadata store is not configured"
+            ));
         };
+        if self.object_repo.is_none() && self.local_store.is_none() {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ServiceUnavailable,
+                "media object storage is not configured"
+            ));
+        }
 
         let now = Utc::now();
         let candidates = store

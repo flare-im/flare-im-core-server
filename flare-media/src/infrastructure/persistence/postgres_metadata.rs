@@ -28,6 +28,10 @@ mod tests;
 #[path = "postgres_race_tests.rs"]
 mod race_tests;
 
+#[cfg(test)]
+#[path = "media_source_audit_pg_tests.rs"]
+mod source_audit_tests;
+
 #[derive(Debug, FromRow)]
 struct MediaAssetRow {
     owner_id: Option<String>,
@@ -240,6 +244,10 @@ impl PostgresMetadataStore {
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    pub(crate) fn audit_pool(&self) -> Arc<PgPool> {
+        self.pool.clone()
     }
 
     fn metadata_to_json(metadata: &HashMap<String, String>) -> Result<Value> {
@@ -570,6 +578,17 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 .map_err(|e| db_error(e, "failed to release orphaned media claim"))?;
             return Ok(None);
         }
+        // Enqueue before touching object storage. Evidence and metadata deletion remain
+        // uncommitted until claim.commit(); a failed audit tail prevents external deletion.
+        flare_im_service_kit::audit_effects::durable::record(
+            &mut tx,
+            tenant_id,
+            "media_asset_metadata",
+            file_id,
+            "reclaim",
+        )
+        .await
+        .map_err(|_| FlareError::system("media source audit transaction unavailable"))?;
         Ok(Some(Box::new(PostgresOrphanClaim {
             tx,
             asset: row.try_into()?,

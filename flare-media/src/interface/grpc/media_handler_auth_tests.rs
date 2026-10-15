@@ -14,7 +14,9 @@ use flare_grpc_proto::media::media_service_client::MediaServiceClient;
 use flare_grpc_proto::media::{GetFileInfoRequest, UploadFileMetadata};
 use flare_im_service_kit::clients::{MediaCaller, MediaServiceClientWrapper};
 use flare_server_core::context::Context;
-use flare_server_core::{SignedContextIdentity, SignedContextSigner, set_signed_context_token};
+use flare_server_core::{
+    SignedActorType, SignedContextIdentity, SignedContextSigner, set_signed_context_token,
+};
 use std::collections::HashMap;
 use tonic::Code;
 use tonic::transport::Channel;
@@ -211,11 +213,24 @@ async fn employee_service_or_system_ids_never_act_as_the_im_owner() {
     let h = serve().await;
     let file_id = seed_private_file(&h).await;
     for actor in [
+        SignedActorType::Staff,
         SignedActorType::TenantAdmin,
         SignedActorType::Service,
         SignedActorType::System,
     ] {
-        let impostor = token(&h.signer, actor, "tenant-a", "owner");
+        let impostor = if actor == SignedActorType::Staff {
+            h.signer
+                .clone()
+                .with_kid("gateway")
+                .unwrap()
+                .sign(
+                    &SignedContextIdentity::new(actor, "owner", "tenant-a", "staff-owner-test")
+                        .with_staff_grant(None, Some("core:medias:read".into()), 1),
+                )
+                .unwrap()
+        } else {
+            token(&h.signer, actor, "tenant-a", "owner")
+        };
         let get = GetFileInfoRequest {
             file_id: file_id.clone(),
         };
@@ -277,7 +292,7 @@ async fn core_client_wrapper_uploads_and_reads_back_as_the_signed_owner() {
 }
 
 #[tokio::test]
-async fn orphan_cleanup_requires_signed_tenant_admin_and_stays_in_its_tenant() {
+async fn orphan_cleanup_requires_exact_signed_staff_permission_and_stays_in_its_tenant() {
     let h = serve().await;
     let orphan = MediaFileMetadata {
         file_id: "orphan".to_string(),
@@ -321,7 +336,7 @@ async fn orphan_cleanup_requires_signed_tenant_admin_and_stays_in_its_tenant() {
         Err(Code::PermissionDenied)
     );
     // An administrator of tenant B cannot reach tenant A through metadata.
-    let admin_b = token(&h.signer, SignedActorType::TenantAdmin, "tenant-b", "admin");
+    let admin_b = staff_token(&h.signer, "tenant-b", "core:medias:write");
     assert_eq!(cleanup(Some(admin_b), "tenant-a").await, Ok(vec![]));
     assert!(
         h.metadata
@@ -330,7 +345,27 @@ async fn orphan_cleanup_requires_signed_tenant_admin_and_stays_in_its_tenant() {
             .unwrap()
             .is_some()
     );
-    let admin_a = token(&h.signer, SignedActorType::TenantAdmin, "tenant-a", "admin");
+    for legacy in [SignedActorType::TenantAdmin, SignedActorType::System] {
+        assert_eq!(
+            cleanup(
+                Some(token(&h.signer, legacy, "tenant-a", "admin")),
+                "tenant-a"
+            )
+            .await,
+            Err(Code::PermissionDenied)
+        );
+    }
+    let read_only = staff_token(&h.signer, "tenant-a", "core:medias:read");
+    assert_eq!(
+        cleanup(Some(read_only), "tenant-a").await,
+        Err(Code::PermissionDenied)
+    );
+    let foreign_kid = token(&h.signer, SignedActorType::Staff, "tenant-a", "admin");
+    assert_eq!(
+        cleanup(Some(foreign_kid), "tenant-a").await,
+        Err(Code::Unauthenticated)
+    );
+    let admin_a = staff_token(&h.signer, "tenant-a", "core:medias:write");
     assert_eq!(
         cleanup(Some(admin_a), "tenant-b").await,
         Ok(vec!["orphan".to_string()])
@@ -342,6 +377,18 @@ async fn orphan_cleanup_requires_signed_tenant_admin_and_stays_in_its_tenant() {
             .unwrap()
             .is_none()
     );
+}
+
+fn staff_token(signer: &SignedContextSigner, tenant: &str, permission: &str) -> String {
+    signer
+        .clone()
+        .with_kid("gateway")
+        .unwrap()
+        .sign(
+            &SignedContextIdentity::new(SignedActorType::Staff, "admin", tenant, "staff-test")
+                .with_staff_grant(None, Some(permission.into()), 1),
+        )
+        .unwrap()
 }
 
 #[test]

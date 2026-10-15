@@ -1,7 +1,7 @@
 //! 应用启动器 - 负责依赖注入和服务启动
 
 use flare_server_core::SignedContextVerifier;
-use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
+use flare_server_core::error::Result;
 use tracing::info;
 
 use flare_im_contracts::service_names::MEDIA;
@@ -57,9 +57,22 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
-            "media-grpc",
-            move |shutdown_rx| async move {
+        let mut runtime = runtime_plan.service_runtime();
+        if let Some((pool, publisher)) = context.audit_delivery {
+            runtime = runtime.add_spawn_with_shutdown(
+                "media-audit-delivery",
+                move |shutdown| async move {
+                    publisher
+                        .run_durable(pool, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+        let runtime =
+            runtime.add_spawn_with_shutdown("media-grpc", move |shutdown_rx| async move {
                 // 只接受 Cell 签名的内部上下文；未签名的网内调用方无法冒用任意租户。
                 let media_service =
                     crate::interface::grpc::authenticated_media_service(handler, verifier);
@@ -72,8 +85,7 @@ impl ApplicationBootstrap {
                     })
                     .await
                     .map_err(|e| format!("gRPC server error: {}", e).into())
-            },
-        );
+            });
 
         // 过期上传会话回收：释放存储侧资源与本机分块目录。多副本各跑一份，靠会话存储的
         // 领取租约分工。
@@ -130,35 +142,18 @@ async fn reclaim_round(media_service: &MediaService) {
 
 /// Media 缺少 Cell 公钥时拒绝启动，而不是退回无认证的 gRPC 入口。
 fn media_identity_verifier() -> Result<SignedContextVerifier> {
-    let key = std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY").ok();
-    verifier_from_public_key(key.as_deref())
-}
-
-fn verifier_from_public_key(key: Option<&str>) -> Result<SignedContextVerifier> {
-    let key = key.filter(|key| !key.trim().is_empty()).ok_or_else(|| {
-        ErrorBuilder::new(
-            ErrorCode::ServiceUnavailable,
-            "FLARE_INTERNAL_CTX_PUBLIC_KEY is required for Media",
-        )
-        .build_error()
-    })?;
-    SignedContextVerifier::from_public_key(key).map_err(|_| {
-        ErrorBuilder::new(
-            ErrorCode::ServiceUnavailable,
-            "FLARE_INTERNAL_CTX_PUBLIC_KEY is invalid for Media",
-        )
-        .build_error()
-    })
+    flare_im_service_kit::staff_context::admin_staff_verifier_from_env("Media")
 }
 
 #[cfg(test)]
 mod identity_startup_tests {
-    use super::*;
-
     #[test]
     fn missing_or_invalid_public_key_prevents_media_start() {
-        assert!(verifier_from_public_key(None).is_err());
-        assert!(verifier_from_public_key(Some("")).is_err());
-        assert!(verifier_from_public_key(Some("not a public key")).is_err());
+        use flare_im_service_kit::staff_context::admin_staff_verifier_from_sources;
+        assert!(admin_staff_verifier_from_sources("Media", None, None).is_err());
+        assert!(admin_staff_verifier_from_sources("Media", None, Some("")).is_err());
+        assert!(
+            admin_staff_verifier_from_sources("Media", None, Some("not a public key")).is_err()
+        );
     }
 }

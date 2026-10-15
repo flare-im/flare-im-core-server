@@ -37,8 +37,30 @@ Hook DB 提交在运行时 reload 之前。reload 失败意味着运行态尚未
 
 ## 尚未收口
 
-- Online 会话/设备踢出、Media 等无同一 PG 事务的实际拥有方效果仍有旧 best-effort 生产路径。
+- Online 会话/设备踢出的实际拥有方效果仍有旧 best-effort 生产路径。
+- Media 对象 ACL 和对象清单仍明确未实现；孤儿清理的最新范围见下一节。
 - Platform机器系统消息的 Writer 持久提交审计仍待；API accepted 不是持久化或客户端送达。
 - 正常RPC→真实Broker→Platform聚合→客户端效果由最终统一初始化后整体验收，不用本批进程内/受控发布器测试代替。
 
 因此本批仅完成 Capability 员工源事务审计，不能勾完 R4-F05/R4、R5/R6或全部计划。
+
+## Media：原始 Staff 与逐资产源效果
+
+正常 Core admin-gateway 媒资管理不再把员工转换为 TenantAdmin，也不再读取用于此路径的 Cell 私钥。`MediaCaller::staff` 只接受带原令牌的已验证 gateway Staff Context，逐跳转发同一断言，不延长期限、不丢失权限或重签。普通终端 User 媒资调用仍按原机制每次签发用户内部断言。
+
+Media 生产签名层将 Staff 固定到 `kid=gateway`，清理/ACL 要求 `core:medias:write`，清单/桶读取要求 `core:medias:read`；均要求具体应用。有效的 User、System、TenantAdmin、其他路由权限或错误 Staff key id 都不能代用。Staff 也不能因为 actor ID 恰好等于文件 owner 而借普通用户读取/删除私有文件。支持公钥环输入，缺失或非法公钥仍拒绝启动。
+
+孤儿清理沿用拥有方的逐行锁定、孤儿条件重验和领取事务：元数据 DELETE 后、外部存储调用前，在同一个尚未提交的 PG 事务写 `aggregate=media_asset_metadata/action=reclaim` 的源证据；外部删除成功后提交领取。证据尾失败不删文件；外部删除失败或领取取消则回滚元数据与证据，仍可重试。无元数据/存储配置返回不可用，而不是成功空列表。`dry_run=true` 在 Gateway 和直接 Media RPC 两处都拒绝，绝不执行删除。
+
+这是**每个资产的元数据与证据**原子性，不是 PG 与文件系统/S3 的分布式事务，也不是整批原子。若对象已删除而 PG 提交失败或请求取消，下次仍依靠幂等对象删除重试；同批前一个资产已提交、后一个失败时，前者证据保留。已提交后缓存失效失败也不能抹去源事实。Gateway 不再按成功返回的 ID 列表补 best-effort effect，否则部分失败会丢失已提交证据。
+
+Media 使用既有 PG 池与自己的服务生命周期启动共享 durable 发布器；消息 ID、重试、ACK 和清理边界与上方 Capability 相同，不增加容器。R6 源输入声明 Media 公钥环/审计发布权限以及最终 outbox DDL，仍不可安装。ACL 和对象清单保持明确 `not_implemented`，没有伪造空列表或成功；本批不是完成所有 Media 功能。
+
+### 本地相关验证
+
+- admin-gateway 默认与集成共118通过（49 library、69 integration）；Media74与service-kit136 library通过，共328。11个ignored另列，其中新增 Media 功能方法已显式运行，其余不追认执行。Media 的11个HTTP契约测试用受控下游；不是实际 Media gRPC 整链。
+- 新增一个真实 PG18 + 生产签名层/Media gRPC + 实际本机文件功能方法通过，使用全新nonce库并清理。覆盖精确权限/应用隔离、直接 dry-run 拒绝、审计尾失败不删文件、领取取消释放、重复不追加、批次部分提交及存储故障后重试，核对实际行/文件/证据与秘密字段缺失。夹具元数据由仓储准备，不是上传流程、S3或真实Broker证明。
+- 三个相关包 all-targets 严格Clippy、格式/diff、Management24契约、2.4.0/192源锁与Web生成类型检查、R6初始化源/装配26通过。仅更新旧私钥错误说明、Staff权限和dry-run描述，DTO/权限集合不变；没有运行未受影响Web视觉/Flutter套件。
+- 首轮快照仍包含已删除的私钥错误说明，已按当前生产源更新并复验；新增缺配置断言初轮误用非Option错误码、Clippy发现测试clone/import问题均已修复，失败不计通过。
+
+本批没有操作存量数据库、安装/替换运行制品、启动容器/VM或刷新用户页面。Online/Writer、Media ACL/清单及最终实际整链仍待，R4-F05保持部分。

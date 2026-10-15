@@ -7,8 +7,6 @@ use flare_im_service_kit::{
     service_names::ADMIN_GATEWAY,
     staff_context::admin_staff_verifier_from_env,
 };
-use flare_server_core::SignedContextSigner;
-use flare_server_core::auth::kid;
 use flare_server_core::error::{AnyhowContext, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,7 +16,7 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
-use crate::interface::http::{AdminCapabilityDownstream, MediaContextSigner, create_admin_router};
+use crate::interface::http::{AdminCapabilityDownstream, create_admin_router};
 
 pub struct ApplicationBootstrap;
 
@@ -104,24 +102,6 @@ impl ApplicationBootstrap {
             }
         };
 
-        // Media admits only Cell-signed context; the verified staff is re-signed here under
-        // the admin-gateway key id so Media can pin this gateway once per-component keys exist.
-        let media_signer = match std::env::var("FLARE_INTERNAL_CTX_PRIVATE_KEY") {
-            Ok(material) => Some(
-                SignedContextSigner::from_private_key(&material)
-                    .and_then(|signer| signer.with_kid(kid::ADMIN_GATEWAY))
-                    .map_err(|_| {
-                        flare_server_core::error::FlareError::system(
-                            "invalid FLARE_INTERNAL_CTX_PRIVATE_KEY for admin gateway",
-                        )
-                    })?,
-            ),
-            Err(_) => {
-                warn!("FLARE_INTERNAL_CTX_PRIVATE_KEY missing; admin media API fails closed");
-                None
-            }
-        };
-
         // Effect events of successful writes (flare.audit.effect.v1); unset URL disables them
         // with a warning, an unreachable stream refuses startup.
         let audit_effects = Arc::new(AuditEffects::from_env("admin-gateway").await?);
@@ -138,7 +118,6 @@ impl ApplicationBootstrap {
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(staff_verifier))
             .layer(axum::Extension(audit_effects))
-            .layer(axum::Extension(MediaContextSigner(media_signer)))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())

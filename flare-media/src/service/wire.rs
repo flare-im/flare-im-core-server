@@ -26,6 +26,10 @@ use tracing::warn;
 
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
+    pub audit_delivery: Option<(
+        Arc<sqlx::PgPool>,
+        flare_im_service_kit::audit_effects::AuditEffects,
+    )>,
     pub handler: MediaGrpcHandler,
     /// 供后台任务（过期上传会话回收）使用的领域服务。
     pub media_service: Arc<MediaService>,
@@ -47,7 +51,7 @@ pub async fn initialize(
     let media_config = MediaConfig::from_app_config(app_config);
 
     // 2. 构建媒体服务
-    let media_service = build_media_service(&media_config)
+    let (media_service, audit_pool) = build_media_service(&media_config)
         .await
         .context("Failed to build media service")?;
 
@@ -60,27 +64,51 @@ pub async fn initialize(
     // 5. 构建 gRPC 处理器
     let handler = MediaGrpcHandler::new(command_handler, query_handler);
 
+    let audit_delivery = if let Some(pool) = audit_pool {
+        let publisher =
+            flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-media").await?;
+        if publisher.enabled() {
+            Some((pool, publisher))
+        } else {
+            tracing::warn!(
+                "Media source evidence is retained in PostgreSQL; broker delivery is disabled"
+            );
+            None
+        }
+    } else {
+        None
+    };
     Ok(ApplicationContext {
+        audit_delivery,
         handler,
         media_service,
     })
 }
 
 /// 构建媒体服务
-async fn build_media_service(config: &MediaConfig) -> Result<Arc<MediaService>> {
+async fn build_media_service(
+    config: &MediaConfig,
+) -> Result<(Arc<MediaService>, Option<Arc<sqlx::PgPool>>)> {
     let object_repo: Option<ObjectRepositoryRef> =
         build_object_store(config.object_store.as_ref()).await?;
 
-    let (metadata_store, reference_store): (Option<MetadataStoreRef>, Option<ReferenceStoreRef>) =
-        match config.postgres.as_ref() {
-            Some(postgres) => {
-                let store = PostgresMetadataStore::from_config(postgres).await?;
-                let metadata_store: MetadataStoreRef = Arc::new(store.clone());
-                let reference_store: ReferenceStoreRef = Arc::new(store.clone());
-                (Some(metadata_store), Some(reference_store))
-            }
-            None => (None, None),
-        };
+    let (metadata_store, reference_store, audit_pool): (
+        Option<MetadataStoreRef>,
+        Option<ReferenceStoreRef>,
+        Option<Arc<sqlx::PgPool>>,
+    ) = match config.postgres.as_ref() {
+        Some(postgres) => {
+            let store = PostgresMetadataStore::from_config(postgres).await?;
+            let metadata_store: MetadataStoreRef = Arc::new(store.clone());
+            let reference_store: ReferenceStoreRef = Arc::new(store.clone());
+            (
+                Some(metadata_store),
+                Some(reference_store),
+                Some(store.audit_pool()),
+            )
+        }
+        None => (None, None, None),
+    };
 
     let metadata_cache: Option<MetadataCacheRef> = match config.redis_url() {
         Some(url) => Some(
@@ -146,13 +174,16 @@ async fn build_media_service(config: &MediaConfig) -> Result<Arc<MediaService>> 
         config.max_chunk_size_bytes,
     );
 
-    Ok(Arc::new(MediaService::new(
-        object_repo,
-        metadata_store,
-        reference_store,
-        metadata_cache,
-        upload_conversation_store,
-        local_store,
-        domain_config,
-    )))
+    Ok((
+        Arc::new(MediaService::new(
+            object_repo,
+            metadata_store,
+            reference_store,
+            metadata_cache,
+            upload_conversation_store,
+            local_store,
+            domain_config,
+        )),
+        audit_pool,
+    ))
 }

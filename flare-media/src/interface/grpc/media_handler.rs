@@ -20,11 +20,12 @@ use flare_grpc_proto::media::{
     UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
     UploadMultipartChunkResponse,
 };
+use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_server_core::auth::core_admin::permission::{MEDIAS_READ, MEDIAS_WRITE};
 use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::{
-    SignedActorType, SignedContextLayer, SignedContextService, SignedContextVerifier,
-    VerifiedContext,
+    SignedContextLayer, SignedContextService, SignedContextVerifier, VerifiedContext,
 };
 use prost_types::Timestamp;
 use tokio_stream::StreamExt;
@@ -470,12 +471,18 @@ impl MediaService for MediaGrpcHandler {
         request: Request<CleanupOrphanedAssetsRequest>,
     ) -> Result<Response<CleanupOrphanedAssetsResponse>, Status> {
         let ctx = verified_ctx(&request)?;
-        require_media_admin(&ctx)?;
+        require_media_admin(&ctx, MEDIAS_WRITE)?;
         let req = request.into_inner();
+        if req.dry_run {
+            return Err(Status::invalid_argument(
+                "media cleanup dry run is not supported",
+            ));
+        }
 
         let cleaned = self
             .command_handler
             .handle_cleanup_orphaned_assets(&ctx, req.limit)
+            .staff_audit(&ctx, "flare-media")
             .await
             .into_grpc()?;
 
@@ -608,7 +615,7 @@ impl MediaService for MediaGrpcHandler {
         request: Request<SetObjectAclRequest>,
     ) -> Result<Response<()>, Status> {
         let ctx = verified_ctx(&request)?;
-        require_media_admin(&ctx)?;
+        require_media_admin(&ctx, MEDIAS_WRITE)?;
         let req = request.into_inner();
         self.command_handler
             .handle_set_object_acl(&ctx, req)
@@ -622,7 +629,7 @@ impl MediaService for MediaGrpcHandler {
         request: Request<ListObjectsRequest>,
     ) -> Result<Response<ListObjectsResponse>, Status> {
         let ctx = verified_ctx(&request)?;
-        require_media_admin(&ctx)?;
+        require_media_admin(&ctx, MEDIAS_READ)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -651,7 +658,7 @@ impl MediaService for MediaGrpcHandler {
         request: Request<DescribeBucketRequest>,
     ) -> Result<Response<DescribeBucketResponse>, Status> {
         let ctx = verified_ctx(&request)?;
-        require_media_admin(&ctx)?;
+        require_media_admin(&ctx, MEDIAS_READ)?;
         let req = request.into_inner();
         let response = self
             .query_handler
@@ -669,7 +676,8 @@ pub fn authenticated_media_service(
     handler: MediaGrpcHandler,
     verifier: SignedContextVerifier,
 ) -> SignedContextService<MediaServiceServer<MediaGrpcHandler>> {
-    SignedContextLayer::new(verifier).layer(MediaServiceServer::new(handler))
+    SignedContextLayer::new(verifier.require_staff_kid([flare_server_core::auth::kid::GATEWAY]))
+        .layer(MediaServiceServer::new(handler))
 }
 
 /// 身份只来自签名层注入的已验上下文。即便 handler 被错误地挂在没有签名层的
@@ -695,18 +703,10 @@ fn upload_tenant(ctx: &Ctx) -> Result<String, Status> {
         .into_grpc()
 }
 
-/// 孤儿清理、对象清单、ACL、桶描述是租户管理操作，普通用户身份即便签名有效也不能调用。
-fn require_media_admin(ctx: &Ctx) -> Result<(), Status> {
-    let actor_type = ctx
-        .get_data::<VerifiedContext>()
-        .and_then(VerifiedContext::claims)
-        .map(|claims| claims.actor_type);
-    match actor_type {
-        Some(SignedActorType::TenantAdmin | SignedActorType::System) => Ok(()),
-        _ => Err(Status::permission_denied(
-            "media administration requires a tenant administrator",
-        )),
-    }
+/// 管理操作只接受具体应用的 Staff 与当前路由权限；有效 User/System/TenantAdmin 也不能代用。
+fn require_media_admin(ctx: &Ctx, permission: &str) -> Result<(), Status> {
+    crate::domain::service::require_tenant(ctx).into_grpc()?;
+    flare_server_core::require_staff_permission(ctx, permission).map(|_| ())
 }
 
 #[cfg(test)]

@@ -464,8 +464,8 @@ async fn concurrent_cleaners_and_reference_creation_never_leave_dangling_referen
             let early_cleaners = (round % 2 == 0).then(spawn_cleaners);
             let references: Vec<_> = ids
                 .iter()
-                .cloned()
                 .map(|id| {
+                    let id = id.clone();
                     let service = service.clone();
                     tokio::spawn(async move {
                         let outcome = service

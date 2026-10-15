@@ -338,6 +338,31 @@ async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
 }
 
 #[tokio::test]
+async fn cleanup_without_metadata_or_storage_is_unavailable_not_an_empty_success() {
+    let mut f = Fixture::new();
+    f.service.metadata_store = None;
+    let caller = ctx("a", "admin");
+    assert_eq!(
+        f.service
+            .cleanup_orphaned_assets(&caller, 1)
+            .await
+            .unwrap_err()
+            .code(),
+        Some(ErrorCode::ServiceUnavailable)
+    );
+    f.service.metadata_store = Some(f.metadata.clone());
+    f.service.local_store = None;
+    assert_eq!(
+        f.service
+            .cleanup_orphaned_assets(&caller, 1)
+            .await
+            .unwrap_err()
+            .code(),
+        Some(ErrorCode::ServiceUnavailable)
+    );
+}
+
+#[tokio::test]
 async fn cleanup_only_deletes_selected_tenant_and_honors_limit() {
     let f = Fixture::new();
     for (tenant, id) in [("a", "same-file"), ("a", "second-file"), ("b", "same-file")] {
