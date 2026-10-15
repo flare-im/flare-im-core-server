@@ -10,7 +10,10 @@ use flare_im_service_kit::{
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::{
     TokenService,
-    auth::{RedisTokenStore, SignedContextSigner, build_token_issuer, build_token_validator},
+    auth::{
+        AuthProviderMode, RedisTokenStore, SignedContextSigner, TokenIssuer,
+        build_http_hook_token_validator, build_token_issuer, build_token_validator,
+    },
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -78,64 +81,72 @@ impl ApplicationBootstrap {
             .map_err(flare_server_core::error::FlareError::system)?;
         info!(push_proxy_url = %push_proxy_url, "device push token endpoint uses static Push Proxy address");
 
-        let token_service = {
-            let base = TokenService::new(
-                require_secure_token_secret(
-                    "FLARE_API_GATEWAY_TOKEN_SECRET",
-                    gateway_config.token_secret.as_deref(),
-                    "services.api_gateway.token_secret",
-                )?,
-                gateway_config
-                    .token_issuer
-                    .clone()
-                    .unwrap_or_else(|| "flare-im-core".to_string()),
-                gateway_config.token_ttl_seconds.unwrap_or(3600),
-            );
-            // 刷新令牌有效期（长效，支撑 7x24 免重登）。缺省 30 天。
-            let refresh_ttl = gateway_config
-                .refresh_token_ttl_seconds
-                .unwrap_or(flare_server_core::auth::DEFAULT_REFRESH_TTL_SECS);
-            let mut base = base.with_refresh_ttl(refresh_ttl);
-            // 接上 token 撤销/轮换存储：刷新令牌轮换后旧的立即作废、校验查撤销位。
-            // 约定用 `[redis.token_store]`（可经 services.api_gateway.token_store 改名）；
-            // 没有该 profile 则退化为无状态（撤销为空操作，与历史行为一致）。
-            let store_profile = gateway_config
-                .token_store
-                .as_deref()
-                .unwrap_or("token_store");
-            match app_config.redis_profile(store_profile) {
-                Some(redis) => {
-                    let namespace = redis
-                        .namespace
+        // Hook-owned identity must not require or construct an unused local HMAC authority.
+        let token_service = if settings.auth.mode == AuthProviderMode::CoreJwt {
+            Some({
+                let base = TokenService::new(
+                    require_secure_token_secret(
+                        "FLARE_API_GATEWAY_TOKEN_SECRET",
+                        gateway_config.token_secret.as_deref(),
+                        "services.api_gateway.token_secret",
+                    )?,
+                    gateway_config
+                        .token_issuer
                         .clone()
-                        .unwrap_or_else(|| "flare".to_string());
-                    match RedisTokenStore::with_namespace(&redis.url, namespace) {
-                        Ok(store) => {
-                            base = base.with_store(Arc::new(store));
-                            info!(
-                                profile = store_profile,
-                                "token store attached: refresh-token rotation-revoke enabled"
-                            );
-                        }
-                        Err(err) => {
-                            warn!(%err, profile = store_profile, "failed to build token store; token revoke/rotation disabled (stateless)");
+                        .unwrap_or_else(|| "flare-im-core".to_string()),
+                    gateway_config.token_ttl_seconds.unwrap_or(3600),
+                );
+                // 刷新令牌有效期（长效，支撑 7x24 免重登）。缺省 30 天。
+                let refresh_ttl = gateway_config
+                    .refresh_token_ttl_seconds
+                    .unwrap_or(flare_server_core::auth::DEFAULT_REFRESH_TTL_SECS);
+                let mut base = base.with_refresh_ttl(refresh_ttl);
+                // 接上 token 撤销/轮换存储：刷新令牌轮换后旧的立即作废、校验查撤销位。
+                // 约定用 `[redis.token_store]`（可经 services.api_gateway.token_store 改名）；
+                // 没有该 profile 则退化为无状态（撤销为空操作，与历史行为一致）。
+                let store_profile = gateway_config
+                    .token_store
+                    .as_deref()
+                    .unwrap_or("token_store");
+                match app_config.redis_profile(store_profile) {
+                    Some(redis) => {
+                        let namespace = redis
+                            .namespace
+                            .clone()
+                            .unwrap_or_else(|| "flare".to_string());
+                        match RedisTokenStore::with_namespace(&redis.url, namespace) {
+                            Ok(store) => {
+                                base = base.with_store(Arc::new(store));
+                                info!(
+                                    profile = store_profile,
+                                    "token store attached: refresh-token rotation-revoke enabled"
+                                );
+                            }
+                            Err(err) => {
+                                warn!(%err, profile = store_profile, "failed to build token store; token revoke/rotation disabled (stateless)");
+                            }
                         }
                     }
+                    None => {
+                        info!(
+                            profile = store_profile,
+                            "no token_store redis profile; token revoke/rotation disabled (stateless)"
+                        );
+                    }
                 }
-                None => {
-                    info!(
-                        profile = store_profile,
-                        "no token_store redis profile; token revoke/rotation disabled (stateless)"
-                    );
-                }
-            }
-            Arc::new(base)
+                Arc::new(base)
+            })
+        } else {
+            None
         };
-        let auth_validator = build_token_validator(
-            &settings.auth,
-            token_service.clone(),
-            &gateway_config.trusted_token_issuers,
-        )
+        let auth_validator = match token_service.as_ref() {
+            Some(service) => build_token_validator(
+                &settings.auth,
+                service.clone(),
+                &gateway_config.trusted_token_issuers,
+            ),
+            None => build_http_hook_token_validator(&settings.auth),
+        }
         .context("failed to initialize gateway auth validator")?;
         info!(auth_mode = ?settings.auth.mode, "Gateway auth validator initialized");
         let tenant_policy = std::env::var("FLARE_API_GATEWAY_TENANT_POLICY")
@@ -179,8 +190,20 @@ impl ApplicationBootstrap {
         );
         let tenant_guard = TenantRuntimeGuard::new(tenant_runtime, tenant_policy);
         let token_issuer = crate::interface::http::auth_handler::TokenIssuerHandle(
-            build_token_issuer(&settings.auth, token_service.clone())
-                .context("failed to initialize gateway token issuer")?,
+            match token_service.as_ref() {
+                Some(service) => build_token_issuer(&settings.auth, service.clone()),
+                None if settings
+                    .auth
+                    .hook_issue_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty()) =>
+                {
+                    flare_server_core::auth::issuer::HttpHookTokenIssuer::new(&settings.auth)
+                        .map(|issuer| Some(Arc::new(issuer) as Arc<dyn TokenIssuer>))
+                }
+                None => Ok(None),
+            }
+            .context("failed to initialize gateway token issuer")?,
         );
         if settings.auth.dev_issue {
             tracing::warn!(

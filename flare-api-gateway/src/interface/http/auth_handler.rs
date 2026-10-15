@@ -167,7 +167,7 @@ pub async fn issue_token(
 pub async fn refresh_token(
     Extension(settings): Extension<GatewaySettings>,
     Extension(issuer): Extension<TokenIssuerHandle>,
-    Extension(token_service): Extension<Arc<TokenService>>,
+    Extension(token_service): Extension<Option<Arc<TokenService>>>,
     Extension(tenant_guard): Extension<TenantRuntimeGuard>,
     headers: HeaderMap,
 ) -> Response {
@@ -182,6 +182,9 @@ pub async fn refresh_token(
     // The external http_hook issuer owns its own token format; validate its
     // returned tenant as well, before exposing the refreshed token to callers.
     if settings.auth.mode == AuthProviderMode::CoreJwt {
+        let Some(token_service) = token_service.as_ref() else {
+            return delegated_response();
+        };
         let claims = match token_service.decode_claims_allow_expired(&current) {
             Ok(claims) => claims,
             Err(err) => {
@@ -229,10 +232,16 @@ pub struct RevokeUserHttpRequest {
 #[instrument(skip_all, fields(user_id = %request.user_id))]
 pub async fn revoke_user(
     Extension(settings): Extension<GatewaySettings>,
-    Extension(token_service): Extension<Arc<TokenService>>,
+    Extension(token_service): Extension<Option<Arc<TokenService>>>,
     headers: HeaderMap,
     Json(request): Json<RevokeUserHttpRequest>,
 ) -> Response {
+    if settings.auth.mode != AuthProviderMode::CoreJwt {
+        return delegated_response();
+    }
+    let Some(token_service) = token_service else {
+        return delegated_response();
+    };
     // 特权操作：只认 app 凭据，不接受 dev-issue 联调开关。
     let tenant_id = match authorize_admin(&settings, &headers) {
         Ok(tenant_id) => tenant_id,
@@ -386,6 +395,21 @@ fn delegated_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn delegated_revoke_needs_no_local_hmac_authority() {
+        let mut config = settings(&[]);
+        config.auth.mode = AuthProviderMode::HttpHook;
+        let response = revoke_user(
+            Extension(config),
+            Extension(None),
+            HeaderMap::new(),
+            Json(RevokeUserHttpRequest {
+                user_id: "fixture-user".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
     use axum::{Router, body::Body, http::Request, routing::post};
     use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
     use flare_im_service_kit::gateway::GatewayEnvScope;
@@ -433,7 +457,7 @@ mod tests {
             .route("/tokens/refresh", post(refresh_token))
             .layer(Extension(settings))
             .layer(Extension(TokenIssuerHandle(issuer)))
-            .layer(Extension(service()))
+            .layer(Extension(Some(service())))
             .layer(Extension(tenant_guard))
     }
 
