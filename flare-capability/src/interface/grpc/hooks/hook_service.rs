@@ -459,10 +459,15 @@ impl HookServiceServer {
         let mut deleted_tenant = tenant_id.clone();
         let deleted = if let Ok(id) = hook_id_parsed {
             // 作为数字ID查询并删除
-            if let Ok(Some((row, _))) = self.repository.get_by_id(id).await {
+            if let Some((row, _)) = self
+                .repository
+                .get_by_id(id)
+                .await
+                .map_err(|_| Status::internal("Failed to get hook config"))?
+            {
                 deleted_tenant = row.tenant_id.clone();
                 self.repository
-                    .delete(row.tenant_id.as_deref(), &row.hook_type, &row.name)
+                    .delete_by_id(row.id)
                     .await
                     .map_err(|e| Status::internal(format!("Failed to delete hook config: {}", e)))?
             } else {

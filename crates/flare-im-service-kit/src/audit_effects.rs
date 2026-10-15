@@ -6,6 +6,9 @@
 //! `request_id` into one audit record. Same stream and subject family as the Social side:
 //! stream [`STREAM`], subject `flare.audit.v1.<app>`.
 //!
+//! [`durable`] is the source-owned transactional queue used by Capability management.
+//! [`AuditEffects::record`] is retained for owners not yet converted; its best-effort outcome
+//! is not a durable commit or client delivery acknowledgement.
 //! Only effects of a Staff context are recorded: end users and services are not operators.
 //! A failed publish is only logged, because the effect has already happened and the audit
 //! event is asynchronous, not a precondition of the write. [`NATS_URL_ENV`] unset disables the
@@ -22,6 +25,8 @@ use flare_server_core::mq::nats::config::{NatsProducerConfig, NatsStreamSpec};
 use flare_server_core::mq::producer::Producer;
 use flare_server_core::{SignedActorType, VerifiedContext};
 use serde::Serialize;
+
+pub mod durable;
 
 pub const STREAM: &str = "flare_audit";
 pub const SUBJECT_PREFIX: &str = "flare.audit.v1";
@@ -85,7 +90,7 @@ impl AuditEffects {
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 tracing::warn!(
                     source,
-                    "{NATS_URL_ENV} not set: management effects are not audited"
+                    "{NATS_URL_ENV} not set: audit broker publishing is disabled"
                 );
                 Ok(Self::disabled(source))
             }
@@ -102,12 +107,9 @@ impl AuditEffects {
             url: url.to_owned(),
         })
         .await
-        .map_err(|error| {
-            ErrorBuilder::new(
-                ErrorCode::ConfigurationError,
-                format!("audit stream unavailable: {error}"),
-            )
-            .build_error()
+        .map_err(|_| {
+            ErrorBuilder::new(ErrorCode::ConfigurationError, "audit stream unavailable")
+                .build_error()
         })?;
         Ok(Self {
             source,

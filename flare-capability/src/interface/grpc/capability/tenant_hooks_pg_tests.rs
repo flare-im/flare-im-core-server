@@ -95,10 +95,7 @@ impl Drop for RowCleanup {
 }
 
 fn employee(tenant: &str) -> HookAdministrator {
-    HookAdministrator {
-        actor_id: "employee-w11h".into(),
-        tenant_id: tenant.into(),
-    }
+    super::administer::test_employee("employee-w11h", tenant, "request-w11h")
 }
 
 fn create(tenant: &str, name: &str, endpoint: &str) -> GenericRequest {

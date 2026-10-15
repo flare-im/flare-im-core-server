@@ -288,6 +288,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         source: Option<String>,
     ) -> Result<()> {
         let tenant_id = normalize_tenant_id(tenant_id);
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
         sqlx::query(
             r#"
             INSERT INTO public.capability_user_grants (
@@ -307,9 +308,19 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         .bind(expires_at)
         .bind(plan_code.as_deref())
         .bind(source.as_deref())
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
-        .map_err(|e| CapabilityError::System(format!("grant_user_capability: {e}")))?;
+        .map_err(write_error)?;
+        flare_im_service_kit::audit_effects::durable::record(
+            &mut tx,
+            &tenant_id,
+            "capability_grant",
+            &format!("{user_id}:{capability_id}"),
+            "grant",
+        )
+        .await
+        .map_err(write_error)?;
+        tx.commit().await.map_err(write_error)?;
         Ok(())
     }
 
@@ -320,7 +331,8 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         capability_id: &str,
     ) -> Result<()> {
         let tenant_id = normalize_tenant_id(tenant_id);
-        sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
+        let deleted = sqlx::query(
             r#"
             DELETE FROM public.capability_user_grants
             WHERE tenant_id = $1 AND user_id = $2 AND capability_id = $3
@@ -329,9 +341,21 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         .bind(&tenant_id)
         .bind(user_id)
         .bind(capability_id)
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
-        .map_err(|e| CapabilityError::System(format!("revoke_user_capability: {e}")))?;
+        .map_err(write_error)?;
+        if deleted.rows_affected() > 0 {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                &tenant_id,
+                "capability_grant",
+                &format!("{user_id}:{capability_id}"),
+                "revoke",
+            )
+            .await
+            .map_err(write_error)?;
+        }
+        tx.commit().await.map_err(write_error)?;
         Ok(())
     }
 
@@ -342,6 +366,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         enabled: bool,
     ) -> Result<()> {
         let tenant_id = normalize_tenant_id(tenant_id);
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
         sqlx::query(
             r#"
             INSERT INTO public.capability_tenant_switches (tenant_id, capability_id, enabled, updated_at)
@@ -354,9 +379,19 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         .bind(&tenant_id)
         .bind(capability_id)
         .bind(enabled)
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
-        .map_err(|e| CapabilityError::System(format!("set_tenant_capability: {e}")))?;
+        .map_err(write_error)?;
+        flare_im_service_kit::audit_effects::durable::record(
+            &mut tx,
+            &tenant_id,
+            "capability_switch",
+            capability_id,
+            if enabled { "enable" } else { "disable" },
+        )
+        .await
+        .map_err(write_error)?;
+        tx.commit().await.map_err(write_error)?;
         Ok(())
     }
 
@@ -386,4 +421,8 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
             )
             .collect())
     }
+}
+
+fn write_error(_: sqlx::Error) -> CapabilityError {
+    CapabilityError::System("capability write transaction unavailable".into())
 }

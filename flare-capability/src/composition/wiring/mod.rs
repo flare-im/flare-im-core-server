@@ -84,7 +84,22 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         hook_plugin_verifier,
     );
 
+    let audit_delivery = if let Some(pool) = db_pool {
+        let publisher =
+            flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-capability").await?;
+        if publisher.enabled() {
+            Some((pool, publisher))
+        } else {
+            tracing::warn!(
+                "Core source audit evidence is retained in PostgreSQL; broker delivery is disabled"
+            );
+            None
+        }
+    } else {
+        None
+    };
     Ok(ApplicationContext {
+        audit_delivery,
         im_hook_plugin,
         hook_governance: hook.hook_governance,
         plugin_routes,

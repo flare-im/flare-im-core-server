@@ -12,7 +12,6 @@ use flare_grpc_proto::capability::{
     ListHookConfigsResponse, QueryHookExecutionsResponse, SetHookStatusResponse,
     UpdateHookConfigResponse,
 };
-use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_im_service_kit::clients::{AdminGrpcClients, CapabilityAdminClientWrapper};
 use flare_server_core::{
     AuthenticatedPrincipal,
@@ -151,7 +150,6 @@ pub async fn create_hook(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(request): AdminJson<AdminHookCreateHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminHookDetailHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
@@ -178,9 +176,6 @@ pub async fn create_hook(
         .config
         .ok_or_else(|| HttpApiError::internal("ADMIN_HOOK_CREATE_FAILED", ""))?;
     let hook = hook_http(config);
-    effects
-        .record(staff.ctx(), "hook_config", &hook.hook_id, "create")
-        .await;
     Ok(Json(ApiResponse::success(AdminHookDetailHttp { hook })))
 }
 
@@ -257,7 +252,6 @@ pub async fn update_hook(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath(hook_id): AdminPath<String>,
     AdminJson(request): AdminJson<AdminHookUpdateHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminHookDetailHttp>>> {
@@ -283,9 +277,6 @@ pub async fn update_hook(
     let config = response
         .config
         .ok_or_else(|| HttpApiError::internal("ADMIN_HOOK_UPDATE_FAILED", ""))?;
-    effects
-        .record(staff.ctx(), "hook_config", &hook_id, "update")
-        .await;
     Ok(Json(ApiResponse::success(AdminHookDetailHttp {
         hook: hook_http(config),
     })))
@@ -319,7 +310,6 @@ pub async fn delete_hook(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath(hook_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminHookDeleteHttp>>> {
     audit_write(
@@ -341,11 +331,6 @@ pub async fn delete_hook(
         "ADMIN_HOOK_DELETE_FAILED",
     )
     .await?;
-    if response.success {
-        effects
-            .record(staff.ctx(), "hook_config", &hook_id, "delete")
-            .await;
-    }
     Ok(Json(ApiResponse::success(delete_http(hook_id, response))))
 }
 
@@ -380,7 +365,6 @@ pub async fn set_hook_status(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath(hook_id): AdminPath<String>,
     AdminJson(request): AdminJson<AdminHookStatusHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminHookStatusHttp>>> {
@@ -402,16 +386,6 @@ pub async fn set_hook_status(
         "ADMIN_HOOK_STATUS_FAILED",
     )
     .await?;
-    if response.success {
-        effects
-            .record(
-                staff.ctx(),
-                "hook_config",
-                &hook_id,
-                if enabled { "enable" } else { "disable" },
-            )
-            .await;
-    }
     Ok(Json(ApiResponse::success(status_http(
         hook_id, enabled, response,
     ))))

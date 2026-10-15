@@ -24,6 +24,7 @@ use flare_grpc_proto::capability::{
     UserCapabilityGrant as ProtoGrant,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_service_kit::audit_effects::durable::StaffAudit;
 use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_server_core::auth::core_admin::permission::{
     CAPABILITIES_READ, CAPABILITIES_WRITE, HOOKS_READ, HOOKS_WRITE, PLUGINS_READ, PLUGINS_WRITE,
@@ -187,7 +188,7 @@ impl CapabilityGrpcServer {
             ));
         }
         staff.require_tenant(tenant_id)?;
-        Ok(PluginRouteActor::Staff(staff.actor_id))
+        Ok(PluginRouteActor::Staff(staff))
     }
 
     pub fn runtime_config(&self) -> Arc<CapabilityRuntimeConfig> {
@@ -377,16 +378,23 @@ async fn check_plugin_health(
 }
 
 /// Who may touch the plugin route book: platform staff, or the plugin host's own service identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum PluginRouteActor {
-    Staff(String),
+    Staff(VerifiedStaff),
     Service(String),
 }
 
 impl PluginRouteActor {
     fn id(&self) -> &str {
         match self {
-            Self::Staff(id) | Self::Service(id) => id,
+            Self::Staff(staff) => &staff.actor_id,
+            Self::Service(id) => id,
+        }
+    }
+    async fn run<F: std::future::Future>(&self, work: F) -> F::Output {
+        match self {
+            Self::Staff(staff) => work.staff_audit(&staff.ctx, "flare-capability").await,
+            Self::Service(_) => work.await,
         }
     }
 }
@@ -596,6 +604,7 @@ impl CapabilityService for CapabilityGrpcServer {
                     Some(r.source.clone())
                 },
             )
+            .staff_audit(&staff.ctx, "flare-capability")
             .await
             .map_err(capability_error_to_status)?;
 
@@ -641,6 +650,7 @@ impl CapabilityService for CapabilityGrpcServer {
         }
         self.policy
             .revoke_user_capability(&r.tenant_id, &r.user_id, &r.capability_id)
+            .staff_audit(&staff.ctx, "flare-capability")
             .await
             .map_err(capability_error_to_status)?;
 
@@ -681,6 +691,7 @@ impl CapabilityService for CapabilityGrpcServer {
         }
         self.policy
             .set_tenant_capability(&r.tenant_id, &r.capability_id, r.enabled)
+            .staff_audit(&staff.ctx, "flare-capability")
             .await
             .map_err(capability_error_to_status)?;
 
@@ -765,8 +776,11 @@ impl CapabilityService for CapabilityGrpcServer {
             )));
         }
         // 有库时先写 capability_plugin_endpoints，写成功才进本进程的读模型；其他实例重读后收敛。
-        self.plugin_routes
-            .register(endpoint.tenant_id.as_str(), endpoint.instance)
+        actor
+            .run(
+                self.plugin_routes
+                    .register(endpoint.tenant_id.as_str(), endpoint.instance),
+            )
             .await
             .map_err(|_| Status::unavailable("plugin registration storage is unavailable"))?;
         Ok(Response::new(RegisterPluginEndpointResponse {
@@ -784,15 +798,17 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<DeregisterPluginEndpointRequest>,
     ) -> Result<Response<DeregisterPluginEndpointResponse>, Status> {
-        let _actor =
+        let actor =
             self.plugin_route_actor(&request, PLUGINS_WRITE, &request.get_ref().tenant_id)?;
         let r = request.into_inner();
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id, plugin_id required"));
         }
-        let removed = self
-            .plugin_routes
-            .deregister(r.tenant_id.as_str(), r.plugin_id.as_str())
+        let removed = actor
+            .run(
+                self.plugin_routes
+                    .deregister(r.tenant_id.as_str(), r.plugin_id.as_str()),
+            )
             .await
             .map_err(|_| Status::unavailable("plugin registration storage is unavailable"))?;
         Ok(Response::new(DeregisterPluginEndpointResponse {

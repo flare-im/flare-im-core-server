@@ -24,8 +24,8 @@ impl PostgresPluginEndpointRepository {
 }
 
 /// 存储错误只带固定说明与操作名；连接串、SQL 与行内容不进错误文本。
-fn storage_error(operation: &'static str, error: sqlx::Error) -> FlareError {
-    tracing::warn!(operation, error = %error, "plugin endpoint storage failed");
+fn storage_error(operation: &'static str, _error: sqlx::Error) -> FlareError {
+    tracing::warn!(operation, "plugin endpoint storage failed");
     ErrorBuilder::new(
         ErrorCode::DatabaseError,
         "plugin endpoint storage is unavailable",
@@ -41,6 +41,11 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
         let labels = serde_json::to_string(&instance.labels).map_err(|_| {
             ErrorBuilder::new(ErrorCode::InvalidParameter, "labels are not encodable").build_error()
         })?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage_error("upsert", e))?;
         sqlx::query(
             "INSERT INTO capability_plugin_endpoints (
                  tenant_id, plugin_id, capability_id, grpc_authority, labels, plugin_version,
@@ -70,22 +75,53 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
         .bind(&instance.declared_operations)
         .bind(instance.unverified)
         .bind(&instance.seat_model)
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(|e| storage_error("upsert", e))?;
+        flare_im_service_kit::audit_effects::durable::record(
+            &mut tx,
+            &endpoint.tenant_id,
+            "plugin_endpoint",
+            &instance.plugin_id,
+            "register",
+        )
+        .await
+        .map_err(|e| storage_error("upsert audit", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| storage_error("upsert commit", e))?;
         Ok(())
     }
 
     async fn delete(&self, tenant_id: &str, plugin_id: &str) -> Result<bool> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage_error("delete", e))?;
         let deleted = sqlx::query(
             "DELETE FROM capability_plugin_endpoints WHERE tenant_id = $1 AND plugin_id = $2",
         )
         .bind(tenant_id)
         .bind(plugin_id)
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(|e| storage_error("delete", e))?
         .rows_affected();
+        if deleted > 0 {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                tenant_id,
+                "plugin_endpoint",
+                plugin_id,
+                "deregister",
+            )
+            .await
+            .map_err(|e| storage_error("delete audit", e))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| storage_error("delete commit", e))?;
         Ok(deleted > 0)
     }
 

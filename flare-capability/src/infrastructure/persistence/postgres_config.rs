@@ -108,6 +108,10 @@ pub struct PostgresHookConfigRepository {
     pool: Arc<PgPool>,
 }
 
+fn write_error(_: sqlx::Error) -> FlareError {
+    FlareError::system("hook write transaction unavailable")
+}
+
 impl PostgresHookConfigRepository {
     /// 与 [`crate::infrastructure::persistence::PostgresCapabilityPolicy`] 等共用连接池。
     pub fn connection_pool(&self) -> Arc<PgPool> {
@@ -291,6 +295,7 @@ impl PostgresHookConfigRepository {
             )
         };
 
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
         let row = sqlx::query_as::<_, (i64,)>(
             r#"
             INSERT INTO hook_configs (
@@ -333,15 +338,20 @@ impl PostgresHookConfigRepository {
         .bind(transport_json)
         .bind(metadata_json)
         .bind(created_by)
-        .fetch_one(&*self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "failed to save hook config: {}",
-                e
-            ))
-        })?;
+        .map_err(write_error)?;
 
+        flare_im_service_kit::audit_effects::durable::record(
+            &mut tx,
+            tenant_id.unwrap_or("platform"),
+            "hook_config",
+            &row.0.to_string(),
+            "configure",
+        )
+        .await
+        .map_err(write_error)?;
+        tx.commit().await.map_err(write_error)?;
         Ok(row.0)
     }
 
@@ -447,7 +457,8 @@ impl PostgresHookConfigRepository {
             )
         };
 
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
+        let tenant = sqlx::query_scalar::<_, Option<String>>(
             r#"
             UPDATE hook_configs
             SET version = $1,
@@ -462,8 +473,10 @@ impl PostgresHookConfigRepository {
                 selector_config = $10,
                 transport_config = $11,
                 metadata = $12,
+                name = $14,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $13
+            RETURNING tenant_id
             "#,
         )
         .bind(&hook_item.version)
@@ -479,40 +492,68 @@ impl PostgresHookConfigRepository {
         .bind(transport_json)
         .bind(metadata_json)
         .bind(hook_id)
-        .execute(&*self.pool)
+        .bind(&hook_item.name)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "failed to update hook config: {}",
-                e
-            ))
-        })?;
+        .map_err(write_error)?;
 
-        Ok(result.rows_affected() > 0)
+        if let Some(tenant) = &tenant {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                tenant.as_deref().unwrap_or("platform"),
+                "hook_config",
+                &hook_id.to_string(),
+                "update",
+            )
+            .await
+            .map_err(write_error)?;
+        }
+        tx.commit().await.map_err(write_error)?;
+        Ok(tenant.is_some())
     }
 
     /// 更新Hook状态（启用/禁用）
     pub async fn update_enabled(&self, hook_id: i64, enabled: bool) -> Result<bool> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
+        let current = sqlx::query_scalar::<_, bool>(
+            "SELECT enabled FROM hook_configs WHERE id=$1 FOR UPDATE",
+        )
+        .bind(hook_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(write_error)?;
+        if current == Some(enabled) {
+            tx.commit().await.map_err(write_error)?;
+            return Ok(true);
+        }
+        let tenant = sqlx::query_scalar::<_, Option<String>>(
             r#"
             UPDATE hook_configs
             SET enabled = $1,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2
+            WHERE id = $2 AND enabled IS DISTINCT FROM $1
+            RETURNING tenant_id
             "#,
         )
         .bind(enabled)
         .bind(hook_id)
-        .execute(&*self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "failed to update hook enabled status: {}",
-                e
-            ))
-        })?;
+        .map_err(write_error)?;
 
-        Ok(result.rows_affected() > 0)
+        if let Some(tenant) = &tenant {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                tenant.as_deref().unwrap_or("platform"),
+                "hook_config",
+                &hook_id.to_string(),
+                if enabled { "enable" } else { "disable" },
+            )
+            .await
+            .map_err(write_error)?;
+        }
+        tx.commit().await.map_err(write_error)?;
+        Ok(tenant.is_some())
     }
 
     /// 删除Hook配置
@@ -522,27 +563,61 @@ impl PostgresHookConfigRepository {
         hook_type: &str,
         name: &str,
     ) -> Result<bool> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
+        let id = sqlx::query_scalar::<_, i64>(
             r#"
             DELETE FROM hook_configs
             WHERE (tenant_id IS NULL AND $1::TEXT IS NULL OR tenant_id = $1)
               AND hook_type = $2
               AND name = $3
+            RETURNING id
             "#,
         )
         .bind(tenant_id)
         .bind(hook_type)
         .bind(name)
-        .execute(&*self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "failed to delete hook config: {}",
-                e
-            ))
-        })?;
+        .map_err(write_error)?;
 
-        Ok(result.rows_affected() > 0)
+        if let Some(id) = id {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                tenant_id.unwrap_or("platform"),
+                "hook_config",
+                &id.to_string(),
+                "delete",
+            )
+            .await
+            .map_err(write_error)?;
+        }
+        tx.commit().await.map_err(write_error)?;
+        Ok(id.is_some())
+    }
+
+    /// Delete the immutable identity, not a name read before a concurrent rename/recreate.
+    pub async fn delete_by_id(&self, hook_id: i64) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(write_error)?;
+        let tenant = sqlx::query_scalar::<_, Option<String>>(
+            "DELETE FROM hook_configs WHERE id=$1 RETURNING tenant_id",
+        )
+        .bind(hook_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(write_error)?;
+        if let Some(tenant) = &tenant {
+            flare_im_service_kit::audit_effects::durable::record(
+                &mut tx,
+                tenant.as_deref().unwrap_or("platform"),
+                "hook_config",
+                &hook_id.to_string(),
+                "delete",
+            )
+            .await
+            .map_err(write_error)?;
+        }
+        tx.commit().await.map_err(write_error)?;
+        Ok(tenant.is_some())
     }
 
     /// 查询Hook配置（支持过滤）

@@ -77,6 +77,19 @@ impl ApplicationBootstrap {
         let hook_config_listener = context.hook_config_listener;
 
         let mut runtime = runtime_plan.service_runtime();
+        if let Some((pool, publisher)) = context.audit_delivery {
+            runtime = runtime.add_spawn_with_shutdown(
+                "flare-capability-audit-delivery",
+                move |shutdown| async move {
+                    publisher
+                        .run_durable(pool, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
         // Hook 配置失效通知的监听任务（独立 PostgreSQL 连接）随进程停机停掉、关掉连接。
         if let Some(listener) = hook_config_listener {
             runtime = runtime.add_spawn_with_shutdown(

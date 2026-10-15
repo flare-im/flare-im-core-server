@@ -5,6 +5,8 @@ mod administer;
 mod hook_secret_invalidation_pg_tests;
 mod service;
 #[cfg(test)]
+mod source_audit_pg_tests;
+#[cfg(test)]
 mod tenant_hooks_pg_tests;
 
 pub use service::{CapabilityGrpcServer, CapabilityInvocationMetrics, CapabilityMetricsSnapshot};

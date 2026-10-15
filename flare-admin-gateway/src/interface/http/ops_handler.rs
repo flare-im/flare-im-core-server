@@ -822,7 +822,6 @@ pub async fn set_tenant_capability_switch(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath(capability_id): AdminPath<String>,
     AdminJson(request): AdminJson<AdminTenantCapabilitySwitchHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminCapabilitySwitchUpdateHttp>>> {
@@ -845,14 +844,6 @@ pub async fn set_tenant_capability_switch(
         ))
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_CAPABILITY_SWITCH_FAILED"))?;
-    effects
-        .record(
-            staff.ctx(),
-            "tenant_capability",
-            &capability_id,
-            if request.enabled { "enable" } else { "disable" },
-        )
-        .await;
     Ok(Json(ApiResponse::success(
         AdminCapabilitySwitchUpdateHttp {
             tenant_id,
@@ -928,7 +919,6 @@ pub async fn register_plugin(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(request): AdminJson<AdminPluginRegisterHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminPluginRegisterHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
@@ -947,11 +937,6 @@ pub async fn register_plugin(
         .bounded(client.register_plugin_endpoint(staff.token(), proto))
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_PLUGIN_REGISTER_FAILED"))?;
-    if response.accepted {
-        effects
-            .record(staff.ctx(), "plugin_endpoint", &plugin_id, "register")
-            .await;
-    }
     Ok(Json(ApiResponse::success(AdminPluginRegisterHttp {
         tenant_id,
         plugin_id,
@@ -987,7 +972,6 @@ pub async fn deregister_plugin(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(request): AdminJson<AdminPluginDeregisterHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminPluginDeregisterHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
@@ -1016,11 +1000,6 @@ pub async fn deregister_plugin(
         ))
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_PLUGIN_DEREGISTER_FAILED"))?;
-    if response.accepted {
-        effects
-            .record(staff.ctx(), "plugin_endpoint", &plugin_id, "deregister")
-            .await;
-    }
     Ok(Json(ApiResponse::success(AdminPluginDeregisterHttp {
         tenant_id,
         plugin_id,

@@ -122,10 +122,7 @@ fn cleanup(tenant: &str) -> TenantRowCleanup {
 }
 
 fn employee(tenant: &str) -> HookAdministrator {
-    HookAdministrator {
-        actor_id: "employee-w12w".into(),
-        tenant_id: tenant.into(),
-    }
+    super::administer::test_employee("employee-w12w", tenant, "request-w12w")
 }
 
 fn administer(operation: &str, type_url: &str, value: Vec<u8>) -> GenericRequest {

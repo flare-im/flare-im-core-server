@@ -15,6 +15,11 @@ use crate::interface::grpc::{
 
 /// 应用上下文：接口层 gRPC 依赖 + 能力注册表 + 策略后端。
 pub struct ApplicationContext {
+    /// Source-owned queue delivery, independent of IM ordering. Disabled broker retains rows.
+    pub audit_delivery: Option<(
+        Arc<sqlx::PgPool>,
+        flare_im_service_kit::audit_effects::AuditEffects,
+    )>,
     /// IM `HookPlugin` 入站适配器。
     pub im_hook_plugin: ImHookPluginServer,
     /// Hook 配置治理（写路径）；供 `CapabilityService.Administer` 与内部复用。

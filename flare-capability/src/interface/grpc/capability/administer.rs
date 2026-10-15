@@ -10,10 +10,9 @@ use flare_grpc_proto::capability::{
     GetHookConfigRequest, GetHookStatisticsRequest, ListHookConfigsRequest,
     QueryHookExecutionsRequest, SetHookStatusRequest, UpdateHookConfigRequest,
 };
+use flare_im_service_kit::audit_effects::durable::StaffAudit;
 use flare_im_service_kit::staff_context::VerifiedStaff;
-use flare_server_core::context::{ActorContext, ActorType, Context, Ctx};
 use prost::Message;
-use std::sync::Arc;
 use tonic::{Request, Status};
 
 use crate::interface::grpc::hooks::HookServiceServer;
@@ -32,28 +31,22 @@ pub const WRITE_OPERATIONS: [&str; 4] = [
     "flare.extension.v1.hook_config.set_status",
 ];
 
-/// 已验证的 Hook 治理操作员：员工 id 与签名里的应用（租户）。由 Staff 上下文构造；测试里
-/// 直接构造。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Retains the original verified context, including permission and signed request identity.
+#[derive(Debug, Clone)]
 pub struct HookAdministrator {
-    pub actor_id: String,
-    pub tenant_id: String,
+    staff: VerifiedStaff,
 }
 
 impl HookAdministrator {
     pub fn from_staff(staff: &VerifiedStaff) -> Self {
         Self {
-            actor_id: staff.actor_id.clone(),
-            tenant_id: staff.tenant_id.clone(),
+            staff: staff.clone(),
         }
     }
 
     /// 租户范围的操作必须指名签名里的租户。
     pub fn require_tenant(&self, tenant_id: &str) -> Result<(), Status> {
-        if tenant_id != self.tenant_id {
-            return Err(Status::permission_denied("staff tenant mismatch"));
-        }
-        Ok(())
+        self.staff.require_tenant(tenant_id)
     }
 }
 
@@ -81,8 +74,18 @@ pub async fn dispatch_hook_administer(
     outer: GenericRequest,
     actor: &HookAdministrator,
 ) -> Result<tonic::Response<GenericResponse>, Status> {
+    dispatch_verified(governance, outer, actor)
+        .staff_audit(&actor.staff.ctx, "flare-capability")
+        .await
+}
+
+async fn dispatch_verified(
+    governance: &HookServiceServer,
+    outer: GenericRequest,
+    actor: &HookAdministrator,
+) -> Result<tonic::Response<GenericResponse>, Status> {
     let operation = outer.operation.clone();
-    let request_id = outer.request_id.clone();
+    let request_id = actor.staff.ctx.request_id().to_owned();
     let payload = outer
         .payload
         .ok_or_else(|| Status::invalid_argument("payload required"))?;
@@ -205,27 +208,10 @@ pub async fn dispatch_hook_administer(
     )))
 }
 
-fn trusted_request<T>(payload: T, actor: &HookAdministrator, request_id: &str) -> Request<T> {
-    // The inner governance service is called in-process, not through the gRPC
-    // transport. Reconstruct its context only from the already verified staff
-    // context, never from GenericRequest.metadata or its payload.
-    let request_id = if request_id.len() <= 128
-        && request_id.is_ascii()
-        && !request_id.chars().any(char::is_control)
-        && request_id.trim() == request_id
-    {
-        request_id
-    } else {
-        ""
-    };
-    let ctx: Ctx = Arc::new(
-        Context::with_request_id(request_id)
-            .with_tenant_id(&actor.tenant_id)
-            .with_user_id(&actor.actor_id)
-            .with_actor(ActorContext::new(&actor.actor_id).with_type(ActorType::Staff)),
-    );
+fn trusted_request<T>(payload: T, actor: &HookAdministrator, _request_id: &str) -> Request<T> {
+    // Preserve the verified token/claims; never rebuild an unsigned Staff from payload IDs.
     let mut request = Request::new(payload);
-    request.extensions_mut().insert(ctx);
+    request.extensions_mut().insert(actor.staff.ctx.clone());
     request
 }
 
@@ -256,23 +242,67 @@ async fn require_hook_tenant(
 }
 
 #[cfg(test)]
+pub(super) fn test_employee(actor: &str, tenant: &str, request_id: &str) -> HookAdministrator {
+    use ed25519_dalek::{
+        SigningKey,
+        pkcs8::{EncodePrivateKey, EncodePublicKey},
+    };
+    use flare_server_core::{
+        SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
+    };
+    let key = SigningKey::from_bytes(&[91; 32]);
+    let private = key.to_pkcs8_pem(Default::default()).unwrap();
+    let public = key
+        .verifying_key()
+        .to_public_key_pem(Default::default())
+        .unwrap();
+    let signer = SignedContextSigner::from_private_key(private.as_str())
+        .unwrap()
+        .with_kid("gateway")
+        .unwrap();
+    let verifier = SignedContextVerifier::from_public_key(&public)
+        .unwrap()
+        .require_staff_kid(["gateway"]);
+    let token = signer
+        .sign(
+            &SignedContextIdentity::new(SignedActorType::Staff, actor, tenant, request_id)
+                .with_staff_grant(None, Some("core:hooks:write".into()), 1),
+        )
+        .unwrap();
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    metadata.insert("x-flare-ctx", token.parse().unwrap());
+    HookAdministrator::from_staff(
+        &flare_im_service_kit::staff_context::verify_staff_metadata(
+            &metadata,
+            &verifier,
+            "core:hooks:write",
+        )
+        .unwrap(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use flare_server_core::utils::require_ctx_from_request;
 
     #[test]
     fn inner_hook_request_uses_verified_staff_identity_only() {
-        let actor = HookAdministrator {
-            actor_id: "employee-7".into(),
-            tenant_id: "tenant-a".into(),
-        };
-        let request = trusted_request((), &actor, "request-1");
+        let actor = test_employee("employee-7", "tenant-a", "request-1");
+        let request = trusted_request((), &actor, "forged-payload-request");
         let ctx = require_ctx_from_request(&request).unwrap();
         assert_eq!(ctx.user_id(), Some("employee-7"));
         assert_eq!(ctx.tenant_id(), Some("tenant-a"));
         assert_eq!(ctx.request_id(), "request-1");
         assert_eq!(ctx.actor().unwrap().actor_id(), "employee-7");
-        assert_eq!(ctx.actor().unwrap().actor_type, ActorType::Staff);
+        assert_eq!(
+            ctx.actor().unwrap().actor_type,
+            flare_server_core::context::ActorType::Staff
+        );
+        assert!(
+            ctx.get_data::<flare_server_core::VerifiedContext>()
+                .is_some()
+        );
         assert!(actor.require_tenant("tenant-a").is_ok());
         assert_eq!(
             actor.require_tenant("tenant-b").unwrap_err().code(),
