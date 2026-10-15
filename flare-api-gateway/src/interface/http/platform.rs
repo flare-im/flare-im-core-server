@@ -36,10 +36,12 @@ use tonic::transport::{Channel, Endpoint};
 const SCOPE: &str = "platform.conversations.read";
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+mod send;
 
 pub struct PlatformConfig {
     pepper: ApiKeyPepper,
     proxies: TrustedProxyChain,
+    signer: Arc<SignedContextSigner>,
 }
 impl PlatformConfig {
     pub fn from_env() -> anyhow::Result<Option<Self>> {
@@ -50,13 +52,34 @@ impl PlatformConfig {
                 Err(_) => anyhow::bail!("invalid Platform environment configuration"),
             }
         }
-        Self::parse(
+        let config = Self::parse(
             &optional("FLARE_PLATFORM_API_ENABLED")?.unwrap_or_else(|| "false".into()),
             optional("FLARE_API_KEY_PEPPER")?.as_deref(),
             &optional("FLARE_PLATFORM_TRUSTED_PROXY_CIDRS")?.unwrap_or_default(),
-        )
+        )?;
+        let Some((pepper, proxies)) = config else {
+            return Ok(None);
+        };
+        // A Platform machine request must never borrow the Staff Gateway or
+        // client/Cell signing identity. Validate before opening any PG pool.
+        let material = optional("FLARE_API_GATEWAY_CTX_PRIVATE_KEY")?
+            .ok_or_else(|| anyhow::anyhow!("missing Platform API signing key"))?;
+        let signer = SignedContextSigner::from_private_key(&material)
+            .and_then(|signer| {
+                signer.with_kid(flare_im_service_kit::platform_send::PLATFORM_API_KID)
+            })
+            .map_err(|_| anyhow::anyhow!("invalid Platform API signing key"))?;
+        Ok(Some(Self {
+            pepper,
+            proxies,
+            signer: Arc::new(signer),
+        }))
     }
-    fn parse(enabled: &str, pepper: Option<&str>, proxies: &str) -> anyhow::Result<Option<Self>> {
+    fn parse(
+        enabled: &str,
+        pepper: Option<&str>,
+        proxies: &str,
+    ) -> anyhow::Result<Option<(ApiKeyPepper, TrustedProxyChain)>> {
         match enabled {
             "false" => return Ok(None),
             "true" => {}
@@ -71,13 +94,13 @@ impl PlatformConfig {
         };
         let proxies = TrustedProxyChain::new(&cidrs)
             .map_err(|_| anyhow::anyhow!("invalid FLARE_PLATFORM_TRUSTED_PROXY_CIDRS"))?;
-        Ok(Some(Self { pepper, proxies }))
+        Ok(Some((pepper, proxies)))
     }
     pub async fn router(
         self,
         primary_url: &str,
         conversation_url: &str,
-        signer: Arc<SignedContextSigner>,
+        ingest_url: &str,
     ) -> anyhow::Result<Router> {
         // Independent from client pools/channels/circuit/rate limits. Never a replica.
         let pool = connect_readonly_credential_pool(primary_url)
@@ -91,7 +114,8 @@ impl PlatformConfig {
             pepper: self.pepper,
             proxies: self.proxies,
             conversation: channel(conversation_url)?,
-            signer,
+            ingest: channel(ingest_url)?,
+            signer: self.signer,
             budget: CredentialRequestBudget::new(32),
             breaker: CircuitBreaker::new(
                 "Platform Core",
@@ -132,6 +156,7 @@ struct PlatformState {
     pepper: ApiKeyPepper,
     proxies: TrustedProxyChain,
     conversation: Channel,
+    ingest: Channel,
     signer: Arc<SignedContextSigner>,
     budget: CredentialRequestBudget,
     breaker: CircuitBreaker,
@@ -166,6 +191,10 @@ fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a st
 }
 fn router(state: Arc<PlatformState>) -> Router {
     let routes = Router::new()
+        .route(
+            "/apps/{app_id}/conversations/{conversation_id}/system-messages",
+            axum::routing::post(send::send),
+        )
         .route(
             "/apps/{app_id}/conversations/{conversation_id}/participants",
             get(participants),
@@ -211,8 +240,8 @@ async fn boundary(
             }
             let (parts, body) = request.into_parts();
             match to_bytes(body, 16 * 1024).await {
-                Ok(body) if body.is_empty() => {
-                    next.run(Request::from_parts(parts, Body::empty())).await
+                Ok(body) if body.is_empty() || parts.method == axum::http::Method::POST => {
+                    next.run(Request::from_parts(parts, Body::from(body))).await
                 }
                 _ => invalid(),
             }
@@ -289,6 +318,7 @@ async fn authorize(
     headers: &HeaderMap,
     app: &str,
     ip: IpAddr,
+    scope: &'static str,
 ) -> Result<AuthorizedApiKey, Response> {
     let encoded = single_header(headers, "authorization")
         .ok()
@@ -298,7 +328,7 @@ async fn authorize(
         .ok_or_else(|| failure(StatusCode::UNAUTHORIZED, "API_KEY_UNAUTHENTICATED"))?;
     let key = state
         .verifier
-        .verify(encoded, &state.pepper, Some(app), SCOPE, ip)
+        .verify(encoded, &state.pepper, Some(app), scope, ip)
         .await
         .map_err(|e| match e {
             CredentialAuthError::Unauthenticated => {
@@ -365,7 +395,7 @@ async fn participants(
     {
         return invalid();
     }
-    let key = match authorize(&state, &headers, &app, ip).await {
+    let key = match authorize(&state, &headers, &app, ip, SCOPE).await {
         Ok(key) => key,
         Err(response) => return response,
     };
@@ -447,6 +477,7 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+    include!("platform/send_contract_tests.rs");
     const PATH: &str = "/platform/v1/apps/app-a/conversations/same-conversation/participants";
     struct Reader {
         value: LocalCredential,
@@ -523,7 +554,13 @@ mod tests {
             pepper,
             proxies: TrustedProxyChain::default(),
             conversation: channel("http://127.0.0.1:1").unwrap(),
-            signer: Arc::new(SignedContextSigner::from_private_key(&signing).unwrap()),
+            ingest: channel("http://127.0.0.1:1").unwrap(),
+            signer: Arc::new(
+                SignedContextSigner::from_private_key(&signing)
+                    .unwrap()
+                    .with_kid(flare_im_service_kit::platform_send::PLATFORM_API_KID)
+                    .unwrap(),
+            ),
             budget: CredentialRequestBudget::new(1),
             breaker: CircuitBreaker::new(
                 "Platform test",

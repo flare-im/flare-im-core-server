@@ -126,6 +126,22 @@ fn authorize_message_claims(
                 ));
             }
         }
+        SignedActorType::Service
+            if flare_im_service_kit::platform_send::is_platform_system_sender(claims) =>
+        {
+            let content_ok = matches!(&message.content,Some(flare_proto::common::MessageContent{content:Some(flare_proto::common::message_content::Content::System(content))})
+                if content.event_kind.strip_prefix("platform.").is_some_and(|kind|!kind.is_empty()&&kind.len()<=64&&kind.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-')))
+                && !content.body.trim().is_empty()&&content.body.len()<=8192&&content.attributes.is_empty()&&content.payload.is_empty());
+            if !system_only
+                || message.source != MessageSource::System as i32
+                || message.message_type != MessageType::System as i32
+                || message.sender_id != claims.actor_id
+                || !message.attributes.is_empty()
+                || !content_ok
+            {
+                return Err(Status::permission_denied("invalid platform system message"));
+            }
+        }
         SignedActorType::Service if claims.actor_id == "flare-social-bridge" => {
             let expected_type = if system_only {
                 MessageType::System
@@ -679,6 +695,50 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn platform_system_send_requires_api_gateway_key_scope_credential_and_fixed_envelope() {
+        use flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE;
+        let mut caller = claims(SignedActorType::Service, "sa-platform");
+        caller.kid = flare_im_service_kit::platform_send::PLATFORM_API_KID.into();
+        caller.roles = vec![SYSTEM_MESSAGE_SCOPE.into()];
+        caller.credential_id = Some("AAAAAAAAAAAA".into());
+        let mut msg = message("sa-platform", MessageSource::System, MessageType::System);
+        msg.attributes.clear();
+        msg.content = Some(flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::System(
+                flare_proto::common::SystemContent {
+                    event_kind: "platform.maintenance".into(),
+                    body: "Notice".into(),
+                    ..Default::default()
+                },
+            )),
+        });
+        assert!(authorize_message_claims(&caller, &msg, true).is_ok());
+        assert!(authorize_message_claims(&caller, &msg, false).is_err());
+        for key in ["legacy", "hook", "bridge", "gateway"] {
+            let mut c = caller.clone();
+            c.kid = key.into();
+            assert!(authorize_message_claims(&c, &msg, true).is_err());
+        }
+        let mut c = caller.clone();
+        c.roles = vec!["platform.users.read".into()];
+        assert!(authorize_message_claims(&c, &msg, true).is_err());
+        c = caller.clone();
+        c.credential_id = None;
+        assert!(authorize_message_claims(&c, &msg, true).is_err());
+        let mut forged = msg.clone();
+        forged.sender_id = "end-user".into();
+        assert!(authorize_message_claims(&caller, &forged, true).is_err());
+        if let Some(flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::System(s)),
+        }) = &mut forged.content
+        {
+            s.event_kind = "social.group.member_muted".into();
+        }
+        forged.sender_id = caller.actor_id.clone();
+        assert!(authorize_message_claims(&caller, &forged, true).is_err());
     }
 
     #[test]

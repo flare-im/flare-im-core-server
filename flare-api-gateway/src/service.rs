@@ -219,11 +219,7 @@ impl ApplicationBootstrap {
                             )
                         })?,
                         &settings.grpc.conversation_service_url,
-                        Arc::new(message_signer.clone().ok_or_else(|| {
-                            flare_server_core::error::FlareError::system(
-                                "Platform requires the Cell signing key",
-                            )
-                        })?),
+                        &settings.grpc.message_ingest_service_url,
                     )
                     .await
                     .map_err(|_| {
