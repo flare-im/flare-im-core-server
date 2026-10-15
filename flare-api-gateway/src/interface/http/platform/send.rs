@@ -64,11 +64,32 @@ pub(super) async fn send(
         Err(_) => return unavailable(),
     };
     let client_id = input.client_msg_id.to_string();
+    let origin_header = flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER;
+    let request_id = if let Some(token) = headers.get(origin_header) {
+        let claims = state
+            .origin_verifier
+            .as_ref()
+            .and_then(|v| token.to_str().ok().and_then(|s| v.verify(s).ok()));
+        let Some(claims) = claims.filter(|c| {
+            c.actor_type == SignedActorType::Service
+                && c.kid == flare_server_core::auth::kid::GATEWAY
+                && c.tenant_id == app
+                && c.actor_id == key.service_account_id
+                && c.credential_id.as_deref() == Some(key.key_id.as_str())
+                && c.roles == [SYSTEM_MESSAGE_SCOPE]
+                && headers.get_all(origin_header).iter().count() == 1
+        }) else {
+            return unavailable();
+        };
+        claims.request_id
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
     let identity = SignedContextIdentity::new(
         SignedActorType::Service,
         &key.service_account_id,
         &app,
-        &client_id,
+        &request_id,
     )
     .with_credential_id(key.key_id)
     .with_roles(vec![SYSTEM_MESSAGE_SCOPE.into()]);

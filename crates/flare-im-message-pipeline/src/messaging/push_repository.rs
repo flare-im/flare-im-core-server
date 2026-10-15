@@ -40,6 +40,7 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 /// - 所有发布操作通过 `Producer::send()` 完成
 pub struct MqPushRepository {
     producer: Arc<dyn Producer>,
+    write_signer: Option<flare_im_service_kit::audit_effects::write_proof::ProofSigner>,
 }
 
 impl MqPushRepository {
@@ -48,7 +49,20 @@ impl MqPushRepository {
     /// # 参数
     /// - `producer`: 生产者实例（如 JetStreamProducer、NatsProducer）
     pub fn new(producer: Arc<dyn Producer>) -> Arc<Self> {
-        Arc::new(Self { producer })
+        Arc::new(Self {
+            producer,
+            write_signer: None,
+        })
+    }
+
+    pub fn from_env(producer: Arc<dyn Producer>) -> Result<Arc<Self>> {
+        let write_signer =
+            flare_im_service_kit::audit_effects::write_proof::ProofSigner::from_env()
+                .map_err(flare_server_core::error::FlareError::system)?;
+        Ok(Arc::new(Self {
+            producer,
+            write_signer,
+        }))
     }
 
     /// 将 ProducerError 转换为 FlareError
@@ -90,8 +104,18 @@ impl MqPushRepository {
         Ok(headers)
     }
 
-    fn message_headers(ctx: &Ctx, message: &Message) -> Result<HashMap<String, String>> {
-        Self::build_timeline_headers(ctx, (message.created_at > 0).then_some(message.created_at))
+    fn message_headers(&self, ctx: &Ctx, message: &Message) -> Result<HashMap<String, String>> {
+        let headers = Self::build_timeline_headers(
+            ctx,
+            (message.created_at > 0).then_some(message.created_at),
+        )?;
+        flare_im_service_kit::audit_effects::write_proof::queue_headers(
+            ctx,
+            message,
+            self.write_signer.as_ref(),
+            headers,
+        )
+        .map_err(flare_server_core::error::FlareError::system)
     }
 
     fn event_headers(ctx: &Ctx, event: &Event) -> Result<HashMap<String, String>> {
@@ -312,6 +336,12 @@ impl MqPushRepository {
 }
 
 impl PushRepository for MqPushRepository {
+    fn prepare_write_proof(&self, ctx: &Ctx, message: &Message) -> Result<Option<String>> {
+        Ok(self
+            .message_headers(ctx, message)?
+            .get(flare_im_service_kit::audit_effects::write_proof::HEADER)
+            .cloned())
+    }
     /// 推送完整消息到 MQ（持久化 + 推送）
     ///
     /// Infrastructure 实现层负责：
@@ -333,7 +363,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             recipient_user_ids,
-            Self::message_headers(ctx, &message)?,
+            self.message_headers(ctx, &message)?,
             large_conversation,
         );
         Self::finalize_mq_headers(&mut mq);
@@ -452,7 +482,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             recipient_user_ids,
-            Self::message_headers(ctx, &message)?,
+            self.message_headers(ctx, &message)?,
             false,
         );
 
@@ -586,7 +616,7 @@ impl PushRepository for MqPushRepository {
         let mut mq = mq_envelope_for_main_queue_message_with_headers(
             &message,
             Vec::new(),
-            Self::message_headers(ctx, &message)?,
+            self.message_headers(ctx, &message)?,
             false,
         );
 

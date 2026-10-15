@@ -1,7 +1,6 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
 use flare_im_service_kit::{
-    audit_effects::AuditEffects,
     clients::{AdminGrpcClients, CapabilityAdminClientWrapper, DownstreamGrpcResolver},
     gateway::{GatewayEnvScope, GatewaySettings, capability_downstream_from_env},
     service_names::ADMIN_GATEWAY,
@@ -102,14 +101,6 @@ impl ApplicationBootstrap {
             }
         };
 
-        // Effect events of successful writes (flare.audit.effect.v1); unset URL disables them
-        // with a warning, an unreachable stream refuses startup.
-        let audit_effects = Arc::new(AuditEffects::from_env("admin-gateway").await?);
-        info!(
-            enabled = audit_effects.enabled(),
-            "Admin Gateway audit effect sink initialized"
-        );
-
         let app = create_admin_router(clients, capability)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 ADMIN_GATEWAY,
@@ -117,7 +108,6 @@ impl ApplicationBootstrap {
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
             .layer(axum::Extension(settings.clone()))
             .layer(axum::Extension(staff_verifier))
-            .layer(axum::Extension(audit_effects))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())

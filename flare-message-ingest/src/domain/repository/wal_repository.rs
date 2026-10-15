@@ -6,6 +6,7 @@ use crate::domain::model::MessageSubmission;
 
 #[derive(Debug, Clone)]
 pub struct WalPendingMessage {
+    pub write_proof: Option<String>,
     pub message_id: String,
     pub tenant_id: String,
     pub message: flare_proto::common::Message,
@@ -17,6 +18,7 @@ pub trait WalRepository: Send + Sync {
         &'a self,
         submission: &'a MessageSubmission,
         tenant_id: &'a str,
+        write_proof: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     /// 根据消息ID从 WAL 中查询消息（用于权限验证时的 fallback）

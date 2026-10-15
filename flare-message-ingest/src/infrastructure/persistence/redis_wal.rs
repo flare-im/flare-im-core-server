@@ -40,6 +40,8 @@ return claimed
 
 #[derive(Serialize, Deserialize)]
 struct WalEntrySnapshot {
+    #[serde(default)]
+    write_proof: Option<String>,
     message_id: String,
     #[serde(default)]
     tenant_id: String,
@@ -197,6 +199,7 @@ impl WalRepository for RedisWalRepository {
         &'a self,
         submission: &'a MessageSubmission,
         tenant_id: &'a str,
+        write_proof: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         let _self = self; // 保持对 self 的引用
         let _submission = submission; // 保持对 submission 的引用
@@ -213,6 +216,7 @@ impl WalRepository for RedisWalRepository {
 
             let encoded_payload = BASE64.encode(_submission.message.encode_to_vec());
             let entry = WalEntrySnapshot {
+                write_proof: write_proof.map(str::to_owned),
                 message_id: wal_message_id.clone(),
                 tenant_id: _tenant_id.to_string(),
                 encoded: encoded_payload,
@@ -445,6 +449,7 @@ impl WalRepository for RedisWalRepository {
                 };
 
                 pending.push(WalPendingMessage {
+                    write_proof: entry.write_proof.clone(),
                     message_id,
                     tenant_id: entry.tenant_id,
                     message,
@@ -531,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn append_fails_closed_when_wal_hash_key_missing() {
         let repo = repository_with_wal_key(None);
-        let result = repo.append(&submission(), "tenant-1").await;
+        let result = repo.append(&submission(), "tenant-1", None).await;
 
         assert!(result.is_err());
         assert!(
@@ -546,7 +551,7 @@ mod tests {
     #[tokio::test]
     async fn append_fails_closed_when_wal_hash_key_blank() {
         let repo = repository_with_wal_key(Some("  ".to_string()));
-        let result = repo.append(&submission(), "tenant-1").await;
+        let result = repo.append(&submission(), "tenant-1", None).await;
 
         assert!(result.is_err());
         assert!(

@@ -619,6 +619,7 @@ impl MediaService for MediaGrpcHandler {
         let req = request.into_inner();
         self.command_handler
             .handle_set_object_acl(&ctx, req)
+            .staff_audit(&ctx, "flare-media")
             .await
             .into_grpc()?;
         Ok(Response::new(()))

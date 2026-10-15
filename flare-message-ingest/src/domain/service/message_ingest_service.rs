@@ -468,14 +468,26 @@ impl MessageIngestService {
     ))]
     pub async fn write_wal_if_needed(
         &self,
+        ctx: &Ctx,
         submission: &MessageSubmission,
         profile: &MessageProfile,
         persistence_mode: PersistenceMode,
         tenant_id: &str,
     ) -> Result<()> {
         if should_write_wal(profile, persistence_mode) {
+            let proof = self
+                .push_repository
+                .prepare_write_proof(ctx, &submission.message)?;
+            if flare_im_service_kit::audit_effects::write_proof::requires_proof(&submission.message)
+                && proof.is_none()
+            {
+                return Err(flare_err!(
+                    ErrorCode::ConfigurationError,
+                    "machine WAL provenance unavailable"
+                ));
+            }
             self.wal_repository
-                .append(submission, tenant_id)
+                .append(submission, tenant_id, proof.as_deref())
                 .await
                 .map_err(|e| {
                     flare_err!(

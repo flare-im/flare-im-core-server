@@ -48,6 +48,20 @@ impl ApplicationBootstrap {
     ) -> Result<()> {
         info!(backend = %context.config.mq_backend, "Starting Storage Writer (MQ consumer via ServiceRuntime)");
 
+        if let Some((pool, publisher)) = context.audit_delivery {
+            runtime = runtime.add_spawn_with_shutdown(
+                "writer-audit-delivery",
+                move |shutdown| async move {
+                    publisher
+                        .run_durable(pool, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();
             runtime = runtime.add_spawn_with_shutdown(

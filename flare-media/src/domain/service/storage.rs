@@ -364,14 +364,14 @@ impl MediaService {
         if let Some(cache) = &self.metadata_cache
             && let Some(metadata) = cache.get_cached_metadata(ctx, file_id).await?
         {
-            Self::authorize_file_read(ctx, &metadata)?;
+            self.authorize_file_read(ctx, &metadata).await?;
             return Ok(metadata);
         }
 
         if let Some(store) = &self.metadata_store
             && let Some(metadata) = store.load_metadata(ctx, file_id).await?
         {
-            Self::authorize_file_read(ctx, &metadata)?;
+            self.authorize_file_read(ctx, &metadata).await?;
             if let Some(cache) = &self.metadata_cache {
                 cache.cache_metadata(ctx, &metadata).await.ok();
             }
@@ -614,22 +614,78 @@ impl MediaService {
     pub async fn list_objects(
         &self,
         ctx: &Context,
-        _bucket: &str,
-        _prefix: &str,
-    ) -> Result<Vec<MediaFileMetadata>> {
-        require_tenant(ctx)?;
-        Err(flare_server_core::flare_err!(
-            ErrorCode::OperationNotSupported,
-            "tenant object inventory is not implemented"
-        ))
+        bucket: &str,
+        prefix: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<(Vec<MediaFileMetadata>, bool)> {
+        let app = require_tenant(ctx)?;
+        self.describe_bucket(ctx, Some(bucket))?;
+        if prefix.len() > 1024
+            || after.len() > 256
+            || prefix.starts_with('/')
+            || prefix.split('/').any(|p| p == "." || p == "..")
+            || prefix
+                .chars()
+                .chain(after.chars())
+                .any(|c| c.is_control() || c == '\\')
+            || !(1..=200).contains(&limit)
+        {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "invalid media inventory query"
+            ));
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            flare_server_core::flare_err!(ErrorCode::ServiceUnavailable, "media index unavailable")
+        })?;
+        let full_prefix = format!(
+            "{}/{}",
+            crate::domain::model::tenant_storage_segment(app),
+            prefix
+        );
+        let mut rows = store
+            .list_registered(ctx, &full_prefix, after, limit + 1)
+            .await?;
+        let more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        Ok((rows, more))
     }
 
-    pub async fn set_object_acl(&self, ctx: &Context, _file_id: &str) -> Result<()> {
+    pub async fn set_object_acl(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+        mut users: Vec<String>,
+    ) -> Result<()> {
         require_tenant(ctx)?;
-        Err(flare_server_core::flare_err!(
-            ErrorCode::OperationNotSupported,
-            "media ACL mutation is not implemented"
-        ))
+        if file_id.is_empty()
+            || file_id.len() > 256
+            || users.len() > 128
+            || users.iter().any(|u| {
+                u.is_empty()
+                    || u.len() > 256
+                    || u.trim() != u
+                    || u == "*"
+                    || u.chars().any(char::is_control)
+            })
+        {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "invalid media read grant"
+            ));
+        }
+        users.sort();
+        if users.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "duplicate media read grant"
+            ));
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            flare_server_core::flare_err!(ErrorCode::ServiceUnavailable, "media grants unavailable")
+        })?;
+        store.replace_read_grants(ctx, file_id, &users).await
     }
 
     pub fn describe_bucket(

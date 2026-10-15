@@ -116,11 +116,11 @@ GET /api/v1/admin/medias/bucket 500 Media failed (ADMIN_MEDIA_BUCKET_FAILED)
 GET /api/v1/admin/medias/bucket 502 Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 GET /api/v1/admin/medias/bucket 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 GET /api/v1/admin/medias/bucket 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
-GET /api/v1/admin/medias/objects 200 Objects of the staff application; only file_id, file_name, mime_type, size and object_key
+GET /api/v1/admin/medias/objects 200 Paged registered asset index of the staff application, not a bucket scan or proof of physical object existence; no signed URLs or metadata
 GET /api/v1/admin/medias/objects 400 Media refused the bucket or prefix (BAD_REQUEST). ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)
 GET /api/v1/admin/medias/objects 401 Staff context is missing or invalid
 GET /api/v1/admin/medias/objects 403 Signed permission is not core:medias:read (ADMIN_PERMISSION_DENIED), or Media refused the Staff application, permission or bucket (FORBIDDEN)
-GET /api/v1/admin/medias/objects 500 Object inventory is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_LIST_OBJECTS_FAILED), never a fabricated empty inventory
+GET /api/v1/admin/medias/objects 500 Media asset index failed (ADMIN_MEDIA_LIST_OBJECTS_FAILED)
 GET /api/v1/admin/medias/objects 502 Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 GET /api/v1/admin/medias/objects 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 GET /api/v1/admin/medias/objects 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
@@ -194,7 +194,7 @@ POST /api/v1/admin/medias/object-acl 400 Media refused an argument (BAD_REQUEST)
 POST /api/v1/admin/medias/object-acl 401 Staff context is missing or invalid
 POST /api/v1/admin/medias/object-acl 403 Signed permission is not core:medias:write (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Media refused the Staff application or permission (FORBIDDEN)
 POST /api/v1/admin/medias/object-acl 404 No such file in the staff application (NOT_FOUND)
-POST /api/v1/admin/medias/object-acl 500 ACL mutation is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_OBJECT_ACL_FAILED), never a successful no-op
+POST /api/v1/admin/medias/object-acl 500 Media ACL transaction failed (ADMIN_MEDIA_OBJECT_ACL_FAILED)
 POST /api/v1/admin/medias/object-acl 502 Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 POST /api/v1/admin/medias/object-acl 503 Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 POST /api/v1/admin/medias/object-acl 504 Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
@@ -238,7 +238,7 @@ POST /api/v1/admin/plugins/register 500 Capability downstream failed (ADMIN_PLUG
 POST /api/v1/admin/plugins/register 502 Capability downstream refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 POST /api/v1/admin/plugins/register 503 Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 POST /api/v1/admin/plugins/register 504 Capability downstream did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
-POST /api/v1/admin/tenant/kick-all 200 Every connection of the staff application was kicked; clients receive KICKED with TENANT_UNAVAILABLE
+POST /api/v1/admin/tenant/kick-all 200 Snapshotted physical connections of the staff application were confirmed absent by their gateway registries; this does not acknowledge client receipt of KICKED
 POST /api/v1/admin/tenant/kick-all 400 Online refused the request (BAD_REQUEST). ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)
 POST /api/v1/admin/tenant/kick-all 401 Staff context is missing or invalid
 POST /api/v1/admin/tenant/kick-all 403 Signed permission is not core:tenant:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Online refused the application (FORBIDDEN)
@@ -246,7 +246,7 @@ POST /api/v1/admin/tenant/kick-all 500 Online service failed (ADMIN_TENANT_KICK_
 POST /api/v1/admin/tenant/kick-all 502 Online service refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 POST /api/v1/admin/tenant/kick-all 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 POST /api/v1/admin/tenant/kick-all 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
-POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 200 Device was kicked
+POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 200 The addressed physical connection was confirmed absent by its gateway registry; a client KICKED-frame acknowledgement is not implied
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 400 Online refused the user or device id (BAD_REQUEST). ADMIN_INVALID_PATH: a path parameter is not valid percent-encoded UTF-8. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 401 Staff context is missing or invalid
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 403 Signed permission is not core:users:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing, or the device session belongs to another application (FORBIDDEN)
@@ -255,7 +255,7 @@ POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 500 Online service f
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 502 Online service refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 503 Online service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick 504 Online service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)
-POST /api/v1/admin/users/{user_id}/kick 200 Every device the user had online was kicked; devices that went offline in between are listed separately
+POST /api/v1/admin/users/{user_id}/kick 200 Addressed physical connections were confirmed absent by their gateway registries; newly logged-in connections are not targeted. This is not a client KICKED-frame acknowledgement
 POST /api/v1/admin/users/{user_id}/kick 400 Online refused the user id (BAD_REQUEST). ADMIN_INVALID_PATH: a path parameter is not valid percent-encoded UTF-8. ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)
 POST /api/v1/admin/users/{user_id}/kick 401 Staff context is missing or invalid
 POST /api/v1/admin/users/{user_id}/kick 403 Signed permission is not core:users:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Online refused the application (FORBIDDEN)

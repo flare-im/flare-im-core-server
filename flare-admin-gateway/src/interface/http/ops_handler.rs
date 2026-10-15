@@ -17,7 +17,6 @@ use flare_grpc_proto::conversation::{
 use flare_grpc_proto::signaling::online::{
     AdminGetUserPresenceRequest, AdminListUserDevicesRequest, KickDeviceRequest, KickTenantRequest,
 };
-use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_im_service_kit::clients::{
     AdminGrpcClients, CapabilityAdminClientWrapper, CapabilityDownstreamConfig,
 };
@@ -510,7 +509,7 @@ pub async fn get_user_presence(
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "Every device the user had online was kicked; devices that went offline in between are listed separately", body = ApiResponse<AdminUserKickHttp>),
+        (status = 200, description = "Addressed physical connections were confirmed absent by their gateway registries; newly logged-in connections are not targeted. This is not a client KICKED-frame acknowledgement", body = ApiResponse<AdminUserKickHttp>),
         (status = 400, description = "Online refused the user id (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:users:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Online refused the application (FORBIDDEN)"),
@@ -525,7 +524,6 @@ pub async fn kick_user(
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath(user_id): AdminPath<String>,
 ) -> Result<Json<ApiResponse<AdminUserKickHttp>>> {
     let reason = audit_write(
@@ -567,9 +565,6 @@ pub async fn kick_user(
             Err(err) => return Err(admin_rpc_error(err, "ADMIN_USER_KICK_FAILED")),
         }
     }
-    effects
-        .record(staff.ctx(), "user_session", &user_id, "kick_user")
-        .await;
     Ok(Json(ApiResponse::success(AdminUserKickHttp {
         user_id,
         kicked,
@@ -589,7 +584,7 @@ pub async fn kick_user(
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "Device was kicked", body = ApiResponse<AdminDeviceKickHttp>),
+        (status = 200, description = "The addressed physical connection was confirmed absent by its gateway registry; a client KICKED-frame acknowledgement is not implied", body = ApiResponse<AdminDeviceKickHttp>),
         (status = 400, description = "Online refused the user or device id (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:users:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing, or the device session belongs to another application (FORBIDDEN)"),
@@ -605,7 +600,6 @@ pub async fn kick_device(
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminPath((user_id, device_id)): AdminPath<(String, String)>,
 ) -> Result<Json<ApiResponse<AdminDeviceKickHttp>>> {
     let reason = audit_write(
@@ -630,14 +624,6 @@ pub async fn kick_device(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_DEVICE_KICK_FAILED"))?;
-    effects
-        .record(
-            staff.ctx(),
-            "user_session",
-            &format!("{user_id}/{device_id}"),
-            "kick_device",
-        )
-        .await;
     Ok(Json(ApiResponse::success(AdminDeviceKickHttp {
         user_id,
         device_id,
@@ -655,7 +641,7 @@ pub async fn kick_device(
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "Every connection of the staff application was kicked; clients receive KICKED with TENANT_UNAVAILABLE", body = ApiResponse<AdminTenantKickHttp>),
+        (status = 200, description = "Snapshotted physical connections of the staff application were confirmed absent by their gateway registries; this does not acknowledge client receipt of KICKED", body = ApiResponse<AdminTenantKickHttp>),
         (status = 400, description = "Online refused the request (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:tenant:kick (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Online refused the application (FORBIDDEN)"),
@@ -670,7 +656,6 @@ pub async fn kick_tenant(
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
 ) -> Result<Json<ApiResponse<AdminTenantKickHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
     let reason = audit_write(
@@ -695,9 +680,6 @@ pub async fn kick_tenant(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_TENANT_KICK_FAILED"))?;
-    effects
-        .record(staff.ctx(), "tenant_sessions", &tenant_id, "kick_all")
-        .await;
     Ok(Json(ApiResponse::success(AdminTenantKickHttp {
         tenant_id,
         kicked: response.kicked,

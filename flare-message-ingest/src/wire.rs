@@ -63,7 +63,7 @@ async fn initialize_with_config(
 
     let redis_client = build_redis_client(&config).await?;
     let mq_producer = build_mq_producer(&config).await?;
-    let push_repository = MqPushRepository::new(mq_producer.clone());
+    let push_repository = MqPushRepository::from_env(mq_producer.clone())?;
 
     let conversation_service_type = config
         .conversation_service_type
@@ -144,11 +144,17 @@ async fn initialize_with_config(
         },
     ));
 
-    let wal_replay_handler = Arc::new(WalReplayHandler::new(
-        wal_repository,
-        message_ingest_service.clone(),
-        config.default_tenant_id.clone(),
-    ));
+    let wal_replay_handler = Arc::new(
+        WalReplayHandler::new(
+            wal_repository,
+            message_ingest_service.clone(),
+            config.default_tenant_id.clone(),
+        )
+        .with_write_verifier(
+            flare_im_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
+                .map_err(flare_server_core::error::FlareError::system)?,
+        ),
+    );
 
     let hook_execution_service = Arc::new(HookExecutionService::new(
         hook_dispatcher,

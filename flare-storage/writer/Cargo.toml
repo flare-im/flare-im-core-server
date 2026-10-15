@@ -37,6 +37,7 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 # 只用于 tests/event_codec_contract.rs：Writer 编码、Reader 解码的往返契约。
 flare-storage-reader = { path = "../reader" }
 tokio-stream = { workspace = true }

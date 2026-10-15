@@ -624,6 +624,21 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             ))
         })?;
 
+        if let Some(proof) =
+            ctx.get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>()
+        {
+            proof
+                .record(
+                    &mut tx,
+                    &tenant_id,
+                    &proto_msg.server_id,
+                    &proto_msg.conversation_id,
+                )
+                .await
+                .map_err(|_| {
+                    flare_server_core::error::FlareError::system("machine commit audit unavailable")
+                })?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1356,6 +1371,9 @@ impl PostgresMessageStore {
                         })?;
                     }
 
+                    if let Some(proof)=ctx.get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>() {
+                        for row in &rows_to_insert {proof.record(&mut tx,&row.0,&row.1,&row.2).await.map_err(|_|flare_server_core::error::FlareError::system("machine commit audit unavailable"))?;}
+                    }
                     // 提交事务
                     match tx.commit().await {
                         Ok(_) => {

@@ -35,14 +35,9 @@ Hook DB 提交在运行时 reload 之前。reload 失败意味着运行态尚未
 
 相关三包严格 all-targets Clippy、格式/diff、Management2.4.0/192既有契约与R6源装配检查另记计划。本批未改 API DTO/权限集合，不重跑未受影响的 Web/Flutter 或全仓套件。初轮 SQLx UUID特性缺失、测试 import/字段及 Clippy 诊断已修复，不计通过。
 
-## 尚未收口
+## 当前功能边界
 
-- Online 会话/设备踢出的实际拥有方效果仍有旧 best-effort 生产路径。
-- Media 对象 ACL 和对象清单仍明确未实现；孤儿清理的最新范围见下一节。
-- Platform机器系统消息的 Writer 持久提交审计仍待；API accepted 不是持久化或客户端送达。
-- 正常RPC→真实Broker→Platform聚合→客户端效果由最终统一初始化后整体验收，不用本批进程内/受控发布器测试代替。
-
-因此本批仅完成 Capability 员工源事务审计，不能勾完 R4-F05/R4、R5/R6或全部计划。
+Online、Media ACL/对象清单、Writer机器消息与Reader导出登记已接上源拥有方，详见下方最新接续；上面的Capability分母仅属于其原候选，不累计为本轮覆盖。正常RPC→真实Broker→Platform聚合→物理客户端/S3效果由全部功能完成、统一新库初始化后的R6整体验收确认，不能由模块/受控传输证明代替。
 
 ## Media：原始 Staff 与逐资产源效果
 
@@ -54,7 +49,7 @@ Media 生产签名层将 Staff 固定到 `kid=gateway`，清理/ACL 要求 `core
 
 这是**每个资产的元数据与证据**原子性，不是 PG 与文件系统/S3 的分布式事务，也不是整批原子。若对象已删除而 PG 提交失败或请求取消，下次仍依靠幂等对象删除重试；同批前一个资产已提交、后一个失败时，前者证据保留。已提交后缓存失效失败也不能抹去源事实。Gateway 不再按成功返回的 ID 列表补 best-effort effect，否则部分失败会丢失已提交证据。
 
-Media 使用既有 PG 池与自己的服务生命周期启动共享 durable 发布器；消息 ID、重试、ACK 和清理边界与上方 Capability 相同，不增加容器。R6 源输入声明 Media 公钥环/审计发布权限以及最终 outbox DDL，仍不可安装。ACL 和对象清单保持明确 `not_implemented`，没有伪造空列表或成功；本批不是完成所有 Media 功能。
+Media 使用既有 PG 池与自己的服务生命周期启动共享 durable 发布器；消息 ID、重试、ACK 和清理边界与上方 Capability 相同，不增加容器。R6 源输入声明 Media 公钥环/审计发布权限以及最终 outbox DDL，仍不可安装。原批次未实现的ACL与对象清单已在下方接续完成，不把原测试追认为新增能力验证。
 
 ### 本地相关验证
 
@@ -63,4 +58,37 @@ Media 使用既有 PG 池与自己的服务生命周期启动共享 durable 发�
 - 三个相关包 all-targets 严格Clippy、格式/diff、Management24契约、2.4.0/192源锁与Web生成类型检查、R6初始化源/装配26通过。仅更新旧私钥错误说明、Staff权限和dry-run描述，DTO/权限集合不变；没有运行未受影响Web视觉/Flutter套件。
 - 首轮快照仍包含已删除的私钥错误说明，已按当前生产源更新并复验；新增缺配置断言初轮误用非Option错误码、Clippy发现测试clone/import问题均已修复，失败不计通过。
 
-本批没有操作存量数据库、安装/替换运行制品、启动容器/VM或刷新用户页面。Online/Writer、Media ACL/清单及最终实际整链仍待，R4-F05保持部分。
+原批次没有操作存量数据库、安装/替换运行制品、启动容器/VM或刷新用户页面。
+
+## 2026-10-15 Online / Writer / Media / Reader 接续
+
+### Media只读授权与登记清单
+
+正常Staff ACL RPC支持最多128个具体`user:<id>`的`read`授权，整体替换；空列表撤销显式授权。锁定应用资产后比较排序集合，无变化不重复写证据；修改与`media_read_grants/replace`证据同事务。不是S3桶ACL，也不授予写/删除/角色/通配权限。私有读和新签名URL生成每次查权威授权，不依赖元数据缓存；owner/public原策略不变，Staff或System同名ID不能借User授权。已签发的预签名URL在过期前不能由PG撤销立刻作废。
+
+清单枚举具体应用的已登记资产，限制相对前缀、file_id游标和1～200条页，提供`next_cursor/has_more`；不返回签名URL或任意metadata。不扫描物理桶，不能证明未登记对象/对象存在性。正式源DDL增加0013，最终一次初始化折叠，不应用到存量库。
+
+### Online精确目标与持久确认
+
+员工踢设备/用户/应用先把可信Staff归因及旧physical connection、gateway、device快照写PG命令表0014。命令未完成时重试不会重新选中新登录连接。发送信号、最多2秒确认与条件Redis索引清理在PG事务外；收到指定Gateway对同一physical ID的注册表缺失ACK后，短PG行锁事务同时完成命令并写`online_connection/retire`证据。
+
+没有ACK只留pending与持久退避，不用PUBLISH订阅数当成功；证据尾失败不抹掉命令，后台重建后继续确认并只写一次效果。接收端并发有界，移除物理注册连接后才回执，错误gateway不确认；新物理ID不匹配、不被清理。回执24小时过期可以重建，未完成PG命令不按TTL丢失。需稳定`GATEWAY_ID`；目标节点永久不再上线则保持pending，不能凭超时猜已完成。这是Gateway注册表确认，不是客户端收到KICKED帧或网络socket关闭ACK。自动到期scheduler条件版本路径保持原语义，本批只改Staff源效果。
+
+### Writer可信持久效果与WAL恢复
+
+正常机器消息仍走原API→Ingest→WAL/MQ→Writer，不加第二条发送通路。统一Gateway以自身签名传服务器生成的审计request_id，Core复验Service用途、Key、账号、app与scope后才采用；无该断言的私有直接API生成新request_id，不信任client_msg_id或用户头中的actor。
+
+Ingest对最终System/platform.*消息用**独立Ed25519**签持久来源证明，绑定应用、request、Key/服务账号、message/conversation、序号及完整内容摘要；所有具体System形状中的map按稳定顺序编码。证明不是认证或授权令牌，不用短JWT期限决定延迟消息能否归因。WAL同时保存证明；恢复器用公钥校验，缺失/改动保留失败项而非补造身份，再沿原发布路径转发。私钥只给Ingest，公钥给Ingest恢复器与Writer；Writer缺公钥拒绝生产启动。
+
+Writer在解包转换前验签/绑定，删除原始证明头并只留typed marker；普通和机器批次用结构化键隔离上下文。消息archive、write ledger与`message/archive_commit`证据同事务，重复ledger不追加效果。证据尾失败回滚整个源提交；API accepted/WALAccepted不等于archive或送达。消息正文、签名证明与令牌不进入审计payload。证明公钥当前单一，最终运行期不能在旧WAL/队列排空前移除旧验证能力；本轮不设计开发期旧版兼容层。
+
+### Reader导出任务
+
+顺带修复最后一处管理网关effect依赖：正常导出RPC以原Staff作用域在Reader登记任务与`message_export/enqueue`源证据同事务，无变化重放不追加，尾失败不留任务。Reader生命周期独立投递；管理网关已无effect发布器，不需要对应Broker凭证。这里只证明导出意图持久化，不是文件生成、下载成功或export worker实现。
+
+### 本地验证
+
+- 相关11包library默认模块共738通过，19 ignored单列；其中Writer最终分组修改后重跑的60不另加分母。admin-gateway另69 integration通过（受控RPC）；Social Gateway签名来源定向方法1通过。
+- 本批四个独占PG18功能方法分别验证Media实际gRPC/文件读授权与分页、Online真实Redis/受控ACK恢复、Writer生产解包→真实PG archive/ledger、Reader真实PG导出登记。均核对成功/尾故障回滚/重复或恢复及应用边界，nonce库最终删除。Gateway另一个独占Redis方法使用生产ConnectionManager与受控transport验证精确目标ACK；不是物理客户端。此前Media孤儿清理专项不重复计入本批四项。
+- WAL重放、证明篡改/用途/跨应用、可信HTTP来源等是上述默认分母子集。相关包all-targets严格Clippy、格式/diff、Management2.5.0/192的24契约和生成Web类型、R6源规格/装配26通过分别记录，不充抵Broker、UI或全栈。
+- 初轮WAL测试夹具漏填最终server_id（生产签名正确拒绝）、旧契约版本断言及SQLx/测试夹具问题已修复复验；失败不计通过。全部仅本地源码/自有新库测试，未安装、清空存量数据、改运行密钥、启停共享容器/VM或刷新用户页。

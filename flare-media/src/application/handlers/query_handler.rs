@@ -115,16 +115,40 @@ impl MediaQueryHandler {
         ctx: &Context,
         request: ListObjectsRequest,
     ) -> Result<ListObjectsResponse> {
-        let files = self
+        if !request.filters.is_empty() || !request.sort.is_empty() {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::InvalidParameter,
+                "media inventory only supports prefix and file cursor"
+            ));
+        }
+        let page = request.pagination.unwrap_or_default();
+        let limit = if page.limit == 0 { 50 } else { page.limit };
+        let (files, more) = self
             .domain_service
-            .list_objects(ctx, &request.bucket, &request.prefix)
+            .list_objects(
+                ctx,
+                &request.bucket,
+                &request.prefix,
+                &page.cursor,
+                limit.try_into().unwrap_or(0),
+            )
             .await?;
+        let cursor = if more {
+            files.last().map(|f| f.file_id.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
         Ok(ListObjectsResponse {
             files: files
                 .iter()
                 .map(crate::application::utils::to_proto_file_info)
                 .collect(),
-            pagination: None,
+            pagination: Some(flare_grpc_proto::Pagination {
+                cursor,
+                limit,
+                has_more: more,
+                ..Default::default()
+            }),
         })
     }
 

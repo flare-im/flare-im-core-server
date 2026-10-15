@@ -1741,8 +1741,16 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         ctx: &Ctx,
         draft: MessageExportTaskDraft,
     ) -> Result<String> {
-        let _ = ctx;
-        sqlx::query(
+        if tenant_id_from_ctx(ctx)? != draft.tenant_id {
+            return Err(flare_server_core::error::FlareError::system(
+                "export application mismatch",
+            ));
+        }
+        let work = async {
+        let mut tx = self.base.pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout='250ms'").execute(&mut *tx).await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'").execute(&mut *tx).await?;
+        let inserted = sqlx::query(
             r#"
             INSERT INTO message_export_tasks (
                 tenant_id, task_id, conversation_id, start_time, end_time, filters,
@@ -1762,9 +1770,17 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .bind(&draft.requested_by)
         .bind(&draft.request_id)
         .bind(&draft.trace_id)
-        .execute(&self.base.pool)
-        .await
-        .db_context("create message export task")?;
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() > 0 {
+            flare_im_service_kit::audit_effects::durable::record(&mut tx, &draft.tenant_id, "message_export", &draft.task_id, "enqueue").await?;
+        }
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(())
+        }.await;
+        work.map_err(|_| {
+            flare_server_core::error::FlareError::system("export source transaction unavailable")
+        })?;
 
         Ok(draft.task_id)
     }

@@ -106,6 +106,10 @@ pub(crate) fn storage_consumer_config(config: &StorageWriterConfig) -> ConsumerC
 }
 
 pub struct ApplicationContext {
+    pub audit_delivery: Option<(
+        Arc<sqlx::PgPool>,
+        flare_im_service_kit::audit_effects::AuditEffects,
+    )>,
     pub config: Arc<StorageWriterConfig>,
     pub consumer_config: ConsumerConfig,
     pub dispatcher: Arc<dyn Dispatcher>,
@@ -193,7 +197,12 @@ pub async fn initialize(
         metrics.clone(),
     ));
 
-    let message_event_handler = MessageCreatedConsumerFactory::create_handler(command_handler);
+    let message_event_handler = MessageCreatedConsumerFactory::create_handler(command_handler)?;
+    let publisher =
+        flare_im_service_kit::audit_effects::AuditEffects::from_env("storage-writer").await?;
+    let audit_delivery = publisher
+        .enabled()
+        .then(|| (Arc::new(archive_repo.pool().clone()), publisher));
     let operation_event_handler =
         MessageEventsConsumerFactory::create_handler(operation_command_handler);
 
@@ -226,6 +235,7 @@ pub async fn initialize(
     })?;
 
     Ok(ApplicationContext {
+        audit_delivery,
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),

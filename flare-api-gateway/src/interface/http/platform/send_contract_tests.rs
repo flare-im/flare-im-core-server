@@ -3,6 +3,7 @@
 #[derive(Clone)]
 struct SystemIngest(
     std::sync::Arc<std::sync::Mutex<Vec<flare_grpc_proto::message::SendSystemMessageRequest>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 );
 #[tonic::async_trait]
 impl flare_grpc_proto::message::message_send_service_server::MessageSendService for SystemIngest {
@@ -46,6 +47,7 @@ impl flare_grpc_proto::message::message_send_service_server::MessageSendService 
         assert_eq!(claims.tenant_id, "app-a");
         assert_eq!(claims.actor_id, "sa-native");
         assert!(flare_im_service_kit::platform_send::is_platform_system_sender(claims));
+        self.1.lock().unwrap().push(claims.request_id.clone());
         let value = request.into_inner();
         self.0.lock().unwrap().push(value);
         Ok(tonic::Response::new(
@@ -71,9 +73,10 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
     .unwrap();
     let verifier = flare_server_core::SignedContextVerifier::from_key_set(keys);
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
     let service = flare_server_core::SignedContextLayer::new(verifier).layer(
         flare_grpc_proto::message::message_send_service_server::MessageSendServiceServer::new(
-            SystemIngest(seen.clone()),
+            SystemIngest(seen.clone(), seen_ids.clone()),
         ),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -90,6 +93,20 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
         false,
     );
     Arc::get_mut(&mut sender).unwrap().ingest = channel(&endpoint).unwrap();
+    let gateway_key = SigningKey::from_bytes(&[31; 32]);
+    let mut origin_keys = flare_server_core::auth::KeySet::empty();
+    origin_keys
+        .insert(
+            "gateway",
+            &gateway_key
+                .verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+    Arc::get_mut(&mut sender).unwrap().origin_verifier = Some(
+        flare_server_core::SignedContextVerifier::from_key_set(origin_keys),
+    );
     let path = "/platform/v1/apps/app-a/conversations/group:g1/system-messages";
     let id = uuid::Uuid::new_v4().to_string();
     let payload =
@@ -132,6 +149,61 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
         }
     }
     let (denied, wrong, _) = state(SCOPE, Some(TenantStatus::Active), false, false);
+    for observed in seen_ids.lock().unwrap().iter() {
+        assert!(uuid::Uuid::parse_str(observed).is_ok());
+        assert_ne!(observed, &id);
+    }
+    let gateway_signer = SignedContextSigner::from_private_key(
+        &gateway_key.to_pkcs8_pem(Default::default()).unwrap(),
+    )
+    .unwrap()
+    .with_kid("gateway")
+    .unwrap();
+    let key = ApiKeyToken::parse(&token).unwrap();
+    let origin = gateway_signer
+        .sign(
+            &SignedContextIdentity::new(
+                SignedActorType::Service,
+                "sa-native",
+                "app-a",
+                "trusted-server-request",
+            )
+            .with_credential_id(key.key_id())
+            .with_roles(vec![
+                flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE.into(),
+            ]),
+        )
+        .unwrap();
+    let mut with_origin = post(&token, path, &payload);
+    with_origin.headers_mut().insert(
+        flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
+        origin.parse().unwrap(),
+    );
+    assert_eq!(
+        router(sender.clone())
+            .oneshot(with_origin)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        seen_ids.lock().unwrap().last().unwrap(),
+        "trusted-server-request"
+    );
+    let mut forged_origin = post(&token, path, &payload);
+    forged_origin.headers_mut().insert(
+        flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
+        "attacker-request-id".parse().unwrap(),
+    );
+    assert_eq!(
+        router(sender.clone())
+            .oneshot(forged_origin)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     check(
         router(denied)
             .oneshot(post(&wrong, path, &payload))
@@ -163,7 +235,7 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
     .await;
     assert_eq!(
         seen.lock().unwrap().len(),
-        2,
+        3,
         "denied requests must not dispatch"
     );
     server.abort();

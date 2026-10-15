@@ -54,6 +54,13 @@ pub struct ListObjectsQuery {
     pub bucket: String,
     #[serde(default)]
     pub prefix: String,
+    #[serde(default)]
+    pub cursor: String,
+    #[serde(default = "default_media_limit")]
+    pub limit: i32,
+}
+fn default_media_limit() -> i32 {
+    50
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -68,6 +75,8 @@ pub struct AdminMediaObject {
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct AdminMediaObjects {
     pub files: Vec<AdminMediaObject>,
+    pub has_more: bool,
+    pub next_cursor: String,
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -172,7 +181,7 @@ pub async fn cleanup_orphaned_assets(
 }
 
 #[utoipa::path(post, path = "/api/v1/admin/medias/object-acl", tag = "Admin",
-    request_body(content = AdminMediaAclRequest, description = "File of the staff application and its ACL entries"),
+    request_body(content = AdminMediaAclRequest, description = "Replace at most 128 application read grants: principal=user:<IM user id>, permissions=[read]. Empty entries revoke explicit grants; owner/public policy and delete rights are unchanged. Not an S3 bucket ACL."),
     params(
         ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
@@ -184,7 +193,7 @@ pub async fn cleanup_orphaned_assets(
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:medias:write (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Media refused the Staff application or permission (FORBIDDEN)"),
         (status = 404, description = "No such file in the staff application (NOT_FOUND)"),
-        (status = 500, description = "ACL mutation is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_OBJECT_ACL_FAILED), never a successful no-op"),
+        (status = 500, description = "Media ACL transaction failed (ADMIN_MEDIA_OBJECT_ACL_FAILED)"),
         (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
@@ -230,13 +239,13 @@ pub async fn set_object_acl(
 }
 
 #[utoipa::path(get, path = "/api/v1/admin/medias/objects", tag = "Admin",
-    params(("bucket" = String, Query, description = "Configured bucket"), ("prefix" = Option<String>, Query, description = "Tenant-relative prefix")),
+    params(("bucket" = String, Query, description = "Configured bucket"), ("prefix" = Option<String>, Query, description = "Application-relative registered object prefix"), ("cursor" = Option<String>, Query, description = "Last file_id of preceding page"), ("limit" = Option<i32>, Query, description = "Page size 1..200, default 50")),
     responses(
-        (status = 200, description = "Objects of the staff application; only file_id, file_name, mime_type, size and object_key", body = ApiResponse<AdminMediaObjects>),
+        (status = 200, description = "Paged registered asset index of the staff application, not a bucket scan or proof of physical object existence; no signed URLs or metadata", body = ApiResponse<AdminMediaObjects>),
         (status = 400, description = "Media refused the bucket or prefix (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
         (status = 403, description = "Signed permission is not core:medias:read (ADMIN_PERMISSION_DENIED), or Media refused the Staff application, permission or bucket (FORBIDDEN)"),
-        (status = 500, description = "Object inventory is not implemented by Media (contract status not_implemented; ADMIN_MEDIA_LIST_OBJECTS_FAILED), never a fabricated empty inventory"),
+        (status = 500, description = "Media asset index failed (ADMIN_MEDIA_LIST_OBJECTS_FAILED)"),
         (status = 502, description = "Media refused the signed internal context as unauthenticated, a deployment error: Media's key set does not hold the gateway key (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Media service is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
         (status = 504, description = "Media service did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
@@ -257,7 +266,11 @@ pub async fn list_objects(
                     ListObjectsRequest {
                         bucket: request.bucket,
                         prefix: request.prefix,
-                        pagination: None,
+                        pagination: Some(flare_grpc_proto::Pagination {
+                            cursor: request.cursor,
+                            limit: request.limit,
+                            ..Default::default()
+                        }),
                         filters: Vec::new(),
                         sort: Vec::new(),
                     },
@@ -266,7 +279,10 @@ pub async fn list_objects(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MEDIA_LIST_OBJECTS_FAILED"))?;
+    let page = response.pagination.unwrap_or_default();
     Ok(Json(ApiResponse::success(AdminMediaObjects {
+        has_more: page.has_more,
+        next_cursor: page.cursor,
         files: response
             .files
             .into_iter()

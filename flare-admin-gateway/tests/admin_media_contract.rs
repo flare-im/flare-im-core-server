@@ -318,7 +318,7 @@ async fn object_acl_shape_and_request() {
     assert_eq!(calls[0].method, "SetObjectAcl");
     assert_eq!(
         calls[0].request,
-        "file_id=f-1 entries=role:auditor:read,user:u-owner:read+write"
+        "file_id=f-1 entries=user:auditor:read,user:u-owner:read"
     );
 
     // 缺 entries 或不是 JSON 都在网关拒绝，不调用 Media。
@@ -345,7 +345,7 @@ async fn list_objects_shape_and_request() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let data = &body["data"];
-    assert_eq!(keys(data), sorted(&["files"]));
+    assert_eq!(keys(data), sorted(&["files", "has_more", "next_cursor"]));
     let files = data["files"].as_array().unwrap();
     assert_eq!(files.len(), 2);
     // 只给五个字段：签名 URL、CDN 地址、租户、桶与扩展元数据都不出网关。
@@ -361,7 +361,7 @@ async fn list_objects_shape_and_request() {
     assert_eq!(calls[0].method, "ListObjects");
     assert_eq!(
         calls[0].request,
-        "bucket=media prefix=2026/ pagination=false filters=0 sort=0"
+        "bucket=media prefix=2026/ pagination=true filters=0 sort=0"
     );
 
     // prefix 可省略；bucket 缺失是 400，不调用 Media。
@@ -374,7 +374,7 @@ async fn list_objects_shape_and_request() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         h.media.calls()[0].request,
-        "bucket=media prefix= pagination=false filters=0 sort=0"
+        "bucket=media prefix= pagination=true filters=0 sort=0"
     );
     h.media.clear();
     let (status, body) = send(

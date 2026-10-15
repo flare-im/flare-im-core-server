@@ -6,3 +6,5 @@ pub mod postgres_base;
 pub mod redis_cache;
 
 pub(crate) use db_error::DbResultExt;
+#[cfg(test)]
+mod export_audit_pg_tests;

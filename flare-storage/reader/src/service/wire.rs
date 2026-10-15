@@ -25,6 +25,10 @@ where
     M: MessageStorage + Send + Sync + Clone + 'static,
 {
     pub handler: StorageReaderGrpcHandler<M>,
+    pub audit_delivery: (
+        Arc<sqlx::PgPool>,
+        flare_im_service_kit::audit_effects::AuditEffects,
+    ),
 }
 
 /// 构建应用上下文
@@ -82,6 +86,10 @@ pub async fn initialize(
         }
         None => None,
     };
+    let audit_delivery = (
+        Arc::new(pool.clone()),
+        flare_im_service_kit::audit_effects::AuditEffects::from_env("storage-reader").await?,
+    );
     let postgres_base_storage = PostgresBaseStorage::from_pool_and_cache(pool, cache.clone())
         .await
         .with_context(|| "Failed to create PostgreSQL base storage")?;
@@ -119,5 +127,6 @@ pub async fn initialize(
         GrpcHandlerType::new(query_handler.clone(), staff_verifier).await?;
     Ok(ApplicationContext {
         handler: grpc_handler,
+        audit_delivery,
     })
 }

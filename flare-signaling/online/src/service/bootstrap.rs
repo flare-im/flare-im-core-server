@@ -54,7 +54,21 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
+        let mut runtime = runtime_plan.service_runtime();
+        if let Some((repository, pool, publisher)) = context.command_delivery {
+            runtime = runtime.add_spawn_with_shutdown(
+                "online-command-delivery",
+                move |shutdown| async move {
+                    repository
+                        .run_commands(pool, publisher, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+        let runtime = runtime.add_spawn_with_shutdown(
             "signaling-online-grpc",
             move |shutdown_rx| async move {
                 // 使用 ContextLayer 包裹 Service

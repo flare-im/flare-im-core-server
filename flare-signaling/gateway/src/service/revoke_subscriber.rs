@@ -33,6 +33,7 @@ pub fn spawn_revoke_subscriber(
     redis_url: String,
     namespace: String,
     connection_manager: Arc<dyn ConnectionManagerTrait>,
+    gateway_id: String,
 ) {
     let channel = format!("{namespace}:kick");
     let dispatcher = KickDispatcher::new(
@@ -42,7 +43,7 @@ pub fn spawn_revoke_subscriber(
     );
     tokio::spawn(async move {
         loop {
-            if let Err(err) = run_subscriber(&redis_url, &channel, &dispatcher).await {
+            if let Err(err) = run_subscriber(&redis_url, &channel, &dispatcher, &gateway_id).await {
                 warn!(%err, channel = %channel, "revoke subscriber error; reconnecting in 3s");
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -55,6 +56,7 @@ async fn run_subscriber(
     redis_url: &str,
     channel: &str,
     dispatcher: &KickDispatcher,
+    gateway_id: &str,
 ) -> flare_server_core::error::Result<()> {
     let client = redis::Client::open(redis_url)?;
     let mut pubsub = client.get_async_pubsub().await?;
@@ -69,6 +71,9 @@ async fn run_subscriber(
                 continue;
             }
         };
+        if payload.len() > 4096 {
+            continue;
+        }
         let signal: KickSignal = match serde_json::from_str(&payload) {
             Ok(signal) => signal,
             Err(_) => {
@@ -81,7 +86,28 @@ async fn run_subscriber(
             continue;
         }
         // 不等这个信号踢完：它的连接再慢，也不耽误后面的信号
-        drop(dispatcher.dispatch(signal).await);
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        if value.get("command_id").is_some()
+            && (value["target_gateway"].as_str() != Some(gateway_id)
+                || value["command_id"]
+                    .as_str()
+                    .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+                || signal.connection_id.is_none())
+        {
+            continue;
+        }
+        let receipt = value
+            .get("command_id")
+            .and_then(|v| v.as_str())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .filter(|_| value["target_gateway"].as_str() == Some(gateway_id))
+            .zip(signal.connection_id.as_deref())
+            .map(|(id, physical)| ReceiptAck {
+                client: client.clone(),
+                key: format!("{channel}:receipt:{id}"),
+                physical: physical.into(),
+            });
+        drop(dispatcher.dispatch_internal(signal, receipt).await);
     }
     Ok(())
 }
@@ -103,6 +129,33 @@ struct KickDispatcher {
     kicker: Arc<Kicker>,
 }
 
+struct ReceiptAck {
+    client: redis::Client,
+    key: String,
+    physical: String,
+}
+async fn execute_and_confirm(
+    kicker: &Kicker,
+    manager: &dyn ConnectionManagerTrait,
+    signal: &KickSignal,
+    receipt: Option<ReceiptAck>,
+) -> usize {
+    let closed = kicker.kick(manager, signal).await;
+    if let Some(receipt) = receipt
+        && manager.get_connection(&receipt.physical).await.is_none()
+    {
+        use redis::AsyncCommands;
+        // Acknowledges the addressed node's registry, not delivery of the KICKED frame.
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut conn = receipt.client.get_multiplexed_async_connection().await?;
+            conn.set_ex::<_, _, ()>(receipt.key, receipt.physical, 86400)
+                .await
+        })
+        .await;
+    }
+    closed
+}
+
 impl KickDispatcher {
     fn new(
         connection_manager: Arc<dyn ConnectionManagerTrait>,
@@ -120,17 +173,27 @@ impl KickDispatcher {
     ///
     /// 名额池正常不会被关闭。万一被关闭，不 panic 也不丢信号：在调用方任务里串行执行，
     /// 由订阅循环本身限流，句柄在返回时已完成。
+    #[cfg(test)]
     async fn dispatch(&self, signal: KickSignal) -> tokio::task::JoinHandle<usize> {
+        self.dispatch_internal(signal, None).await
+    }
+
+    async fn dispatch_internal(
+        &self,
+        signal: KickSignal,
+        receipt: Option<ReceiptAck>,
+    ) -> tokio::task::JoinHandle<usize> {
         let connection_manager = self.connection_manager.clone();
         let kicker = self.kicker.clone();
         let Ok(permit) = self.permits.clone().acquire_owned().await else {
             warn!("kick limiter closed; executing kick signal inline");
-            let closed = kicker.kick(connection_manager.as_ref(), &signal).await;
+            let closed =
+                execute_and_confirm(&kicker, connection_manager.as_ref(), &signal, receipt).await;
             return tokio::spawn(std::future::ready(closed));
         };
         tokio::spawn(async move {
             let _permit = permit;
-            kicker.kick(connection_manager.as_ref(), &signal).await
+            execute_and_confirm(&kicker, connection_manager.as_ref(), &signal, receipt).await
         })
     }
 }
@@ -302,6 +365,127 @@ fn kick_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "starts an owned redis-server; controlled transport, not real client socket"]
+    async fn receiver_ack_names_only_its_gateway_and_removed_physical_connection() {
+        use redis::AsyncCommands;
+        use std::process::{Child, Command, Stdio};
+        struct RedisOwner {
+            child: Child,
+            root: std::path::PathBuf,
+        }
+        impl Drop for RedisOwner {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        struct Task(tokio::task::JoinHandle<()>);
+        impl Drop for Task {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("flare-kick-receiver-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let socket = root.join("redis.sock");
+        let child = Command::new("redis-server")
+            .args([
+                "--port",
+                "0",
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--unixsocket",
+            ])
+            .arg(&socket)
+            .args(["--unixsocketperm", "700"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let owned = RedisOwner { child, root };
+        let url = format!("redis+unix://{}", socket.display());
+        let client = redis::Client::open(url.clone()).unwrap();
+        let mut conn = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(c) = client.get_multiplexed_async_connection().await {
+                    break c;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
+        let sent = authenticated(&manager, "physical-old", "tenant-a").await;
+        let new = authenticated(&manager, "physical-new", "tenant-a").await;
+        let dispatcher = KickDispatcher::new(manager.clone(), 2, Duration::from_millis(50));
+        let task = Task(tokio::spawn(async move {
+            let _ = run_subscriber(&url, "owned:kick", &dispatcher, "gateway-a").await;
+        }));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let count: Vec<(String, i64)> = redis::cmd("PUBSUB")
+                    .arg("NUMSUB")
+                    .arg("owned:kick")
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                if count[0].1 == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let wrong = uuid::Uuid::new_v4().to_string();
+        let mut signal = tenant_kick("u1");
+        signal.connection_id = Some("physical-old".into());
+        let mut payload = serde_json::to_value(&signal).unwrap();
+        payload["command_id"] = wrong.clone().into();
+        payload["target_gateway"] = "gateway-b".into();
+        let _: i64 = conn
+            .publish("owned:kick", payload.to_string())
+            .await
+            .unwrap();
+        payload["command_id"] = id.clone().into();
+        payload["target_gateway"] = "gateway-a".into();
+        let _: i64 = conn
+            .publish("owned:kick", payload.to_string())
+            .await
+            .unwrap();
+        let key = format!("owned:kick:receipt:{id}");
+        let ack: String = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let v: Option<String> = conn.get(&key).await.unwrap();
+                if let Some(v) = v {
+                    break v;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ack, "physical-old");
+        assert!(manager.get_connection("physical-old").is_none());
+        assert!(manager.get_connection("physical-new").is_some());
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert!(new.lock().unwrap().is_empty());
+        let absent: Option<String> = conn
+            .get(format!("owned:kick:receipt:{wrong}"))
+            .await
+            .unwrap();
+        assert!(absent.is_none());
+        drop(task);
+        drop(owned);
+    }
 
     #[test]
     fn kick_never_crosses_tenant_or_device() {

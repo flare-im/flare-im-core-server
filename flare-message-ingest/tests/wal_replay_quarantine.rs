@@ -29,6 +29,7 @@ impl WalRepository for FixedWal {
         &'a self,
         _submission: &'a MessageSubmission,
         _tenant_id: &'a str,
+        _write_proof: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
@@ -109,6 +110,7 @@ impl CapturedLogs {
 
 fn pending(message_id: &str, tenant_id: &str) -> WalPendingMessage {
     WalPendingMessage {
+        write_proof: None,
         message_id: message_id.to_string(),
         tenant_id: tenant_id.to_string(),
         message: Message {

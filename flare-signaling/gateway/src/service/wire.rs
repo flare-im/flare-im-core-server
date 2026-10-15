@@ -94,6 +94,7 @@ pub async fn initialize(
             redis_url,
             namespace,
             connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
+            gateway_id.clone(),
         );
     }
 

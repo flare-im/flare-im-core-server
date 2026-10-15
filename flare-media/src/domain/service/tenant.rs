@@ -65,13 +65,23 @@ impl MediaService {
         Ok(())
     }
 
-    pub(super) fn authorize_file_read(ctx: &Context, metadata: &MediaFileMetadata) -> Result<()> {
+    pub(super) async fn authorize_file_read(
+        &self,
+        ctx: &Context,
+        metadata: &MediaFileMetadata,
+    ) -> Result<()> {
         require_tenant(ctx)?;
         if matches!(metadata.access_type, FileAccessType::Public)
             || metadata
                 .owner_id
                 .as_deref()
                 .is_some_and(|owner| !owner.is_empty() && Some(owner) == authenticated_user(ctx))
+        {
+            return Ok(());
+        }
+        if let Some(user) = authenticated_user(ctx)
+            && let Some(store) = &self.metadata_store
+            && store.has_read_grant(ctx, &metadata.file_id, user).await?
         {
             return Ok(());
         }

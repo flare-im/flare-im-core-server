@@ -11,6 +11,9 @@ use flare_server_core::error::Result;
 ///
 /// 注意：使用 async fn in traits (Rust 2024 原生支持)
 pub trait PushRepository: Send + Sync {
+    fn prepare_write_proof(&self, _ctx: &Ctx, _message: &Message) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// 推送完整消息到 MQ（持久化 + 推送）
     ///
     /// Infrastructure 实现层需负责：

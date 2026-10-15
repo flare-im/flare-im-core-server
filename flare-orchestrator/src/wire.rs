@@ -68,7 +68,7 @@ pub async fn initialize(
     let retry_forwarder_dispatcher =
         build_retry_forwarder_dispatcher(&config, mq_producer.clone())?;
 
-    let push_repository = MqPushRepository::new(mq_producer.clone());
+    let push_repository = MqPushRepository::from_env(mq_producer.clone())?;
     let user_sync_index_repository: Arc<dyn crate::domain::repository::UserSyncIndexRepository> =
         Arc::new(RedisUserSyncIndexRepository::new(
             redis_client.clone(),

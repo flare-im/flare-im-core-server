@@ -32,6 +32,11 @@ pub type WiredOnlineHandler = OnlineHandler<
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub online_handler: WiredOnlineHandler,
+    pub command_delivery: Option<(
+        Arc<RedisConversationRepository>,
+        Arc<sqlx::PgPool>,
+        flare_im_service_kit::audit_effects::AuditEffects,
+    )>,
 }
 
 /// 构建应用上下文
@@ -61,9 +66,37 @@ pub async fn initialize(
     })?);
 
     // 3. 构建仓储（具体类型，禁止 `Arc<dyn>` + 异步 trait）
-    let conversation_repository: Arc<RedisConversationRepository> = Arc::new(
-        RedisConversationRepository::new(redis_client.clone(), online_config.clone()),
-    );
+    let command_pool = if let Some(url) = online_config.tenant_runtime_postgres_url.as_deref() {
+        Some(Arc::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .min_connections(0)
+                .acquire_timeout(std::time::Duration::from_millis(500))
+                .connect_lazy(url)
+                .map_err(|_| {
+                    flare_server_core::error::FlareError::system(
+                        "invalid Online command store configuration",
+                    )
+                })?,
+        ))
+    } else {
+        None
+    };
+    let mut repository =
+        RedisConversationRepository::new(redis_client.clone(), online_config.clone());
+    if let Some(pool) = &command_pool {
+        repository = repository.with_command_pool(pool.clone());
+    }
+    let conversation_repository = Arc::new(repository);
+    let command_delivery = if let Some(pool) = command_pool {
+        Some((
+            conversation_repository.clone(),
+            pool,
+            flare_im_service_kit::audit_effects::AuditEffects::from_env("signaling-online").await?,
+        ))
+    } else {
+        None
+    };
 
     let subscription_repository: Arc<RedisSubscriptionRepository> = Arc::new(
         RedisSubscriptionRepository::new(redis_client.clone(), online_config.clone()),
@@ -159,7 +192,10 @@ pub async fn initialize(
     .with_identity_verifier(identity_verifier)
     .with_staff_verifier(staff_verifier);
 
-    Ok(ApplicationContext { online_handler })
+    Ok(ApplicationContext {
+        online_handler,
+        command_delivery,
+    })
 }
 
 use flare_grpc_proto::signaling::online::online_admin_service_server::OnlineAdminService;

@@ -52,8 +52,30 @@ pub async fn record(
     id: &str,
     action: &'static str,
 ) -> sqlx::Result<()> {
-    let Ok(actor) = STAFF.try_with(Clone::clone) else {
+    let Some(payload) = pending_evidence(app, aggregate, id, action)? else {
         return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO core_audit_outbox(event_id,app_id,payload) VALUES($1::uuid,$2,$3::jsonb)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(app)
+    .bind(payload)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// Snapshot attribution for an owned durable command. This is NOT an effect yet:
+/// the owner inserts it into the outbox only in its confirmed-completion transaction.
+pub fn pending_evidence(
+    app: &str,
+    aggregate: &'static str,
+    id: &str,
+    action: &'static str,
+) -> sqlx::Result<Option<String>> {
+    let Ok(actor) = STAFF.try_with(Clone::clone) else {
+        return Ok(None);
     };
     if actor.app != app || app.is_empty() || app == "*" {
         return Err(sqlx::Error::Protocol("audit application mismatch".into()));
@@ -73,15 +95,7 @@ pub async fn record(
         outcome: "committed",
     })
     .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-    sqlx::query(
-        "INSERT INTO core_audit_outbox(event_id,app_id,payload) VALUES($1::uuid,$2,$3::jsonb)",
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(app)
-    .bind(payload)
-    .execute(tx)
-    .await?;
-    Ok(())
+    Ok(Some(payload))
 }
 
 #[async_trait::async_trait]

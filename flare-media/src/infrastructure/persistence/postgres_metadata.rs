@@ -259,6 +259,74 @@ impl PostgresMetadataStore {
 
 #[async_trait::async_trait]
 impl MediaMetadataStore for PostgresMetadataStore {
+    async fn replace_read_grants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+        users: &[String],
+    ) -> Result<()> {
+        let app = crate::domain::service::require_tenant(ctx)?;
+        let work = async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout='2s'").execute(&mut *tx).await?;
+            sqlx::query("SET LOCAL statement_timeout='3s'").execute(&mut *tx).await?;
+            let exists: Option<String> = sqlx::query_scalar("SELECT file_id FROM media_assets WHERE tenant_id=$1 AND file_id=$2 FOR UPDATE")
+                .bind(app).bind(file_id).fetch_optional(&mut *tx).await?;
+            if exists.is_none() { return Ok::<_,sqlx::Error>(false); }
+            let existing: Vec<String> = sqlx::query_scalar("SELECT user_id FROM media_read_grants WHERE tenant_id=$1 AND file_id=$2 ORDER BY user_id")
+                .bind(app).bind(file_id).fetch_all(&mut *tx).await?;
+            if existing != users {
+                sqlx::query("DELETE FROM media_read_grants WHERE tenant_id=$1 AND file_id=$2").bind(app).bind(file_id).execute(&mut *tx).await?;
+                for user in users {
+                    sqlx::query("INSERT INTO media_read_grants(tenant_id,file_id,user_id) VALUES($1,$2,$3)")
+                        .bind(app).bind(file_id).bind(user).execute(&mut *tx).await?;
+                }
+                flare_im_service_kit::audit_effects::durable::record(&mut tx,app,"media_read_grants",file_id,"replace").await?;
+            }
+            tx.commit().await?;
+            Ok(true)
+        }.await.map_err(|_|FlareError::system("media grants transaction unavailable"))?;
+        if !work {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::MessageNotFound,
+                "media asset not found"
+            ));
+        }
+        Ok(())
+    }
+    async fn has_read_grant(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        file_id: &str,
+        user: &str,
+    ) -> Result<bool> {
+        let app = crate::domain::service::require_tenant(ctx)?;
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_read_grants WHERE tenant_id=$1 AND file_id=$2 AND user_id=$3)")
+            .bind(app).bind(file_id).bind(user).fetch_one(self.pool()).await.map_err(|_|FlareError::system("media grants unavailable"))
+    }
+    async fn list_registered(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        prefix: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<MediaFileMetadata>> {
+        let app = crate::domain::service::require_tenant(ctx)?;
+        let sql = format!(
+            "SELECT {MEDIA_ASSET_COLUMNS} FROM media_assets WHERE tenant_id=$1 AND file_id>$2 AND starts_with(metadata->>'storage_path',$3) ORDER BY file_id LIMIT $4"
+        );
+        sqlx::query_as::<_, MediaAssetRow>(&sql)
+            .bind(app)
+            .bind(after)
+            .bind(prefix)
+            .bind(i64::from(limit))
+            .fetch_all(self.pool())
+            .await
+            .map_err(|_| FlareError::system("media inventory unavailable"))?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
+    }
     async fn save_metadata(
         &self,
         ctx: &flare_server_core::context::Context,

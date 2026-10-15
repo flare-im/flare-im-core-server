@@ -559,6 +559,7 @@ impl MessageIngestHandler {
         self.measure_stage(
             "wal_write",
             self.message_ingest_service.write_wal_if_needed(
+                ctx,
                 &submission,
                 &profile,
                 persistence_mode,

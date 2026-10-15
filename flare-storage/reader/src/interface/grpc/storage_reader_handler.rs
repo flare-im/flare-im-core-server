@@ -23,6 +23,7 @@ use crate::domain::model::{
 };
 use crate::domain::repository::MessageStorage;
 use flare_im_contracts::utils::extract_seq_from_message;
+use flare_im_service_kit::audit_effects::durable::StaffAudit;
 use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::{MESSAGES_EXPORT, MESSAGES_READ};
@@ -747,6 +748,7 @@ where
             .query_handler
             .storage()
             .create_message_export_task(&ctx, draft)
+            .staff_audit(&ctx, "storage-reader")
             .await
         {
             Ok(export_task_id) => Ok(Response::new(ExportMessagesResponse { export_task_id })),

@@ -294,8 +294,18 @@ impl MediaCommandHandler {
                 "file_id is required"
             ));
         }
+        let mut users = Vec::with_capacity(request.entries.len().min(128));
+        for entry in request.entries {
+            if entry.permissions != ["read"] || !entry.principal.starts_with("user:") {
+                return Err(flare_server_core::flare_err!(
+                    ErrorCode::InvalidParameter,
+                    "ACL supports explicit user:<id> read grants only"
+                ));
+            }
+            users.push(entry.principal[5..].to_owned());
+        }
         self.domain_service
-            .set_object_acl(ctx, &request.file_id)
+            .set_object_acl(ctx, &request.file_id, users)
             .await
     }
 

@@ -477,7 +477,7 @@ pub fn cleanup_body(limit: u32) -> String {
 
 pub fn acl_body(file_id: &str) -> String {
     format!(
-        r#"{{"file_id":"{file_id}","entries":[{{"principal":"role:auditor","permissions":["read"]}},{{"principal":"user:u-owner","permissions":["read","write"]}}]}}"#
+        r#"{{"file_id":"{file_id}","entries":[{{"principal":"user:auditor","permissions":["read"]}},{{"principal":"user:u-owner","permissions":["read"]}}]}}"#
     )
 }
 

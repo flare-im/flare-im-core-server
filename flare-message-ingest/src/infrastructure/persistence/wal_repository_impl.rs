@@ -14,8 +14,16 @@ impl WalRepository for NoopWalRepository {
         &'a self,
         _submission: &'a MessageSubmission,
         _tenant_id: &'a str,
+        _write_proof: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            if _write_proof.is_some() {
+                return Err(flare_server_core::error::FlareError::system(
+                    "machine messages require a durable WAL",
+                ));
+            }
+            Ok(())
+        })
     }
 
     fn find_by_message_id<'a>(
@@ -54,10 +62,15 @@ impl WalRepository for WalRepositoryItem {
         &'a self,
         submission: &'a crate::domain::model::MessageSubmission,
         tenant_id: &'a str,
+        write_proof: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         match self {
-            WalRepositoryItem::Noop(repo) => Box::pin(repo.append(submission, tenant_id)),
-            WalRepositoryItem::Redis(repo) => Box::pin(repo.append(submission, tenant_id)),
+            WalRepositoryItem::Noop(repo) => {
+                Box::pin(repo.append(submission, tenant_id, write_proof))
+            }
+            WalRepositoryItem::Redis(repo) => {
+                Box::pin(repo.append(submission, tenant_id, write_proof))
+            }
         }
     }
 

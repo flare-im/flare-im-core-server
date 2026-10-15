@@ -1,5 +1,4 @@
 use axum::{Json, extract::Extension, http::HeaderMap};
-use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_server_core::{
     AuthenticatedPrincipal,
     http::{ApiResponse, HttpApiError as GatewayError, Result},
@@ -494,7 +493,6 @@ pub async fn admin_export_messages(
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    Extension(effects): Extension<Arc<AuditEffects>>,
     AdminJson(req): AdminJson<AdminMessageExportHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminMessageExportHttpResponse>>> {
     let storage_request = build_storage_message_export_request(&req)
@@ -515,14 +513,6 @@ pub async fn admin_export_messages(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_EXPORT_FAILED"))?;
-    effects
-        .record(
-            staff.ctx(),
-            "message_export",
-            &storage_response.export_task_id,
-            "export",
-        )
-        .await;
 
     Ok(Json(ApiResponse::success(admin_message_export_response(
         storage_response,

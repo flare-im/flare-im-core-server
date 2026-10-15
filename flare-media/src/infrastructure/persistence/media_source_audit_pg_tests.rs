@@ -127,6 +127,12 @@ where
         .execute(&*run)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0013_20261015_media_read_grants.sql"
+        ))
+        .execute(&*run)
+        .await
+        .unwrap();
         work(run, root).await;
     })
     .await;
@@ -380,5 +386,227 @@ async fn check_cleanup(pool: Arc<PgPool>, root: PathBuf) {
     drop(client);
     let _ = shutdown.send(());
     // The test owns this server; never leave a listener on success or unwind.
+    drop(running);
+}
+
+fn signed<T>(
+    payload: T,
+    app: &str,
+    actor: SignedActorType,
+    id: &str,
+    permission: &str,
+) -> Request<T> {
+    let identity = SignedContextIdentity::new(actor, id, app, "media-acl-request");
+    let identity = if actor == SignedActorType::Staff {
+        identity.with_staff_grant(None, Some(permission.into()), 1)
+    } else {
+        identity
+    };
+    let mut r = Request::new(payload);
+    flare_server_core::set_signed_context_token(&mut r, &keys().0.sign(&identity).unwrap())
+        .unwrap();
+    r
+}
+
+#[tokio::test]
+#[ignore = "requires explicit owned-test FLARE_FUNCTIONAL_PG_ADMIN_URL"]
+async fn acl_replacement_is_atomic_revokes_actual_reads_and_inventory_is_app_scoped() {
+    database(check_acl).await;
+}
+
+async fn check_acl(pool: Arc<PgPool>, root: PathBuf) {
+    use flare_grpc_proto::media::{
+        AccessControlEntry, DeleteFileRequest, GetFileInfoRequest, ListObjectsRequest,
+        SetObjectAclRequest,
+    };
+    let store = Arc::new(PostgresMetadataStore { pool: pool.clone() });
+    let local = Arc::new(FilesystemMediaStore::new(&root, None).unwrap());
+    let service = Arc::new(MediaService::new(
+        None,
+        Some(store.clone()),
+        Some(store.clone()),
+        None,
+        None,
+        Some(local),
+        MediaDomainConfig::new(3600, None, 60, root.join("chunks"), 3600, 1024),
+    ));
+    let handler = MediaGrpcHandler::new(
+        Arc::new(MediaCommandHandler::new(service.clone())),
+        Arc::new(MediaQueryHandler::new(service)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let running = Running(tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(authenticated_media_service(handler, keys().1))
+            .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
+            .await
+            .unwrap();
+    }));
+    let mut client = MediaServiceClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    for (app, id) in [("app-a", "first"), ("app-a", "last"), ("app-b", "first")] {
+        seed(&store, &root, app, id, 100).await;
+    }
+    let read = || {
+        signed(
+            GetFileInfoRequest {
+                file_id: "first".into(),
+            },
+            "app-a",
+            SignedActorType::User,
+            "reader",
+            "",
+        )
+    };
+    let grants = |entries: Vec<AccessControlEntry>| {
+        signed(
+            SetObjectAclRequest {
+                file_id: "first".into(),
+                entries,
+            },
+            "app-a",
+            SignedActorType::Staff,
+            "employee",
+            "core:medias:write",
+        )
+    };
+    let entry = || AccessControlEntry {
+        principal: "user:reader".into(),
+        permissions: vec!["read".into()],
+    };
+    assert_eq!(
+        client.get_file_info(read()).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    client.set_object_acl(grants(vec![entry()])).await.unwrap();
+    assert_eq!(
+        client
+            .get_file_info(read())
+            .await
+            .unwrap()
+            .get_ref()
+            .info
+            .as_ref()
+            .unwrap()
+            .file_id,
+        "first"
+    );
+    assert_eq!(
+        client
+            .delete_file(signed(
+                DeleteFileRequest {
+                    file_id: "first".into(),
+                    ..Default::default()
+                },
+                "app-a",
+                SignedActorType::User,
+                "reader",
+                ""
+            ))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    client.set_object_acl(grants(vec![entry()])).await.unwrap();
+    assert_eq!(
+        effects(&pool).await.len(),
+        1,
+        "unchanged replacement does not duplicate evidence"
+    );
+    client.set_object_acl(grants(vec![])).await.unwrap();
+    assert_eq!(
+        client.get_file_info(read()).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(effects(&pool).await.len(), 2);
+    sqlx::raw_sql("CREATE FUNCTION reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned audit fault'; END $$; CREATE TRIGGER reject_audit BEFORE INSERT ON core_audit_outbox FOR EACH ROW EXECUTE FUNCTION reject_audit()").execute(&*pool).await.unwrap();
+    assert!(client.set_object_acl(grants(vec![entry()])).await.is_err());
+    assert_eq!(
+        client.get_file_info(read()).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(effects(&pool).await.len(), 2);
+    sqlx::raw_sql("DROP TRIGGER reject_audit ON core_audit_outbox; DROP FUNCTION reject_audit()")
+        .execute(&*pool)
+        .await
+        .unwrap();
+    for permissions in [vec!["write".into()], vec!["read".into(), "delete".into()]] {
+        assert_eq!(
+            client
+                .set_object_acl(grants(vec![AccessControlEntry {
+                    principal: "user:reader".into(),
+                    permissions
+                }]))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+    }
+    assert!(
+        client
+            .set_object_acl(signed(
+                SetObjectAclRequest {
+                    file_id: "last".into(),
+                    entries: vec![entry()]
+                },
+                "app-b",
+                SignedActorType::Staff,
+                "employee",
+                "core:medias:write"
+            ))
+            .await
+            .is_err()
+    );
+    let page = |cursor: &str| {
+        signed(
+            ListObjectsRequest {
+                bucket: "media".into(),
+                pagination: Some(flare_grpc_proto::Pagination {
+                    cursor: cursor.into(),
+                    limit: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "app-a",
+            SignedActorType::Staff,
+            "employee",
+            "core:medias:read",
+        )
+    };
+    let first = client.list_objects(page("")).await.unwrap().into_inner();
+    assert_eq!(first.files.len(), 1);
+    assert_eq!(first.files[0].file_id, "first");
+    assert!(first.pagination.as_ref().unwrap().has_more);
+    let last = client
+        .list_objects(page(&first.pagination.unwrap().cursor))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(last.files.len(), 1);
+    assert_eq!(last.files[0].file_id, "last");
+    assert!(!last.pagination.unwrap().has_more);
+    let mut wrong = page("");
+    wrong.get_mut().bucket = "foreign-bucket".into();
+    assert_eq!(
+        client.list_objects(wrong).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let mut prefix = page("");
+    prefix.get_mut().prefix = "../app-b".into();
+    assert_eq!(
+        client.list_objects(prefix).await.unwrap_err().code(),
+        Code::InvalidArgument
+    );
+    for row in effects(&pool).await {
+        assert_eq!(row["aggregate"], "media_read_grants");
+        assert_eq!(row["scope"], "app-a");
+        assert_eq!(row["actor_type"], "staff");
+    }
+    drop(client);
     drop(running);
 }

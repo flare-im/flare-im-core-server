@@ -52,6 +52,7 @@ type MessagePersistenceHandler = MessagePersistenceCommandHandler<
 pub struct MessageCreatedHandler {
     /// 消息持久化处理器（应用层）
     persistence_handler: Arc<MessagePersistenceHandler>,
+    write_verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
 }
 
 struct DecodedStoreMessage {
@@ -77,11 +78,21 @@ impl MessageCreatedHandler {
     pub fn new(persistence_handler: Arc<MessagePersistenceHandler>) -> Self {
         Self {
             persistence_handler,
+            write_verifier: None,
         }
+    }
+
+    pub fn with_write_verifier(
+        mut self,
+        verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+    ) -> Self {
+        self.write_verifier = verifier;
+        self
     }
 
     fn decode_store_message(
         message: &Message,
+        verifier: Option<&flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
     ) -> Result<Option<DecodedStoreMessage>, ConsumerError> {
         let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
             tracing::error!(
@@ -126,7 +137,9 @@ impl MessageCreatedHandler {
         for (key, value) in &envelope.headers {
             merged_headers.insert(key.clone(), value.clone());
         }
-        let ctx = context_from_mq_metadata(&merged_headers);
+        use flare_im_service_kit::audit_effects::write_proof::{HEADER, requires_proof};
+        let proof = merged_headers.remove(HEADER);
+        let mut ctx = context_from_mq_metadata(&merged_headers);
 
         // 租户只认消息头：生产方（ingest、orchestrator）按已验证的上下文写 `x-tenant-id`。
         // 消息体 attributes 里的租户字段由发送方或 PreSend Hook 提供，不作数。
@@ -141,6 +154,16 @@ impl MessageCreatedHandler {
                 MESSAGE_WITHOUT_TENANT.to_string(),
             ));
         };
+
+        if requires_proof(proto_message) || proof.is_some() {
+            let (verifier, token) = verifier.zip(proof.as_deref()).ok_or_else(|| {
+                ConsumerError::DeadLetter("machine write proof unavailable".into())
+            })?;
+            let proof = verifier
+                .verify(token, &tenant_id, proto_message)
+                .map_err(|_| ConsumerError::DeadLetter("machine write proof rejected".into()))?;
+            ctx = Arc::new(ctx.insert_data(proof));
+        }
 
         let mut command = crate::convert::message_command_from_proto(proto_message.clone());
         for (key, value) in merged_headers {
@@ -160,8 +183,14 @@ impl MessageCreatedHandler {
         }))
     }
 
-    fn batch_group_key(decoded: &DecodedStoreMessage) -> String {
-        decoded.tenant_id.clone()
+    fn batch_group_key(decoded: &DecodedStoreMessage) -> (String, Option<String>) {
+        if let Some(proof) = decoded
+            .ctx
+            .get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>(
+        ) {
+            return (decoded.tenant_id.clone(), Some(proof.group_key().into()));
+        }
+        (decoded.tenant_id.clone(), None)
     }
 }
 
@@ -189,7 +218,8 @@ impl MessageHandler for MessageCreatedHandler {
         offset = message.context.offset,
     ))]
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError> {
-        let Some(decoded) = Self::decode_store_message(&message)? else {
+        let Some(decoded) = Self::decode_store_message(&message, self.write_verifier.as_ref())?
+        else {
             return Ok(MessageResult::Ack);
         };
 
@@ -248,12 +278,12 @@ impl MessageHandler for MessageCreatedHandler {
         }
 
         let mut results = vec![MessageResult::Ack; messages.len()];
-        let mut groups: BTreeMap<String, (Ctx, Vec<ProcessStoreMessageCommand>)> = BTreeMap::new();
+        let mut groups: BTreeMap<_, (Ctx, Vec<ProcessStoreMessageCommand>)> = BTreeMap::new();
         let mut decoded_count = 0usize;
 
         for (index, message) in messages.iter().enumerate() {
             // 解不开或缺租户的消息逐条进死信，不连累同批其余消息。
-            let decoded = match Self::decode_store_message(message) {
+            let decoded = match Self::decode_store_message(message, self.write_verifier.as_ref()) {
                 Ok(Some(decoded)) => decoded,
                 Ok(None) => {
                     results[index] = MessageResult::Ack;
@@ -286,7 +316,7 @@ impl MessageHandler for MessageCreatedHandler {
             entry.1.push(decoded.command);
         }
 
-        for (tenant_id, (ctx, commands)) in groups {
+        for ((tenant_id, _), (ctx, commands)) in groups {
             let batch_size = commands.len();
             self.persistence_handler
                 .handle_batch(&ctx, commands)
@@ -338,8 +368,15 @@ impl MessageCreatedConsumerFactory {
     /// - `Arc<dyn MessageHandler>`: 消息创建处理器实例
     pub fn create_handler(
         persistence_handler: Arc<MessagePersistenceHandler>,
-    ) -> Arc<dyn MessageHandler> {
-        Arc::new(MessageCreatedHandler::new(persistence_handler))
+    ) -> flare_server_core::error::Result<Arc<dyn MessageHandler>> {
+        let verifier = flare_im_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
+            .map_err(flare_server_core::error::FlareError::system)?
+            .ok_or_else(|| {
+                flare_server_core::error::FlareError::system("writer proof public key is required")
+            })?;
+        Ok(Arc::new(
+            MessageCreatedHandler::new(persistence_handler).with_write_verifier(Some(verifier)),
+        ))
     }
 
     /// 获取订阅的主题
@@ -358,6 +395,10 @@ impl MessageCreatedConsumerFactory {
         flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT
     }
 }
+
+#[cfg(test)]
+#[path = "machine_commit_pg_tests.rs"]
+mod machine_commit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -506,7 +547,7 @@ mod tests {
     }
 
     async fn stored_tenants(message: &Message) -> (Recorder, String) {
-        let decoded = MessageCreatedHandler::decode_store_message(message)
+        let decoded = MessageCreatedHandler::decode_store_message(message, None)
             .expect("decodes")
             .expect("is a message");
         let group = MessageCreatedHandler::batch_group_key(&decoded);
@@ -517,7 +558,8 @@ mod tests {
             .ensure_consistency(&decoded.ctx, prepared)
             .await
             .expect("persists");
-        (recorder, group)
+        assert!(group.1.is_none());
+        (recorder, group.0)
     }
 
     #[tokio::test]
@@ -568,7 +610,7 @@ mod tests {
     fn message_without_header_tenant_is_dead_lettered_not_stored_as_zero() {
         for attributes in [vec![], vec![("tenant_id", "tenant-b")]] {
             let message = created_message(None, &attributes);
-            let error = match MessageCreatedHandler::decode_store_message(&message) {
+            let error = match MessageCreatedHandler::decode_store_message(&message, None) {
                 Err(error) => error,
                 Ok(_) => panic!("a message without a header tenant was accepted ({attributes:?})"),
             };

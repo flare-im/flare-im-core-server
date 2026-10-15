@@ -27,6 +27,7 @@ use flare_server_core::{SignedActorType, VerifiedContext};
 use serde::Serialize;
 
 pub mod durable;
+pub mod write_proof;
 
 pub const STREAM: &str = "flare_audit";
 pub const SUBJECT_PREFIX: &str = "flare.audit.v1";

@@ -25,6 +25,7 @@ use flare_server_core::grpc::middleware::signed_context::{
 
 use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
 use crate::application::queries::GetOnlineStatusQuery;
+use flare_im_service_kit::audit_effects::durable::StaffAudit;
 
 use crate::application::handlers::{
     OnlineCommandHandler, OnlinePresenceWatcherHandler, OnlineQueryHandler, OnlineUserHandler,
@@ -508,6 +509,7 @@ where
         let response = self
             .user_handler
             .kick_device(request.into_inner(), &staff.tenant_id)
+            .staff_audit(&staff.ctx, "signaling-online")
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -535,9 +537,11 @@ where
         // 租户），或平台调度器的控制断言（`FLARE_PLATFORM_PUBLIC_KEY`，租户须等于请求租户）。
         // 带 `x-flare-ctx` 的调用走 Staff 分支，否则走调度器分支；两边各自 fail closed。
         let tenant_id = request.get_ref().tenant_id.clone();
+        let mut audit_ctx = None;
         if request.metadata().contains_key("x-flare-ctx") {
             let staff = self.staff(&request, TENANT_KICK)?;
             staff.require_tenant(&tenant_id)?;
+            audit_ctx = Some(staff.ctx.clone());
             tracing::info!(actor_id = %staff.actor_id, tenant_id = %staff.tenant_id, request_id = %staff.request_id, "staff kick_tenant authorized");
         } else {
             let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
@@ -567,10 +571,13 @@ where
         } else {
             None
         };
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.user_handler.kick_tenant(request.into_inner()),
-        )
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let work = self.user_handler.kick_tenant(request.into_inner());
+            match audit_ctx {
+                Some(ctx) => work.staff_audit(&ctx, "signaling-online").await,
+                None => work.await,
+            }
+        })
         .await
         .map_err(|_| Status::deadline_exceeded("tenant kick deadline"))?
         .into_grpc()?;

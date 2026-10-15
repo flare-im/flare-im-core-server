@@ -58,9 +58,21 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
-            "storage-reader-grpc",
-            move |shutdown_rx| async move {
+        let (audit_pool, audit_publisher) = context.audit_delivery;
+        let runtime = runtime_plan
+            .service_runtime()
+            .add_spawn_with_shutdown(
+                "storage-reader-audit-delivery",
+                move |shutdown| async move {
+                    audit_publisher
+                        .run_durable(audit_pool, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            )
+            .add_spawn_with_shutdown("storage-reader-grpc", move |shutdown_rx| async move {
                 let storage_reader_service =
                     crate::interface::grpc::signed_read_service(handler, &read_layer);
 
@@ -72,8 +84,7 @@ impl ApplicationBootstrap {
                     })
                     .await
                     .map_err(|e| format!("gRPC server error: {}", e).into())
-            },
-        );
+            });
 
         // 运行服务（带服务注册）
         Ok(runtime

@@ -116,6 +116,8 @@ impl PlatformConfig {
             conversation: channel(conversation_url)?,
             ingest: channel(ingest_url)?,
             signer: self.signer,
+            origin_verifier: flare_server_core::SignedContextVerifier::from_env_optional()
+                .map_err(|_| anyhow::anyhow!("invalid Platform origin public key set"))?,
             budget: CredentialRequestBudget::new(32),
             breaker: CircuitBreaker::new(
                 "Platform Core",
@@ -151,6 +153,7 @@ fn channel(url: &str) -> anyhow::Result<Channel> {
         .connect_lazy())
 }
 struct PlatformState {
+    origin_verifier: Option<flare_server_core::SignedContextVerifier>,
     verifier: CachedApiKeyVerifier,
     gate: TenantRuntimeCache,
     pepper: ApiKeyPepper,
@@ -543,6 +546,7 @@ mod tests {
             .to_pkcs8_pem(Default::default())
             .unwrap();
         let state = Arc::new(PlatformState {
+            origin_verifier: None,
             verifier: CachedApiKeyVerifier::new(reader.clone()),
             gate: TenantRuntimeCache::with_source(
                 Arc::new(Runtime {

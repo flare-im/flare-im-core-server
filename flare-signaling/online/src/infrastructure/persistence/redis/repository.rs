@@ -123,7 +123,9 @@ struct RedisConnectionRecord {
     tenant_id: String,
 }
 
+#[derive(Clone)]
 pub struct RedisConversationRepository {
+    commands: Option<Arc<sqlx::PgPool>>,
     client: Arc<redis::Client>,
     /// kick 频道所在实例（token_store profile），与 signaling-gateway 的订阅端一致。
     kick_client: Arc<redis::Client>,
@@ -139,6 +141,7 @@ local rec = cjson.decode(raw)
 if rec.tenant_id ~= ARGV[2] or type(rec.connection_id) ~= 'string' or rec.connection_id == '' then
   return redis.error_reply('invalid kick session')
 end
+if ARGV[4] and rec.connection_id ~= ARGV[4] then return false end
 local keep = false
 for _, value in ipairs(redis.call('HVALS', KEYS[1])) do
   local other = cjson.decode(value)
@@ -174,6 +177,7 @@ impl RedisConversationRepository {
             }
         };
         Self {
+            commands: None,
             client,
             kick_client,
             config,
@@ -435,6 +439,25 @@ impl ConversationRepository for RedisConversationRepository {
                 "kick session mismatch"
             ));
         }
+        if let Some(evidence) = flare_im_service_kit::audit_effects::durable::pending_evidence(
+            tenant,
+            "online_connection",
+            &record.connection_id,
+            "retire",
+        )
+        .map_err(|_| flare_server_core::error::FlareError::system("kick attribution rejected"))?
+        {
+            let id = self
+                .prepare_command(tenant, user.as_str(), &record, reason, &evidence)
+                .await?;
+            if self.advance_command(&id).await? {
+                return Ok(Some(record.connection_id));
+            }
+            return Err(flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::ServiceUnavailable,
+                "kick command pending receiver confirmation"
+            ));
+        }
         // Failed publication leaves the exact session available for retry. The
         // signal only names this physical socket; a later same-device login is safe.
         self.broadcast_user_kick(
@@ -451,6 +474,7 @@ impl ConversationRepository for RedisConversationRepository {
             .arg(session.as_str())
             .arg(tenant)
             .arg(tenant_session_member_prefix(user.as_str()))
+            .arg(&record.connection_id)
             .invoke_async(&mut conn)
             .await
             .map_err(|_| {
@@ -726,6 +750,9 @@ impl ConversationRepository for RedisConversationRepository {
         Ok(())
     }
 }
+
+#[path = "kick_commands.rs"]
+mod kick_commands;
 
 #[cfg(test)]
 mod admission_tests {

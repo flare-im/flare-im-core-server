@@ -29,6 +29,7 @@ pub struct WalReplayReport {
 const QUARANTINE_REPORTED_CAPACITY: u64 = 10_000;
 
 pub struct WalReplayHandler {
+    write_verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
     wal_repository: Arc<dyn WalRepository>,
     publisher: Arc<dyn WalReplayPublisher>,
     /// 显式配置的部署级默认租户（`MESSAGE_INGEST_DEFAULT_TENANT_ID`），只给没记租户的旧 WAL
@@ -68,11 +69,20 @@ impl WalReplayHandler {
         default_tenant_id: Option<String>,
     ) -> Self {
         Self {
+            write_verifier: None,
             wal_repository,
             publisher,
             default_tenant_id: normalize_optional_tenant_id(default_tenant_id.as_deref()),
             quarantine_reported: moka::future::Cache::new(QUARANTINE_REPORTED_CAPACITY),
         }
+    }
+
+    pub fn with_write_verifier(
+        mut self,
+        verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+    ) -> Self {
+        self.write_verifier = verifier;
+        self
     }
 
     /// 重放一批待恢复的 WAL 条目。
@@ -128,7 +138,21 @@ impl WalReplayHandler {
                 }
                 continue;
             };
-            let ctx = replay_ctx(&tenant_id);
+            let mut ctx = replay_ctx(&tenant_id);
+            if flare_im_service_kit::audit_effects::write_proof::requires_proof(&message)
+                || pending.write_proof.is_some()
+            {
+                let recovered = self
+                    .write_verifier
+                    .as_ref()
+                    .zip(pending.write_proof.as_deref())
+                    .and_then(|(v, p)| v.recover(p, &tenant_id, &message).ok());
+                let Some(recovered) = recovered else {
+                    report.failed += 1;
+                    continue;
+                };
+                ctx = Arc::new(ctx.insert_data(recovered));
+            }
             let submission = MessageSubmission {
                 message,
                 message_id: pending.message_id.clone(),
@@ -237,12 +261,14 @@ mod tests {
             &'a self,
             submission: &'a MessageSubmission,
             tenant_id: &'a str,
+            write_proof: Option<&'a str>,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
                 let message_id = submission.message_id.clone();
                 self.entries.lock().expect("memory wal poisoned").insert(
                     message_id.clone(),
                     WalPendingMessage {
+                        write_proof: write_proof.map(str::to_owned),
                         message_id,
                         tenant_id: tenant_id.to_string(),
                         message: submission.message.clone(),
@@ -389,6 +415,7 @@ mod tests {
 
     fn pending_text(message_id: &str, tenant_id: &str) -> WalPendingMessage {
         WalPendingMessage {
+            write_proof: None,
             message_id: message_id.to_string(),
             tenant_id: tenant_id.to_string(),
             message: Message {
@@ -410,6 +437,7 @@ mod tests {
     fn pending_notification(message_id: &str, persistent: bool) -> WalPendingMessage {
         let (_, message) = notification(persistent);
         WalPendingMessage {
+            write_proof: None,
             message_id: message_id.to_string(),
             tenant_id: "tenant-a".to_string(),
             message: Message {
@@ -548,6 +576,7 @@ mod tests {
                         timeline: Default::default(),
                     },
                     "tenant-a",
+                    None,
                 )
                 .await
                 .unwrap();
@@ -635,5 +664,108 @@ mod tests {
         assert!(wal.contains("msg-1"));
         assert!(wal.removed_ids().is_empty());
         assert!(publisher.captured().is_empty());
+    }
+
+    #[tokio::test]
+    async fn machine_wal_replay_keeps_original_proof_and_does_not_forge_missing_authority() {
+        use ed25519_dalek::{
+            SigningKey,
+            pkcs8::{EncodePrivateKey, EncodePublicKey},
+        };
+        use flare_im_service_kit::{
+            audit_effects::write_proof::{HEADER, ProofSigner, ProofVerifier, queue_headers},
+            platform_send::{PLATFORM_API_KID, SYSTEM_MESSAGE_SCOPE},
+        };
+        use flare_server_core::{
+            SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
+        };
+        struct ProofPublisher(Mutex<Vec<String>>);
+        impl WalReplayPublisher for ProofPublisher {
+            fn push_wal_message<'a>(
+                &'a self,
+                ctx: &'a flare_im_contracts::Ctx,
+                submission: &'a MessageSubmission,
+                _: &'a MessageProfile,
+                _: PersistenceMode,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                Box::pin(async move {
+                    let headers = queue_headers(ctx, &submission.message, None, HashMap::new())
+                        .map_err(flare_server_core::error::FlareError::system)?;
+                    self.0.lock().unwrap().push(headers[HEADER].clone());
+                    Ok(())
+                })
+            }
+        }
+        let key = SigningKey::from_bytes(&[91; 32]);
+        let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let signer = SignedContextSigner::from_private_key(&pem)
+            .unwrap()
+            .with_kid(PLATFORM_API_KID)
+            .unwrap();
+        let mut ring = flare_server_core::auth::KeySet::empty();
+        ring.insert(PLATFORM_API_KID, &public).unwrap();
+        let verifier = SignedContextVerifier::from_key_set(ring);
+        let token = signer
+            .sign(
+                &SignedContextIdentity::new(
+                    SignedActorType::Service,
+                    "service-a",
+                    "tenant-a",
+                    "original-request",
+                )
+                .with_credential_id("AAAAAAAAAAAA")
+                .with_roles(vec![SYSTEM_MESSAGE_SCOPE.into()]),
+            )
+            .unwrap();
+        let mut r = tonic::Request::new(());
+        flare_server_core::set_signed_context_token(&mut r, &token).unwrap();
+        let ctx =
+            flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata(
+                r.metadata(),
+                &verifier,
+            )
+            .unwrap();
+        let mut message = pending_text("signed-machine", "tenant-a").message;
+        message.server_id = "signed-machine".into();
+        message.sender_id = "service-a".into();
+        message.content = Some(MessageContent {
+            content: Some(Content::System(flare_proto::common::SystemContent {
+                event_kind: "platform.notice".into(),
+                body: "hello".into(),
+                ..Default::default()
+            })),
+        });
+        MessageProfile::ensure(&mut message);
+        let proof = ProofSigner::from_pem(&pem)
+            .unwrap()
+            .stamp(&ctx, &message)
+            .unwrap();
+        let valid = WalPendingMessage {
+            message_id: message.server_id.clone(),
+            tenant_id: "tenant-a".into(),
+            message: message.clone(),
+            write_proof: Some(proof.clone()),
+        };
+        message.server_id = "missing-proof".into();
+        let invalid = WalPendingMessage {
+            message_id: message.server_id.clone(),
+            tenant_id: "tenant-a".into(),
+            message,
+            write_proof: None,
+        };
+        let wal = MemoryWalRepository::with_entries(vec![valid, invalid]);
+        let publisher = Arc::new(ProofPublisher(Mutex::new(vec![])));
+        let handler = WalReplayHandler::new(wal.clone(), publisher.clone(), None)
+            .with_write_verifier(Some(ProofVerifier::from_pem(&public).unwrap()));
+        let report = handler.replay_once(10).await.unwrap();
+        assert_eq!(report.replayed, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(*publisher.0.lock().unwrap(), [proof]);
+        assert!(wal.contains("missing-proof"));
+        assert!(!wal.contains("signed-machine"));
     }
 }

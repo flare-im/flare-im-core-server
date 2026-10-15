@@ -130,6 +130,34 @@ pub trait MediaObjectRepository: Send + Sync {
 /// 使用 `#[async_trait::async_trait]` 宏以支持 trait 对象（详见 `MediaObjectRepository` 说明）
 #[async_trait::async_trait]
 pub trait MediaMetadataStore: Send + Sync {
+    /// Complete replacement of explicit read-only User grants; owner/public policy is unchanged.
+    async fn replace_read_grants(
+        &self,
+        _ctx: &Context,
+        _file_id: &str,
+        _users: &[String],
+    ) -> Result<()> {
+        Err(flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::OperationNotSupported,
+            "media read grants unavailable"
+        ))
+    }
+    async fn has_read_grant(&self, _ctx: &Context, _file_id: &str, _user: &str) -> Result<bool> {
+        Ok(false)
+    }
+    /// Registered asset index only, file_id keyset order. Fetch limit+1 for continuation.
+    async fn list_registered(
+        &self,
+        _ctx: &Context,
+        _prefix: &str,
+        _after: &str,
+        _limit: u32,
+    ) -> Result<Vec<MediaFileMetadata>> {
+        Err(flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::OperationNotSupported,
+            "media index unavailable"
+        ))
+    }
     async fn save_metadata(&self, ctx: &Context, metadata: &MediaFileMetadata) -> Result<()>;
     async fn load_metadata(
         &self,
